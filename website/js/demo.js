@@ -24,12 +24,10 @@ class VoxtypeDemo {
             windowAgent: document.getElementById('window-agent'),
             windowEditor: document.getElementById('window-editor'),
             windowVim: document.getElementById('window-vim'),
-            windowChat: document.getElementById('window-chat'),
             // Input elements
             agentInput: document.getElementById('agent-input'),
             editorInput: document.getElementById('editor-input'),
             vimInput: document.getElementById('vim-input'),
-            chatInput: document.getElementById('chat-input'),
         };
 
         // Scenario configurations
@@ -60,15 +58,6 @@ class VoxtypeDemo {
                 inputElement: 'vimInput',
                 text: 'println!("Please enter your name: ");',
                 speechDuration: 2500,
-            },
-            chat: {
-                title: 'Sending a Message',
-                description: 'Dictate messages hands-free in your favorite chat app. Perfect for quick replies while multitasking.',
-                window: 'window-chat',
-                windowTitle: 'Element - #general',
-                inputElement: 'chatInput',
-                text: 'Just pushed the fix, can someone review the PR when you get a chance?',
-                speechDuration: 3000,
             },
         };
 
@@ -205,7 +194,6 @@ class VoxtypeDemo {
         this.elements.agentInput.textContent = '';
         this.elements.editorInput.textContent = '';
         this.elements.vimInput.textContent = '';
-        this.elements.chatInput.textContent = '';
     }
 
     pressKey() {
