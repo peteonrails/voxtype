@@ -33,6 +33,11 @@ The main key to hold for recording. Must be a valid Linux evdev key name.
 - `RIGHTALT` - Right Alt key
 - `F13` through `F24` - Extended function keys
 - `INSERT` - Insert key
+- `HOME` - Home key
+- `END` - End key
+- `PAGEUP` - Page Up key
+- `PAGEDOWN` - Page Down key
+- `DELETE` - Delete key
 
 **Example:**
 ```toml
@@ -247,20 +252,44 @@ mode = "type"
 fallback_to_clipboard = true  # Use clipboard if ydotool fails
 ```
 
-### notification
+---
+
+## [output.notification]
+
+Controls desktop notifications at various stages.
+
+### on_recording_start
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+When `true`, shows a notification when recording starts (hotkey pressed).
+
+### on_recording_stop
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+When `true`, shows a notification when recording stops (transcription begins).
+
+### on_transcription
 
 **Type:** Boolean
 **Default:** `true`
 **Required:** No
 
-When `true`, shows a desktop notification with the transcribed text.
+When `true`, shows a notification with the transcribed text after transcription completes.
 
 **Requires:** `notify-send` (libnotify)
 
 **Example:**
 ```toml
-[output]
-notification = false  # Disable notifications
+[output.notification]
+on_recording_start = true   # Notify when PTT activates
+on_recording_stop = true    # Notify when transcribing
+on_transcription = true     # Show transcribed text
 ```
 
 ### type_delay_ms
@@ -345,8 +374,8 @@ model = "base.en"
 model = "medium.en"
 threads = 8
 
-[output]
-notification = true
+[output.notification]
+on_transcription = true
 ```
 
 ### Low Latency
@@ -380,7 +409,9 @@ modifiers = ["LEFTCTRL", "LEFTSHIFT"]
 
 [output]
 mode = "clipboard"
-notification = true
+
+[output.notification]
+on_transcription = true
 ```
 
 ### Server/Headless
@@ -391,5 +422,9 @@ key = "F24"
 
 [output]
 mode = "clipboard"
-notification = false  # No desktop notifications
+
+[output.notification]
+on_recording_start = false
+on_recording_stop = false
+on_transcription = false  # No desktop notifications
 ```

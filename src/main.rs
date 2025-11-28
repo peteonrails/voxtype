@@ -292,12 +292,19 @@ mode = "type"
 # Fall back to clipboard if typing fails
 fallback_to_clipboard = true
 
-# Show desktop notification with transcribed text
-notification = true
-
 # Delay between typed characters in milliseconds
 # 0 = fastest possible, increase if characters are dropped
 type_delay_ms = 0
+
+[output.notification]
+# Show notification when recording starts (hotkey pressed)
+on_recording_start = false
+
+# Show notification when recording stops (transcription beginning)
+on_recording_stop = false
+
+# Show notification with transcribed text after transcription completes
+on_transcription = true
 "#;
 
 /// Run the setup command

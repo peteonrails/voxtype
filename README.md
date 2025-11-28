@@ -64,8 +64,12 @@ translate = false
 [output]
 mode = "type"       # "type" or "clipboard"
 fallback_to_clipboard = true
-notification = true
 type_delay_ms = 0
+
+[output.notification]
+on_recording_start = false  # Notify when PTT activates
+on_recording_stop = false   # Notify when transcribing
+on_transcription = true     # Show transcribed text
 ```
 
 ## CLI Options
@@ -289,7 +293,9 @@ language = "en"    # or "auto" for detection
 [output]
 mode = "type"      # or "clipboard"
 fallback_to_clipboard = true
-notification = true
+
+[output.notification]
+on_transcription = true
 ```
 
 ### Commands

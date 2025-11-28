@@ -172,12 +172,19 @@ mode = "type"
 # Fall back to clipboard if typing fails
 fallback_to_clipboard = true
 
-# Show desktop notification with transcribed text
-notification = true
-
 # Delay between typed characters in milliseconds
 # 0 = fastest, increase if characters are dropped
 type_delay_ms = 0
+
+[output.notification]
+# Show notification when recording starts (hotkey pressed)
+on_recording_start = false
+
+# Show notification when recording stops (transcription begins)
+on_recording_stop = false
+
+# Show notification with transcribed text
+on_transcription = true
 ```
 
 ### Creating a Custom Configuration
@@ -213,6 +220,11 @@ Any key supported by the Linux evdev system can be used as a hotkey:
 | Right Ctrl | `RIGHTCTRL` |
 | F13-F24 | `F13`, `F14`, ... `F24` |
 | Insert | `INSERT` |
+| Home | `HOME` |
+| End | `END` |
+| Page Up | `PAGEUP` |
+| Page Down | `PAGEDOWN` |
+| Delete | `DELETE` |
 | Caps Lock* | `CAPSLOCK` |
 
 *Note: Using Caps Lock may interfere with normal typing.
