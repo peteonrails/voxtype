@@ -131,6 +131,12 @@ impl Config {
             .map(|dirs| dirs.config_dir().join("config.toml"))
     }
 
+    /// Get the config directory path
+    pub fn config_dir() -> Option<PathBuf> {
+        directories::ProjectDirs::from("", "", "voxtype")
+            .map(|dirs| dirs.config_dir().to_path_buf())
+    }
+
     /// Get the data directory path (for models)
     pub fn data_dir() -> PathBuf {
         directories::ProjectDirs::from("", "", "voxtype")
@@ -141,6 +147,23 @@ impl Config {
     /// Get the models directory path
     pub fn models_dir() -> PathBuf {
         Self::data_dir().join("models")
+    }
+
+    /// Ensure all required directories exist
+    /// Creates: config dir, data dir, and models dir
+    pub fn ensure_directories() -> std::io::Result<()> {
+        // Create config directory
+        if let Some(config_dir) = Self::config_dir() {
+            std::fs::create_dir_all(&config_dir)?;
+            tracing::debug!("Ensured config directory exists: {:?}", config_dir);
+        }
+
+        // Create models directory (includes data dir)
+        let models_dir = Self::models_dir();
+        std::fs::create_dir_all(&models_dir)?;
+        tracing::debug!("Ensured models directory exists: {:?}", models_dir);
+
+        Ok(())
     }
 }
 

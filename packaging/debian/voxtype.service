@@ -11,7 +11,7 @@ Restart=on-failure
 RestartSec=5
 
 # Note: User must be in 'input' group for evdev access
-# Run: sudo usermod -aG input $USER
+# Before enabling this service, run: voxtype setup --download
 
 [Install]
 WantedBy=default.target

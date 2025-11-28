@@ -243,6 +243,12 @@ async fn run_setup(config: &config::Config, download: bool) -> anyhow::Result<()
     println!("Voxtype Setup\n");
     println!("=============\n");
 
+    // Ensure directories exist first
+    println!("Creating directories...");
+    config::Config::ensure_directories()?;
+    println!("  ✓ Config directory: {:?}", config::Config::config_dir().unwrap_or_default());
+    println!("  ✓ Models directory: {:?}", config::Config::models_dir());
+
     let mut all_ok = true;
 
     // Check input group

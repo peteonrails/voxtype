@@ -27,6 +27,12 @@ impl Daemon {
     /// Run the daemon main loop
     pub async fn run(&mut self) -> Result<()> {
         tracing::info!("Starting voxtype daemon");
+
+        // Ensure required directories exist
+        Config::ensure_directories().map_err(|e| {
+            crate::error::VoxtypeError::Config(format!("Failed to create directories: {}", e))
+        })?;
+
         tracing::info!("Hotkey: {}", self.config.hotkey.key);
         tracing::info!("Output mode: {:?}", self.config.output.mode);
 
