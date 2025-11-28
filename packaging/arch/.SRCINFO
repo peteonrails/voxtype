@@ -18,7 +18,7 @@ pkgbase = voxtype
 	optdepends = pipewire: audio capture (recommended)
 	optdepends = pulseaudio: audio capture (alternative)
 	backup = etc/voxtype/config.toml
-	source = voxtype-0.1.0.tar.gz::https://voxtype.io/archive/v0.1.0.tar.gz
+	source = voxtype-0.1.0.tar.gz::https://github.com/peteonrails/voxtype/archive/refs/tags/v0.1.0.tar.gz
 	sha256sums = SKIP
 
 pkgname = voxtype
