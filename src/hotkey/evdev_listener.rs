@@ -321,6 +321,13 @@ fn parse_key_name(name: &str) -> Result<Key, HotkeyError> {
         "KEY_F23" => Key::KEY_F23,
         "KEY_F24" => Key::KEY_F24,
 
+        // Navigation keys
+        "KEY_HOME" => Key::KEY_HOME,
+        "KEY_END" => Key::KEY_END,
+        "KEY_PAGEUP" => Key::KEY_PAGEUP,
+        "KEY_PAGEDOWN" => Key::KEY_PAGEDOWN,
+        "KEY_DELETE" => Key::KEY_DELETE,
+
         // Common keys that might be used
         "KEY_SPACE" => Key::KEY_SPACE,
         "KEY_ENTER" => Key::KEY_ENTER,
