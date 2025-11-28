@@ -1,6 +1,6 @@
 [package]
 name = "voxtype"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Peter Jackson"]
 description = "Push-to-talk voice-to-text for Wayland"

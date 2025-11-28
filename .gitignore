@@ -19,3 +19,4 @@
 
 # Claude Code
 .claude/
+*.deb

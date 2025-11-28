@@ -1,3 +1,11 @@
+voxtype (0.1.1-1) unstable; urgency=medium
+
+  * Add Waybar integration with status indicator
+  * Add voxtype status command for external integrations
+  * Add optional state_file configuration option
+
+ -- Peter Jackson <pete@peteonrails.com>  Fri, 28 Nov 2025 17:30:00 +0000
+
 voxtype (0.1.0-1) unstable; urgency=medium
 
   * Initial release.
