@@ -2,7 +2,7 @@
 name = "voxtype"
 version = "0.1.0"
 edition = "2021"
-authors = ["Pete"]
+authors = ["Peter Jackson"]
 description = "Push-to-talk voice-to-text for Wayland"
 license = "MIT"
 readme = "README.md"
