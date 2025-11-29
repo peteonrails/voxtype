@@ -9,7 +9,8 @@ Hold a hotkey (default: ScrollLock) while speaking, release to transcribe and ou
 - **Works on all Wayland compositors** - Uses kernel-level input (evdev) instead of compositor-specific protocols
 - **Fully offline** - Uses whisper.cpp for local transcription, no internet required
 - **Fallback chain** - Types via ydotool, falls back to clipboard if unavailable
-- **Push-to-talk** - Natural workflow: hold to record, release to transcribe
+- **Push-to-talk or Toggle mode** - Hold to record, or press once to start/stop
+- **Audio feedback** - Optional sound cues when recording starts/stops
 - **Configurable** - Choose your hotkey, model size, output mode, and more
 - **Waybar integration** - Optional status indicator shows recording state in your bar
 
@@ -43,6 +44,20 @@ systemctl --user enable --now ydotool
 
 Press Ctrl+C to stop the daemon.
 
+### Toggle Mode
+
+If you prefer to press once to start recording and again to stop (instead of holding):
+
+```bash
+# Via command line
+voxtype --toggle
+
+# Or in config.toml
+[hotkey]
+key = "SCROLLLOCK"
+mode = "toggle"
+```
+
 ## Configuration
 
 Config file location: `~/.config/voxtype/config.toml`
@@ -51,11 +66,18 @@ Config file location: `~/.config/voxtype/config.toml`
 [hotkey]
 key = "SCROLLLOCK"  # Or: PAUSE, F13-F24, RIGHTALT, etc.
 modifiers = []      # Optional: ["LEFTCTRL", "LEFTALT"]
+# mode = "toggle"   # Uncomment for toggle mode (press to start/stop)
 
 [audio]
 device = "default"
 sample_rate = 16000
 max_duration_secs = 60
+
+# Audio feedback (sound cues when recording starts/stops)
+# [audio.feedback]
+# enabled = true
+# theme = "default"   # "default", "subtle", "mechanical", or path to custom dir
+# volume = 0.7        # 0.0 to 1.0
 
 [whisper]
 model = "base.en"   # tiny, base, small, medium, large-v3
@@ -73,6 +95,24 @@ on_recording_stop = false   # Notify when transcribing
 on_transcription = true     # Show transcribed text
 ```
 
+### Audio Feedback
+
+Enable audio feedback to hear a sound when recording starts and stops:
+
+```toml
+[audio.feedback]
+enabled = true
+theme = "default"  # Built-in themes: default, subtle, mechanical
+volume = 0.7       # 0.0 to 1.0
+```
+
+**Built-in themes:**
+- `default` - Clear, pleasant two-tone beeps
+- `subtle` - Quiet, unobtrusive clicks
+- `mechanical` - Typewriter/keyboard-like sounds
+
+**Custom themes:** Point `theme` to a directory containing `start.wav`, `stop.wav`, and `error.wav` files.
+
 ## CLI Options
 
 ```
@@ -83,6 +123,7 @@ Commands:
   transcribe  Transcribe an audio file
   setup       Check dependencies and download models
   config      Show current configuration
+  status      Show daemon state (for Waybar integration)
 
 Options:
   -c, --config <FILE>  Path to config file
@@ -91,6 +132,7 @@ Options:
   --clipboard          Force clipboard mode
   --model <MODEL>      Override whisper model
   --hotkey <KEY>       Override hotkey
+  --toggle             Use toggle mode (press to start/stop)
 ```
 
 ## Whisper Models
@@ -154,203 +196,24 @@ cargo build --release
 # Binary is at: target/release/voxtype
 ```
 
-## Architecture
+## Waybar Integration
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                         Daemon                              │
-├─────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
-│  │   Hotkey     │  │    Audio     │  │   Text Output    │  │
-│  │  (evdev)     │──│   (cpal)     │──│  (ydotool/clip)  │  │
-│  └──────────────┘  └──────────────┘  └──────────────────┘  │
-│         │               │                    │              │
-│         │               ▼                    │              │
-│         │        ┌──────────────┐            │              │
-│         │        │   Whisper    │            │              │
-│         └───────▶│  (whisper-rs)│────────────┘              │
-│                  └──────────────┘                           │
-└─────────────────────────────────────────────────────────────┘
+Add to your Waybar config:
+
+```json
+"custom/voxtype": {
+    "exec": "voxtype status --follow --format json",
+    "return-type": "json",
+    "format": "{}",
+    "tooltip": true
+}
 ```
 
-**Why evdev?** Wayland doesn't provide a standard way to capture global hotkeys. Using evdev (the Linux input subsystem) works on all compositors but requires the user to be in the `input` group.
-
-**Why ydotool?** Similarly, Wayland doesn't provide a standard way to simulate keyboard input. ydotool uses the uinput kernel interface, which works on all compositors.
-
-## License
-
-MIT
-
----
-
-# Voxtype (Old README content below - can be deleted)
-
-Push-to-talk voice-to-text for Wayland Linux systems.
-
-Hold a hotkey, speak, release the hotkey, and your words appear at the cursor position (or in the clipboard).
-
-## Features
-
-- **Works on all Wayland compositors** - Uses kernel-level input (evdev) and output (ydotool)
-- **Fully offline** - Speech recognition via whisper.cpp, no network required
-- **Low latency** - Optimized for short push-to-talk recordings
-- **Configurable** - Choose your hotkey, model size, output mode
-- **Fallback chain** - Falls back to clipboard if typing fails
-
-## Requirements
-
-### System
-
-- Linux with Wayland
-- PipeWire or PulseAudio (for audio capture)
-- User must be in the `input` group (for hotkey detection)
-
-### Tools
-
-- **ydotool** - For typing text (recommended)
-- **wl-copy** - For clipboard fallback (wl-clipboard package)
-
-### Whisper Model
-
-Download a model from [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp/tree/main):
-
-```bash
-mkdir -p ~/.local/share/voxtype/models
-curl -L -o ~/.local/share/voxtype/models/ggml-base.en.bin \
-  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
-```
-
-Or run `voxtype setup` for interactive setup.
-
-## Installation
-
-### From Source
-
-```bash
-# Install build dependencies (Fedora)
-sudo dnf install alsa-lib-devel
-
-# Install build dependencies (Ubuntu/Debian)
-sudo apt install libasound2-dev
-
-# Build
-cargo build --release
-
-# Install
-sudo cp target/release/voxtype /usr/local/bin/
-```
-
-### Setup
-
-```bash
-# Add user to input group (required for hotkey detection)
-sudo usermod -aG input $USER
-# Log out and back in for group change to take effect
-
-# Enable ydotool daemon
-systemctl --user enable --now ydotool
-
-# Run setup to verify everything works
-voxtype setup
-```
-
-## Usage
-
-### Basic
-
-```bash
-# Run with defaults (ScrollLock as hotkey)
-voxtype
-
-# Use a different hotkey
-voxtype --hotkey PAUSE
-voxtype --hotkey F13
-
-# Force clipboard mode (no typing, just copy)
-voxtype --clipboard
-
-# Use a different model
-voxtype --model small.en
-```
-
-### Configuration
-
-Create `~/.config/voxtype/config.toml`:
+First, enable the state file in your voxtype config:
 
 ```toml
-[hotkey]
-key = "SCROLLLOCK"
-modifiers = []  # e.g., ["LEFTCTRL"] for Ctrl+ScrollLock
-
-[audio]
-device = "default"
-sample_rate = 16000
-max_duration_secs = 60
-
-[whisper]
-model = "base.en"  # tiny, base, small, medium, large-v3
-language = "en"    # or "auto" for detection
-
-[output]
-mode = "type"      # or "clipboard"
-fallback_to_clipboard = true
-
-[output.notification]
-on_transcription = true
+state_file = "auto"
 ```
-
-### Commands
-
-```bash
-# Run as daemon (default)
-voxtype daemon
-
-# Transcribe an audio file
-voxtype transcribe recording.wav
-
-# Interactive setup and diagnostics
-voxtype setup
-
-# Show current configuration
-voxtype config
-```
-
-### Systemd Service
-
-Create `~/.config/systemd/user/voxtype.service`:
-
-```ini
-[Unit]
-Description=Voxtype voice-to-text daemon
-After=pipewire.service
-
-[Service]
-ExecStart=/usr/local/bin/voxtype daemon
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-```
-
-Then:
-
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now voxtype
-```
-
-## Models
-
-| Model | Size | Speed | Quality | Best For |
-|-------|------|-------|---------|----------|
-| tiny.en | 39 MB | Fastest | Good | Quick notes |
-| base.en | 142 MB | Fast | Better | **Recommended** |
-| small.en | 466 MB | Medium | Great | Accuracy-focused |
-| medium.en | 1.5 GB | Slow | Excellent | High accuracy |
-| large-v3 | 3.1 GB | Slowest | Best | Maximum accuracy |
-
-`.en` models are English-only but faster and more accurate for English.
 
 ## Troubleshooting
 
@@ -396,21 +259,24 @@ type_delay_ms = 10
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                      voxtype daemon                         │
+│                         Daemon                              │
 ├─────────────────────────────────────────────────────────────┤
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │   evdev     │  │    cpal     │  │      ydotool        │  │
-│  │  (hotkey)   │──│   (audio)   │──│   (text output)     │  │
-│  │             │  │             │  │   or wl-copy        │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────┘  │
-│                          │                                  │
-│                          ▼                                  │
-│                   ┌─────────────┐                           │
-│                   │ whisper.cpp │                           │
-│                   │   (STT)     │                           │
-│                   └─────────────┘                           │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
+│  │   Hotkey     │  │    Audio     │  │   Text Output    │  │
+│  │  (evdev)     │──│   (cpal)     │──│  (ydotool/clip)  │  │
+│  └──────────────┘  └──────────────┘  └──────────────────┘  │
+│         │               │                    │              │
+│         │               ▼                    │              │
+│         │        ┌──────────────┐            │              │
+│         │        │   Whisper    │            │              │
+│         └───────▶│  (whisper-rs)│────────────┘              │
+│                  └──────────────┘                           │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+**Why evdev?** Wayland doesn't provide a standard way to capture global hotkeys. Using evdev (the Linux input subsystem) works on all compositors but requires the user to be in the `input` group.
+
+**Why ydotool?** Similarly, Wayland doesn't provide a standard way to simulate keyboard input. ydotool uses the uinput kernel interface, which works on all compositors.
 
 ## License
 

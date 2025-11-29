@@ -26,8 +26,6 @@ pub struct CpalCapture {
     cmd_tx: Option<std::sync::mpsc::Sender<CaptureCommand>>,
     /// Handle to the capture thread
     thread_handle: Option<thread::JoinHandle<()>>,
-    /// Whether recording is active
-    is_recording: Arc<Mutex<bool>>,
 }
 
 impl CpalCapture {
@@ -37,7 +35,6 @@ impl CpalCapture {
             config: config.clone(),
             cmd_tx: None,
             thread_handle: None,
-            is_recording: Arc::new(Mutex::new(false)),
         })
     }
 }
@@ -91,10 +88,6 @@ impl AudioCapture for CpalCapture {
         // Shared state
         let samples = Arc::new(Mutex::new(Vec::<f32>::new()));
         let samples_clone = samples.clone();
-        let is_recording = self.is_recording.clone();
-
-        // Set recording flag
-        *is_recording.lock().unwrap() = true;
 
         // Spawn audio capture thread
         let thread_handle = thread::spawn(move || {
@@ -185,9 +178,6 @@ impl AudioCapture for CpalCapture {
     }
 
     async fn stop(&mut self) -> Result<Vec<f32>, AudioError> {
-        // Mark as not recording
-        *self.is_recording.lock().unwrap() = false;
-
         // Send stop command and get samples back
         let samples = if let Some(cmd_tx) = self.cmd_tx.take() {
             let (response_tx, response_rx) = oneshot::channel();
@@ -228,10 +218,6 @@ impl AudioCapture for CpalCapture {
         }
 
         Ok(samples)
-    }
-
-    fn is_recording(&self) -> bool {
-        self.is_recording.lock().map(|s| *s).unwrap_or(false)
     }
 }
 

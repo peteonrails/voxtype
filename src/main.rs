@@ -60,6 +60,10 @@ struct Cli {
     #[arg(long, value_name = "KEY")]
     hotkey: Option<String>,
 
+    /// Use toggle mode (press to start/stop) instead of push-to-talk (hold to record)
+    #[arg(long)]
+    toggle: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -132,6 +136,9 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(hotkey) = cli.hotkey {
         config.hotkey.key = hotkey;
+    }
+    if cli.toggle {
+        config.hotkey.mode = config::ActivationMode::Toggle;
     }
 
     // Run the appropriate command
@@ -269,6 +276,11 @@ key = "SCROLLLOCK"
 # Example: modifiers = ["LEFTCTRL", "LEFTALT"]
 modifiers = []
 
+# Activation mode: "push_to_talk" or "toggle"
+# - push_to_talk: Hold hotkey to record, release to transcribe (default)
+# - toggle: Press hotkey once to start recording, press again to stop
+# mode = "push_to_talk"
+
 [audio]
 # Audio input device ("default" uses system default)
 # List devices with: pactl list sources short
@@ -279,6 +291,16 @@ sample_rate = 16000
 
 # Maximum recording duration in seconds (safety limit)
 max_duration_secs = 60
+
+# [audio.feedback]
+# Enable audio feedback sounds (beeps when recording starts/stops)
+# enabled = true
+#
+# Sound theme: "default", "subtle", "mechanical", or path to custom theme directory
+# theme = "default"
+#
+# Volume level (0.0 to 1.0)
+# volume = 0.7
 
 [whisper]
 # Model to use for transcription
@@ -597,11 +619,17 @@ fn show_config(config: &config::Config) -> anyhow::Result<()> {
     println!("[hotkey]");
     println!("  key = {:?}", config.hotkey.key);
     println!("  modifiers = {:?}", config.hotkey.modifiers);
+    println!("  mode = {:?}", config.hotkey.mode);
 
     println!("\n[audio]");
     println!("  device = {:?}", config.audio.device);
     println!("  sample_rate = {}", config.audio.sample_rate);
     println!("  max_duration_secs = {}", config.audio.max_duration_secs);
+
+    println!("\n[audio.feedback]");
+    println!("  enabled = {}", config.audio.feedback.enabled);
+    println!("  theme = {:?}", config.audio.feedback.theme);
+    println!("  volume = {}", config.audio.feedback.volume);
 
     println!("\n[whisper]");
     println!("  model = {:?}", config.whisper.model);

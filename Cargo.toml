@@ -1,6 +1,6 @@
 [package]
 name = "voxtype"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["Peter Jackson"]
 description = "Push-to-talk voice-to-text for Wayland"
@@ -39,6 +39,9 @@ libc = "0.2"
 # Audio capture
 cpal = "0.15"
 hound = "3"  # WAV file reading/writing
+
+# Audio playback (for feedback sounds)
+rodio = { version = "0.19", default-features = false, features = ["wav"] }
 
 # Whisper speech-to-text
 whisper-rs = "0.12"

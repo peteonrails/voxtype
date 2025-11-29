@@ -10,6 +10,17 @@ use crate::error::VoxtypeError;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Hotkey activation mode
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivationMode {
+    /// Hold key to record, release to stop (default)
+    #[default]
+    PushToTalk,
+    /// Press once to start recording, press again to stop
+    Toggle,
+}
+
 /// Root configuration structure
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
@@ -37,6 +48,10 @@ pub struct HotkeyConfig {
     /// Examples: ["LEFTCTRL"], ["LEFTALT", "LEFTSHIFT"]
     #[serde(default)]
     pub modifiers: Vec<String>,
+
+    /// Activation mode: push_to_talk (hold to record) or toggle (press to start/stop)
+    #[serde(default)]
+    pub mode: ActivationMode,
 }
 
 /// Audio capture configuration
@@ -50,6 +65,44 @@ pub struct AudioConfig {
 
     /// Maximum recording duration in seconds (safety limit)
     pub max_duration_secs: u32,
+
+    /// Audio feedback settings
+    #[serde(default)]
+    pub feedback: AudioFeedbackConfig,
+}
+
+/// Audio feedback configuration for sound cues
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AudioFeedbackConfig {
+    /// Enable audio feedback sounds
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Sound theme: "default", "subtle", "mechanical", or path to custom theme directory
+    #[serde(default = "default_sound_theme")]
+    pub theme: String,
+
+    /// Volume level (0.0 to 1.0)
+    #[serde(default = "default_volume")]
+    pub volume: f32,
+}
+
+fn default_sound_theme() -> String {
+    "default".to_string()
+}
+
+fn default_volume() -> f32 {
+    0.7
+}
+
+impl Default for AudioFeedbackConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            theme: default_sound_theme(),
+            volume: default_volume(),
+        }
+    }
 }
 
 /// Whisper speech-to-text configuration
@@ -135,11 +188,13 @@ impl Default for Config {
             hotkey: HotkeyConfig {
                 key: "SCROLLLOCK".to_string(),
                 modifiers: vec![],
+                mode: ActivationMode::default(),
             },
             audio: AudioConfig {
                 device: "default".to_string(),
                 sample_rate: 16000,
                 max_duration_secs: 60,
+                feedback: AudioFeedbackConfig::default(),
             },
             whisper: WhisperConfig {
                 model: "base.en".to_string(),
@@ -265,6 +320,7 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
 }
 
 /// Save configuration to file
+#[allow(dead_code)]
 pub fn save_config(config: &Config, path: &Path) -> Result<(), VoxtypeError> {
     // Ensure parent directory exists
     if let Some(parent) = path.parent() {
@@ -289,7 +345,9 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.hotkey.key, "SCROLLLOCK");
+        assert_eq!(config.hotkey.mode, ActivationMode::PushToTalk);
         assert_eq!(config.audio.sample_rate, 16000);
+        assert!(!config.audio.feedback.enabled);
         assert_eq!(config.whisper.model, "base.en");
         assert_eq!(config.output.mode, OutputMode::Type);
     }
@@ -300,16 +358,16 @@ mod tests {
             [hotkey]
             key = "PAUSE"
             modifiers = ["LEFTCTRL"]
-            
+
             [audio]
             device = "default"
             sample_rate = 16000
             max_duration_secs = 30
-            
+
             [whisper]
             model = "small.en"
             language = "en"
-            
+
             [output]
             mode = "clipboard"
 
@@ -322,10 +380,44 @@ mod tests {
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.hotkey.key, "PAUSE");
         assert_eq!(config.hotkey.modifiers, vec!["LEFTCTRL"]);
+        assert_eq!(config.hotkey.mode, ActivationMode::PushToTalk); // default
         assert_eq!(config.whisper.model, "small.en");
         assert_eq!(config.output.mode, OutputMode::Clipboard);
         assert!(config.output.notification.on_recording_start);
         assert!(config.output.notification.on_recording_stop);
         assert!(!config.output.notification.on_transcription);
+    }
+
+    #[test]
+    fn test_parse_toggle_mode() {
+        let toml_str = r#"
+            [hotkey]
+            key = "F13"
+            mode = "toggle"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [audio.feedback]
+            enabled = true
+            theme = "subtle"
+            volume = 0.5
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.hotkey.key, "F13");
+        assert_eq!(config.hotkey.mode, ActivationMode::Toggle);
+        assert!(config.audio.feedback.enabled);
+        assert_eq!(config.audio.feedback.theme, "subtle");
+        assert_eq!(config.audio.feedback.volume, 0.5);
     }
 }

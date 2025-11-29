@@ -4,6 +4,7 @@
 //! PipeWire, PulseAudio, and ALSA backends.
 
 pub mod cpal_capture;
+pub mod feedback;
 
 use crate::config::AudioConfig;
 use crate::error::AudioError;
@@ -18,9 +19,6 @@ pub trait AudioCapture: Send + Sync {
 
     /// Stop capturing and return all recorded samples
     async fn stop(&mut self) -> Result<Vec<f32>, AudioError>;
-
-    /// Check if currently recording
-    fn is_recording(&self) -> bool;
 }
 
 /// Factory function to create audio capture
