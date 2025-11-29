@@ -13,6 +13,7 @@ Voxtype is a push-to-talk voice-to-text tool for Wayland Linux. This manual cove
 - [Output Modes](#output-modes)
 - [Tips & Best Practices](#tips--best-practices)
 - [Keyboard Shortcuts](#keyboard-shortcuts)
+- [Integration Examples](#integration-examples)
 
 ---
 
@@ -456,81 +457,33 @@ Enable the systemd service, or add Voxtype to Startup Applications.
 
 Voxtype can display a status indicator in Waybar showing when push-to-talk is active.
 
-**Why enable this?** A Waybar widget provides visual feedback when:
-- Recording is active (microphone icon lights up)
-- Transcription is in progress
-- Voxtype is running and ready
+> **For a complete step-by-step guide, see [WAYBAR.md](WAYBAR.md).**
 
-This is useful if you disable desktop notifications or prefer a more subtle indicator.
+**Quick setup:**
 
-**Step 1: Enable the state file**
+1. Enable the state file in `~/.config/voxtype/config.toml`:
+   ```toml
+   state_file = "auto"
+   ```
 
-Add to your `~/.config/voxtype/config.toml`:
+2. Add the Waybar module to your config:
+   ```json
+   "custom/voxtype": {
+       "exec": "voxtype status --follow --format json",
+       "return-type": "json",
+       "format": "{}",
+       "tooltip": true
+   }
+   ```
 
-```toml
-# Enable state file for Waybar integration
-state_file = "auto"
-```
-
-This tells the daemon to write its current state to `$XDG_RUNTIME_DIR/voxtype/state`.
-
-**Step 2: Add Waybar module**
-
-Add to your Waybar config (`~/.config/waybar/config` or `config.jsonc`):
-
-```json
-"custom/voxtype": {
-    "exec": "voxtype status --follow --format json",
-    "return-type": "json",
-    "format": "{}",
-    "tooltip": true
-}
-```
-
-Don't forget to add `"custom/voxtype"` to your modules list (e.g., in `modules-center` or `modules-right`).
+3. Add `"custom/voxtype"` to your modules list and restart Waybar.
 
 The module displays:
 - 🎙️ when idle (ready to record)
 - 🎤 when recording (hotkey held)
 - ⏳ when transcribing
 
-**Step 3: Add Waybar styles (optional)**
-
-Add to your `~/.config/waybar/style.css`:
-
-```css
-#custom-voxtype {
-    padding: 0 8px;
-}
-
-#custom-voxtype.recording {
-    color: #ff5555;
-    animation: pulse 1s infinite;
-}
-
-#custom-voxtype.transcribing {
-    color: #f1fa8c;
-}
-
-@keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
-}
-```
-
-**Alternative: Simple polling approach**
-
-If you prefer not to use `--follow`, you can poll the status:
-
-```json
-"custom/voxtype": {
-    "exec": "voxtype status --format json",
-    "return-type": "json",
-    "format": "{}",
-    "interval": 1,
-    "tooltip": true
-}
-```
+See [WAYBAR.md](WAYBAR.md) for styling options, troubleshooting, and Polybar setup.
 
 ### With Polybar
 
@@ -550,5 +503,6 @@ label = %output%
 ## Next Steps
 
 - [Configuration Reference](CONFIGURATION.md) - Detailed config options
+- [Waybar Integration](WAYBAR.md) - Status bar indicator setup
 - [Troubleshooting Guide](TROUBLESHOOTING.md) - Common issues and solutions
 - [FAQ](FAQ.md) - Frequently asked questions
