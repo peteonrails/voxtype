@@ -1,3 +1,12 @@
+voxtype (0.1.2-1) unstable; urgency=medium
+
+  * Add toggle mode: press hotkey once to start/stop recording
+  * Add audio feedback: sound cues when recording starts/stops
+  * Three built-in sound themes: default, subtle, mechanical
+  * Support for custom sound themes
+
+ -- Peter Jackson <pete@peteonrails.com>  Sat, 29 Nov 2025 12:00:00 +0000
+
 voxtype (0.1.1-1) unstable; urgency=medium
 
   * Add Waybar integration with status indicator

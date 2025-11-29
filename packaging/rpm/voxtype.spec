@@ -1,5 +1,5 @@
 Name:           voxtype
-Version:        0.1.0
+Version:        0.1.2
 Release:        1%{?dist}
 Summary:        Push-to-talk voice-to-text for Wayland Linux
 
@@ -110,5 +110,12 @@ echo ""
 %{_datadir}/fish/vendor_completions.d/voxtype.fish
 
 %changelog
+* Sat Nov 29 2025 Peter Jackson <pete@peteonrails.com> - 0.1.2-1
+- Add toggle mode: press hotkey once to start/stop recording
+- Add audio feedback with configurable sound themes
+
+* Fri Nov 28 2025 Peter Jackson <pete@peteonrails.com> - 0.1.1-1
+- Add Waybar integration and status command
+
 * Thu Nov 28 2025 Peter Jackson <pete@peteonrails.com> - 0.1.0-1
 - Initial release
