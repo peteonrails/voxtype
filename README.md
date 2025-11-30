@@ -1,5 +1,9 @@
 # Voxtype
 
+[![Voxtype - Voice to Text for Wayland Linux](website/images/og-preview.png)](https://voxtype.io)
+
+**[voxtype.io](https://voxtype.io)**
+
 Push-to-talk voice-to-text for Wayland Linux systems.
 
 Hold a hotkey (default: ScrollLock) while speaking, release to transcribe and output the text at your cursor position.
