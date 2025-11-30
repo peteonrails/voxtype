@@ -278,6 +278,13 @@ type_delay_ms = 10
 
 **Why ydotool?** Similarly, Wayland doesn't provide a standard way to simulate keyboard input. ydotool uses the uinput kernel interface, which works on all compositors.
 
+## Feedback
+
+We want to hear from you! Voxtype is a young project and your feedback helps make it better.
+
+- **Something not working?** If Voxtype doesn't install cleanly, doesn't work on your system, or is buggy in any way, please [open an issue](https://github.com/peteonrails/voxtype/issues). I actively monitor and respond to issues.
+- **Like Voxtype?** I don't accept donations, but if you find it useful, a star on the [GitHub repository](https://github.com/peteonrails/voxtype) would mean a lot!
+
 ## License
 
 MIT
