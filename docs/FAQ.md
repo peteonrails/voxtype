@@ -150,7 +150,20 @@ Depends on model and hardware. On a modern CPU:
 
 ### Does it use GPU acceleration?
 
-Currently, Voxtype uses CPU-only inference via whisper.cpp. GPU support (CUDA, Metal) may be added in future versions.
+Yes! Voxtype supports optional GPU acceleration via compile-time features:
+
+- **Vulkan** - Works on AMD, NVIDIA, and Intel GPUs (recommended for AMD)
+- **CUDA** - NVIDIA GPUs
+- **Metal** - Apple Silicon
+- **HIP/ROCm** - AMD GPUs (alternative to Vulkan)
+
+To enable, build with the appropriate feature flag:
+
+```bash
+cargo build --release --features gpu-vulkan
+```
+
+GPU acceleration dramatically improves inference speed, especially for larger models. The `large-v3` model can achieve sub-second inference with GPU acceleration.
 
 ### Is my voice data sent anywhere?
 

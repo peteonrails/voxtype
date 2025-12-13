@@ -45,7 +45,19 @@ This guide covers all methods for installing Voxtype on Linux systems.
 | Rust toolchain | `rustup` | `rustc cargo` | `rust cargo` |
 | ALSA dev libs | `alsa-lib` | `libasound2-dev` | `alsa-lib-devel` |
 | Clang | `clang` | `libclang-dev` | `clang-devel` |
+| CMake | `cmake` | `cmake` | `cmake` |
 | pkg-config | `pkgconf` | `pkg-config` | `pkgconf` |
+
+### GPU Build Dependencies (optional)
+
+For GPU-accelerated builds, you'll also need:
+
+| GPU Backend | Arch | Debian/Ubuntu | Fedora |
+|-------------|------|---------------|--------|
+| Vulkan | `vulkan-devel` | `libvulkan-dev` | `vulkan-devel` |
+| CUDA | `cuda` | `nvidia-cuda-toolkit` | `cuda` |
+
+Build with GPU support using: `cargo build --release --features gpu-vulkan`
 
 ---
 
