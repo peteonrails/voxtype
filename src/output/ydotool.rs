@@ -64,6 +64,7 @@ impl TextOutput for YdotoolOutput {
         // Add delay if specified
         if self.delay_ms > 0 {
             cmd.arg("--key-delay").arg(self.delay_ms.to_string());
+            cmd.arg("--key-hold").arg(self.delay_ms.to_string());
         }
 
         // The -- ensures text starting with - isn't treated as an option
