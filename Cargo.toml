@@ -44,7 +44,7 @@ hound = "3"  # WAV file reading/writing
 rodio = { version = "0.19", default-features = false, features = ["wav"] }
 
 # Whisper speech-to-text
-whisper-rs = "0.12"
+whisper-rs = "0.15.1"
 
 # HTTP client (for model download in setup command)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

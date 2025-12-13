@@ -91,7 +91,7 @@ impl Transcriber for WhisperTranscriber {
 
         // Improve transcription quality
         params.set_suppress_blank(true);
-        params.set_suppress_non_speech_tokens(true);
+        params.set_suppress_nst(true);
 
         // For short recordings, use single segment mode
         if duration_secs < 30.0 {
@@ -103,16 +103,14 @@ impl Transcriber for WhisperTranscriber {
             .full(params, samples)
             .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
 
-        // Collect all segments
-        let num_segments = state
-            .full_n_segments()
-            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
-
+        // Collect all segments using iterator API
         let mut text = String::new();
-        for i in 0..num_segments {
-            if let Ok(segment) = state.full_get_segment_text(i) {
-                text.push_str(&segment);
-            }
+        for segment in state.as_iter() {
+            text.push_str(
+                segment
+                    .to_str()
+                    .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?,
+            );
         }
 
         let result = text.trim().to_string();
