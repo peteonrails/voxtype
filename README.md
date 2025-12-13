@@ -289,6 +289,11 @@ We want to hear from you! Voxtype is a young project and your feedback helps mak
 - **Something not working?** If Voxtype doesn't install cleanly, doesn't work on your system, or is buggy in any way, please [open an issue](https://github.com/peteonrails/voxtype/issues). I actively monitor and respond to issues.
 - **Like Voxtype?** I don't accept donations, but if you find it useful, a star on the [GitHub repository](https://github.com/peteonrails/voxtype) would mean a lot!
 
+## Contributors
+
+- [Peter Jackson](https://github.com/peteonrails) - Creator and maintainer
+- [jvantillo](https://github.com/jvantillo) - GPU acceleration patch, whisper-rs 0.15.1 compatibility
+
 ## License
 
 MIT
