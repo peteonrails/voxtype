@@ -151,6 +151,55 @@ Options:
 
 For most uses, `base.en` provides a good balance of speed and accuracy.
 
+## GPU Acceleration
+
+Voxtype supports optional GPU acceleration for significantly faster inference. With GPU acceleration, even the `large-v3` model can achieve sub-second inference times.
+
+### Building with GPU Support
+
+GPU acceleration requires building from source with the appropriate feature flag:
+
+**Vulkan (AMD, NVIDIA, Intel - recommended for AMD)**
+```bash
+# Install Vulkan development libraries
+# Arch:
+sudo pacman -S vulkan-devel
+
+# Ubuntu/Debian:
+sudo apt install libvulkan-dev
+
+# Fedora:
+sudo dnf install vulkan-devel
+
+# Build with Vulkan support
+cargo build --release --features gpu-vulkan
+```
+
+**CUDA (NVIDIA)**
+```bash
+# Install CUDA toolkit first, then:
+cargo build --release --features gpu-cuda
+```
+
+**Metal (macOS/Apple Silicon)**
+```bash
+cargo build --release --features gpu-metal
+```
+
+**HIP/ROCm (AMD alternative)**
+```bash
+cargo build --release --features gpu-hipblas
+```
+
+### Performance Comparison
+
+Results vary by hardware. Example on AMD RX 6800:
+
+| Model | CPU | Vulkan GPU |
+|-------|-----|------------|
+| base.en | ~7x realtime | ~35x realtime |
+| large-v3 | ~1x realtime | ~5x realtime |
+
 ## Requirements
 
 ### Runtime Dependencies
