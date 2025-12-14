@@ -18,6 +18,15 @@ enum CaptureCommand {
     Stop(oneshot::Sender<Vec<f32>>),
 }
 
+/// Parameters for building an audio input stream
+struct StreamBuildParams {
+    samples: Arc<Mutex<Vec<f32>>>,
+    tx: mpsc::Sender<Vec<f32>>,
+    source_rate: u32,
+    target_rate: u32,
+    source_channels: usize,
+}
+
 /// cpal-based audio capture implementation
 pub struct CpalCapture {
     /// Audio configuration
@@ -101,37 +110,24 @@ impl AudioCapture for CpalCapture {
             let err_fn = |err| tracing::error!("Audio stream error: {}", err);
 
             // Create the input stream based on sample format
+            let make_params = || StreamBuildParams {
+                samples: samples_clone.clone(),
+                tx: chunk_tx.clone(),
+                source_rate: source_sample_rate,
+                target_rate: target_sample_rate,
+                source_channels,
+            };
+
             let stream_result = match sample_format {
-                cpal::SampleFormat::F32 => build_stream::<f32>(
-                    &device,
-                    &stream_config,
-                    samples_clone.clone(),
-                    chunk_tx.clone(),
-                    source_sample_rate,
-                    target_sample_rate,
-                    source_channels,
-                    err_fn,
-                ),
-                cpal::SampleFormat::I16 => build_stream::<i16>(
-                    &device,
-                    &stream_config,
-                    samples_clone.clone(),
-                    chunk_tx.clone(),
-                    source_sample_rate,
-                    target_sample_rate,
-                    source_channels,
-                    err_fn,
-                ),
-                cpal::SampleFormat::U16 => build_stream::<u16>(
-                    &device,
-                    &stream_config,
-                    samples_clone.clone(),
-                    chunk_tx.clone(),
-                    source_sample_rate,
-                    target_sample_rate,
-                    source_channels,
-                    err_fn,
-                ),
+                cpal::SampleFormat::F32 => {
+                    build_stream::<f32>(&device, &stream_config, make_params(), err_fn)
+                }
+                cpal::SampleFormat::I16 => {
+                    build_stream::<i16>(&device, &stream_config, make_params(), err_fn)
+                }
+                cpal::SampleFormat::U16 => {
+                    build_stream::<u16>(&device, &stream_config, make_params(), err_fn)
+                }
                 format => {
                     tracing::error!("Unsupported sample format: {:?}", format);
                     return;
@@ -225,11 +221,7 @@ impl AudioCapture for CpalCapture {
 fn build_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    samples: Arc<Mutex<Vec<f32>>>,
-    tx: mpsc::Sender<Vec<f32>>,
-    source_rate: u32,
-    target_rate: u32,
-    source_channels: usize,
+    params: StreamBuildParams,
     err_fn: impl Fn(cpal::StreamError) + Send + 'static,
 ) -> Result<cpal::Stream, AudioError>
 where
@@ -237,6 +229,14 @@ where
     f32: cpal::FromSample<T>,
 {
     use cpal::traits::DeviceTrait;
+
+    let StreamBuildParams {
+        samples,
+        tx,
+        source_rate,
+        target_rate,
+        source_channels,
+    } = params;
 
     let stream = device
         .build_input_stream(

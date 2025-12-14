@@ -113,13 +113,29 @@ enum SetupAction {
         /// Uninstall the service instead of installing
         #[arg(long)]
         uninstall: bool,
+
+        /// Show service status
+        #[arg(long)]
+        status: bool,
     },
 
     /// Show Waybar configuration snippets
-    Waybar,
+    Waybar {
+        /// Output only the JSON config (for scripting)
+        #[arg(long)]
+        json: bool,
+
+        /// Output only the CSS config (for scripting)
+        #[arg(long)]
+        css: bool,
+    },
 
     /// Interactive model selection and download
-    Model,
+    Model {
+        /// List installed models instead of interactive selection
+        #[arg(long)]
+        list: bool,
+    },
 }
 
 #[tokio::main]
@@ -175,18 +191,30 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::Setup { action, download } => {
             match action {
-                Some(SetupAction::Systemd { uninstall }) => {
-                    if uninstall {
+                Some(SetupAction::Systemd { uninstall, status }) => {
+                    if status {
+                        setup::systemd::status().await?;
+                    } else if uninstall {
                         setup::systemd::uninstall().await?;
                     } else {
                         setup::systemd::install().await?;
                     }
                 }
-                Some(SetupAction::Waybar) => {
-                    setup::waybar::print_config();
+                Some(SetupAction::Waybar { json, css }) => {
+                    if json {
+                        println!("{}", setup::waybar::get_json_config());
+                    } else if css {
+                        println!("{}", setup::waybar::get_css_config());
+                    } else {
+                        setup::waybar::print_config();
+                    }
                 }
-                Some(SetupAction::Model) => {
-                    setup::model::interactive_select().await?;
+                Some(SetupAction::Model { list }) => {
+                    if list {
+                        setup::model::list_installed();
+                    } else {
+                        setup::model::interactive_select().await?;
+                    }
                 }
                 None => {
                     // Default: run basic setup (backwards compatible)

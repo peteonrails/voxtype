@@ -229,7 +229,7 @@ pub struct WhisperConfig {
 }
 
 /// Text processing configuration
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct TextConfig {
     /// Enable spoken punctuation conversion (e.g., "period" → ".")
     #[serde(default)]
@@ -239,15 +239,6 @@ pub struct TextConfig {
     /// Example: { "hyperwhisper" = "hyprwhspr" }
     #[serde(default)]
     pub replacements: HashMap<String, String>,
-}
-
-impl Default for TextConfig {
-    fn default() -> Self {
-        Self {
-            spoken_punctuation: false,
-            replacements: HashMap::new(),
-        }
-    }
 }
 
 /// Notification configuration

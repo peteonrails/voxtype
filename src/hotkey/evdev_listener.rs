@@ -267,7 +267,14 @@ fn find_keyboard_devices() -> Result<Vec<PathBuf>, HotkeyError> {
 
 /// Parse a key name string to evdev Key
 fn parse_key_name(name: &str) -> Result<Key, HotkeyError> {
-    let normalized = name.to_uppercase().replace('-', "_").replace(' ', "_");
+    // Normalize: uppercase and replace - or space with _
+    let normalized: String = name
+        .chars()
+        .map(|c| match c {
+            '-' | ' ' => '_',
+            c => c.to_ascii_uppercase(),
+        })
+        .collect();
 
     // Add KEY_ prefix if not present
     let key_name = if normalized.starts_with("KEY_") {
