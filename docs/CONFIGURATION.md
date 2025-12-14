@@ -72,6 +72,25 @@ key = "SCROLLLOCK"
 modifiers = ["LEFTCTRL"]  # Requires Ctrl+ScrollLock
 ```
 
+### mode
+
+**Type:** String
+**Default:** `"push_to_talk"`
+**Required:** No
+
+Activation mode for the hotkey.
+
+**Values:**
+- `push_to_talk` - Hold hotkey to record, release to transcribe (default)
+- `toggle` - Press hotkey once to start recording, press again to stop
+
+**Example:**
+```toml
+[hotkey]
+key = "SCROLLLOCK"
+mode = "toggle"  # Press to start, press again to stop
+```
+
 ---
 
 ## [audio]
@@ -124,6 +143,59 @@ Maximum recording duration in seconds. Recording automatically stops after this 
 ```toml
 [audio]
 max_duration_secs = 120  # Allow 2-minute recordings
+```
+
+---
+
+## [audio.feedback]
+
+Controls audio feedback sounds (beeps when recording starts/stops).
+
+### enabled
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+When `true`, plays audio cues when recording starts and stops.
+
+### theme
+
+**Type:** String
+**Default:** `"default"`
+**Required:** No
+
+Sound theme to use for audio feedback.
+
+**Built-in themes:**
+- `default` - Clear, pleasant two-tone beeps
+- `subtle` - Quiet, unobtrusive clicks
+- `mechanical` - Typewriter/keyboard-like sounds
+
+**Custom themes:** Specify a path to a directory containing `start.wav`, `stop.wav`, and `error.wav` files.
+
+### volume
+
+**Type:** Float
+**Default:** `0.7`
+**Required:** No
+
+Volume level for audio feedback, from `0.0` (silent) to `1.0` (full volume).
+
+**Example:**
+```toml
+[audio.feedback]
+enabled = true
+theme = "subtle"
+volume = 0.5
+```
+
+**Custom theme example:**
+```toml
+[audio.feedback]
+enabled = true
+theme = "/home/user/.config/voxtype/sounds"
+volume = 0.8
 ```
 
 ---
