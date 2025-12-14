@@ -1,3 +1,11 @@
+voxtype (0.2.1-1) unstable; urgency=medium
+
+  * Add text processing: word replacements and spoken punctuation
+  * Add setup subcommands: systemd, waybar, model (interactive selection)
+  * Add large-v3-turbo model support
+
+ -- Peter Jackson <pete@peteonrails.com>  Sat, 14 Dec 2025 11:00:00 +0000
+
 voxtype (0.2.0-1) unstable; urgency=medium
 
   * Add optional GPU acceleration (Vulkan, CUDA, Metal, HIP)

@@ -1,5 +1,5 @@
 Name:           voxtype
-Version:        0.2.0
+Version:        0.2.1
 Release:        1%{?dist}
 Summary:        Push-to-talk voice-to-text for Wayland Linux
 
@@ -110,6 +110,11 @@ echo ""
 %{_datadir}/fish/vendor_completions.d/voxtype.fish
 
 %changelog
+* Sat Dec 14 2025 Peter Jackson <pete@peteonrails.com> - 0.2.1-1
+- Add text processing: word replacements and spoken punctuation
+- Add setup subcommands: systemd, waybar, model (interactive selection)
+- Add large-v3-turbo model support
+
 * Sat Dec 13 2025 Peter Jackson <pete@peteonrails.com> - 0.2.0-1
 - Add optional GPU acceleration (Vulkan, CUDA, Metal, HIP/ROCm)
 - Upgrade whisper-rs to 0.15.1
