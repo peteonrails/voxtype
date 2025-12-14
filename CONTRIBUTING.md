@@ -85,9 +85,11 @@ Types: `fix`, `feat`, `docs`, `style`, `refactor`, `test`, `chore`
 
 ## Code of Conduct
 
-- Be respectful and inclusive
-- Focus on constructive feedback
-- Help create a welcoming environment
+Please read our [Code of Conduct](CODE_OF_CONDUCT.md) before contributing. We are committed to providing a welcoming and positive experience for everyone.
+
+## Maintainer Availability
+
+I typically respond to issues and PRs within 48-72 hours. For urgent bugs affecting core functionality, mention @peteonrails in your issue.
 
 ## Questions?
 

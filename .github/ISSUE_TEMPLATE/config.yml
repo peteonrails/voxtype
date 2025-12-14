@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Questions & Discussions
+    url: https://github.com/peteonrails/voxtype/discussions
+    about: Ask questions or discuss ideas in GitHub Discussions
+  - name: Documentation
+    url: https://voxtype.io
+    about: Check the documentation for setup and troubleshooting guides
