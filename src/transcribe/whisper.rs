@@ -159,7 +159,7 @@ fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
         // Otherwise, assume it's a model name and add prefix/suffix
         other => {
             return Err(TranscribeError::ModelNotFound(format!(
-                "Unknown model: '{}'. Valid models: tiny, base, small, medium, large-v3",
+                "Unknown model: '{}'. Valid models: tiny, base, small, medium, large-v3, large-v3-turbo",
                 other
             )));
         }
@@ -194,9 +194,9 @@ fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
     )))
 }
 
-/// Get the download URL for a model
-pub fn get_model_url(model: &str) -> String {
-    let filename = match model {
+/// Get the filename for a model
+pub fn get_model_filename(model: &str) -> String {
+    match model {
         "tiny" => "ggml-tiny.bin",
         "tiny.en" => "ggml-tiny.en.bin",
         "base" => "ggml-base.bin",
@@ -206,8 +206,15 @@ pub fn get_model_url(model: &str) -> String {
         "medium" => "ggml-medium.bin",
         "medium.en" => "ggml-medium.en.bin",
         "large-v3" => "ggml-large-v3.bin",
+        "large-v3-turbo" => "ggml-large-v3-turbo.bin",
         other => other,
-    };
+    }
+    .to_string()
+}
+
+/// Get the download URL for a model
+pub fn get_model_url(model: &str) -> String {
+    let filename = get_model_filename(model);
 
     format!(
         "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",

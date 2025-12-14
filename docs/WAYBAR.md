@@ -22,7 +22,17 @@ This is useful if you:
 - Voxtype installed and working
 - Waybar configured and running
 
-## Setup Steps
+## Quick Setup
+
+Run the setup command to get ready-to-use config snippets:
+
+```bash
+voxtype setup waybar
+```
+
+This outputs the Waybar module JSON and CSS styling, ready to copy into your config files.
+
+## Manual Setup Steps
 
 ### Step 1: Enable the State File
 

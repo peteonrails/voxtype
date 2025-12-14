@@ -141,17 +141,18 @@ Controls the Whisper speech-to-text engine.
 Which Whisper model to use for transcription.
 
 **Model names:**
-| Value | Size | Speed | Accuracy |
-|-------|------|-------|----------|
-| `tiny` | 39 MB | Fastest | Good |
-| `tiny.en` | 39 MB | Fastest | Better (English) |
-| `base` | 142 MB | Fast | Better |
-| `base.en` | 142 MB | Fast | Good (English) |
-| `small` | 466 MB | Medium | Great |
-| `small.en` | 466 MB | Medium | Great (English) |
-| `medium` | 1.5 GB | Slow | Excellent |
-| `medium.en` | 1.5 GB | Slow | Excellent (English) |
-| `large-v3` | 3.1 GB | Slowest | Best |
+| Value | Size | Speed | Accuracy | Notes |
+|-------|------|-------|----------|-------|
+| `tiny` | 39 MB | Fastest | Good | Multilingual |
+| `tiny.en` | 39 MB | Fastest | Better | English only |
+| `base` | 142 MB | Fast | Better | Multilingual |
+| `base.en` | 142 MB | Fast | Good | English only (default) |
+| `small` | 466 MB | Medium | Great | Multilingual |
+| `small.en` | 466 MB | Medium | Great | English only |
+| `medium` | 1.5 GB | Slow | Excellent | Multilingual |
+| `medium.en` | 1.5 GB | Slow | Excellent | English only |
+| `large-v3` | 3.1 GB | Slowest | Best | Multilingual |
+| `large-v3-turbo` | 1.6 GB | Fast | Excellent | Multilingual, GPU recommended |
 
 **Custom model path:**
 ```toml
@@ -304,6 +305,92 @@ Delay in milliseconds between each typed character. Increase if characters are b
 ```toml
 [output]
 type_delay_ms = 10  # 10ms delay between characters
+```
+
+---
+
+## [text]
+
+Controls text post-processing after transcription.
+
+### spoken_punctuation
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+When `true`, converts spoken punctuation words into their symbol equivalents. Useful for developers and technical writing.
+
+**Supported conversions:**
+
+| Spoken | Symbol |
+|--------|--------|
+| `period` | `.` |
+| `comma` | `,` |
+| `question mark` | `?` |
+| `exclamation mark` / `exclamation point` | `!` |
+| `colon` | `:` |
+| `semicolon` | `;` |
+| `open paren` / `open parenthesis` | `(` |
+| `close paren` / `close parenthesis` | `)` |
+| `open bracket` | `[` |
+| `close bracket` | `]` |
+| `open brace` | `{` |
+| `close brace` | `}` |
+| `dash` / `hyphen` | `-` |
+| `underscore` | `_` |
+| `at sign` / `at symbol` | `@` |
+| `hash` / `hashtag` | `#` |
+| `dollar sign` | `$` |
+| `percent` / `percent sign` | `%` |
+| `ampersand` | `&` |
+| `asterisk` | `*` |
+| `plus` / `plus sign` | `+` |
+| `equals` / `equals sign` | `=` |
+| `slash` / `forward slash` | `/` |
+| `backslash` | `\` |
+| `pipe` | `\|` |
+| `tilde` | `~` |
+| `backtick` | `` ` `` |
+| `single quote` | `'` |
+| `double quote` | `"` |
+| `new line` | newline character |
+| `new paragraph` | double newline |
+| `tab` | tab character |
+
+**Example:**
+```toml
+[text]
+spoken_punctuation = true
+```
+
+With this enabled, saying "function open paren close paren" produces `function()`.
+
+### replacements
+
+**Type:** Table (key-value pairs)
+**Default:** `{}`
+**Required:** No
+
+Custom word replacements applied after transcription. Matching is case-insensitive but preserves word boundaries. Useful for:
+- Correcting frequently misheard words
+- Expanding abbreviations
+- Fixing brand names or technical terms
+
+**Example:**
+```toml
+[text]
+replacements = { "hyperwhisper" = "hyprwhspr", "javascript" = "JavaScript" }
+```
+
+If Whisper transcribes "hyperwhisper" (or "HyperWhisper"), it will be replaced with "hyprwhspr".
+
+**Multiple replacements:**
+```toml
+[text.replacements]
+hyperwhisper = "hyprwhspr"
+omarchy = "Omarchy"
+claude = "Claude"
 ```
 
 ---
@@ -467,6 +554,23 @@ mode = "clipboard"
 
 [output.notification]
 on_transcription = true
+```
+
+### Developer / Programmer
+
+```toml
+[whisper]
+model = "base.en"
+
+[text]
+# Say "period" to get ".", "open paren" to get "(", etc.
+spoken_punctuation = true
+
+# Fix common misheard technical terms
+[text.replacements]
+javascript = "JavaScript"
+typescript = "TypeScript"
+python = "Python"
 ```
 
 ### Server/Headless

@@ -31,7 +31,9 @@ pub mod daemon;
 pub mod error;
 pub mod hotkey;
 pub mod output;
+pub mod setup;
 pub mod state;
+pub mod text;
 pub mod transcribe;
 
 pub use config::Config;

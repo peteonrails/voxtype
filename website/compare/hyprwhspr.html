@@ -89,6 +89,21 @@
                 <td><strong>No (audio only)</strong></td>
             </tr>
             <tr>
+                <td>Word Replacements</td>
+                <td>Yes</td>
+                <td>Yes (via WhisperTux)</td>
+            </tr>
+            <tr>
+                <td>Spoken Punctuation</td>
+                <td>Yes (opt-in)</td>
+                <td>Yes</td>
+            </tr>
+            <tr>
+                <td>Interactive Setup</td>
+                <td>Yes (<code>voxtype setup model</code>)</td>
+                <td>Yes (<code>hyprwhspr setup</code>)</td>
+            </tr>
+            <tr>
                 <td>Cloud Fallback</td>
                 <td>No (offline only)</td>
                 <td>Yes (OpenAI, Groq APIs)</td>
@@ -96,7 +111,7 @@
         </table>
 
         <h2>What They Share</h2>
-        <p>Both tools have solid feature parity in core areas:</p>
+        <p>Both tools have excellent feature parity:</p>
         <ul>
             <li><strong>Whisper-powered</strong> - Both use OpenAI's Whisper for high-accuracy transcription</li>
             <li><strong>Waybar integration</strong> - Status indicators for tiling WM users</li>
@@ -104,6 +119,9 @@
             <li><strong>Audio feedback</strong> - Know when recording starts/stops</li>
             <li><strong>Push-to-talk</strong> - Hold hotkey to record</li>
             <li><strong>ydotool integration</strong> - Text appears at cursor</li>
+            <li><strong>Word replacements</strong> - Custom text substitutions for misheard words</li>
+            <li><strong>Spoken punctuation</strong> - Say "period" to get ".", "open paren" for "(", etc.</li>
+            <li><strong>Interactive setup</strong> - Guided model selection and download</li>
         </ul>
 
         <h2>Critical Differences</h2>
@@ -125,9 +143,7 @@
         <h3>What hyprwhspr Does Better</h3>
         <ul>
             <li><strong>Cloud API fallback</strong> - Can use OpenAI or Groq APIs when local transcription is too slow</li>
-            <li><strong>Word override list</strong> - Replace transcribed words with custom text (via WhisperTux)</li>
-            <li><strong>Parakeet support</strong> - Alternative to Whisper using NVIDIA's Parakeet-v3 model</li>
-            <li><strong>Interactive setup</strong> - <code>hyprwhspr setup</code> wizard walks through configuration</li>
+            <li><strong>Parakeet support</strong> - Alternative to Whisper using NVIDIA's Parakeet-v3 model (requires NeMo)</li>
         </ul>
 
         <h3>What Voxtype Does Better</h3>
@@ -138,14 +154,16 @@
             <li><strong>Desktop notifications</strong> - Visual feedback via notify-send, not just audio</li>
             <li><strong>Privacy-first</strong> - No cloud options means your voice never leaves your machine</li>
             <li><strong>Broader GPU support</strong> - Vulkan works across GPU vendors (including ROCm 7.x)</li>
+            <li><strong>large-v3-turbo model</strong> - Fast multilingual model (1.6 GB) with excellent accuracy</li>
         </ul>
 
         <h2>Setup Comparison</h2>
 
         <h3>Voxtype on Arch</h3>
         <pre><code>paru -S voxtype
-voxtype setup --download
-systemctl --user enable --now voxtype</code></pre>
+voxtype setup model     # Interactive model selection
+voxtype setup systemd   # Install systemd service
+voxtype setup waybar    # Get Waybar config (optional)</code></pre>
 
         <h3>hyprwhspr on Arch</h3>
         <pre><code>yay -S hyprwhspr
@@ -154,9 +172,9 @@ hyprwhspr setup
 
         <div class="verdict-box">
             <h3>The Verdict</h3>
-            <p><strong>Choose Voxtype</strong> if you want a single binary that works on any Wayland compositor and any Linux distro, or if you prioritize privacy (no cloud options).</p>
-            <p><strong>Choose hyprwhspr</strong> if you're on Arch/Omarchy with Hyprland and want cloud API fallbacks, word replacements, or prefer Python's flexibility for customization.</p>
-            <p>Both are excellent choices for Hyprland users. hyprwhspr is more tailored to that specific ecosystem, while Voxtype is more portable.</p>
+            <p><strong>Choose Voxtype</strong> if you want a single binary that works on any Wayland compositor and any Linux distro, prefer privacy-first (no cloud options), or want broader GPU support via Vulkan.</p>
+            <p><strong>Choose hyprwhspr</strong> if you're on Arch/Omarchy with Hyprland and want cloud API fallbacks when local transcription is too slow, or if you want to use NVIDIA's Parakeet model.</p>
+            <p>Both tools now offer excellent feature parity: word replacements, spoken punctuation, interactive setup, Waybar integration, and audio feedback. The main differences are architecture (Rust vs Python) and cloud capabilities.</p>
         </div>
 
         <h2>Links</h2>

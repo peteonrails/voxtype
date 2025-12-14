@@ -117,6 +117,26 @@ volume = 0.7       # 0.0 to 1.0
 
 **Custom themes:** Point `theme` to a directory containing `start.wav`, `stop.wav`, and `error.wav` files.
 
+### Text Processing
+
+Voxtype can post-process transcribed text with word replacements and spoken punctuation.
+
+**Word replacements** fix commonly misheard words:
+
+```toml
+[text]
+replacements = { "hyperwhisper" = "hyprwhspr", "javascript" = "JavaScript" }
+```
+
+**Spoken punctuation** (opt-in) converts spoken words to symbols - useful for developers:
+
+```toml
+[text]
+spoken_punctuation = true
+```
+
+With this enabled, saying "function open paren close paren" outputs `function()`. Supports period, comma, brackets, braces, newlines, and many more. See [CONFIGURATION.md](docs/CONFIGURATION.md#text) for the full list.
+
 ## CLI Options
 
 ```
@@ -125,9 +145,16 @@ voxtype [OPTIONS] [COMMAND]
 Commands:
   daemon      Run as background daemon (default)
   transcribe  Transcribe an audio file
-  setup       Check dependencies and download models
+  setup       Setup and installation utilities
   config      Show current configuration
   status      Show daemon state (for Waybar integration)
+
+Setup subcommands:
+  voxtype setup              Run basic dependency checks (default)
+  voxtype setup --download   Download the configured Whisper model
+  voxtype setup systemd      Install/manage systemd user service
+  voxtype setup waybar       Generate Waybar module configuration
+  voxtype setup model        Interactive model selection and download
 
 Options:
   -c, --config <FILE>  Path to config file
@@ -148,8 +175,9 @@ Options:
 | small.en | 466 MB | ~6% | Medium |
 | medium.en | 1.5 GB | ~5% | Slow |
 | large-v3 | 3 GB | ~4% | Slowest |
+| large-v3-turbo | 1.6 GB | ~4% | Fast |
 
-For most uses, `base.en` provides a good balance of speed and accuracy.
+For most uses, `base.en` provides a good balance of speed and accuracy. If you have a GPU, `large-v3-turbo` offers excellent accuracy with fast inference.
 
 ### Multilingual Support
 

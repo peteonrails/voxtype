@@ -8,7 +8,108 @@
 
 use crate::error::VoxtypeError;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+/// Default configuration file content
+pub const DEFAULT_CONFIG: &str = r#"# Voxtype Configuration
+#
+# Location: ~/.config/voxtype/config.toml
+# All settings can be overridden via CLI flags
+
+[hotkey]
+# Key to hold for push-to-talk
+# Common choices: SCROLLLOCK, PAUSE, RIGHTALT, F13-F24
+# Use `evtest` to find key names for your keyboard
+key = "SCROLLLOCK"
+
+# Optional modifier keys that must also be held
+# Example: modifiers = ["LEFTCTRL", "LEFTALT"]
+modifiers = []
+
+# Activation mode: "push_to_talk" or "toggle"
+# - push_to_talk: Hold hotkey to record, release to transcribe (default)
+# - toggle: Press hotkey once to start recording, press again to stop
+# mode = "push_to_talk"
+
+[audio]
+# Audio input device ("default" uses system default)
+# List devices with: pactl list sources short
+device = "default"
+
+# Sample rate in Hz (whisper expects 16000)
+sample_rate = 16000
+
+# Maximum recording duration in seconds (safety limit)
+max_duration_secs = 60
+
+# [audio.feedback]
+# Enable audio feedback sounds (beeps when recording starts/stops)
+# enabled = true
+#
+# Sound theme: "default", "subtle", "mechanical", or path to custom theme directory
+# theme = "default"
+#
+# Volume level (0.0 to 1.0)
+# volume = 0.7
+
+[whisper]
+# Model to use for transcription
+# Options: tiny, tiny.en, base, base.en, small, small.en, medium, medium.en, large-v3, large-v3-turbo
+# .en models are English-only but faster and more accurate for English
+# large-v3-turbo is faster than large-v3 with minimal accuracy loss (recommended for GPU)
+# Or provide absolute path to a custom .bin model file
+model = "base.en"
+
+# Language for transcription
+# Use "en" for English, "auto" for auto-detection
+# See: https://github.com/openai/whisper#available-models-and-languages
+language = "en"
+
+# Translate non-English speech to English
+translate = false
+
+# Number of CPU threads for inference (omit for auto-detection)
+# threads = 4
+
+[output]
+# Primary output mode: "type" or "clipboard"
+# - type: Simulates keyboard input at cursor position (requires ydotool)
+# - clipboard: Copies text to clipboard (requires wl-copy)
+mode = "type"
+
+# Fall back to clipboard if typing fails
+fallback_to_clipboard = true
+
+# Delay between typed characters in milliseconds
+# 0 = fastest possible, increase if characters are dropped
+type_delay_ms = 0
+
+[output.notification]
+# Show notification when recording starts (hotkey pressed)
+on_recording_start = false
+
+# Show notification when recording stops (transcription beginning)
+on_recording_stop = false
+
+# Show notification with transcribed text after transcription completes
+on_transcription = true
+
+# [text]
+# Text processing options (word replacements, spoken punctuation)
+#
+# Enable spoken punctuation conversion (e.g., say "period" to get ".")
+# spoken_punctuation = false
+#
+# Custom word replacements (case-insensitive)
+# replacements = { "hyperwhisper" = "hyprwhspr" }
+
+# State file for external integrations (Waybar, polybar, etc.)
+# Uncomment to enable. Use "auto" for default location ($XDG_RUNTIME_DIR/voxtype/state)
+# or provide a custom path. The daemon writes state ("idle", "recording", "transcribing")
+# to this file whenever it changes.
+# state_file = "auto"
+"#;
 
 /// Hotkey activation mode
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
@@ -28,6 +129,10 @@ pub struct Config {
     pub audio: AudioConfig,
     pub whisper: WhisperConfig,
     pub output: OutputConfig,
+
+    /// Text processing configuration (replacements, spoken punctuation)
+    #[serde(default)]
+    pub text: TextConfig,
 
     /// Optional path to state file for external integrations (e.g., Waybar)
     /// When set, the daemon writes current state ("idle", "recording", "transcribing")
@@ -108,7 +213,7 @@ impl Default for AudioFeedbackConfig {
 /// Whisper speech-to-text configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WhisperConfig {
-    /// Model name: tiny, base, small, medium, large-v3
+    /// Model name: tiny, base, small, medium, large-v3, large-v3-turbo
     /// Can also be an absolute path to a .bin file
     pub model: String,
 
@@ -121,6 +226,28 @@ pub struct WhisperConfig {
 
     /// Number of threads for inference (None = auto-detect)
     pub threads: Option<usize>,
+}
+
+/// Text processing configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TextConfig {
+    /// Enable spoken punctuation conversion (e.g., "period" → ".")
+    #[serde(default)]
+    pub spoken_punctuation: bool,
+
+    /// Custom word replacements (case-insensitive)
+    /// Example: { "hyperwhisper" = "hyprwhspr" }
+    #[serde(default)]
+    pub replacements: HashMap<String, String>,
+}
+
+impl Default for TextConfig {
+    fn default() -> Self {
+        Self {
+            spoken_punctuation: false,
+            replacements: HashMap::new(),
+        }
+    }
 }
 
 /// Notification configuration
@@ -208,6 +335,7 @@ impl Default for Config {
                 notification: NotificationConfig::default(),
                 type_delay_ms: 0,
             },
+            text: TextConfig::default(),
             state_file: None,
         }
     }

@@ -10,6 +10,7 @@ use crate::error::Result;
 use crate::hotkey::{self, HotkeyEvent};
 use crate::output;
 use crate::state::State;
+use crate::text::TextProcessor;
 use crate::transcribe;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -63,6 +64,7 @@ pub struct Daemon {
     config: Config,
     state_file_path: Option<PathBuf>,
     audio_feedback: Option<AudioFeedback>,
+    text_processor: TextProcessor,
 }
 
 impl Daemon {
@@ -90,10 +92,23 @@ impl Daemon {
             None
         };
 
+        // Initialize text processor
+        let text_processor = TextProcessor::new(&config.text);
+        if config.text.spoken_punctuation {
+            tracing::info!("Spoken punctuation enabled");
+        }
+        if !config.text.replacements.is_empty() {
+            tracing::info!(
+                "Word replacements configured: {} rules",
+                config.text.replacements.len()
+            );
+        }
+
         Self {
             config,
             state_file_path,
             audio_feedback,
+            text_processor,
         }
     }
 
@@ -170,12 +185,18 @@ impl Daemon {
                             } else {
                                 tracing::info!("Transcribed: {:?}", text);
 
+                                // Apply text processing (replacements, punctuation)
+                                let processed_text = self.text_processor.process(&text);
+                                if processed_text != text {
+                                    tracing::debug!("After text processing: {:?}", processed_text);
+                                }
+
                                 // Output the text
-                                *state = State::Outputting { text: text.clone() };
+                                *state = State::Outputting { text: processed_text.clone() };
 
                                 if let Err(e) = output::output_with_fallback(
                                     output_chain,
-                                    &text
+                                    &processed_text
                                 ).await {
                                     tracing::error!("Output failed: {}", e);
                                 }

@@ -10,7 +10,9 @@ mod daemon;
 mod error;
 mod hotkey;
 mod output;
+mod setup;
 mod state;
+mod text;
 mod transcribe;
 
 use clap::{Parser, Subcommand};
@@ -52,7 +54,7 @@ struct Cli {
     #[arg(long)]
     clipboard: bool,
 
-    /// Override whisper model (tiny, base, small, medium, large-v3)
+    /// Override whisper model (tiny, base, small, medium, large-v3, large-v3-turbo)
     #[arg(long, value_name = "MODEL")]
     model: Option<String>,
 
@@ -79,9 +81,12 @@ enum Commands {
         file: PathBuf,
     },
 
-    /// Check setup and optionally download models
+    /// Setup and installation utilities
     Setup {
-        /// Download model if missing
+        #[command(subcommand)]
+        action: Option<SetupAction>,
+
+        /// Download model if missing (shorthand for basic setup)
         #[arg(long)]
         download: bool,
     },
@@ -99,6 +104,22 @@ enum Commands {
         #[arg(long, default_value = "text")]
         format: String,
     },
+}
+
+#[derive(Subcommand)]
+enum SetupAction {
+    /// Install voxtype as a systemd user service
+    Systemd {
+        /// Uninstall the service instead of installing
+        #[arg(long)]
+        uninstall: bool,
+    },
+
+    /// Show Waybar configuration snippets
+    Waybar,
+
+    /// Interactive model selection and download
+    Model,
 }
 
 #[tokio::main]
@@ -152,8 +173,26 @@ async fn main() -> anyhow::Result<()> {
             transcribe_file(&config, &file)?;
         }
 
-        Commands::Setup { download } => {
-            run_setup(&config, download).await?;
+        Commands::Setup { action, download } => {
+            match action {
+                Some(SetupAction::Systemd { uninstall }) => {
+                    if uninstall {
+                        setup::systemd::uninstall().await?;
+                    } else {
+                        setup::systemd::install().await?;
+                    }
+                }
+                Some(SetupAction::Waybar) => {
+                    setup::waybar::print_config();
+                }
+                Some(SetupAction::Model) => {
+                    setup::model::interactive_select().await?;
+                }
+                None => {
+                    // Default: run basic setup (backwards compatible)
+                    setup::run_basic_setup(&config, download).await?;
+                }
+            }
         }
 
         Commands::Config => {
@@ -258,236 +297,6 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     }
 
     output
-}
-
-/// Default configuration file content
-const DEFAULT_CONFIG: &str = r#"# Voxtype Configuration
-#
-# Location: ~/.config/voxtype/config.toml
-# All settings can be overridden via CLI flags
-
-[hotkey]
-# Key to hold for push-to-talk
-# Common choices: SCROLLLOCK, PAUSE, RIGHTALT, F13-F24
-# Use `evtest` to find key names for your keyboard
-key = "SCROLLLOCK"
-
-# Optional modifier keys that must also be held
-# Example: modifiers = ["LEFTCTRL", "LEFTALT"]
-modifiers = []
-
-# Activation mode: "push_to_talk" or "toggle"
-# - push_to_talk: Hold hotkey to record, release to transcribe (default)
-# - toggle: Press hotkey once to start recording, press again to stop
-# mode = "push_to_talk"
-
-[audio]
-# Audio input device ("default" uses system default)
-# List devices with: pactl list sources short
-device = "default"
-
-# Sample rate in Hz (whisper expects 16000)
-sample_rate = 16000
-
-# Maximum recording duration in seconds (safety limit)
-max_duration_secs = 60
-
-# [audio.feedback]
-# Enable audio feedback sounds (beeps when recording starts/stops)
-# enabled = true
-#
-# Sound theme: "default", "subtle", "mechanical", or path to custom theme directory
-# theme = "default"
-#
-# Volume level (0.0 to 1.0)
-# volume = 0.7
-
-[whisper]
-# Model to use for transcription
-# Options: tiny, tiny.en, base, base.en, small, small.en, medium, medium.en, large-v3
-# .en models are English-only but faster and more accurate for English
-# Or provide absolute path to a custom .bin model file
-model = "base.en"
-
-# Language for transcription
-# Use "en" for English, "auto" for auto-detection
-# See: https://github.com/openai/whisper#available-models-and-languages
-language = "en"
-
-# Translate non-English speech to English
-translate = false
-
-# Number of CPU threads for inference (omit for auto-detection)
-# threads = 4
-
-[output]
-# Primary output mode: "type" or "clipboard"
-# - type: Simulates keyboard input at cursor position (requires ydotool)
-# - clipboard: Copies text to clipboard (requires wl-copy)
-mode = "type"
-
-# Fall back to clipboard if typing fails
-fallback_to_clipboard = true
-
-# Delay between typed characters in milliseconds
-# 0 = fastest possible, increase if characters are dropped
-type_delay_ms = 0
-
-[output.notification]
-# Show notification when recording starts (hotkey pressed)
-on_recording_start = false
-
-# Show notification when recording stops (transcription beginning)
-on_recording_stop = false
-
-# Show notification with transcribed text after transcription completes
-on_transcription = true
-
-# State file for external integrations (Waybar, polybar, etc.)
-# Uncomment to enable. Use "auto" for default location ($XDG_RUNTIME_DIR/voxtype/state)
-# or provide a custom path. The daemon writes state ("idle", "recording", "transcribing")
-# to this file whenever it changes.
-# state_file = "auto"
-"#;
-
-/// Run the setup command
-async fn run_setup(config: &config::Config, download: bool) -> anyhow::Result<()> {
-    println!("Voxtype Setup\n");
-    println!("=============\n");
-
-    // Ensure directories exist first
-    println!("Creating directories...");
-    config::Config::ensure_directories()?;
-    println!("  ✓ Config directory: {:?}", config::Config::config_dir().unwrap_or_default());
-    println!("  ✓ Models directory: {:?}", config::Config::models_dir());
-
-    // Create default config file if it doesn't exist
-    if let Some(config_path) = config::Config::default_path() {
-        if !config_path.exists() {
-            println!("\nCreating default config file...");
-            std::fs::write(&config_path, DEFAULT_CONFIG)?;
-            println!("  ✓ Created: {:?}", config_path);
-        } else {
-            println!("\n  Config file exists: {:?}", config_path);
-        }
-    }
-
-    let mut all_ok = true;
-
-    // Check input group
-    println!("Checking input group membership...");
-    let groups_output = std::process::Command::new("groups").output()?;
-    let groups_str = String::from_utf8_lossy(&groups_output.stdout);
-    if groups_str.contains("input") {
-        println!("  ✓ User is in 'input' group");
-    } else {
-        println!("  ✗ User is NOT in 'input' group");
-        println!("    Run: sudo usermod -aG input $USER");
-        println!("    Then log out and back in");
-        all_ok = false;
-    }
-
-    // Check ydotool
-    println!("\nChecking ydotool...");
-    let ydotool_check = tokio::process::Command::new("which")
-        .arg("ydotool")
-        .output()
-        .await?;
-    if ydotool_check.status.success() {
-        println!("  ✓ ydotool found");
-
-        // Check daemon
-        let daemon_check = tokio::process::Command::new("systemctl")
-            .args(["--user", "is-active", "ydotool"])
-            .output()
-            .await?;
-        if daemon_check.status.success() {
-            println!("  ✓ ydotool daemon running");
-        } else {
-            println!("  ✗ ydotool daemon not running");
-            println!("    Run: systemctl --user enable --now ydotool");
-            all_ok = false;
-        }
-    } else {
-        println!("  ✗ ydotool not found (typing won't work, will use clipboard)");
-        println!("    Install via your package manager");
-    }
-
-    // Check wl-copy
-    println!("\nChecking wl-clipboard...");
-    let wlcopy_check = tokio::process::Command::new("which")
-        .arg("wl-copy")
-        .output()
-        .await?;
-    if wlcopy_check.status.success() {
-        println!("  ✓ wl-copy found");
-    } else {
-        println!("  ✗ wl-copy not found");
-        println!("    Install wl-clipboard via your package manager");
-        all_ok = false;
-    }
-
-    // Check whisper model
-    println!("\nChecking whisper model...");
-    let models_dir = config::Config::models_dir();
-    let model_name = &config.whisper.model;
-
-    let model_filename = match model_name.as_str() {
-        "tiny" => "ggml-tiny.bin",
-        "tiny.en" => "ggml-tiny.en.bin",
-        "base" => "ggml-base.bin",
-        "base.en" => "ggml-base.en.bin",
-        "small" => "ggml-small.bin",
-        "small.en" => "ggml-small.en.bin",
-        "medium" => "ggml-medium.bin",
-        "medium.en" => "ggml-medium.en.bin",
-        "large-v3" => "ggml-large-v3.bin",
-        other => other,
-    };
-
-    let model_path = models_dir.join(model_filename);
-
-    if model_path.exists() {
-        let size = std::fs::metadata(&model_path)
-            .map(|m| m.len() as f64 / 1024.0 / 1024.0)
-            .unwrap_or(0.0);
-        println!("  ✓ Model found: {:?} ({:.0} MB)", model_path, size);
-    } else {
-        println!("  ✗ Model not found: {:?}", model_path);
-        all_ok = false;
-
-        if download {
-            println!("\n  Downloading model...");
-            std::fs::create_dir_all(&models_dir)?;
-
-            let url = transcribe::whisper::get_model_url(model_name);
-            println!("  URL: {}", url);
-
-            let response = reqwest::get(&url).await?;
-            let total_size = response.content_length().unwrap_or(0);
-            println!("  Size: {:.0} MB", total_size as f64 / 1024.0 / 1024.0);
-
-            let bytes = response.bytes().await?;
-            std::fs::write(&model_path, &bytes)?;
-            println!("  ✓ Downloaded to {:?}", model_path);
-        } else {
-            let url = transcribe::whisper::get_model_url(model_name);
-            println!("\n  To download automatically, run: voxtype setup --download");
-            println!("  Or manually download from:");
-            println!("    {}", url);
-            println!("  And place in: {:?}", models_dir);
-        }
-    }
-
-    // Summary
-    println!("\n---");
-    if all_ok {
-        println!("✓ All checks passed! Run 'voxtype' to start.");
-    } else {
-        println!("✗ Some checks failed. Please fix the issues above.");
-    }
-
-    Ok(())
 }
 
 /// Run the status command - show current daemon state

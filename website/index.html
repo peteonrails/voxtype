@@ -489,6 +489,21 @@
                             </td>
                             <td>Maximum accuracy, multilingual</td>
                         </tr>
+                        <tr class="recommended">
+                            <td><code>large-v3-turbo</code> <span class="rec-badge">GPU Recommended</span></td>
+                            <td>1.6 GB</td>
+                            <td>
+                                <div class="speed-bar">
+                                    <div class="speed-fill" style="width: 75%"></div>
+                                </div>
+                            </td>
+                            <td>
+                                <div class="accuracy-bar">
+                                    <div class="accuracy-fill" style="width: 95%"></div>
+                                </div>
+                            </td>
+                            <td>Fast + accurate, multilingual</td>
+                        </tr>
                     </tbody>
                 </table>
             </div>
@@ -600,14 +615,20 @@ sudo usermod -aG input $USER
 <span class="comment"># Start ydotool daemon (for typing output)</span>
 systemctl --user enable --now ydotool
 
-<span class="comment"># Download whisper model and verify setup</span>
+<span class="comment"># Interactive setup: select and download a whisper model</span>
+voxtype setup model
+
+<span class="comment"># Or quick setup with default model (base.en)</span>
 voxtype setup --download
 
-<span class="comment"># Enable and start voxtype as a user service</span>
-systemctl --user enable --now voxtype
+<span class="comment"># Install voxtype as a systemd service</span>
+voxtype setup systemd
 
 <span class="comment"># Check status</span>
-systemctl --user status voxtype</code></pre>
+systemctl --user status voxtype
+
+<span class="comment"># Optional: Get Waybar integration config</span>
+voxtype setup waybar</code></pre>
                 </div>
             </div>
         </div>
