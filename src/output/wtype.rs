@@ -89,12 +89,9 @@ impl TextOutput for WtypeOutput {
     }
 
     async fn is_available(&self) -> bool {
-        // Check if we're on Wayland
-        if std::env::var("WAYLAND_DISPLAY").is_err() {
-            return false;
-        }
-
-        // Check if wtype exists in PATH
+        // Just check if wtype exists in PATH
+        // Don't check WAYLAND_DISPLAY - systemd services may not have it
+        // wtype will fail naturally if Wayland isn't available
         Command::new("which")
             .arg("wtype")
             .stdout(Stdio::null())
