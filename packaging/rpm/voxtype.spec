@@ -1,5 +1,5 @@
 Name:           voxtype
-Version:        0.2.1
+Version:        0.2.2
 Release:        1%{?dist}
 Summary:        Push-to-talk voice-to-text for Wayland Linux
 
@@ -99,9 +99,9 @@ echo "     systemctl --user enable --now voxtype"
 echo ""
 
 %files
-%license LICENSE
-%doc README.md
-%doc docs/INSTALL.md
+%{_licensedir}/%{name}/LICENSE
+%{_docdir}/%{name}/README.md
+%{_docdir}/%{name}/INSTALL.md
 %{_bindir}/voxtype
 %config(noreplace) %{_sysconfdir}/voxtype/config.toml
 %{_userunitdir}/voxtype.service
@@ -110,6 +110,10 @@ echo ""
 %{_datadir}/fish/vendor_completions.d/voxtype.fish
 
 %changelog
+* Sat Dec 14 2025 Peter Jackson <pete@peteonrails.com> - 0.2.2-1
+- Code cleanup: fix clippy warnings, derive Default, refactor build_stream
+- Wire up CLI commands: setup model --list, setup systemd --status, setup waybar --json/--css
+
 * Sat Dec 14 2025 Peter Jackson <pete@peteonrails.com> - 0.2.1-1
 - Add text processing: word replacements and spoken punctuation
 - Add setup subcommands: systemd, waybar, model (interactive selection)
