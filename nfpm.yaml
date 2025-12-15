@@ -1,0 +1,76 @@
+name: voxtype
+version: 0.2.2
+arch: amd64
+platform: linux
+maintainer: Peter Jackson <pete@peteonrails.com>
+description: Push-to-talk voice-to-text for Wayland Linux systems
+vendor: voxtype.io
+homepage: https://voxtype.io
+license: MIT
+section: utils
+
+contents:
+  - src: target/release/voxtype
+    dst: /usr/bin/voxtype
+    file_info:
+      mode: 0755
+
+  - src: config/default.toml
+    dst: /etc/voxtype/config.toml
+    type: config|noreplace
+    file_info:
+      mode: 0644
+
+  - src: packaging/systemd/voxtype.service
+    dst: /usr/lib/systemd/user/voxtype.service
+    file_info:
+      mode: 0644
+
+  - src: README.md
+    dst: /usr/share/doc/voxtype/README.md
+    file_info:
+      mode: 0644
+
+  - src: docs/INSTALL.md
+    dst: /usr/share/doc/voxtype/INSTALL.md
+    file_info:
+      mode: 0644
+
+  - src: LICENSE
+    dst: /usr/share/licenses/voxtype/LICENSE
+    file_info:
+      mode: 0644
+
+  - src: packaging/completions/voxtype.bash
+    dst: /usr/share/bash-completion/completions/voxtype
+    file_info:
+      mode: 0644
+
+  - src: packaging/completions/voxtype.zsh
+    dst: /usr/share/zsh/site-functions/_voxtype
+    file_info:
+      mode: 0644
+
+  - src: packaging/completions/voxtype.fish
+    dst: /usr/share/fish/vendor_completions.d/voxtype.fish
+    file_info:
+      mode: 0644
+
+recommends:
+  - ydotool
+  - wl-clipboard
+
+suggests:
+  - libnotify
+  - pipewire
+
+rpm:
+  summary: Push-to-talk voice-to-text for Wayland Linux
+  group: Applications/Multimedia
+
+deb:
+  fields:
+    Priority: optional
+
+scripts:
+  postinstall: packaging/scripts/postinstall.sh
