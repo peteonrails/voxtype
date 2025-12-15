@@ -1,6 +1,6 @@
 # Voxtype
 
-[![Voxtype - Voice to Text for Wayland Linux](website/images/og-preview.png)](https://voxtype.io)
+[![Voxtype - Voice to Text for Linux](website/images/og-preview.png)](https://voxtype.io)
 
 **[voxtype.io](https://voxtype.io)**
 
