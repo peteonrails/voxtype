@@ -12,7 +12,7 @@ Hold a hotkey (default: ScrollLock) while speaking, release to transcribe and ou
 
 - **Works on all Wayland compositors** - Uses kernel-level input (evdev) instead of compositor-specific protocols
 - **Fully offline** - Uses whisper.cpp for local transcription, no internet required
-- **Fallback chain** - Types via ydotool, falls back to clipboard if unavailable
+- **Fallback chain** - Types via wtype (best CJK support), falls back to ydotool, then clipboard
 - **Push-to-talk or Toggle mode** - Hold to record, or press once to start/stop
 - **Audio feedback** - Optional sound cues when recording starts/stops
 - **Configurable** - Choose your hotkey, model size, output mode, and more
@@ -28,8 +28,10 @@ cargo build --release
 sudo usermod -aG input $USER
 # Log out and back in
 
-# 3. Start ydotool daemon (for typing output)
-systemctl --user enable --now ydotool
+# 3. Install wtype (for typing output)
+# Fedora: sudo dnf install wtype
+# Arch: sudo pacman -S wtype
+# Ubuntu: sudo apt install wtype
 
 # 4. Download whisper model
 ./target/release/voxtype setup --download
@@ -44,7 +46,7 @@ systemctl --user enable --now ydotool
 2. Hold **ScrollLock** (or your configured hotkey)
 3. Speak
 4. Release the key
-5. Text appears at your cursor (or in clipboard if ydotool isn't available)
+5. Text appears at your cursor (or in clipboard if typing isn't available)
 
 Press Ctrl+C to stop the daemon.
 
@@ -273,8 +275,9 @@ Results vary by hardware. Example on AMD RX 6800:
 
 - **Wayland compositor** (any - GNOME, KDE, Sway, Hyprland, etc.)
 - **PipeWire** or **PulseAudio** (for audio capture)
-- **ydotool** + daemon (for typing output) - *optional, falls back to clipboard*
+- **wtype** (for typing output) - *recommended, best CJK/Unicode support*
 - **wl-clipboard** (for clipboard fallback)
+- **ydotool** + daemon - *optional fallback for X11/TTY*
 
 ### Permissions
 
@@ -284,17 +287,17 @@ Results vary by hardware. Example on AMD RX 6800:
 
 **Fedora:**
 ```bash
-sudo dnf install ydotool wl-clipboard
+sudo dnf install wtype wl-clipboard
 ```
 
 **Ubuntu/Debian:**
 ```bash
-sudo apt install ydotool wl-clipboard
+sudo apt install wtype wl-clipboard
 ```
 
 **Arch:**
 ```bash
-sudo pacman -S ydotool wl-clipboard
+sudo pacman -S wtype wl-clipboard
 ```
 
 ## Building from Source
@@ -346,9 +349,15 @@ sudo usermod -aG input $USER
 # Log out and back in
 ```
 
-### "ydotool daemon not running" error
+### Text not appearing / typing not working
+
+Voxtype uses wtype (preferred) or ydotool as fallback for typing output:
 
 ```bash
+# Check if wtype is installed
+which wtype
+
+# If using ydotool fallback (X11/TTY), start the daemon:
 systemctl --user start ydotool
 systemctl --user enable ydotool  # Start on login
 ```
@@ -383,7 +392,7 @@ type_delay_ms = 10
 ├─────────────────────────────────────────────────────────────┤
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
 │  │   Hotkey     │  │    Audio     │  │   Text Output    │  │
-│  │  (evdev)     │──│   (cpal)     │──│  (ydotool/clip)  │  │
+│  │  (evdev)     │──│   (cpal)     │──│ (wtype/ydotool)  │  │
 │  └──────────────┘  └──────────────┘  └──────────────────┘  │
 │         │               │                    │              │
 │         │               ▼                    │              │
@@ -396,7 +405,7 @@ type_delay_ms = 10
 
 **Why evdev?** Wayland doesn't provide a standard way to capture global hotkeys. Using evdev (the Linux input subsystem) works on all compositors but requires the user to be in the `input` group.
 
-**Why ydotool?** Similarly, Wayland doesn't provide a standard way to simulate keyboard input. ydotool uses the uinput kernel interface, which works on all compositors.
+**Why wtype?** Wayland doesn't provide a standard way to simulate keyboard input. wtype uses the Wayland virtual-keyboard protocol for text input, with excellent Unicode/CJK support and no daemon required. ydotool (using uinput) is available as a fallback for X11/TTY.
 
 ## Feedback
 

@@ -172,8 +172,8 @@
                     </div>
                     <h3>Smart Fallbacks</h3>
                     <p>
-                        Types directly at cursor via ydotool, automatically falls back to clipboard
-                        if typing isn't available. Always works, one way or another.
+                        Types directly at cursor via wtype, with full CJK/Unicode support.
+                        Falls back to ydotool or clipboard. Always works, one way or another.
                     </p>
                 </div>
 
@@ -565,7 +565,7 @@ paru -S voxtype
 yay -S voxtype
 
 <span class="comment"># Install optional dependencies</span>
-sudo pacman -S ydotool wl-clipboard</code></pre>
+sudo pacman -S wtype wl-clipboard</code></pre>
                     </div>
                 </div>
 
@@ -581,7 +581,7 @@ sudo dpkg -i voxtype_0.2.2_amd64.deb
 sudo apt-get install -f
 
 <span class="comment"># Install optional dependencies</span>
-sudo apt install ydotool wl-clipboard</code></pre>
+sudo apt install wtype wl-clipboard</code></pre>
                     </div>
                 </div>
 
@@ -596,7 +596,7 @@ wget https://github.com/peteonrails/voxtype/releases/download/v0.2.2/voxtype-0.2
 sudo dnf install ./voxtype-0.2.2-1.x86_64.rpm
 
 <span class="comment"># Install optional dependencies</span>
-sudo dnf install ydotool wl-clipboard</code></pre>
+sudo dnf install wtype wl-clipboard</code></pre>
                     </div>
                 </div>
 
@@ -629,9 +629,6 @@ sudo cp target/release/voxtype /usr/local/bin/</code></pre>
                     <pre><code><span class="comment"># Add user to input group (required for hotkey detection)</span>
 sudo usermod -aG input $USER
 <span class="comment"># Log out and back in for group change to take effect</span>
-
-<span class="comment"># Start ydotool daemon (for typing output)</span>
-systemctl --user enable --now ydotool
 
 <span class="comment"># Interactive setup: select and download a whisper model</span>
 voxtype setup model

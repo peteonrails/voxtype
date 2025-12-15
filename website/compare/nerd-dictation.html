@@ -66,9 +66,14 @@
                 <td>Via ydotool</td>
             </tr>
             <tr>
-                <td>Cursor Injection</td>
-                <td>Yes (ydotool)</td>
-                <td>Yes (xdotool/ydotool)</td>
+                <td>Text Output</td>
+                <td>wtype (native Wayland)</td>
+                <td>xdotool/ydotool</td>
+            </tr>
+            <tr>
+                <td>CJK/Unicode Output</td>
+                <td><strong>Yes</strong></td>
+                <td>No (ydotool limitation)</td>
             </tr>
             <tr>
                 <td>Recording Feedback</td>
@@ -88,6 +93,10 @@
         </table>
 
         <h2>Critical Differences</h2>
+
+        <h3>CJK/Multilingual Text Output</h3>
+        <p><strong>Voxtype</strong> uses <code>wtype</code> for text output, which properly handles Korean, Chinese, Japanese, and other Unicode characters. No daemon required.</p>
+        <p><strong>Nerd-dictation</strong> uses <code>ydotool</code> which <strong>cannot output CJK characters</strong>. ydotool simulates physical key presses, but CJK characters don't map to keyboard keys. You'll get garbled output like <code> 9 .</code> instead of Korean text.</p>
 
         <h3>Daemon vs Foreground</h3>
         <p><strong>Voxtype</strong> runs as a systemd user service. It starts automatically at login, runs invisibly, and is always ready.</p>
