@@ -28,10 +28,24 @@ cargo build --release
 sudo usermod -aG input $USER
 # Log out and back in
 
-# 3. Install wtype (for typing output)
-# Fedora: sudo dnf install wtype
-# Arch: sudo pacman -S wtype
-# Ubuntu: sudo apt install wtype
+# 3. Install typing backend
+# For Wayland (recommended):
+# Fedora:
+sudo dnf install wtype
+# Arch:
+sudo pacman -S wtype
+# Ubuntu:
+sudo apt install wtype
+
+# For X11 (or as fallback):
+# Fedora:
+sudo dnf install ydotool
+# Arch:
+sudo pacman -S ydotool
+# Ubuntu:
+sudo apt install ydotool
+# Then start the daemon:
+systemctl --user enable --now ydotool
 
 # 4. Download whisper model
 ./target/release/voxtype setup --download
