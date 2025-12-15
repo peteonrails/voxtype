@@ -4,13 +4,13 @@
 
 **[voxtype.io](https://voxtype.io)**
 
-Push-to-talk voice-to-text for Wayland Linux systems.
+Push-to-talk voice-to-text for Linux. Optimized for Wayland, works on X11 too.
 
 Hold a hotkey (default: ScrollLock) while speaking, release to transcribe and output the text at your cursor position.
 
 ## Features
 
-- **Works on all Wayland compositors** - Uses kernel-level input (evdev) instead of compositor-specific protocols
+- **Works on any Linux desktop** - Uses kernel-level input (evdev). Works on Wayland and X11
 - **Fully offline** - Uses whisper.cpp for local transcription, no internet required
 - **Fallback chain** - Types via wtype (best CJK support), falls back to ydotool, then clipboard
 - **Push-to-talk or Toggle mode** - Hold to record, or press once to start/stop
@@ -273,11 +273,11 @@ Results vary by hardware. Example on AMD RX 6800:
 
 ### Runtime Dependencies
 
-- **Wayland compositor** (any - GNOME, KDE, Sway, Hyprland, etc.)
+- **Linux desktop** (Wayland or X11 - GNOME, KDE, Sway, Hyprland, i3, etc.)
 - **PipeWire** or **PulseAudio** (for audio capture)
-- **wtype** (for typing output) - *recommended, best CJK/Unicode support*
-- **wl-clipboard** (for clipboard fallback)
-- **ydotool** + daemon - *optional fallback for X11/TTY*
+- **wtype** (for typing output on Wayland) - *recommended, best CJK/Unicode support*
+- **ydotool** + daemon - *for X11 or as Wayland fallback*
+- **wl-clipboard** (for clipboard fallback on Wayland)
 
 ### Permissions
 
@@ -403,9 +403,9 @@ type_delay_ms = 10
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Why evdev?** Wayland doesn't provide a standard way to capture global hotkeys. Using evdev (the Linux input subsystem) works on all compositors but requires the user to be in the `input` group.
+**Why evdev?** Neither Wayland nor X11 provide a standard way to capture global hotkeys that works everywhere. Using evdev (the Linux input subsystem) works on all desktops but requires the user to be in the `input` group.
 
-**Why wtype?** Wayland doesn't provide a standard way to simulate keyboard input. wtype uses the Wayland virtual-keyboard protocol for text input, with excellent Unicode/CJK support and no daemon required. ydotool (using uinput) is available as a fallback for X11/TTY.
+**Why wtype + ydotool?** On Wayland, wtype uses the virtual-keyboard protocol for text input, with excellent Unicode/CJK support and no daemon required. On X11 (or as a fallback), ydotool uses uinput for text injection. This combination ensures Voxtype works on any Linux desktop.
 
 ## Feedback
 
