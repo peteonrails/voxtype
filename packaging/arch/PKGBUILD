@@ -21,7 +21,8 @@ makedepends=(
     # 'cuda'            # for CUDA (NVIDIA only)
 )
 optdepends=(
-    'ydotool: keyboard simulation for typing output'
+    'wtype: keyboard simulation for Wayland (recommended, best CJK support)'
+    'ydotool: keyboard simulation fallback (X11/TTY support)'
     'wl-clipboard: clipboard support'
     'libnotify: desktop notifications'
     'pipewire: audio capture (recommended)'

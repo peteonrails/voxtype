@@ -13,8 +13,9 @@ BuildRequires:  clang-devel
 BuildRequires:  alsa-lib-devel
 BuildRequires:  systemd-rpm-macros
 
-Recommends:     ydotool
+Recommends:     wtype
 Recommends:     wl-clipboard
+Suggests:       ydotool
 Suggests:       libnotify
 Suggests:       pipewire
 
@@ -26,7 +27,7 @@ your cursor position.
 Features:
 - Works on all Wayland compositors using kernel-level input (evdev)
 - Fully offline transcription using whisper.cpp
-- Fallback chain: types via ydotool, falls back to clipboard
+- Fallback chain: wtype (best CJK support), ydotool, clipboard
 - Configurable hotkeys, models, and output modes
 
 Note: User must be in the 'input' group for hotkey detection.
@@ -88,14 +89,14 @@ echo "     sudo usermod -aG input \$USER"
 echo ""
 echo "  2. Log out and back in for group changes to take effect"
 echo ""
-echo "  3. Enable and start the ydotool daemon:"
-echo "     systemctl --user enable --now ydotool"
-echo ""
-echo "  4. Download a whisper model:"
+echo "  3. Download a whisper model:"
 echo "     voxtype setup --download"
 echo ""
-echo "  5. Start voxtype:"
+echo "  4. Start voxtype:"
 echo "     systemctl --user enable --now voxtype"
+echo ""
+echo "Note: wtype is used for text output on Wayland (best CJK support)."
+echo "      ydotool is an optional fallback for X11/TTY."
 echo ""
 
 %files

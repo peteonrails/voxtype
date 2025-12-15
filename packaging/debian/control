@@ -18,8 +18,8 @@ Rules-Requires-Root: no
 Package: voxtype
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}
-Recommends: ydotool, wl-clipboard
-Suggests: libnotify-bin, pipewire
+Recommends: wtype, wl-clipboard
+Suggests: ydotool, libnotify-bin, pipewire
 Description: Push-to-talk voice-to-text for Wayland Linux
  Voxtype is a push-to-talk voice-to-text daemon for Wayland Linux systems.
  Hold a hotkey while speaking, release to transcribe and output text at
@@ -28,7 +28,7 @@ Description: Push-to-talk voice-to-text for Wayland Linux
  Features:
   - Works on all Wayland compositors using kernel-level input (evdev)
   - Fully offline transcription using whisper.cpp
-  - Fallback chain: types via ydotool, falls back to clipboard
+  - Fallback chain: wtype (best CJK support), ydotool, clipboard
   - Configurable hotkeys, models, and output modes
  .
  Note: User must be in the 'input' group for hotkey detection.
