@@ -25,13 +25,14 @@ optdepends=(
     'pulseaudio: audio capture (alternative)'
 )
 backup=('etc/voxtype/config.toml')
+options=(!lto)
 
 # Build from local source - no download needed
 source=()
 sha256sums=()
 
 # Point to the project root (two levels up from packaging/arch/)
-_srcdir="/home/pete/workspace/voxtype"
+_srcdir="${PWD%/*/*}"
 
 pkgver() {
     cd "$_srcdir"

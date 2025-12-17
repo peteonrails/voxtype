@@ -14,8 +14,9 @@ echo "==> Building voxtype Arch package..."
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
 
-# Copy PKGBUILD
-cp "$PROJECT_ROOT/packaging/arch/PKGBUILD-local" "$BUILD_DIR/PKGBUILD"
+# Copy PKGBUILD and substitute the project root path
+sed "s|_srcdir=\".*\"|_srcdir=\"$PROJECT_ROOT\"|" \
+    "$PROJECT_ROOT/packaging/arch/PKGBUILD-local" > "$BUILD_DIR/PKGBUILD"
 
 # Build and install
 cd "$BUILD_DIR"
