@@ -36,6 +36,24 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
+    // Setup tabs (Standard vs Hyprland/Sway)
+    const setupTabBtns = document.querySelectorAll('.setup-tab-btn');
+    const setupContents = document.querySelectorAll('.setup-content');
+
+    setupTabBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+            const target = btn.dataset.setup;
+
+            // Remove active class from all
+            setupTabBtns.forEach(b => b.classList.remove('active'));
+            setupContents.forEach(c => c.classList.remove('active'));
+
+            // Add active class to clicked
+            btn.classList.add('active');
+            document.getElementById(`setup-${target}`)?.classList.add('active');
+        });
+    });
+
     // Copy button functionality
     const copyBtns = document.querySelectorAll('.copy-btn');
 

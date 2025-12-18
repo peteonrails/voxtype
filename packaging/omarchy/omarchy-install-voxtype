@@ -8,22 +8,76 @@ echo ""
 # Install from AUR
 yay -S --noconfirm voxtype
 
-# Add user to input group for evdev access
-if ! groups | grep -q input; then
-    echo ""
-    echo "Adding $USER to input group..."
-    sudo usermod -aG input "$USER"
-    echo "NOTE: You must log out and back in for group changes to take effect"
-fi
-
 # Download default whisper model
 echo ""
 echo "Downloading Whisper model (this may take a few minutes)..."
 voxtype setup --download
 
-# Create default config if not exists
-if [ ! -f ~/.config/voxtype/config.toml ]; then
-    voxtype setup --config
+# Create config directory
+mkdir -p ~/.config/voxtype
+
+# Configure voxtype for Hyprland native keybindings
+# This avoids needing the input group - keybindings are handled by Hyprland
+echo ""
+echo "Configuring voxtype for Hyprland keybindings..."
+cat > ~/.config/voxtype/config.toml << 'EOF'
+# Voxtype configuration for Omarchy (Hyprland)
+# Uses native compositor keybindings instead of evdev
+
+[hotkey]
+# Disable built-in hotkey - we use Hyprland keybindings instead
+# This means no input group membership required!
+enabled = false
+
+[whisper]
+model = "base.en"
+language = "en"
+
+[audio]
+device = "default"
+sample_rate = 16000
+max_duration_secs = 60
+
+[audio.feedback]
+enabled = true
+theme = "default"
+volume = 0.5
+
+[output]
+mode = "type"
+fallback_to_clipboard = true
+
+[output.notification]
+on_recording_start = false
+on_recording_stop = false
+on_transcription = true
+
+# Required for Hyprland keybinding integration
+state_file = "auto"
+EOF
+
+# Install Hyprland keybindings
+HYPR_CONF_DIR="$HOME/.config/hypr/conf.d"
+mkdir -p "$HYPR_CONF_DIR"
+
+echo "Installing Hyprland keybindings..."
+cat > "$HYPR_CONF_DIR/voxtype.conf" << 'EOF'
+# Voxtype push-to-talk keybindings
+# Hold HOME to record, release to transcribe
+bind = , HOME, exec, voxtype record start
+bindr = , HOME, exec, voxtype record stop
+
+# Alternative: Super+V (uncomment to use)
+# bind = SUPER, V, exec, voxtype record start
+# bindr = SUPER, V, exec, voxtype record stop
+EOF
+
+# Source the config if not already sourced in hyprland.conf
+HYPR_CONF="$HOME/.config/hypr/hyprland.conf"
+if [ -f "$HYPR_CONF" ] && ! grep -q "conf.d/voxtype.conf" "$HYPR_CONF"; then
+    echo "" >> "$HYPR_CONF"
+    echo "# Voxtype voice-to-text keybindings" >> "$HYPR_CONF"
+    echo "source = ~/.config/hypr/conf.d/voxtype.conf" >> "$HYPR_CONF"
 fi
 
 # Enable systemd user service
@@ -31,14 +85,20 @@ echo ""
 echo "Enabling voxtype service..."
 systemctl --user enable voxtype
 
+# Waybar integration (optional, with user prompt)
+if [ -f "$HOME/.config/waybar/config.jsonc" ] || [ -f "$HOME/.config/waybar/config" ]; then
+    echo ""
+    voxtype setup waybar --install
+fi
+
 echo ""
 echo "=== Voxtype Installation Complete ==="
 echo ""
 echo "To start using voxtype:"
-echo "  1. Log out and back in (for input group access)"
-echo "  2. The service will start automatically on login"
+echo "  1. Reload Hyprland config: hyprctl reload"
+echo "  2. Or log out and back in"
 echo "  3. Hold HOME key to record, release to transcribe"
 echo ""
-echo "Configure hotkey and settings:"
-echo "  nvim ~/.config/voxtype/config.toml"
+echo "Keybindings are in: ~/.config/hypr/conf.d/voxtype.conf"
+echo "Voxtype config in:  ~/.config/voxtype/config.toml"
 echo ""

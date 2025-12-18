@@ -9,6 +9,7 @@ Voxtype is a push-to-talk voice-to-text tool for Linux. Optimized for Wayland, w
 - [Commands](#commands)
 - [Configuration](#configuration)
 - [Hotkeys](#hotkeys)
+- [Compositor Keybindings](#compositor-keybindings)
 - [Whisper Models](#whisper-models)
 - [Output Modes](#output-modes)
 - [Tips & Best Practices](#tips--best-practices)
@@ -156,6 +157,18 @@ voxtype setup gpu --enable   # Switch to Vulkan GPU backend (requires sudo)
 voxtype setup gpu --disable  # Switch back to CPU backend (requires sudo)
 ```
 
+### `voxtype record`
+
+Control recording from external sources (compositor keybindings, scripts).
+
+```bash
+voxtype record start   # Start recording (sends SIGUSR1 to daemon)
+voxtype record stop    # Stop recording and transcribe (sends SIGUSR2 to daemon)
+voxtype record toggle  # Toggle recording state
+```
+
+This command is designed for use with compositor keybindings (Hyprland, Sway) instead of the built-in hotkey detection. See [Compositor Keybindings](#compositor-keybindings) for setup instructions.
+
 ---
 
 ## Configuration
@@ -173,6 +186,10 @@ key = "SCROLLLOCK"
 # Optional modifier keys that must be held with the main key
 # Examples: ["LEFTCTRL"], ["LEFTCTRL", "LEFTALT"]
 modifiers = []
+
+# Enable built-in hotkey detection (default: true)
+# Set to false when using compositor keybindings (Hyprland, Sway) instead
+# enabled = true
 
 [audio]
 # Audio input device
@@ -302,6 +319,83 @@ Available modifiers:
 - `LEFTALT`, `RIGHTALT`
 - `LEFTSHIFT`, `RIGHTSHIFT`
 - `LEFTMETA`, `RIGHTMETA` (Super/Windows key)
+
+---
+
+## Compositor Keybindings
+
+If you prefer to use your compositor's native keybindings instead of voxtype's built-in hotkey detection, you can disable the internal hotkey and trigger recording via CLI commands.
+
+### Why Use Compositor Keybindings?
+
+- **No `input` group membership required** - Voxtype's evdev-based hotkey detection requires being in the `input` group
+- **Native feel** - Use familiar keybinding configuration patterns
+- **Modifier support** - Use any key combination your compositor supports (e.g., Super+V)
+
+### Setup
+
+1. Disable the internal hotkey in `~/.config/voxtype/config.toml`:
+   ```toml
+   [hotkey]
+   enabled = false
+   ```
+
+2. Enable the state file (required for toggle mode):
+   ```toml
+   state_file = "auto"
+   ```
+
+3. Configure your compositor keybindings (see examples below).
+
+### Hyprland
+
+Hyprland supports key release events via `bindr`, enabling push-to-talk:
+
+```hyprlang
+# Push-to-talk (hold to record, release to transcribe)
+bind = , SCROLL_LOCK, exec, voxtype record start
+bindr = , SCROLL_LOCK, exec, voxtype record stop
+
+# Or with a modifier
+bind = SUPER, V, exec, voxtype record start
+bindr = SUPER, V, exec, voxtype record stop
+
+# Toggle mode (press to start/stop)
+bind = SUPER, V, exec, voxtype record toggle
+```
+
+### Sway
+
+Sway supports key release events via `--release`:
+
+```
+# Push-to-talk
+bindsym Scroll_Lock exec voxtype record start
+bindsym --release Scroll_Lock exec voxtype record stop
+
+# With a modifier
+bindsym $mod+v exec voxtype record start
+bindsym --release $mod+v exec voxtype record stop
+
+# Toggle mode
+bindsym $mod+v exec voxtype record toggle
+```
+
+### Other Compositors/Desktops
+
+For compositors without key release support (GNOME, KDE), use toggle mode:
+
+```bash
+# Generic: bind this to your preferred key
+voxtype record toggle
+```
+
+### Trade-offs
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| Built-in hotkey (evdev) | Universal, no config needed | Requires `input` group |
+| Compositor keybindings | Native feel, no `input` group | Compositor-specific config |
 
 ---
 

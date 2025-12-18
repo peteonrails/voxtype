@@ -32,6 +32,11 @@ modifiers = []
 # - toggle: Press hotkey once to start recording, press again to stop
 # mode = "push_to_talk"
 
+# Enable built-in hotkey detection (default: true)
+# Set to false when using compositor keybindings (Hyprland, Sway) instead
+# When disabled, use `voxtype record start/stop/toggle` to control recording
+# enabled = true
+
 [audio]
 # Audio input device ("default" uses system default)
 # List devices with: pactl list sources short
@@ -157,6 +162,12 @@ pub struct HotkeyConfig {
     /// Activation mode: push_to_talk (hold to record) or toggle (press to start/stop)
     #[serde(default)]
     pub mode: ActivationMode,
+
+    /// Enable built-in hotkey detection (default: true)
+    /// Set to false when using compositor keybindings (Hyprland, Sway) instead
+    /// When disabled, use `voxtype record start/stop/toggle` to control recording
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 /// Audio capture configuration
@@ -317,6 +328,7 @@ impl Default for Config {
                 key: "SCROLLLOCK".to_string(),
                 modifiers: vec![],
                 mode: ActivationMode::default(),
+                enabled: true,
             },
             audio: AudioConfig {
                 device: "default".to_string(),

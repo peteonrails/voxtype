@@ -440,7 +440,7 @@ dependencies = [
  "bitvec",
  "cfg-if",
  "libc",
- "nix",
+ "nix 0.23.2",
  "thiserror 1.0.69",
 ]
 
@@ -1101,6 +1101,18 @@ dependencies = [
  "cfg-if",
  "libc",
  "memoffset",
+]
+
+[[package]]
+name = "nix"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
+dependencies = [
+ "bitflags 2.10.0",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
 ]
 
 [[package]]
@@ -2153,6 +2165,7 @@ dependencies = [
  "hound",
  "inotify 0.10.2",
  "libc",
+ "nix 0.29.0",
  "notify",
  "num_cpus",
  "regex",

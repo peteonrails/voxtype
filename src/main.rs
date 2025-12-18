@@ -113,6 +113,22 @@ enum Commands {
         #[arg(long)]
         extended: bool,
     },
+
+    /// Control recording from external sources (compositor keybindings, scripts)
+    Record {
+        #[command(subcommand)]
+        action: RecordAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum RecordAction {
+    /// Start recording (send SIGUSR1 to daemon)
+    Start,
+    /// Stop recording and transcribe (send SIGUSR2 to daemon)
+    Stop,
+    /// Toggle recording state
+    Toggle,
 }
 
 #[derive(Subcommand)]
@@ -137,6 +153,14 @@ enum SetupAction {
         /// Output only the CSS config (for scripting)
         #[arg(long)]
         css: bool,
+
+        /// Install waybar integration (inject config and CSS)
+        #[arg(long)]
+        install: bool,
+
+        /// Uninstall waybar integration (remove config and CSS)
+        #[arg(long)]
+        uninstall: bool,
     },
 
     /// Interactive model selection and download
@@ -227,8 +251,17 @@ async fn main() -> anyhow::Result<()> {
                         setup::systemd::install().await?;
                     }
                 }
-                Some(SetupAction::Waybar { json, css }) => {
-                    if json {
+                Some(SetupAction::Waybar {
+                    json,
+                    css,
+                    install,
+                    uninstall,
+                }) => {
+                    if install {
+                        setup::waybar::install()?;
+                    } else if uninstall {
+                        setup::waybar::uninstall()?;
+                    } else if json {
                         println!("{}", setup::waybar::get_json_config());
                     } else if css {
                         println!("{}", setup::waybar::get_css_config());
@@ -269,7 +302,67 @@ async fn main() -> anyhow::Result<()> {
         Commands::Status { follow, format, extended } => {
             run_status(&config, follow, &format, extended).await?;
         }
+
+        Commands::Record { action } => {
+            send_record_command(&config, action)?;
+        }
     }
+
+    Ok(())
+}
+
+/// Send a record command to the running daemon via Unix signals
+fn send_record_command(config: &config::Config, action: RecordAction) -> anyhow::Result<()> {
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+
+    // Read PID from the pid file
+    let pid_file = config::Config::runtime_dir().join("pid");
+
+    if !pid_file.exists() {
+        eprintln!("Error: Voxtype daemon is not running.");
+        eprintln!("Start it with: voxtype daemon");
+        std::process::exit(1);
+    }
+
+    let pid_str = std::fs::read_to_string(&pid_file)
+        .map_err(|e| anyhow::anyhow!("Failed to read PID file: {}", e))?;
+
+    let pid: i32 = pid_str
+        .trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid PID in file: {}", e))?;
+
+    // Check if the process is actually running
+    if kill(Pid::from_raw(pid), None).is_err() {
+        // Process doesn't exist, clean up stale PID file
+        let _ = std::fs::remove_file(&pid_file);
+        eprintln!("Error: Voxtype daemon is not running (stale PID file removed).");
+        eprintln!("Start it with: voxtype daemon");
+        std::process::exit(1);
+    }
+
+    // For toggle, we need to read current state to decide which signal to send
+    let signal = match action {
+        RecordAction::Start => Signal::SIGUSR1,
+        RecordAction::Stop => Signal::SIGUSR2,
+        RecordAction::Toggle => {
+            // Read current state to determine action
+            let state_file = config.resolve_state_file();
+            let current_state = state_file
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .unwrap_or_else(|| "idle".to_string());
+
+            if current_state.trim() == "recording" {
+                Signal::SIGUSR2 // Stop
+            } else {
+                Signal::SIGUSR1 // Start
+            }
+        }
+    };
+
+    kill(Pid::from_raw(pid), signal)
+        .map_err(|e| anyhow::anyhow!("Failed to send signal to daemon: {}", e))?;
 
     Ok(())
 }

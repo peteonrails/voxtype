@@ -329,18 +329,16 @@ fn print_tool_status(tool: &OutputToolStatus, is_relevant: bool) {
                 note
             );
         }
+    } else if is_relevant {
+        println!("  {}:{}  \x1b[31m✗\x1b[0m not installed",
+            tool.name,
+            " ".repeat(14 - tool.name.len())
+        );
     } else {
-        if is_relevant {
-            println!("  {}:{}  \x1b[31m✗\x1b[0m not installed",
-                tool.name,
-                " ".repeat(14 - tool.name.len())
-            );
-        } else {
-            println!("  {}:{}  \x1b[90m- not installed\x1b[0m",
-                tool.name,
-                " ".repeat(14 - tool.name.len())
-            );
-        }
+        println!("  {}:{}  \x1b[90m- not installed\x1b[0m",
+            tool.name,
+            " ".repeat(14 - tool.name.len())
+        );
     }
 }
 

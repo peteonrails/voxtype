@@ -91,6 +91,54 @@ key = "SCROLLLOCK"
 mode = "toggle"  # Press to start, press again to stop
 ```
 
+### enabled
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Enable or disable the built-in hotkey detection.
+
+When set to `false`, voxtype will not listen for keyboard events via evdev. Instead, use the `voxtype record` command to control recording from external sources like compositor keybindings.
+
+**When to disable:**
+- You prefer using your compositor's native keybindings (Hyprland, Sway)
+- You don't want to add your user to the `input` group
+- You want to use key combinations not supported by evdev (e.g., Super+V)
+
+**Example:**
+```toml
+[hotkey]
+enabled = false  # Use compositor keybindings instead
+```
+
+**Usage with compositor keybindings:**
+
+When `enabled = false`, control recording via CLI:
+```bash
+voxtype record start   # Start recording
+voxtype record stop    # Stop and transcribe
+voxtype record toggle  # Toggle recording state
+```
+
+Bind these commands in your compositor config:
+
+**Hyprland:**
+```hyprlang
+bind = SUPER, V, exec, voxtype record start
+bindr = SUPER, V, exec, voxtype record stop
+```
+
+**Sway:**
+```
+bindsym $mod+v exec voxtype record start
+bindsym --release $mod+v exec voxtype record stop
+```
+
+**Note:** For `toggle` mode to work correctly, you must also set `state_file = "auto"` so voxtype can track its current state.
+
+See [User Manual - Compositor Keybindings](USER_MANUAL.md#compositor-keybindings) for complete setup instructions.
+
 ---
 
 ## [audio]
@@ -709,4 +757,34 @@ mode = "clipboard"
 on_recording_start = false
 on_recording_stop = false
 on_transcription = false  # No desktop notifications
+```
+
+### Compositor Keybindings (Hyprland/Sway)
+
+```toml
+[hotkey]
+enabled = false  # Disable built-in hotkey, use compositor keybindings
+
+# Required for toggle mode
+state_file = "auto"
+
+[whisper]
+model = "base.en"
+
+[audio.feedback]
+enabled = true  # Audio cues helpful when using external triggers
+```
+
+Then configure your compositor:
+
+**Hyprland** (`~/.config/hypr/hyprland.conf`):
+```hyprlang
+bind = SUPER, V, exec, voxtype record start
+bindr = SUPER, V, exec, voxtype record stop
+```
+
+**Sway** (`~/.config/sway/config`):
+```
+bindsym $mod+v exec voxtype record start
+bindsym --release $mod+v exec voxtype record stop
 ```
