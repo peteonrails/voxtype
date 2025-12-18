@@ -181,8 +181,11 @@ if [[ "$SKIP_BUILD" == "false" ]]; then
         # This disables AVX-512 to prevent SIGILL on older CPUs
         if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2" ]]; then
             echo "Building AVX2 baseline release (broad compatibility)..."
-            echo "  Setting WHISPER_NO_AVX512=ON to disable AVX-512 instructions"
-            WHISPER_NO_AVX512=ON cargo build --release
+            echo "  Disabling AVX-512 instructions via compiler flags"
+            # Note: WHISPER_NO_AVX512=ON doesn't work with whisper-rs-sys 0.14.1
+            # because the bundled whisper.cpp (1.7.6) doesn't handle this flag.
+            # We use compiler flags to disable AVX-512 at the instruction level.
+            CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" cargo build --release
             cp target/release/voxtype "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2"
         fi
 
@@ -195,10 +198,10 @@ if [[ "$SKIP_BUILD" == "false" ]]; then
             cp target/release/voxtype "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512"
         fi
 
-        # Build Vulkan GPU release (optional)
+        # Build Vulkan GPU release (optional, uses AVX2 for broad compatibility)
         if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan" ]]; then
             echo "Building Vulkan GPU release..."
-            WHISPER_NO_AVX512=ON cargo build --release --features gpu-vulkan
+            CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" cargo build --release --features gpu-vulkan
             cp target/release/voxtype "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan"
         fi
     else
