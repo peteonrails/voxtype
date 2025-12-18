@@ -27,13 +27,13 @@ optdepends=(
     'libnotify: desktop notifications'
     'pipewire: audio capture (recommended)'
     'pulseaudio: audio capture (alternative)'
-    'vulkan-icd-loader: GPU acceleration via Vulkan (requires rebuild with gpu-vulkan feature)'
+    'vulkan-icd-loader: GPU acceleration via Vulkan (enable with: voxtype setup gpu --enable)'
     'cuda: GPU acceleration for NVIDIA (requires rebuild with gpu-cuda feature)'
 )
 backup=('etc/voxtype/config.toml')
 install=voxtype.install
 source=("$pkgname-$pkgver.tar.gz::https://github.com/peteonrails/voxtype/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('cfb898783e53fbb801b8d9339d58fe194eece067aa1cf8737922b1d847a81c98')
+sha256sums=('127d026cfd6011dc04db6fa641b497f686e74d6ad17fd37077cb53b275317de9')
 
 prepare() {
     cd "$pkgname-$pkgver"

@@ -418,6 +418,7 @@ if [[ "$BUILD_DEB" == "true" ]]; then
         --deb-recommends wl-clipboard \
         --deb-suggests ydotool \
         --deb-suggests libnotify-bin \
+        --deb-suggests libvulkan1 \
         --package "$DEB_FILE" \
         usr etc
 
