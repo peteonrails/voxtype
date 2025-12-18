@@ -201,7 +201,7 @@ fn default_volume() -> f32 {
 }
 
 fn default_on_demand_loading() -> bool {
-    true
+    false
 }
 
 impl Default for AudioFeedbackConfig {

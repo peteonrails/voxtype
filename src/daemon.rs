@@ -66,7 +66,7 @@ pub struct Daemon {
     audio_feedback: Option<AudioFeedback>,
     text_processor: TextProcessor,
     // Background task for loading model on-demand
-    model_load_task: Option<tokio::task::JoinHandle<Box<dyn crate::transcribe::Transcriber>>>,
+    model_load_task: Option<tokio::task::JoinHandle<std::result::Result<Box<dyn crate::transcribe::Transcriber>, crate::error::TranscribeError>>>,
 }
 
 impl Daemon {
@@ -323,13 +323,7 @@ impl Daemon {
                                 if self.config.whisper.on_demand_loading {
                                     let config = self.config.whisper.clone();
                                     self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                        match transcribe::create_transcriber(&config) {
-                                            Ok(transcriber) => transcriber,
-                                            Err(e) => {
-                                                tracing::error!("Failed to load model in background: {}", e);
-                                                panic!("Model loading failed: {}", e); // For now, panic on error
-                                            }
-                                        }
+                                        transcribe::create_transcriber(&config)
                                     }));
                                     tracing::debug!("Started background model loading");
                                 }
@@ -366,14 +360,20 @@ impl Daemon {
                                 let transcriber = if self.config.whisper.on_demand_loading {
                                     if let Some(task) = self.model_load_task.take() {
                                         match task.await {
-                                            Ok(transcriber) => {
+                                            Ok(Ok(transcriber)) => {
                                                 tracing::info!("Model loaded successfully");
                                                 Some(Arc::new(transcriber))
                                             }
-                                            Err(e) => {
-                                                tracing::error!("Model loading task failed: {}", e);
+                                            Ok(Err(e)) => {
+                                                tracing::error!("Model loading failed: {}", e);
                                                 self.play_feedback(SoundEvent::Error);
-                                                // Reset state and continue
+                                                state = State::Idle;
+                                                self.update_state("idle");
+                                                continue;
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("Model loading task panicked: {}", e);
+                                                self.play_feedback(SoundEvent::Error);
                                                 state = State::Idle;
                                                 self.update_state("idle");
                                                 continue;
@@ -416,13 +416,7 @@ impl Daemon {
                                 if self.config.whisper.on_demand_loading {
                                     let config = self.config.whisper.clone();
                                     self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                        match transcribe::create_transcriber(&config) {
-                                            Ok(transcriber) => transcriber,
-                                            Err(e) => {
-                                                tracing::error!("Failed to load model in background: {}", e);
-                                                panic!("Model loading failed: {}", e); // For now, panic on error
-                                            }
-                                        }
+                                        transcribe::create_transcriber(&config)
                                     }));
                                     tracing::debug!("Started background model loading");
                                 }
@@ -451,14 +445,20 @@ impl Daemon {
                                 let transcriber = if self.config.whisper.on_demand_loading {
                                     if let Some(task) = self.model_load_task.take() {
                                         match task.await {
-                                            Ok(transcriber) => {
+                                            Ok(Ok(transcriber)) => {
                                                 tracing::info!("Model loaded successfully");
                                                 Some(Arc::new(transcriber))
                                             }
-                                            Err(e) => {
-                                                tracing::error!("Model loading task failed: {}", e);
+                                            Ok(Err(e)) => {
+                                                tracing::error!("Model loading failed: {}", e);
                                                 self.play_feedback(SoundEvent::Error);
-                                                // Reset state and continue
+                                                state = State::Idle;
+                                                self.update_state("idle");
+                                                continue;
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("Model loading task panicked: {}", e);
+                                                self.play_feedback(SoundEvent::Error);
                                                 state = State::Idle;
                                                 self.update_state("idle");
                                                 continue;
