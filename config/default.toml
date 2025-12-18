@@ -42,10 +42,16 @@ translate = false
 # Number of CPU threads for inference (omit for auto-detection)
 # threads = 4
 
+# Load model on-demand when recording starts (true) or keep loaded (false)
+# When true, model is loaded when recording starts and unloaded after transcription
+# When false, model is kept in memory for faster response times (default)
+on_demand_loading = false
+
 [output]
-# Primary output mode: "type" or "clipboard"
+# Primary output mode: "type", "clipboard", or "paste"
 # - type: Simulates keyboard input at cursor position (requires ydotool)
 # - clipboard: Copies text to clipboard (requires wl-copy)
+# - paste: Copies to clipboard then pastes with Ctrl+V (requires wl-copy and ydotool)
 mode = "type"
 
 # Fall back to clipboard if typing fails

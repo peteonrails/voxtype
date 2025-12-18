@@ -55,6 +55,10 @@ struct Cli {
     #[arg(long)]
     clipboard: bool,
 
+    /// Force paste mode (clipboard + Ctrl+V)
+    #[arg(long)]
+    paste: bool,
+
     /// Override whisper model (tiny, base, small, medium, large-v3, large-v3-turbo)
     #[arg(long, value_name = "MODEL")]
     model: Option<String>,
@@ -168,6 +172,9 @@ async fn main() -> anyhow::Result<()> {
     // Apply CLI overrides
     if cli.clipboard {
         config.output.mode = config::OutputMode::Clipboard;
+    }
+    if cli.paste {
+        config.output.mode = config::OutputMode::Paste;
     }
     if let Some(model) = cli.model {
         config.whisper.model = model;

@@ -3,8 +3,11 @@
 # Creates deb and rpm packages from pre-built binaries
 #
 # This script builds tiered CPU binaries to support different CPUs:
-#   - voxtype-avx2:   AVX2 baseline (compatible with most CPUs from 2013+)
-#   - voxtype-avx512: AVX-512 optimized (Zen 4+, some Intel)
+#   x86_64:
+#     - voxtype-avx2:   AVX2 baseline (compatible with most CPUs from 2013+)
+#     - voxtype-avx512: AVX-512 optimized (Zen 4+, some Intel)
+#   aarch64:
+#     - voxtype:        Single binary (no CPU feature tiers needed)
 #
 # The packages include a post-install script that detects CPU capabilities
 # and creates a symlink to the appropriate binary.
@@ -19,6 +22,7 @@
 #   ./scripts/package.sh 0.3.0
 #   ./scripts/package.sh --deb-only 0.3.0
 #   ./scripts/package.sh --skip-build 0.3.0
+#   ./scripts/package.sh --arch aarch64 0.3.0
 #
 # Options:
 #   --deb-only    Build only the Debian package
@@ -26,6 +30,7 @@
 #   --skip-build  Skip building binaries (use existing)
 #   --no-validate Skip package validation
 #   --release N   Set package release number (default: 1)
+#   --arch ARCH   Target architecture: x86_64 (default) or aarch64
 
 set -e
 
@@ -35,6 +40,7 @@ BUILD_RPM=true
 SKIP_BUILD=false
 VALIDATE=true
 RELEASE="1"
+TARGET_ARCH="${TARGET_ARCH:-x86_64}"  # Default to x86_64, allow env override
 
 while [[ "$1" == --* ]]; do
     case "$1" in
@@ -58,12 +64,33 @@ while [[ "$1" == --* ]]; do
             RELEASE="$2"
             shift 2
             ;;
+        --arch)
+            TARGET_ARCH="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
             exit 1
             ;;
     esac
 done
+
+# Validate architecture
+case "$TARGET_ARCH" in
+    x86_64|amd64)
+        TARGET_ARCH="x86_64"
+        DEB_ARCH="amd64"
+        ;;
+    aarch64|arm64)
+        TARGET_ARCH="aarch64"
+        DEB_ARCH="arm64"
+        ;;
+    *)
+        echo "Error: Unsupported architecture: $TARGET_ARCH"
+        echo "Supported: x86_64, aarch64"
+        exit 1
+        ;;
+esac
 
 VERSION="${1:-$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)}"
 RELEASE_DIR="releases/${VERSION}"
@@ -134,7 +161,7 @@ validate_deb() {
     return 0
 }
 
-echo "=== Packaging voxtype v${VERSION} ==="
+echo "=== Packaging voxtype v${VERSION} (${TARGET_ARCH}) ==="
 echo ""
 
 # Check for fpm
@@ -149,53 +176,81 @@ mkdir -p "$RELEASE_DIR"
 
 # Build binaries (unless --skip-build was specified)
 if [[ "$SKIP_BUILD" == "false" ]]; then
-    # Build AVX2 baseline binary (compatible with most CPUs from 2013+)
-    # This disables AVX-512 to prevent SIGILL on older CPUs
-    if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2" ]]; then
-        echo "Building AVX2 baseline release (broad compatibility)..."
-        echo "  Setting WHISPER_NO_AVX512=ON to disable AVX-512 instructions"
-        WHISPER_NO_AVX512=ON cargo build --release
-        cp target/release/voxtype "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2"
-    fi
+    if [[ "$TARGET_ARCH" == "x86_64" ]]; then
+        # Build AVX2 baseline binary (compatible with most CPUs from 2013+)
+        # This disables AVX-512 to prevent SIGILL on older CPUs
+        if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2" ]]; then
+            echo "Building AVX2 baseline release (broad compatibility)..."
+            echo "  Disabling AVX-512 instructions via compiler flags"
+            # Note: WHISPER_NO_AVX512=ON doesn't work with whisper-rs-sys 0.14.1
+            # because the bundled whisper.cpp (1.7.6) doesn't handle this flag.
+            # We use compiler flags to disable AVX-512 at the instruction level.
+            CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" cargo build --release
+            cp target/release/voxtype "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2"
+        fi
 
-    # Build AVX-512 optimized binary (for Zen 4+, some Intel)
-    if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512" ]]; then
-        echo "Building AVX-512 optimized release..."
-        cargo build --release
-        cp target/release/voxtype "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512"
-    fi
+        # Build AVX-512 optimized binary (for Zen 4+, some Intel)
+        if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512" ]]; then
+            echo "Building AVX-512 optimized release..."
+            # Clean build cache to ensure whisper.cpp recompiles with AVX-512 enabled
+            cargo clean
+            cargo build --release
+            cp target/release/voxtype "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512"
+        fi
 
-    # Build Vulkan GPU release (optional)
-    if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan" ]]; then
-        echo "Building Vulkan GPU release..."
-        WHISPER_NO_AVX512=ON cargo build --release --features gpu-vulkan
-        cp target/release/voxtype "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan"
+        # Build Vulkan GPU release (optional, uses AVX2 for broad compatibility)
+        if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan" ]]; then
+            echo "Building Vulkan GPU release..."
+            CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" cargo build --release --features gpu-vulkan
+            cp target/release/voxtype "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan"
+        fi
+    else
+        # aarch64: Single binary, no CPU feature tiers needed
+        if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-aarch64" ]]; then
+            echo "Building aarch64 release..."
+            cargo build --release --target aarch64-unknown-linux-gnu
+            cp target/aarch64-unknown-linux-gnu/release/voxtype "${RELEASE_DIR}/voxtype-${VERSION}-linux-aarch64"
+        fi
     fi
 else
     echo "Skipping binary build (--skip-build)"
-    if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2" ]]; then
-        echo "Error: Binary not found: ${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2"
-        exit 1
-    fi
-    if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512" ]]; then
-        echo "Error: Binary not found: ${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512"
-        exit 1
+    if [[ "$TARGET_ARCH" == "x86_64" ]]; then
+        if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2" ]]; then
+            echo "Error: Binary not found: ${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2"
+            exit 1
+        fi
+        if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512" ]]; then
+            echo "Error: Binary not found: ${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512"
+            exit 1
+        fi
+    else
+        if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-aarch64" ]]; then
+            echo "Error: Binary not found: ${RELEASE_DIR}/voxtype-${VERSION}-linux-aarch64"
+            exit 1
+        fi
     fi
 fi
 
-# Create staging directory
+# Create staging directory using mktemp for portability
 # Note: We don't create /usr/bin here - the postinstall script creates the symlink
-STAGING="/tmp/voxtype-package-$$"
-rm -rf "$STAGING"
+STAGING="$(mktemp -d "${TMPDIR:-/tmp}/voxtype-package.XXXXXX")"
+trap 'rm -rf "$STAGING"' EXIT
 mkdir -p "$STAGING"/{usr/lib/voxtype,etc/voxtype,usr/lib/systemd/user,usr/share/doc/voxtype}
 mkdir -p "$STAGING"/usr/share/{bash-completion/completions,zsh/site-functions,fish/vendor_completions.d}
 
-# Copy tiered CPU binaries to /usr/lib/voxtype/
+# Copy binaries to /usr/lib/voxtype/
 # The post-install script will create a symlink at /usr/bin/voxtype
-cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2" "$STAGING/usr/lib/voxtype/voxtype-avx2"
-cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512" "$STAGING/usr/lib/voxtype/voxtype-avx512"
-chmod 755 "$STAGING/usr/lib/voxtype/voxtype-avx2"
-chmod 755 "$STAGING/usr/lib/voxtype/voxtype-avx512"
+if [[ "$TARGET_ARCH" == "x86_64" ]]; then
+    # x86_64: Tiered CPU binaries
+    cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2" "$STAGING/usr/lib/voxtype/voxtype-avx2"
+    cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512" "$STAGING/usr/lib/voxtype/voxtype-avx512"
+    chmod 755 "$STAGING/usr/lib/voxtype/voxtype-avx2"
+    chmod 755 "$STAGING/usr/lib/voxtype/voxtype-avx512"
+else
+    # aarch64: Single binary
+    cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-aarch64" "$STAGING/usr/lib/voxtype/voxtype"
+    chmod 755 "$STAGING/usr/lib/voxtype/voxtype"
+fi
 cp config/default.toml "$STAGING/etc/voxtype/config.toml"
 cp packaging/systemd/voxtype.service "$STAGING/usr/lib/systemd/user/"
 cp README.md "$STAGING/usr/share/doc/voxtype/"
@@ -207,19 +262,21 @@ cp packaging/completions/voxtype.zsh "$STAGING/usr/share/zsh/site-functions/_vox
 cp packaging/completions/voxtype.fish "$STAGING/usr/share/fish/vendor_completions.d/voxtype.fish"
 
 # Post-install script - detects CPU and creates symlink to appropriate binary
-cat > "$STAGING/postinstall.sh" << 'POSTINST'
-#!/bin/bash
+# Generate architecture-specific post-install script
+if [[ "$TARGET_ARCH" == "x86_64" ]]; then
+    cat > "$STAGING/postinstall.sh" << 'POSTINST'
+#!/bin/sh
 # Detect CPU capabilities and symlink the appropriate voxtype binary
 #
-# Binary variants:
+# Binary variants (x86_64):
 #   voxtype-avx2:   Works on most CPUs from 2013+ (Intel Haswell, AMD Zen)
 #   voxtype-avx512: Optimized for newer CPUs (AMD Zen 4+, some Intel)
 
 # Remove existing binary/symlink if present (for upgrades)
 rm -f /usr/bin/voxtype
 
-# Detect AVX-512 support
-if grep -q avx512f /proc/cpuinfo 2>/dev/null; then
+# Detect AVX-512 support (Linux-specific, falls back to AVX2 on other systems)
+if [ -f /proc/cpuinfo ] && grep -q avx512f /proc/cpuinfo 2>/dev/null; then
     VARIANT="avx512"
     ln -sf /usr/lib/voxtype/voxtype-avx512 /usr/bin/voxtype
 else
@@ -228,7 +285,7 @@ else
 fi
 
 # Restore SELinux context if available (for Fedora/RHEL)
-if command -v restorecon &> /dev/null; then
+if command -v restorecon >/dev/null 2>&1; then
     restorecon /usr/bin/voxtype 2>/dev/null || true
 fi
 
@@ -251,11 +308,46 @@ echo "  4. Start voxtype:"
 echo "     systemctl --user enable --now voxtype"
 echo ""
 POSTINST
+else
+    # aarch64: Single binary, no CPU detection needed
+    cat > "$STAGING/postinstall.sh" << 'POSTINST'
+#!/bin/sh
+# Create symlink for voxtype binary (aarch64)
+
+# Remove existing binary/symlink if present (for upgrades)
+rm -f /usr/bin/voxtype
+
+# Create symlink to the binary
+ln -sf /usr/lib/voxtype/voxtype /usr/bin/voxtype
+
+# Restore SELinux context if available (for Fedora/RHEL)
+if command -v restorecon >/dev/null 2>&1; then
+    restorecon /usr/bin/voxtype 2>/dev/null || true
+fi
+
+echo ""
+echo "=== Voxtype Post-Installation ==="
+echo ""
+echo "To complete setup:"
+echo ""
+echo "  1. Add your user to the 'input' group:"
+echo "     sudo usermod -aG input \$USER"
+echo ""
+echo "  2. Log out and back in for group changes to take effect"
+echo ""
+echo "  3. Download a whisper model:"
+echo "     voxtype setup --download"
+echo ""
+echo "  4. Start voxtype:"
+echo "     systemctl --user enable --now voxtype"
+echo ""
+POSTINST
+fi
 chmod +x "$STAGING/postinstall.sh"
 
 # Post-uninstall script - removes the symlink
 cat > "$STAGING/postuninstall.sh" << 'POSTRM'
-#!/bin/bash
+#!/bin/sh
 # Remove symlink on package removal
 rm -f /usr/bin/voxtype
 POSTRM
@@ -268,7 +360,7 @@ FPM_OPTS=(
     --name voxtype
     --version "$VERSION"
     --iteration "$RELEASE"
-    --architecture x86_64
+    --architecture "$TARGET_ARCH"
     --maintainer "Peter Jackson <pete@peteonrails.com>"
     --url "https://voxtype.io"
     --license "MIT"
@@ -280,7 +372,7 @@ FPM_OPTS=(
 )
 
 # Build deb
-DEB_FILE="${RELEASE_DIR}/voxtype_${VERSION}-${RELEASE}_amd64.deb"
+DEB_FILE="${RELEASE_DIR}/voxtype_${VERSION}-${RELEASE}_${DEB_ARCH}.deb"
 if [[ "$BUILD_DEB" == "true" ]]; then
     echo ""
     echo "Building deb package..."
@@ -311,7 +403,7 @@ if [[ "$BUILD_DEB" == "true" ]]; then
 fi
 
 # Build rpm
-RPM_FILE="${RELEASE_DIR}/voxtype-${VERSION}-${RELEASE}.x86_64.rpm"
+RPM_FILE="${RELEASE_DIR}/voxtype-${VERSION}-${RELEASE}.${TARGET_ARCH}.rpm"
 if [[ "$BUILD_RPM" == "true" ]]; then
     echo ""
     echo "Building rpm package..."
@@ -327,8 +419,7 @@ if [[ "$BUILD_RPM" == "true" ]]; then
     echo "  Created: $RPM_FILE"
 fi
 
-# Cleanup
-rm -rf "$STAGING"
+# Cleanup handled by trap
 
 echo ""
 echo "=== Packaging complete ==="

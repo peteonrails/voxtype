@@ -104,11 +104,14 @@ model = "base.en"   # tiny, base, small, medium, large-v3, large-v3-turbo
 language = "en"     # Or "auto" for detection, or language code (es, fr, de, etc.)
 translate = false   # Translate non-English speech to English
 # threads = 4       # CPU threads for inference (omit for auto-detect)
+# on_demand_loading = true  # Load model only when recording (saves memory)
 
 [output]
-mode = "type"       # "type" or "clipboard"
+mode = "type"       # "type", "clipboard", or "paste"
 fallback_to_clipboard = true
 type_delay_ms = 0   # Increase if characters are dropped
+# Note: "paste" mode copies to clipboard then simulates Ctrl+V
+#       Useful for non-US keyboard layouts where ydotool typing fails
 
 [output.notification]
 on_recording_start = false  # Notify when PTT activates
@@ -186,6 +189,7 @@ Options:
   -v, --verbose        Increase verbosity (-v, -vv)
   -q, --quiet          Quiet mode (errors only)
   --clipboard          Force clipboard mode
+  --paste              Force paste mode (clipboard + Ctrl+V)
   --model <MODEL>      Override whisper model
   --hotkey <KEY>       Override hotkey
   --toggle             Use toggle mode (press to start/stop)
@@ -434,6 +438,7 @@ We want to hear from you! Voxtype is a young project and your feedback helps mak
 
 - [Peter Jackson](https://github.com/peteonrails) - Creator and maintainer
 - [jvantillo](https://github.com/jvantillo) - GPU acceleration patch, whisper-rs 0.15.1 compatibility
+- [materemias](https://github.com/materemias) - Paste output mode, on-demand model loading, PKGBUILD fix
 
 ## License
 

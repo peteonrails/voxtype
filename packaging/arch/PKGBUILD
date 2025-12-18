@@ -1,7 +1,7 @@
 # Maintainer: Peter Jackson <pete@peteonrails.com>
 pkgname=voxtype
-pkgver=0.3.0
-pkgrel=2
+pkgver=0.3.2
+pkgrel=1
 pkgdesc="Push-to-talk voice-to-text for Linux (optimized for Wayland, works on X11)"
 arch=('x86_64' 'aarch64')
 url="https://voxtype.io"
@@ -33,7 +33,7 @@ optdepends=(
 backup=('etc/voxtype/config.toml')
 install=voxtype.install
 source=("$pkgname-$pkgver.tar.gz::https://github.com/peteonrails/voxtype/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('cfb898783e53fbb801b8d9339d58fe194eece067aa1cf8737922b1d847a81c98')
 
 prepare() {
     cd "$pkgname-$pkgver"
@@ -52,8 +52,8 @@ build() {
     # local _features="--features gpu-hipblas"  # AMD ROCm
 
     # Build AVX2 baseline binary (compatible with most CPUs from 2013+)
-    # Disable AVX-512 to prevent SIGILL on older CPUs
-    WHISPER_NO_AVX512=ON cargo build --frozen --release ${_features:-}
+    # Disable AVX-512 via compiler flags (WHISPER_NO_AVX512 doesn't work with whisper-rs-sys 0.14.1)
+    CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" cargo build --frozen --release ${_features:-}
     cp target/release/voxtype target/release/voxtype-avx2
 
     # Build AVX-512 optimized binary (for Zen 4+, some Intel)
@@ -66,7 +66,7 @@ check() {
     cd "$pkgname-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
     # Only test with AVX2 build to avoid SIGILL in build environments
-    WHISPER_NO_AVX512=ON cargo test --frozen
+    CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" cargo test --frozen
 }
 
 package() {

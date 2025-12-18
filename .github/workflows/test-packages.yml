@@ -57,14 +57,17 @@ jobs:
 
       - name: Build tiered binaries
         run: |
-          # Build AVX2 baseline
+          # Build AVX2 baseline (disable AVX-512 via compiler flags)
+          # Note: WHISPER_NO_AVX512=ON doesn't work with whisper-rs-sys 0.14.1
           echo "Building AVX2 baseline..."
-          WHISPER_NO_AVX512=ON cargo build --release
+          CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" cargo build --release
           mkdir -p releases/test
           cp target/release/voxtype releases/test/voxtype-test-linux-x86_64-avx2
 
-          # Build AVX-512 (on CI this is the same as AVX2 since CI runners don't have AVX-512)
+          # Build AVX-512 (on CI this produces same as AVX2 since runners lack AVX-512)
+          # Clean build cache to ensure whisper.cpp recompiles with different flags
           echo "Building AVX-512 optimized..."
+          cargo clean
           cargo build --release
           cp target/release/voxtype releases/test/voxtype-test-linux-x86_64-avx512
 

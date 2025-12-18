@@ -12,8 +12,8 @@ case "$1" in
         # Remove existing binary/symlink if present (for upgrades)
         rm -f /usr/bin/voxtype
 
-        # Detect AVX-512 support
-        if grep -q avx512f /proc/cpuinfo 2>/dev/null; then
+        # Detect AVX-512 support (Linux-specific, falls back to AVX2)
+        if [ -f /proc/cpuinfo ] && grep -q avx512f /proc/cpuinfo 2>/dev/null; then
             VARIANT="avx512"
             ln -sf /usr/lib/voxtype/voxtype-avx512 /usr/bin/voxtype
         else

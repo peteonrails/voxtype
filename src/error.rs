@@ -96,6 +96,9 @@ pub enum OutputError {
     #[error("Text injection failed: {0}")]
     InjectionFailed(String),
 
+    #[error("Ctrl+V simulation failed: {0}")]
+    CtrlVFailed(String),
+
     #[error("All output methods failed. Ensure wtype, ydotool, or wl-copy is available.")]
     AllMethodsFailed,
 }

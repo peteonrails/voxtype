@@ -164,10 +164,14 @@ translate = false
 # Omit to auto-detect optimal thread count
 # threads = 4
 
+# Load model on-demand (saves memory/VRAM, slight delay per recording)
+# on_demand_loading = true
+
 [output]
 # Primary output mode
 # "type" - Simulates keyboard input at cursor (wtype on Wayland, ydotool on X11)
 # "clipboard" - Copies text to clipboard (requires wl-copy)
+# "paste" - Copies to clipboard then simulates Ctrl+V (for non-US keyboard layouts)
 mode = "type"
 
 # Fall back to clipboard if typing fails
@@ -349,6 +353,38 @@ mode = "clipboard"
 **Cons**:
 - Requires manual paste (Ctrl+V)
 - Overwrites clipboard contents
+
+### Paste Mode
+
+Copies text to clipboard, then automatically simulates Ctrl+V to paste it. This mode is designed for **non-US keyboard layouts** where ydotool's direct typing produces wrong characters.
+
+**Requires**: wl-copy (wl-clipboard) and ydotool
+
+```toml
+[output]
+mode = "paste"
+```
+
+**When to use paste mode**:
+- You have a non-US keyboard layout (German, French, Dvorak, etc.)
+- ydotool typing produces wrong characters (e.g., `z` and `y` swapped on German layout)
+- You're on X11 where wtype isn't available
+
+**How it works**:
+1. Copies transcribed text to clipboard via `wl-copy`
+2. Waits briefly for clipboard to settle
+3. Simulates Ctrl+V keypress via `ydotool`
+
+**Pros**:
+- Works with any keyboard layout
+- Text appears at cursor position (like type mode)
+- No character translation issues
+
+**Cons**:
+- Requires both wl-copy and ydotool
+- Won't work in applications where Ctrl+V has a different meaning (e.g., Vim command mode)
+- Overwrites clipboard contents
+- No fallback behavior
 
 ### Fallback Behavior
 

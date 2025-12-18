@@ -65,6 +65,8 @@ pub struct Daemon {
     state_file_path: Option<PathBuf>,
     audio_feedback: Option<AudioFeedback>,
     text_processor: TextProcessor,
+    // Background task for loading model on-demand
+    model_load_task: Option<tokio::task::JoinHandle<std::result::Result<Box<dyn crate::transcribe::Transcriber>, crate::error::TranscribeError>>>,
 }
 
 impl Daemon {
@@ -109,6 +111,7 @@ impl Daemon {
             state_file_path,
             audio_feedback,
             text_processor,
+            model_load_task: None,
         }
     }
 
@@ -131,7 +134,7 @@ impl Daemon {
         &self,
         state: &mut State,
         audio_capture: &mut Option<Box<dyn AudioCapture>>,
-        transcriber: &Arc<Box<dyn crate::transcribe::Transcriber>>,
+        transcriber: Option<Arc<Box<dyn crate::transcribe::Transcriber>>>,
         output_chain: &[Box<dyn output::TextOutput>],
     ) {
         let duration = state.recording_duration().unwrap_or_default();
@@ -170,11 +173,14 @@ impl Daemon {
                     self.update_state("transcribing");
 
                     // Run transcription in blocking task
-                    let transcriber = transcriber.clone();
-                    let text_result = tokio::task::spawn_blocking(move || {
-                        transcriber.transcribe(&samples)
-                    })
-                    .await;
+                    let text_result = if let Some(t) = transcriber {
+                        tokio::task::spawn_blocking(move || {
+                            t.transcribe(&samples)
+                        }).await
+                    } else {
+                        // This should not happen as we'll load the model on-demand
+                        Ok(Err(crate::error::TranscribeError::InitFailed("No transcriber available".to_string())))
+                    };
 
                     match text_result {
                         Ok(Ok(text)) => {
@@ -260,10 +266,15 @@ impl Daemon {
                 .join(" -> ")
         );
 
-        // Pre-load whisper model (can take a few seconds)
-        tracing::info!("Loading transcription model: {}", self.config.whisper.model);
-        let transcriber = Arc::new(transcribe::create_transcriber(&self.config.whisper)?);
-        tracing::info!("Model loaded, ready for voice input");
+        // Pre-load whisper model if on_demand_loading is disabled
+        let mut transcriber_preloaded = None;
+        if !self.config.whisper.on_demand_loading {
+            tracing::info!("Loading transcription model: {}", self.config.whisper.model);
+            transcriber_preloaded = Some(Arc::new(transcribe::create_transcriber(&self.config.whisper)?));
+            tracing::info!("Model loaded, ready for voice input");
+        } else {
+            tracing::info!("On-demand loading enabled, model will be loaded when recording starts");
+        }
 
         // Start hotkey listener
         let mut hotkey_rx = hotkey_listener.start().await?;
@@ -308,6 +319,15 @@ impl Daemon {
                                     send_notification("Push to Talk Active", "Recording...").await;
                                 }
 
+                                // Start model loading in background if on-demand loading is enabled
+                                if self.config.whisper.on_demand_loading {
+                                    let config = self.config.whisper.clone();
+                                    self.model_load_task = Some(tokio::task::spawn_blocking(move || {
+                                        transcribe::create_transcriber(&config)
+                                    }));
+                                    tracing::debug!("Started background model loading");
+                                }
+
                                 // Create and start audio capture
                                 tracing::debug!("Creating audio capture with device: {}", self.config.audio.device);
                                 match audio::create_capture(&self.config.audio) {
@@ -336,10 +356,44 @@ impl Daemon {
                         (HotkeyEvent::Released, ActivationMode::PushToTalk) => {
                             tracing::debug!("Received HotkeyEvent::Released (push-to-talk), state.is_recording() = {}", state.is_recording());
                             if state.is_recording() {
+                                // Wait for model loading task if on-demand loading is enabled
+                                let transcriber = if self.config.whisper.on_demand_loading {
+                                    if let Some(task) = self.model_load_task.take() {
+                                        match task.await {
+                                            Ok(Ok(transcriber)) => {
+                                                tracing::info!("Model loaded successfully");
+                                                Some(Arc::new(transcriber))
+                                            }
+                                            Ok(Err(e)) => {
+                                                tracing::error!("Model loading failed: {}", e);
+                                                self.play_feedback(SoundEvent::Error);
+                                                state = State::Idle;
+                                                self.update_state("idle");
+                                                continue;
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("Model loading task panicked: {}", e);
+                                                self.play_feedback(SoundEvent::Error);
+                                                state = State::Idle;
+                                                self.update_state("idle");
+                                                continue;
+                                            }
+                                        }
+                                    } else {
+                                        tracing::error!("No model loading task found");
+                                        self.play_feedback(SoundEvent::Error);
+                                        state = State::Idle;
+                                        self.update_state("idle");
+                                        continue;
+                                    }
+                                } else {
+                                    transcriber_preloaded.clone()
+                                };
+
                                 self.stop_and_transcribe(
                                     &mut state,
                                     &mut audio_capture,
-                                    &transcriber,
+                                    transcriber,
                                     &output_chain,
                                 ).await;
                             }
@@ -356,6 +410,15 @@ impl Daemon {
 
                                 if self.config.output.notification.on_recording_start {
                                     send_notification("Recording Started", "Press hotkey again to stop").await;
+                                }
+
+                                // Start model loading in background if on-demand loading is enabled
+                                if self.config.whisper.on_demand_loading {
+                                    let config = self.config.whisper.clone();
+                                    self.model_load_task = Some(tokio::task::spawn_blocking(move || {
+                                        transcribe::create_transcriber(&config)
+                                    }));
+                                    tracing::debug!("Started background model loading");
                                 }
 
                                 match audio::create_capture(&self.config.audio) {
@@ -378,11 +441,45 @@ impl Daemon {
                                     }
                                 }
                             } else if state.is_recording() {
+                                // Wait for model loading task if on-demand loading is enabled
+                                let transcriber = if self.config.whisper.on_demand_loading {
+                                    if let Some(task) = self.model_load_task.take() {
+                                        match task.await {
+                                            Ok(Ok(transcriber)) => {
+                                                tracing::info!("Model loaded successfully");
+                                                Some(Arc::new(transcriber))
+                                            }
+                                            Ok(Err(e)) => {
+                                                tracing::error!("Model loading failed: {}", e);
+                                                self.play_feedback(SoundEvent::Error);
+                                                state = State::Idle;
+                                                self.update_state("idle");
+                                                continue;
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("Model loading task panicked: {}", e);
+                                                self.play_feedback(SoundEvent::Error);
+                                                state = State::Idle;
+                                                self.update_state("idle");
+                                                continue;
+                                            }
+                                        }
+                                    } else {
+                                        tracing::error!("No model loading task found");
+                                        self.play_feedback(SoundEvent::Error);
+                                        state = State::Idle;
+                                        self.update_state("idle");
+                                        continue;
+                                    }
+                                } else {
+                                    transcriber_preloaded.clone()
+                                };
+
                                 // Stop recording and transcribe
                                 self.stop_and_transcribe(
                                     &mut state,
                                     &mut audio_capture,
-                                    &transcriber,
+                                    transcriber,
                                     &output_chain,
                                 ).await;
                             }

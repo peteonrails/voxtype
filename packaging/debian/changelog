@@ -1,3 +1,11 @@
+voxtype (0.3.1-1) unstable; urgency=medium
+
+  * Add on-demand model loading option (saves VRAM when not transcribing)
+  * Add paste output mode for non-US keyboard layouts
+  * Improve portability: better CPU detection, POSIX-compatible scripts
+
+ -- Peter Jackson <pete@peteonrails.com>  Wed, 18 Dec 2025 12:00:00 +0000
+
 voxtype (0.3.0-2) unstable; urgency=high
 
   * Add tiered CPU binaries (AVX2 baseline + AVX-512 optimized)

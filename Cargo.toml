@@ -1,8 +1,8 @@
 [package]
 name = "voxtype"
-version = "0.3.0"
+version = "0.3.2"
 edition = "2021"
-authors = ["Peter Jackson", "jvantillo"]
+authors = ["Peter Jackson", "Jean-Paul van Tillo", "Máté Rémiás"]
 description = "Push-to-talk voice-to-text for Wayland"
 license = "MIT"
 readme = "README.md"
@@ -38,6 +38,7 @@ async-trait = "0.1"
 # Input handling (evdev for kernel-level key events)
 evdev = "0.12"
 libc = "0.2"
+inotify = "0.10"  # Watch /dev/input for device hotplug
 
 # Audio capture
 cpal = "0.15"

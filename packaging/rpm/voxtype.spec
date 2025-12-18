@@ -1,5 +1,5 @@
 Name:           voxtype
-Version:        0.3.0
+Version:        0.3.1
 Release:        1%{?dist}
 Summary:        Push-to-talk voice-to-text for Linux
 
@@ -94,7 +94,8 @@ WHISPER_NO_AVX512=ON cargo test --release --locked
 # Detect CPU capabilities and symlink the appropriate binary
 rm -f %{_bindir}/voxtype
 
-if grep -q avx512f /proc/cpuinfo 2>/dev/null; then
+# Check for AVX-512 support (Linux-specific, falls back to AVX2)
+if [ -f /proc/cpuinfo ] && grep -q avx512f /proc/cpuinfo 2>/dev/null; then
     VARIANT="avx512"
     ln -sf %{_libdir}/voxtype/voxtype-avx512 %{_bindir}/voxtype
 else
@@ -102,8 +103,10 @@ else
     ln -sf %{_libdir}/voxtype/voxtype-avx2 %{_bindir}/voxtype
 fi
 
-# Restore SELinux context
-restorecon %{_bindir}/voxtype 2>/dev/null || true
+# Restore SELinux context if available
+if command -v restorecon >/dev/null 2>&1; then
+    restorecon %{_bindir}/voxtype 2>/dev/null || true
+fi
 
 echo ""
 echo "=== Voxtype Post-Installation ==="
@@ -150,6 +153,11 @@ rm -f %{_bindir}/voxtype
 %{_datadir}/fish/vendor_completions.d/voxtype.fish
 
 %changelog
+* Wed Dec 18 2025 Peter Jackson <pete@peteonrails.com> - 0.3.1-1
+- Add on-demand model loading option (saves VRAM when not transcribing)
+- Add paste output mode for non-US keyboard layouts
+- Improve portability: better CPU detection, POSIX-compatible scripts
+
 * Tue Dec 17 2025 Peter Jackson <pete@peteonrails.com> - 0.3.0-2
 - Add tiered CPU binaries (AVX2 baseline + AVX-512 optimized)
 - Fix SIGILL crash on CPUs without AVX-512 support (Issue #4)

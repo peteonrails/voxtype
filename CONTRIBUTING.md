@@ -102,6 +102,16 @@ We want to hear from you! Voxtype is a young project and your feedback helps mak
 - **Something not working?** If Voxtype doesn't install cleanly, doesn't work on your system, or is buggy in any way, please [open an issue](https://github.com/peteonrails/voxtype/issues). I actively monitor and respond to issues.
 - **Like Voxtype?** I don't accept donations, but if you find it useful, a star on the [GitHub repository](https://github.com/peteonrails/voxtype) and/or a vote on the [AUR package](https://aur.archlinux.org/packages/voxtype/) would mean a lot!
 
+## Credit where it is due
+
+If you submit code that is incorporated into Voxtype, whether I modify it or accept it unchanged, I will credit you and list you as a contributor. If, for some reason, you do not want this, please let me know. I'll make every effort to: 
+
+1. Include your commits with your github username
+2. Add you to the README
+3. Add you to the website pages
+
+Bonus points to you if you make this easy for me by including those changes in your pull request. It's not required, but it is appreciated. 
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the MIT License.

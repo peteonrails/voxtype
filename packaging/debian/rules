@@ -8,8 +8,8 @@ export CARGO_HOME = $(CURDIR)/debian/cargo_home
 
 override_dh_auto_build:
 	# Build AVX2 baseline binary (compatible with most CPUs from 2013+)
-	# Disable AVX-512 to prevent SIGILL on older CPUs
-	WHISPER_NO_AVX512=ON cargo build --release --locked
+	# Disable AVX-512 via compiler flags (WHISPER_NO_AVX512 doesn't work with whisper-rs-sys 0.14.1)
+	CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" cargo build --release --locked
 	cp target/release/voxtype target/release/voxtype-avx2
 	# Build AVX-512 optimized binary (for Zen 4+, some Intel)
 	cargo clean
@@ -36,7 +36,7 @@ override_dh_auto_install:
 
 override_dh_auto_test:
 	# Only test with AVX2 build to avoid SIGILL in build environments
-	WHISPER_NO_AVX512=ON cargo test --release --locked
+	CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" cargo test --release --locked
 
 override_dh_installsystemd:
 	dh_installsystemd --user --name=voxtype

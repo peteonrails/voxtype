@@ -1,7 +1,10 @@
-//! evdev-based hotkey listener
+//! evdev-based hotkey listener with device hotplug support
 //!
 //! Uses the Linux evdev interface to detect key presses at the kernel level.
 //! This works on all Wayland compositors because it bypasses the display server.
+//!
+//! Uses inotify to detect device changes (hotplug, screenlock, suspend/resume)
+//! and automatically re-enumerates devices when needed.
 //!
 //! The user must be in the 'input' group to access /dev/input/* devices.
 
@@ -9,9 +12,11 @@ use super::{HotkeyEvent, HotkeyListener};
 use crate::config::HotkeyConfig;
 use crate::error::HotkeyError;
 use evdev::{Device, InputEventKind, Key};
-use std::collections::HashSet;
+use inotify::{Inotify, WatchMask};
+use std::collections::{HashMap, HashSet};
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 
 /// evdev-based hotkey listener
@@ -20,8 +25,6 @@ pub struct EvdevListener {
     target_key: Key,
     /// Modifier keys that must be held
     modifier_keys: HashSet<Key>,
-    /// Paths to keyboard devices
-    device_paths: Vec<PathBuf>,
     /// Signal to stop the listener task
     stop_signal: Option<oneshot::Sender<()>>,
 }
@@ -37,22 +40,14 @@ impl EvdevListener {
             .map(|k| parse_key_name(k))
             .collect::<Result<HashSet<_>, _>>()?;
 
-        let device_paths = find_keyboard_devices()?;
-
-        if device_paths.is_empty() {
-            return Err(HotkeyError::NoKeyboard);
-        }
-
-        tracing::debug!(
-            "Found {} keyboard device(s): {:?}",
-            device_paths.len(),
-            device_paths
-        );
+        // Verify we can access /dev/input (permission check)
+        std::fs::read_dir("/dev/input").map_err(|e| {
+            HotkeyError::DeviceAccess(format!("/dev/input: {}", e))
+        })?;
 
         Ok(Self {
             target_key,
             modifier_keys,
-            device_paths,
             stop_signal: None,
         })
     }
@@ -67,11 +62,12 @@ impl HotkeyListener for EvdevListener {
 
         let target_key = self.target_key;
         let modifier_keys = self.modifier_keys.clone();
-        let device_paths = self.device_paths.clone();
 
         // Spawn the listener task
         tokio::task::spawn_blocking(move || {
-            evdev_listener_loop(device_paths, target_key, modifier_keys, tx, stop_rx);
+            if let Err(e) = evdev_listener_loop(target_key, modifier_keys, tx, stop_rx) {
+                tracing::error!("Hotkey listener error: {}", e);
+            }
         });
 
         Ok(rx)
@@ -85,151 +81,85 @@ impl HotkeyListener for EvdevListener {
     }
 }
 
-/// Main listener loop running in a blocking task
-fn evdev_listener_loop(
-    device_paths: Vec<PathBuf>,
-    target_key: Key,
-    modifier_keys: HashSet<Key>,
-    tx: mpsc::Sender<HotkeyEvent>,
-    mut stop_rx: oneshot::Receiver<()>,
-) {
-    // Open all keyboard devices in non-blocking mode
-    let mut devices: Vec<Device> = device_paths
-        .iter()
-        .filter_map(|path| match Device::open(path) {
-            Ok(device) => {
-                // Set device to non-blocking mode so fetch_events doesn't block
-                let fd = device.as_raw_fd();
-                unsafe {
-                    let flags = libc::fcntl(fd, libc::F_GETFL);
-                    if flags != -1 {
-                        libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-                    }
-                }
-                tracing::debug!("Opened device (non-blocking): {:?}", path);
-                Some(device)
-            }
-            Err(e) => {
-                tracing::warn!("Failed to open {:?}: {}", path, e);
-                None
-            }
-        })
-        .collect();
-
-    if devices.is_empty() {
-        tracing::error!("No keyboard devices could be opened");
-        return;
-    }
-
-    // Track currently held modifier keys
-    let mut active_modifiers: HashSet<Key> = HashSet::new();
-    
-    // Track if we're currently "pressed" (to handle repeat events)
-    let mut is_pressed = false;
-
-    tracing::info!(
-        "Listening for {:?} (with modifiers: {:?})",
-        target_key,
-        modifier_keys
-    );
-
-    loop {
-        // Check for stop signal (non-blocking)
-        match stop_rx.try_recv() {
-            Ok(_) | Err(oneshot::error::TryRecvError::Closed) => {
-                tracing::debug!("Hotkey listener stopping");
-                return;
-            }
-            Err(oneshot::error::TryRecvError::Empty) => {}
-        }
-
-        // Poll each device (all set to non-blocking mode)
-        for device in &mut devices {
-            // fetch_events returns immediately if no events (non-blocking)
-            if let Ok(events) = device.fetch_events() {
-                for event in events {
-                    if let InputEventKind::Key(key) = event.kind() {
-                        let value = event.value();
-
-                        // Track modifier state
-                        if modifier_keys.contains(&key) {
-                            match value {
-                                1 => {
-                                    active_modifiers.insert(key);
-                                }
-                                0 => {
-                                    active_modifiers.remove(&key);
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        // Check target key
-                        if key == target_key {
-                            let modifiers_satisfied = modifier_keys
-                                .iter()
-                                .all(|m| active_modifiers.contains(m));
-
-                            if modifiers_satisfied {
-                                match value {
-                                    1 if !is_pressed => {
-                                        // Key press (not repeat)
-                                        is_pressed = true;
-                                        tracing::debug!("Hotkey pressed");
-                                        if tx.blocking_send(HotkeyEvent::Pressed).is_err() {
-                                            return; // Channel closed
-                                        }
-                                    }
-                                    0 if is_pressed => {
-                                        // Key release
-                                        is_pressed = false;
-                                        tracing::debug!("Hotkey released");
-                                        if tx.blocking_send(HotkeyEvent::Released).is_err() {
-                                            return; // Channel closed
-                                        }
-                                    }
-                                    2 => {
-                                        // Key repeat - ignore
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Small sleep to avoid busy-waiting
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+/// Manages input devices with hotplug detection via inotify
+struct DeviceManager {
+    /// Map of device path to opened device
+    devices: HashMap<PathBuf, Device>,
+    /// inotify instance watching /dev/input
+    inotify: Inotify,
+    /// Buffer for inotify events
+    inotify_buffer: [u8; 1024],
+    /// Last time we did a full validation
+    last_validation: Instant,
 }
 
-/// Find all keyboard input devices
-fn find_keyboard_devices() -> Result<Vec<PathBuf>, HotkeyError> {
-    let mut keyboards = Vec::new();
+impl DeviceManager {
+    /// Create a new device manager with inotify watcher
+    fn new() -> Result<Self, HotkeyError> {
+        let inotify = Inotify::init().map_err(|e| {
+            HotkeyError::DeviceAccess(format!("Failed to initialize inotify: {}", e))
+        })?;
 
-    let input_dir = std::fs::read_dir("/dev/input").map_err(|e| {
-        HotkeyError::DeviceAccess(format!("/dev/input: {}", e))
-    })?;
+        // Watch /dev/input for device creation and deletion
+        inotify
+            .watches()
+            .add("/dev/input", WatchMask::CREATE | WatchMask::DELETE)
+            .map_err(|e| {
+                HotkeyError::DeviceAccess(format!("Failed to watch /dev/input: {}", e))
+            })?;
 
-    for entry in input_dir {
-        let entry = entry.map_err(|e| HotkeyError::DeviceAccess(e.to_string()))?;
-        let path = entry.path();
+        let mut manager = Self {
+            devices: HashMap::new(),
+            inotify,
+            inotify_buffer: [0u8; 1024],
+            last_validation: Instant::now(),
+        };
 
-        // Only look at event* devices
-        let is_event_device = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.starts_with("event"))
-            .unwrap_or(false);
+        // Initial device enumeration
+        manager.enumerate_devices()?;
 
-        if !is_event_device {
-            continue;
+        if manager.devices.is_empty() {
+            return Err(HotkeyError::NoKeyboard);
         }
 
-        // Try to open and check if it's a keyboard
-        match Device::open(&path) {
+        Ok(manager)
+    }
+
+    /// Enumerate all keyboard devices and open them
+    fn enumerate_devices(&mut self) -> Result<(), HotkeyError> {
+        let input_dir = std::fs::read_dir("/dev/input").map_err(|e| {
+            HotkeyError::DeviceAccess(format!("/dev/input: {}", e))
+        })?;
+
+        for entry in input_dir.flatten() {
+            let path = entry.path();
+
+            // Only look at event* devices
+            let is_event_device = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("event"))
+                .unwrap_or(false);
+
+            if !is_event_device {
+                continue;
+            }
+
+            // Skip if already open
+            if self.devices.contains_key(&path) {
+                continue;
+            }
+
+            // Try to open and check if it's a keyboard
+            self.try_open_device(&path);
+        }
+
+        Ok(())
+    }
+
+    /// Try to open a device and add it if it's a keyboard
+    fn try_open_device(&mut self, path: &PathBuf) {
+        match Device::open(path) {
             Ok(device) => {
                 // Check if device has keyboard capabilities
                 let has_keys = device
@@ -243,26 +173,272 @@ fn find_keyboard_devices() -> Result<Vec<PathBuf>, HotkeyError> {
                     .unwrap_or(false);
 
                 if has_keys {
-                    tracing::debug!(
-                        "Found keyboard: {:?} ({:?})",
+                    // Set device to non-blocking mode
+                    let fd = device.as_raw_fd();
+                    unsafe {
+                        let flags = libc::fcntl(fd, libc::F_GETFL);
+                        if flags != -1 {
+                            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+                        }
+                    }
+
+                    tracing::info!(
+                        "Opened keyboard: {:?} ({:?})",
                         path,
                         device.name().unwrap_or("unknown")
                     );
-                    keyboards.push(path);
+                    self.devices.insert(path.clone(), device);
                 }
             }
             Err(e) => {
-                // Permission denied is common for non-input-group users
-                if e.kind() == std::io::ErrorKind::PermissionDenied {
-                    return Err(HotkeyError::DeviceAccess(path.display().to_string()));
+                if e.kind() != std::io::ErrorKind::PermissionDenied {
+                    tracing::trace!("Skipping {:?}: {}", path, e);
                 }
-                // Other errors (device busy, etc.) - just skip
-                tracing::trace!("Skipping {:?}: {}", path, e);
             }
         }
     }
 
-    Ok(keyboards)
+    /// Check inotify for device changes (non-blocking)
+    /// Returns true if devices changed
+    fn check_for_device_changes(&mut self) -> bool {
+        // Set inotify to non-blocking for this check
+        let fd = self.inotify.as_raw_fd();
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags != -1 {
+                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+        }
+
+        let events = match self.inotify.read_events(&mut self.inotify_buffer) {
+            Ok(events) => events,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                return false;
+            }
+            Err(e) => {
+                tracing::warn!("inotify read error: {}", e);
+                return false;
+            }
+        };
+
+        let mut changed = false;
+        for event in events {
+            if let Some(name) = event.name {
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with("event") {
+                    let path = PathBuf::from("/dev/input").join(&*name_str);
+
+                    if event.mask.contains(inotify::EventMask::CREATE) {
+                        tracing::debug!("Device created: {:?}", path);
+                        changed = true;
+                    } else if event.mask.contains(inotify::EventMask::DELETE) {
+                        tracing::debug!("Device removed: {:?}", path);
+                        self.devices.remove(&path);
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        changed
+    }
+
+    /// Handle device changes - wait for settle and re-enumerate
+    fn handle_device_changes(&mut self) {
+        // Wait for devices to settle (USB enumeration can be slow)
+        std::thread::sleep(Duration::from_millis(150));
+
+        // Re-enumerate to pick up new devices
+        if let Err(e) = self.enumerate_devices() {
+            tracing::warn!("Device enumeration failed: {}", e);
+        }
+
+        tracing::info!(
+            "Devices updated: {} keyboard(s) active",
+            self.devices.len()
+        );
+    }
+
+    /// Validate that all devices are still accessible
+    /// Returns true if any device was removed
+    fn validate_devices(&mut self) -> bool {
+        let mut stale_paths = Vec::new();
+
+        for (path, device) in &self.devices {
+            let fd = device.as_raw_fd();
+            let link_path = format!("/proc/self/fd/{}", fd);
+
+            // Check if the symlink still points to a valid device
+            let is_valid = std::fs::read_link(&link_path)
+                .map(|target| target.exists())
+                .unwrap_or(false);
+
+            if !is_valid {
+                tracing::debug!("Device no longer valid: {:?}", path);
+                stale_paths.push(path.clone());
+            }
+        }
+
+        for path in &stale_paths {
+            self.devices.remove(path);
+        }
+
+        !stale_paths.is_empty()
+    }
+
+    /// Poll all devices for events, handling errors gracefully
+    fn poll_events(&mut self) -> Vec<(Key, i32)> {
+        let mut events = Vec::new();
+        let mut error_paths = Vec::new();
+
+        for (path, device) in &mut self.devices {
+            match device.fetch_events() {
+                Ok(device_events) => {
+                    for event in device_events {
+                        if let InputEventKind::Key(key) = event.kind() {
+                            events.push((key, event.value()));
+                        }
+                    }
+                }
+                Err(ref e) if e.raw_os_error() == Some(libc::ENODEV) => {
+                    tracing::debug!("Device gone (ENODEV): {:?}", path);
+                    error_paths.push(path.clone());
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // No events available, this is normal for non-blocking
+                }
+                Err(e) => {
+                    tracing::trace!("Device read error on {:?}: {}", path, e);
+                }
+            }
+        }
+
+        // Remove devices that returned errors
+        for path in error_paths {
+            self.devices.remove(&path);
+        }
+
+        events
+    }
+
+    /// Check if we have any devices
+    fn has_devices(&self) -> bool {
+        !self.devices.is_empty()
+    }
+}
+
+/// Main listener loop running in a blocking task
+fn evdev_listener_loop(
+    target_key: Key,
+    modifier_keys: HashSet<Key>,
+    tx: mpsc::Sender<HotkeyEvent>,
+    mut stop_rx: oneshot::Receiver<()>,
+) -> Result<(), HotkeyError> {
+    let mut manager = DeviceManager::new()?;
+
+    // Track currently held modifier keys
+    let mut active_modifiers: HashSet<Key> = HashSet::new();
+
+    // Track if we're currently "pressed" (to handle repeat events)
+    let mut is_pressed = false;
+
+    tracing::info!(
+        "Listening for {:?} (with modifiers: {:?}) on {} device(s)",
+        target_key,
+        modifier_keys,
+        manager.devices.len()
+    );
+
+    loop {
+        // Check for stop signal (non-blocking)
+        match stop_rx.try_recv() {
+            Ok(_) | Err(oneshot::error::TryRecvError::Closed) => {
+                tracing::debug!("Hotkey listener stopping");
+                return Ok(());
+            }
+            Err(oneshot::error::TryRecvError::Empty) => {}
+        }
+
+        // Check inotify for device changes
+        if manager.check_for_device_changes() {
+            // Clear state when devices change
+            active_modifiers.clear();
+            is_pressed = false;
+            manager.handle_device_changes();
+        }
+
+        // Periodic validation (every 30 seconds)
+        if manager.last_validation.elapsed() > Duration::from_secs(30) {
+            if manager.validate_devices() {
+                // Devices were removed, clear state
+                active_modifiers.clear();
+                is_pressed = false;
+                tracing::debug!("Stale devices removed during validation");
+            }
+            manager.last_validation = Instant::now();
+        }
+
+        // If no devices, try to find some
+        if !manager.has_devices() {
+            tracing::warn!("No keyboard devices available, waiting...");
+            std::thread::sleep(Duration::from_secs(1));
+            if let Err(e) = manager.enumerate_devices() {
+                tracing::debug!("Enumeration failed: {}", e);
+            }
+            continue;
+        }
+
+        // Poll all devices for events
+        for (key, value) in manager.poll_events() {
+            // Track modifier state
+            if modifier_keys.contains(&key) {
+                match value {
+                    1 => {
+                        active_modifiers.insert(key);
+                    }
+                    0 => {
+                        active_modifiers.remove(&key);
+                    }
+                    _ => {}
+                }
+            }
+
+            // Check target key
+            if key == target_key {
+                let modifiers_satisfied = modifier_keys
+                    .iter()
+                    .all(|m| active_modifiers.contains(m));
+
+                if modifiers_satisfied {
+                    match value {
+                        1 if !is_pressed => {
+                            // Key press (not repeat)
+                            is_pressed = true;
+                            tracing::debug!("Hotkey pressed");
+                            if tx.blocking_send(HotkeyEvent::Pressed).is_err() {
+                                return Ok(()); // Channel closed
+                            }
+                        }
+                        0 if is_pressed => {
+                            // Key release
+                            is_pressed = false;
+                            tracing::debug!("Hotkey released");
+                            if tx.blocking_send(HotkeyEvent::Released).is_err() {
+                                return Ok(()); // Channel closed
+                            }
+                        }
+                        2 => {
+                            // Key repeat - ignore
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // Small sleep to avoid busy-waiting
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 /// Parse a key name string to evdev Key

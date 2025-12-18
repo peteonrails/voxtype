@@ -286,6 +286,38 @@ threads = 4  # Limit to 4 threads
 
 **Tip:** For best performance, set to your physical core count (not hyperthreads).
 
+### on_demand_loading
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Controls when the Whisper model is loaded into memory.
+
+**Values:**
+- `false` (default) - Model is loaded at daemon startup and kept in memory. Provides fastest response times but uses memory/VRAM continuously.
+- `true` - Model is loaded when recording starts and unloaded after transcription completes. Saves memory/VRAM but adds a brief delay when starting each recording.
+
+**When to use `on_demand_loading = true`:**
+- Running on a memory-constrained system
+- Using GPU acceleration and want to free VRAM for other applications
+- Running multiple GPU-accelerated applications simultaneously
+- Using large models (medium, large-v3) that consume significant memory
+
+**When to keep default (`false`):**
+- Want the fastest possible response time
+- Have plenty of available memory/VRAM
+- Using voxtype frequently throughout the day
+
+**Example:**
+```toml
+[whisper]
+model = "large-v3"
+on_demand_loading = true  # Free VRAM when not transcribing
+```
+
+**Performance note:** On modern systems with SSDs, model loading typically takes under 1 second for base/small models. Larger models (medium, large-v3) may take 2-3 seconds to load.
+
 ---
 
 ## [output]
@@ -303,12 +335,16 @@ Primary output method.
 **Values:**
 - `type` - Simulate keyboard input at cursor position (requires ydotool)
 - `clipboard` - Copy text to clipboard (requires wl-copy)
+- `paste` - Copy to clipboard then paste with Ctrl+V (requires wl-copy and ydotool)
 
 **Example:**
 ```toml
 [output]
-mode = "clipboard"
+mode = "paste"
 ```
+
+**Note about paste mode:**
+The `paste` mode is designed to work around non-US keyboard layout issues. Instead of typing characters directly (which assumes US keyboard layout), it copies text to the clipboard and then simulates Ctrl+V to paste it. This works regardless of keyboard layout but requires both wl-copy (for clipboard access) and ydotool (for Ctrl+V simulation).
 
 ### fallback_to_clipboard
 
@@ -317,6 +353,8 @@ mode = "clipboard"
 **Required:** No
 
 When `true` and `mode = "type"`, falls back to clipboard if typing fails.
+
+**Note:** This setting has no effect when `mode = "paste"` since paste mode doesn't use fallback behavior.
 
 **Example:**
 ```toml
@@ -532,6 +570,7 @@ Most configuration options can be overridden via command line:
 | hotkey.key | `--hotkey` |
 | whisper.model | `--model` |
 | output.mode = "clipboard" | `--clipboard` |
+| output.mode = "paste" | `--paste` |
 | Verbosity | `-v`, `-vv`, `-q` |
 
 **Example:**
@@ -612,6 +651,18 @@ type_delay_ms = 0
 model = "large-v3"
 language = "auto"
 translate = true  # Translate to English
+```
+
+### GPU with VRAM Optimization
+
+```toml
+[whisper]
+model = "large-v3-turbo"
+on_demand_loading = true  # Free VRAM when not transcribing
+
+[audio.feedback]
+enabled = true  # Helpful feedback since model loading adds brief delay
+theme = "default"
 ```
 
 ### Custom Hotkey
