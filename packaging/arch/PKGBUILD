@@ -33,7 +33,7 @@ optdepends=(
 backup=('etc/voxtype/config.toml')
 install=voxtype.install
 source=("$pkgname-$pkgver.tar.gz::https://github.com/peteonrails/voxtype/archive/refs/tags/v$pkgver-$pkgrel.tar.gz")
-sha256sums=('26d1117cc37115f8756bd22ac7edbd7a5ecbc1686f762d5dfa64af219efffabb')
+sha256sums=('d38822a6dd15e86d7ea59a44760500a3d23f9312c94053f57e70d3da3ea59028')
 
 prepare() {
     cd "$pkgname-$pkgver-$pkgrel"
