@@ -4,7 +4,7 @@
 pkgname=voxtype
 pkgver=0.1.0
 pkgrel=1
-pkgdesc="Push-to-talk voice-to-text for Wayland Linux systems"
+pkgdesc="Push-to-talk voice-to-text for Linux (optimized for Wayland, works on X11)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/peteonrails/voxtype"
 license=('MIT')
@@ -16,13 +16,21 @@ depends=(
 makedepends=(
     'cargo'
     'clang'
+    'cmake'
+    'pkgconf'
+    # Uncomment for GPU acceleration:
+    'vulkan-headers'  # for Vulkan (AMD, NVIDIA, Intel)
+    # 'cuda'            # for CUDA (NVIDIA only)
 )
 optdepends=(
-    'ydotool: keyboard simulation for typing output'
+    'wtype: keyboard simulation for Wayland (recommended, best CJK support)'
+    'ydotool: keyboard simulation fallback (X11/TTY support)'
     'wl-clipboard: clipboard support'
     'libnotify: desktop notifications'
     'pipewire: audio capture (recommended)'
     'pulseaudio: audio capture (alternative)'
+    'vulkan-icd-loader: GPU acceleration via Vulkan (requires rebuild with gpu-vulkan feature)'
+    'cuda: GPU acceleration for NVIDIA (requires rebuild with gpu-cuda feature)'
 )
 backup=('etc/voxtype/config.toml')
 options=(!lto)
@@ -43,7 +51,13 @@ build() {
     cd "$_srcdir"
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
-    cargo build --release
+
+    # GPU Acceleration (optional) - uncomment ONE of these lines:
+    local _features="--features gpu-vulkan"   # AMD, NVIDIA, Intel (recommended for AMD)
+    # local _features="--features gpu-cuda"     # NVIDIA only
+    # local _features="--features gpu-hipblas"  # AMD ROCm
+
+    cargo build --release ${_features:-}
 }
 
 check() {
