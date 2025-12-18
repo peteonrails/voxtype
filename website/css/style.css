@@ -730,6 +730,59 @@ code, pre {
     text-align: center;
 }
 
+/* Setup tabs (Standard vs Hyprland/Sway) */
+.setup-tabs {
+    display: flex;
+    justify-content: center;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-lg);
+    flex-wrap: wrap;
+}
+
+.setup-tab-btn {
+    padding: var(--space-sm) var(--space-lg);
+    background: transparent;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    color: var(--color-text-secondary);
+    font-size: 0.9375rem;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.setup-tab-btn:hover {
+    border-color: var(--color-text-secondary);
+    color: var(--color-text);
+}
+
+.setup-tab-btn.active {
+    background: var(--color-primary);
+    border-color: var(--color-primary);
+    color: var(--color-bg);
+}
+
+.setup-content {
+    display: none;
+}
+
+.setup-content.active {
+    display: block;
+}
+
+.setup-note {
+    font-size: 0.875rem;
+    color: var(--color-text-muted);
+    margin-bottom: var(--space-md);
+    text-align: center;
+}
+
+.setup-note code {
+    background: var(--color-bg-tertiary);
+    padding: 0.125rem 0.375rem;
+    border-radius: var(--radius-sm);
+    font-size: 0.8125rem;
+}
+
 .code-block {
     max-width: 700px;
     margin: 0 auto var(--space-lg);
