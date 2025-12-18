@@ -114,8 +114,24 @@
                     </div>
                     <h3>Works on Any Linux Desktop</h3>
                     <p>
-                        Uses kernel-level input (evdev) instead of display-specific protocols.
                         Works on GNOME, KDE, Sway, Hyprland—Wayland or X11.
+                        Use built-in hotkeys or native compositor keybindings.
+                    </p>
+                </div>
+
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="3" y="11" width="18" height="10" rx="2"/>
+                            <rect x="7" y="7" width="3" height="4"/>
+                            <rect x="14" y="7" width="3" height="4"/>
+                            <line x1="12" y1="3" x2="12" y2="7"/>
+                        </svg>
+                    </div>
+                    <h3>Native Hyprland & Sway Support</h3>
+                    <p>
+                        Use your compositor's keybindings instead of evdev—no <code>input</code> group required.
+                        Bind any key combo like <code>Super+V</code> for push-to-talk.
                     </p>
                 </div>
 
@@ -626,26 +642,67 @@ sudo cp target/release/voxtype /usr/local/bin/</code></pre>
             </div>
 
             <div class="post-install">
-                <h3>Post-Installation Setup</h3>
-                <div class="code-block">
-                    <pre><code><span class="comment"># Add user to input group (required for hotkey detection)</span>
+                <h3>Quick Start</h3>
+
+                <div class="setup-tabs">
+                    <button class="setup-tab-btn active" data-setup="standard">Standard Setup</button>
+                    <button class="setup-tab-btn" data-setup="hyprland">Hyprland / Sway</button>
+                </div>
+
+                <div id="setup-standard" class="setup-content active">
+                    <p class="setup-note">For GNOME, KDE, and other desktops. Uses kernel-level hotkey detection.</p>
+                    <div class="code-block">
+                        <pre><code><span class="comment"># Add user to input group (required for hotkey detection)</span>
 sudo usermod -aG input $USER
 <span class="comment"># Log out and back in for group change to take effect</span>
 
-<span class="comment"># Interactive setup: select and download a whisper model</span>
-voxtype setup model
-
-<span class="comment"># Or quick setup with default model (base.en)</span>
+<span class="comment"># Download whisper model and configure</span>
 voxtype setup --download
 
-<span class="comment"># Install voxtype as a systemd service</span>
+<span class="comment"># Install as systemd service (starts on login)</span>
 voxtype setup systemd
 
 <span class="comment"># Check status</span>
-systemctl --user status voxtype
+systemctl --user status voxtype</code></pre>
+                    </div>
+                </div>
 
-<span class="comment"># Optional: Get Waybar integration config</span>
-voxtype setup waybar</code></pre>
+                <div id="setup-hyprland" class="setup-content">
+                    <p class="setup-note">For Hyprland and Sway users. Uses native compositor keybindings—no <code>input</code> group required!</p>
+                    <div class="code-block">
+                        <pre><code><span class="comment"># Download whisper model and configure</span>
+voxtype setup --download
+
+<span class="comment"># Disable built-in hotkey (we'll use compositor keybindings)</span>
+cat >> ~/.config/voxtype/config.toml << 'EOF'
+
+[hotkey]
+enabled = false
+EOF
+
+<span class="comment"># Enable state file (required for toggle mode)</span>
+echo 'state_file = "auto"' >> ~/.config/voxtype/config.toml
+
+<span class="comment"># Install as systemd service</span>
+voxtype setup systemd</code></pre>
+                    </div>
+                    <p class="setup-note" style="margin-top: 1rem;"><strong>Then add keybindings to your compositor config:</strong></p>
+                    <div class="code-block">
+                        <div class="code-header"><span>Hyprland (~/.config/hypr/hyprland.conf)</span></div>
+                        <pre><code><span class="comment"># Push-to-talk: hold Super+V to record, release to transcribe</span>
+bind = SUPER, V, exec, voxtype record start
+bindr = SUPER, V, exec, voxtype record stop
+
+<span class="comment"># Or use Scroll Lock</span>
+bind = , SCROLL_LOCK, exec, voxtype record start
+bindr = , SCROLL_LOCK, exec, voxtype record stop</code></pre>
+                    </div>
+                    <div class="code-block">
+                        <div class="code-header"><span>Sway (~/.config/sway/config)</span></div>
+                        <pre><code><span class="comment"># Push-to-talk: hold $mod+v to record, release to transcribe</span>
+bindsym $mod+v exec voxtype record start
+bindsym --release $mod+v exec voxtype record stop</code></pre>
+                    </div>
                 </div>
             </div>
         </div>
