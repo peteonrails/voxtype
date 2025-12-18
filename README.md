@@ -107,9 +107,11 @@ translate = false   # Translate non-English speech to English
 # on_demand_loading = true  # Load model only when recording (saves memory)
 
 [output]
-mode = "type"       # "type" or "clipboard"
+mode = "type"       # "type", "clipboard", or "paste"
 fallback_to_clipboard = true
 type_delay_ms = 0   # Increase if characters are dropped
+# Note: "paste" mode copies to clipboard then simulates Ctrl+V
+#       Useful for non-US keyboard layouts where ydotool typing fails
 
 [output.notification]
 on_recording_start = false  # Notify when PTT activates
@@ -187,6 +189,7 @@ Options:
   -v, --verbose        Increase verbosity (-v, -vv)
   -q, --quiet          Quiet mode (errors only)
   --clipboard          Force clipboard mode
+  --paste              Force paste mode (clipboard + Ctrl+V)
   --model <MODEL>      Override whisper model
   --hotkey <KEY>       Override hotkey
   --toggle             Use toggle mode (press to start/stop)
