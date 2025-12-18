@@ -161,6 +161,8 @@ if [[ "$SKIP_BUILD" == "false" ]]; then
     # Build AVX-512 optimized binary (for Zen 4+, some Intel)
     if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512" ]]; then
         echo "Building AVX-512 optimized release..."
+        # Clean build cache to ensure whisper.cpp recompiles with AVX-512 enabled
+        cargo clean
         cargo build --release
         cp target/release/voxtype "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512"
     fi

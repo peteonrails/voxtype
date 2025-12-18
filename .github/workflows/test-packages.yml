@@ -64,7 +64,9 @@ jobs:
           cp target/release/voxtype releases/test/voxtype-test-linux-x86_64-avx2
 
           # Build AVX-512 (on CI this is the same as AVX2 since CI runners don't have AVX-512)
+          # Clean build cache to ensure whisper.cpp recompiles with different flags
           echo "Building AVX-512 optimized..."
+          cargo clean
           cargo build --release
           cp target/release/voxtype releases/test/voxtype-test-linux-x86_64-avx512
 
