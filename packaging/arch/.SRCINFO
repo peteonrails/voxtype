@@ -1,6 +1,6 @@
 pkgbase = voxtype
 	pkgdesc = Push-to-talk voice-to-text for Linux (optimized for Wayland, works on X11)
-	pkgver = 0.3.2
+	pkgver = 0.4.0
 	pkgrel = 1
 	url = https://voxtype.io
 	install = voxtype.install
@@ -20,10 +20,10 @@ pkgbase = voxtype
 	optdepends = libnotify: desktop notifications
 	optdepends = pipewire: audio capture (recommended)
 	optdepends = pulseaudio: audio capture (alternative)
-	optdepends = vulkan-icd-loader: GPU acceleration via Vulkan (requires rebuild with gpu-vulkan feature)
+	optdepends = vulkan-icd-loader: GPU acceleration via Vulkan (enable with: voxtype setup gpu --enable)
 	optdepends = cuda: GPU acceleration for NVIDIA (requires rebuild with gpu-cuda feature)
 	backup = etc/voxtype/config.toml
-	source = voxtype-0.3.2.tar.gz::https://github.com/peteonrails/voxtype/archive/refs/tags/v0.3.2.tar.gz
-	sha256sums = cfb898783e53fbb801b8d9339d58fe194eece067aa1cf8737922b1d847a81c98
+	source = voxtype-0.4.0.tar.gz::https://github.com/peteonrails/voxtype/archive/refs/tags/v0.4.0-1.tar.gz
+	sha256sums = 26d1117cc37115f8756bd22ac7edbd7a5ecbc1686f762d5dfa64af219efffabb
 
 pkgname = voxtype
