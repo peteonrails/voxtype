@@ -248,25 +248,33 @@ With GPU acceleration, `large-v3` achieves sub-second inference while supporting
 
 Voxtype supports optional GPU acceleration for significantly faster inference. With GPU acceleration, even the `large-v3` model can achieve sub-second inference times.
 
-### Building with GPU Support
+### Vulkan (AMD, NVIDIA, Intel)
 
-GPU acceleration requires building from source with the appropriate feature flag:
+Packages include a Vulkan binary. To enable GPU acceleration:
 
-**Vulkan (AMD, NVIDIA, Intel - recommended for AMD)**
 ```bash
-# Install Vulkan development libraries
+# Install Vulkan runtime (if not already installed)
 # Arch:
-sudo pacman -S vulkan-devel
+sudo pacman -S vulkan-icd-loader
 
 # Ubuntu/Debian:
-sudo apt install libvulkan-dev
+sudo apt install libvulkan1
 
 # Fedora:
-sudo dnf install vulkan-devel
+sudo dnf install vulkan-loader
 
-# Build with Vulkan support
-cargo build --release --features gpu-vulkan
+# Enable GPU acceleration
+sudo voxtype setup gpu --enable
+
+# Check status
+voxtype setup gpu
 ```
+
+To switch back to CPU: `sudo voxtype setup gpu --disable`
+
+### Building from Source (CUDA, Metal, ROCm)
+
+For other GPU backends, build from source with the appropriate feature flag:
 
 **CUDA (NVIDIA)**
 ```bash

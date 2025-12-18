@@ -159,18 +159,21 @@ Depends on model and hardware. On a modern CPU:
 
 ### Does it use GPU acceleration?
 
-Yes! Voxtype supports optional GPU acceleration via compile-time features:
+Yes! Voxtype supports optional GPU acceleration:
 
-- **Vulkan** - Works on AMD, NVIDIA, and Intel GPUs (recommended for AMD)
-- **CUDA** - NVIDIA GPUs
-- **Metal** - Apple Silicon
-- **HIP/ROCm** - AMD GPUs (alternative to Vulkan)
+- **Vulkan** - Works on AMD, NVIDIA, and Intel GPUs (included in packages)
+- **CUDA** - NVIDIA GPUs (build from source)
+- **Metal** - Apple Silicon (build from source)
+- **HIP/ROCm** - AMD GPUs (build from source)
 
-To enable, build with the appropriate feature flag:
+**Vulkan (easiest):** Packages include a pre-built Vulkan binary. Install the runtime and enable:
 
 ```bash
-cargo build --release --features gpu-vulkan
+# Install Vulkan runtime (Arch: vulkan-icd-loader, Debian: libvulkan1, Fedora: vulkan-loader)
+sudo voxtype setup gpu --enable
 ```
+
+**Other backends:** Build from source with `cargo build --release --features gpu-cuda` (or `gpu-metal`, `gpu-hipblas`).
 
 GPU acceleration dramatically improves inference speed, especially for larger models. The `large-v3` model can achieve sub-second inference with GPU acceleration.
 
