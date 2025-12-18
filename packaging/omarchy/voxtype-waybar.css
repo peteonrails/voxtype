@@ -1,0 +1,24 @@
+/* Voxtype Waybar indicator styles */
+
+#custom-voxtype {
+    padding: 0 8px;
+    margin: 0 2px;
+}
+
+#custom-voxtype.recording {
+    color: #f38ba8;
+    animation: voxtype-pulse 1s ease-in-out infinite;
+}
+
+#custom-voxtype.transcribing {
+    color: #fab387;
+}
+
+#custom-voxtype.idle {
+    color: #6c7086;
+}
+
+@keyframes voxtype-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}

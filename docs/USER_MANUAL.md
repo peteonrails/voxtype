@@ -114,6 +114,48 @@ Display the current configuration.
 voxtype config
 ```
 
+### `voxtype status`
+
+Query the daemon's current state (for Waybar/Polybar integration).
+
+```bash
+voxtype status                      # Basic status (text format)
+voxtype status --format json        # JSON output for Waybar
+voxtype status --follow             # Continuously output on state changes
+voxtype status --format json --extended  # Include model, device, backend
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--format text` | Human-readable output (default) |
+| `--format json` | JSON output for status bars |
+| `--follow` | Watch for state changes and output continuously |
+| `--extended` | Include model, device, and backend in JSON output |
+
+**Example JSON output with `--extended`:**
+```json
+{
+  "text": "🎙️",
+  "class": "idle",
+  "tooltip": "Voxtype ready\nModel: base.en\nDevice: default\nBackend: CPU (AVX-512)",
+  "model": "base.en",
+  "device": "default",
+  "backend": "CPU (AVX-512)"
+}
+```
+
+### `voxtype setup gpu`
+
+Manage GPU acceleration backends.
+
+```bash
+voxtype setup gpu            # Show current backend status
+voxtype setup gpu --enable   # Switch to Vulkan GPU backend (requires sudo)
+voxtype setup gpu --disable  # Switch back to CPU backend (requires sudo)
+```
+
 ---
 
 ## Configuration
@@ -531,6 +573,17 @@ The module displays:
 - 🎙️ when idle (ready to record)
 - 🎤 when recording (hotkey held)
 - ⏳ when transcribing
+
+**Extended status info:** Use `--extended` to include model, device, and backend in the JSON output and tooltip:
+
+```json
+"custom/voxtype": {
+    "exec": "voxtype status --follow --format json --extended",
+    "return-type": "json",
+    "format": "{}",
+    "tooltip": true
+}
+```
 
 See [WAYBAR.md](WAYBAR.md) for styling options, troubleshooting, and Polybar setup.
 

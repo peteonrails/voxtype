@@ -5,7 +5,9 @@
 //! - Waybar configuration generation
 //! - Interactive model selection
 //! - Output chain detection
+//! - GPU backend management
 
+pub mod gpu;
 pub mod model;
 pub mod systemd;
 pub mod waybar;

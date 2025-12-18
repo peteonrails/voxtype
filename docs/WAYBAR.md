@@ -86,6 +86,47 @@ killall waybar && waybar &
 
 You should now see a microphone icon in your bar.
 
+## Extended Status Info
+
+Add the `--extended` flag to include model, device, and backend information in the JSON output:
+
+```json
+"custom/voxtype": {
+    "exec": "voxtype status --follow --format json --extended",
+    "return-type": "json",
+    "format": "{}",
+    "tooltip": true
+}
+```
+
+With `--extended`, the JSON output includes additional fields:
+
+```json
+{
+  "text": "🎙️",
+  "class": "idle",
+  "tooltip": "Voxtype ready\nModel: base.en\nDevice: default\nBackend: CPU (AVX-512)",
+  "model": "base.en",
+  "device": "default",
+  "backend": "CPU (AVX-512)"
+}
+```
+
+The tooltip will show the model name, audio device, and compute backend (CPU with AVX level, or GPU with Vulkan).
+
+You can use these fields in your Waybar format string:
+
+```json
+"custom/voxtype": {
+    "exec": "voxtype status --follow --format json --extended",
+    "return-type": "json",
+    "format": "{} [{model}]",
+    "tooltip": true
+}
+```
+
+This displays the icon followed by the model name, e.g., "🎙️ [base.en]".
+
 ## Optional: Custom Styling
 
 Add these styles to your Waybar stylesheet (`~/.config/waybar/style.css`) to make the recording state more visible:

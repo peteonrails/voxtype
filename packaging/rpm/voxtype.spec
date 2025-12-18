@@ -1,5 +1,5 @@
 Name:           voxtype
-Version:        0.3.1
+Version:        0.3.3
 Release:        1%{?dist}
 Summary:        Push-to-talk voice-to-text for Linux
 
@@ -34,11 +34,13 @@ Features:
 
 Note: User must be in the 'input' group for hotkey detection.
 
-This package includes tiered CPU binaries:
-- voxtype-avx2: Compatible with most CPUs from 2013+ (Intel Haswell, AMD Zen)
-- voxtype-avx512: Optimized for newer CPUs (AMD Zen 4+, some Intel)
+This package includes tiered binaries:
+- voxtype-avx2: CPU - Compatible with most CPUs from 2013+ (Intel Haswell, AMD Zen)
+- voxtype-avx512: CPU - Optimized for newer CPUs (AMD Zen 4+, some Intel)
+- voxtype-vulkan: GPU - Vulkan acceleration (NVIDIA, AMD, Intel)
 
-The appropriate binary is selected automatically at install time.
+The appropriate CPU binary is selected automatically at install time.
+GPU acceleration can be enabled with: voxtype setup gpu --enable
 
 %prep
 %autosetup -n %{name}-%{version}
@@ -48,7 +50,7 @@ export CARGO_HOME=%{_builddir}/cargo
 
 # Build AVX2 baseline binary (compatible with most CPUs from 2013+)
 # Disable AVX-512 to prevent SIGILL on older CPUs
-WHISPER_NO_AVX512=ON cargo build --release --locked
+CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" cargo build --release --locked
 cp target/release/voxtype target/release/voxtype-avx2
 
 # Build AVX-512 optimized binary (for Zen 4+, some Intel)
@@ -56,10 +58,16 @@ cargo clean
 cargo build --release --locked
 cp target/release/voxtype target/release/voxtype-avx512
 
+# Build Vulkan GPU binary (for GPU acceleration)
+cargo clean
+CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" cargo build --release --locked --features gpu-vulkan
+cp target/release/voxtype target/release/voxtype-vulkan
+
 %install
 # Install tiered binaries to /usr/lib/voxtype/
 install -D -m 755 target/release/voxtype-avx2 %{buildroot}%{_libdir}/voxtype/voxtype-avx2
 install -D -m 755 target/release/voxtype-avx512 %{buildroot}%{_libdir}/voxtype/voxtype-avx512
+install -D -m 755 target/release/voxtype-vulkan %{buildroot}%{_libdir}/voxtype/voxtype-vulkan
 
 # Install default configuration
 install -D -m 644 config/default.toml %{buildroot}%{_sysconfdir}/voxtype/config.toml
@@ -108,10 +116,37 @@ if command -v restorecon >/dev/null 2>&1; then
     restorecon %{_bindir}/voxtype 2>/dev/null || true
 fi
 
+# Detect GPU for Vulkan acceleration recommendation
+GPU_DETECTED=""
+if [ -d /dev/dri ]; then
+    if ls /dev/dri/renderD* >/dev/null 2>&1; then
+        if command -v lspci >/dev/null 2>&1; then
+            GPU_INFO=$(lspci 2>/dev/null | grep -i 'vga\|3d\|display' | head -1 | sed 's/.*: //')
+            if [ -n "$GPU_INFO" ]; then
+                GPU_DETECTED="$GPU_INFO"
+            fi
+        fi
+        if [ -z "$GPU_DETECTED" ]; then
+            GPU_DETECTED="GPU detected (install pciutils for details)"
+        fi
+    fi
+fi
+
 echo ""
 echo "=== Voxtype Post-Installation ==="
 echo ""
-echo "CPU detected: $VARIANT (using voxtype-$VARIANT)"
+echo "CPU backend: $VARIANT (using voxtype-$VARIANT)"
+
+if [ -n "$GPU_DETECTED" ]; then
+    echo ""
+    echo "GPU detected: $GPU_DETECTED"
+    echo ""
+    echo "  For GPU acceleration (faster inference), run:"
+    echo "    sudo voxtype setup gpu --enable"
+    echo ""
+    echo "  Requires: vulkan-loader package"
+fi
+
 echo ""
 echo "To complete setup:"
 echo ""
@@ -125,9 +160,6 @@ echo "     voxtype setup --download"
 echo ""
 echo "  4. Start voxtype:"
 echo "     systemctl --user enable --now voxtype"
-echo ""
-echo "Note: wtype is used for text output on Wayland (best CJK support)."
-echo "      ydotool is an optional fallback for X11/TTY."
 echo ""
 
 %preun
@@ -144,6 +176,7 @@ rm -f %{_bindir}/voxtype
 %{_docdir}/%{name}/INSTALL.md
 %{_libdir}/voxtype/voxtype-avx2
 %{_libdir}/voxtype/voxtype-avx512
+%{_libdir}/voxtype/voxtype-vulkan
 # The symlink is created by %post, mark as ghost so rpm -V doesn't complain
 %ghost %{_bindir}/voxtype
 %config(noreplace) %{_sysconfdir}/voxtype/config.toml
@@ -153,6 +186,16 @@ rm -f %{_bindir}/voxtype
 %{_datadir}/fish/vendor_completions.d/voxtype.fish
 
 %changelog
+* Wed Dec 18 2025 Peter Jackson <pete@peteonrails.com> - 0.3.3-1
+- Add --extended flag to voxtype status command
+- Extended status includes model, device, and backend in JSON output
+- Enhanced Waybar tooltip with model/device/backend info
+
+* Wed Dec 18 2025 Peter Jackson <pete@peteonrails.com> - 0.3.2-1
+- Ship Vulkan GPU binary alongside CPU binaries
+- Add voxtype setup gpu command to switch between CPU and GPU backends
+- Post-install now detects GPU and recommends enabling Vulkan acceleration
+
 * Wed Dec 18 2025 Peter Jackson <pete@peteonrails.com> - 0.3.1-1
 - Add on-demand model loading option (saves VRAM when not transcribing)
 - Add paste output mode for non-US keyboard layouts

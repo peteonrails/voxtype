@@ -108,6 +108,10 @@ enum Commands {
         /// Output format: "text" (default) or "json" (for Waybar)
         #[arg(long, default_value = "text")]
         format: String,
+
+        /// Include extended info in JSON (model, device, backend)
+        #[arg(long)]
+        extended: bool,
     },
 }
 
@@ -140,6 +144,21 @@ enum SetupAction {
         /// List installed models instead of interactive selection
         #[arg(long)]
         list: bool,
+    },
+
+    /// Manage GPU acceleration (switch between CPU and Vulkan backends)
+    Gpu {
+        /// Enable GPU (Vulkan) acceleration
+        #[arg(long)]
+        enable: bool,
+
+        /// Disable GPU acceleration (switch back to CPU)
+        #[arg(long)]
+        disable: bool,
+
+        /// Show current backend status
+        #[arg(long)]
+        status: bool,
     },
 }
 
@@ -224,6 +243,18 @@ async fn main() -> anyhow::Result<()> {
                         setup::model::interactive_select().await?;
                     }
                 }
+                Some(SetupAction::Gpu { enable, disable, status }) => {
+                    if status {
+                        setup::gpu::show_status();
+                    } else if enable {
+                        setup::gpu::enable()?;
+                    } else if disable {
+                        setup::gpu::disable()?;
+                    } else {
+                        // Default: show status
+                        setup::gpu::show_status();
+                    }
+                }
                 None => {
                     // Default: run basic setup (backwards compatible)
                     setup::run_basic_setup(&config, download).await?;
@@ -235,8 +266,8 @@ async fn main() -> anyhow::Result<()> {
             show_config(&config).await?;
         }
 
-        Commands::Status { follow, format } => {
-            run_status(&config, follow, &format).await?;
+        Commands::Status { follow, format, extended } => {
+            run_status(&config, follow, &format, extended).await?;
         }
     }
 
@@ -335,8 +366,39 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     output
 }
 
+/// Extended status info for JSON output
+struct ExtendedStatusInfo {
+    model: String,
+    device: String,
+    backend: String,
+}
+
+impl ExtendedStatusInfo {
+    fn from_config(config: &config::Config) -> Self {
+        let backend = setup::gpu::detect_current_backend()
+            .map(|b| match b {
+                setup::gpu::Backend::Avx2 => "CPU (AVX2)",
+                setup::gpu::Backend::Avx512 => "CPU (AVX-512)",
+                setup::gpu::Backend::Vulkan => "GPU (Vulkan)",
+            })
+            .unwrap_or("unknown")
+            .to_string();
+
+        Self {
+            model: config.whisper.model.clone(),
+            device: config.audio.device.clone(),
+            backend,
+        }
+    }
+}
+
 /// Run the status command - show current daemon state
-async fn run_status(config: &config::Config, follow: bool, format: &str) -> anyhow::Result<()> {
+async fn run_status(
+    config: &config::Config,
+    follow: bool,
+    format: &str,
+    extended: bool,
+) -> anyhow::Result<()> {
     let state_file = config.resolve_state_file();
 
     if state_file.is_none() {
@@ -351,6 +413,11 @@ async fn run_status(config: &config::Config, follow: bool, format: &str) -> anyh
     }
 
     let state_path = state_file.unwrap();
+    let ext_info = if extended {
+        Some(ExtendedStatusInfo::from_config(config))
+    } else {
+        None
+    };
 
     if !follow {
         // One-shot: just read and print current state
@@ -358,7 +425,7 @@ async fn run_status(config: &config::Config, follow: bool, format: &str) -> anyh
         let state = state.trim();
 
         if format == "json" {
-            println!("{}", format_state_json(state));
+            println!("{}", format_state_json(state, ext_info.as_ref()));
         } else {
             println!("{}", state);
         }
@@ -374,7 +441,7 @@ async fn run_status(config: &config::Config, follow: bool, format: &str) -> anyh
     let state = std::fs::read_to_string(&state_path).unwrap_or_else(|_| "stopped".to_string());
     let state = state.trim();
     if format == "json" {
-        println!("{}", format_state_json(state));
+        println!("{}", format_state_json(state, ext_info.as_ref()));
     } else {
         println!("{}", state);
     }
@@ -409,7 +476,7 @@ async fn run_status(config: &config::Config, follow: bool, format: &str) -> anyh
                     let new_state = new_state.trim().to_string();
                     if new_state != last_state {
                         if format == "json" {
-                            println!("{}", format_state_json(&new_state));
+                            println!("{}", format_state_json(&new_state, ext_info.as_ref()));
                         } else {
                             println!("{}", new_state);
                         }
@@ -424,7 +491,7 @@ async fn run_status(config: &config::Config, follow: bool, format: &str) -> anyh
                 // Check if file was deleted (daemon stopped)
                 if !state_path.exists() && last_state != "stopped" {
                     if format == "json" {
-                        println!("{}", format_state_json("stopped"));
+                        println!("{}", format_state_json("stopped", ext_info.as_ref()));
                     } else {
                         println!("stopped");
                     }
@@ -441,8 +508,8 @@ async fn run_status(config: &config::Config, follow: bool, format: &str) -> anyh
 }
 
 /// Format state as JSON for Waybar consumption
-fn format_state_json(state: &str) -> String {
-    let (text, class, tooltip) = match state {
+fn format_state_json(state: &str, extended: Option<&ExtendedStatusInfo>) -> String {
+    let (text, class, base_tooltip) = match state {
         "recording" => ("🎤", "recording", "Recording..."),
         "transcribing" => ("⏳", "transcribing", "Transcribing..."),
         "idle" => ("🎙️", "idle", "Voxtype ready - hold hotkey to record"),
@@ -450,10 +517,25 @@ fn format_state_json(state: &str) -> String {
         _ => ("?", "unknown", "Unknown state"),
     };
 
-    format!(
-        r#"{{"text": "{}", "class": "{}", "tooltip": "{}"}}"#,
-        text, class, tooltip
-    )
+    match extended {
+        Some(info) => {
+            // Extended format includes model, device, backend
+            let tooltip = format!(
+                "{}\\nModel: {}\\nDevice: {}\\nBackend: {}",
+                base_tooltip, info.model, info.device, info.backend
+            );
+            format!(
+                r#"{{"text": "{}", "class": "{}", "tooltip": "{}", "model": "{}", "device": "{}", "backend": "{}"}}"#,
+                text, class, tooltip, info.model, info.device, info.backend
+            )
+        }
+        None => {
+            format!(
+                r#"{{"text": "{}", "class": "{}", "tooltip": "{}"}}"#,
+                text, class, base_tooltip
+            )
+        }
+    }
 }
 
 /// Show current configuration

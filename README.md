@@ -183,6 +183,12 @@ Setup subcommands:
   voxtype setup systemd      Install/manage systemd user service
   voxtype setup waybar       Generate Waybar module configuration
   voxtype setup model        Interactive model selection and download
+  voxtype setup gpu          Manage GPU acceleration (switch CPU/Vulkan)
+
+Status options:
+  voxtype status --format json      Output as JSON (for Waybar)
+  voxtype status --follow           Continuously output on state changes
+  voxtype status --extended         Include model, device, backend in JSON
 
 Options:
   -c, --config <FILE>  Path to config file
@@ -242,25 +248,33 @@ With GPU acceleration, `large-v3` achieves sub-second inference while supporting
 
 Voxtype supports optional GPU acceleration for significantly faster inference. With GPU acceleration, even the `large-v3` model can achieve sub-second inference times.
 
-### Building with GPU Support
+### Vulkan (AMD, NVIDIA, Intel)
 
-GPU acceleration requires building from source with the appropriate feature flag:
+Packages include a Vulkan binary. To enable GPU acceleration:
 
-**Vulkan (AMD, NVIDIA, Intel - recommended for AMD)**
 ```bash
-# Install Vulkan development libraries
+# Install Vulkan runtime (if not already installed)
 # Arch:
-sudo pacman -S vulkan-devel
+sudo pacman -S vulkan-icd-loader
 
 # Ubuntu/Debian:
-sudo apt install libvulkan-dev
+sudo apt install libvulkan1
 
 # Fedora:
-sudo dnf install vulkan-devel
+sudo dnf install vulkan-loader
 
-# Build with Vulkan support
-cargo build --release --features gpu-vulkan
+# Enable GPU acceleration
+sudo voxtype setup gpu --enable
+
+# Check status
+voxtype setup gpu
 ```
+
+To switch back to CPU: `sudo voxtype setup gpu --disable`
+
+### Building from Source (CUDA, Metal, ROCm)
+
+For other GPU backends, build from source with the appropriate feature flag:
 
 **CUDA (NVIDIA)**
 ```bash
@@ -289,9 +303,13 @@ Results vary by hardware. Example on AMD RX 6800:
 
 ## Requirements
 
+### System Requirements
+
+- **Linux** with glibc 2.38+ (Ubuntu 24.04+, Fedora 39+, Arch, Debian Trixie+)
+- **Wayland or X11** desktop (GNOME, KDE, Sway, Hyprland, i3, etc.)
+
 ### Runtime Dependencies
 
-- **Linux desktop** (Wayland or X11 - GNOME, KDE, Sway, Hyprland, i3, etc.)
 - **PipeWire** or **PulseAudio** (for audio capture)
 - **wtype** (for typing output on Wayland) - *recommended, best CJK/Unicode support*
 - **ydotool** + daemon - *for X11 or as Wayland fallback*
@@ -354,6 +372,37 @@ First, enable the state file in your voxtype config:
 
 ```toml
 state_file = "auto"
+```
+
+### Extended Status Info
+
+Use `--extended` to include model, device, and backend in the JSON output:
+
+```bash
+voxtype status --format json --extended
+```
+
+Output:
+```json
+{
+  "text": "🎙️",
+  "class": "idle",
+  "tooltip": "Voxtype ready\nModel: base.en\nDevice: default\nBackend: CPU (AVX-512)",
+  "model": "base.en",
+  "device": "default",
+  "backend": "CPU (AVX-512)"
+}
+```
+
+Waybar config with model display:
+```json
+"custom/voxtype": {
+    "exec": "voxtype status --follow --format json --extended",
+    "return-type": "json",
+    "format": "{} [{}]",
+    "format-alt": "{model}",
+    "tooltip": true
+}
 ```
 
 ## Troubleshooting

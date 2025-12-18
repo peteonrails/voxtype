@@ -1,3 +1,19 @@
+voxtype (0.3.3-1) unstable; urgency=medium
+
+  * Add --extended flag to voxtype status command
+  * Extended status includes model, device, and backend in JSON output
+  * Enhanced Waybar tooltip with model/device/backend info
+
+ -- Peter Jackson <pete@peteonrails.com>  Wed, 18 Dec 2025 16:00:00 +0000
+
+voxtype (0.3.2-1) unstable; urgency=medium
+
+  * Ship Vulkan GPU binary alongside CPU binaries
+  * Add voxtype setup gpu command to switch between CPU and GPU backends
+  * Post-install now detects GPU and recommends enabling Vulkan acceleration
+
+ -- Peter Jackson <pete@peteonrails.com>  Wed, 18 Dec 2025 14:00:00 +0000
+
 voxtype (0.3.1-1) unstable; urgency=medium
 
   * Add on-demand model loading option (saves VRAM when not transcribing)

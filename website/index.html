@@ -570,14 +570,15 @@ sudo pacman -S wtype wl-clipboard</code></pre>
                 </div>
 
                 <div id="debian" class="tab-content">
+                    <p class="install-note">Requires Ubuntu 24.04+ or Debian Trixie+ (glibc 2.38). Older versions can build from source.</p>
                     <div class="code-block">
                         <div class="code-header">
                             <span>Install .deb package</span>
                             <button class="copy-btn">Copy</button>
                         </div>
-                        <pre><code><span class="comment"># Download and install</span>
-wget https://github.com/peteonrails/voxtype/releases/download/v0.3.2/voxtype_0.3.2-1_amd64.deb
-sudo dpkg -i voxtype_0.3.2-1_amd64.deb
+                        <pre><code><span class="comment"># Download and install (Ubuntu 24.04+, Debian Trixie+)</span>
+wget https://github.com/peteonrails/voxtype/releases/download/v0.3.3/voxtype_0.3.3-1_amd64.deb
+sudo dpkg -i voxtype_0.3.3-1_amd64.deb
 sudo apt-get install -f
 
 <span class="comment"># Install optional dependencies</span>
@@ -586,14 +587,15 @@ sudo apt install wtype wl-clipboard</code></pre>
                 </div>
 
                 <div id="fedora" class="tab-content">
+                    <p class="install-note">Requires Fedora 39+ (glibc 2.38).</p>
                     <div class="code-block">
                         <div class="code-header">
                             <span>Install RPM package</span>
                             <button class="copy-btn">Copy</button>
                         </div>
-                        <pre><code><span class="comment"># Download and install</span>
-wget https://github.com/peteonrails/voxtype/releases/download/v0.3.2/voxtype-0.3.2-1.x86_64.rpm
-sudo dnf install ./voxtype-0.3.2-1.x86_64.rpm
+                        <pre><code><span class="comment"># Download and install (Fedora 39+)</span>
+wget https://github.com/peteonrails/voxtype/releases/download/v0.3.3/voxtype-0.3.3-1.x86_64.rpm
+sudo dnf install ./voxtype-0.3.3-1.x86_64.rpm
 
 <span class="comment"># Install optional dependencies</span>
 sudo dnf install wtype wl-clipboard</code></pre>

@@ -1,0 +1,44 @@
+#!/bin/bash
+
+set -e
+
+echo "Installing Voxtype (push-to-talk voice-to-text)..."
+echo ""
+
+# Install from AUR
+yay -S --noconfirm voxtype
+
+# Add user to input group for evdev access
+if ! groups | grep -q input; then
+    echo ""
+    echo "Adding $USER to input group..."
+    sudo usermod -aG input "$USER"
+    echo "NOTE: You must log out and back in for group changes to take effect"
+fi
+
+# Download default whisper model
+echo ""
+echo "Downloading Whisper model (this may take a few minutes)..."
+voxtype setup --download
+
+# Create default config if not exists
+if [ ! -f ~/.config/voxtype/config.toml ]; then
+    voxtype setup --config
+fi
+
+# Enable systemd user service
+echo ""
+echo "Enabling voxtype service..."
+systemctl --user enable voxtype
+
+echo ""
+echo "=== Voxtype Installation Complete ==="
+echo ""
+echo "To start using voxtype:"
+echo "  1. Log out and back in (for input group access)"
+echo "  2. The service will start automatically on login"
+echo "  3. Hold HOME key to record, release to transcribe"
+echo ""
+echo "Configure hotkey and settings:"
+echo "  nvim ~/.config/voxtype/config.toml"
+echo ""

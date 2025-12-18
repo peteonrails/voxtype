@@ -50,16 +50,38 @@ This guide covers all methods for installing Voxtype on Linux systems.
 | CMake | `cmake` | `cmake` | `cmake` |
 | pkg-config | `pkgconf` | `pkg-config` | `pkgconf` |
 
-### GPU Build Dependencies (optional)
+### GPU Acceleration
 
-For GPU-accelerated builds, you'll also need:
+**Vulkan (included in packages):** Packages include a pre-built Vulkan binary. Just install the runtime and enable:
 
-| GPU Backend | Arch | Debian/Ubuntu | Fedora |
-|-------------|------|---------------|--------|
-| Vulkan | `vulkan-devel` | `libvulkan-dev` | `vulkan-devel` |
-| CUDA | `cuda` | `nvidia-cuda-toolkit` | `cuda` |
+| Distro | Install Runtime | Enable GPU |
+|--------|-----------------|------------|
+| Arch | `sudo pacman -S vulkan-icd-loader` | `sudo voxtype setup gpu --enable` |
+| Debian/Ubuntu | `sudo apt install libvulkan1` | `sudo voxtype setup gpu --enable` |
+| Fedora | `sudo dnf install vulkan-loader` | `sudo voxtype setup gpu --enable` |
 
-Build with GPU support using: `cargo build --release --features gpu-vulkan`
+**Other backends (build from source):** For CUDA, Metal, or ROCm, build from source:
+
+| GPU Backend | Build Dependencies | Build Command |
+|-------------|-------------------|---------------|
+| CUDA | `cuda` / `nvidia-cuda-toolkit` | `cargo build --release --features gpu-cuda` |
+| Metal | (macOS only) | `cargo build --release --features gpu-metal` |
+| HIP/ROCm | ROCm SDK | `cargo build --release --features gpu-hipblas` |
+
+---
+
+## System Requirements
+
+Pre-built packages require **glibc 2.38 or newer**:
+
+| Distro | Minimum Version | glibc |
+|--------|-----------------|-------|
+| Ubuntu | 24.04 (Noble) | 2.39 |
+| Fedora | 39+ | 2.38 |
+| Arch Linux | Rolling | 2.40+ |
+| Debian | Trixie (13) | 2.38 |
+
+Older distributions (Ubuntu 22.04, Debian Bookworm) can build from source.
 
 ---
 

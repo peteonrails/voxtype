@@ -241,11 +241,13 @@ mkdir -p "$STAGING"/usr/share/{bash-completion/completions,zsh/site-functions,fi
 # Copy binaries to /usr/lib/voxtype/
 # The post-install script will create a symlink at /usr/bin/voxtype
 if [[ "$TARGET_ARCH" == "x86_64" ]]; then
-    # x86_64: Tiered CPU binaries
+    # x86_64: Tiered CPU binaries + Vulkan GPU binary
     cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2" "$STAGING/usr/lib/voxtype/voxtype-avx2"
     cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512" "$STAGING/usr/lib/voxtype/voxtype-avx512"
+    cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan" "$STAGING/usr/lib/voxtype/voxtype-vulkan"
     chmod 755 "$STAGING/usr/lib/voxtype/voxtype-avx2"
     chmod 755 "$STAGING/usr/lib/voxtype/voxtype-avx512"
+    chmod 755 "$STAGING/usr/lib/voxtype/voxtype-vulkan"
 else
     # aarch64: Single binary
     cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-aarch64" "$STAGING/usr/lib/voxtype/voxtype"
@@ -269,8 +271,9 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
 # Detect CPU capabilities and symlink the appropriate voxtype binary
 #
 # Binary variants (x86_64):
-#   voxtype-avx2:   Works on most CPUs from 2013+ (Intel Haswell, AMD Zen)
-#   voxtype-avx512: Optimized for newer CPUs (AMD Zen 4+, some Intel)
+#   voxtype-avx2:   CPU - Works on most CPUs from 2013+ (Intel Haswell, AMD Zen)
+#   voxtype-avx512: CPU - Optimized for newer CPUs (AMD Zen 4+, some Intel)
+#   voxtype-vulkan: GPU - Vulkan acceleration (NVIDIA, AMD, Intel)
 
 # Remove existing binary/symlink if present (for upgrades)
 rm -f /usr/bin/voxtype
@@ -289,10 +292,40 @@ if command -v restorecon >/dev/null 2>&1; then
     restorecon /usr/bin/voxtype 2>/dev/null || true
 fi
 
+# Detect GPU for Vulkan acceleration recommendation
+GPU_DETECTED=""
+if [ -d /dev/dri ]; then
+    # Check for render nodes (indicates GPU with driver)
+    if ls /dev/dri/renderD* >/dev/null 2>&1; then
+        # Try to identify the GPU
+        if command -v lspci >/dev/null 2>&1; then
+            GPU_INFO=$(lspci 2>/dev/null | grep -i 'vga\|3d\|display' | head -1 | sed 's/.*: //')
+            if [ -n "$GPU_INFO" ]; then
+                GPU_DETECTED="$GPU_INFO"
+            fi
+        fi
+        # Fallback if lspci didn't work
+        if [ -z "$GPU_DETECTED" ]; then
+            GPU_DETECTED="GPU detected (install pciutils for details)"
+        fi
+    fi
+fi
+
 echo ""
 echo "=== Voxtype Post-Installation ==="
 echo ""
-echo "CPU detected: $VARIANT (using voxtype-$VARIANT)"
+echo "CPU backend: $VARIANT (using voxtype-$VARIANT)"
+
+if [ -n "$GPU_DETECTED" ]; then
+    echo ""
+    echo "GPU detected: $GPU_DETECTED"
+    echo ""
+    echo "  For GPU acceleration (faster inference), run:"
+    echo "    voxtype setup gpu --enable"
+    echo ""
+    echo "  Requires: vulkan-icd-loader and GPU drivers"
+fi
+
 echo ""
 echo "To complete setup:"
 echo ""
@@ -385,6 +418,7 @@ if [[ "$BUILD_DEB" == "true" ]]; then
         --deb-recommends wl-clipboard \
         --deb-suggests ydotool \
         --deb-suggests libnotify-bin \
+        --deb-suggests libvulkan1 \
         --package "$DEB_FILE" \
         usr etc
 

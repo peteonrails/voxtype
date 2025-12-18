@@ -1,6 +1,6 @@
 # Maintainer: Peter Jackson <pete@peteonrails.com>
 pkgname=voxtype
-pkgver=0.3.2
+pkgver=0.3.3
 pkgrel=1
 pkgdesc="Push-to-talk voice-to-text for Linux (optimized for Wayland, works on X11)"
 arch=('x86_64' 'aarch64')
@@ -27,13 +27,13 @@ optdepends=(
     'libnotify: desktop notifications'
     'pipewire: audio capture (recommended)'
     'pulseaudio: audio capture (alternative)'
-    'vulkan-icd-loader: GPU acceleration via Vulkan (requires rebuild with gpu-vulkan feature)'
+    'vulkan-icd-loader: GPU acceleration via Vulkan (enable with: voxtype setup gpu --enable)'
     'cuda: GPU acceleration for NVIDIA (requires rebuild with gpu-cuda feature)'
 )
 backup=('etc/voxtype/config.toml')
 install=voxtype.install
 source=("$pkgname-$pkgver.tar.gz::https://github.com/peteonrails/voxtype/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('cfb898783e53fbb801b8d9339d58fe194eece067aa1cf8737922b1d847a81c98')
+sha256sums=('127d026cfd6011dc04db6fa641b497f686e74d6ad17fd37077cb53b275317de9')
 
 prepare() {
     cd "$pkgname-$pkgver"
@@ -60,6 +60,11 @@ build() {
     cargo clean
     cargo build --frozen --release ${_features:-}
     cp target/release/voxtype target/release/voxtype-avx512
+
+    # Build Vulkan GPU binary (for GPU acceleration)
+    cargo clean
+    CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" cargo build --frozen --release --features gpu-vulkan
+    cp target/release/voxtype target/release/voxtype-vulkan
 }
 
 check() {
@@ -76,6 +81,7 @@ package() {
     # The install script creates a symlink at /usr/bin/voxtype
     install -Dm755 "target/release/voxtype-avx2" "$pkgdir/usr/lib/voxtype/voxtype-avx2"
     install -Dm755 "target/release/voxtype-avx512" "$pkgdir/usr/lib/voxtype/voxtype-avx512"
+    install -Dm755 "target/release/voxtype-vulkan" "$pkgdir/usr/lib/voxtype/voxtype-vulkan"
 
     # Install default configuration
     install -Dm644 "config/default.toml" "$pkgdir/etc/voxtype/config.toml"

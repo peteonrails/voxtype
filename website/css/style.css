@@ -723,6 +723,13 @@ code, pre {
     display: block;
 }
 
+.install-note {
+    font-size: 0.875rem;
+    color: var(--color-text-muted);
+    margin-bottom: var(--space-sm);
+    text-align: center;
+}
+
 .code-block {
     max-width: 700px;
     margin: 0 auto var(--space-lg);
