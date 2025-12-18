@@ -19,7 +19,7 @@ makedepends=(
     'cmake'
     'pkgconf'
     # Uncomment for GPU acceleration:
-    'vulkan-headers'  # for Vulkan (AMD, NVIDIA, Intel)
+    # 'vulkan-headers'  # for Vulkan (AMD, NVIDIA, Intel)
     # 'cuda'            # for CUDA (NVIDIA only)
 )
 optdepends=(

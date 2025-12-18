@@ -1,5 +1,5 @@
 Name:           voxtype
-Version:        0.3.3
+Version:        0.4.0
 Release:        1%{?dist}
 Summary:        Push-to-talk voice-to-text for Linux
 
@@ -49,8 +49,12 @@ GPU acceleration can be enabled with: voxtype setup gpu --enable
 export CARGO_HOME=%{_builddir}/cargo
 
 # Build AVX2 baseline binary (compatible with most CPUs from 2013+)
-# Disable AVX-512 to prevent SIGILL on older CPUs
-CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" cargo build --release --locked
+# Disable AVX-512 in both Rust code and whisper.cpp to prevent SIGILL on older CPUs
+# -C target-feature disables AVX-512 in rustc/LLVM (affects Rust std lib and deps)
+# CMAKE_*_FLAGS disable AVX-512 in whisper.cpp via -mno-avx512f
+RUSTFLAGS="-C target-cpu=haswell -C target-feature=-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl" \
+CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" \
+cargo build --release --locked
 cp target/release/voxtype target/release/voxtype-avx2
 
 # Build AVX-512 optimized binary (for Zen 4+, some Intel)
@@ -60,7 +64,9 @@ cp target/release/voxtype target/release/voxtype-avx512
 
 # Build Vulkan GPU binary (for GPU acceleration)
 cargo clean
-CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" cargo build --release --locked --features gpu-vulkan
+RUSTFLAGS="-C target-cpu=haswell -C target-feature=-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl" \
+CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" \
+cargo build --release --locked --features gpu-vulkan
 cp target/release/voxtype target/release/voxtype-vulkan
 
 %install
@@ -94,7 +100,9 @@ install -D -m 644 packaging/completions/voxtype.fish \
 %check
 export CARGO_HOME=%{_builddir}/cargo
 # Only test with AVX2 build to avoid SIGILL in build environments
-WHISPER_NO_AVX512=ON cargo test --release --locked
+RUSTFLAGS="-C target-cpu=haswell -C target-feature=-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl" \
+CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" \
+cargo test --release --locked
 
 %post
 %systemd_user_post voxtype.service
@@ -186,6 +194,19 @@ rm -f %{_bindir}/voxtype
 %{_datadir}/fish/vendor_completions.d/voxtype.fish
 
 %changelog
+* Wed Dec 18 2025 Peter Jackson <pete@peteonrails.com> - 0.4.0-1
+- Add compositor keybinding support via 'voxtype record' command
+- Add hotkey.enabled config option to disable built-in evdev hotkey
+- Add 'voxtype setup waybar --install/--uninstall' for automated waybar integration
+- Signal-based IPC (SIGUSR1/SIGUSR2) for external recording control
+- Users can now use Hyprland/Sway keybindings without input group membership
+
+* Wed Dec 18 2025 Peter Jackson <pete@peteonrails.com> - 0.3.3-2
+- Fix SIGILL crash on CPUs without AVX-512 support (Issue #4)
+- Root cause: Rust std library was generating AVX-512 instructions
+- Add explicit -C target-feature flags to disable all AVX-512 variants
+- Add post-build verification to prevent future regressions
+
 * Wed Dec 18 2025 Peter Jackson <pete@peteonrails.com> - 0.3.3-1
 - Add --extended flag to voxtype status command
 - Extended status includes model, device, and backend in JSON output

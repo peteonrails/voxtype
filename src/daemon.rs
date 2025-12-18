@@ -17,6 +17,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
+use tokio::signal::unix::{signal, SignalKind};
 
 /// Send a desktop notification
 async fn send_notification(title: &str, body: &str) {
@@ -59,10 +60,42 @@ fn cleanup_state_file(path: &PathBuf) {
     }
 }
 
+/// Write PID file for external control via signals
+fn write_pid_file() -> Option<PathBuf> {
+    let pid_path = Config::runtime_dir().join("pid");
+
+    // Ensure parent directory exists
+    if let Some(parent) = pid_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!("Failed to create PID file directory: {}", e);
+            return None;
+        }
+    }
+
+    let pid = std::process::id();
+    if let Err(e) = std::fs::write(&pid_path, pid.to_string()) {
+        tracing::warn!("Failed to write PID file: {}", e);
+        return None;
+    }
+
+    tracing::debug!("PID file written: {:?} (pid={})", pid_path, pid);
+    Some(pid_path)
+}
+
+/// Remove PID file on shutdown
+fn cleanup_pid_file(path: &PathBuf) {
+    if path.exists() {
+        if let Err(e) = std::fs::remove_file(path) {
+            tracing::warn!("Failed to remove PID file: {}", e);
+        }
+    }
+}
+
 /// Main daemon that orchestrates all components
 pub struct Daemon {
     config: Config,
     state_file_path: Option<PathBuf>,
+    pid_file_path: Option<PathBuf>,
     audio_feedback: Option<AudioFeedback>,
     text_processor: TextProcessor,
     // Background task for loading model on-demand
@@ -109,6 +142,7 @@ impl Daemon {
         Self {
             config,
             state_file_path,
+            pid_file_path: None,
             audio_feedback,
             text_processor,
             model_load_task: None,
@@ -239,12 +273,20 @@ impl Daemon {
     pub async fn run(&mut self) -> Result<()> {
         tracing::info!("Starting voxtype daemon");
 
+        // Write PID file for external control via signals
+        self.pid_file_path = write_pid_file();
+
+        // Set up signal handlers for external control
+        let mut sigusr1 = signal(SignalKind::user_defined1())
+            .map_err(|e| crate::error::VoxtypeError::Config(format!("Failed to set up SIGUSR1 handler: {}", e)))?;
+        let mut sigusr2 = signal(SignalKind::user_defined2())
+            .map_err(|e| crate::error::VoxtypeError::Config(format!("Failed to set up SIGUSR2 handler: {}", e)))?;
+
         // Ensure required directories exist
         Config::ensure_directories().map_err(|e| {
             crate::error::VoxtypeError::Config(format!("Failed to create directories: {}", e))
         })?;
 
-        tracing::info!("Hotkey: {}", self.config.hotkey.key);
         tracing::info!("Output mode: {:?}", self.config.output.mode);
 
         // Log state file if configured
@@ -252,8 +294,14 @@ impl Daemon {
             tracing::info!("State file: {:?}", path);
         }
 
-        // Initialize hotkey listener
-        let mut hotkey_listener = hotkey::create_listener(&self.config.hotkey)?;
+        // Initialize hotkey listener (if enabled)
+        let mut hotkey_listener = if self.config.hotkey.enabled {
+            tracing::info!("Hotkey: {}", self.config.hotkey.key);
+            Some(hotkey::create_listener(&self.config.hotkey)?)
+        } else {
+            tracing::info!("Built-in hotkey disabled, use 'voxtype record' commands or compositor keybindings");
+            None
+        };
 
         // Initialize output chain
         let output_chain = output::create_output_chain(&self.config.output);
@@ -276,8 +324,12 @@ impl Daemon {
             tracing::info!("On-demand loading enabled, model will be loaded when recording starts");
         }
 
-        // Start hotkey listener
-        let mut hotkey_rx = hotkey_listener.start().await?;
+        // Start hotkey listener (if enabled)
+        let mut hotkey_rx = if let Some(ref mut listener) = hotkey_listener {
+            Some(listener.start().await?)
+        } else {
+            None
+        };
 
         // Current state
         let mut state = State::Idle;
@@ -289,15 +341,17 @@ impl Daemon {
         let max_duration = Duration::from_secs(self.config.audio.max_duration_secs as u64);
 
         let activation_mode = self.config.hotkey.mode;
-        let mode_desc = match activation_mode {
-            ActivationMode::PushToTalk => "hold to record, release to transcribe",
-            ActivationMode::Toggle => "press to start/stop recording",
-        };
-        tracing::info!(
-            "Listening for hotkey: {} ({})",
-            self.config.hotkey.key,
-            mode_desc
-        );
+        if self.config.hotkey.enabled {
+            let mode_desc = match activation_mode {
+                ActivationMode::PushToTalk => "hold to record, release to transcribe",
+                ActivationMode::Toggle => "press to start/stop recording",
+            };
+            tracing::info!(
+                "Listening for hotkey: {} ({})",
+                self.config.hotkey.key,
+                mode_desc
+            );
+        }
 
         // Write initial state
         self.update_state("idle");
@@ -305,8 +359,13 @@ impl Daemon {
         // Main event loop
         loop {
             tokio::select! {
-                // Handle hotkey events
-                Some(hotkey_event) = hotkey_rx.recv() => {
+                // Handle hotkey events (only if hotkey listener is enabled)
+                Some(hotkey_event) = async {
+                    match &mut hotkey_rx {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
                     match (hotkey_event, activation_mode) {
                         // === PUSH-TO-TALK MODE ===
                         (HotkeyEvent::Pressed, ActivationMode::PushToTalk) => {
@@ -510,7 +569,93 @@ impl Daemon {
                         }
                     }
                 }
-                
+
+                // Handle SIGUSR1 - start recording (for compositor keybindings)
+                _ = sigusr1.recv() => {
+                    tracing::debug!("Received SIGUSR1 (start recording)");
+                    if state.is_idle() {
+                        tracing::info!("Recording started (external trigger)");
+
+                        if self.config.output.notification.on_recording_start {
+                            send_notification("Recording Started", "External trigger").await;
+                        }
+
+                        // Start model loading in background if on-demand loading is enabled
+                        if self.config.whisper.on_demand_loading {
+                            let config = self.config.whisper.clone();
+                            self.model_load_task = Some(tokio::task::spawn_blocking(move || {
+                                transcribe::create_transcriber(&config)
+                            }));
+                        }
+
+                        match audio::create_capture(&self.config.audio) {
+                            Ok(mut capture) => {
+                                if let Err(e) = capture.start().await {
+                                    tracing::error!("Failed to start audio: {}", e);
+                                } else {
+                                    audio_capture = Some(capture);
+                                    state = State::Recording {
+                                        started_at: std::time::Instant::now(),
+                                    };
+                                    self.update_state("recording");
+                                    self.play_feedback(SoundEvent::RecordingStart);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to create audio capture: {}", e);
+                                self.play_feedback(SoundEvent::Error);
+                            }
+                        }
+                    }
+                }
+
+                // Handle SIGUSR2 - stop recording (for compositor keybindings)
+                _ = sigusr2.recv() => {
+                    tracing::debug!("Received SIGUSR2 (stop recording)");
+                    if state.is_recording() {
+                        // Wait for model loading task if on-demand loading is enabled
+                        let transcriber = if self.config.whisper.on_demand_loading {
+                            if let Some(task) = self.model_load_task.take() {
+                                match task.await {
+                                    Ok(Ok(transcriber)) => {
+                                        tracing::info!("Model loaded successfully");
+                                        Some(Arc::new(transcriber))
+                                    }
+                                    Ok(Err(e)) => {
+                                        tracing::error!("Model loading failed: {}", e);
+                                        self.play_feedback(SoundEvent::Error);
+                                        state = State::Idle;
+                                        self.update_state("idle");
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Model loading task panicked: {}", e);
+                                        self.play_feedback(SoundEvent::Error);
+                                        state = State::Idle;
+                                        self.update_state("idle");
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                tracing::error!("No model loading task found");
+                                self.play_feedback(SoundEvent::Error);
+                                state = State::Idle;
+                                self.update_state("idle");
+                                continue;
+                            }
+                        } else {
+                            transcriber_preloaded.clone()
+                        };
+
+                        self.stop_and_transcribe(
+                            &mut state,
+                            &mut audio_capture,
+                            transcriber,
+                            &output_chain,
+                        ).await;
+                    }
+                }
+
                 // Handle graceful shutdown
                 _ = tokio::signal::ctrl_c() => {
                     tracing::info!("Received interrupt signal, shutting down...");
@@ -520,11 +665,18 @@ impl Daemon {
         }
 
         // Cleanup
-        hotkey_listener.stop().await?;
+        if let Some(mut listener) = hotkey_listener {
+            listener.stop().await?;
+        }
 
         // Remove state file on shutdown
         if let Some(ref path) = self.state_file_path {
             cleanup_state_file(path);
+        }
+
+        // Remove PID file on shutdown
+        if let Some(ref path) = self.pid_file_path {
+            cleanup_pid_file(path);
         }
 
         tracing::info!("Daemon stopped");
