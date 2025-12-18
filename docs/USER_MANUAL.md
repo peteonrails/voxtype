@@ -164,6 +164,9 @@ translate = false
 # Omit to auto-detect optimal thread count
 # threads = 4
 
+# Load model on-demand (saves memory/VRAM, slight delay per recording)
+# on_demand_loading = true
+
 [output]
 # Primary output mode
 # "type" - Simulates keyboard input at cursor (wtype on Wayland, ydotool on X11)

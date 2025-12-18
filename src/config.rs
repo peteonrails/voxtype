@@ -200,6 +200,10 @@ fn default_volume() -> f32 {
     0.7
 }
 
+fn default_on_demand_loading() -> bool {
+    false
+}
+
 impl Default for AudioFeedbackConfig {
     fn default() -> Self {
         Self {
@@ -226,6 +230,10 @@ pub struct WhisperConfig {
 
     /// Number of threads for inference (None = auto-detect)
     pub threads: Option<usize>,
+
+    /// Load model on-demand when recording starts (true) or keep loaded (false)
+    #[serde(default = "default_on_demand_loading")]
+    pub on_demand_loading: bool,
 }
 
 /// Text processing configuration
@@ -319,6 +327,7 @@ impl Default for Config {
                 language: "en".to_string(),
                 translate: false,
                 threads: None,
+                on_demand_loading: default_on_demand_loading(),
             },
             output: OutputConfig {
                 mode: OutputMode::Type,

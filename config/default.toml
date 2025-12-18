@@ -42,6 +42,11 @@ translate = false
 # Number of CPU threads for inference (omit for auto-detection)
 # threads = 4
 
+# Load model on-demand when recording starts (true) or keep loaded (false)
+# When true, model is loaded when recording starts and unloaded after transcription
+# When false, model is kept in memory for faster response times (default)
+on_demand_loading = false
+
 [output]
 # Primary output mode: "type" or "clipboard"
 # - type: Simulates keyboard input at cursor position (requires ydotool)

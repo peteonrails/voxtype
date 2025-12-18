@@ -104,6 +104,7 @@ model = "base.en"   # tiny, base, small, medium, large-v3, large-v3-turbo
 language = "en"     # Or "auto" for detection, or language code (es, fr, de, etc.)
 translate = false   # Translate non-English speech to English
 # threads = 4       # CPU threads for inference (omit for auto-detect)
+# on_demand_loading = true  # Load model only when recording (saves memory)
 
 [output]
 mode = "type"       # "type" or "clipboard"
