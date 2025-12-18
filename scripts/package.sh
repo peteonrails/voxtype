@@ -182,26 +182,38 @@ if [[ "$SKIP_BUILD" == "false" ]]; then
         if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2" ]]; then
             echo "Building AVX2 baseline release (broad compatibility)..."
             echo "  Disabling AVX-512 instructions via compiler flags"
-            # Note: WHISPER_NO_AVX512=ON doesn't work with whisper-rs-sys 0.14.1
-            # because the bundled whisper.cpp (1.7.6) doesn't handle this flag.
-            # We use compiler flags to disable AVX-512 at the instruction level.
-            CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" cargo build --release
+            # IMPORTANT: Must clean to ensure whisper.cpp recompiles without AVX-512
+            # Cargo/cmake don't invalidate cache when CMAKE_*_FLAGS change
+            # Use RUSTFLAGS to disable AVX-512 in Rust code, CMAKE flags for C/C++ code
+            # -C target-feature disables AVX-512 in rustc/LLVM (affects Rust std lib and deps)
+            # CMAKE_*_FLAGS disable AVX-512 in whisper.cpp via -mno-avx512f
+            cargo clean
+            RUSTFLAGS="-C target-cpu=haswell -C target-feature=-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl" \
+            CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" \
+            cargo build --release
             cp target/release/voxtype "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2"
         fi
 
         # Build AVX-512 optimized binary (for Zen 4+, some Intel)
         if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512" ]]; then
             echo "Building AVX-512 optimized release..."
-            # Clean build cache to ensure whisper.cpp recompiles with AVX-512 enabled
+            # Clean to ensure whisper.cpp recompiles with AVX-512 enabled
             cargo clean
             cargo build --release
             cp target/release/voxtype "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512"
         fi
 
-        # Build Vulkan GPU release (optional, uses AVX2 for broad compatibility)
+        # Build Vulkan GPU release (uses AVX2 for broad compatibility)
         if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan" ]]; then
             echo "Building Vulkan GPU release..."
-            CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" cargo build --release --features gpu-vulkan
+            # Clean to ensure whisper.cpp recompiles without AVX-512
+            # Use RUSTFLAGS to disable AVX-512 in Rust code, CMAKE flags for C/C++ code
+            # -C target-feature disables AVX-512 in rustc/LLVM (affects Rust std lib and deps)
+            # CMAKE_*_FLAGS disable AVX-512 in whisper.cpp via -mno-avx512f
+            cargo clean
+            RUSTFLAGS="-C target-cpu=haswell -C target-feature=-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl" \
+            CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" \
+            cargo build --release --features gpu-vulkan
             cp target/release/voxtype "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan"
         fi
     else
@@ -229,6 +241,73 @@ else
             exit 1
         fi
     fi
+fi
+
+# Verify binaries don't have incorrect CPU instructions (x86_64 only)
+# This catches build cache issues where AVX-512 instructions leak into AVX2/Vulkan binaries
+if [[ "$TARGET_ARCH" == "x86_64" ]]; then
+    echo ""
+    echo "Verifying binary CPU instructions..."
+
+    verify_no_avx512() {
+        local binary="$1"
+        local name="$2"
+        if ! command -v objdump &> /dev/null; then
+            echo "  Warning: objdump not found, skipping instruction verification"
+            return 0
+        fi
+        local zmm_count
+        zmm_count=$(objdump -d "$binary" 2>/dev/null | grep -c zmm) || zmm_count=0
+        if [[ "$zmm_count" -gt 0 ]]; then
+            echo "  ERROR: $name has $zmm_count AVX-512 (zmm) instructions!"
+            echo "         This binary will crash on CPUs without AVX-512."
+            echo "         The build cache was likely polluted. Try: cargo clean && re-run"
+            return 1
+        fi
+        echo "  ✓ $name: no AVX-512 instructions"
+        return 0
+    }
+
+    verify_has_avx512() {
+        local binary="$1"
+        local name="$2"
+        if ! command -v objdump &> /dev/null; then
+            echo "  Warning: objdump not found, skipping instruction verification"
+            return 0
+        fi
+        local zmm_count
+        zmm_count=$(objdump -d "$binary" 2>/dev/null | grep -c zmm) || zmm_count=0
+        if [[ "$zmm_count" -eq 0 ]]; then
+            echo "  ERROR: $name has no AVX-512 (zmm) instructions!"
+            echo "         This binary should be optimized for AVX-512 CPUs."
+            return 1
+        fi
+        echo "  ✓ $name: $zmm_count AVX-512 instructions (expected)"
+        return 0
+    }
+
+    VERIFY_FAILED=false
+
+    # AVX2 and Vulkan binaries should NOT have AVX-512 instructions
+    if ! verify_no_avx512 "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2" "voxtype-avx2"; then
+        VERIFY_FAILED=true
+    fi
+    if ! verify_no_avx512 "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan" "voxtype-vulkan"; then
+        VERIFY_FAILED=true
+    fi
+
+    # AVX512 binary SHOULD have AVX-512 instructions
+    if ! verify_has_avx512 "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512" "voxtype-avx512"; then
+        VERIFY_FAILED=true
+    fi
+
+    if [[ "$VERIFY_FAILED" == "true" ]]; then
+        echo ""
+        echo "Binary verification FAILED!"
+        echo "Remove releases/${VERSION}/ and rebuild from scratch."
+        exit 1
+    fi
+    echo ""
 fi
 
 # Create staging directory using mktemp for portability
