@@ -1,7 +1,7 @@
 # Maintainer: Peter Jackson <pete@peteonrails.com>
 pkgname=voxtype
 pkgver=0.4.1
-pkgrel=4
+pkgrel=5
 pkgdesc="Push-to-talk voice-to-text for Linux (optimized for Wayland, works on X11)"
 arch=('x86_64' 'aarch64')
 url="https://voxtype.io"
@@ -31,7 +31,7 @@ optdepends=(
 backup=('etc/voxtype/config.toml')
 install=voxtype.install
 source=("$pkgname-$pkgver.tar.gz::https://github.com/peteonrails/voxtype/archive/refs/tags/v$pkgver-$pkgrel.tar.gz")
-sha256sums=('fdef83f8b0c2cfd00a588218af8bc654f492387bdc6ff5fe7fec948ea9de3c84')
+sha256sums=('e8270552699554cb6b68763a112e966e7718fd6ddcde00b531cbf672b5d8e3fe')
 
 prepare() {
     cd "$pkgname-$pkgver-$pkgrel"
@@ -40,6 +40,18 @@ prepare() {
 }
 
 build() {
+    echo "=== BUILD ENVIRONMENT DEBUG ==="
+    echo "cargo: $(which cargo)"
+    cargo --version
+    echo "rustc: $(which rustc)"
+    rustc --version
+    echo "clang: $(which clang)"
+    clang --version | head -1
+    echo "PATH=$PATH"
+    echo "RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-unset}"
+    env | grep -i rust || true
+    echo "==============================="
+
     cd "$pkgname-$pkgver-$pkgrel"
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target

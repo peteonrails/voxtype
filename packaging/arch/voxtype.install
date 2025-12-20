@@ -56,9 +56,8 @@ post_upgrade() {
     _detect_gpu
 
     echo ""
-    echo "    New in 0.4.1-4:"
-    echo "      - Simplified binary naming (voxtype + voxtype-vulkan)"
-    echo "      - Native compilation for your CPU"
-    echo "      - Fixed build to correctly separate CPU and Vulkan binaries"
+    echo "    New in 0.4.1-5:"
+    echo "      - Added build environment debugging (temporary)"
+    echo "      - Investigating AUR build issues on some systems"
     echo ""
 }
