@@ -1,7 +1,7 @@
 # Maintainer: Peter Jackson <pete@peteonrails.com>
 pkgname=voxtype
 pkgver=0.4.1
-pkgrel=6
+pkgrel=7
 pkgdesc="Push-to-talk voice-to-text for Linux (optimized for Wayland, works on X11)"
 arch=('x86_64' 'aarch64')
 url="https://voxtype.io"
@@ -31,7 +31,7 @@ optdepends=(
 backup=('etc/voxtype/config.toml')
 install=voxtype.install
 source=("$pkgname-$pkgver.tar.gz::https://github.com/peteonrails/voxtype/archive/refs/tags/v$pkgver-$pkgrel.tar.gz")
-sha256sums=('9c454cb83655d6be1d13c5d69b787e3dffd78a4768e86d45268dc5ad37eedbb7')
+sha256sums=('7dc29d030b3c9ce40c1a50336c7f4d28f427b3b1b8b3154702d5b8049d37aaf2')
 
 prepare() {
     cd "$pkgname-$pkgver-$pkgrel"
@@ -47,8 +47,13 @@ build() {
     rustc --version
     echo "clang: $(which clang)"
     clang --version | head -1
+    echo "cmake: $(which cmake)"
+    cmake --version | head -1
     echo "PATH=$PATH"
     echo "RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-unset}"
+    echo "CFLAGS=$CFLAGS"
+    echo "CXXFLAGS=$CXXFLAGS"
+    echo "LDFLAGS=$LDFLAGS"
     env | grep -i rust || true
     echo "==============================="
 
@@ -56,9 +61,12 @@ build() {
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
 
-    # Clear RUSTFLAGS set by makepkg - they can interfere with whisper-rs static linking
+    # Clear flags set by makepkg - they can interfere with whisper-rs/whisper.cpp build
     unset RUSTFLAGS
     unset DEBUG_RUSTFLAGS
+    unset CFLAGS
+    unset CXXFLAGS
+    unset LDFLAGS
 
     # Build native CPU binary (optimized for the user's machine)
     cargo build --frozen --release
