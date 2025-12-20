@@ -25,6 +25,6 @@ pkgbase = voxtype
 	optdepends = vulkan-icd-loader: GPU acceleration via Vulkan (enable with: voxtype setup gpu --enable)
 	backup = etc/voxtype/config.toml
 	source = voxtype-0.4.1.tar.gz::https://github.com/peteonrails/voxtype/archive/refs/tags/v0.4.1-3.tar.gz
-	sha256sums = SKIP
+	sha256sums = e6c36116b1b3701baefe37786022b20e218fe32df26fc6f433a9febc43abfd2e
 
 pkgname = voxtype
