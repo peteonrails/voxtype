@@ -1,24 +1,9 @@
-_detect_cpu_and_link() {
-    # Detect CPU capabilities and symlink the appropriate voxtype binary
-    #
-    # Binary variants:
-    #   voxtype-avx2:   CPU - Works on most CPUs from 2013+ (Intel Haswell, AMD Zen)
-    #   voxtype-avx512: CPU - Optimized for newer CPUs (AMD Zen 4+, some Intel)
-    #   voxtype-vulkan: GPU - Vulkan acceleration (NVIDIA, AMD, Intel)
-
-    # Remove existing binary/symlink if present
+_setup_binary() {
+    # Create symlink to the native CPU binary
+    # The binary is built natively and optimized for the user's CPU
     rm -f /usr/bin/voxtype
-
-    # Detect AVX-512 support (Linux-specific, falls back to AVX2)
-    if [ -f /proc/cpuinfo ] && grep -q avx512f /proc/cpuinfo 2>/dev/null; then
-        VARIANT="avx512"
-        ln -sf /usr/lib/voxtype/voxtype-avx512 /usr/bin/voxtype
-    else
-        VARIANT="avx2"
-        ln -sf /usr/lib/voxtype/voxtype-avx2 /usr/bin/voxtype
-    fi
-
-    echo "    CPU backend: $VARIANT (using voxtype-$VARIANT)"
+    ln -sf /usr/lib/voxtype/voxtype-avx2 /usr/bin/voxtype
+    echo "    CPU backend: native (voxtype-avx2)"
 }
 
 _detect_gpu() {
@@ -54,7 +39,7 @@ post_install() {
     echo "==> Voxtype Post-installation Steps:"
     echo ""
 
-    _detect_cpu_and_link
+    _setup_binary
     _detect_gpu
 
     echo ""
@@ -77,14 +62,13 @@ post_upgrade() {
     echo "==> Voxtype upgraded"
     echo ""
 
-    _detect_cpu_and_link
+    _setup_binary
     _detect_gpu
 
     echo ""
-    echo "    New in 0.3.2:"
-    echo "      - Ship Vulkan GPU binary alongside CPU binaries"
-    echo "      - Add 'voxtype setup gpu' command to switch backends"
-    echo "      - Post-install detects GPU and recommends enabling Vulkan"
+    echo "    New in 0.4.1-2:"
+    echo "      - Simplified AUR build (native compilation)"
+    echo "      - Fixed build errors on various Rust/clang toolchains"
     echo ""
 }
 

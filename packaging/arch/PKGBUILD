@@ -1,7 +1,7 @@
 # Maintainer: Peter Jackson <pete@peteonrails.com>
 pkgname=voxtype
 pkgver=0.4.1
-pkgrel=1
+pkgrel=2
 pkgdesc="Push-to-talk voice-to-text for Linux (optimized for Wayland, works on X11)"
 arch=('x86_64' 'aarch64')
 url="https://voxtype.io"
@@ -17,9 +17,7 @@ makedepends=(
     'clang'
     'cmake'
     'pkgconf'
-    # Uncomment for GPU acceleration:
-    # 'vulkan-headers'  # for Vulkan (AMD, NVIDIA, Intel)
-    # 'cuda'            # for CUDA (NVIDIA only)
+    'vulkan-headers'
 )
 optdepends=(
     'wtype: keyboard simulation for Wayland (recommended, best CJK support)'
@@ -29,12 +27,11 @@ optdepends=(
     'pipewire: audio capture (recommended)'
     'pulseaudio: audio capture (alternative)'
     'vulkan-icd-loader: GPU acceleration via Vulkan (enable with: voxtype setup gpu --enable)'
-    'cuda: GPU acceleration for NVIDIA (requires rebuild with gpu-cuda feature)'
 )
 backup=('etc/voxtype/config.toml')
 install=voxtype.install
 source=("$pkgname-$pkgver.tar.gz::https://github.com/peteonrails/voxtype/archive/refs/tags/v$pkgver-$pkgrel.tar.gz")
-sha256sums=('0f07b5724c1d3a6494865a43b70fac7843cd035fac8d168edc72ffc78cbc0650')
+sha256sums=('SKIP')
 
 prepare() {
     cd "$pkgname-$pkgver-$pkgrel"
@@ -47,34 +44,12 @@ build() {
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
 
-    # GPU Acceleration (optional) - uncomment ONE of these lines:
-    # local _features="--features gpu-vulkan"   # AMD, NVIDIA, Intel (recommended for AMD)
-    # local _features="--features gpu-cuda"     # NVIDIA only
-    # local _features="--features gpu-hipblas"  # AMD ROCm
-
-    # Build AVX2 baseline binary (compatible with most CPUs from 2013+)
-    # Disable AVX-512, GFNI, and AVX-VNNI in both Rust code and whisper.cpp to prevent SIGILL on older CPUs
-    # -C target-feature disables these in rustc/LLVM (affects Rust std lib and deps)
-    # CMAKE_*_FLAGS disable them in whisper.cpp
-    # GGML_AVX512=OFF disables whisper.cpp's auto-detection of AVX-512 on build machine
-    # GGML_AVX_VNNI=OFF disables AVX-VNNI (vpdpbusd) which requires Zen 4+/Alder Lake+
-    # GFNI (Galois Field New Instructions) is separate from AVX-512 and unsupported on Zen 3
-    RUSTFLAGS="-C target-cpu=haswell -C target-feature=-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl,-gfni" \
-    GGML_NATIVE=OFF GGML_AVX512=OFF GGML_AVX_VNNI=OFF GGML_AVX512_VNNI=OFF \
-    CMAKE_C_FLAGS="-mno-avx512f -mno-gfni -mno-avxvnni" CMAKE_CXX_FLAGS="-mno-avx512f -mno-gfni -mno-avxvnni" \
-    cargo build --frozen --release ${_features:-}
+    # Build native CPU binary (optimized for the user's machine)
+    cargo build --frozen --release
     cp target/release/voxtype target/release/voxtype-avx2
-
-    # Build AVX-512 optimized binary (for Zen 4+, some Intel)
-    cargo clean
-    cargo build --frozen --release ${_features:-}
-    cp target/release/voxtype target/release/voxtype-avx512
 
     # Build Vulkan GPU binary (for GPU acceleration)
     cargo clean
-    RUSTFLAGS="-C target-cpu=haswell -C target-feature=-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl,-gfni" \
-    GGML_NATIVE=OFF GGML_AVX512=OFF GGML_AVX_VNNI=OFF GGML_AVX512_VNNI=OFF \
-    CMAKE_C_FLAGS="-mno-avx512f -mno-gfni -mno-avxvnni" CMAKE_CXX_FLAGS="-mno-avx512f -mno-gfni -mno-avxvnni" \
     cargo build --frozen --release --features gpu-vulkan
     cp target/release/voxtype target/release/voxtype-vulkan
 }
@@ -82,20 +57,15 @@ build() {
 check() {
     cd "$pkgname-$pkgver-$pkgrel"
     export RUSTUP_TOOLCHAIN=stable
-    # Only test with AVX2 build to avoid SIGILL in build environments
-    RUSTFLAGS="-C target-cpu=haswell -C target-feature=-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl,-gfni" \
-    GGML_NATIVE=OFF GGML_AVX512=OFF GGML_AVX_VNNI=OFF GGML_AVX512_VNNI=OFF \
-    CMAKE_C_FLAGS="-mno-avx512f -mno-gfni -mno-avxvnni" CMAKE_CXX_FLAGS="-mno-avx512f -mno-gfni -mno-avxvnni" \
     cargo test --frozen
 }
 
 package() {
     cd "$pkgname-$pkgver-$pkgrel"
 
-    # Install tiered binaries to /usr/lib/voxtype/
+    # Install binaries to /usr/lib/voxtype/
     # The install script creates a symlink at /usr/bin/voxtype
     install -Dm755 "target/release/voxtype-avx2" "$pkgdir/usr/lib/voxtype/voxtype-avx2"
-    install -Dm755 "target/release/voxtype-avx512" "$pkgdir/usr/lib/voxtype/voxtype-avx512"
     install -Dm755 "target/release/voxtype-vulkan" "$pkgdir/usr/lib/voxtype/voxtype-vulkan"
 
     # Install default configuration
