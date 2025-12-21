@@ -1,0 +1,85 @@
+# Build environment for voxtype Vulkan binary
+# Uses Ubuntu 22.04 to ensure no AVX-512/GFNI instructions leak from toolchain
+#
+# NOTE: This build can take 30+ minutes due to Kompute shader compilation.
+# If it hangs, the issue is likely glslang/shaderc compatibility.
+#
+# Usage:
+#   docker build -f Dockerfile.vulkan -t voxtype-vulkan-builder .
+#   docker run --rm -v $(pwd)/releases:/output voxtype-vulkan-builder
+#
+FROM ubuntu:24.04
+
+ARG VERSION=0.4.1
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Make VERSION available at runtime
+ENV VERSION=${VERSION}
+
+# Install build dependencies including Vulkan SDK (24.04 has glslc in repos)
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    clang \
+    cmake \
+    pkg-config \
+    libasound2-dev \
+    git \
+    binutils \
+    libvulkan-dev \
+    vulkan-tools \
+    glslang-tools \
+    spirv-tools \
+    libshaderc-dev \
+    glslc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust via rustup
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Set working directory
+WORKDIR /build
+
+# Copy source code
+COPY . .
+
+# Force single-threaded builds to prevent cmake deadlocks
+ENV CARGO_BUILD_JOBS=1
+ENV CMAKE_BUILD_PARALLEL_LEVEL=1
+ENV MAKEFLAGS="-j1"
+
+# Build flags - use native CPU (i9-9900K has no AVX-512, so no leakage possible)
+# Disable LTO to prevent linking hangs
+ENV RUSTFLAGS="-C target-cpu=native -C lto=off -C codegen-units=8"
+# whisper.cpp/ggml flags - let it detect native CPU features
+ENV GGML_NATIVE=ON
+
+# Build Vulkan binary (verbose to show progress)
+# Override Cargo.toml's LTO settings to prevent linking hangs
+RUN cargo build --release --features gpu-vulkan \
+    --config 'profile.release.lto=false' \
+    --config 'profile.release.codegen-units=8' \
+    -vv 2>&1 | tee /tmp/build.log \
+    && cp target/release/voxtype /tmp/voxtype-vulkan
+
+# Verify no AVX-512 or GFNI instructions
+RUN echo "=== Verifying Vulkan binary ===" \
+    && zmm_count=$(objdump -d /tmp/voxtype-vulkan | grep -c zmm || true) \
+    && avx512_count=$(objdump -d /tmp/voxtype-vulkan | grep -cE 'vpternlog|vpermt2|vpblendm' || true) \
+    && broadcast_count=$(objdump -d /tmp/voxtype-vulkan | grep -c '{1to' || true) \
+    && gfni_count=$(objdump -d /tmp/voxtype-vulkan | grep -cE 'vgf2p8|gf2p8' || true) \
+    && echo "  zmm registers: $zmm_count" \
+    && echo "  AVX-512 EVEX: $avx512_count" \
+    && echo "  Broadcast: $broadcast_count" \
+    && echo "  GFNI: $gfni_count" \
+    && if [ "${zmm_count:-0}" -gt 0 ] || [ "${avx512_count:-0}" -gt 0 ] || [ "${broadcast_count:-0}" -gt 0 ] || [ "${gfni_count:-0}" -gt 0 ]; then \
+         echo "ERROR: Vulkan binary contains forbidden instructions!" && exit 1; \
+       fi \
+    && echo "✓ Vulkan binary is clean"
+
+# Output stage - copy binary to /output volume
+CMD mkdir -p /output \
+    && cp /tmp/voxtype-vulkan /output/voxtype-${VERSION}-linux-x86_64-vulkan \
+    && echo "Binary copied to /output:" \
+    && ls -la /output/voxtype-*-vulkan

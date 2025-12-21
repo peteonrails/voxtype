@@ -17,7 +17,7 @@ Rules-Requires-Root: no
 
 Package: voxtype
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}
+Depends: ${shlibs:Depends}, ${misc:Depends}, curl
 Recommends: wtype, wl-clipboard
 Suggests: ydotool, libnotify-bin, pipewire
 Description: Push-to-talk voice-to-text for Linux

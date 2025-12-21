@@ -1,0 +1,9 @@
+// Voxtype Waybar module - add to your config.jsonc
+// Add "custom/voxtype" to your modules-right array
+
+"custom/voxtype": {
+    "exec": "voxtype status --follow --format json --extended",
+    "return-type": "json",
+    "format": "{}",
+    "tooltip": true
+}

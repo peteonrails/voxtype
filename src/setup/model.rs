@@ -4,6 +4,7 @@ use super::{print_failure, print_info, print_success};
 use crate::config::Config;
 use crate::transcribe::whisper::{get_model_filename, get_model_url};
 use std::io::{self, Write};
+use std::process::Command;
 
 /// Model information for display
 struct ModelInfo {
@@ -126,7 +127,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     }
 
     // Download the model
-    download_model(model.name).await?;
+    download_model(model.name)?;
 
     // Offer to update config
     println!("\nWould you like to set this as your default model?");
@@ -159,8 +160,8 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Download a specific model
-pub async fn download_model(model_name: &str) -> anyhow::Result<()> {
+/// Download a specific model using curl
+pub fn download_model(model_name: &str) -> anyhow::Result<()> {
     let models_dir = Config::models_dir();
     let filename = get_model_filename(model_name);
     let model_path = models_dir.join(&filename);
@@ -173,30 +174,37 @@ pub async fn download_model(model_name: &str) -> anyhow::Result<()> {
     println!("\nDownloading {}...", model_name);
     println!("URL: {}", url);
 
-    let response = reqwest::get(&url).await?;
+    // Use curl for downloading - it handles progress display and redirects
+    let status = Command::new("curl")
+        .args([
+            "-L",              // Follow redirects
+            "--progress-bar", // Show progress bar
+            "-o",
+            model_path.to_str().unwrap_or("model.bin"),
+            &url,
+        ])
+        .status();
 
-    if !response.status().is_success() {
-        print_failure(&format!(
-            "Download failed: HTTP {}",
-            response.status()
-        ));
-        return Ok(());
+    match status {
+        Ok(exit_status) if exit_status.success() => {
+            print_success(&format!("Saved to {:?}", model_path));
+            Ok(())
+        }
+        Ok(exit_status) => {
+            print_failure(&format!(
+                "Download failed: curl exited with code {}",
+                exit_status.code().unwrap_or(-1)
+            ));
+            // Clean up partial download
+            let _ = std::fs::remove_file(&model_path);
+            anyhow::bail!("Download failed")
+        }
+        Err(e) => {
+            print_failure(&format!("Failed to run curl: {}", e));
+            print_info("Please ensure curl is installed (e.g., 'sudo pacman -S curl')");
+            anyhow::bail!("curl not available: {}", e)
+        }
     }
-
-    let total_size = response.content_length().unwrap_or(0);
-    println!("Size: {:.0} MB", total_size as f64 / 1024.0 / 1024.0);
-
-    // Download with progress (simple version)
-    print!("Downloading... ");
-    io::stdout().flush()?;
-
-    let bytes = response.bytes().await?;
-    std::fs::write(&model_path, &bytes)?;
-
-    println!("done!");
-    print_success(&format!("Saved to {:?}", model_path));
-
-    Ok(())
 }
 
 /// List installed models

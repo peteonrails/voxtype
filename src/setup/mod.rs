@@ -427,18 +427,7 @@ pub async fn run_basic_setup(config: &Config, download: bool) -> anyhow::Result<
 
         if download {
             println!("\n  Downloading model...");
-            std::fs::create_dir_all(&models_dir)?;
-
-            let url = crate::transcribe::whisper::get_model_url(model_name);
-            println!("  URL: {}", url);
-
-            let response = reqwest::get(&url).await?;
-            let total_size = response.content_length().unwrap_or(0);
-            println!("  Size: {:.0} MB", total_size as f64 / 1024.0 / 1024.0);
-
-            let bytes = response.bytes().await?;
-            std::fs::write(&model_path, &bytes)?;
-            print_success(&format!("Downloaded to {:?}", model_path));
+            model::download_model(model_name)?;
         } else {
             let url = crate::transcribe::whisper::get_model_url(model_name);
             println!("\n  To download automatically, run: voxtype setup --download");

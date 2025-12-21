@@ -1,0 +1,54 @@
+# Build environment for voxtype AVX-512 binary
+# MUST be run on a machine with AVX-512 support (Zen 4+, some Intel)
+#
+# Usage:
+#   docker build -f Dockerfile.avx512 -t voxtype-avx512-builder .
+#   docker run --rm -v $(pwd)/releases:/output voxtype-avx512-builder
+#
+FROM ubuntu:22.04
+
+ARG VERSION=0.4.1
+ARG DEBIAN_FRONTEND=noninteractive
+
+ENV VERSION=${VERSION}
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    clang \
+    cmake \
+    pkg-config \
+    libasound2-dev \
+    git \
+    binutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust via rustup
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /build
+
+COPY . .
+
+# Build with native optimizations (will use AVX-512 if available on host)
+ENV RUSTFLAGS="-C target-cpu=native"
+
+RUN cargo build --release \
+    && cp target/release/voxtype /tmp/voxtype-avx512
+
+# Verify AVX-512 instructions ARE present
+RUN echo "=== Verifying AVX-512 binary ===" \
+    && avx512_count=$(objdump -d /tmp/voxtype-avx512 | grep -cE 'zmm|vpternlog|vpermt2|\{1to' || echo 0) \
+    && echo "  AVX-512 instructions: $avx512_count" \
+    && if [ "$avx512_count" -eq 0 ]; then \
+         echo "WARNING: No AVX-512 instructions found. Is the host AVX-512 capable?"; \
+       else \
+         echo "✓ AVX-512 binary contains $avx512_count AVX-512 instructions"; \
+       fi
+
+CMD mkdir -p /output \
+    && cp /tmp/voxtype-avx512 /output/voxtype-${VERSION}-linux-x86_64-avx512 \
+    && echo "Binary copied to /output:" \
+    && ls -la /output/voxtype-*-avx512

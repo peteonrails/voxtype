@@ -1,3 +1,14 @@
+_detect_cpu() {
+    # Detect CPU capabilities and symlink appropriate binary
+    if grep -q avx512f /proc/cpuinfo 2>/dev/null; then
+        ln -sf /usr/lib/voxtype/voxtype-avx512 /usr/bin/voxtype
+        echo "avx512"
+    else
+        ln -sf /usr/lib/voxtype/voxtype-avx2 /usr/bin/voxtype
+        echo "avx2"
+    fi
+}
+
 _detect_gpu() {
     # Detect GPU for Vulkan acceleration recommendation
     GPU_DETECTED=""
@@ -31,6 +42,9 @@ post_install() {
     echo "==> Voxtype Post-installation Steps:"
     echo ""
 
+    CPU_VARIANT=$(_detect_cpu)
+    echo "    CPU backend: $CPU_VARIANT (using voxtype-$CPU_VARIANT)"
+
     _detect_gpu
 
     echo ""
@@ -53,6 +67,9 @@ post_upgrade() {
     echo "==> Voxtype upgraded"
     echo ""
 
+    CPU_VARIANT=$(_detect_cpu)
+    echo "    CPU backend: $CPU_VARIANT (using voxtype-$CPU_VARIANT)"
+
     _detect_gpu
 
     echo ""
@@ -60,4 +77,8 @@ post_upgrade() {
     echo "      - Clean binaries: no AVX-512/GFNI instruction contamination"
     echo "      - Fixes SIGILL crashes on Zen 3 and older CPUs"
     echo ""
+}
+
+post_remove() {
+    rm -f /usr/bin/voxtype
 }

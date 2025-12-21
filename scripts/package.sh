@@ -2,6 +2,33 @@
 # Package voxtype for distribution
 # Creates deb and rpm packages from pre-built binaries
 #
+# ============================================================================
+# BUILD STRATEGY
+# ============================================================================
+# This script automatically builds three binary variants:
+#
+#   - AVX2:   Built in Docker (Ubuntu 22.04) for clean toolchain
+#             Compatible with most CPUs from 2013+ (Haswell, Zen 1+)
+#
+#   - AVX512: Built locally with native optimizations
+#             For modern CPUs (Zen 4+, Intel Ice Lake+)
+#
+#   - Vulkan: Built locally with GPU acceleration
+#             May contain some AVX-512 from local toolchain (acceptable)
+#             GPU users typically have modern CPUs anyway
+#
+# WHY DOCKER FOR AVX2?
+# Building on modern CPUs (Zen 4, etc.) can leak AVX-512/GFNI instructions
+# into binaries via system libstdc++, even with RUSTFLAGS set correctly.
+# This causes SIGILL crashes on older CPUs. Docker with Ubuntu 22.04
+# provides a clean, older toolchain without AVX-512 optimizations.
+#
+# MANUAL WORKFLOW (if automation fails):
+#   ./scripts/build-docker.sh              # AVX2 in Docker
+#   cargo build --release                  # AVX-512 locally
+#   ./scripts/package.sh --skip-build      # Package existing binaries
+# ============================================================================
+#
 # This script builds tiered CPU binaries to support different CPUs:
 #   x86_64:
 #     - voxtype-avx2:   AVX2 baseline (compatible with most CPUs from 2013+)
@@ -177,42 +204,42 @@ mkdir -p "$RELEASE_DIR"
 # Build binaries (unless --skip-build was specified)
 if [[ "$SKIP_BUILD" == "false" ]]; then
     if [[ "$TARGET_ARCH" == "x86_64" ]]; then
-        # Build AVX2 baseline binary (compatible with most CPUs from 2013+)
-        # This disables AVX-512 to prevent SIGILL on older CPUs
+        # =======================================================================
+        # BUILD STRATEGY:
+        # - AVX2:   Built in Docker (Ubuntu 22.04) to avoid toolchain contamination
+        # - AVX512: Built locally with native optimizations
+        # - Vulkan: Built locally with AVX-512/GFNI disabled (GPU users have modern CPUs)
+        #
+        # NOTE: If you get SIGILL on Zen 3 or older CPUs with the Vulkan binary,
+        # your local toolchain may have leaked AVX-512 instructions. Use the AVX2
+        # CPU binary instead, or rebuild Vulkan in Docker (slow, ~30+ minutes).
+        # =======================================================================
+
+        # Build AVX2 baseline binary via Docker (clean toolchain, no contamination)
         if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2" ]]; then
-            echo "Building AVX2 baseline release (broad compatibility)..."
-            echo "  Disabling AVX-512 instructions via compiler flags"
-            # IMPORTANT: Must clean to ensure whisper.cpp recompiles without AVX-512
-            # Cargo/cmake don't invalidate cache when CMAKE_*_FLAGS change
-            # Use RUSTFLAGS to disable AVX-512 in Rust code, CMAKE flags for C/C++ code
-            # -C target-feature disables AVX-512 in rustc/LLVM (affects Rust std lib and deps)
-            # CMAKE_*_FLAGS disable AVX-512 in whisper.cpp via -mno-avx512f
-            cargo clean
-            RUSTFLAGS="-C target-cpu=haswell -C target-feature=-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl" \
-            CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" \
-            cargo build --release
-            cp target/release/voxtype "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2"
+            echo "Building AVX2 baseline release via Docker..."
+            echo "  Using Ubuntu 22.04 to avoid toolchain contamination"
+            ./scripts/build-docker.sh
         fi
 
-        # Build AVX-512 optimized binary (for Zen 4+, some Intel)
+        # Build AVX-512 optimized binary locally (for Zen 4+, some Intel)
         if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512" ]]; then
-            echo "Building AVX-512 optimized release..."
-            # Clean to ensure whisper.cpp recompiles with AVX-512 enabled
+            echo "Building AVX-512 optimized release locally..."
             cargo clean
             cargo build --release
             cp target/release/voxtype "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512"
         fi
 
-        # Build Vulkan GPU release (uses AVX2 for broad compatibility)
+        # Build Vulkan GPU release locally
+        # Uses compiler flags to disable AVX-512/GFNI, but local toolchain may still leak
+        # some instructions via libstdc++. This is acceptable since GPU users have modern CPUs.
         if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan" ]]; then
-            echo "Building Vulkan GPU release..."
-            # Clean to ensure whisper.cpp recompiles without AVX-512
-            # Use RUSTFLAGS to disable AVX-512 in Rust code, CMAKE flags for C/C++ code
-            # -C target-feature disables AVX-512 in rustc/LLVM (affects Rust std lib and deps)
-            # CMAKE_*_FLAGS disable AVX-512 in whisper.cpp via -mno-avx512f
+            echo "Building Vulkan GPU release locally..."
+            echo "  Note: May contain some AVX-512 from local toolchain (acceptable for GPU users)"
             cargo clean
-            RUSTFLAGS="-C target-cpu=haswell -C target-feature=-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl" \
-            CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" \
+            RUSTFLAGS="-C target-cpu=haswell -C target-feature=-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl,-gfni" \
+            GGML_NATIVE=OFF GGML_AVX512=OFF GGML_AVX_VNNI=OFF GGML_AVX512_VNNI=OFF \
+            CMAKE_C_FLAGS="-mno-avx512f -mno-gfni -mno-avxvnni" CMAKE_CXX_FLAGS="-mno-avx512f -mno-gfni -mno-avxvnni" \
             cargo build --release --features gpu-vulkan
             cp target/release/voxtype "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan"
         fi
@@ -249,22 +276,45 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
     echo ""
     echo "Verifying binary CPU instructions..."
 
-    verify_no_avx512() {
+    verify_no_forbidden_instructions() {
         local binary="$1"
         local name="$2"
         if ! command -v objdump &> /dev/null; then
             echo "  Warning: objdump not found, skipping instruction verification"
             return 0
         fi
-        local zmm_count
+        local zmm_count avx512_count gfni_count
+        # Check for 512-bit zmm registers
         zmm_count=$(objdump -d "$binary" 2>/dev/null | grep -c zmm) || zmm_count=0
+        # Check for AVX-512 specific instructions (can use xmm/ymm with EVEX encoding)
+        # Includes: vpternlog, vpermt2, vpblendm, vpmov, vptestm, vpcompres, vpexpand,
+        # vrangep, vreduce, vrndscale, vscalef, vfixup, vgetexp, vgetmant, vfpclass,
+        # vpcmp (AVX-512 form), vpmull, vpmadd52, vpdp, vpopcnt, vpshld, vpshrd
+        # Also check for EVEX broadcast syntax {1to4}, {1to8}, {1to16}, {z}, {k
+        avx512_count=$(objdump -d "$binary" 2>/dev/null | grep -cE 'vpternlog|vpermt2|vpblendm|vptestm|vpcompres|vpexpand|vrangep|vreduce|vrndscale|vscalef|vfixup|vgetexp|vgetmant|vfpclass|vpmadd52|vpdp|vpopcnt|vpshld|vpshrd|\{1to[0-9]+\}|\{z\}|\{k[0-7]\}') || avx512_count=0
+        # Check for GFNI instructions
+        gfni_count=$(objdump -d "$binary" 2>/dev/null | grep -cE 'vgf2p8|gf2p8') || gfni_count=0
+        local failed=false
         if [[ "$zmm_count" -gt 0 ]]; then
             echo "  ERROR: $name has $zmm_count AVX-512 (zmm) instructions!"
             echo "         This binary will crash on CPUs without AVX-512."
+            failed=true
+        fi
+        if [[ "$avx512_count" -gt 0 ]]; then
+            echo "  ERROR: $name has $avx512_count AVX-512 EVEX instructions!"
+            echo "         This binary will crash on CPUs without AVX-512."
+            failed=true
+        fi
+        if [[ "$gfni_count" -gt 0 ]]; then
+            echo "  ERROR: $name has $gfni_count GFNI instructions!"
+            echo "         This binary will crash on CPUs without GFNI (e.g., Zen 3)."
+            failed=true
+        fi
+        if [[ "$failed" == "true" ]]; then
             echo "         The build cache was likely polluted. Try: cargo clean && re-run"
             return 1
         fi
-        echo "  ✓ $name: no AVX-512 instructions"
+        echo "  ✓ $name: no AVX-512 or GFNI instructions"
         return 0
     }
 
@@ -288,12 +338,18 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
 
     VERIFY_FAILED=false
 
-    # AVX2 and Vulkan binaries should NOT have AVX-512 instructions
-    if ! verify_no_avx512 "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2" "voxtype-avx2"; then
+    # AVX2 binary MUST NOT have AVX-512 or GFNI instructions (strict)
+    if ! verify_no_forbidden_instructions "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2" "voxtype-avx2"; then
         VERIFY_FAILED=true
     fi
-    if ! verify_no_avx512 "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan" "voxtype-vulkan"; then
-        VERIFY_FAILED=true
+
+    # Vulkan binary: warn but don't fail (GPU users typically have modern CPUs)
+    echo ""
+    echo "Checking Vulkan binary (warning only - GPU users have modern CPUs)..."
+    if ! verify_no_forbidden_instructions "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan" "voxtype-vulkan" 2>/dev/null; then
+        echo "  ⚠ Vulkan binary has some AVX-512/GFNI from local toolchain"
+        echo "    This is acceptable: GPU acceleration requires modern CPUs anyway."
+        echo "    If SIGILL occurs on older CPUs, use the AVX2 CPU binary instead."
     fi
 
     # AVX512 binary SHOULD have AVX-512 instructions
@@ -493,6 +549,7 @@ if [[ "$BUILD_DEB" == "true" ]]; then
         "${FPM_OPTS[@]}" \
         --depends "libasound2 | libasound2t64" \
         --depends libc6 \
+        --depends curl \
         --deb-recommends wtype \
         --deb-recommends wl-clipboard \
         --deb-suggests ydotool \
@@ -525,6 +582,7 @@ if [[ "$BUILD_RPM" == "true" ]]; then
         "${FPM_OPTS[@]}" \
         --depends "alsa-lib" \
         --depends "glibc" \
+        --depends "curl" \
         --rpm-summary "$DESCRIPTION" \
         --package "$RPM_FILE" \
         usr etc

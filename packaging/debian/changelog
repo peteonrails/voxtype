@@ -1,3 +1,20 @@
+voxtype (0.4.1-1) unstable; urgency=medium
+
+  * Replace reqwest/rustls with curl for model downloads
+  * Fixes ring crate LTO linking errors on Arch Linux (Issue #10)
+  * Add curl as runtime dependency
+
+ -- Peter Jackson <pete@peteonrails.com>  Fri, 20 Dec 2025 12:00:00 +0000
+
+voxtype (0.4.0-2) unstable; urgency=high
+
+  * Fix SIGILL crash on Zen 3 CPUs caused by GFNI instructions (Issue #4)
+  * GFNI (Galois Field New Instructions) is separate from AVX-512
+  * Add -gfni to RUSTFLAGS and -mno-gfni to CMAKE flags
+  * Extend binary verification to detect both AVX-512 and GFNI instructions
+
+ -- Peter Jackson <pete@peteonrails.com>  Wed, 18 Dec 2025 23:00:00 +0000
+
 voxtype (0.4.0-1) unstable; urgency=medium
 
   * Add compositor keybinding support via 'voxtype record' command

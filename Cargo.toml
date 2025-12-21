@@ -1,6 +1,6 @@
 [package]
 name = "voxtype"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 authors = ["Peter Jackson", "Jean-Paul van Tillo", "Máté Rémiás"]
 description = "Push-to-talk voice-to-text for Wayland"
@@ -51,8 +51,6 @@ rodio = { version = "0.19", default-features = false, features = ["wav"] }
 # Whisper speech-to-text
 whisper-rs = "0.15.1"
 
-# HTTP client (for model download in setup command)
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 # CPU count for thread detection
 num_cpus = "1.16"

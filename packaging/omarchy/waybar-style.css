@@ -1,0 +1,20 @@
+/* Voxtype Waybar styling - add to your style.css */
+
+#custom-voxtype {
+    padding: 0 8px;
+    font-size: 14px;
+}
+
+#custom-voxtype.recording {
+    color: #ff5555;
+    animation: voxtype-pulse 1s infinite;
+}
+
+#custom-voxtype.transcribing {
+    color: #f1fa8c;
+}
+
+@keyframes voxtype-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}

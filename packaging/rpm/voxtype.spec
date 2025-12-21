@@ -1,5 +1,5 @@
 Name:           voxtype
-Version:        0.4.0
+Version:        0.4.1
 Release:        1%{?dist}
 Summary:        Push-to-talk voice-to-text for Linux
 
@@ -14,6 +14,7 @@ BuildRequires:  alsa-lib-devel
 BuildRequires:  systemd-rpm-macros
 BuildRequires:  cmake
 
+Requires:       curl
 Recommends:     wtype
 Recommends:     wl-clipboard
 Suggests:       ydotool
@@ -49,11 +50,14 @@ GPU acceleration can be enabled with: voxtype setup gpu --enable
 export CARGO_HOME=%{_builddir}/cargo
 
 # Build AVX2 baseline binary (compatible with most CPUs from 2013+)
-# Disable AVX-512 in both Rust code and whisper.cpp to prevent SIGILL on older CPUs
-# -C target-feature disables AVX-512 in rustc/LLVM (affects Rust std lib and deps)
-# CMAKE_*_FLAGS disable AVX-512 in whisper.cpp via -mno-avx512f
-RUSTFLAGS="-C target-cpu=haswell -C target-feature=-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl" \
-CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" \
+# Disable AVX-512 and GFNI in both Rust code and whisper.cpp to prevent SIGILL on older CPUs
+# -C target-feature disables these in rustc/LLVM (affects Rust std lib and deps)
+# CMAKE_*_FLAGS disable them in whisper.cpp
+# GGML_AVX512=OFF disables whisper.cpp's auto-detection of AVX-512 on build machine
+# GFNI (Galois Field New Instructions) is separate from AVX-512 and unsupported on Zen 3
+RUSTFLAGS="-C target-cpu=haswell -C target-feature=-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl,-gfni" \
+GGML_NATIVE=OFF GGML_AVX512=OFF \
+CMAKE_C_FLAGS="-mno-avx512f -mno-gfni" CMAKE_CXX_FLAGS="-mno-avx512f -mno-gfni" \
 cargo build --release --locked
 cp target/release/voxtype target/release/voxtype-avx2
 
@@ -64,8 +68,9 @@ cp target/release/voxtype target/release/voxtype-avx512
 
 # Build Vulkan GPU binary (for GPU acceleration)
 cargo clean
-RUSTFLAGS="-C target-cpu=haswell -C target-feature=-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl" \
-CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" \
+RUSTFLAGS="-C target-cpu=haswell -C target-feature=-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl,-gfni" \
+GGML_NATIVE=OFF GGML_AVX512=OFF \
+CMAKE_C_FLAGS="-mno-avx512f -mno-gfni" CMAKE_CXX_FLAGS="-mno-avx512f -mno-gfni" \
 cargo build --release --locked --features gpu-vulkan
 cp target/release/voxtype target/release/voxtype-vulkan
 
@@ -100,8 +105,9 @@ install -D -m 644 packaging/completions/voxtype.fish \
 %check
 export CARGO_HOME=%{_builddir}/cargo
 # Only test with AVX2 build to avoid SIGILL in build environments
-RUSTFLAGS="-C target-cpu=haswell -C target-feature=-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl" \
-CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" \
+RUSTFLAGS="-C target-cpu=haswell -C target-feature=-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl,-gfni" \
+GGML_NATIVE=OFF GGML_AVX512=OFF \
+CMAKE_C_FLAGS="-mno-avx512f -mno-gfni" CMAKE_CXX_FLAGS="-mno-avx512f -mno-gfni" \
 cargo test --release --locked
 
 %post
@@ -194,6 +200,17 @@ rm -f %{_bindir}/voxtype
 %{_datadir}/fish/vendor_completions.d/voxtype.fish
 
 %changelog
+* Fri Dec 20 2025 Peter Jackson <pete@peteonrails.com> - 0.4.1-1
+- Replace reqwest/rustls with curl for model downloads
+- Fixes ring crate LTO linking errors on Arch Linux (Issue #10)
+- Add curl as runtime dependency
+
+* Wed Dec 18 2025 Peter Jackson <pete@peteonrails.com> - 0.4.0-2
+- Fix SIGILL crash on Zen 3 CPUs caused by GFNI instructions (Issue #4)
+- GFNI (Galois Field New Instructions) is separate from AVX-512
+- Add -gfni to RUSTFLAGS and -mno-gfni to CMAKE flags
+- Extend binary verification to detect both AVX-512 and GFNI instructions
+
 * Wed Dec 18 2025 Peter Jackson <pete@peteonrails.com> - 0.4.0-1
 - Add compositor keybinding support via 'voxtype record' command
 - Add hotkey.enabled config option to disable built-in evdev hotkey

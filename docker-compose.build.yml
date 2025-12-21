@@ -1,0 +1,61 @@
+version: '3.8'
+
+# CI build configuration for TrueNAS SCALE
+#
+# Builds voxtype binaries on a machine WITHOUT AVX-512 to ensure compatibility
+# with older CPUs (Zen 3, Haswell, etc.)
+#
+# Usage:
+#   docker compose -f docker-compose.build.yml build
+#   docker compose -f docker-compose.build.yml up
+#
+# Or build specific targets:
+#   docker compose -f docker-compose.build.yml up avx2
+#   docker compose -f docker-compose.build.yml up vulkan
+#   docker compose -f docker-compose.build.yml up avx512
+
+services:
+  avx2:
+    build:
+      context: .
+      dockerfile: Dockerfile.build
+      args:
+        VERSION: ${VERSION:-0.4.1}
+    volumes:
+      - ./releases/${VERSION:-0.4.1}:/output
+    environment:
+      - VERSION=${VERSION:-0.4.1}
+
+  vulkan:
+    build:
+      context: .
+      dockerfile: Dockerfile.vulkan
+      args:
+        VERSION: ${VERSION:-0.4.1}
+    volumes:
+      - ./releases/${VERSION:-0.4.1}:/output
+    environment:
+      - VERSION=${VERSION:-0.4.1}
+
+  avx512:
+    build:
+      context: .
+      dockerfile: Dockerfile.avx512
+      args:
+        VERSION: ${VERSION:-0.4.1}
+    volumes:
+      - ./releases/${VERSION:-0.4.1}:/output
+    environment:
+      - VERSION=${VERSION:-0.4.1}
+    profiles:
+      - avx512  # Only build if explicitly requested (requires AVX-512 capable host)
+
+  # All-in-one build (AVX2 + Vulkan)
+  all:
+    build:
+      context: .
+      dockerfile: Dockerfile.build
+    depends_on:
+      - avx2
+      - vulkan
+    command: echo "All builds complete"

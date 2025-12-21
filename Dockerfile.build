@@ -1,0 +1,77 @@
+# Build environment for voxtype AVX2 binary
+# Uses Ubuntu 22.04 to ensure no AVX-512/GFNI instructions leak from toolchain
+#
+# WHY: Modern distros (Arch, Fedora 40+) have libstdc++ compiled with AVX-512
+# optimizations that leak into binaries via inlined templates, causing SIGILL
+# on older CPUs (Zen 3, Haswell, etc.) even with RUSTFLAGS set correctly.
+#
+# NOTE: Only builds AVX2 binary. Vulkan build is skipped because:
+#   1. Kompute shader compilation hangs with Ubuntu 22.04's glslang
+#   2. Vulkan users have GPUs and typically modern CPUs
+#   3. The GPU-bound Vulkan binary is less affected by CPU instruction issues
+#
+# Usage:
+#   docker build -f Dockerfile.build -t voxtype-builder .
+#   docker run --rm -v $(pwd)/releases:/output voxtype-builder
+#
+FROM ubuntu:22.04
+
+ARG VERSION=0.4.1
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Make VERSION available at runtime (ARG only works during build)
+ENV VERSION=${VERSION}
+
+# Install build dependencies (no Vulkan - see header comment)
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    clang \
+    cmake \
+    pkg-config \
+    libasound2-dev \
+    git \
+    binutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust via rustup
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Set working directory
+WORKDIR /build
+
+# Copy source code
+COPY . .
+
+# Build flags to disable AVX-512, GFNI, and AVX-VNNI (for Zen 3 compatibility)
+ENV RUSTFLAGS="-C target-cpu=haswell -C target-feature=-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl,-gfni"
+ENV GGML_NATIVE=OFF
+ENV GGML_AVX512=OFF
+ENV GGML_AVX_VNNI=OFF
+ENV GGML_AVX512_VNNI=OFF
+ENV CMAKE_C_FLAGS="-mno-avx512f -mno-avx512vl -mno-avx512bw -mno-avx512dq -mno-avx512cd -mno-gfni -mno-avxvnni"
+ENV CMAKE_CXX_FLAGS="-mno-avx512f -mno-avx512vl -mno-avx512bw -mno-avx512dq -mno-avx512cd -mno-gfni -mno-avxvnni"
+
+# Build AVX2 binary
+RUN cargo build --release \
+    && cp target/release/voxtype /tmp/voxtype-avx2
+
+# Verify no AVX-512 or GFNI instructions
+RUN echo "=== Verifying AVX2 binary ===" \
+    && zmm_count=$(objdump -d /tmp/voxtype-avx2 | grep -c zmm || echo 0) \
+    && avx512_count=$(objdump -d /tmp/voxtype-avx2 | grep -cE 'vpternlog|vpermt2|vpblendm|\{1to[0-9]+\}' || echo 0) \
+    && gfni_count=$(objdump -d /tmp/voxtype-avx2 | grep -cE 'vgf2p8|gf2p8' || echo 0) \
+    && echo "  zmm registers: $zmm_count" \
+    && echo "  AVX-512 EVEX: $avx512_count" \
+    && echo "  GFNI: $gfni_count" \
+    && if [ "$zmm_count" -gt 0 ] || [ "$avx512_count" -gt 0 ] || [ "$gfni_count" -gt 0 ]; then \
+         echo "ERROR: AVX2 binary contains forbidden instructions!" && exit 1; \
+       fi \
+    && echo "✓ AVX2 binary is clean"
+
+# Output stage - copy binary to /output volume
+CMD mkdir -p /output \
+    && cp /tmp/voxtype-avx2 /output/voxtype-${VERSION}-linux-x86_64-avx2 \
+    && echo "Binary copied to /output:" \
+    && ls -la /output/voxtype-*
