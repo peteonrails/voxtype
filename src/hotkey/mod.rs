@@ -13,12 +13,12 @@ use crate::error::HotkeyError;
 use tokio::sync::mpsc;
 
 /// Events emitted by the hotkey listener
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HotkeyEvent {
     /// The hotkey was pressed
-    Pressed,
+    Pressed { language: Option<String> },
     /// The hotkey was released
-    Released,
+    Released { language: Option<String> },
 }
 
 /// Trait for hotkey detection implementations

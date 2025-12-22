@@ -37,6 +37,14 @@ modifiers = []
 # When disabled, use `voxtype record start/stop/toggle` to control recording
 # enabled = true
 
+# Language-specific modifier mappings
+# Maps modifier keys to language codes for transcription
+# Example: RIGHTSHIFT = "hu" (Hungarian), RIGHTCTRL = "en" (English)
+# When no language modifier is pressed, uses the default language from [whisper] section
+[hotkey.language_modifiers]
+# RIGHTSHIFT = "hu"
+# RIGHTCTRL = "en"
+
 [audio]
 # Audio input device ("default" uses system default)
 # List devices with: pactl list sources short
@@ -168,6 +176,11 @@ pub struct HotkeyConfig {
     /// When disabled, use `voxtype record start/stop/toggle` to control recording
     #[serde(default = "default_true")]
     pub enabled: bool,
+
+    /// Language-specific modifier mappings
+    /// Maps modifier keys to language codes for transcription
+    #[serde(default)]
+    pub language_modifiers: HashMap<String, String>,
 }
 
 /// Audio capture configuration
@@ -329,6 +342,7 @@ impl Default for Config {
                 modifiers: vec![],
                 mode: ActivationMode::default(),
                 enabled: true,
+                language_modifiers: HashMap::new(),
             },
             audio: AudioConfig {
                 device: "default".to_string(),

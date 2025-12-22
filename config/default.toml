@@ -13,6 +13,14 @@ key = "SCROLLLOCK"
 # Example: modifiers = ["LEFTCTRL", "LEFTALT"]
 modifiers = []
 
+# Language-specific modifier mappings
+# Maps modifier keys to language codes for transcription
+# Example: RIGHTSHIFT = "hu" (Hungarian), RIGHTCTRL = "en" (English)
+# When no language modifier is pressed, uses the default language from [whisper] section
+[hotkey.language_modifiers]
+# RIGHTSHIFT = "lang1"
+# RIGHTCTRL  = "lang2"
+
 [audio]
 # Audio input device ("default" uses system default)
 # List devices with: pactl list sources short

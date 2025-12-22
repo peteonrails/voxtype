@@ -170,6 +170,7 @@ impl Daemon {
         audio_capture: &mut Option<Box<dyn AudioCapture>>,
         transcriber: Option<Arc<Box<dyn crate::transcribe::Transcriber>>>,
         output_chain: &[Box<dyn output::TextOutput>],
+        _language: Option<String>,
     ) {
         let duration = state.recording_duration().unwrap_or_default();
         tracing::info!("Recording stopped ({:.1}s)", duration.as_secs_f32());
@@ -368,14 +369,18 @@ impl Daemon {
                 } => {
                     match (hotkey_event, activation_mode) {
                         // === PUSH-TO-TALK MODE ===
-                        (HotkeyEvent::Pressed, ActivationMode::PushToTalk) => {
+                        (HotkeyEvent::Pressed { language }, ActivationMode::PushToTalk) => {
                             tracing::debug!("Received HotkeyEvent::Pressed (push-to-talk), state.is_idle() = {}", state.is_idle());
                             if state.is_idle() {
                                 tracing::info!("Recording started");
 
                                 // Send notification if enabled
                                 if self.config.output.notification.on_recording_start {
-                                    send_notification("Push to Talk Active", "Recording...").await;
+                                    let notification_title = match language.as_ref() {
+                                        Some(lang) => format!("Push to Talk Active ({})", lang.to_uppercase()),
+                                        None => "Push to Talk Active".to_string(),
+                                    };
+                                    send_notification(&notification_title, "Recording...").await;
                                 }
 
                                 // Start model loading in background if on-demand loading is enabled
@@ -412,7 +417,7 @@ impl Daemon {
                             }
                         }
 
-                        (HotkeyEvent::Released, ActivationMode::PushToTalk) => {
+                        (HotkeyEvent::Released { language }, ActivationMode::PushToTalk) => {
                             tracing::debug!("Received HotkeyEvent::Released (push-to-talk), state.is_recording() = {}", state.is_recording());
                             if state.is_recording() {
                                 // Wait for model loading task if on-demand loading is enabled
@@ -449,17 +454,37 @@ impl Daemon {
                                     transcriber_preloaded.clone()
                                 };
 
+                                // Create language-specific transcriber if needed
+                                let transcriber = if let Some(lang) = language.as_ref() {
+                                    // Create a new transcriber with the specific language
+                                    let mut whisper_config = self.config.whisper.clone();
+                                    whisper_config.language = lang.clone();
+                                    match transcribe::create_transcriber(&whisper_config) {
+                                        Ok(t) => Some(Arc::new(t)),
+                                        Err(e) => {
+                                            tracing::error!("Failed to create language-specific transcriber: {}", e);
+                                            self.play_feedback(SoundEvent::Error);
+                                            state = State::Idle;
+                                            self.update_state("idle");
+                                            continue;
+                                        }
+                                    }
+                                } else {
+                                    transcriber
+                                };
+
                                 self.stop_and_transcribe(
                                     &mut state,
                                     &mut audio_capture,
                                     transcriber,
                                     &output_chain,
+                                    language,
                                 ).await;
                             }
                         }
 
                         // === TOGGLE MODE ===
-                        (HotkeyEvent::Pressed, ActivationMode::Toggle) => {
+                        (HotkeyEvent::Pressed { language }, ActivationMode::Toggle) => {
                             tracing::debug!("Received HotkeyEvent::Pressed (toggle), state.is_idle() = {}, state.is_recording() = {}",
                                 state.is_idle(), state.is_recording());
 
@@ -468,7 +493,11 @@ impl Daemon {
                                 tracing::info!("Recording started (toggle mode)");
 
                                 if self.config.output.notification.on_recording_start {
-                                    send_notification("Recording Started", "Press hotkey again to stop").await;
+                                    let notification_title = match language.as_ref() {
+                                        Some(lang) => format!("Recording Started ({})", lang.to_uppercase()),
+                                        None => "Recording Started".to_string(),
+                                    };
+                                    send_notification(&notification_title, "Press hotkey again to stop").await;
                                 }
 
                                 // Start model loading in background if on-demand loading is enabled
@@ -540,11 +569,12 @@ impl Daemon {
                                     &mut audio_capture,
                                     transcriber,
                                     &output_chain,
+                                    language,
                                 ).await;
                             }
                         }
 
-                        (HotkeyEvent::Released, ActivationMode::Toggle) => {
+                        (HotkeyEvent::Released { language: _ }, ActivationMode::Toggle) => {
                             // In toggle mode, we ignore key release events
                             tracing::trace!("Ignoring HotkeyEvent::Released in toggle mode");
                         }
@@ -652,6 +682,7 @@ impl Daemon {
                             &mut audio_capture,
                             transcriber,
                             &output_chain,
+                            None,
                         ).await;
                     }
                 }

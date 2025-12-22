@@ -25,6 +25,8 @@ pub struct EvdevListener {
     target_key: Key,
     /// Modifier keys that must be held
     modifier_keys: HashSet<Key>,
+    /// Language-specific modifier mappings (mapped to evdev Key)
+    language_modifiers: HashMap<Key, String>,
     /// Signal to stop the listener task
     stop_signal: Option<oneshot::Sender<()>>,
 }
@@ -45,9 +47,17 @@ impl EvdevListener {
             HotkeyError::DeviceAccess(format!("/dev/input: {}", e))
         })?;
 
+        // Convert language modifier keys (string) to evdev Key -> language map
+        let mut language_modifier_map: HashMap<Key, String> = HashMap::new();
+        for (k, v) in &config.language_modifiers {
+            let key = parse_key_name(k)?;
+            language_modifier_map.insert(key, v.clone());
+        }
+
         Ok(Self {
             target_key,
             modifier_keys,
+            language_modifiers: language_modifier_map,
             stop_signal: None,
         })
     }
@@ -62,10 +72,11 @@ impl HotkeyListener for EvdevListener {
 
         let target_key = self.target_key;
         let modifier_keys = self.modifier_keys.clone();
+        let language_modifiers = self.language_modifiers.clone();
 
         // Spawn the listener task
         tokio::task::spawn_blocking(move || {
-            if let Err(e) = evdev_listener_loop(target_key, modifier_keys, tx, stop_rx) {
+            if let Err(e) = evdev_listener_loop(target_key, modifier_keys, language_modifiers, tx, stop_rx) {
                 tracing::error!("Hotkey listener error: {}", e);
             }
         });
@@ -331,6 +342,7 @@ impl DeviceManager {
 fn evdev_listener_loop(
     target_key: Key,
     modifier_keys: HashSet<Key>,
+    language_modifiers: HashMap<Key, String>,
     tx: mpsc::Sender<HotkeyEvent>,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<(), HotkeyError> {
@@ -341,6 +353,8 @@ fn evdev_listener_loop(
 
     // Track if we're currently "pressed" (to handle repeat events)
     let mut is_pressed = false;
+    // Remember language detected when the hotkey was pressed so release can reuse it
+    let mut last_language: Option<String> = None;
 
     tracing::info!(
         "Listening for {:?} (with modifiers: {:?}) on {} device(s)",
@@ -390,40 +404,47 @@ fn evdev_listener_loop(
 
         // Poll all devices for events
         for (key, value) in manager.poll_events() {
-            // Track modifier state
-            if modifier_keys.contains(&key) {
+    
+            // Track modifier state (include language-specific modifiers)
+            let is_language_modifier = language_modifiers.contains_key(&key);
+    
+            if modifier_keys.contains(&key) || is_language_modifier {
                 match value {
-                    1 => {
-                        active_modifiers.insert(key);
-                    }
-                    0 => {
-                        active_modifiers.remove(&key);
-                    }
+                    1 => { active_modifiers.insert(key); }
+                    0 => { active_modifiers.remove(&key); }
                     _ => {}
                 }
             }
-
+    
             // Check target key
             if key == target_key {
-                let modifiers_satisfied = modifier_keys
+                let required_modifiers_satisfied = modifier_keys
                     .iter()
                     .all(|m| active_modifiers.contains(m));
-
-                if modifiers_satisfied {
+    
+    
+                if required_modifiers_satisfied {
                     match value {
                         1 if !is_pressed => {
                             // Key press (not repeat)
                             is_pressed = true;
-                            tracing::debug!("Hotkey pressed");
-                            if tx.blocking_send(HotkeyEvent::Pressed).is_err() {
+                            // determine and remember detected language for this press
+                            let detected = determine_language(&active_modifiers, &modifier_keys, &language_modifiers);
+                            last_language = detected.clone();
+                            tracing::info!("Hotkey pressed (start) language={:?}", detected);
+                            if tx.blocking_send(HotkeyEvent::Pressed { language: detected }).is_err() {
                                 return Ok(()); // Channel closed
                             }
                         }
                         0 if is_pressed => {
                             // Key release
                             is_pressed = false;
-                            tracing::debug!("Hotkey released");
-                            if tx.blocking_send(HotkeyEvent::Released).is_err() {
+                            // Reuse remembered language from press (fallback to fresh detection)
+                            let language_on_release = last_language.take().or_else(|| {
+                                determine_language(&active_modifiers, &modifier_keys, &language_modifiers)
+                            });
+                            tracing::info!("Hotkey released (stop) language={:?}", language_on_release);
+                            if tx.blocking_send(HotkeyEvent::Released { language: language_on_release }).is_err() {
                                 return Ok(()); // Channel closed
                             }
                         }
@@ -432,6 +453,13 @@ fn evdev_listener_loop(
                         }
                         _ => {}
                     }
+                } else {
+                    // If required modifiers not satisfied, log which required modifiers are missing
+                    let missing: Vec<_> = modifier_keys
+                        .iter()
+                        .filter(|m| !active_modifiers.contains(m))
+                        .collect();
+                    tracing::trace!("Required modifiers missing: {:?}", missing);
                 }
             }
         }
@@ -538,6 +566,29 @@ fn parse_key_name(name: &str) -> Result<Key, HotkeyError> {
 
     Ok(key)
 }
+
+/// Determine the language based on active modifiers
+fn determine_language(
+    active_modifiers: &HashSet<Key>,
+    required_modifiers: &HashSet<Key>,
+    language_modifiers: &HashMap<Key, String>,
+) -> Option<String> {
+    // Check each active modifier to see if it has a language mapping
+    for modifier in active_modifiers {
+        // Skip modifiers that are required for the hotkey itself
+        if required_modifiers.contains(modifier) {
+            continue;
+        }
+
+        // Return the first matching language (priority to first found)
+        if let Some(language) = language_modifiers.get(modifier) {
+            return Some(language.clone());
+        }
+    }
+    
+    None
+}
+
 
 #[cfg(test)]
 mod tests {
