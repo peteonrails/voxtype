@@ -393,10 +393,13 @@ cp packaging/systemd/voxtype.service "$STAGING/usr/lib/systemd/user/"
 cp README.md "$STAGING/usr/share/doc/voxtype/"
 cp LICENSE "$STAGING/usr/share/doc/voxtype/"
 
-# Shell completions
+# Shell completions (must be world-readable for non-root users)
 cp packaging/completions/voxtype.bash "$STAGING/usr/share/bash-completion/completions/voxtype"
 cp packaging/completions/voxtype.zsh "$STAGING/usr/share/zsh/site-functions/_voxtype"
 cp packaging/completions/voxtype.fish "$STAGING/usr/share/fish/vendor_completions.d/voxtype.fish"
+chmod 644 "$STAGING/usr/share/bash-completion/completions/voxtype"
+chmod 644 "$STAGING/usr/share/zsh/site-functions/_voxtype"
+chmod 644 "$STAGING/usr/share/fish/vendor_completions.d/voxtype.fish"
 
 # Post-install script - detects CPU and creates symlink to appropriate binary
 # Generate architecture-specific post-install script
