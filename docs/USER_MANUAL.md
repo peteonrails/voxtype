@@ -381,6 +381,23 @@ bindsym --release $mod+v exec voxtype record stop
 bindsym $mod+v exec voxtype record toggle
 ```
 
+### River
+
+River supports key release events via `-release` in `riverctl map`. Add these to your `~/.config/river/init`:
+
+```bash
+# Push-to-talk (hold to record, release to transcribe)
+riverctl map normal None Scroll_Lock spawn 'voxtype record start'
+riverctl map -release normal None Scroll_Lock spawn 'voxtype record stop'
+
+# With a modifier
+riverctl map normal Super V spawn 'voxtype record start'
+riverctl map -release normal Super V spawn 'voxtype record stop'
+
+# Toggle mode (press to start/stop)
+riverctl map normal Super V spawn 'voxtype record toggle'
+```
+
 ### Other Compositors/Desktops
 
 For compositors without key release support (GNOME, KDE), use toggle mode:
@@ -632,6 +649,13 @@ exec --no-startup-id voxtype
 Add to `hyprland.conf`:
 ```
 exec-once = voxtype
+```
+
+### With River
+
+Add to `~/.config/river/init`:
+```bash
+riverctl spawn voxtype
 ```
 
 ### With GNOME

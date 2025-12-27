@@ -114,7 +114,7 @@
                     </div>
                     <h3>Works on Any Linux Desktop</h3>
                     <p>
-                        Works on GNOME, KDE, Sway, Hyprland—Wayland or X11.
+                        Works on GNOME, KDE, Sway, Hyprland, River—Wayland or X11.
                         Use built-in hotkeys or native compositor keybindings.
                     </p>
                 </div>
@@ -128,7 +128,7 @@
                             <line x1="12" y1="3" x2="12" y2="7"/>
                         </svg>
                     </div>
-                    <h3>Native Hyprland & Sway Support</h3>
+                    <h3>Native Hyprland, Sway & River Support</h3>
                     <p>
                         Use your compositor's keybindings instead of evdev—no <code>input</code> group required.
                         Bind any key combo like <code>Super+V</code> for push-to-talk.
@@ -645,12 +645,12 @@ sudo cp target/release/voxtype /usr/local/bin/</code></pre>
                 <h3>Quick Start</h3>
 
                 <div class="setup-tabs">
-                    <button class="setup-tab-btn active" data-setup="hyprland">Hyprland / Sway</button>
+                    <button class="setup-tab-btn active" data-setup="hyprland">Hyprland / Sway / River</button>
                     <button class="setup-tab-btn" data-setup="standard">Standard Setup</button>
                 </div>
 
                 <div id="setup-hyprland" class="setup-content active">
-                    <p class="setup-note">For Hyprland and Sway users. Uses native compositor keybindings—no <code>input</code> group required!</p>
+                    <p class="setup-note">For Hyprland, Sway, and River users. Uses native compositor keybindings—no <code>input</code> group required!</p>
                     <div class="code-block">
                         <pre><code><span class="comment"># Download whisper model and configure</span>
 voxtype setup --download
@@ -684,6 +684,12 @@ bindr = , SCROLL_LOCK, exec, voxtype record stop</code></pre>
                         <pre><code><span class="comment"># Push-to-talk: hold $mod+v to record, release to transcribe</span>
 bindsym $mod+v exec voxtype record start
 bindsym --release $mod+v exec voxtype record stop</code></pre>
+                    </div>
+                    <div class="code-block">
+                        <div class="code-header"><span>River (~/.config/river/init)</span></div>
+                        <pre><code><span class="comment"># Push-to-talk: hold Super+V to record, release to transcribe</span>
+riverctl map normal Super V spawn 'voxtype record start'
+riverctl map -release normal Super V spawn 'voxtype record stop'</code></pre>
                     </div>
                 </div>
 
@@ -730,6 +736,10 @@ systemctl --user status voxtype</code></pre>
                 <div class="compositor-card">
                     <img src="images/hyprland.svg" alt="Hyprland" class="compositor-logo">
                     <span>Hyprland</span>
+                </div>
+                <div class="compositor-card">
+                    <img src="images/river.svg" alt="River" class="compositor-logo">
+                    <span>River</span>
                 </div>
                 <div class="compositor-card">
                     <img src="images/wayland.svg" alt="Any Wayland" class="compositor-logo">

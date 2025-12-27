@@ -306,7 +306,7 @@ Results vary by hardware. Example on AMD RX 6800:
 ### System Requirements
 
 - **Linux** with glibc 2.38+ (Ubuntu 24.04+, Fedora 39+, Arch, Debian Trixie+)
-- **Wayland or X11** desktop (GNOME, KDE, Sway, Hyprland, i3, etc.)
+- **Wayland or X11** desktop (GNOME, KDE, Sway, Hyprland, River, i3, etc.)
 
 ### Runtime Dependencies
 
