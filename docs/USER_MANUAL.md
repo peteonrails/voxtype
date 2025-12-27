@@ -92,7 +92,7 @@ Transcribe an audio file without running the daemon.
 
 ```bash
 voxtype transcribe recording.wav
-voxtype transcribe --model large-v3 interview.wav
+voxtype --model large-v3 transcribe interview.wav  # Use specific model
 ```
 
 Supported formats: WAV (16-bit PCM, 16kHz mono recommended)
@@ -103,8 +103,8 @@ Check dependencies and optionally download models.
 
 ```bash
 voxtype setup              # Check dependencies only
-voxtype setup --download   # Also download default model
-voxtype setup --download --model small.en  # Download specific model
+voxtype setup --download   # Download default model (base.en)
+voxtype setup model        # Interactive model selection
 ```
 
 ### `voxtype config`

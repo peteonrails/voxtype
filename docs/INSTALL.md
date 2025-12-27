@@ -367,8 +367,11 @@ Voxtype needs a Whisper model for speech recognition. Use the built-in setup com
 # Interactive setup (checks dependencies and offers to download)
 voxtype setup
 
-# Download a specific model
-voxtype setup --download --model base.en
+# Download the default model (base.en)
+voxtype setup --download
+
+# Interactive model selection (choose from available models)
+voxtype setup model
 ```
 
 ### Available Models
