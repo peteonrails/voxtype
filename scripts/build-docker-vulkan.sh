@@ -1,5 +1,9 @@
 #!/bin/bash
-# Build voxtype Vulkan binary in Docker for clean toolchain
+# Build voxtype Vulkan binary in Docker for clean toolchain (no AVX-512/GFNI)
+#
+# This builds on a remote Docker context (TrueNAS with i9-9900KF) to ensure
+# no AVX-512 or GFNI instructions leak into the binary. The resulting binary
+# is safe for all users, including those with Zen 3 or older CPUs.
 #
 # This is separate from build-docker.sh because:
 #   1. Vulkan build takes much longer (30+ minutes)
@@ -9,6 +13,10 @@
 # Usage:
 #   ./scripts/build-docker-vulkan.sh              # Build Vulkan binary
 #   ./scripts/build-docker-vulkan.sh --no-cache   # Force full rebuild
+#   ./scripts/build-docker-vulkan.sh --local      # Build locally (for testing)
+#
+# Output:
+#   releases/X.Y.Z/voxtype-X.Y.Z-linux-x86_64-vulkan
 
 set -e
 
@@ -19,12 +27,18 @@ cd "$PROJECT_DIR"
 VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
 RELEASE_DIR="releases/${VERSION}"
 
-# Parse options
+# Default to TrueNAS context (i9-9900KF, no AVX-512/GFNI)
+DOCKER_CONTEXT="truenas"
 DOCKER_OPTS=""
+
 while [[ "$1" == --* ]]; do
     case "$1" in
         --no-cache)
             DOCKER_OPTS="--no-cache"
+            shift
+            ;;
+        --local)
+            DOCKER_CONTEXT=""
             shift
             ;;
         *)
@@ -34,9 +48,19 @@ while [[ "$1" == --* ]]; do
     esac
 done
 
+# Build context flag
+CONTEXT_FLAG=""
+if [[ -n "$DOCKER_CONTEXT" ]]; then
+    CONTEXT_FLAG="--context $DOCKER_CONTEXT"
+fi
+
 echo "=== Building voxtype v${VERSION} Vulkan binary in Docker ==="
 echo ""
-echo "This builds the Vulkan GPU binary using Ubuntu 22.04's toolchain."
+if [[ -n "$DOCKER_CONTEXT" ]]; then
+    echo "Using Docker context: $DOCKER_CONTEXT (remote build for clean binary)"
+else
+    echo "Using local Docker (WARNING: may contain AVX-512/GFNI if host has them)"
+fi
 echo "NOTE: This can take 30+ minutes due to Kompute shader compilation."
 echo ""
 
@@ -46,16 +70,39 @@ if ! command -v docker &> /dev/null; then
     exit 1
 fi
 
+# Check if context exists
+if [[ -n "$DOCKER_CONTEXT" ]]; then
+    if ! docker context inspect "$DOCKER_CONTEXT" &>/dev/null; then
+        echo "Error: Docker context '$DOCKER_CONTEXT' not found."
+        echo "Available contexts:"
+        docker context ls
+        echo ""
+        echo "Use --local to build on this machine instead."
+        exit 1
+    fi
+fi
+
 # Build Docker image
 echo "Building Docker image..."
-docker build $DOCKER_OPTS -f Dockerfile.vulkan -t voxtype-vulkan-builder .
+docker $CONTEXT_FLAG build $DOCKER_OPTS \
+    --build-arg VERSION="$VERSION" \
+    -f Dockerfile.vulkan \
+    -t voxtype-vulkan-builder .
 
 echo ""
 echo "Extracting binary to ${RELEASE_DIR}/..."
 mkdir -p "$RELEASE_DIR"
 
 # Run container to extract binary
-docker run --rm -v "$(pwd)/${RELEASE_DIR}:/output" voxtype-vulkan-builder
+# For remote context, we need to copy the file differently
+if [[ -n "$DOCKER_CONTEXT" ]]; then
+    # Create container, copy file out, remove container
+    CONTAINER_ID=$(docker $CONTEXT_FLAG create voxtype-vulkan-builder)
+    docker $CONTEXT_FLAG cp "$CONTAINER_ID:/tmp/voxtype-vulkan" "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan"
+    docker $CONTEXT_FLAG rm "$CONTAINER_ID" > /dev/null
+else
+    docker run --rm -v "$(pwd)/${RELEASE_DIR}:/output" voxtype-vulkan-builder
+fi
 
 echo ""
 echo "=== Verifying extracted binary ==="
@@ -67,10 +114,10 @@ if [[ ! -f "$BINARY" ]]; then
     exit 1
 fi
 
-vpternlog=$(objdump -d "$BINARY" | grep -c vpternlog || echo 0)
-broadcast=$(objdump -d "$BINARY" | grep -c '{1to' || echo 0)
-gfni=$(objdump -d "$BINARY" | grep -cE 'vgf2p8|gf2p8' || echo 0)
-zmm=$(objdump -d "$BINARY" | grep -c zmm || echo 0)
+vpternlog=$(objdump -d "$BINARY" | grep -c vpternlog) || vpternlog=0
+broadcast=$(objdump -d "$BINARY" | grep -c '{1to') || broadcast=0
+gfni=$(objdump -d "$BINARY" | grep -cE 'vgf2p8|gf2p8') || gfni=0
+zmm=$(objdump -d "$BINARY" | grep -c zmm) || zmm=0
 
 echo "  vpternlog: $vpternlog"
 echo "  broadcast: $broadcast"

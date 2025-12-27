@@ -208,11 +208,10 @@ if [[ "$SKIP_BUILD" == "false" ]]; then
         # BUILD STRATEGY:
         # - AVX2:   Built in Docker (Ubuntu 22.04) to avoid toolchain contamination
         # - AVX512: Built locally with native optimizations
-        # - Vulkan: Built locally with AVX-512/GFNI disabled (GPU users have modern CPUs)
+        # - Vulkan: Built in Docker (TrueNAS i9-9900KF) for clean binary
         #
-        # NOTE: If you get SIGILL on Zen 3 or older CPUs with the Vulkan binary,
-        # your local toolchain may have leaked AVX-512 instructions. Use the AVX2
-        # CPU binary instead, or rebuild Vulkan in Docker (slow, ~30+ minutes).
+        # All binaries for end-users are built on systems without AVX-512/GFNI
+        # to ensure compatibility with Zen 3 and older CPUs.
         # =======================================================================
 
         # Build AVX2 baseline binary via Docker (clean toolchain, no contamination)
@@ -230,18 +229,13 @@ if [[ "$SKIP_BUILD" == "false" ]]; then
             cp target/release/voxtype "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512"
         fi
 
-        # Build Vulkan GPU release locally
-        # Uses compiler flags to disable AVX-512/GFNI, but local toolchain may still leak
-        # some instructions via libstdc++. This is acceptable since GPU users have modern CPUs.
+        # Build Vulkan GPU release via Docker (clean toolchain, no AVX-512/GFNI)
+        # This ensures the Vulkan binary works on all CPUs including Zen 3
         if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan" ]]; then
-            echo "Building Vulkan GPU release locally..."
-            echo "  Note: May contain some AVX-512 from local toolchain (acceptable for GPU users)"
-            cargo clean
-            RUSTFLAGS="-C target-cpu=haswell -C target-feature=-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl,-gfni" \
-            GGML_NATIVE=OFF GGML_AVX512=OFF GGML_AVX_VNNI=OFF GGML_AVX512_VNNI=OFF \
-            CMAKE_C_FLAGS="-mno-avx512f -mno-gfni -mno-avxvnni" CMAKE_CXX_FLAGS="-mno-avx512f -mno-gfni -mno-avxvnni" \
-            cargo build --release --features gpu-vulkan
-            cp target/release/voxtype "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan"
+            echo "Building Vulkan GPU release via Docker (TrueNAS context)..."
+            echo "  This ensures no AVX-512/GFNI instructions leak into the binary."
+            echo "  NOTE: This can take 30+ minutes due to shader compilation."
+            ./scripts/build-docker-vulkan.sh
         fi
     else
         # aarch64: Single binary, no CPU feature tiers needed
@@ -343,13 +337,11 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
         VERIFY_FAILED=true
     fi
 
-    # Vulkan binary: warn but don't fail (GPU users typically have modern CPUs)
+    # Vulkan binary MUST NOT have AVX-512 or GFNI instructions (strict)
+    # Since we now build Vulkan in Docker on TrueNAS (i9-9900KF), it should be clean
     echo ""
-    echo "Checking Vulkan binary (warning only - GPU users have modern CPUs)..."
-    if ! verify_no_forbidden_instructions "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan" "voxtype-vulkan" 2>/dev/null; then
-        echo "  ⚠ Vulkan binary has some AVX-512/GFNI from local toolchain"
-        echo "    This is acceptable: GPU acceleration requires modern CPUs anyway."
-        echo "    If SIGILL occurs on older CPUs, use the AVX2 CPU binary instead."
+    if ! verify_no_forbidden_instructions "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan" "voxtype-vulkan"; then
+        VERIFY_FAILED=true
     fi
 
     # AVX512 binary SHOULD have AVX-512 instructions

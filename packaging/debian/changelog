@@ -1,3 +1,12 @@
+voxtype (0.4.2-1) unstable; urgency=high
+
+  * Fix SIGILL crash in Vulkan binary on Zen 3 CPUs (Issue #14)
+  * Build Vulkan binary in Docker on clean toolchain (no AVX-512/GFNI)
+  * Add River compositor documentation
+  * Update build scripts for reproducible Vulkan builds
+
+ -- Peter Jackson <pete@peteonrails.com>  Fri, 27 Dec 2025 18:00:00 +0000
+
 voxtype (0.4.1-1) unstable; urgency=medium
 
   * Replace reqwest/rustls with curl for model downloads

@@ -1,5 +1,5 @@
 Name:           voxtype
-Version:        0.4.1
+Version:        0.4.2
 Release:        1%{?dist}
 Summary:        Push-to-talk voice-to-text for Linux
 
