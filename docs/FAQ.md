@@ -37,12 +37,15 @@ No. All speech recognition is done locally using whisper.cpp. The only time netw
 
 ### Which desktops are supported?
 
-All of them! Voxtype uses:
-- **evdev** for hotkey detection (kernel-level, works on Wayland and X11)
-- **wtype** for typing output on Wayland (best CJK support)
-- **ydotool** for typing output on X11 (or as Wayland fallback)
+All of them! Voxtype is optimized for Wayland compositors with native keybinding support:
 
-Tested on: GNOME, KDE Plasma, Sway, Hyprland, i3, and more.
+- **Hyprland, Sway, River** - Full push-to-talk via compositor keybindings (no special permissions needed)
+- **GNOME, KDE Plasma** - Works with built-in evdev hotkey (requires `input` group)
+- **X11 desktops (i3, etc.)** - Works with built-in evdev hotkey (requires `input` group)
+
+For text output, Voxtype uses:
+- **wtype** on Wayland (best CJK/Unicode support, no daemon needed)
+- **ydotool** on X11 or as fallback (requires daemon)
 
 ### Which audio systems are supported?
 
@@ -131,7 +134,9 @@ Whisper automatically adds punctuation based on context. For explicit punctuatio
 
 ### Why do I need to be in the 'input' group?
 
-Voxtype uses the Linux evdev subsystem to detect global hotkeys. This requires read access to `/dev/input/event*` devices, which is restricted to the `input` group for security reasons.
+**Most Wayland users don't need this.** If you use compositor keybindings (Hyprland, Sway, River), voxtype doesn't need any special permissions.
+
+The `input` group is only required if you use voxtype's built-in evdev hotkey (e.g., on X11 or GNOME/KDE). The evdev subsystem requires read access to `/dev/input/event*` devices, which is restricted to the `input` group for security reasons.
 
 ### Why does it need wtype/ydotool?
 
@@ -187,10 +192,17 @@ No. All processing happens locally on your machine. No audio or text is sent to 
 
 ### It's not detecting my hotkey
 
-1. Verify you're in the `input` group: `groups | grep input`
-2. Log out and back in after adding to the group
-3. Check the key name with `evtest`
-4. Try running with debug: `voxtype -vv`
+**Using compositor keybindings (recommended):**
+1. Verify your compositor config calls `voxtype record start` and `voxtype record stop`
+2. Check that voxtype is running: `pgrep voxtype`
+3. Test manually: `voxtype record start` then `voxtype record stop`
+
+**Using built-in evdev hotkey:**
+1. Make sure `enabled = true` in your config's `[hotkey]` section
+2. Verify you're in the `input` group: `groups | grep input`
+3. Log out and back in after adding to the group
+4. Check the key name with `evtest`
+5. Try running with debug: `voxtype -vv`
 
 ### No text is typed
 
