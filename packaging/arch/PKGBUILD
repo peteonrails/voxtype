@@ -1,7 +1,7 @@
 # Maintainer: Peter Jackson <pete@peteonrails.com>
 pkgname=voxtype
-pkgver=0.4.1
-pkgrel=8
+pkgver=0.4.2
+pkgrel=1
 pkgdesc="Push-to-talk voice-to-text for Linux (optimized for Wayland, works on X11)"
 arch=('x86_64' 'aarch64')
 url="https://voxtype.io"
@@ -31,11 +31,11 @@ optdepends=(
 )
 backup=('etc/voxtype/config.toml')
 install=voxtype.install
-source=("$pkgname-$pkgver.tar.gz::https://github.com/peteonrails/voxtype/archive/refs/tags/v$pkgver-$pkgrel.tar.gz")
-sha256sums=('0935b4d987d123574b52a69f74f33d194ea1ce6fdd978e3ae5e17453b6fe28fd')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/peteonrails/voxtype/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('46bb90abf895d37fe53ce7775f7ceaf22863e99a20c5d8277e06d27d41be5a86')
 
 prepare() {
-    cd "$pkgname-$pkgver-$pkgrel"
+    cd "$pkgname-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
     cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
@@ -58,7 +58,7 @@ build() {
     env | grep -i rust || true
     echo "==============================="
 
-    cd "$pkgname-$pkgver-$pkgrel"
+    cd "$pkgname-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
 
@@ -89,13 +89,13 @@ build() {
 }
 
 check() {
-    cd "$pkgname-$pkgver-$pkgrel"
+    cd "$pkgname-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
     cargo test --frozen
 }
 
 package() {
-    cd "$pkgname-$pkgver-$pkgrel"
+    cd "$pkgname-$pkgver"
 
     # Install native CPU binary directly to /usr/bin/
     install -Dm755 "voxtype-cpu" "$pkgdir/usr/bin/voxtype"

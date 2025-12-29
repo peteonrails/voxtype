@@ -6,17 +6,13 @@
 # instructions into binaries via system libstdc++, even with RUSTFLAGS set.
 # This causes SIGILL crashes on older CPUs like Zen 3.
 #
-# This script builds in Ubuntu 22.04 Docker container which has an older
-# toolchain without these optimizations.
-#
-# NOTE: Only builds AVX2 binary. Vulkan is skipped because:
-#   1. Kompute shader compilation hangs with Ubuntu 22.04's glslang
-#   2. Vulkan users have GPUs and typically modern CPUs
-#   3. GPU-bound code is less affected by CPU instruction contamination
+# This script builds on a remote Docker context (TrueNAS with i9-9900KF) to ensure
+# no AVX-512 or GFNI instructions leak into the binary.
 #
 # Usage:
-#   ./scripts/build-docker.sh              # Build and extract binary
+#   ./scripts/build-docker.sh              # Build on TrueNAS (default)
 #   ./scripts/build-docker.sh --no-cache   # Force full rebuild
+#   ./scripts/build-docker.sh --local      # Build locally (for testing)
 #
 # Output:
 #   releases/X.Y.Z/voxtype-X.Y.Z-linux-x86_64-avx2
@@ -33,12 +29,18 @@ cd "$PROJECT_DIR"
 VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
 RELEASE_DIR="releases/${VERSION}"
 
-# Parse options
+# Default to TrueNAS context (i9-9900KF, no AVX-512/GFNI)
+DOCKER_CONTEXT="truenas"
 DOCKER_OPTS=""
+
 while [[ "$1" == --* ]]; do
     case "$1" in
         --no-cache)
             DOCKER_OPTS="--no-cache"
+            shift
+            ;;
+        --local)
+            DOCKER_CONTEXT=""
             shift
             ;;
         *)
@@ -48,10 +50,19 @@ while [[ "$1" == --* ]]; do
     esac
 done
 
+# Build context flag
+CONTEXT_FLAG=""
+if [[ -n "$DOCKER_CONTEXT" ]]; then
+    CONTEXT_FLAG="--context $DOCKER_CONTEXT"
+fi
+
 echo "=== Building voxtype v${VERSION} AVX2 binary in Docker ==="
 echo ""
-echo "This builds the AVX2 binary using Ubuntu 22.04's toolchain"
-echo "to avoid AVX-512/GFNI contamination from modern system libraries."
+if [[ -n "$DOCKER_CONTEXT" ]]; then
+    echo "Using Docker context: $DOCKER_CONTEXT (remote build for clean binary)"
+else
+    echo "Using local Docker (WARNING: may contain AVX-512/GFNI if host has them)"
+fi
 echo ""
 
 # Check for Docker
@@ -60,16 +71,39 @@ if ! command -v docker &> /dev/null; then
     exit 1
 fi
 
+# Check if context exists
+if [[ -n "$DOCKER_CONTEXT" ]]; then
+    if ! docker context inspect "$DOCKER_CONTEXT" &>/dev/null; then
+        echo "Error: Docker context '$DOCKER_CONTEXT' not found."
+        echo "Available contexts:"
+        docker context ls
+        echo ""
+        echo "Use --local to build on this machine instead."
+        exit 1
+    fi
+fi
+
 # Build Docker image
-echo "Building Docker image (this takes ~15 minutes on first run)..."
-docker build $DOCKER_OPTS -f Dockerfile.build -t voxtype-builder .
+echo "Building Docker image..."
+docker $CONTEXT_FLAG build $DOCKER_OPTS \
+    --build-arg VERSION="$VERSION" \
+    -f Dockerfile.build \
+    -t voxtype-builder .
 
 echo ""
 echo "Extracting binaries to ${RELEASE_DIR}/..."
 mkdir -p "$RELEASE_DIR"
 
 # Run container to extract binaries
-docker run --rm -v "$(pwd)/${RELEASE_DIR}:/output" voxtype-builder
+# For remote context, we need to copy the file differently
+if [[ -n "$DOCKER_CONTEXT" ]]; then
+    # Create container, copy file out, remove container
+    CONTAINER_ID=$(docker $CONTEXT_FLAG create voxtype-builder)
+    docker $CONTEXT_FLAG cp "$CONTAINER_ID:/tmp/voxtype-avx2" "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2"
+    docker $CONTEXT_FLAG rm "$CONTAINER_ID" > /dev/null
+else
+    docker run --rm -v "$(pwd)/${RELEASE_DIR}:/output" voxtype-builder
+fi
 
 echo ""
 echo "=== Verifying extracted binaries ==="
@@ -84,10 +118,10 @@ verify_clean() {
     fi
 
     local vpternlog broadcast gfni zmm
-    vpternlog=$(objdump -d "$binary" | grep -c vpternlog || echo 0)
-    broadcast=$(objdump -d "$binary" | grep -c '{1to' || echo 0)
-    gfni=$(objdump -d "$binary" | grep -cE 'vgf2p8|gf2p8' || echo 0)
-    zmm=$(objdump -d "$binary" | grep -c zmm || echo 0)
+    vpternlog=$(objdump -d "$binary" | grep -c vpternlog) || vpternlog=0
+    broadcast=$(objdump -d "$binary" | grep -c '{1to') || broadcast=0
+    gfni=$(objdump -d "$binary" | grep -cE 'vgf2p8|gf2p8') || gfni=0
+    zmm=$(objdump -d "$binary" | grep -c zmm) || zmm=0
 
     if [[ "$vpternlog" -gt 0 ]] || [[ "$broadcast" -gt 0 ]] || [[ "$gfni" -gt 0 ]] || [[ "$zmm" -gt 0 ]]; then
         echo "  ERROR: $name has forbidden instructions!"
