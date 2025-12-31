@@ -281,6 +281,8 @@ impl Daemon {
             .map_err(|e| crate::error::VoxtypeError::Config(format!("Failed to set up SIGUSR1 handler: {}", e)))?;
         let mut sigusr2 = signal(SignalKind::user_defined2())
             .map_err(|e| crate::error::VoxtypeError::Config(format!("Failed to set up SIGUSR2 handler: {}", e)))?;
+        let mut sigterm = signal(SignalKind::terminate())
+            .map_err(|e| crate::error::VoxtypeError::Config(format!("Failed to set up SIGTERM handler: {}", e)))?;
 
         // Ensure required directories exist
         Config::ensure_directories().map_err(|e| {
@@ -656,9 +658,15 @@ impl Daemon {
                     }
                 }
 
-                // Handle graceful shutdown
+                // Handle graceful shutdown (SIGINT from Ctrl+C)
                 _ = tokio::signal::ctrl_c() => {
-                    tracing::info!("Received interrupt signal, shutting down...");
+                    tracing::info!("Received SIGINT, shutting down...");
+                    break;
+                }
+
+                // Handle graceful shutdown (SIGTERM from systemctl stop)
+                _ = sigterm.recv() => {
+                    tracing::info!("Received SIGTERM, shutting down...");
                     break;
                 }
             }

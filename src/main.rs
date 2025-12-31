@@ -486,6 +486,25 @@ impl ExtendedStatusInfo {
     }
 }
 
+/// Check if the daemon is actually running by verifying the PID file
+fn is_daemon_running() -> bool {
+    let pid_path = config::Config::runtime_dir().join("pid");
+
+    // Read PID from file
+    let pid_str = match std::fs::read_to_string(&pid_path) {
+        Ok(s) => s,
+        Err(_) => return false, // No PID file = not running
+    };
+
+    let pid: u32 = match pid_str.trim().parse() {
+        Ok(p) => p,
+        Err(_) => return false, // Invalid PID = not running
+    };
+
+    // Check if process exists by testing /proc/{pid}
+    std::path::Path::new(&format!("/proc/{}", pid)).exists()
+}
+
 /// Run the status command - show current daemon state
 async fn run_status(
     config: &config::Config,
@@ -515,7 +534,12 @@ async fn run_status(
 
     if !follow {
         // One-shot: just read and print current state
-        let state = std::fs::read_to_string(&state_path).unwrap_or_else(|_| "stopped".to_string());
+        // First check if daemon is actually running to avoid stale state
+        let state = if !is_daemon_running() {
+            "stopped".to_string()
+        } else {
+            std::fs::read_to_string(&state_path).unwrap_or_else(|_| "stopped".to_string())
+        };
         let state = state.trim();
 
         if format == "json" {
@@ -531,8 +555,12 @@ async fn run_status(
     use std::sync::mpsc::channel;
     use std::time::Duration;
 
-    // Print initial state
-    let state = std::fs::read_to_string(&state_path).unwrap_or_else(|_| "stopped".to_string());
+    // Print initial state (check if daemon is running to avoid stale state)
+    let state = if !is_daemon_running() {
+        "stopped".to_string()
+    } else {
+        std::fs::read_to_string(&state_path).unwrap_or_else(|_| "stopped".to_string())
+    };
     let state = state.trim();
     if format == "json" {
         println!("{}", format_state_json(state, ext_info.as_ref()));
@@ -582,8 +610,8 @@ async fn run_status(
                 tracing::warn!("Watch error: {:?}", e);
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                // Check if file was deleted (daemon stopped)
-                if !state_path.exists() && last_state != "stopped" {
+                // Check if daemon stopped (file deleted or process died)
+                if (!state_path.exists() || !is_daemon_running()) && last_state != "stopped" {
                     if format == "json" {
                         println!("{}", format_state_json("stopped", ext_info.as_ref()));
                     } else {
