@@ -22,6 +22,18 @@ fn service_path() -> PathBuf {
 fn generate_service_file() -> String {
     let voxtype_path = get_voxtype_path();
 
+    // Use Type=notify if compiled with systemd feature, otherwise Type=simple
+    #[cfg(feature = "systemd")]
+    let service_type = "notify";
+    #[cfg(not(feature = "systemd"))]
+    let service_type = "simple";
+
+    // Add timeout for notify type (model loading can take time)
+    #[cfg(feature = "systemd")]
+    let timeout_line = "TimeoutStartSec=60\n";
+    #[cfg(not(feature = "systemd"))]
+    let timeout_line = "";
+
     format!(
         r#"[Unit]
 Description=Voxtype push-to-talk voice-to-text daemon
@@ -30,11 +42,11 @@ PartOf=graphical-session.target
 After=graphical-session.target
 
 [Service]
-Type=simple
+Type={service_type}
 ExecStart={voxtype_path} daemon
 Restart=on-failure
 RestartSec=5
-
+{timeout_line}
 # Ensure we have access to the display
 Environment=XDG_RUNTIME_DIR=%t
 

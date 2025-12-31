@@ -358,6 +358,16 @@ impl Daemon {
         // Write initial state
         self.update_state("idle");
 
+        // Notify systemd that we're ready (if compiled with systemd feature)
+        #[cfg(feature = "systemd")]
+        {
+            if let Err(e) = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]) {
+                tracing::warn!("Failed to notify systemd: {}", e);
+            } else {
+                tracing::info!("Notified systemd of readiness");
+            }
+        }
+
         // Main event loop
         loop {
             tokio::select! {

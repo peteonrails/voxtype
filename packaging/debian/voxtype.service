@@ -6,10 +6,14 @@ After=graphical-session.target pipewire.service pipewire-pulse.service
 Wants=ydotool.service
 
 [Service]
-Type=simple
+# Use Type=notify if voxtype was built with --features systemd
+# This allows systemd to wait for the daemon to be fully ready
+Type=notify
 ExecStart=/usr/bin/voxtype daemon
 Restart=on-failure
 RestartSec=5
+# Timeout for startup notification (model loading can take time)
+TimeoutStartSec=60
 
 # Note: User must be in 'input' group for evdev access
 # Before enabling this service, run: voxtype setup --download

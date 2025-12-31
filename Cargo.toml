@@ -58,8 +58,12 @@ num_cpus = "1.16"
 # File watching for status --follow
 notify = "6"
 
+# Systemd readiness notification (optional)
+sd-notify = { version = "0.4", optional = true }
+
 [features]
 default = []
+systemd = ["sd-notify"]
 gpu-vulkan = ["whisper-rs/vulkan"]
 gpu-cuda = ["whisper-rs/cuda"]
 gpu-metal = ["whisper-rs/metal"]
