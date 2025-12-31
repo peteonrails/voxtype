@@ -340,7 +340,7 @@ If you prefer to use your compositor's native keybindings instead of voxtype's b
    enabled = false
    ```
 
-2. Enable the state file (required for toggle mode):
+2. Ensure state file is enabled (required for toggle mode, enabled by default):
    ```toml
    state_file = "auto"
    ```
@@ -670,7 +670,7 @@ Voxtype can display a status indicator in Waybar showing when push-to-talk is ac
 
 **Quick setup:**
 
-1. Enable the state file in `~/.config/voxtype/config.toml`:
+1. Ensure state file is enabled in `~/.config/voxtype/config.toml` (enabled by default):
    ```toml
    state_file = "auto"
    ```
@@ -707,7 +707,7 @@ See [WAYBAR.md](WAYBAR.md) for styling options, troubleshooting, and Polybar set
 
 ### With Polybar
 
-Similar to Waybar, enable `state_file = "auto"` and create a custom script:
+Similar to Waybar, ensure `state_file = "auto"` is set (the default) and create a custom script:
 
 ```ini
 [module/voxtype]

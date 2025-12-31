@@ -555,8 +555,8 @@ claude = "Claude"
 
 ## state_file
 
-**Type:** String (optional)
-**Default:** Not set (disabled)
+**Type:** String
+**Default:** `"auto"`
 **Required:** No
 
 Path to a state file for external integrations like Waybar or Polybar. When configured, the daemon writes its current state to this file whenever state changes.
@@ -566,16 +566,20 @@ Path to a state file for external integrations like Waybar or Polybar. When conf
 - `recording` - Push-to-talk active, capturing audio
 - `transcribing` - Processing audio through Whisper
 
-**Special value:**
-- `"auto"` - Uses `$XDG_RUNTIME_DIR/voxtype/state` (recommended)
+**Special values:**
+- `"auto"` - Uses `$XDG_RUNTIME_DIR/voxtype/state` (default, recommended)
+- `"disabled"` - Turns off state file (also accepts `"none"`, `"off"`, `"false"`)
 
 **Example:**
 ```toml
-# Use automatic location (recommended)
+# Use automatic location (default)
 state_file = "auto"
 
 # Or specify explicit path
 state_file = "/tmp/voxtype-state"
+
+# Disable state file
+state_file = "disabled"
 ```
 
 **Usage with `voxtype status`:**

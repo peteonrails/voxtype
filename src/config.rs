@@ -18,9 +18,10 @@ pub const DEFAULT_CONFIG: &str = r#"# Voxtype Configuration
 # All settings can be overridden via CLI flags
 
 # State file for external integrations (Waybar, polybar, etc.)
-# Use "auto" for default location ($XDG_RUNTIME_DIR/voxtype/state)
-# or provide a custom path. The daemon writes state ("idle", "recording", "transcribing")
-# to this file whenever it changes. Required for `voxtype record toggle` command.
+# Use "auto" for default location ($XDG_RUNTIME_DIR/voxtype/state),
+# a custom path, or "disabled" to turn off. The daemon writes state
+# ("idle", "recording", "transcribing") to this file whenever it changes.
+# Required for `voxtype record toggle` and `voxtype status` commands.
 state_file = "auto"
 
 [hotkey]
@@ -377,14 +378,14 @@ impl Config {
     }
 
     /// Resolve the state file path from config
-    /// Returns None if state_file is not configured
+    /// Returns None if state_file is not configured or explicitly disabled
     /// Returns the resolved path if set to "auto" or an explicit path
     pub fn resolve_state_file(&self) -> Option<PathBuf> {
-        self.state_file.as_ref().map(|path| {
-            if path == "auto" {
-                Self::runtime_dir().join("state")
-            } else {
-                PathBuf::from(path)
+        self.state_file.as_ref().and_then(|path| {
+            match path.to_lowercase().as_str() {
+                "disabled" | "none" | "off" | "false" => None,
+                "auto" => Some(Self::runtime_dir().join("state")),
+                _ => Some(PathBuf::from(path)),
             }
         })
     }

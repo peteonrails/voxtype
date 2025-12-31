@@ -34,17 +34,17 @@ This outputs the Waybar module JSON and CSS styling, ready to copy into your con
 
 ## Manual Setup Steps
 
-### Step 1: Enable the State File
+### Step 1: Verify State File is Enabled
 
-Add this line to your Voxtype config (`~/.config/voxtype/config.toml`):
+The state file is enabled by default in Voxtype. Verify it's set in your config (`~/.config/voxtype/config.toml`):
 
 ```toml
-state_file = "auto"
+state_file = "auto"  # This is the default
 ```
 
 This tells Voxtype to write its current state to `$XDG_RUNTIME_DIR/voxtype/state` whenever the state changes. The `voxtype status` command reads this file.
 
-Restart Voxtype after making this change:
+If you've previously disabled it, re-enable it and restart Voxtype:
 
 ```bash
 systemctl --user restart voxtype
