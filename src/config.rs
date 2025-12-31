@@ -17,6 +17,12 @@ pub const DEFAULT_CONFIG: &str = r#"# Voxtype Configuration
 # Location: ~/.config/voxtype/config.toml
 # All settings can be overridden via CLI flags
 
+# State file for external integrations (Waybar, polybar, etc.)
+# Use "auto" for default location ($XDG_RUNTIME_DIR/voxtype/state)
+# or provide a custom path. The daemon writes state ("idle", "recording", "transcribing")
+# to this file whenever it changes. Required for `voxtype record toggle` command.
+state_file = "auto"
+
 [hotkey]
 # Key to hold for push-to-talk
 # Common choices: SCROLLLOCK, PAUSE, RIGHTALT, F13-F24
@@ -108,12 +114,6 @@ on_transcription = true
 #
 # Custom word replacements (case-insensitive)
 # replacements = { "hyperwhisper" = "hyprwhspr" }
-
-# State file for external integrations (Waybar, polybar, etc.)
-# Uncomment to enable. Use "auto" for default location ($XDG_RUNTIME_DIR/voxtype/state)
-# or provide a custom path. The daemon writes state ("idle", "recording", "transcribing")
-# to this file whenever it changes.
-# state_file = "auto"
 "#;
 
 /// Hotkey activation mode
@@ -355,7 +355,7 @@ impl Default for Config {
                 type_delay_ms: 0,
             },
             text: TextConfig::default(),
-            state_file: None,
+            state_file: Some("auto".to_string()),
         }
     }
 }
