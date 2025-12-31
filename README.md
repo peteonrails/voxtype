@@ -142,8 +142,8 @@ on_transcription = true     # Show transcribed text
 # spoken_punctuation = true  # Say "period" → ".", "open paren" → "("
 # replacements = { "hyperwhisper" = "hyprwhspr", "javascript" = "JavaScript" }
 
-# State file for Waybar/polybar integration
-# state_file = "auto"  # Or custom path like "/tmp/voxtype-state"
+# State file for Waybar/polybar integration (enabled by default)
+state_file = "auto"  # Or custom path, or "disabled" to turn off
 ```
 
 ### Audio Feedback
@@ -388,7 +388,7 @@ Add to your Waybar config:
 }
 ```
 
-First, enable the state file in your voxtype config:
+The state file is enabled by default (`state_file = "auto"`). If you've disabled it, re-enable it:
 
 ```toml
 state_file = "auto"
