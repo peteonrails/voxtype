@@ -348,10 +348,23 @@ fn send_record_command(config: &config::Config, action: RecordAction) -> anyhow:
         RecordAction::Stop => Signal::SIGUSR2,
         RecordAction::Toggle => {
             // Read current state to determine action
-            let state_file = config.resolve_state_file();
-            let current_state = state_file
-                .and_then(|p| std::fs::read_to_string(p).ok())
-                .unwrap_or_else(|| "idle".to_string());
+            let state_file = match config.resolve_state_file() {
+                Some(path) => path,
+                None => {
+                    eprintln!("Error: Cannot toggle recording without state_file configured.");
+                    eprintln!();
+                    eprintln!("Add to your config.toml:");
+                    eprintln!("  state_file = \"auto\"");
+                    eprintln!();
+                    eprintln!("Or use explicit start/stop commands:");
+                    eprintln!("  voxtype record start");
+                    eprintln!("  voxtype record stop");
+                    std::process::exit(1);
+                }
+            };
+
+            let current_state = std::fs::read_to_string(&state_file)
+                .unwrap_or_else(|_| "idle".to_string());
 
             if current_state.trim() == "recording" {
                 Signal::SIGUSR2 // Stop
