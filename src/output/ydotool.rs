@@ -19,12 +19,42 @@ pub struct YdotoolOutput {
     delay_ms: u32,
     /// Whether to show a desktop notification
     notify: bool,
+    /// Whether ydotool supports --key-hold flag (added in newer versions)
+    supports_key_hold: bool,
 }
 
 impl YdotoolOutput {
     /// Create a new ydotool output
+    ///
+    /// Detects ydotool capabilities at construction time.
     pub fn new(delay_ms: u32, notify: bool) -> Self {
-        Self { delay_ms, notify }
+        let supports_key_hold = Self::detect_key_hold_support();
+        if supports_key_hold {
+            tracing::debug!("ydotool supports --key-hold flag");
+        } else {
+            tracing::debug!("ydotool does not support --key-hold flag, using --key-delay only");
+        }
+        Self {
+            delay_ms,
+            notify,
+            supports_key_hold,
+        }
+    }
+
+    /// Detect if ydotool supports the --key-hold flag
+    ///
+    /// Older versions of ydotool don't have this flag and silently ignore it
+    /// (exiting with code 0), which can cause subtle issues.
+    fn detect_key_hold_support() -> bool {
+        std::process::Command::new("ydotool")
+            .args(["type", "--help"])
+            .output()
+            .map(|output| {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                stdout.contains("--key-hold") || stderr.contains("--key-hold")
+            })
+            .unwrap_or(false)
     }
 
     /// Send a desktop notification
@@ -63,7 +93,11 @@ impl TextOutput for YdotoolOutput {
 
         // Always set delay explicitly (ydotool defaults to 12ms if not specified)
         cmd.arg("--key-delay").arg(self.delay_ms.to_string());
-        cmd.arg("--key-hold").arg(self.delay_ms.to_string());
+
+        // Use --key-hold only if supported (older versions silently ignore unknown flags)
+        if self.supports_key_hold {
+            cmd.arg("--key-hold").arg(self.delay_ms.to_string());
+        }
 
         // The -- ensures text starting with - isn't treated as an option
         cmd.arg("--").arg(text);
@@ -140,5 +174,13 @@ mod tests {
         let output = YdotoolOutput::new(10, true);
         assert_eq!(output.delay_ms, 10);
         assert!(output.notify);
+        // supports_key_hold depends on system ydotool version, so we just check it's set
+        let _ = output.supports_key_hold;
+    }
+
+    #[test]
+    fn test_detect_key_hold_support() {
+        // This test will pass regardless of ydotool version - it just shouldn't panic
+        let _supports = YdotoolOutput::detect_key_hold_support();
     }
 }

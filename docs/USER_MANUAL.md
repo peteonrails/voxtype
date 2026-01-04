@@ -558,14 +558,22 @@ On Wayland, wtype is tried first (best CJK support), then ydotool, then clipboar
 
 Voxtype can pipe transcriptions through an external command before output, enabling integration with local LLMs for text cleanup, grammar correction, and filler word removal.
 
-### Why Post-Process?
+### When to Use Post-Processing
 
-Whisper transcriptions are good but not perfect:
-- Filler words ("um", "uh", "like") slip through
-- Homophones get confused ("right alt" → "write alt")
-- Punctuation and formatting can be inconsistent
+Post-processing is most valuable for specific workflows:
 
-Services like Spokenly (macOS) solve this by passing raw transcriptions through an LLM before output. With post-processing, Voxtype can do the same using local LLMs like Ollama, LM Studio, or llama.cpp.
+- **Translation**: Speak in one language, output in another
+- **Domain vocabulary**: Medical, legal, or technical term correction
+- **Reformatting**: Convert casual dictation to formal prose
+- **Stubborn filler words**: Remove "um", "uh", "like" that Whisper occasionally keeps
+- **Custom workflows**: Multi-output scenarios (e.g., translate to 5 languages, save to file, inject only one at cursor)
+
+**Important**: For most users, Whisper large-v3-turbo with Voxtype's built-in `spoken_punctuation` feature is sufficient. Post-processing adds 2-5 seconds of latency and provides marginal improvement for general transcription.
+
+**Limitations**:
+- LLMs interpret text literally—saying "slash" won't produce "/" (use `spoken_punctuation` instead)
+- Use instruct/chat models, not reasoning models (they output `<think>` blocks)
+- Avoid emojis in LLM output—ydotool cannot type them
 
 ### Basic Configuration
 

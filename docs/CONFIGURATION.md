@@ -472,10 +472,19 @@ type_delay_ms = 10  # 10ms delay between characters
 Optional post-processing command that runs after transcription. The command receives
 the transcribed text on stdin and should output the processed text on stdout.
 
-**Common use cases:**
-- LLM-based text cleanup (grammar, punctuation, filler word removal)
-- Custom text transformations via shell commands
-- Integration with local AI services (Ollama, llama.cpp, LM Studio)
+**Best use cases:**
+- **Translation**: Speak in one language, output in another
+- **Domain vocabulary**: Medical, legal, or technical term correction
+- **Reformatting**: Convert casual dictation to formal prose
+- **Filler word removal**: Remove "um", "uh", "like" that Whisper sometimes keeps
+- **Custom workflows**: Multi-output scenarios (e.g., translate to 5 languages, save JSON to file, inject only English at cursor)
+
+**Important notes:**
+- Adds 2-5 seconds latency depending on model size
+- For most users, Whisper large-v3-turbo with Voxtype's built-in `spoken_punctuation` is sufficient
+- LLMs interpret text literally—saying "slash" won't produce "/" (use `spoken_punctuation` for that)
+- Use **instruct/chat models**, not reasoning models (they output `<think>` blocks)
+- Avoid emojis in LLM output—ydotool cannot type them
 
 ### command
 
@@ -553,7 +562,7 @@ curl -s http://localhost:1234/v1/chat/completions \
   -d "{
     \"messages\": [{
       \"role\": \"system\",
-      \"content\": \"Clean up this dictated text. Fix spelling, remove filler words (um, uh), add proper punctuation. Output ONLY the cleaned text, nothing else.\"
+      \"content\": \"Clean up this dictated text. Fix spelling, remove filler words (um, uh), add proper punctuation. Output ONLY the cleaned text - no quotes, no emojis, no explanations.\"
     },{
       \"role\": \"user\",
       \"content\": \"$INPUT\"
