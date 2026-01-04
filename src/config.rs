@@ -97,6 +97,16 @@ fallback_to_clipboard = true
 # 0 = fastest possible, increase if characters are dropped
 type_delay_ms = 0
 
+# Post-processing command (optional)
+# Pipe transcribed text through an external command for cleanup before output.
+# The command receives text on stdin and outputs processed text on stdout.
+# Useful for LLM-based text cleanup, grammar correction, filler word removal.
+# On any failure (timeout, error), falls back to original transcription.
+#
+# [output.post_process]
+# command = "ollama run llama3.2:1b 'Clean up this dictation. Fix grammar, remove filler words. Output only the cleaned text:'"
+# timeout_ms = 30000  # 30 second timeout (generous for LLM)
+
 [output.notification]
 # Show notification when recording starts (hotkey pressed)
 on_recording_start = false
@@ -292,6 +302,25 @@ impl Default for NotificationConfig {
     }
 }
 
+/// Post-processing command configuration
+///
+/// Pipes transcribed text through an external command for cleanup/formatting.
+/// Commonly used with local LLMs (Ollama, llama.cpp) or text processing tools.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PostProcessConfig {
+    /// Shell command to execute
+    /// Receives transcribed text on stdin, outputs processed text on stdout
+    pub command: String,
+
+    /// Timeout in milliseconds (default: 30000 = 30 seconds)
+    #[serde(default = "default_post_process_timeout")]
+    pub timeout_ms: u64,
+}
+
+fn default_post_process_timeout() -> u64 {
+    30000 // 30 seconds - generous for LLM processing
+}
+
 /// Text output configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OutputConfig {
@@ -309,6 +338,11 @@ pub struct OutputConfig {
     /// Delay between typed characters (ms), 0 for fastest
     #[serde(default)]
     pub type_delay_ms: u32,
+
+    /// Optional post-processing command configuration
+    /// Pipes transcribed text through an external command before output
+    #[serde(default)]
+    pub post_process: Option<PostProcessConfig>,
 }
 
 /// Output mode selection
@@ -354,6 +388,7 @@ impl Default for Config {
                 fallback_to_clipboard: true,
                 notification: NotificationConfig::default(),
                 type_delay_ms: 0,
+                post_process: None,
             },
             text: TextConfig::default(),
             state_file: Some("auto".to_string()),

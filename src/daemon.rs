@@ -9,6 +9,7 @@ use crate::config::{ActivationMode, Config};
 use crate::error::Result;
 use crate::hotkey::{self, HotkeyEvent};
 use crate::output;
+use crate::output::post_process::PostProcessor;
 use crate::state::State;
 use crate::text::TextProcessor;
 use crate::transcribe;
@@ -98,6 +99,7 @@ pub struct Daemon {
     pid_file_path: Option<PathBuf>,
     audio_feedback: Option<AudioFeedback>,
     text_processor: TextProcessor,
+    post_processor: Option<PostProcessor>,
     // Background task for loading model on-demand
     model_load_task: Option<tokio::task::JoinHandle<std::result::Result<Box<dyn crate::transcribe::Transcriber>, crate::error::TranscribeError>>>,
 }
@@ -139,12 +141,23 @@ impl Daemon {
             );
         }
 
+        // Initialize post-processor if configured
+        let post_processor = config.output.post_process.as_ref().map(|cfg| {
+            tracing::info!(
+                "Post-processing enabled: command={:?}, timeout={}ms",
+                cfg.command,
+                cfg.timeout_ms
+            );
+            PostProcessor::new(cfg)
+        });
+
         Self {
             config,
             state_file_path,
             pid_file_path: None,
             audio_feedback,
             text_processor,
+            post_processor,
             model_load_task: None,
         }
     }
@@ -231,12 +244,22 @@ impl Daemon {
                                     tracing::debug!("After text processing: {:?}", processed_text);
                                 }
 
+                                // Apply post-processing command if configured
+                                let final_text = if let Some(ref post_processor) = self.post_processor {
+                                    tracing::info!("Post-processing: {:?}", processed_text);
+                                    let result = post_processor.process(&processed_text).await;
+                                    tracing::info!("Post-processed: {:?}", result);
+                                    result
+                                } else {
+                                    processed_text
+                                };
+
                                 // Output the text
-                                *state = State::Outputting { text: processed_text.clone() };
+                                *state = State::Outputting { text: final_text.clone() };
 
                                 if let Err(e) = output::output_with_fallback(
                                     output_chain,
-                                    &processed_text
+                                    &final_text
                                 ).await {
                                     tracing::error!("Output failed: {}", e);
                                 }

@@ -10,8 +10,9 @@
 //! Paste mode (clipboard + Ctrl+V) helps with system with non US keyboard layouts.
 
 pub mod clipboard;
-pub mod wtype;
 pub mod paste;
+pub mod post_process;
+pub mod wtype;
 pub mod ydotool;
 
 use crate::config::OutputConfig;

@@ -12,6 +12,7 @@ Voxtype is a push-to-talk voice-to-text tool for Linux. Optimized for Wayland, w
 - [Compositor Keybindings](#compositor-keybindings)
 - [Whisper Models](#whisper-models)
 - [Output Modes](#output-modes)
+- [Post-Processing with LLMs](#post-processing-with-llms)
 - [Tips & Best Practices](#tips--best-practices)
 - [Keyboard Shortcuts](#keyboard-shortcuts)
 - [Integration Examples](#integration-examples)
@@ -550,6 +551,123 @@ fallback_to_clipboard = true  # Falls back to clipboard if typing fails
 ```
 
 On Wayland, wtype is tried first (best CJK support), then ydotool, then clipboard. On X11, ydotool is used, falling back to clipboard if unavailable.
+
+---
+
+## Post-Processing with LLMs
+
+Voxtype can pipe transcriptions through an external command before output, enabling integration with local LLMs for text cleanup, grammar correction, and filler word removal.
+
+### When to Use Post-Processing
+
+Post-processing is most valuable for specific workflows:
+
+- **Translation**: Speak in one language, output in another
+- **Domain vocabulary**: Medical, legal, or technical term correction
+- **Reformatting**: Convert casual dictation to formal prose
+- **Stubborn filler words**: Remove "um", "uh", "like" that Whisper occasionally keeps
+- **Custom workflows**: Multi-output scenarios (e.g., translate to 5 languages, save to file, inject only one at cursor)
+
+**Important**: For most users, Whisper large-v3-turbo with Voxtype's built-in `spoken_punctuation` feature is sufficient. Post-processing adds 2-5 seconds of latency and provides marginal improvement for general transcription.
+
+**Limitations**:
+- LLMs interpret text literally—saying "slash" won't produce "/" (use `spoken_punctuation` instead)
+- Use instruct/chat models, not reasoning models (they output `<think>` blocks)
+- Avoid emojis in LLM output—ydotool cannot type them
+
+### Basic Configuration
+
+Add an `[output.post_process]` section to your config:
+
+```toml
+[output.post_process]
+# Command receives text on stdin, outputs cleaned text on stdout
+command = "ollama run llama3.2:1b 'Clean up this dictation. Fix grammar, remove filler words. Output only the cleaned text:'"
+timeout_ms = 30000  # 30 second timeout (generous for LLM)
+```
+
+### Example Commands
+
+**Ollama (recommended for simplicity):**
+```toml
+[output.post_process]
+command = "ollama run llama3.2:1b 'Clean up this transcription. Fix grammar and remove filler words. Output only the cleaned text:'"
+timeout_ms = 30000
+```
+
+**Simple sed-based cleanup (fast, no LLM):**
+```toml
+[output.post_process]
+command = "sed 's/\\bum\\b//g; s/\\buh\\b//g; s/\\blike\\b//g'"
+timeout_ms = 5000
+```
+
+**Custom script:**
+```toml
+[output.post_process]
+command = "~/.config/voxtype/cleanup.sh"
+timeout_ms = 45000
+```
+
+### LM Studio Script Example
+
+For users running LM Studio locally:
+
+```bash
+#!/bin/bash
+# ~/.config/voxtype/lm-studio-cleanup.sh
+
+INPUT=$(cat)
+
+curl -s http://localhost:1234/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"messages\": [{
+      \"role\": \"system\",
+      \"content\": \"Clean up this dictated text. Fix spelling, remove filler words (um, uh), add proper punctuation. Output ONLY the cleaned text, nothing else.\"
+    },{
+      \"role\": \"user\",
+      \"content\": \"$INPUT\"
+    }],
+    \"temperature\": 0.1
+  }" | jq -r '.choices[0].message.content'
+```
+
+Make it executable: `chmod +x ~/.config/voxtype/lm-studio-cleanup.sh`
+
+### Timeout Recommendations
+
+| Use Case | Timeout |
+|----------|---------|
+| Simple shell commands (sed, tr) | 5000ms (5 seconds) |
+| Local LLMs (Ollama, llama.cpp) | 30000-60000ms (30-60 seconds) |
+| Remote APIs | 30000ms or higher |
+
+### Error Handling
+
+Post-processing is designed to be fault-tolerant:
+
+- **Command not found**: Falls back to original text
+- **Timeout**: Falls back to original text
+- **Non-zero exit**: Falls back to original text
+- **Empty output**: Falls back to original text
+
+This ensures voice-to-text always produces output, even when the LLM is slow or unavailable.
+
+### Debugging
+
+Run Voxtype with verbose logging to see post-processing in action:
+
+```bash
+voxtype -vv
+```
+
+You'll see log messages like:
+```
+[DEBUG] After text processing: "um so I think we should um fix the bug"
+[DEBUG] Post-processed (47 -> 32 chars)
+[DEBUG] After post-processing: "I think we should fix the bug"
+```
 
 ---
 

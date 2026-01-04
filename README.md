@@ -184,6 +184,22 @@ spoken_punctuation = true
 
 With this enabled, saying "function open paren close paren" outputs `function()`. Supports period, comma, brackets, braces, newlines, and many more. See [CONFIGURATION.md](docs/CONFIGURATION.md#text) for the full list.
 
+### Post-Processing Command (Advanced)
+
+For advanced cleanup, you can pipe transcriptions through an external command
+like a local LLM for grammar correction, filler word removal, or text formatting:
+
+```toml
+[output.post_process]
+command = "ollama run llama3.2:1b 'Clean up this dictation. Fix grammar, remove filler words:'"
+timeout_ms = 30000  # 30 second timeout for LLM
+```
+
+The command receives text on stdin and outputs cleaned text on stdout. On any
+failure (timeout, error), Voxtype gracefully falls back to the original transcription.
+
+See [CONFIGURATION.md](docs/CONFIGURATION.md#outputpost_process) for more examples including scripts for LM Studio, Ollama, and llama.cpp.
+
 ## CLI Options
 
 ```
