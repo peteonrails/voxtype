@@ -22,4 +22,7 @@
 
 # Claude Code
 .claude/
+CLAUDE.md
+
+# Packages
 *.deb
