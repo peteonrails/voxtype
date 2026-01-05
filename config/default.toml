@@ -122,7 +122,7 @@ on_transcription = true
 # Custom word replacements (case-insensitive)
 # replacements = { "hyperwhisper" = "hyprwhspr" }
 
-# [status]
+[status]
 # Status display icons for Waybar/tray integrations
 #
 # Icon theme (or path to custom theme file):
@@ -138,7 +138,7 @@ on_transcription = true
 #     - "dots"      - Geometric shapes (◯ ⬤ ◔ ◌)
 #     - "arrows"    - Media player style (▶ ● ↻ ■)
 #     - "text"      - Plain text ([MIC] [REC] [...] [OFF])
-# icon_theme = "emoji"
+icon_theme = "emoji"
 #
 # Per-state icon overrides (optional, takes precedence over theme)
 # [status.icons]
