@@ -1,7 +1,10 @@
 # Build artifacts
 /target
 /dist
-/packaging/arch/build/
+
+# AUR repos (nested git repos)
+/packaging/arch/
+/packaging/arch-bin/
 
 # Whisper models (large binary files)
 /models/*.bin
