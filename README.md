@@ -494,20 +494,20 @@ type_delay_ms = 10
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                         Daemon                              │
-├─────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
-│  │   Hotkey     │  │    Audio     │  │   Text Output    │  │
-│  │  (evdev)     │──│   (cpal)     │──│ (wtype/ydotool)  │  │
-│  └──────────────┘  └──────────────┘  └──────────────────┘  │
-│         │               │                    │              │
-│         │               ▼                    │              │
-│         │        ┌──────────────┐            │              │
-│         │        │   Whisper    │            │              │
-│         └───────▶│  (whisper-rs)│────────────┘              │
-│                  └──────────────┘                           │
-└─────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────┐
+│                              Daemon                                   │
+├───────────────────────────────────────────────────────────────────────┤
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌───────────┐ │
+│  │   Hotkey     │  │    Audio     │  │ Post-Process │  │   Output  │ │
+│  │  (evdev)     │──│   (cpal)     │──│  (optional)  │──│  (wtype)  │ │
+│  └──────────────┘  └──────────────┘  └──────────────┘  └───────────┘ │
+│         │               │                   │                │        │
+│         │               ▼                   │                │        │
+│         │        ┌──────────────┐           │                │        │
+│         │        │   Whisper    │───────────┘                │        │
+│         └───────▶│  (whisper-rs)│────────────────────────────┘        │
+│                  └──────────────┘                                     │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
 **Why compositor keybindings?** Wayland compositors like Hyprland, Sway, and River support key-release events, enabling push-to-talk without special permissions. Voxtype's `record start/stop` commands integrate directly with your compositor's keybinding system.
@@ -515,6 +515,8 @@ type_delay_ms = 10
 **Fallback: evdev hotkey.** For X11 or compositors without key-release support, voxtype includes a built-in hotkey using evdev (the Linux input subsystem). This requires the user to be in the `input` group.
 
 **Why wtype + ydotool?** On Wayland, wtype uses the virtual-keyboard protocol for text input, with excellent Unicode/CJK support and no daemon required. On X11 (or as a fallback), ydotool uses uinput for text injection. This combination ensures Voxtype works on any Linux desktop.
+
+**Post-processing.** Transcriptions can optionally be piped through an external command before output. Use this to integrate local LLMs (Ollama, llama.cpp) for grammar correction, text expansion, or domain-specific vocabulary. Any command that reads stdin and writes stdout works.
 
 ## Feedback
 
