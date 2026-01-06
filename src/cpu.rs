@@ -3,15 +3,32 @@
 //! Provides graceful error messages when running on incompatible CPUs,
 //! particularly in virtualized environments where the hypervisor may not
 //! expose all host CPU features.
+//!
+//! The SIGILL handler is installed via a .init_array constructor, which runs
+//! before main() - this is critical because AVX-512 instructions can appear
+//! in library initialization code, before our Rust main() even starts.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static SIGILL_HANDLER_INSTALLED: AtomicBool = AtomicBool::new(false);
 
+/// Constructor function that runs before main() via .init_array
+/// This ensures the SIGILL handler is installed before any library
+/// initialization code that might use unsupported instructions.
+#[used]
+#[link_section = ".init_array"]
+static INIT_SIGILL_HANDLER: extern "C" fn() = {
+    extern "C" fn init() {
+        install_sigill_handler();
+    }
+    init
+};
+
 /// Install a signal handler for SIGILL that prints a helpful error message
 /// instead of core dumping.
 ///
-/// This should be called early in main(), before loading the whisper model.
+/// This is called automatically before main() via .init_array, but can also
+/// be called manually if needed.
 pub fn install_sigill_handler() {
     // Only install once
     if SIGILL_HANDLER_INSTALLED.swap(true, Ordering::SeqCst) {
