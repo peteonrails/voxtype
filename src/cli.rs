@@ -11,26 +11,25 @@ use clap::{Parser, Subcommand};
 #[command(long_about = "
 Voxtype is a push-to-talk voice-to-text tool for Linux.
 Optimized for Wayland, works on X11 too.
-Hold a hotkey to record, release to transcribe and output the text.
 
-SETUP (Wayland with compositor keybindings - recommended):
-  1. Add a keybinding in your compositor to run: voxtype record-toggle
-     Hyprland: bind = , F9, exec, voxtype record-toggle
-     Sway/River: bindsym F9 exec voxtype record-toggle
-  2. Install wtype for typing support
-  3. Run: voxtype setup (download whisper model)
-  4. Start the daemon: voxtype daemon (or enable systemd service)
+COMMANDS:
+  voxtype                  Start the daemon (with evdev hotkey detection)
+  voxtype daemon           Same as above
+  voxtype record-toggle    Toggle recording (for compositor keybindings)
+  voxtype record-start     Start recording
+  voxtype record-stop      Stop recording and transcribe
+  voxtype status           Show daemon status (integrates with Waybar)
+  voxtype setup            Check dependencies and download models
+  voxtype config           Show current configuration
 
-SETUP (evdev hotkeys - X11/TTY or no compositor keybindings):
-  1. Add yourself to the input group: sudo usermod -aG input $USER
-  2. Log out and back in
-  3. Install ydotool for typing support
-  4. Run: voxtype setup
-  5. Run: voxtype
+EXAMPLES:
+  voxtype setup model      Interactive model selection
+  voxtype setup waybar     Show Waybar integration config
+  voxtype setup gpu        Manage GPU acceleration
+  voxtype status --follow --format json   Waybar integration
 
-USAGE:
-  Speak while recording, release/toggle to transcribe.
-  Text will be typed at cursor position, or copied to clipboard as fallback.
+See 'voxtype <command> --help' for more info on a command.
+See 'man voxtype' or docs/INSTALL.md for setup instructions.
 ")]
 pub struct Cli {
     /// Path to config file
