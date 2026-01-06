@@ -65,6 +65,10 @@ gpu-cuda = ["whisper-rs/cuda"]
 gpu-metal = ["whisper-rs/metal"]
 gpu-hipblas = ["whisper-rs/hipblas"]
 
+[build-dependencies]
+clap = { version = "4", features = ["derive"] }
+clap_mangen = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 

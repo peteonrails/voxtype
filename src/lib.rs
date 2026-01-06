@@ -26,6 +26,7 @@
 //! ```
 
 pub mod audio;
+pub mod cli;
 pub mod config;
 pub mod daemon;
 pub mod error;
@@ -36,6 +37,7 @@ pub mod state;
 pub mod text;
 pub mod transcribe;
 
+pub use cli::{Cli, Commands, RecordAction, SetupAction};
 pub use config::Config;
 pub use daemon::Daemon;
 pub use error::{Result, VoxtypeError};
