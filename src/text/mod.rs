@@ -223,12 +223,12 @@ mod tests {
 
     #[test]
     fn test_word_replacements() {
-        let config = make_config(false, &[("hyperwhisper", "hyprwhspr")]);
+        let config = make_config(false, &[("vox type", "voxtype")]);
         let processor = TextProcessor::new(&config);
 
         assert_eq!(
-            processor.process("I use hyperwhisper for dictation"),
-            "I use hyprwhspr for dictation"
+            processor.process("I use vox type for dictation"),
+            "I use voxtype for dictation"
         );
     }
 

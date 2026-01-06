@@ -124,7 +124,7 @@ on_transcription = true
 # spoken_punctuation = false
 #
 # Custom word replacements (case-insensitive)
-# replacements = { "hyperwhisper" = "hyprwhspr" }
+# replacements = { "vox type" = "voxtype" }
 
 # [status]
 # Status display icons for Waybar/tray integrations
@@ -476,7 +476,7 @@ pub struct TextConfig {
     pub spoken_punctuation: bool,
 
     /// Custom word replacements (case-insensitive)
-    /// Example: { "hyperwhisper" = "hyprwhspr" }
+    /// Example: { "vox type" = "voxtype" }
     #[serde(default)]
     pub replacements: HashMap<String, String>,
 }

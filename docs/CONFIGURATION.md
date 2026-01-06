@@ -646,15 +646,15 @@ Custom word replacements applied after transcription. Matching is case-insensiti
 **Example:**
 ```toml
 [text]
-replacements = { "hyperwhisper" = "hyprwhspr", "javascript" = "JavaScript" }
+replacements = { "vox type" = "voxtype", "javascript" = "JavaScript" }
 ```
 
-If Whisper transcribes "hyperwhisper" (or "HyperWhisper"), it will be replaced with "hyprwhspr".
+If Whisper transcribes "vox type" (or "Vox Type"), it will be replaced with "voxtype".
 
 **Multiple replacements:**
 ```toml
 [text.replacements]
-hyperwhisper = "hyprwhspr"
+"vox type" = "voxtype"
 omarchy = "Omarchy"
 claude = "Claude"
 ```
