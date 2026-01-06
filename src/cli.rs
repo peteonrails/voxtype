@@ -197,3 +197,55 @@ pub enum SetupAction {
         status: bool,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_setup_quiet_flag() {
+        let cli = Cli::parse_from(["voxtype", "setup", "--quiet"]);
+        match cli.command {
+            Some(Commands::Setup { quiet, .. }) => {
+                assert!(quiet, "setup --quiet should set quiet=true");
+            }
+            _ => panic!("Expected Setup command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_without_quiet_flag() {
+        let cli = Cli::parse_from(["voxtype", "setup"]);
+        match cli.command {
+            Some(Commands::Setup { quiet, .. }) => {
+                assert!(!quiet, "setup without --quiet should have quiet=false");
+            }
+            _ => panic!("Expected Setup command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_quiet_with_download() {
+        let cli = Cli::parse_from(["voxtype", "setup", "--quiet", "--download"]);
+        match cli.command {
+            Some(Commands::Setup { quiet, download, .. }) => {
+                assert!(quiet, "should have quiet=true");
+                assert!(download, "should have download=true");
+            }
+            _ => panic!("Expected Setup command"),
+        }
+    }
+
+    #[test]
+    fn test_model_set_restart_flags() {
+        let cli = Cli::parse_from(["voxtype", "setup", "model", "--set", "large-v3", "--restart"]);
+        match cli.command {
+            Some(Commands::Setup { action: Some(SetupAction::Model { set, restart, .. }), .. }) => {
+                assert_eq!(set, Some("large-v3".to_string()));
+                assert!(restart, "should have restart=true");
+            }
+            _ => panic!("Expected Setup Model command"),
+        }
+    }
+}
