@@ -87,6 +87,10 @@ pub enum Commands {
         /// Download model if missing (shorthand for basic setup)
         #[arg(long)]
         download: bool,
+
+        /// Suppress "Next steps" instructions (for automated installs)
+        #[arg(long)]
+        quiet: bool,
     },
 
     /// Show current configuration
