@@ -210,7 +210,8 @@ Commands:
   transcribe  Transcribe an audio file
   setup       Setup and installation utilities
   config      Show current configuration
-  status      Show daemon state (for Waybar integration)
+  status      Show daemon status (for Waybar/polybar integration)
+  record      Control recording from external sources (compositor keybindings, scripts)
 
 Setup subcommands:
   voxtype setup              Run basic dependency checks (default)
@@ -221,9 +222,15 @@ Setup subcommands:
   voxtype setup gpu          Manage GPU acceleration (switch CPU/Vulkan)
 
 Status options:
-  voxtype status --format json      Output as JSON (for Waybar)
-  voxtype status --follow           Continuously output on state changes
-  voxtype status --extended         Include model, device, backend in JSON
+  voxtype status --format json       Output as JSON (for Waybar)
+  voxtype status --follow            Continuously output on state changes
+  voxtype status --extended          Include model, device, backend in JSON
+  voxtype status --icon-theme THEME  Icon theme (emoji, nerd-font, material, etc.)
+
+Record subcommands (for compositor keybindings):
+  voxtype record start   Start recording (send SIGUSR1 to daemon)
+  voxtype record stop    Stop recording and transcribe (send SIGUSR2 to daemon)
+  voxtype record toggle  Toggle recording state
 
 Options:
   -c, --config <FILE>  Path to config file
@@ -234,6 +241,8 @@ Options:
   --model <MODEL>      Override whisper model
   --hotkey <KEY>       Override hotkey
   --toggle             Use toggle mode (press to start/stop)
+  -h, --help           Print help
+  -V, --version        Print version
 ```
 
 ## Whisper Models
