@@ -61,6 +61,81 @@
 
             <!-- v0.4.x Era Posts -->
 
+            <article class="news-article" id="man-pages">
+                <div class="article-meta">
+                    <time datetime="2026-01">January 2026</time>
+                    <span class="article-tag">DX</span>
+                </div>
+                <h2>Man Pages for Every Command</h2>
+                <div class="article-body">
+                    <p>Real Unix tools have man pages.</p>
+
+                    <p>Voxtype now generates man pages automatically from the CLI definitions using <code>clap_mangen</code>. 14 pages covering every command and subcommand.</p>
+
+                    <div class="code-block">
+                        <pre><code>man voxtype
+man voxtype-status
+man voxtype-setup-gpu</code></pre>
+                    </div>
+
+                    <p>Why does this matter?</p>
+
+                    <ul>
+                        <li><strong>Offline documentation</strong> &mdash; No internet required</li>
+                        <li><strong>Consistent format</strong> &mdash; Works with apropos, whatis, man -k</li>
+                        <li><strong>Auto-updated</strong> &mdash; Generated from code, never out of sync</li>
+                        <li><strong>Unix convention</strong> &mdash; Expected by experienced users</li>
+                    </ul>
+
+                    <p>The man pages are included in deb/rpm packages and Arch AUR. They install to <code>/usr/share/man/man1/</code>.</p>
+
+                    <p>Small polish, but the details matter.</p>
+                </div>
+            </article>
+
+            <article class="news-article" id="icon-themes">
+                <div class="article-meta">
+                    <time datetime="2026-01">January 2026</time>
+                    <span class="article-tag">New Feature</span>
+                </div>
+                <h2>v0.4.4: Configurable Status Bar Icons</h2>
+                <div class="article-body">
+                    <p>"The emoji icons look out of place in my setup."</p>
+
+                    <p>This was the most common feedback about Voxtype's Waybar integration. Emoji icons work everywhere but don't match every aesthetic.</p>
+
+                    <p>v0.4.4 ships with 10 built-in icon themes:</p>
+
+                    <ul>
+                        <li><strong>emoji</strong> &mdash; Universal, works everywhere (default)</li>
+                        <li><strong>nerd-font</strong> &mdash; Requires Nerd Font</li>
+                        <li><strong>material</strong> &mdash; Material Design Icons</li>
+                        <li><strong>phosphor</strong> &mdash; Phosphor Icons</li>
+                        <li><strong>codicons</strong> &mdash; VS Code icons</li>
+                        <li><strong>minimal</strong> &mdash; Simple Unicode (○ ● ◐ ×)</li>
+                        <li><strong>dots</strong> &mdash; Geometric shapes</li>
+                        <li><strong>arrows</strong> &mdash; Media player style</li>
+                        <li><strong>text</strong> &mdash; Plain text labels</li>
+                    </ul>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[status]
+icon_theme = "nerd-font"</code></pre>
+                    </div>
+
+                    <p>Or override at runtime:</p>
+
+                    <div class="code-block">
+                        <pre><code>voxtype status --icon-theme material</code></pre>
+                    </div>
+
+                    <p>You can also create custom themes as TOML files with your own icons. This release also adds the <code>alt</code> field to JSON output, enabling Waybar's native <code>format-icons</code> feature.</p>
+
+                    <p>See the <a href="https://github.com/peteonrails/voxtype/blob/main/docs/CONFIGURATION.md#status">configuration docs</a> for details.</p>
+                </div>
+            </article>
+
             <article class="news-article" id="post-process-llm">
                 <div class="article-meta">
                     <time datetime="2025-01">January 2025</time>
