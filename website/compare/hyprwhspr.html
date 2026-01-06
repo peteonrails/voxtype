@@ -69,7 +69,7 @@
             <tr>
                 <td>GPU Acceleration</td>
                 <td>Vulkan, CUDA, Metal, ROCm</td>
-                <td>CUDA, ROCm (6.x only)</td>
+                <td>CUDA, Vulkann</td>
             </tr>
             <tr>
                 <td>Waybar Integration</td>
@@ -84,7 +84,7 @@
             <tr>
                 <td>Audio Feedback</td>
                 <td>Yes (customizable themes)</td>
-                <td>Yes</td>
+                <td>Yes (auto matches Omarch)</td>
             </tr>
             <tr>
                 <td>Desktop Notifications</td>
@@ -94,7 +94,7 @@
             <tr>
                 <td>Word Replacements</td>
                 <td>Yes</td>
-                <td>Yes (via WhisperTux)</td>
+                <td>Yes</td>
             </tr>
             <tr>
                 <td>Spoken Punctuation</td>
@@ -139,7 +139,7 @@
 
         <h3>GPU Acceleration</h3>
         <p><strong>Voxtype</strong> supports Vulkan (works on AMD, NVIDIA, Intel), CUDA, Metal, and ROCm via compile-time features.</p>
-        <p><strong>hyprwhspr</strong> supports CUDA and ROCm, but notes that <strong>ROCm 7.x has compatibility issues</strong> and falls back to CPU. If you're on AMD with recent ROCm, verify compatibility.</p>
+        <p><strong>hyprwhspr</strong> supports CUDA and Vulkan.</p>
 
         <h2>Feature Comparison</h2>
 
@@ -155,9 +155,6 @@
             <li><strong>Any distro</strong> - Packages for Arch, Debian, Fedora, or build from source</li>
             <li><strong>Single binary</strong> - No Python environment to manage</li>
             <li><strong>Desktop notifications</strong> - Visual feedback via notify-send, not just audio</li>
-            <li><strong>Privacy-first</strong> - No cloud options means your voice never leaves your machine</li>
-            <li><strong>Broader GPU support</strong> - Vulkan works across GPU vendors (including ROCm 7.x)</li>
-            <li><strong>large-v3-turbo model</strong> - Fast multilingual model (1.6 GB) with excellent accuracy</li>
         </ul>
 
         <h2>Setup Comparison</h2>
@@ -175,8 +172,8 @@ hyprwhspr setup
 
         <div class="verdict-box">
             <h3>The Verdict</h3>
-            <p><strong>Choose Voxtype</strong> if you want a single binary that works on any Wayland compositor and any Linux distro, prefer privacy-first (no cloud options), or want broader GPU support via Vulkan.</p>
-            <p><strong>Choose hyprwhspr</strong> if you're on Arch/Omarchy with Hyprland and want cloud API fallbacks when local transcription is too slow, or if you want to use NVIDIA's Parakeet model.</p>
+            <p><strong>Choose Voxtype</strong> if you want a single binary that works on any Wayland compositor and any Linux distro.</p>
+            <p><strong>Choose hyprwhspr</strong> if you're on Arch/Omarchy with Hyprland and want REST API fallbacks for cloud usage when local transcription is too slow, or if you want to use NVIDIA's Parakeet model or any local model.</p>
             <p>Both tools now offer excellent feature parity: word replacements, spoken punctuation, interactive setup, Waybar integration, and audio feedback. The main differences are architecture (Rust vs Python) and cloud capabilities.</p>
         </div>
 
