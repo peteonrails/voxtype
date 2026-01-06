@@ -646,7 +646,7 @@ Custom word replacements applied after transcription. Matching is case-insensiti
 **Example:**
 ```toml
 [text]
-replacements = { "vox type" = "voxtype", "javascript" = "JavaScript" }
+replacements = { "vox type" = "voxtype", "oh marky" = "Omarchy" }
 ```
 
 If Whisper transcribes "vox type" (or "Vox Type"), it will be replaced with "voxtype".
@@ -655,7 +655,7 @@ If Whisper transcribes "vox type" (or "Vox Type"), it will be replaced with "vox
 ```toml
 [text.replacements]
 "vox type" = "voxtype"
-omarchy = "Omarchy"
+"oh marky" = "Omarchy"
 claude = "Claude"
 ```
 

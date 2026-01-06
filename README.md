@@ -140,7 +140,7 @@ on_transcription = true     # Show transcribed text
 # Text processing (word replacements, spoken punctuation)
 # [text]
 # spoken_punctuation = true  # Say "period" → ".", "open paren" → "("
-# replacements = { "vox type" = "voxtype", "javascript" = "JavaScript" }
+# replacements = { "vox type" = "voxtype", "oh marky" = "Omarchy" }
 
 # State file for Waybar/polybar integration (enabled by default)
 state_file = "auto"  # Or custom path, or "disabled" to turn off
@@ -172,7 +172,7 @@ Voxtype can post-process transcribed text with word replacements and spoken punc
 
 ```toml
 [text]
-replacements = { "vox type" = "voxtype", "javascript" = "JavaScript" }
+replacements = { "vox type" = "voxtype", "oh marky" = "Omarchy" }
 ```
 
 **Spoken punctuation** (opt-in) converts spoken words to symbols - useful for developers:
