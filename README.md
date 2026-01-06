@@ -542,6 +542,7 @@ We want to hear from you! Voxtype is a young project and your feedback helps mak
 - [jvantillo](https://github.com/jvantillo) - GPU acceleration patch, whisper-rs 0.15.1 compatibility
 - [materemias](https://github.com/materemias) - Paste output mode, on-demand model loading, PKGBUILD fix
 - [reisset](https://github.com/reisset) - Testing and feedback on post-processing feature
+- [Goodroot](https://github.com/goodroot) - Testing, feedback, and documentation updates
 
 ## License
 

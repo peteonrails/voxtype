@@ -343,59 +343,79 @@ fn print_tool_status(tool: &OutputToolStatus, is_relevant: bool) {
 }
 
 /// Run setup tasks (non-blocking, no red X errors)
-pub async fn run_setup(config: &Config, download: bool, quiet: bool) -> anyhow::Result<()> {
-    println!("Voxtype Setup\n");
-    println!("=============\n");
+///
+/// Flags:
+/// - `quiet`: Suppress ALL output (for scripting/automation)
+/// - `no_post_install`: Suppress only "Next steps" instructions
+pub async fn run_setup(config: &Config, download: bool, quiet: bool, no_post_install: bool) -> anyhow::Result<()> {
+    if !quiet {
+        println!("Voxtype Setup\n");
+        println!("=============\n");
 
-    // Ensure directories exist first
-    println!("Creating directories...");
+        // Ensure directories exist first
+        println!("Creating directories...");
+    }
     Config::ensure_directories()?;
-    print_success(&format!(
-        "Config directory: {:?}",
-        Config::config_dir().unwrap_or_default()
-    ));
-    print_success(&format!("Models directory: {:?}", Config::models_dir()));
+    if !quiet {
+        print_success(&format!(
+            "Config directory: {:?}",
+            Config::config_dir().unwrap_or_default()
+        ));
+        print_success(&format!("Models directory: {:?}", Config::models_dir()));
+    }
 
     // Create default config file if it doesn't exist
     if let Some(config_path) = Config::default_path() {
         if !config_path.exists() {
-            println!("\nCreating default config file...");
+            if !quiet {
+                println!("\nCreating default config file...");
+            }
             std::fs::write(&config_path, crate::config::DEFAULT_CONFIG)?;
-            print_success(&format!("Created: {:?}", config_path));
-        } else {
+            if !quiet {
+                print_success(&format!("Created: {:?}", config_path));
+            }
+        } else if !quiet {
             print_success(&format!("Config file: {:?}", config_path));
         }
     }
 
     // Check/download whisper model
-    println!("\nWhisper model...");
+    if !quiet {
+        println!("\nWhisper model...");
+    }
     let models_dir = Config::models_dir();
     let model_name = &config.whisper.model;
     let model_filename = crate::transcribe::whisper::get_model_filename(model_name);
     let model_path = models_dir.join(&model_filename);
 
     if model_path.exists() {
-        let size = std::fs::metadata(&model_path)
-            .map(|m| m.len() as f64 / 1024.0 / 1024.0)
-            .unwrap_or(0.0);
-        print_success(&format!(
-            "Model ready: {} ({:.0} MB)",
-            model_name, size
-        ));
+        if !quiet {
+            let size = std::fs::metadata(&model_path)
+                .map(|m| m.len() as f64 / 1024.0 / 1024.0)
+                .unwrap_or(0.0);
+            print_success(&format!(
+                "Model ready: {} ({:.0} MB)",
+                model_name, size
+            ));
+        }
     } else if download {
-        println!("  Downloading {}...", model_name);
+        if !quiet {
+            println!("  Downloading {}...", model_name);
+        }
         model::download_model(model_name)?;
-    } else {
+    } else if !quiet {
         print_info(&format!("Model '{}' not downloaded yet", model_name));
         println!("       Run: voxtype setup --download");
     }
 
     // Summary
-    println!("\n---");
-    println!("\x1b[32m✓ Setup complete!\x1b[0m");
-
-    // Show next steps unless --quiet is passed (for automated installs like Omarchy)
     if !quiet {
+        println!("\n---");
+        println!("\x1b[32m✓ Setup complete!\x1b[0m");
+    }
+
+    // Show next steps unless --quiet or --no-post-install is passed
+    if !quiet && !no_post_install {
         println!();
         println!("Next steps:");
         println!("  1. Set up a compositor keybinding to trigger recording:");

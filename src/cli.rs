@@ -88,9 +88,13 @@ pub enum Commands {
         #[arg(long)]
         download: bool,
 
-        /// Suppress "Next steps" instructions (for automated installs)
+        /// Suppress all output (for scripting/automation)
         #[arg(long)]
         quiet: bool,
+
+        /// Suppress only "Next steps" instructions
+        #[arg(long)]
+        no_post_install: bool,
     },
 
     /// Show current configuration
@@ -215,11 +219,24 @@ mod tests {
     }
 
     #[test]
-    fn test_setup_without_quiet_flag() {
+    fn test_setup_no_post_install_flag() {
+        let cli = Cli::parse_from(["voxtype", "setup", "--no-post-install"]);
+        match cli.command {
+            Some(Commands::Setup { no_post_install, quiet, .. }) => {
+                assert!(no_post_install, "setup --no-post-install should set no_post_install=true");
+                assert!(!quiet, "quiet should be false");
+            }
+            _ => panic!("Expected Setup command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_without_flags() {
         let cli = Cli::parse_from(["voxtype", "setup"]);
         match cli.command {
-            Some(Commands::Setup { quiet, .. }) => {
+            Some(Commands::Setup { quiet, no_post_install, .. }) => {
                 assert!(!quiet, "setup without --quiet should have quiet=false");
+                assert!(!no_post_install, "setup without --no-post-install should have no_post_install=false");
             }
             _ => panic!("Expected Setup command"),
         }
@@ -231,6 +248,45 @@ mod tests {
         match cli.command {
             Some(Commands::Setup { quiet, download, .. }) => {
                 assert!(quiet, "should have quiet=true");
+                assert!(download, "should have download=true");
+            }
+            _ => panic!("Expected Setup command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_both_quiet_flags() {
+        // Both flags can be used together (quiet takes precedence)
+        let cli = Cli::parse_from(["voxtype", "setup", "--quiet", "--no-post-install"]);
+        match cli.command {
+            Some(Commands::Setup { quiet, no_post_install, .. }) => {
+                assert!(quiet, "should have quiet=true");
+                assert!(no_post_install, "should have no_post_install=true");
+            }
+            _ => panic!("Expected Setup command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_no_post_install_with_download() {
+        let cli = Cli::parse_from(["voxtype", "setup", "--no-post-install", "--download"]);
+        match cli.command {
+            Some(Commands::Setup { quiet, no_post_install, download, .. }) => {
+                assert!(!quiet, "quiet should be false");
+                assert!(no_post_install, "should have no_post_install=true");
+                assert!(download, "should have download=true");
+            }
+            _ => panic!("Expected Setup command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_all_flags() {
+        let cli = Cli::parse_from(["voxtype", "setup", "--quiet", "--no-post-install", "--download"]);
+        match cli.command {
+            Some(Commands::Setup { quiet, no_post_install, download, .. }) => {
+                assert!(quiet, "should have quiet=true");
+                assert!(no_post_install, "should have no_post_install=true");
                 assert!(download, "should have download=true");
             }
             _ => panic!("Expected Setup command"),
