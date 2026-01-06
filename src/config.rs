@@ -97,6 +97,11 @@ fallback_to_clipboard = true
 # 0 = fastest possible, increase if characters are dropped
 type_delay_ms = 0
 
+# Automatically submit (send Enter key) after outputting transcribed text
+# Useful for chat applications, command lines, or forms where you want
+# to auto-submit after dictation
+# auto_submit = true
+
 # Post-processing command (optional)
 # Pipe transcribed text through an external command for cleanup before output.
 # The command receives text on stdin and outputs processed text on stdout.
@@ -348,10 +353,10 @@ fn load_icon_theme(theme: &str) -> ResolvedIcons {
         },
         "nerd-font" => ResolvedIcons {
             // Nerd Font icons: microphone, circle, spinner, microphone-slash
-            idle: "\u{f130}".to_string(),      // nf-fa-microphone
-            recording: "\u{f111}".to_string(), // nf-fa-circle (filled)
+            idle: "\u{f130}".to_string(),         // nf-fa-microphone
+            recording: "\u{f111}".to_string(),    // nf-fa-circle (filled)
             transcribing: "\u{f110}".to_string(), // nf-fa-spinner
-            stopped: "\u{f131}".to_string(),   // nf-fa-microphone_slash
+            stopped: "\u{f131}".to_string(),      // nf-fa-microphone_slash
         },
         "omarchy" => ResolvedIcons {
             // Icons from hyprwhspr for Omarchy compatibility
@@ -368,24 +373,24 @@ fn load_icon_theme(theme: &str) -> ResolvedIcons {
         },
         "material" => ResolvedIcons {
             // Material Design Icons (requires MDI font)
-            idle: "\u{f036c}".to_string(),      // mdi-microphone
-            recording: "\u{f040a}".to_string(), // mdi-record
+            idle: "\u{f036c}".to_string(),         // mdi-microphone
+            recording: "\u{f040a}".to_string(),    // mdi-record
             transcribing: "\u{f04ce}".to_string(), // mdi-sync
-            stopped: "\u{f036d}".to_string(),   // mdi-microphone-off
+            stopped: "\u{f036d}".to_string(),      // mdi-microphone-off
         },
         "phosphor" => ResolvedIcons {
             // Phosphor Icons (requires Phosphor font)
-            idle: "\u{e43a}".to_string(),      // ph-microphone
-            recording: "\u{e438}".to_string(), // ph-record
+            idle: "\u{e43a}".to_string(),         // ph-microphone
+            recording: "\u{e438}".to_string(),    // ph-record
             transcribing: "\u{e225}".to_string(), // ph-circle-notch (spinner)
-            stopped: "\u{e43b}".to_string(),   // ph-microphone-slash
+            stopped: "\u{e43b}".to_string(),      // ph-microphone-slash
         },
         "codicons" => ResolvedIcons {
             // VS Code Codicons (requires Codicons font)
-            idle: "\u{eb51}".to_string(),      // codicon-mic
-            recording: "\u{ebfc}".to_string(), // codicon-record
+            idle: "\u{eb51}".to_string(),         // codicon-mic
+            recording: "\u{ebfc}".to_string(),    // codicon-record
             transcribing: "\u{eb4c}".to_string(), // codicon-sync
-            stopped: "\u{eb52}".to_string(),   // codicon-mute
+            stopped: "\u{eb52}".to_string(),      // codicon-mute
         },
         "text" => ResolvedIcons {
             // Plain text labels (no special fonts required)
@@ -396,20 +401,24 @@ fn load_icon_theme(theme: &str) -> ResolvedIcons {
         },
         "dots" => ResolvedIcons {
             // Unicode geometric shapes (no special fonts required)
-            idle: "◯".to_string(),        // U+25EF white circle
-            recording: "⬤".to_string(),   // U+2B24 black large circle
+            idle: "◯".to_string(),         // U+25EF white circle
+            recording: "⬤".to_string(),    // U+2B24 black large circle
             transcribing: "◔".to_string(), // U+25D4 circle with upper right quadrant black
             stopped: "◌".to_string(),      // U+25CC dotted circle
         },
         "arrows" => ResolvedIcons {
             // Media player style (no special fonts required)
-            idle: "▶".to_string(),        // U+25B6 play
-            recording: "●".to_string(),   // U+25CF black circle
+            idle: "▶".to_string(),         // U+25B6 play
+            recording: "●".to_string(),    // U+25CF black circle
             transcribing: "↻".to_string(), // U+21BB clockwise arrow
             stopped: "■".to_string(),      // U+25A0 black square
         },
         path => load_custom_icon_theme(path).unwrap_or_else(|e| {
-            tracing::warn!("Failed to load custom icon theme '{}': {}, using emoji", path, e);
+            tracing::warn!(
+                "Failed to load custom icon theme '{}': {}, using emoji",
+                path,
+                e
+            );
             load_icon_theme("emoji")
         }),
     }
@@ -422,8 +431,8 @@ fn load_custom_icon_theme(path: &str) -> Result<ResolvedIcons, String> {
         return Err(format!("Theme file not found: {}", path.display()));
     }
 
-    let contents = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read theme file: {}", e))?;
+    let contents =
+        std::fs::read_to_string(&path).map_err(|e| format!("Failed to read theme file: {}", e))?;
 
     #[derive(Deserialize)]
     struct ThemeFile {
@@ -433,8 +442,8 @@ fn load_custom_icon_theme(path: &str) -> Result<ResolvedIcons, String> {
         stopped: Option<String>,
     }
 
-    let theme: ThemeFile = toml::from_str(&contents)
-        .map_err(|e| format!("Invalid theme file: {}", e))?;
+    let theme: ThemeFile =
+        toml::from_str(&contents).map_err(|e| format!("Invalid theme file: {}", e))?;
 
     // Start with emoji defaults, override with file values
     let base = load_icon_theme("emoji");
@@ -544,6 +553,12 @@ pub struct OutputConfig {
     #[serde(default)]
     pub type_delay_ms: u32,
 
+    /// Automatically submit (send Enter key) after outputting transcribed text
+    /// Useful for chat applications, command lines, or forms where you want
+    /// to auto-submit after dictation
+    #[serde(default)]
+    pub auto_submit: bool,
+
     /// Optional post-processing command configuration
     /// Pipes transcribed text through an external command before output
     #[serde(default)]
@@ -593,6 +608,7 @@ impl Default for Config {
                 fallback_to_clipboard: true,
                 notification: NotificationConfig::default(),
                 type_delay_ms: 0,
+                auto_submit: false,
                 post_process: None,
             },
             text: TextConfig::default(),
@@ -622,13 +638,13 @@ impl Config {
     /// Returns None if state_file is not configured or explicitly disabled
     /// Returns the resolved path if set to "auto" or an explicit path
     pub fn resolve_state_file(&self) -> Option<PathBuf> {
-        self.state_file.as_ref().and_then(|path| {
-            match path.to_lowercase().as_str() {
+        self.state_file
+            .as_ref()
+            .and_then(|path| match path.to_lowercase().as_str() {
                 "disabled" | "none" | "off" | "false" => None,
                 "auto" => Some(Self::runtime_dir().join("state")),
                 _ => Some(PathBuf::from(path)),
-            }
-        })
+            })
     }
 
     /// Get the config directory path
@@ -673,9 +689,7 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     let mut config = Config::default();
 
     // Determine config file path
-    let config_path = path
-        .map(PathBuf::from)
-        .or_else(Config::default_path);
+    let config_path = path.map(PathBuf::from).or_else(Config::default_path);
 
     // Load from file if it exists
     if let Some(ref path) = config_path {
@@ -740,6 +754,7 @@ mod tests {
         assert!(!config.audio.feedback.enabled);
         assert_eq!(config.whisper.model, "base.en");
         assert_eq!(config.output.mode, OutputMode::Type);
+        assert!(!config.output.auto_submit);
     }
 
     #[test]
@@ -838,16 +853,85 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_auto_submit() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+            auto_submit = true
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.output.auto_submit);
+    }
+
+    #[test]
+    fn test_parse_auto_submit_defaults_false() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(!config.output.auto_submit);
+    }
+
+    #[test]
     fn test_builtin_icon_themes() {
         // Test all built-in themes load correctly
-        let themes = ["emoji", "nerd-font", "material", "phosphor", "codicons",
-                      "omarchy", "minimal", "dots", "arrows", "text"];
+        let themes = [
+            "emoji",
+            "nerd-font",
+            "material",
+            "phosphor",
+            "codicons",
+            "omarchy",
+            "minimal",
+            "dots",
+            "arrows",
+            "text",
+        ];
 
         for theme in themes {
             let icons = load_icon_theme(theme);
-            assert!(!icons.idle.is_empty() || theme == "emoji", "Theme {} should have idle icon", theme);
-            assert!(!icons.recording.is_empty(), "Theme {} should have recording icon", theme);
-            assert!(!icons.transcribing.is_empty(), "Theme {} should have transcribing icon", theme);
+            assert!(
+                !icons.idle.is_empty() || theme == "emoji",
+                "Theme {} should have idle icon",
+                theme
+            );
+            assert!(
+                !icons.recording.is_empty(),
+                "Theme {} should have recording icon",
+                theme
+            );
+            assert!(
+                !icons.transcribing.is_empty(),
+                "Theme {} should have transcribing icon",
+                theme
+            );
             // stopped can be empty for some themes
         }
     }
@@ -997,12 +1081,16 @@ mod tests {
 
         // Create a temporary theme file
         let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-        writeln!(temp_file, r#"
+        writeln!(
+            temp_file,
+            r#"
             idle = "IDLE"
             recording = "REC"
             transcribing = "BUSY"
             stopped = "OFF"
-        "#).unwrap();
+        "#
+        )
+        .unwrap();
 
         let icons = load_icon_theme(temp_file.path().to_str().unwrap());
         assert_eq!(icons.idle, "IDLE");
@@ -1017,9 +1105,13 @@ mod tests {
 
         // Create a theme file with only some icons (others should default to emoji)
         let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-        writeln!(temp_file, r#"
+        writeln!(
+            temp_file,
+            r#"
             recording = "🔴"
-        "#).unwrap();
+        "#
+        )
+        .unwrap();
 
         let icons = load_icon_theme(temp_file.path().to_str().unwrap());
         // Only recording is overridden, others fall back to emoji

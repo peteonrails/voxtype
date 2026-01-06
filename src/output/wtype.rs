@@ -18,12 +18,17 @@ use tokio::process::Command;
 pub struct WtypeOutput {
     /// Whether to show a desktop notification
     notify: bool,
+    /// Whether to send Enter key after output
+    auto_submit: bool,
 }
 
 impl WtypeOutput {
     /// Create a new wtype output
-    pub fn new(notify: bool) -> Self {
-        Self { notify }
+    pub fn new(notify: bool, auto_submit: bool) -> Self {
+        Self {
+            notify,
+            auto_submit,
+        }
     }
 
     /// Send a desktop notification
@@ -80,6 +85,22 @@ impl TextOutput for WtypeOutput {
             )));
         }
 
+        // Send Enter key if configured
+        if self.auto_submit {
+            let enter_output = Command::new("wtype")
+                .args(["-k", "Return"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+                .await
+                .map_err(|e| OutputError::InjectionFailed(format!("wtype Enter failed: {}", e)))?;
+
+            if !enter_output.status.success() {
+                let stderr = String::from_utf8_lossy(&enter_output.stderr);
+                tracing::warn!("Failed to send Enter key: {}", stderr);
+            }
+        }
+
         // Send notification if enabled
         if self.notify {
             self.send_notification(text).await;
@@ -113,7 +134,15 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = WtypeOutput::new(true);
+        let output = WtypeOutput::new(true, false);
         assert!(output.notify);
+        assert!(!output.auto_submit);
+    }
+
+    #[test]
+    fn test_new_with_enter() {
+        let output = WtypeOutput::new(false, true);
+        assert!(!output.notify);
+        assert!(output.auto_submit);
     }
 }

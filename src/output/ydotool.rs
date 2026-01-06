@@ -21,13 +21,15 @@ pub struct YdotoolOutput {
     notify: bool,
     /// Whether ydotool supports --key-hold flag (added in newer versions)
     supports_key_hold: bool,
+    /// Whether to send Enter key after output
+    auto_submit: bool,
 }
 
 impl YdotoolOutput {
     /// Create a new ydotool output
     ///
     /// Detects ydotool capabilities at construction time.
-    pub fn new(delay_ms: u32, notify: bool) -> Self {
+    pub fn new(delay_ms: u32, notify: bool, auto_submit: bool) -> Self {
         let supports_key_hold = Self::detect_key_hold_support();
         if supports_key_hold {
             tracing::debug!("ydotool supports --key-hold flag");
@@ -38,6 +40,7 @@ impl YdotoolOutput {
             delay_ms,
             notify,
             supports_key_hold,
+            auto_submit,
         }
     }
 
@@ -127,6 +130,26 @@ impl TextOutput for YdotoolOutput {
             return Err(OutputError::InjectionFailed(stderr.to_string()));
         }
 
+        // Send Enter key if configured
+        // ydotool key uses evdev key codes: 28 is KEY_ENTER
+        // Format: keycode:press (1) then keycode:release (0)
+        if self.auto_submit {
+            let enter_output = Command::new("ydotool")
+                .args(["key", "28:1", "28:0"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+                .await
+                .map_err(|e| {
+                    OutputError::InjectionFailed(format!("ydotool Enter failed: {}", e))
+                })?;
+
+            if !enter_output.status.success() {
+                let stderr = String::from_utf8_lossy(&enter_output.stderr);
+                tracing::warn!("Failed to send Enter key: {}", stderr);
+            }
+        }
+
         // Send notification if enabled
         if self.notify {
             self.send_notification(text).await;
@@ -171,11 +194,20 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = YdotoolOutput::new(10, true);
+        let output = YdotoolOutput::new(10, true, false);
         assert_eq!(output.delay_ms, 10);
         assert!(output.notify);
+        assert!(!output.auto_submit);
         // supports_key_hold depends on system ydotool version, so we just check it's set
         let _ = output.supports_key_hold;
+    }
+
+    #[test]
+    fn test_new_with_enter() {
+        let output = YdotoolOutput::new(0, false, true);
+        assert_eq!(output.delay_ms, 0);
+        assert!(!output.notify);
+        assert!(output.auto_submit);
     }
 
     #[test]
