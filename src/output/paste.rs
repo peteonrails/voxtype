@@ -18,12 +18,17 @@ use tokio::process::Command;
 pub struct PasteOutput {
     /// Whether to show a desktop notification
     notify: bool,
+    /// Whether to send Enter key after output
+    auto_submit: bool,
 }
 
 impl PasteOutput {
     /// Create a new paste output
-    pub fn new(notify: bool) -> Self {
-        Self { notify }
+    pub fn new(notify: bool, auto_submit: bool) -> Self {
+        Self {
+            notify,
+            auto_submit,
+        }
     }
 
     /// Send a desktop notification
@@ -71,7 +76,7 @@ impl PasteOutput {
                 .write_all(text.as_bytes())
                 .await
                 .map_err(|e| OutputError::InjectionFailed(e.to_string()))?;
-            
+
             // Close stdin to signal EOF
             drop(stdin);
         }
@@ -141,6 +146,26 @@ impl TextOutput for PasteOutput {
 
         // Step 2: Simulate Ctrl+V
         self.simulate_ctrl_v().await?;
+
+        // Send Enter key if configured
+        // ydotool key uses evdev key codes: 28 is KEY_ENTER
+        // Format: keycode:press (1) then keycode:release (0)
+        if self.auto_submit {
+            let enter_output = Command::new("ydotool")
+                .args(["key", "28:1", "28:0"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+                .await
+                .map_err(|e| {
+                    OutputError::InjectionFailed(format!("ydotool Enter failed: {}", e))
+                })?;
+
+            if !enter_output.status.success() {
+                let stderr = String::from_utf8_lossy(&enter_output.stderr);
+                tracing::warn!("Failed to send Enter key: {}", stderr);
+            }
+        }
 
         // Send notification if enabled
         if self.notify {
