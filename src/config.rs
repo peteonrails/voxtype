@@ -354,11 +354,11 @@ fn load_icon_theme(theme: &str) -> ResolvedIcons {
             stopped: "\u{f131}".to_string(),   // nf-fa-microphone_slash
         },
         "omarchy" => ResolvedIcons {
-            // Icons from hyprwhspr for Omarchy compatibility
-            idle: "\u{ec12}".to_string(),
-            recording: "\u{ec1c}".to_string(),
-            transcribing: "\u{ec1c}".to_string(),
-            stopped: "\u{ec12}".to_string(),
+            // Material Design icons matching Omarchy waybar config
+            idle: "\u{ec12}".to_string(),     // nf-md-microphone_outline
+            recording: "\u{f036c}".to_string(), // nf-md-microphone
+            transcribing: "\u{f051f}".to_string(), // nf-md-timer_sand
+            stopped: "\u{ec12}".to_string(),  // nf-md-microphone_outline
         },
         "minimal" => ResolvedIcons {
             idle: "○".to_string(),
