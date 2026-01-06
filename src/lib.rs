@@ -1,28 +1,59 @@
-//! Voxtype: Push-to-talk voice-to-text for Wayland
+//! Voxtype: Push-to-talk voice-to-text for Linux
 //!
 //! This library provides the core functionality for:
 //! - Detecting hotkey presses via evdev (kernel-level, works on all compositors)
 //! - Capturing audio via cpal (supports PipeWire, PulseAudio, ALSA)
 //! - Transcribing speech using whisper.cpp (fast, local, offline)
-//! - Outputting text via ydotool or clipboard (fallback chain)
+//! - Processing text (punctuation, replacements, optional LLM post-processing)
+//! - Outputting text via wtype/ydotool/clipboard fallback chain
 //!
 //! # Architecture
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────────────────┐
-//! │                         Daemon                              │
-//! ├─────────────────────────────────────────────────────────────┤
-//! │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
-//! │  │   Hotkey     │  │    Audio     │  │   Text Output    │  │
-//! │  │  (evdev)     │──│   (cpal)     │──│  (ydotool/clip)  │  │
-//! │  └──────────────┘  └──────────────┘  └──────────────────┘  │
-//! │         │               │                    │              │
-//! │         │               ▼                    │              │
-//! │         │        ┌──────────────┐            │              │
-//! │         │        │   Whisper    │            │              │
-//! │         └───────▶│  (whisper-rs)│────────────┘              │
-//! │                  └──────────────┘                           │
-//! └─────────────────────────────────────────────────────────────┘
+//!                            ┌─────────────────────────────────────┐
+//!                            │              Daemon                 │
+//!                            └─────────────────────────────────────┘
+//!                                            │
+//!                   ┌────────────────────────┼────────────────────────┐
+//!                   │                        │                        │
+//!                   ▼                        ▼                        ▼
+//!          ┌──────────────┐         ┌──────────────┐         ┌──────────────┐
+//!          │    Hotkey    │         │    Audio     │         │    State     │
+//!          │   (evdev)    │         │    (cpal)    │         │   Manager    │
+//!          └──────────────┘         └──────────────┘         └──────────────┘
+//!                   │                        │
+//!                   │  key press             │ audio samples
+//!                   │  key release           │
+//!                   ▼                        ▼
+//!          ┌─────────────────────────────────────────────────────────────────┐
+//!          │                        Recording Flow                           │
+//!          │  [Press] ──▶ Start Recording ──▶ [Release] ──▶ Stop & Process   │
+//!          └─────────────────────────────────────────────────────────────────┘
+//!                                            │
+//!                                            ▼
+//!                                   ┌──────────────┐
+//!                                   │   Whisper    │
+//!                                   │ (whisper-rs) │
+//!                                   └──────────────┘
+//!                                            │
+//!                                            ▼ raw text
+//!                                   ┌──────────────┐
+//!                                   │     Text     │
+//!                                   │  Processing  │
+//!                                   └──────────────┘
+//!                                            │
+//!                                            ▼ processed text
+//!                                   ┌──────────────┐
+//!                                   │ Post-Process │ (optional: LLM cleanup)
+//!                                   │   Command    │
+//!                                   └──────────────┘
+//!                                            │
+//!                                            ▼ final text
+//!                                   ┌──────────────┐
+//!                                   │    Output    │
+//!                                   │ wtype/ydotool│
+//!                                   │  /clipboard  │
+//!                                   └──────────────┘
 //! ```
 
 pub mod audio;
