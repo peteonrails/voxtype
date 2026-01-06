@@ -465,6 +465,22 @@ Delay in milliseconds between each typed character. Increase if characters are b
 type_delay_ms = 10  # 10ms delay between characters
 ```
 
+### auto_submit
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Automatically send an Enter keypress after outputting the transcribed text. Useful for chat applications, command lines, or forms where you want to auto-submit after dictation.
+
+**Example:**
+```toml
+[output]
+auto_submit = true  # Press Enter after transcription
+```
+
+**Note:** This works with all output modes (`type`, `paste`) but has no effect in `clipboard` mode since clipboard-only output doesn't simulate keypresses.
+
 ---
 
 ## [output.post_process]

@@ -129,6 +129,7 @@ translate = false   # Translate non-English speech to English
 mode = "type"       # "type", "clipboard", or "paste"
 fallback_to_clipboard = true
 type_delay_ms = 0   # Increase if characters are dropped
+# auto_submit = true  # Send Enter after transcription (for chat apps, terminals)
 # Note: "paste" mode copies to clipboard then simulates Ctrl+V
 #       Useful for non-US keyboard layouts where ydotool typing fails
 
