@@ -1,6 +1,6 @@
 //! Interactive model selection and download
 
-use super::{print_failure, print_info, print_success};
+use super::{print_failure, print_info, print_success, print_warning};
 use crate::config::Config;
 use crate::transcribe::whisper::{get_model_filename, get_model_url};
 use std::io::{self, Write};
@@ -213,7 +213,7 @@ pub fn download_model(model_name: &str) -> anyhow::Result<()> {
 }
 
 /// Set a specific model as the default (must already be downloaded)
-pub fn set_model(model_name: &str) -> anyhow::Result<()> {
+pub async fn set_model(model_name: &str, restart: bool) -> anyhow::Result<()> {
     let models_dir = Config::models_dir();
     let filename = get_model_filename(model_name);
     let model_path = models_dir.join(&filename);
@@ -227,7 +227,30 @@ pub fn set_model(model_name: &str) -> anyhow::Result<()> {
     }
 
     // Update the config
-    update_config_model(model_name)
+    update_config_model(model_name)?;
+
+    if restart {
+        println!("  Restarting daemon...");
+        let status = tokio::process::Command::new("systemctl")
+            .args(["--user", "restart", "voxtype"])
+            .status()
+            .await;
+
+        match status {
+            Ok(s) if s.success() => {
+                print_success("Daemon restarted with new model");
+            }
+            _ => {
+                print_warning("Could not restart daemon (not running as systemd service?)");
+                print_info("Restart manually: systemctl --user restart voxtype");
+            }
+        }
+    } else {
+        print_info("Restart daemon to use new model: systemctl --user restart voxtype");
+        println!("       Or use: voxtype setup model --set {} --restart", model_name);
+    }
+
+    Ok(())
 }
 
 /// List installed models
@@ -314,4 +337,95 @@ fn update_model_in_config(config: &str, model_name: &str) -> String {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_update_model_in_config_basic() {
+        let config = r#"[whisper]
+model = "base.en"
+language = "en"
+"#;
+        let result = update_model_in_config(config, "large-v3");
+        assert!(result.contains(r#"model = "large-v3""#));
+        assert!(!result.contains("base.en"));
+    }
+
+    #[test]
+    fn test_update_model_in_config_preserves_other_sections() {
+        let config = r#"[hotkey]
+key = "SCROLLLOCK"
+
+[whisper]
+model = "base.en"
+language = "en"
+
+[output]
+mode = "type"
+"#;
+        let result = update_model_in_config(config, "small.en");
+        assert!(result.contains(r#"model = "small.en""#));
+        assert!(result.contains(r#"key = "SCROLLLOCK""#));
+        assert!(result.contains(r#"mode = "type""#));
+        assert!(result.contains("[hotkey]"));
+        assert!(result.contains("[output]"));
+    }
+
+    #[test]
+    fn test_update_model_in_config_only_changes_whisper_section() {
+        // If there's a "model" key in another section, it should not be changed
+        let config = r#"[some_other_section]
+model = "should_not_change"
+
+[whisper]
+model = "base.en"
+"#;
+        let result = update_model_in_config(config, "large-v3");
+        assert!(result.contains(r#"model = "should_not_change""#));
+        assert!(result.contains(r#"model = "large-v3""#));
+    }
+
+    #[test]
+    fn test_update_model_in_config_handles_comments() {
+        let config = r#"[whisper]
+# Model to use
+model = "base.en"
+# Language setting
+language = "en"
+"#;
+        let result = update_model_in_config(config, "medium.en");
+        assert!(result.contains(r#"model = "medium.en""#));
+        assert!(result.contains("# Model to use"));
+        assert!(result.contains("# Language setting"));
+    }
+
+    #[test]
+    fn test_models_list_contains_expected_models() {
+        let model_names: Vec<&str> = MODELS.iter().map(|m| m.name).collect();
+        assert!(model_names.contains(&"tiny.en"));
+        assert!(model_names.contains(&"base.en"));
+        assert!(model_names.contains(&"small.en"));
+        assert!(model_names.contains(&"medium.en"));
+        assert!(model_names.contains(&"large-v3"));
+        assert!(model_names.contains(&"large-v3-turbo"));
+    }
+
+    #[test]
+    fn test_model_info_sizes_are_reasonable() {
+        for model in MODELS {
+            // All models should have positive size
+            assert!(model.size_mb > 0, "Model {} has invalid size", model.name);
+            // Tiny should be smallest, large should be biggest
+            if model.name == "tiny.en" {
+                assert!(model.size_mb < 100);
+            }
+            if model.name == "large-v3" {
+                assert!(model.size_mb > 2000);
+            }
+        }
+    }
+
 }

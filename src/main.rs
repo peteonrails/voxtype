@@ -4,25 +4,17 @@
 //! Use `voxtype setup` to check dependencies and download models.
 //! Use `voxtype transcribe <file>` to transcribe an audio file.
 
-mod audio;
-mod cli;
-mod config;
-mod daemon;
-mod error;
-mod hotkey;
-mod output;
-mod setup;
-mod state;
-mod text;
-mod transcribe;
-
 use clap::Parser;
-use cli::{Cli, Commands, RecordAction, SetupAction};
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
+use voxtype::{config, cpu, daemon, setup, transcribe, Cli, Commands, RecordAction, SetupAction};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Install SIGILL handler early to catch illegal instruction crashes
+    // and provide a helpful error message instead of core dumping
+    cpu::install_sigill_handler();
+
     let cli = Cli::parse();
 
     // Initialize logging
@@ -107,11 +99,11 @@ async fn main() -> anyhow::Result<()> {
                         setup::waybar::print_config();
                     }
                 }
-                Some(SetupAction::Model { list, set }) => {
+                Some(SetupAction::Model { list, set, restart }) => {
                     if list {
                         setup::model::list_installed();
                     } else if let Some(model_name) = set {
-                        setup::model::set_model(&model_name)?;
+                        setup::model::set_model(&model_name, restart).await?;
                     } else {
                         setup::model::interactive_select().await?;
                     }

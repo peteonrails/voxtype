@@ -172,6 +172,10 @@ pub enum SetupAction {
         /// Set a specific model as default (must already be downloaded)
         #[arg(long, value_name = "NAME")]
         set: Option<String>,
+
+        /// Restart the daemon after changing model (use with --set)
+        #[arg(long)]
+        restart: bool,
     },
 
     /// Manage GPU acceleration (switch between CPU and Vulkan backends)

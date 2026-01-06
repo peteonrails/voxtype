@@ -413,6 +413,17 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
 
     let mut all_ok = true;
 
+    // Check CPU compatibility
+    println!("CPU:");
+    if let Some(warning) = crate::cpu::check_cpu_compatibility() {
+        print_warning(&warning);
+    } else {
+        print_success("CPU features compatible");
+    }
+    if crate::cpu::is_running_in_vm() {
+        print_info("Running in a virtual machine - ensure CPU features are passed through");
+    }
+
     // Check directories
     println!("Directories:");
     if let Some(config_dir) = Config::config_dir() {
