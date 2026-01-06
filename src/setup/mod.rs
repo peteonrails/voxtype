@@ -342,8 +342,8 @@ fn print_tool_status(tool: &OutputToolStatus, is_relevant: bool) {
     }
 }
 
-/// Run the basic setup checks (existing functionality)
-pub async fn run_basic_setup(config: &Config, download: bool) -> anyhow::Result<()> {
+/// Run setup tasks (non-blocking, no red X errors)
+pub async fn run_setup(config: &Config, download: bool) -> anyhow::Result<()> {
     println!("Voxtype Setup\n");
     println!("=============\n");
 
@@ -363,53 +363,14 @@ pub async fn run_basic_setup(config: &Config, download: bool) -> anyhow::Result<
             std::fs::write(&config_path, crate::config::DEFAULT_CONFIG)?;
             print_success(&format!("Created: {:?}", config_path));
         } else {
-            println!("\n  Config file exists: {:?}", config_path);
+            print_success(&format!("Config file: {:?}", config_path));
         }
     }
 
-    let mut all_ok = true;
-
-    // Check input group
-    println!("\nChecking input group membership...");
-    if user_in_group("input") {
-        print_success("User is in 'input' group");
-    } else {
-        print_failure("User is NOT in 'input' group");
-        println!("    Run: sudo usermod -aG input $USER");
-        println!("    Then log out and back in");
-        all_ok = false;
-    }
-
-    // Check output chain
-    let output_status = detect_output_chain().await;
-    print_output_chain_status(&output_status);
-
-    // Determine if output setup is OK
-    if output_status.primary_method.is_none() {
-        all_ok = false;
-    } else if output_status.primary_method.as_deref() == Some("clipboard") {
-        print_warning("Only clipboard mode available - typing won't work");
-        if output_status.display_server == DisplayServer::Wayland {
-            println!("    Install wtype: sudo dnf/apt/pacman install wtype");
-        } else {
-            println!("    Install ydotool: sudo dnf/apt/pacman install ydotool");
-            println!("    Then run: systemctl --user enable --now ydotool");
-        }
-    }
-
-    // Provide specific advice for missing tools
-    if output_status.display_server == DisplayServer::Wayland && !output_status.wtype.installed {
-        print_info("Tip: Install wtype for best CJK/Unicode support on Wayland");
-    }
-    if output_status.ydotool.installed && !output_status.ydotool_daemon {
-        print_info("Start ydotool daemon: systemctl --user enable --now ydotool");
-    }
-
-    // Check whisper model
-    println!("\nChecking whisper model...");
+    // Check/download whisper model
+    println!("\nWhisper model...");
     let models_dir = Config::models_dir();
     let model_name = &config.whisper.model;
-
     let model_filename = crate::transcribe::whisper::get_model_filename(model_name);
     let model_path = models_dir.join(&model_filename);
 
@@ -418,32 +379,124 @@ pub async fn run_basic_setup(config: &Config, download: bool) -> anyhow::Result<
             .map(|m| m.len() as f64 / 1024.0 / 1024.0)
             .unwrap_or(0.0);
         print_success(&format!(
-            "Model found: {:?} ({:.0} MB)",
-            model_path, size
+            "Model ready: {} ({:.0} MB)",
+            model_name, size
         ));
+    } else if download {
+        println!("  Downloading {}...", model_name);
+        model::download_model(model_name)?;
     } else {
-        print_failure(&format!("Model not found: {:?}", model_path));
-        all_ok = false;
+        print_info(&format!("Model '{}' not downloaded yet", model_name));
+        println!("       Run: voxtype setup --download");
+    }
 
-        if download {
-            println!("\n  Downloading model...");
-            model::download_model(model_name)?;
+    // Summary
+    println!("\n---");
+    println!("\x1b[32m✓ Setup complete!\x1b[0m\n");
+    println!("Next steps:");
+    println!("  1. Set up a compositor keybinding to trigger recording:");
+    println!("     Example for Hyprland: bind = , XF86AudioRecord, exec, voxtype record-toggle\n");
+    println!("  2. Start the daemon: voxtype daemon\n");
+    println!("Optional:");
+    println!("  voxtype setup check    - Verify system configuration");
+    println!("  voxtype setup model    - Download/switch whisper models");
+    println!("  voxtype setup systemd  - Install as systemd service");
+    println!("  voxtype setup waybar   - Get Waybar integration config");
+
+    Ok(())
+}
+
+/// Run system checks (blocking, shows red X for failures)
+pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
+    println!("Voxtype System Check\n");
+    println!("====================\n");
+
+    let mut all_ok = true;
+
+    // Check directories
+    println!("Directories:");
+    if let Some(config_dir) = Config::config_dir() {
+        if config_dir.exists() {
+            print_success(&format!("Config directory: {:?}", config_dir));
         } else {
-            let url = crate::transcribe::whisper::get_model_url(model_name);
-            println!("\n  To download automatically, run: voxtype setup --download");
-            println!("  Or manually download from:");
-            println!("    {}", url);
-            println!("  And place in: {:?}", models_dir);
+            print_failure(&format!("Config directory missing: {:?}", config_dir));
+            println!("       Run: voxtype setup");
+            all_ok = false;
         }
+    }
+
+    let models_dir = Config::models_dir();
+    if models_dir.exists() {
+        print_success(&format!("Models directory: {:?}", models_dir));
+    } else {
+        print_failure(&format!("Models directory missing: {:?}", models_dir));
+        println!("       Run: voxtype setup");
+        all_ok = false;
+    }
+
+    // Check config file
+    if let Some(config_path) = Config::default_path() {
+        if config_path.exists() {
+            print_success(&format!("Config file: {:?}", config_path));
+        } else {
+            print_failure(&format!("Config file missing: {:?}", config_path));
+            println!("       Run: voxtype setup");
+            all_ok = false;
+        }
+    }
+
+    // Check input group
+    println!("\nInput:");
+    if user_in_group("input") {
+        print_success("User is in 'input' group (evdev hotkeys available)");
+    } else {
+        print_warning("User is not in 'input' group (evdev hotkeys unavailable)");
+        println!("       Required only for evdev hotkey mode, not compositor keybindings");
+        println!("       To enable: sudo usermod -aG input $USER && logout");
+    }
+
+    // Check output chain
+    let output_status = detect_output_chain().await;
+    print_output_chain_status(&output_status);
+
+    if output_status.primary_method.is_none() {
+        print_failure("No text output method available");
+        if output_status.display_server == DisplayServer::Wayland {
+            println!("       Install wtype: sudo pacman -S wtype");
+        } else {
+            println!("       Install ydotool: sudo pacman -S ydotool");
+        }
+        all_ok = false;
+    } else if output_status.primary_method.as_deref() == Some("clipboard") {
+        print_warning("Only clipboard mode available - typing won't work");
+        if output_status.display_server == DisplayServer::Wayland {
+            println!("       Install wtype: sudo pacman -S wtype");
+        } else {
+            println!("       Install ydotool: sudo pacman -S ydotool");
+        }
+    }
+
+    // Check whisper model
+    println!("\nWhisper Model:");
+    let model_name = &config.whisper.model;
+    let model_filename = crate::transcribe::whisper::get_model_filename(model_name);
+    let model_path = models_dir.join(&model_filename);
+
+    if model_path.exists() {
+        let size = std::fs::metadata(&model_path)
+            .map(|m| m.len() as f64 / 1024.0 / 1024.0)
+            .unwrap_or(0.0);
+        print_success(&format!("Model '{}' installed ({:.0} MB)", model_name, size));
+    } else {
+        print_failure(&format!("Model '{}' not found", model_name));
+        println!("       Run: voxtype setup --download");
+        all_ok = false;
     }
 
     // Summary
     println!("\n---");
     if all_ok {
-        println!("\x1b[32m✓ All checks passed!\x1b[0m Run 'voxtype' to start.");
-        println!("\nOptional next steps:");
-        println!("  voxtype setup systemd  - Install as systemd service");
-        println!("  voxtype setup waybar   - Get Waybar integration config");
+        println!("\x1b[32m✓ All checks passed!\x1b[0m");
     } else {
         println!("\x1b[31m✗ Some checks failed.\x1b[0m Please fix the issues above.");
     }

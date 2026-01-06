@@ -77,6 +77,9 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::Setup { action, download } => {
             match action {
+                Some(SetupAction::Check) => {
+                    setup::run_checks(&config).await?;
+                }
                 Some(SetupAction::Systemd { uninstall, status }) => {
                     if status {
                         setup::systemd::status().await?;
@@ -104,9 +107,11 @@ async fn main() -> anyhow::Result<()> {
                         setup::waybar::print_config();
                     }
                 }
-                Some(SetupAction::Model { list }) => {
+                Some(SetupAction::Model { list, set }) => {
                     if list {
                         setup::model::list_installed();
+                    } else if let Some(model_name) = set {
+                        setup::model::set_model(&model_name)?;
                     } else {
                         setup::model::interactive_select().await?;
                     }
@@ -124,8 +129,8 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 None => {
-                    // Default: run basic setup (backwards compatible)
-                    setup::run_basic_setup(&config, download).await?;
+                    // Default: run setup (non-blocking)
+                    setup::run_setup(&config, download).await?;
                 }
             }
         }

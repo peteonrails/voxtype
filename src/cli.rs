@@ -130,6 +130,9 @@ pub enum RecordAction {
 
 #[derive(Subcommand)]
 pub enum SetupAction {
+    /// Check system configuration and dependencies
+    Check,
+
     /// Install voxtype as a systemd user service
     Systemd {
         /// Uninstall the service instead of installing
@@ -165,6 +168,10 @@ pub enum SetupAction {
         /// List installed models instead of interactive selection
         #[arg(long)]
         list: bool,
+
+        /// Set a specific model as default (must already be downloaded)
+        #[arg(long, value_name = "NAME")]
+        set: Option<String>,
     },
 
     /// Manage GPU acceleration (switch between CPU and Vulkan backends)

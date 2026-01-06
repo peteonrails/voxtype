@@ -114,15 +114,33 @@ pub async fn interactive_select() -> anyhow::Result<()> {
 
     // Check if already installed
     if model_path.exists() {
-        print!("\nModel already installed. Re-download? [y/N]: ");
+        println!("\nModel '{}' is already installed.\n", model.name);
+        println!("  [1] Set as default model (update config)");
+        println!("  [2] Re-download");
+        println!("  [0] Cancel\n");
+
+        print!("Select option [1]: ");
         io::stdout().flush()?;
 
-        let mut confirm = String::new();
-        io::stdin().read_line(&mut confirm)?;
+        let mut choice = String::new();
+        io::stdin().read_line(&mut choice)?;
+        let choice = choice.trim();
 
-        if !confirm.trim().eq_ignore_ascii_case("y") {
-            println!("Cancelled.");
-            return Ok(());
+        match choice {
+            "" | "1" => {
+                // Set as default without re-downloading
+                update_config_model(model.name)?;
+                println!("\n---");
+                println!("Model setup complete! Run 'voxtype' to start using it.");
+                return Ok(());
+            }
+            "2" => {
+                // Continue to download below
+            }
+            _ => {
+                println!("Cancelled.");
+                return Ok(());
+            }
         }
     }
 
@@ -138,20 +156,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     io::stdin().read_line(&mut update_config)?;
 
     if update_config.trim().is_empty() || update_config.trim().eq_ignore_ascii_case("y") {
-        if let Some(config_path) = Config::default_path() {
-            if config_path.exists() {
-                // Read and update config
-                let content = std::fs::read_to_string(&config_path)?;
-                let updated = update_model_in_config(&content, model.name);
-                std::fs::write(&config_path, updated)?;
-                print_success(&format!(
-                    "Config updated to use '{}' model",
-                    model.name
-                ));
-            } else {
-                print_info("No config file found. Run 'voxtype setup' first.");
-            }
-        }
+        update_config_model(model.name)?;
     }
 
     println!("\n---");
@@ -207,6 +212,24 @@ pub fn download_model(model_name: &str) -> anyhow::Result<()> {
     }
 }
 
+/// Set a specific model as the default (must already be downloaded)
+pub fn set_model(model_name: &str) -> anyhow::Result<()> {
+    let models_dir = Config::models_dir();
+    let filename = get_model_filename(model_name);
+    let model_path = models_dir.join(&filename);
+
+    // Verify the model exists
+    if !model_path.exists() {
+        print_failure(&format!("Model '{}' is not installed", model_name));
+        println!("\n  Run 'voxtype setup model' to download it first.");
+        println!("  Or 'voxtype setup model --list' to see installed models.");
+        anyhow::bail!("Model not installed: {}", model_name);
+    }
+
+    // Update the config
+    update_config_model(model_name)
+}
+
 /// List installed models
 pub fn list_installed() {
     println!("Installed Whisper Models\n");
@@ -241,6 +264,24 @@ pub fn list_installed() {
     if !found {
         println!("  No models installed.");
         println!("\n  Run 'voxtype setup model' to download a model.");
+    }
+}
+
+/// Update the config file to use a specific model
+fn update_config_model(model_name: &str) -> anyhow::Result<()> {
+    if let Some(config_path) = Config::default_path() {
+        if config_path.exists() {
+            let content = std::fs::read_to_string(&config_path)?;
+            let updated = update_model_in_config(&content, model_name);
+            std::fs::write(&config_path, updated)?;
+            print_success(&format!("Config updated to use '{}' model", model_name));
+            Ok(())
+        } else {
+            print_info("No config file found. Run 'voxtype setup' first.");
+            Ok(())
+        }
+    } else {
+        anyhow::bail!("Could not determine config path")
     }
 }
 
