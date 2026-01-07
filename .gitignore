@@ -29,3 +29,7 @@ CLAUDE.md
 
 # Release binaries (uploaded to GitHub Releases)
 /releases/
+
+# Nix build output symlinks
+/result
+/result-*
