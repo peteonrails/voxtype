@@ -4,8 +4,8 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.2.x   | :white_check_mark: |
-| < 0.2   | :x:                |
+| 0.4.x   | :white_check_mark: |
+| < 0.4   | :x:                |
 
 ## Reporting a Vulnerability
 
@@ -24,12 +24,30 @@ If you discover a security vulnerability in Voxtype, please report it responsibl
 
 ## Security Considerations
 
-Voxtype requires elevated permissions by design:
+### Recommended: Compositor Keybindings (No Special Permissions)
 
-- **input group membership**: Required to read keyboard events via evdev for hotkey detection. This is the standard Wayland-compatible approach for global hotkeys.
-- **ydotool/uinput access**: Required to inject text at the cursor position.
+The preferred way to use voxtype is with **compositor keybindings** (Hyprland, Sway, River, etc.). This approach:
 
-These permissions are documented in the installation guide. Users should be aware that any application with input group access can read keyboard input.
+- Requires **no special permissions** or group membership
+- Uses your compositor's native keybinding system
+- Is more secure than the alternative
+
+Configure your compositor to call `voxtype record start/stop/toggle`, and set `[hotkey] enabled = false` in your voxtype config. See the [User Manual](docs/USER_MANUAL.md#compositor-keybindings) for setup instructions.
+
+### Alternative: Built-in Hotkey (Requires `input` Group)
+
+If your desktop doesn't support key release events (GNOME, KDE, X11), voxtype can use its built-in evdev hotkey detection. This requires:
+
+- **input group membership**: Grants read access to `/dev/input/event*` devices
+
+**Security warning:** The `input` group grants access to **all keyboard input system-wide**. Any application running as your user with this permission can act as a keylogger. Only use this approach if compositor keybindings aren't available for your desktop.
+
+### Text Injection
+
+For text output, voxtype uses (in order of preference):
+- **wtype**: Wayland-native, no special permissions
+- **ydotool**: Requires the ydotoold daemon running
+- **clipboard**: Falls back to copying text (user must paste)
 
 ## Scope
 
@@ -40,6 +58,5 @@ Security issues we care about:
 - Dependencies with known vulnerabilities
 
 Out of scope:
-- Issues inherent to the permissions model (evdev requires input group)
 - Whisper model accuracy or transcription errors
 - Third-party tools (ydotool, whisper.cpp) - report those upstream

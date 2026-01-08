@@ -28,12 +28,13 @@ Hold a hotkey while speaking, release to transcribe and output text at
 your cursor position.
 
 Features:
-- Works on any Linux desktop using kernel-level input (evdev)
 - Fully offline transcription using whisper.cpp
+- Native compositor keybinding support (Hyprland, Sway, River)
 - Fallback chain: wtype (Wayland, CJK support), ydotool (X11), clipboard
 - Configurable hotkeys, models, and output modes
 
-Note: User must be in the 'input' group for hotkey detection.
+Recommended: Use compositor keybindings (no special permissions needed).
+See post-install instructions for setup.
 
 This package includes tiered binaries:
 - voxtype-avx2: CPU - Compatible with most CPUs from 2013+ (Intel Haswell, AMD Zen)
