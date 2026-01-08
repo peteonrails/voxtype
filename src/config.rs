@@ -66,7 +66,12 @@ max_duration_secs = 60
 # volume = 0.7
 
 [whisper]
-# Model to use for transcription
+# Transcription backend: "local" or "remote"
+# - local: Use whisper.cpp locally (default)
+# - remote: Send audio to a remote whisper.cpp server or OpenAI-compatible API
+# backend = "local"
+
+# Model to use for transcription (local backend)
 # Options: tiny, tiny.en, base, base.en, small, small.en, medium, medium.en, large-v3, large-v3-turbo
 # .en models are English-only but faster and more accurate for English
 # large-v3-turbo is faster than large-v3 with minimal accuracy loss (recommended for GPU)
@@ -83,6 +88,23 @@ translate = false
 
 # Number of CPU threads for inference (omit for auto-detection)
 # threads = 4
+
+# --- Remote backend settings (used when backend = "remote") ---
+#
+# Remote server endpoint URL (required for remote backend)
+# Examples:
+#   - whisper.cpp server: "http://192.168.1.100:8080"
+#   - OpenAI API: "https://api.openai.com"
+# remote_endpoint = "http://192.168.1.100:8080"
+#
+# Model name to send to remote server (default: "whisper-1")
+# remote_model = "whisper-1"
+#
+# API key for remote server (optional, or use VOXTYPE_WHISPER_API_KEY env var)
+# remote_api_key = ""
+#
+# Timeout for remote requests in seconds (default: 30)
+# remote_timeout_secs = 30
 
 [output]
 # Primary output mode: "type" or "clipboard"
@@ -455,9 +477,24 @@ fn load_custom_icon_theme(path: &str) -> Result<ResolvedIcons, String> {
     })
 }
 
+/// Whisper transcription backend
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum WhisperBackend {
+    /// Local transcription using whisper.cpp
+    #[default]
+    Local,
+    /// Remote transcription via OpenAI-compatible API
+    Remote,
+}
+
 /// Whisper speech-to-text configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WhisperConfig {
+    /// Transcription backend: "local" or "remote"
+    #[serde(default)]
+    pub backend: WhisperBackend,
+
     /// Model name: tiny, base, small, medium, large-v3, large-v3-turbo
     /// Can also be an absolute path to a .bin file
     pub model: String,
@@ -475,6 +512,25 @@ pub struct WhisperConfig {
     /// Load model on-demand when recording starts (true) or keep loaded (false)
     #[serde(default = "default_on_demand_loading")]
     pub on_demand_loading: bool,
+
+    // --- Remote backend settings ---
+
+    /// Remote server endpoint URL (e.g., "http://192.168.1.100:8080")
+    /// Required when backend = "remote"
+    #[serde(default)]
+    pub remote_endpoint: Option<String>,
+
+    /// Model name to send to remote server (default: "whisper-1")
+    #[serde(default)]
+    pub remote_model: Option<String>,
+
+    /// API key for remote server (optional, can also use VOXTYPE_WHISPER_API_KEY env var)
+    #[serde(default)]
+    pub remote_api_key: Option<String>,
+
+    /// Timeout for remote requests in seconds (default: 30)
+    #[serde(default)]
+    pub remote_timeout_secs: Option<u64>,
 }
 
 /// Text processing configuration
@@ -597,11 +653,16 @@ impl Default for Config {
                 feedback: AudioFeedbackConfig::default(),
             },
             whisper: WhisperConfig {
+                backend: WhisperBackend::default(),
                 model: "base.en".to_string(),
                 language: "en".to_string(),
                 translate: false,
                 threads: None,
                 on_demand_loading: default_on_demand_loading(),
+                remote_endpoint: None,
+                remote_model: None,
+                remote_api_key: None,
+                remote_timeout_secs: None,
             },
             output: OutputConfig {
                 mode: OutputMode::Type,

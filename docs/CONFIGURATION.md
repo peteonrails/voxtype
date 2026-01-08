@@ -252,6 +252,27 @@ volume = 0.8
 
 Controls the Whisper speech-to-text engine.
 
+### backend
+
+**Type:** String
+**Default:** `"local"`
+**Required:** No
+
+Selects the transcription backend.
+
+**Values:**
+- `local` - Use whisper.cpp locally on your machine (default, fully offline)
+- `remote` - Send audio to a remote server for transcription
+
+> **Privacy Notice**: When using `remote` backend, audio is transmitted over the network. See [User Manual - Remote Whisper Servers](USER_MANUAL.md#remote-whisper-servers) for privacy considerations.
+
+**Example:**
+```toml
+[whisper]
+backend = "remote"
+remote_endpoint = "http://192.168.1.100:8080"
+```
+
 ### model
 
 **Type:** String
@@ -365,6 +386,95 @@ on_demand_loading = true  # Free VRAM when not transcribing
 ```
 
 **Performance note:** On modern systems with SSDs, model loading typically takes under 1 second for base/small models. Larger models (medium, large-v3) may take 2-3 seconds to load.
+
+---
+
+## Remote Backend Settings
+
+The following options are used when `backend = "remote"`. They have no effect when using local transcription.
+
+> **Privacy Notice**: Remote transcription sends your audio over the network. This feature was designed for users who self-host Whisper servers on their own hardware. While it can also connect to cloud services like OpenAI, users with privacy concerns should carefully consider the implications. See [User Manual - Remote Whisper Servers](USER_MANUAL.md#remote-whisper-servers) for details.
+
+### remote_endpoint
+
+**Type:** String
+**Default:** None
+**Required:** Yes (when `backend = "remote"`)
+
+The base URL of the remote Whisper server. Must include the protocol (`http://` or `https://`).
+
+**Examples:**
+```toml
+[whisper]
+backend = "remote"
+
+# Self-hosted whisper.cpp server
+remote_endpoint = "http://192.168.1.100:8080"
+
+# OpenAI API
+remote_endpoint = "https://api.openai.com"
+```
+
+**Security note:** Voxtype logs a warning if you use HTTP (unencrypted) for non-localhost endpoints, as your audio would be transmitted in the clear.
+
+### remote_model
+
+**Type:** String
+**Default:** `"whisper-1"`
+**Required:** No
+
+The model name to send to the remote server.
+
+- For **whisper.cpp server**: This is ignored (the server uses whatever model it was started with)
+- For **OpenAI API**: Must be `"whisper-1"`
+- For **other providers**: Check their documentation
+
+**Example:**
+```toml
+[whisper]
+backend = "remote"
+remote_endpoint = "https://api.openai.com"
+remote_model = "whisper-1"
+```
+
+### remote_api_key
+
+**Type:** String
+**Default:** None
+**Required:** No (depends on server)
+
+API key for authenticating with the remote server. Sent as a Bearer token in the Authorization header.
+
+**Recommendation:** Use the `VOXTYPE_WHISPER_API_KEY` environment variable instead of putting keys in your config file.
+
+**Example using environment variable:**
+```bash
+export VOXTYPE_WHISPER_API_KEY="sk-..."
+```
+
+**Example in config (less secure):**
+```toml
+[whisper]
+backend = "remote"
+remote_endpoint = "https://api.openai.com"
+remote_api_key = "sk-..."
+```
+
+### remote_timeout_secs
+
+**Type:** Integer
+**Default:** `30`
+**Required:** No
+
+Maximum time in seconds to wait for the remote server to respond. Increase for slow networks or when transcribing long audio.
+
+**Example:**
+```toml
+[whisper]
+backend = "remote"
+remote_endpoint = "http://192.168.1.100:8080"
+remote_timeout_secs = 60  # 60 second timeout for long recordings
+```
 
 ---
 
@@ -899,6 +1009,16 @@ XDG_DATA_HOME=/custom/data voxtype
 # Models stored in: /custom/data/voxtype/models/
 ```
 
+### VOXTYPE_WHISPER_API_KEY
+
+API key for remote Whisper server authentication. Used when `backend = "remote"`.
+
+```bash
+export VOXTYPE_WHISPER_API_KEY="sk-..."
+```
+
+This is the recommended way to provide API keys instead of putting them in the config file.
+
 ---
 
 ## Example Configurations
@@ -1030,3 +1150,38 @@ bindr = SUPER, V, exec, voxtype record stop
 bindsym $mod+v exec voxtype record start
 bindsym --release $mod+v exec voxtype record stop
 ```
+
+### Remote Transcription (Self-Hosted)
+
+Offload transcription to a GPU server on your local network:
+
+```toml
+[whisper]
+backend = "remote"
+language = "en"
+
+# Your whisper.cpp server
+remote_endpoint = "http://192.168.1.100:8080"
+remote_timeout_secs = 30
+```
+
+On your GPU server, run whisper.cpp server:
+```bash
+./server -m models/ggml-large-v3-turbo.bin --host 0.0.0.0 --port 8080
+```
+
+### Remote Transcription (OpenAI Cloud)
+
+Use OpenAI's hosted Whisper API (requires API key, has privacy implications):
+
+```toml
+[whisper]
+backend = "remote"
+language = "en"
+remote_endpoint = "https://api.openai.com"
+remote_model = "whisper-1"
+remote_timeout_secs = 30
+# API key set via: export VOXTYPE_WHISPER_API_KEY="sk-..."
+```
+
+> **Note**: Cloud-based transcription sends your audio to third-party servers. See [User Manual - Remote Whisper Servers](USER_MANUAL.md#remote-whisper-servers) for privacy considerations.

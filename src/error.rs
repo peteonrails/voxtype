@@ -76,6 +76,15 @@ pub enum TranscribeError {
 
     #[error("Audio format error: {0}")]
     AudioFormat(String),
+
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
+
+    #[error("Network error: {0}")]
+    NetworkError(String),
+
+    #[error("Remote server error: {0}")]
+    RemoteError(String),
 }
 
 /// Errors related to text output

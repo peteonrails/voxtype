@@ -45,6 +45,9 @@ nix = { version = "0.29", features = ["signal", "process"] }  # Unix signals for
 cpal = "0.15"
 hound = "3"  # WAV file reading/writing
 
+# HTTP client for remote transcription
+ureq = { version = "2", features = ["json"] }
+
 # Audio playback (for feedback sounds)
 rodio = { version = "0.19", default-features = false, features = ["wav"] }
 
