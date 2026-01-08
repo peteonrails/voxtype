@@ -34,6 +34,7 @@ pub trait TextOutput: Send + Sync {
 /// Factory function that returns a fallback chain of output methods
 pub fn create_output_chain(config: &OutputConfig) -> Vec<Box<dyn TextOutput>> {
     let mut chain: Vec<Box<dyn TextOutput>> = Vec::new();
+    let message_template = config.notification.transcription_complete_message.clone();
 
     match config.mode {
         crate::config::OutputMode::Type => {
@@ -41,6 +42,7 @@ pub fn create_output_chain(config: &OutputConfig) -> Vec<Box<dyn TextOutput>> {
             chain.push(Box::new(wtype::WtypeOutput::new(
                 config.notification.on_transcription,
                 config.auto_submit,
+                message_template.clone(),
             )));
 
             // Fallback: ydotool (works on X11/TTY, requires daemon)
@@ -48,17 +50,19 @@ pub fn create_output_chain(config: &OutputConfig) -> Vec<Box<dyn TextOutput>> {
                 config.type_delay_ms,
                 false, // no notification, wtype handles it if available
                 config.auto_submit,
+                None,
             )));
 
             // Last resort: clipboard
             if config.fallback_to_clipboard {
-                chain.push(Box::new(clipboard::ClipboardOutput::new(false)));
+                chain.push(Box::new(clipboard::ClipboardOutput::new(false, None)));
             }
         }
         crate::config::OutputMode::Clipboard => {
             // Only clipboard
             chain.push(Box::new(clipboard::ClipboardOutput::new(
                 config.notification.on_transcription,
+                message_template,
             )));
         }
         crate::config::OutputMode::Paste => {
@@ -66,6 +70,7 @@ pub fn create_output_chain(config: &OutputConfig) -> Vec<Box<dyn TextOutput>> {
             chain.push(Box::new(paste::PasteOutput::new(
                 config.notification.on_transcription,
                 config.auto_submit,
+                message_template,
             )));
         }
     }

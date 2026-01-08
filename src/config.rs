@@ -125,6 +125,7 @@ on_transcription = true
 # Custom notification messages (optional)
 # recording_start_message = "Listening..."
 # recording_stop_message = "Processing speech..."
+# transcription_complete_message = "You said: {text}"  # Use {text} as placeholder
 
 # [text]
 # Text processing options (word replacements, spoken punctuation)
@@ -518,6 +519,12 @@ pub struct NotificationConfig {
     /// Default: "Transcribing..."
     #[serde(default)]
     pub recording_stop_message: Option<String>,
+
+    /// Custom message when transcription completes
+    /// Use {text} as placeholder for the transcribed text
+    /// Default: "{text}"
+    #[serde(default)]
+    pub transcription_complete_message: Option<String>,
 }
 
 impl Default for NotificationConfig {
@@ -528,6 +535,7 @@ impl Default for NotificationConfig {
             on_transcription: true,
             recording_start_message: None,
             recording_stop_message: None,
+            transcription_complete_message: None,
         }
     }
 }
@@ -546,6 +554,14 @@ impl NotificationConfig {
     /// Get the recording stop message
     pub fn get_recording_stop_message(&self) -> &str {
         self.recording_stop_message.as_deref().unwrap_or("Transcribing...")
+    }
+
+    /// Get the transcription complete message with text placeholder replaced
+    pub fn format_transcription_complete_message(&self, text: &str) -> String {
+        match &self.transcription_complete_message {
+            Some(template) => template.replace("{text}", text),
+            None => text.to_string(),
+        }
     }
 }
 

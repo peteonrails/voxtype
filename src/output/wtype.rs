@@ -20,33 +20,47 @@ pub struct WtypeOutput {
     notify: bool,
     /// Whether to send Enter key after output
     auto_submit: bool,
+    /// Custom message template for transcription complete notification
+    /// Use {text} as placeholder for the transcribed text
+    message_template: Option<String>,
 }
 
 impl WtypeOutput {
     /// Create a new wtype output
-    pub fn new(notify: bool, auto_submit: bool) -> Self {
+    pub fn new(notify: bool, auto_submit: bool, message_template: Option<String>) -> Self {
         Self {
             notify,
             auto_submit,
+            message_template,
+        }
+    }
+
+    /// Format the notification message using template or default
+    fn format_message(&self, text: &str) -> String {
+        match &self.message_template {
+            Some(template) => template.replace("{text}", text),
+            None => {
+                // Default: truncate preview for notification
+                let preview: String = text.chars().take(100).collect();
+                if text.chars().count() > 100 {
+                    format!("{}...", preview)
+                } else {
+                    preview
+                }
+            }
         }
     }
 
     /// Send a desktop notification
     async fn send_notification(&self, text: &str) {
-        // Truncate preview for notification
-        let preview: String = text.chars().take(100).collect();
-        let preview = if text.chars().count() > 100 {
-            format!("{}...", preview)
-        } else {
-            preview
-        };
+        let message = self.format_message(text);
 
         let _ = Command::new("notify-send")
             .args([
                 "--app-name=Voxtype",
                 "--expire-time=3000",
                 "Transcribed",
-                &preview,
+                &message,
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -134,15 +148,31 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = WtypeOutput::new(true, false);
+        let output = WtypeOutput::new(true, false, None);
         assert!(output.notify);
         assert!(!output.auto_submit);
+        assert!(output.message_template.is_none());
     }
 
     #[test]
     fn test_new_with_enter() {
-        let output = WtypeOutput::new(false, true);
+        let output = WtypeOutput::new(false, true, None);
         assert!(!output.notify);
         assert!(output.auto_submit);
+    }
+
+    #[test]
+    fn test_custom_message_template() {
+        let output = WtypeOutput::new(true, false, Some("You said: {text}".to_string()));
+        assert_eq!(output.format_message("hello world"), "You said: hello world");
+    }
+
+    #[test]
+    fn test_default_message_truncation() {
+        let output = WtypeOutput::new(true, false, None);
+        let long_text = "a".repeat(150);
+        let formatted = output.format_message(&long_text);
+        assert!(formatted.ends_with("..."));
+        assert!(formatted.len() < 150);
     }
 }

@@ -23,13 +23,15 @@ pub struct YdotoolOutput {
     supports_key_hold: bool,
     /// Whether to send Enter key after output
     auto_submit: bool,
+    /// Custom message template for transcription complete notification
+    message_template: Option<String>,
 }
 
 impl YdotoolOutput {
     /// Create a new ydotool output
     ///
     /// Detects ydotool capabilities at construction time.
-    pub fn new(delay_ms: u32, notify: bool, auto_submit: bool) -> Self {
+    pub fn new(delay_ms: u32, notify: bool, auto_submit: bool, message_template: Option<String>) -> Self {
         let supports_key_hold = Self::detect_key_hold_support();
         if supports_key_hold {
             tracing::debug!("ydotool supports --key-hold flag");
@@ -41,6 +43,7 @@ impl YdotoolOutput {
             notify,
             supports_key_hold,
             auto_submit,
+            message_template,
         }
     }
 
@@ -60,22 +63,31 @@ impl YdotoolOutput {
             .unwrap_or(false)
     }
 
+    /// Format the notification message using template or default
+    fn format_message(&self, text: &str) -> String {
+        match &self.message_template {
+            Some(template) => template.replace("{text}", text),
+            None => {
+                let preview: String = text.chars().take(100).collect();
+                if text.chars().count() > 100 {
+                    format!("{}...", preview)
+                } else {
+                    preview
+                }
+            }
+        }
+    }
+
     /// Send a desktop notification
     async fn send_notification(&self, text: &str) {
-        // Truncate preview for notification
-        let preview: String = text.chars().take(100).collect();
-        let preview = if text.len() > 100 {
-            format!("{}...", preview)
-        } else {
-            preview
-        };
+        let message = self.format_message(text);
 
         let _ = Command::new("notify-send")
             .args([
                 "--app-name=Voxtype",
                 "--expire-time=3000",
                 "Transcribed",
-                &preview,
+                &message,
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -194,20 +206,27 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = YdotoolOutput::new(10, true, false);
+        let output = YdotoolOutput::new(10, true, false, None);
         assert_eq!(output.delay_ms, 10);
         assert!(output.notify);
         assert!(!output.auto_submit);
+        assert!(output.message_template.is_none());
         // supports_key_hold depends on system ydotool version, so we just check it's set
         let _ = output.supports_key_hold;
     }
 
     #[test]
     fn test_new_with_enter() {
-        let output = YdotoolOutput::new(0, false, true);
+        let output = YdotoolOutput::new(0, false, true, None);
         assert_eq!(output.delay_ms, 0);
         assert!(!output.notify);
         assert!(output.auto_submit);
+    }
+
+    #[test]
+    fn test_custom_message_template() {
+        let output = YdotoolOutput::new(0, true, false, Some("Speech: {text}".to_string()));
+        assert_eq!(output.format_message("hello"), "Speech: hello");
     }
 
     #[test]

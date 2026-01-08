@@ -15,22 +15,34 @@ use tokio::process::Command;
 pub struct ClipboardOutput {
     /// Whether to show a desktop notification
     notify: bool,
+    /// Custom message template for transcription complete notification
+    message_template: Option<String>,
 }
 
 impl ClipboardOutput {
     /// Create a new clipboard output
-    pub fn new(notify: bool) -> Self {
-        Self { notify }
+    pub fn new(notify: bool, message_template: Option<String>) -> Self {
+        Self { notify, message_template }
+    }
+
+    /// Format the notification message using template or default
+    fn format_message(&self, text: &str) -> String {
+        match &self.message_template {
+            Some(template) => template.replace("{text}", text),
+            None => {
+                // Truncate preview for notification (use chars() to handle multi-byte UTF-8)
+                if text.chars().count() > 80 {
+                    format!("{}...", text.chars().take(80).collect::<String>())
+                } else {
+                    text.to_string()
+                }
+            }
+        }
     }
 
     /// Send a desktop notification
     async fn send_notification(&self, text: &str) {
-        // Truncate preview for notification (use chars() to handle multi-byte UTF-8)
-        let preview = if text.chars().count() > 80 {
-            format!("{}...", text.chars().take(80).collect::<String>())
-        } else {
-            text.to_string()
-        };
+        let message = self.format_message(text);
 
         let _ = Command::new("notify-send")
             .args([
@@ -38,7 +50,7 @@ impl ClipboardOutput {
                 "--urgency=low",
                 "--expire-time=3000",
                 "Copied to clipboard",
-                &preview,
+                &message,
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -122,10 +134,17 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = ClipboardOutput::new(true);
+        let output = ClipboardOutput::new(true, None);
         assert!(output.notify);
+        assert!(output.message_template.is_none());
 
-        let output = ClipboardOutput::new(false);
+        let output = ClipboardOutput::new(false, None);
         assert!(!output.notify);
+    }
+
+    #[test]
+    fn test_custom_message_template() {
+        let output = ClipboardOutput::new(true, Some("Copied: {text}".to_string()));
+        assert_eq!(output.format_message("test"), "Copied: test");
     }
 }

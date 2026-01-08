@@ -20,25 +20,38 @@ pub struct PasteOutput {
     notify: bool,
     /// Whether to send Enter key after output
     auto_submit: bool,
+    /// Custom message template for transcription complete notification
+    message_template: Option<String>,
 }
 
 impl PasteOutput {
     /// Create a new paste output
-    pub fn new(notify: bool, auto_submit: bool) -> Self {
+    pub fn new(notify: bool, auto_submit: bool, message_template: Option<String>) -> Self {
         Self {
             notify,
             auto_submit,
+            message_template,
+        }
+    }
+
+    /// Format the notification message using template or default
+    fn format_message(&self, text: &str) -> String {
+        match &self.message_template {
+            Some(template) => template.replace("{text}", text),
+            None => {
+                // Truncate preview for notification (use chars() to handle multi-byte UTF-8)
+                if text.chars().count() > 80 {
+                    format!("{}...", text.chars().take(80).collect::<String>())
+                } else {
+                    text.to_string()
+                }
+            }
         }
     }
 
     /// Send a desktop notification
     async fn send_notification(&self, text: &str) {
-        // Truncate preview for notification (use chars() to handle multi-byte UTF-8)
-        let preview = if text.chars().count() > 80 {
-            format!("{}...", text.chars().take(80).collect::<String>())
-        } else {
-            text.to_string()
-        };
+        let message = self.format_message(text);
 
         let _ = Command::new("notify-send")
             .args([
@@ -46,7 +59,7 @@ impl PasteOutput {
                 "--urgency=low",
                 "--expire-time=3000",
                 "Pasted text",
-                &preview,
+                &message,
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
