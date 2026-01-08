@@ -17,6 +17,7 @@
           pkg-config
           clang
           llvmPackages.libclang
+          git  # Required by whisper.cpp cmake
         ];
 
         commonBuildInputs = with pkgs; [
