@@ -295,7 +295,7 @@ fn transcribe_file(config: &config::Config, path: &PathBuf) -> anyhow::Result<()
     );
 
     // Create transcriber and transcribe
-    let transcriber = transcribe::create_transcriber(&config.whisper)?;
+    let transcriber = transcribe::create_transcriber(&config)?;
     let text = transcriber.transcribe(&final_samples)?;
 
     println!("\n{}", text);

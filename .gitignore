@@ -6,6 +6,9 @@
 /packaging/arch/
 /packaging/arch-bin/
 
+# Vendored dependencies (patched forks)
+/vendor/
+
 # Whisper models (large binary files)
 /models/*.bin
 

@@ -205,6 +205,15 @@ pub struct Config {
     pub whisper: WhisperConfig,
     pub output: OutputConfig,
 
+    /// Transcription backend: "whisper" (default) or "parakeet"
+    /// Parakeet requires: cargo build --features parakeet
+    #[serde(default)]
+    pub backend: TranscriptionBackend,
+
+    /// Parakeet configuration (optional, only used when backend = "parakeet")
+    #[serde(default)]
+    pub parakeet: Option<ParakeetConfig>,
+
     /// Text processing configuration (replacements, spoken punctuation)
     #[serde(default)]
     pub text: TextConfig,
@@ -546,6 +555,41 @@ pub struct WhisperConfig {
     pub remote_timeout_secs: Option<u64>,
 }
 
+/// Parakeet speech-to-text configuration (ONNX-based, alternative to Whisper)
+/// Requires: cargo build --features parakeet
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ParakeetConfig {
+    /// Path to model directory containing ONNX model files
+    /// Should contain: model.onnx (or model_int8.onnx), tokenizer.json
+    /// Or: absolute path to a specific .onnx file
+    pub model: String,
+
+    /// Load model on-demand when recording starts (true) or keep loaded (false)
+    #[serde(default = "default_on_demand_loading")]
+    pub on_demand_loading: bool,
+}
+
+impl Default for ParakeetConfig {
+    fn default() -> Self {
+        Self {
+            model: "parakeet-ctc-0.6b".to_string(),
+            on_demand_loading: false,
+        }
+    }
+}
+
+/// Transcription backend selection
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TranscriptionBackend {
+    /// Use Whisper (whisper.cpp via whisper-rs) - default
+    #[default]
+    Whisper,
+    /// Use Parakeet (NVIDIA's FastConformer via ONNX Runtime)
+    /// Requires: cargo build --features parakeet
+    Parakeet,
+}
+
 /// Text processing configuration
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct TextConfig {
@@ -698,6 +742,8 @@ impl Default for Config {
                 post_output_command: None,
                 post_process: None,
             },
+            backend: TranscriptionBackend::default(),
+            parakeet: None,
             text: TextConfig::default(),
             status: StatusConfig::default(),
             state_file: Some("auto".to_string()),
@@ -767,6 +813,30 @@ impl Config {
         tracing::debug!("Ensured models directory exists: {:?}", models_dir);
 
         Ok(())
+    }
+
+    /// Check if on-demand model loading is enabled for the active backend
+    pub fn on_demand_loading(&self) -> bool {
+        match self.backend {
+            TranscriptionBackend::Whisper => self.whisper.on_demand_loading,
+            TranscriptionBackend::Parakeet => self
+                .parakeet
+                .as_ref()
+                .map(|p| p.on_demand_loading)
+                .unwrap_or(false),
+        }
+    }
+
+    /// Get the model name/path for the active backend (for logging)
+    pub fn model_name(&self) -> &str {
+        match self.backend {
+            TranscriptionBackend::Whisper => &self.whisper.model,
+            TranscriptionBackend::Parakeet => self
+                .parakeet
+                .as_ref()
+                .map(|p| p.model.as_str())
+                .unwrap_or("parakeet (not configured)"),
+        }
     }
 }
 

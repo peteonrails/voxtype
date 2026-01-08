@@ -57,6 +57,10 @@ rodio = { version = "0.19", default-features = false, features = ["wav"] }
 # Whisper speech-to-text
 whisper-rs = "0.15.1"
 
+# Parakeet speech-to-text (optional, ONNX-based)
+# Using local patched version until upstream fixes ndarray 0.16 -> 0.17
+parakeet-rs = { path = "vendor/parakeet-rs", optional = true }
+
 
 # CPU count for thread detection
 num_cpus = "1.16"
@@ -70,6 +74,8 @@ gpu-vulkan = ["whisper-rs/vulkan"]
 gpu-cuda = ["whisper-rs/cuda"]
 gpu-metal = ["whisper-rs/metal"]
 gpu-hipblas = ["whisper-rs/hipblas"]
+# Parakeet backend (ONNX-based, alternative to Whisper)
+parakeet = ["dep:parakeet-rs"]
 
 [build-dependencies]
 clap = { version = "4", features = ["derive"] }

@@ -3,11 +3,15 @@
 //! Provides transcription via:
 //! - Local whisper.cpp inference (whisper-rs crate)
 //! - Remote OpenAI-compatible Whisper API (whisper.cpp server, OpenAI, etc.)
+//! - Optionally NVIDIA Parakeet via ONNX Runtime (when `parakeet` feature is enabled)
 
 pub mod remote;
 pub mod whisper;
 
-use crate::config::{WhisperBackend, WhisperConfig};
+#[cfg(feature = "parakeet")]
+pub mod parakeet;
+
+use crate::config::{Config, TranscriptionBackend, WhisperBackend, WhisperConfig};
 use crate::error::TranscribeError;
 
 /// Trait for speech-to-text implementations
@@ -18,7 +22,28 @@ pub trait Transcriber: Send + Sync {
 }
 
 /// Factory function to create transcriber based on configured backend
-pub fn create_transcriber(
+pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, TranscribeError> {
+    match config.backend {
+        TranscriptionBackend::Whisper => create_whisper_transcriber(&config.whisper),
+        #[cfg(feature = "parakeet")]
+        TranscriptionBackend::Parakeet => {
+            let parakeet_config = config.parakeet.as_ref().ok_or_else(|| {
+                TranscribeError::InitFailed(
+                    "Parakeet backend selected but [parakeet] config section is missing".to_string(),
+                )
+            })?;
+            Ok(Box::new(parakeet::ParakeetTranscriber::new(parakeet_config)?))
+        }
+        #[cfg(not(feature = "parakeet"))]
+        TranscriptionBackend::Parakeet => Err(TranscribeError::InitFailed(
+            "Parakeet backend requested but voxtype was not compiled with --features parakeet"
+                .to_string(),
+        )),
+    }
+}
+
+/// Factory function to create Whisper transcriber (local or remote)
+pub fn create_whisper_transcriber(
     config: &WhisperConfig,
 ) -> Result<Box<dyn Transcriber>, TranscribeError> {
     match config.backend {
