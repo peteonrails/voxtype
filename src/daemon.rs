@@ -820,9 +820,13 @@ impl Daemon {
                                 tracing::warn!("Hotkey config changed - restart daemon to apply");
                             }
 
-                            // Note: whisper model changes require model reload
+                            // Model changes behavior depends on on_demand_loading setting
                             if new_config.whisper.model != self.config.whisper.model {
-                                tracing::warn!("Whisper model changed - will use new model on next transcription");
+                                if new_config.whisper.on_demand_loading {
+                                    tracing::info!("Whisper model changed - will use new model on next transcription");
+                                } else {
+                                    tracing::warn!("Whisper model changed - restart daemon to apply (or enable on_demand_loading)");
+                                }
                             }
 
                             // Store new config
