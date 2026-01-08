@@ -6,6 +6,16 @@
 //!
 //! Engine-aware: In Parakeet mode, switches between parakeet-cuda and parakeet-avx*.
 //! In Whisper mode, switches between vulkan and avx*.
+//!
+//! GPU Selection:
+//! On systems with multiple GPUs (e.g., Intel integrated + NVIDIA discrete), the Vulkan
+//! backend may select the wrong GPU by default. Use VOXTYPE_VULKAN_DEVICE environment
+//! variable to select a specific GPU:
+//!   - VOXTYPE_VULKAN_DEVICE=nvidia  (selects NVIDIA GPU)
+//!   - VOXTYPE_VULKAN_DEVICE=amd     (selects AMD GPU)
+//!   - VOXTYPE_VULKAN_DEVICE=intel   (selects Intel GPU)
+//!
+//! This sets VK_LOADER_DRIVERS_SELECT internally to filter Vulkan ICDs.
 
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -55,6 +65,58 @@ impl Backend {
             Backend::Vulkan => "GPU (Vulkan)",
         }
     }
+}
+
+/// GPU vendor type for device selection
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GpuVendor {
+    Nvidia,
+    Amd,
+    Intel,
+    Other,
+}
+
+impl GpuVendor {
+    /// Parse vendor from GPU name string
+    fn from_name(name: &str) -> Self {
+        let lower = name.to_lowercase();
+        if lower.contains("nvidia") || lower.contains("geforce") || lower.contains("quadro") || lower.contains("rtx") || lower.contains("gtx") {
+            GpuVendor::Nvidia
+        } else if lower.contains("amd") || lower.contains("radeon") || lower.contains("rx ") {
+            GpuVendor::Amd
+        } else if lower.contains("intel") {
+            GpuVendor::Intel
+        } else {
+            GpuVendor::Other
+        }
+    }
+
+    /// Get the VK_LOADER_DRIVERS_SELECT glob pattern for this vendor
+    fn vulkan_driver_glob(&self) -> &'static str {
+        match self {
+            GpuVendor::Nvidia => "nvidia*",
+            GpuVendor::Amd => "*radeon*,*amd*",
+            GpuVendor::Intel => "*intel*",
+            GpuVendor::Other => "*",
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            GpuVendor::Nvidia => "NVIDIA",
+            GpuVendor::Amd => "AMD",
+            GpuVendor::Intel => "Intel",
+            GpuVendor::Other => "Other",
+        }
+    }
+}
+
+/// Information about a detected GPU
+#[derive(Debug, Clone)]
+pub struct GpuInfo {
+    pub name: String,
+    pub vendor: GpuVendor,
+    pub pci_slot: Option<String>,
 }
 
 /// Detect if we're in tiered mode (pre-built packages) or simple mode (source build)
@@ -117,27 +179,33 @@ pub fn detect_available_backends() -> Vec<Backend> {
     available
 }
 
-/// Detect if GPU is available for Vulkan
-pub fn detect_gpu() -> Option<String> {
+/// Detect all available GPUs
+pub fn detect_gpus() -> Vec<GpuInfo> {
+    let mut gpus = Vec::new();
+
     // Check for DRI render nodes (indicates GPU with working driver)
     if !Path::new("/dev/dri").exists() {
-        return None;
+        return gpus;
     }
 
     // Check for render nodes
     let render_nodes: Vec<_> = fs::read_dir("/dev/dri")
-        .ok()?
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_str()
-                .map(|s| s.starts_with("renderD"))
-                .unwrap_or(false)
+        .ok()
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_name()
+                        .to_str()
+                        .map(|s| s.starts_with("renderD"))
+                        .unwrap_or(false)
+                })
+                .collect()
         })
-        .collect();
+        .unwrap_or_default();
 
     if render_nodes.is_empty() {
-        return None;
+        return gpus;
     }
 
     // Try to get GPU info via lspci
@@ -146,16 +214,65 @@ pub fn detect_gpu() -> Option<String> {
         for line in stdout.lines() {
             let lower = line.to_lowercase();
             if lower.contains("vga") || lower.contains("3d") || lower.contains("display") {
+                // Extract PCI slot (first field before space)
+                let pci_slot = line.split_whitespace().next().map(String::from);
+
                 // Extract the GPU name (after the colon)
                 if let Some(idx) = line.find(": ") {
-                    return Some(line[idx + 2..].to_string());
+                    let name = line[idx + 2..].to_string();
+                    let vendor = GpuVendor::from_name(&name);
+                    gpus.push(GpuInfo {
+                        name,
+                        vendor,
+                        pci_slot,
+                    });
                 }
             }
         }
     }
 
-    // Fallback
-    Some("GPU detected (install pciutils for details)".to_string())
+    // Fallback if lspci not available but render nodes exist
+    if gpus.is_empty() && !render_nodes.is_empty() {
+        gpus.push(GpuInfo {
+            name: "GPU detected (install pciutils for details)".to_string(),
+            vendor: GpuVendor::Other,
+            pci_slot: None,
+        });
+    }
+
+    gpus
+}
+
+/// Detect if GPU is available for Vulkan (returns first GPU for backward compatibility)
+pub fn detect_gpu() -> Option<String> {
+    detect_gpus().first().map(|g| g.name.clone())
+}
+
+/// Parse VOXTYPE_VULKAN_DEVICE environment variable and return the appropriate vendor
+pub fn get_selected_gpu_vendor() -> Option<GpuVendor> {
+    std::env::var("VOXTYPE_VULKAN_DEVICE").ok().and_then(|val| {
+        match val.to_lowercase().as_str() {
+            "nvidia" | "nv" => Some(GpuVendor::Nvidia),
+            "amd" | "radeon" => Some(GpuVendor::Amd),
+            "intel" => Some(GpuVendor::Intel),
+            _ => None,
+        }
+    })
+}
+
+/// Apply GPU selection environment variables based on VOXTYPE_VULKAN_DEVICE
+/// Call this before initializing Vulkan to ensure the correct GPU is selected.
+/// Returns the vendor that was selected, if any.
+pub fn apply_gpu_selection() -> Option<GpuVendor> {
+    if let Some(vendor) = get_selected_gpu_vendor() {
+        // Only set if not already set by user
+        if std::env::var("VK_LOADER_DRIVERS_SELECT").is_err() {
+            std::env::set_var("VK_LOADER_DRIVERS_SELECT", vendor.vulkan_driver_glob());
+        }
+        Some(vendor)
+    } else {
+        None
+    }
 }
 
 /// Check if Vulkan runtime is available
@@ -370,17 +487,42 @@ pub fn show_status() {
 
     // GPU detection
     println!();
-    if let Some(gpu) = detect_gpu() {
-        println!("GPU detected: {}", gpu);
+    let gpus = detect_gpus();
+    if gpus.is_empty() {
+        println!("GPU: not detected");
+    } else {
+        println!("GPUs detected:");
+        for (i, gpu) in gpus.iter().enumerate() {
+            println!("  {}. [{}] {}", i + 1, gpu.vendor.display_name(), gpu.name);
+        }
 
+        // Show Vulkan runtime status
+        println!();
         if check_vulkan_runtime() {
             println!("Vulkan runtime: installed");
         } else {
             println!("Vulkan runtime: NOT FOUND");
             println!("  Install vulkan-icd-loader for GPU acceleration");
         }
-    } else {
-        println!("GPU: not detected");
+
+        // Show GPU selection status if multiple GPUs
+        if gpus.len() > 1 {
+            println!();
+            if let Some(selected) = get_selected_gpu_vendor() {
+                println!("GPU selection: {} (via VOXTYPE_VULKAN_DEVICE)", selected.display_name());
+            } else {
+                println!("GPU selection: auto (first available)");
+                println!();
+                println!("Multiple GPUs detected. To select a specific GPU, set:");
+                println!("  VOXTYPE_VULKAN_DEVICE=nvidia   # Use NVIDIA GPU");
+                println!("  VOXTYPE_VULKAN_DEVICE=amd      # Use AMD GPU");
+                println!("  VOXTYPE_VULKAN_DEVICE=intel    # Use Intel GPU");
+                println!();
+                println!("For systemd, create ~/.config/systemd/user/voxtype.service.d/gpu.conf:");
+                println!("  [Service]");
+                println!("  Environment=\"VOXTYPE_VULKAN_DEVICE=nvidia\"");
+            }
+        }
     }
 
     // Usage hints

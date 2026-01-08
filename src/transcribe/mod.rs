@@ -18,6 +18,7 @@ pub mod parakeet;
 
 use crate::config::{Config, TranscriptionEngine, WhisperConfig, WhisperMode};
 use crate::error::TranscribeError;
+use crate::setup::gpu;
 
 /// Trait for speech-to-text implementations
 pub trait Transcriber: Send + Sync {
@@ -72,6 +73,12 @@ pub fn create_transcriber_with_config_path(
     config: &WhisperConfig,
     config_path: Option<std::path::PathBuf>,
 ) -> Result<Box<dyn Transcriber>, TranscribeError> {
+    // Apply GPU selection from VOXTYPE_VULKAN_DEVICE environment variable
+    // This sets VK_LOADER_DRIVERS_SELECT to filter Vulkan drivers
+    if let Some(vendor) = gpu::apply_gpu_selection() {
+        tracing::info!("GPU selection: {} (via VOXTYPE_VULKAN_DEVICE)", vendor.display_name());
+    }
+
     match config.effective_mode() {
         WhisperMode::Local => {
             if config.gpu_isolation {
