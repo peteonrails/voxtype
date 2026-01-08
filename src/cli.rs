@@ -88,6 +88,10 @@ pub enum Commands {
         #[arg(long)]
         download: bool,
 
+        /// Specify which model to download (use with --download)
+        #[arg(long, value_name = "NAME")]
+        model: Option<String>,
+
         /// Suppress all output (for scripting/automation)
         #[arg(long)]
         quiet: bool,
@@ -302,6 +306,45 @@ mod tests {
                 assert!(restart, "should have restart=true");
             }
             _ => panic!("Expected Setup Model command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_download_with_model() {
+        let cli = Cli::parse_from(["voxtype", "setup", "--download", "--model", "large-v3-turbo"]);
+        match cli.command {
+            Some(Commands::Setup { download, model, .. }) => {
+                assert!(download, "should have download=true");
+                assert_eq!(model, Some("large-v3-turbo".to_string()));
+            }
+            _ => panic!("Expected Setup command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_model_without_download() {
+        // --model can be specified without --download (for validation/config update of existing model)
+        let cli = Cli::parse_from(["voxtype", "setup", "--model", "small.en"]);
+        match cli.command {
+            Some(Commands::Setup { download, model, .. }) => {
+                assert!(!download, "download should be false");
+                assert_eq!(model, Some("small.en".to_string()));
+            }
+            _ => panic!("Expected Setup command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_download_model_quiet() {
+        // Full non-interactive setup command
+        let cli = Cli::parse_from(["voxtype", "setup", "--download", "--model", "large-v3-turbo", "--quiet"]);
+        match cli.command {
+            Some(Commands::Setup { download, model, quiet, .. }) => {
+                assert!(download, "should have download=true");
+                assert_eq!(model, Some("large-v3-turbo".to_string()));
+                assert!(quiet, "should have quiet=true");
+            }
+            _ => panic!("Expected Setup command"),
         }
     }
 }

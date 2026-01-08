@@ -53,6 +53,16 @@ const MODELS: &[ModelInfo] = &[
     },
 ];
 
+/// Check if a model name is valid
+pub fn is_valid_model(name: &str) -> bool {
+    MODELS.iter().any(|m| m.name == name)
+}
+
+/// Get list of valid model names (for error messages)
+pub fn valid_model_names() -> Vec<&'static str> {
+    MODELS.iter().map(|m| m.name).collect()
+}
+
 /// Run interactive model selection
 pub async fn interactive_select() -> anyhow::Result<()> {
     println!("Voxtype Model Selection\n");
@@ -290,7 +300,7 @@ pub fn list_installed() {
     }
 }
 
-/// Update the config file to use a specific model
+/// Update the config file to use a specific model (with status messages)
 fn update_config_model(model_name: &str) -> anyhow::Result<()> {
     if let Some(config_path) = Config::default_path() {
         if config_path.exists() {
@@ -303,6 +313,21 @@ fn update_config_model(model_name: &str) -> anyhow::Result<()> {
             print_info("No config file found. Run 'voxtype setup' first.");
             Ok(())
         }
+    } else {
+        anyhow::bail!("Could not determine config path")
+    }
+}
+
+/// Update the config file to use a specific model (quiet, no output)
+pub fn set_model_config(model_name: &str) -> anyhow::Result<()> {
+    if let Some(config_path) = Config::default_path() {
+        if config_path.exists() {
+            let content = std::fs::read_to_string(&config_path)?;
+            let updated = update_model_in_config(&content, model_name);
+            std::fs::write(&config_path, updated)?;
+        }
+        // Silently succeed if config doesn't exist yet - setup will create it
+        Ok(())
     } else {
         anyhow::bail!("Could not determine config path")
     }
@@ -428,4 +453,28 @@ language = "en"
         }
     }
 
+    #[test]
+    fn test_is_valid_model() {
+        // Valid models
+        assert!(is_valid_model("tiny.en"));
+        assert!(is_valid_model("base.en"));
+        assert!(is_valid_model("small.en"));
+        assert!(is_valid_model("medium.en"));
+        assert!(is_valid_model("large-v3"));
+        assert!(is_valid_model("large-v3-turbo"));
+
+        // Invalid models
+        assert!(!is_valid_model("invalid"));
+        assert!(!is_valid_model("large"));
+        assert!(!is_valid_model(""));
+        assert!(!is_valid_model("LARGE-V3")); // case sensitive
+    }
+
+    #[test]
+    fn test_valid_model_names() {
+        let names = valid_model_names();
+        assert!(names.contains(&"tiny.en"));
+        assert!(names.contains(&"large-v3-turbo"));
+        assert_eq!(names.len(), MODELS.len());
+    }
 }

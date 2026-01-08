@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
             transcribe_file(&config, &file)?;
         }
 
-        Commands::Setup { action, download, quiet, no_post_install } => {
+        Commands::Setup { action, download, model, quiet, no_post_install } => {
             match action {
                 Some(SetupAction::Check) => {
                     setup::run_checks(&config).await?;
@@ -122,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 None => {
                     // Default: run setup (non-blocking)
-                    setup::run_setup(&config, download, quiet, no_post_install).await?;
+                    setup::run_setup(&config, download, model.as_deref(), quiet, no_post_install).await?;
                 }
             }
         }
