@@ -120,6 +120,9 @@ async fn main() -> anyhow::Result<()> {
                         setup::gpu::show_status();
                     }
                 }
+                Some(SetupAction::Compositor { compositor_type }) => {
+                    setup::compositor::run(&compositor_type).await?;
+                }
                 None => {
                     // Default: run setup (non-blocking)
                     setup::run_setup(&config, download, quiet, no_post_install).await?;

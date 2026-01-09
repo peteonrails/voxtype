@@ -200,6 +200,58 @@ pub enum SetupAction {
         #[arg(long)]
         status: bool,
     },
+
+    /// Compositor integration (fixes modifier key interference)
+    Compositor {
+        #[command(subcommand)]
+        compositor_type: CompositorType,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum CompositorType {
+    /// Hyprland compositor configuration
+    Hyprland {
+        /// Uninstall the compositor integration
+        #[arg(long)]
+        uninstall: bool,
+
+        /// Show installation status
+        #[arg(long)]
+        status: bool,
+
+        /// Show config without installing (print to stdout)
+        #[arg(long)]
+        show: bool,
+    },
+    /// Sway compositor configuration
+    Sway {
+        /// Uninstall the compositor integration
+        #[arg(long)]
+        uninstall: bool,
+
+        /// Show installation status
+        #[arg(long)]
+        status: bool,
+
+        /// Show config without installing (print to stdout)
+        #[arg(long)]
+        show: bool,
+    },
+    /// River compositor configuration
+    River {
+        /// Uninstall the compositor integration
+        #[arg(long)]
+        uninstall: bool,
+
+        /// Show installation status
+        #[arg(long)]
+        status: bool,
+
+        /// Show config without installing (print to stdout)
+        #[arg(long)]
+        show: bool,
+    },
 }
 
 #[cfg(test)]

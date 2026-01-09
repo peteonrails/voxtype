@@ -417,6 +417,10 @@ voxtype record toggle
 | Built-in hotkey (evdev) | Universal, no config needed | Requires `input` group |
 | Compositor keybindings | Native feel, no `input` group | Compositor-specific config |
 
+### Modifier Key Issues
+
+If you use a multi-key combination (e.g., `SUPER+CTRL+X`) and release keys slowly, the typed output may trigger compositor shortcuts instead of inserting text. See [Output Hooks (Compositor Integration)](#output-hooks-compositor-integration) for an automatic fix.
+
 ---
 
 ## Whisper Models
@@ -553,6 +557,74 @@ fallback_to_clipboard = true  # Falls back to clipboard if typing fails
 ```
 
 On Wayland, wtype is tried first (best CJK support), then ydotool, then clipboard. On X11, ydotool is used, falling back to clipboard if unavailable.
+
+---
+
+## Output Hooks (Compositor Integration)
+
+Voxtype can run commands before and after typing output. This is primarily useful for compositor integration—for example, switching to a Hyprland submap that blocks modifier keys during typing.
+
+### Why Output Hooks?
+
+When using compositor keybindings with modifiers (e.g., `SUPER+CTRL+X`), if you release the keys slowly, held modifiers can interfere with typed output. For example, if SUPER is still held when voxtype types "hello", you might trigger SUPER+h, SUPER+e, etc. instead of inserting text.
+
+Output hooks solve this by letting you block modifier keys at the compositor level during typing.
+
+### Automatic Setup (Recommended)
+
+If you're experiencing modifier key interference (typed text triggering shortcuts instead of inserting characters), use the compositor setup command to automatically install a fix:
+
+```bash
+# For Hyprland
+voxtype setup compositor hyprland
+hyprctl reload
+systemctl --user restart voxtype
+
+# For Sway
+voxtype setup compositor sway
+swaymsg reload
+systemctl --user restart voxtype
+
+# For River
+voxtype setup compositor river
+# Restart River or source the new config
+systemctl --user restart voxtype
+```
+
+**Note:** This command does NOT set up keybindings for voxtype. It only installs a workaround that blocks modifier keys during text output. See [Compositor Keybindings](#compositor-keybindings) to set up your push-to-talk hotkey.
+
+This command:
+1. Writes a modifier-blocking submap/mode to `~/.config/hypr/conf.d/voxtype-submap.conf` (or `sway/conf.d/voxtype-mode.conf`, or `river/conf.d/voxtype-mode.sh`)
+2. Adds pre/post output hooks to your voxtype config
+3. Checks that your compositor sources the conf.d directory
+
+If voxtype crashes while typing, press **F12** to escape the submap.
+
+Use `--status` to check installation status, `--uninstall` to remove, or `--show` to view the configuration without installing.
+
+### Manual Configuration
+
+If you prefer manual setup, add these to your voxtype config:
+
+```toml
+[output]
+# Command to run BEFORE typing (e.g., switch to modifier-blocking submap)
+pre_output_command = "hyprctl dispatch submap voxtype_suppress"
+
+# Command to run AFTER typing (e.g., reset to default submap)
+post_output_command = "hyprctl dispatch submap reset"
+```
+
+See `voxtype setup compositor hyprland --show` for the full submap configuration.
+
+### Other Uses
+
+Output hooks are generic shell commands—you can use them for any compositor or custom workflow:
+
+- **Sway**: Use `swaymsg` commands
+- **River**: Use `riverctl` commands
+- **Notifications**: `pre_output_command = "notify-send 'Typing...'"`
+- **Logging**: `post_output_command = "echo $(date) >> ~/voxtype.log"`
 
 ---
 

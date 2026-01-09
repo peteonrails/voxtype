@@ -4,6 +4,7 @@ Solutions to common issues when using Voxtype.
 
 ## Table of Contents
 
+- [Modifier Key Interference (Hyprland/Sway/River)](#modifier-key-interference-hyprlandswayriver)
 - [Permission Issues](#permission-issues)
 - [Audio Problems](#audio-problems)
 - [Transcription Issues](#transcription-issues)
@@ -11,6 +12,90 @@ Solutions to common issues when using Voxtype.
 - [Performance Issues](#performance-issues)
 - [Systemd Service Issues](#systemd-service-issues)
 - [Debug Mode](#debug-mode)
+
+---
+
+## Modifier Key Interference (Hyprland/Sway/River)
+
+### Typed text triggers window manager shortcuts instead of inserting text
+
+**Symptoms:** When using compositor keybindings with modifiers (e.g., `SUPER+CTRL+X` or `SUPER+O`), releasing keys slowly causes typed output to trigger shortcuts instead of inserting text. For example, if you release X while still holding SUPER, the transcribed "hello" might trigger SUPER+h, SUPER+e, SUPER+l, etc.
+
+**Cause:** The compositor tracks physical keyboard state. Even though voxtype types text, if you're still physically holding a modifier key, the compositor combines them.
+
+**Solution:** Use the compositor setup command to automatically install a fix that blocks modifier keys during text output.
+
+**For Hyprland:**
+```bash
+voxtype setup compositor hyprland
+hyprctl reload
+systemctl --user restart voxtype
+```
+
+**For Sway:**
+```bash
+voxtype setup compositor sway
+swaymsg reload
+systemctl --user restart voxtype
+```
+
+**For River:**
+```bash
+voxtype setup compositor river
+# Restart River or source the new config
+systemctl --user restart voxtype
+```
+
+**Note:** This command does NOT set up keybindings—it only installs the modifier interference fix. See the [User Manual](USER_MANUAL.md#compositor-keybindings) to set up your push-to-talk hotkey.
+
+This command:
+1. Writes a modifier-blocking submap/mode to `~/.config/hypr/conf.d/voxtype-submap.conf` (or `sway/conf.d/voxtype-mode.conf`, or `river/conf.d/voxtype-mode.sh`)
+2. Adds pre/post output hooks to your voxtype config
+3. Checks that your compositor config sources the conf.d directory
+
+If voxtype crashes while typing, press **F12** to escape the submap and restore normal modifier behavior.
+
+**Manual setup:** See `voxtype setup compositor hyprland --show` for the full configuration if you prefer to set it up manually.
+
+**Alternative workaround:** If you can't use submaps, a simple delay before typing may help:
+
+```toml
+[output.post_process]
+command = "sleep 0.3 && cat"
+timeout_ms = 5000
+```
+
+### Compositors Without Mode/Submap Support
+
+The automatic fix (`voxtype setup compositor`) only works on compositors that support input modes or submaps:
+
+| Compositor | Supported | Why |
+|------------|-----------|-----|
+| Hyprland | Yes | Has submaps |
+| Sway | Yes | Has modes |
+| River | Yes | Has modes |
+| Qtile | No | No mode/submap concept |
+| Niri | No | No mode/submap concept |
+| GNOME | No | No mode/submap concept |
+| KDE | No | No mode/submap concept |
+
+**For unsupported compositors, use one of these alternatives:**
+
+1. **Use a dedicated key without modifiers** - Keys like ScrollLock, Pause, or F13-F24 don't have this problem since there are no modifiers to interfere:
+   ```toml
+   [hotkey]
+   key = "SCROLLLOCK"
+   ```
+
+2. **Use the post-processor delay** (works on any compositor):
+   ```toml
+   [output.post_process]
+   command = "sleep 0.3 && cat"
+   timeout_ms = 5000
+   ```
+   This gives you 300ms to release all keys before typing starts.
+
+3. **Use voxtype's built-in evdev hotkey** instead of compositor keybindings - release timing doesn't matter since voxtype controls the entire recording flow.
 
 ---
 

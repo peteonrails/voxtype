@@ -75,6 +75,8 @@ enabled = false
 
 > **X11 / Built-in hotkey fallback:** If you're on X11 or prefer voxtype's built-in hotkey (ScrollLock by default), add yourself to the `input` group: `sudo usermod -aG input $USER` and log out/in. See the [User Manual](docs/USER_MANUAL.md) for details.
 
+> **Omarchy / Multi-modifier keybindings:** If using keybindings with multiple modifiers (e.g., `SUPER+CTRL+X`), releasing keys slowly can cause typed text to trigger window manager shortcuts instead of inserting text. See [Modifier Key Interference](docs/TROUBLESHOOTING.md#modifier-key-interference-hyprlandsway) in the troubleshooting guide for the solution using output hooks and Hyprland submaps.
+
 ## Usage
 
 1. Run `voxtype` (it runs as a foreground daemon)
@@ -547,6 +549,8 @@ We want to hear from you! Voxtype is a young project and your feedback helps mak
 - [reisset](https://github.com/reisset) - Testing and feedback on post-processing feature
 - [Goodroot](https://github.com/goodroot) - Testing, feedback, and documentation updates
 - [robzolkos](https://github.com/robzolkos) - Auto-submit feature for AI agent workflows
+- [konnsim](https://github.com/konnsim) - Modifier key interference bug report
+- [IgorWarzocha](https://github.com/IgorWarzocha) - Hyprland submap solution for modifier key fix
 
 ## License
 

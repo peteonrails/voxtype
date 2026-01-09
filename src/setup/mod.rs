@@ -6,7 +6,9 @@
 //! - Interactive model selection
 //! - Output chain detection
 //! - GPU backend management
+//! - Compositor integration (modifier key fix)
 
+pub mod compositor;
 pub mod gpu;
 pub mod model;
 pub mod systemd;
