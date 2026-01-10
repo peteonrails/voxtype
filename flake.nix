@@ -162,15 +162,16 @@
 
       in {
         packages = {
-          # Unwrapped packages (for Home Manager module which does its own wrapping)
-          voxtype-unwrapped = mkVoxtypeUnwrapped {};
-          voxtype-vulkan-unwrapped = vulkanUnwrapped;
-          voxtype-rocm-unwrapped = rocmUnwrapped;
-
           # Wrapped packages (ready to use, runtime deps in PATH)
+          # Use these for Home Manager module and direct installation
           default = wrapVoxtype (mkVoxtypeUnwrapped {});
           vulkan = wrapVoxtype vulkanUnwrapped;
           rocm = wrapVoxtype rocmUnwrapped;
+
+          # Unwrapped packages (for custom wrapping scenarios)
+          voxtype-unwrapped = mkVoxtypeUnwrapped {};
+          voxtype-vulkan-unwrapped = vulkanUnwrapped;
+          voxtype-rocm-unwrapped = rocmUnwrapped;
         };
 
         # Development shell with all dependencies
