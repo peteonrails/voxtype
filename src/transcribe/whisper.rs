@@ -422,6 +422,145 @@ fn geometric_mean(probabilities: &[f32]) -> f32 {
     product.powf(1.0 / probabilities.len() as f32)
 }
 
+/// Confidence breakdown for sentence-level scoring
+#[derive(Debug, Clone)]
+pub struct ConfidenceBreakdown {
+    pub avg_conf: f32,
+    pub min_conf: f32,
+    pub red_ratio: f32,
+}
+
+/// Minimum confidence threshold below which a sentence requires retry
+const SENTENCE_RETRY_MIN_CONF_THRESHOLD: f32 = 0.33;
+
+/// Cluster consecutive word segments into sentences based on punctuation delimiters.
+///
+/// Sentences are delimited by punctuation marks: `.`, `!`, `?`
+pub fn cluster_into_sentences(segments: &[WordSegment]) -> Vec<Vec<WordSegment>> {
+    if segments.is_empty() {
+        return Vec::new();
+    }
+
+    let mut sentences: Vec<Vec<WordSegment>> = Vec::new();
+    let mut current_sentence: Vec<WordSegment> = Vec::new();
+
+    for segment in segments {
+        current_sentence.push(segment.clone());
+
+        // Check if the segment text ends with sentence-ending punctuation
+        let text = segment.text.trim();
+        if !text.is_empty() && text.ends_with(|c: char| c == '.' || c == '!' || c == '?') {
+            // End of sentence - save current sentence and start new one
+            if !current_sentence.is_empty() {
+                sentences.push(current_sentence);
+                current_sentence = Vec::new();
+            }
+        }
+    }
+
+    // Add any remaining segments as the last sentence
+    if !current_sentence.is_empty() {
+        sentences.push(current_sentence);
+    }
+
+    sentences
+}
+
+/// Calculate weighted confidence score for a sentence.
+///
+/// Uses weighted combination:
+/// - Average confidence (40% weight)
+/// - Minimum confidence (30% weight)
+/// - Red word ratio (30% weight)
+///
+/// Returns tuple of (weighted_score, breakdown)
+pub fn calculate_sentence_confidence(sentence: &[WordSegment]) -> (f32, ConfidenceBreakdown) {
+    if sentence.is_empty() {
+        return (
+            0.0,
+            ConfidenceBreakdown {
+                avg_conf: 0.0,
+                min_conf: 0.0,
+                red_ratio: 1.0,
+            },
+        );
+    }
+
+    // Filter out empty/whitespace-only segments and NaN probabilities
+    let probabilities: Vec<f32> = sentence
+        .iter()
+        .filter_map(|seg| {
+            if seg.probability.is_nan() || seg.text.trim().is_empty() {
+                None
+            } else {
+                Some(seg.probability)
+            }
+        })
+        .collect();
+
+    if probabilities.is_empty() {
+        // All NaN probabilities or all empty segments - treat as low confidence
+        return (
+            0.0,
+            ConfidenceBreakdown {
+                avg_conf: 0.0,
+                min_conf: 0.0,
+                red_ratio: 1.0,
+            },
+        );
+    }
+
+    let avg_conf = probabilities.iter().sum::<f32>() / probabilities.len() as f32;
+    let min_conf = probabilities
+        .iter()
+        .copied()
+        .reduce(f32::min)
+        .unwrap_or(0.0);
+
+    // Only count non-empty segments for red ratio
+    let non_empty_segments: Vec<&WordSegment> = sentence
+        .iter()
+        .filter(|seg| !seg.text.trim().is_empty())
+        .collect();
+
+    let red_count = non_empty_segments
+        .iter()
+        .filter(|seg| seg.label == ConfidenceLabel::Red)
+        .count();
+
+    let red_ratio = if non_empty_segments.is_empty() {
+        1.0
+    } else {
+        red_count as f32 / non_empty_segments.len() as f32
+    };
+
+    // Weighted score: higher is better
+    // Normalize components to [0, 1] range where 1 is best
+    let weighted_score = 0.4 * avg_conf +           // Average confidence (already 0-1)
+                         0.3 * min_conf +            // Minimum confidence (already 0-1)
+                         0.3 * (1.0 - red_ratio);   // Inverse red ratio (1 - red_ratio gives higher score for fewer reds)
+
+    let breakdown = ConfidenceBreakdown {
+        avg_conf,
+        min_conf,
+        red_ratio,
+    };
+
+    (weighted_score, breakdown)
+}
+
+/// Decide whether a sentence needs retry based on minimum confidence threshold.
+///
+/// Current rule (simple, threshold-based): retry if min_conf < SENTENCE_RETRY_MIN_CONF_THRESHOLD.
+/// Weighted score is still computed (returned) for visibility/diagnostics, but is not used for the decision.
+///
+/// Returns tuple of (needs_retry, weighted_score, breakdown)
+pub fn sentence_needs_retry(sentence: &[WordSegment]) -> (bool, f32, ConfidenceBreakdown) {
+    let (score, breakdown) = calculate_sentence_confidence(sentence);
+    let needs_retry = breakdown.min_conf < SENTENCE_RETRY_MIN_CONF_THRESHOLD;
+    (needs_retry, score, breakdown)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

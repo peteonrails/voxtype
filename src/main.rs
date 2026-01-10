@@ -366,6 +366,52 @@ fn transcribe_file(config: &config::Config, path: &PathBuf) -> anyhow::Result<()
             );
         }
         
+        // Cluster into sentences and detect retry sections
+        let sentences = transcribe::whisper::cluster_into_sentences(&details.segments);
+        let retry_sections: Vec<_> = sentences
+            .iter()
+            .filter_map(|sentence| {
+                let (needs_retry, score, breakdown) = transcribe::whisper::sentence_needs_retry(sentence);
+                if needs_retry {
+                    Some((sentence, score, breakdown))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if !retry_sections.is_empty() {
+            println!("\nSections requiring retry:");
+            for (sentence, score, _) in &retry_sections {
+                // Get first and last timestamps for the sentence
+                let t0_cs = sentence[0].t0_cs;
+                let t1_cs = sentence[sentence.len() - 1].t1_cs;
+                
+                let t0_secs = t0_cs as f64 / 100.0;
+                let t1_secs = t1_cs as f64 / 100.0;
+                
+                let hours0 = (t0_secs / 3600.0) as u32;
+                let mins0 = ((t0_secs % 3600.0) / 60.0) as u32;
+                let secs0 = (t0_secs % 60.0) as u32;
+                let millis0 = ((t0_secs % 1.0) * 1000.0) as u32;
+                
+                let hours1 = (t1_secs / 3600.0) as u32;
+                let mins1 = ((t1_secs % 3600.0) / 60.0) as u32;
+                let secs1 = (t1_secs % 60.0) as u32;
+                let millis1 = ((t1_secs % 1.0) * 1000.0) as u32;
+                
+                let sentence_text: String = sentence.iter().map(|seg| seg.text.as_str()).collect::<Vec<_>>().join(" ");
+                
+                println!(
+                    "  [{:02}:{:02}:{:02}.{:03} --> {:02}:{:02}:{:02}.{:03}] \"{}\" (score: {:.2})",
+                    hours0, mins0, secs0, millis0,
+                    hours1, mins1, secs1, millis1,
+                    sentence_text,
+                    score
+                );
+            }
+        }
+        
         // Print final text summary
         println!("\n{}", details.text);
     } else {
