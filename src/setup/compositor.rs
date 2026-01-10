@@ -26,6 +26,11 @@ const HYPRLAND_CONFIG: &str = r#"# Voxtype compositor integration
 # When using keybindings with modifiers (e.g., SUPER+CTRL+X), if keys are
 # released slowly, voxtype may start typing while modifier keys are still
 # held down. This submap temporarily blocks modifiers during text output.
+#
+# NOTE: Escape must NOT be bound here. Binding Escape causes wtype's first
+# character to be dropped. Escape appears to clear compositor state during
+# submap transitions; binding it to a no-op prevents this.
+# See: https://github.com/hyprwm/Hyprland/issues/3165
 
 # Modifier suppression submap
 submap = voxtype_suppress
@@ -37,9 +42,8 @@ bind = , Alt_L, exec, true
 bind = , Alt_R, exec, true
 bind = , Shift_L, exec, true
 bind = , Shift_R, exec, true
-bind = , Escape, exec, voxtype record cancel  # Cancel recording/transcription
-bind = , Escape, submap, reset
-bind = , F12, submap, reset  # Emergency escape if voxtype crashes
+bind = , F12, exec, voxtype record cancel  # Cancel recording/transcription
+bind = , F12, submap, reset
 submap = reset
 "#;
 
@@ -51,6 +55,11 @@ const SWAY_CONFIG: &str = r#"# Voxtype compositor integration
 # When using keybindings with modifiers (e.g., $mod+Ctrl+x), if keys are
 # released slowly, voxtype may start typing while modifier keys are still
 # held down. This mode temporarily blocks modifiers during text output.
+#
+# NOTE: Escape must NOT be bound here. Binding Escape causes wtype's first
+# character to be dropped. Escape appears to clear compositor state during
+# mode transitions; binding it to a no-op prevents this.
+# See: https://github.com/hyprwm/Hyprland/issues/3165
 
 # Modifier suppression mode
 mode "voxtype_suppress" {
@@ -62,8 +71,7 @@ mode "voxtype_suppress" {
     bindsym Alt_R nop
     bindsym Shift_L nop
     bindsym Shift_R nop
-    bindsym Escape exec voxtype record cancel; mode "default"  # Cancel recording/transcription
-    bindsym F12 mode "default"  # Emergency escape if voxtype crashes
+    bindsym F12 exec voxtype record cancel; mode "default"  # Cancel recording/transcription
 }
 "#;
 
@@ -84,6 +92,11 @@ const RIVER_CONFIG: &str = r#"#!/bin/sh
 # When using keybindings with modifiers (e.g., Super+Control+X), if keys are
 # released slowly, voxtype may start typing while modifier keys are still
 # held down. This mode temporarily blocks modifiers during text output.
+#
+# NOTE: Escape must NOT be bound here. Binding Escape causes wtype's first
+# character to be dropped. Escape appears to clear compositor state during
+# mode transitions; binding it to a no-op prevents this.
+# See: https://github.com/hyprwm/Hyprland/issues/3165
 
 # Declare the modifier suppression mode
 riverctl declare-mode voxtype_suppress
@@ -98,11 +111,8 @@ riverctl map voxtype_suppress None Alt_R spawn true
 riverctl map voxtype_suppress None Shift_L spawn true
 riverctl map voxtype_suppress None Shift_R spawn true
 
-# Cancel recording/transcription with Escape
-riverctl map voxtype_suppress None Escape spawn "voxtype record cancel"
-riverctl map voxtype_suppress None Escape enter-mode normal
-
-# Emergency escape if voxtype crashes
+# Cancel recording/transcription with F12 (NOT Escape - see note above)
+riverctl map voxtype_suppress None F12 spawn "voxtype record cancel"
 riverctl map voxtype_suppress None F12 enter-mode normal
 "#;
 
