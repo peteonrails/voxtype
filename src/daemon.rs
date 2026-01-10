@@ -4,7 +4,7 @@
 //! and text output components.
 
 use crate::audio::feedback::{AudioFeedback, SoundEvent};
-use crate::audio::{self, AudioCapture};
+use crate::audio::{self, preprocess, AudioCapture};
 use crate::config::{ActivationMode, Config, OutputMode};
 use crate::error::Result;
 use crate::hotkey::{self, HotkeyEvent};
@@ -293,10 +293,33 @@ impl Daemon {
                     *state = State::Transcribing { audio: samples.clone() };
                     self.update_state("transcribing");
 
+                    // Preprocess audio (apply speedup optimization if enabled)
+                    let processed_samples = match preprocess::preprocess_audio(
+                        &samples,
+                        self.config.audio.sample_rate,
+                        self.config.whisper.speedup_enabled,
+                    ) {
+                        Ok(processed) => {
+                            if processed.len() != samples.len() {
+                                let processed_duration = processed.len() as f32 / self.config.audio.sample_rate as f32;
+                                tracing::info!(
+                                    "Audio preprocessing: {:.1}s -> {:.1}s",
+                                    audio_duration,
+                                    processed_duration
+                                );
+                            }
+                            processed
+                        }
+                        Err(e) => {
+                            tracing::warn!("Audio preprocessing failed: {}, using original samples", e);
+                            samples
+                        }
+                    };
+
                     // Spawn transcription task (non-blocking)
                     if let Some(t) = transcriber {
                         self.transcription_task = Some(tokio::task::spawn_blocking(move || {
-                            t.transcribe(&samples)
+                            t.transcribe(&processed_samples)
                         }));
                         return true;
                     } else {

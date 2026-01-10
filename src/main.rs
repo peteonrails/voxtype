@@ -7,7 +7,7 @@
 use clap::Parser;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
-use voxtype::{config, cpu, daemon, setup, transcribe, Cli, Commands, RecordAction, SetupAction};
+use voxtype::{audio::preprocess, config, cpu, daemon, setup, transcribe, Cli, Commands, RecordAction, SetupAction};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -294,9 +294,32 @@ fn transcribe_file(config: &config::Config, path: &PathBuf) -> anyhow::Result<()
         final_samples.len() as f32 / 16000.0
     );
 
+    // Preprocess audio (apply speedup optimization if enabled)
+    let processed_samples = match preprocess::preprocess_audio(
+        &final_samples,
+        16000,
+        config.whisper.speedup_enabled,
+    ) {
+        Ok(processed) => {
+            if processed.len() != final_samples.len() {
+                let processed_duration = processed.len() as f32 / 16000.0;
+                println!(
+                    "Audio preprocessing: {:.2}s -> {:.2}s",
+                    final_samples.len() as f32 / 16000.0,
+                    processed_duration
+                );
+            }
+            processed
+        }
+        Err(e) => {
+            eprintln!("Warning: Audio preprocessing failed: {}, using original samples", e);
+            final_samples
+        }
+    };
+
     // Create transcriber and transcribe
     let transcriber = transcribe::create_transcriber(&config.whisper)?;
-    let text = transcriber.transcribe(&final_samples)?;
+    let text = transcriber.transcribe(&processed_samples)?;
 
     println!("\n{}", text);
     Ok(())

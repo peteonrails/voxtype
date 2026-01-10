@@ -89,6 +89,10 @@ translate = false
 # Number of CPU threads for inference (omit for auto-detection)
 # threads = 4
 
+# Enable speedup optimization for recordings longer than 29 seconds (default: true)
+# This reduces transcription time by up to 2x for long recordings
+# speedup_enabled = true
+
 # --- Remote backend settings (used when backend = "remote") ---
 #
 # Remote server endpoint URL (required for remote backend)
@@ -298,6 +302,10 @@ fn default_volume() -> f32 {
 
 fn default_on_demand_loading() -> bool {
     false
+}
+
+fn default_speedup_enabled() -> bool {
+    true
 }
 
 impl Default for AudioFeedbackConfig {
@@ -526,6 +534,10 @@ pub struct WhisperConfig {
     #[serde(default = "default_on_demand_loading")]
     pub on_demand_loading: bool,
 
+    /// Enable speedup optimization for recordings longer than 29 seconds (default: true)
+    #[serde(default = "default_speedup_enabled")]
+    pub speedup_enabled: bool,
+
     // --- Remote backend settings ---
 
     /// Remote server endpoint URL (e.g., "http://192.168.1.100:8080")
@@ -683,6 +695,7 @@ impl Default for Config {
                 translate: false,
                 threads: None,
                 on_demand_loading: default_on_demand_loading(),
+                speedup_enabled: default_speedup_enabled(),
                 remote_endpoint: None,
                 remote_model: None,
                 remote_api_key: None,
