@@ -101,6 +101,17 @@ impl Transcriber for WhisperTranscriber {
             params.set_single_segment(true);
         }
 
+        // Optimize context window for short clips
+        if let Some(audio_ctx) = calculate_audio_ctx(duration_secs) {
+            params.set_audio_ctx(audio_ctx);
+            tracing::info!(
+                "Audio context optimization: using audio_ctx={} for {:.2}s clip (formula: {:.2}s * 50 + 64)",
+                audio_ctx,
+                duration_secs,
+                duration_secs
+            );
+        }
+
         // Run inference
         state
             .full(params, samples)
@@ -192,6 +203,16 @@ fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
         cwd_path.display(),
         local_models_path.display()
     )))
+}
+
+/// Calculate audio_ctx parameter for short clips (≤22.5s).
+/// Formula: duration_seconds * 50 + 64
+fn calculate_audio_ctx(duration_secs: f32) -> Option<i32> {
+    if duration_secs <= 22.5 {
+        Some((duration_secs * 50.0) as i32 + 64)
+    } else {
+        None
+    }
 }
 
 /// Get the filename for a model
