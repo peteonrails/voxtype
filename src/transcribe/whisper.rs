@@ -43,6 +43,8 @@ pub struct WhisperTranscriber {
     translate: bool,
     /// Number of threads to use
     threads: usize,
+    /// Optional initial prompt for context-aware transcription
+    initial_prompt: Option<String>,
 }
 
 impl WhisperTranscriber {
@@ -70,6 +72,7 @@ impl WhisperTranscriber {
             language: config.language.clone(),
             translate: config.translate,
             threads,
+            initial_prompt: config.initial_prompt.clone(),
         })
     }
 }
@@ -110,6 +113,12 @@ impl Transcriber for WhisperTranscriber {
 
         params.set_translate(self.translate);
         params.set_n_threads(self.threads as i32);
+
+        // Set initial prompt if configured
+        if let Some(ref prompt) = self.initial_prompt {
+            params.set_initial_prompt(prompt);
+            tracing::debug!("Using initial prompt for transcription");
+        }
 
         // Disable output we don't need
         params.set_print_special(false);
@@ -207,6 +216,12 @@ impl WhisperTranscriber {
 
         params.set_translate(self.translate);
         params.set_n_threads(self.threads as i32);
+
+        // Set initial prompt if configured
+        if let Some(ref prompt) = self.initial_prompt {
+            params.set_initial_prompt(prompt);
+            tracing::debug!("Using initial prompt for transcription with confidence");
+        }
 
         // Disable output we don't need
         params.set_print_special(false);
@@ -374,6 +389,13 @@ impl WhisperTranscriber {
         params.set_translate(self.translate);
         params.set_n_threads(self.threads as i32);
 
+        // Set initial prompt (use parameter if provided, otherwise use config)
+        let prompt_to_use = initial_prompt.or(self.initial_prompt.as_deref());
+        if let Some(prompt) = prompt_to_use {
+            params.set_initial_prompt(prompt);
+            tracing::debug!("Using initial prompt for segment transcription");
+        }
+
         // Disable output we don't need
         params.set_print_special(false);
         params.set_print_progress(false);
@@ -388,11 +410,6 @@ impl WhisperTranscriber {
         params.set_token_timestamps(true);
         params.set_max_len(1); // One word per segment
         params.set_split_on_word(true);
-
-        // Set initial prompt if provided (for context injection)
-        if let Some(prompt) = initial_prompt {
-            params.set_initial_prompt(prompt);
-        }
 
         // For short recordings, use single segment mode
         if segment_duration_secs < 30.0 {

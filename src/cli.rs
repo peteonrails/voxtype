@@ -60,6 +60,10 @@ pub struct Cli {
     #[arg(long, value_name = "MODEL")]
     pub retry_model: Option<String>,
 
+    /// Optional initial prompt to provide context for transcription
+    #[arg(long, value_name = "PROMPT")]
+    pub initial_prompt: Option<String>,
+
     /// Override hotkey (e.g., SCROLLLOCK, PAUSE, F13)
     #[arg(long, value_name = "KEY")]
     pub hotkey: Option<String>,

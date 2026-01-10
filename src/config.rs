@@ -102,6 +102,11 @@ translate = false
 # Enables hybrid mode: primary model runs on full audio, retry model runs on low-confidence sections
 # retry_model = "medium.en"
 
+# Optional initial prompt for improved transcription accuracy (optional)
+# Provide context like technical terms, names, preferences, or domain vocabulary
+# Example: "I write code in JavaScript and Python. Technical terms: Kubernetes, FastAPI, PostgreSQL."
+# initial_prompt = "I write code in JavaScript and Python. I prefer metric measurements."
+
 # --- Remote backend settings (used when backend = "remote") ---
 #
 # Remote server endpoint URL (required for remote backend)
@@ -562,6 +567,11 @@ pub struct WhisperConfig {
     #[serde(default = "default_silence_removal_enabled")]
     pub silence_removal_enabled: bool,
 
+    /// Optional initial prompt to provide context for transcription
+    /// Helps improve accuracy for technical terms, names, and domain-specific vocabulary
+    #[serde(default)]
+    pub initial_prompt: Option<String>,
+
     // --- Remote backend settings ---
     /// Remote server endpoint URL (e.g., "http://192.168.1.100:8080")
     /// Required when backend = "remote"
@@ -721,6 +731,7 @@ impl Default for Config {
                 on_demand_loading: default_on_demand_loading(),
                 speedup_enabled: default_speedup_enabled(),
                 silence_removal_enabled: default_silence_removal_enabled(),
+                initial_prompt: None,
                 remote_endpoint: None,
                 remote_model: None,
                 remote_api_key: None,

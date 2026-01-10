@@ -55,6 +55,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(retry_model) = cli.retry_model {
         config.whisper.retry_model = Some(retry_model);
     }
+    if let Some(initial_prompt) = cli.initial_prompt {
+        config.whisper.initial_prompt = Some(initial_prompt);
+    }
     if let Some(hotkey) = cli.hotkey {
         config.hotkey.key = hotkey;
     }
