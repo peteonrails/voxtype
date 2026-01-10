@@ -395,10 +395,10 @@ fn load_icon_theme(theme: &str) -> ResolvedIcons {
         },
         "omarchy" => ResolvedIcons {
             // Material Design icons matching Omarchy waybar config
-            idle: "\u{ec12}".to_string(),     // nf-md-microphone_outline
+            idle: "\u{ec12}".to_string(), // nf-md-microphone_outline
             recording: "\u{f036c}".to_string(), // nf-md-microphone
             transcribing: "\u{f051f}".to_string(), // nf-md-timer_sand
-            stopped: "\u{ec12}".to_string(),  // nf-md-microphone_outline
+            stopped: "\u{ec12}".to_string(), // nf-md-microphone_outline
         },
         "minimal" => ResolvedIcons {
             idle: "○".to_string(),
@@ -501,6 +501,17 @@ pub enum WhisperBackend {
     Remote,
 }
 
+/// Remote transcription mode
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteTranscriptionMode {
+    /// Standard Whisper transcription via /v1/audio/transcriptions
+    #[default]
+    Transcription,
+    /// Multimodal chat completion via /v1/chat/completions
+    Chat,
+}
+
 /// Whisper speech-to-text configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WhisperConfig {
@@ -527,7 +538,6 @@ pub struct WhisperConfig {
     pub on_demand_loading: bool,
 
     // --- Remote backend settings ---
-
     /// Remote server endpoint URL (e.g., "http://192.168.1.100:8080")
     /// Required when backend = "remote"
     #[serde(default)]
@@ -544,6 +554,18 @@ pub struct WhisperConfig {
     /// Timeout for remote requests in seconds (default: 30)
     #[serde(default)]
     pub remote_timeout_secs: Option<u64>,
+
+    /// Remote transcription mode (transcription or chat)
+    #[serde(default)]
+    pub remote_mode: RemoteTranscriptionMode,
+
+    /// Optional system prompt for chat-mode requests
+    #[serde(default)]
+    pub remote_system_prompt: Option<String>,
+
+    /// Use data:audio/wav base64 data URI in image_url for chat mode
+    #[serde(default)]
+    pub remote_use_data_uri: bool,
 }
 
 /// Text processing configuration
@@ -687,6 +709,9 @@ impl Default for Config {
                 remote_model: None,
                 remote_api_key: None,
                 remote_timeout_secs: None,
+                remote_mode: RemoteTranscriptionMode::default(),
+                remote_system_prompt: None,
+                remote_use_data_uri: false,
             },
             output: OutputConfig {
                 mode: OutputMode::Type,
