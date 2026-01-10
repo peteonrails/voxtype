@@ -192,7 +192,7 @@ pub fn download_model(model_name: &str) -> anyhow::Result<()> {
     // Use curl for downloading - it handles progress display and redirects
     let status = Command::new("curl")
         .args([
-            "-L",              // Follow redirects
+            "-L",             // Follow redirects
             "--progress-bar", // Show progress bar
             "-o",
             model_path.to_str().unwrap_or("model.bin"),
@@ -257,7 +257,10 @@ pub async fn set_model(model_name: &str, restart: bool) -> anyhow::Result<()> {
         }
     } else {
         print_info("Restart daemon to use new model: systemctl --user restart voxtype");
-        println!("       Or use: voxtype setup model --set {} --restart", model_name);
+        println!(
+            "       Or use: voxtype setup model --set {} --restart",
+            model_name
+        );
     }
 
     Ok(())
@@ -286,10 +289,7 @@ pub fn list_installed() {
                 .map(|m| m.len() as f64 / 1024.0 / 1024.0)
                 .unwrap_or(0.0);
 
-            println!(
-                "  {} ({:.0} MB) - {}",
-                model.name, size, model.description
-            );
+            println!("  {} ({:.0} MB) - {}", model.name, size, model.description);
             found = true;
         }
     }

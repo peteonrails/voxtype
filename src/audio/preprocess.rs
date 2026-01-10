@@ -20,7 +20,10 @@ use tracing::{debug, info};
 /// would exceed 2.0x. Otherwise returns a factor between 1.0 and 2.0.
 pub fn calculate_speedup_factor(duration_secs: f32) -> Option<f32> {
     if duration_secs <= 29.0 {
-        debug!("No speedup needed (duration {:.3}s <= 29.0s)", duration_secs);
+        debug!(
+            "No speedup needed (duration {:.3}s <= 29.0s)",
+            duration_secs
+        );
         return None; // Fits in one batch, no speedup needed
     }
 
@@ -54,11 +57,7 @@ pub fn calculate_speedup_factor(duration_secs: f32) -> Option<f32> {
 ///
 /// Writes samples to a temporary WAV file, applies speedup via FFmpeg,
 /// then reads back the sped-up samples.
-fn speedup_samples(
-    samples: &[f32],
-    sample_rate: u32,
-    factor: f32,
-) -> Result<Vec<f32>> {
+fn speedup_samples(samples: &[f32], sample_rate: u32, factor: f32) -> Result<Vec<f32>> {
     // Create temporary files with unique names
     let temp_dir = std::env::temp_dir();
     let timestamp = std::time::SystemTime::now()
@@ -128,7 +127,8 @@ fn speedup_samples(
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 AudioError::StreamError(
-                    "FFmpeg not found in PATH. Install FFmpeg to use speedup optimization.".to_string(),
+                    "FFmpeg not found in PATH. Install FFmpeg to use speedup optimization."
+                        .to_string(),
                 )
             } else {
                 AudioError::StreamError(format!("Failed to execute FFmpeg: {}", e))
@@ -137,11 +137,7 @@ fn speedup_samples(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(AudioError::StreamError(format!(
-            "FFmpeg failed: {}",
-            stderr
-        ))
-        .into());
+        return Err(AudioError::StreamError(format!("FFmpeg failed: {}", stderr)).into());
     }
 
     // Read back sped-up WAV file
@@ -271,7 +267,8 @@ fn detect_mean_volume(samples: &[f32], sample_rate: u32) -> Result<f32> {
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 AudioError::StreamError(
-                    "FFmpeg not found in PATH. Install FFmpeg to use silence removal optimization.".to_string(),
+                    "FFmpeg not found in PATH. Install FFmpeg to use silence removal optimization."
+                        .to_string(),
                 )
             } else {
                 AudioError::StreamError(format!("Failed to execute FFmpeg: {}", e))
@@ -363,7 +360,8 @@ fn remove_silence(
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 AudioError::StreamError(
-                    "FFmpeg not found in PATH. Install FFmpeg to use silence removal optimization.".to_string(),
+                    "FFmpeg not found in PATH. Install FFmpeg to use silence removal optimization."
+                        .to_string(),
                 )
             } else {
                 AudioError::StreamError(format!("Failed to execute FFmpeg: {}", e))
@@ -413,18 +411,29 @@ pub fn preprocess_audio(
         // Use max() to ensure threshold never goes below -44.0 dB
         // This prevents the threshold from being too low for microphones with higher noise floors
         let threshold_db = (mean_db - 20.0).max(-44.0);
-        debug!("Removing silence: mean_volume={:.2} dB, threshold={:.2} dB", mean_db, threshold_db);
+        debug!(
+            "Removing silence: mean_volume={:.2} dB, threshold={:.2} dB",
+            mean_db, threshold_db
+        );
 
         // Note: Whispered speech is not currently optimized - a future version will add
         // Voice Activity Detection (VAD) for better handling of quiet recordings.
         let stop_duration_s = 0.1;
-        debug!("Silence removal: using stop_duration={:.1}s", stop_duration_s);
+        debug!(
+            "Silence removal: using stop_duration={:.1}s",
+            stop_duration_s
+        );
 
         let original_duration = processed_samples.len() as f32 / sample_rate as f32;
-        processed_samples = remove_silence(&processed_samples, sample_rate, threshold_db, stop_duration_s)?;
+        processed_samples = remove_silence(
+            &processed_samples,
+            sample_rate,
+            threshold_db,
+            stop_duration_s,
+        )?;
         let post_silence_duration = processed_samples.len() as f32 / sample_rate as f32;
         let reduction = original_duration - post_silence_duration;
-        
+
         if reduction > 0.01 {
             // Only log if there was meaningful compression (>10ms)
             info!(
@@ -437,9 +446,7 @@ pub fn preprocess_audio(
         } else {
             debug!(
                 "Silence removal: {:.3}s -> {:.3}s (reduced by {:.3}s)",
-                original_duration,
-                post_silence_duration,
-                reduction
+                original_duration, post_silence_duration, reduction
             );
         }
     }

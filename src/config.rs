@@ -97,6 +97,11 @@ translate = false
 # This reduces transcription time by removing silence periods
 # silence_removal_enabled = true
 
+# Retry model for hybrid transcription (optional)
+# When set, low-confidence sections are re-transcribed with this model
+# Enables hybrid mode: primary model runs on full audio, retry model runs on low-confidence sections
+# retry_model = "medium.en"
+
 # --- Remote backend settings (used when backend = "remote") ---
 #
 # Remote server endpoint URL (required for remote backend)
@@ -411,10 +416,10 @@ fn load_icon_theme(theme: &str) -> ResolvedIcons {
         },
         "omarchy" => ResolvedIcons {
             // Material Design icons matching Omarchy waybar config
-            idle: "\u{ec12}".to_string(),     // nf-md-microphone_outline
+            idle: "\u{ec12}".to_string(), // nf-md-microphone_outline
             recording: "\u{f036c}".to_string(), // nf-md-microphone
             transcribing: "\u{f051f}".to_string(), // nf-md-timer_sand
-            stopped: "\u{ec12}".to_string(),  // nf-md-microphone_outline
+            stopped: "\u{ec12}".to_string(), // nf-md-microphone_outline
         },
         "minimal" => ResolvedIcons {
             idle: "○".to_string(),
@@ -528,6 +533,12 @@ pub struct WhisperConfig {
     /// Can also be an absolute path to a .bin file
     pub model: String,
 
+    /// Retry model for hybrid transcription (optional)
+    /// When set, low-confidence sections are re-transcribed with this model
+    /// Enables hybrid mode: primary model runs on full audio, retry model runs on low-confidence sections
+    #[serde(default)]
+    pub retry_model: Option<String>,
+
     /// Language code (en, es, fr, auto, etc.)
     pub language: String,
 
@@ -552,7 +563,6 @@ pub struct WhisperConfig {
     pub silence_removal_enabled: bool,
 
     // --- Remote backend settings ---
-
     /// Remote server endpoint URL (e.g., "http://192.168.1.100:8080")
     /// Required when backend = "remote"
     #[serde(default)]
@@ -704,6 +714,7 @@ impl Default for Config {
             whisper: WhisperConfig {
                 backend: WhisperBackend::default(),
                 model: "base.en".to_string(),
+                retry_model: None,
                 language: "en".to_string(),
                 translate: false,
                 threads: None,

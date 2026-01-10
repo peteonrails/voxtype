@@ -62,11 +62,7 @@ impl AudioCapture for CpalCapture {
         } else {
             host.input_devices()
                 .map_err(|e| AudioError::Connection(e.to_string()))?
-                .find(|d| {
-                    d.name()
-                        .map(|n| n == self.config.device)
-                        .unwrap_or(false)
-                })
+                .find(|d| d.name().map(|n| n == self.config.device).unwrap_or(false))
                 .ok_or_else(|| AudioError::DeviceNotFound(self.config.device.clone()))?
         };
 
@@ -180,14 +176,11 @@ impl AudioCapture for CpalCapture {
 
             if cmd_tx.send(CaptureCommand::Stop(response_tx)).is_ok() {
                 // Wait for response (with timeout)
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(2),
-                    response_rx,
-                )
-                .await
-                {
+                match tokio::time::timeout(std::time::Duration::from_secs(2), response_rx).await {
                     Ok(Ok(samples)) => samples,
-                    Ok(Err(_)) => return Err(AudioError::StreamError("Channel closed".to_string())),
+                    Ok(Err(_)) => {
+                        return Err(AudioError::StreamError("Channel closed".to_string()))
+                    }
                     Err(_) => return Err(AudioError::Timeout(2)),
                 }
             } else {

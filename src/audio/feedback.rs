@@ -77,8 +77,7 @@ impl AudioFeedback {
 
     fn play_wav(&self, data: &[u8]) -> Result<(), String> {
         let cursor = Cursor::new(data.to_vec());
-        let source = Decoder::new(cursor)
-            .map_err(|e| format!("Failed to decode audio: {}", e))?;
+        let source = Decoder::new(cursor).map_err(|e| format!("Failed to decode audio: {}", e))?;
 
         // Apply volume control
         let source = source.amplify(self.config.volume);
@@ -152,12 +151,7 @@ fn generate_tone_wav(frequency: f32, duration_ms: u32, fade_ms: u32) -> Vec<u8> 
 }
 
 /// Generate a two-tone sound (rising or falling)
-fn generate_two_tone_wav(
-    freq1: f32,
-    freq2: f32,
-    duration_ms: u32,
-    fade_ms: u32,
-) -> Vec<u8> {
+fn generate_two_tone_wav(freq1: f32, freq2: f32, duration_ms: u32, fade_ms: u32) -> Vec<u8> {
     let sample_rate = 44100u32;
     let num_samples = (sample_rate * duration_ms / 1000) as usize;
     let fade_samples = (sample_rate * fade_ms / 1000) as usize;

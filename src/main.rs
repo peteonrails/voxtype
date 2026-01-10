@@ -7,7 +7,10 @@
 use clap::Parser;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
-use voxtype::{audio::preprocess, config, cpu, daemon, setup, transcribe, Cli, Commands, RecordAction, SetupAction};
+use voxtype::{
+    audio::preprocess, config, cpu, daemon, setup, transcribe, Cli, Commands, RecordAction,
+    SetupAction,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -49,6 +52,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(model) = cli.model {
         config.whisper.model = model;
     }
+    if let Some(retry_model) = cli.retry_model {
+        config.whisper.retry_model = Some(retry_model);
+    }
     if let Some(hotkey) = cli.hotkey {
         config.hotkey.key = hotkey;
     }
@@ -67,7 +73,13 @@ async fn main() -> anyhow::Result<()> {
             transcribe_file(&config, &file)?;
         }
 
-        Commands::Setup { action, download, model, quiet, no_post_install } => {
+        Commands::Setup {
+            action,
+            download,
+            model,
+            quiet,
+            no_post_install,
+        } => {
             match action {
                 Some(SetupAction::Check) => {
                     setup::run_checks(&config).await?;
@@ -108,7 +120,11 @@ async fn main() -> anyhow::Result<()> {
                         setup::model::interactive_select().await?;
                     }
                 }
-                Some(SetupAction::Gpu { enable, disable, status }) => {
+                Some(SetupAction::Gpu {
+                    enable,
+                    disable,
+                    status,
+                }) => {
                     if status {
                         setup::gpu::show_status();
                     } else if enable {
@@ -125,7 +141,8 @@ async fn main() -> anyhow::Result<()> {
                 }
                 None => {
                     // Default: run setup (non-blocking)
-                    setup::run_setup(&config, download, model.as_deref(), quiet, no_post_install).await?;
+                    setup::run_setup(&config, download, model.as_deref(), quiet, no_post_install)
+                        .await?;
                 }
             }
         }
@@ -134,7 +151,12 @@ async fn main() -> anyhow::Result<()> {
             show_config(&config).await?;
         }
 
-        Commands::Status { follow, format, extended, icon_theme } => {
+        Commands::Status {
+            follow,
+            format,
+            extended,
+            icon_theme,
+        } => {
             run_status(&config, follow, &format, extended, icon_theme).await?;
         }
 
@@ -219,8 +241,8 @@ fn send_record_command(config: &config::Config, action: RecordAction) -> anyhow:
                 }
             };
 
-            let current_state = std::fs::read_to_string(&state_file)
-                .unwrap_or_else(|_| "idle".to_string());
+            let current_state =
+                std::fs::read_to_string(&state_file).unwrap_or_else(|_| "idle".to_string());
 
             if current_state.trim() == "recording" {
                 Signal::SIGUSR2 // Stop
@@ -279,10 +301,7 @@ fn transcribe_file(config: &config::Config, path: &PathBuf) -> anyhow::Result<()
 
     // Resample to 16kHz if needed
     let final_samples = if spec.sample_rate != 16000 {
-        println!(
-            "Resampling from {} Hz to 16000 Hz...",
-            spec.sample_rate
-        );
+        println!("Resampling from {} Hz to 16000 Hz...", spec.sample_rate);
         resample(&mono_samples, spec.sample_rate, 16000)
     } else {
         mono_samples
@@ -313,114 +332,147 @@ fn transcribe_file(config: &config::Config, path: &PathBuf) -> anyhow::Result<()
             processed
         }
         Err(e) => {
-            eprintln!("Warning: Audio preprocessing failed: {}, using original samples", e);
+            eprintln!(
+                "Warning: Audio preprocessing failed: {}, using original samples",
+                e
+            );
             final_samples
         }
     };
 
-    // Create transcriber and transcribe with confidence
-    // For local backend, use confidence-aware transcription
+    // Create transcriber using factory (supports hybrid mode)
     use config::WhisperBackend;
+    tracing::info!(
+        "CLI transcribe command: backend={:?}, model={}, retry_model={:?}",
+        config.whisper.backend,
+        config.whisper.model,
+        config.whisper.retry_model
+    );
+    
     if matches!(config.whisper.backend, WhisperBackend::Local) {
-        let whisper_transcriber = transcribe::whisper::WhisperTranscriber::new(&config.whisper)?;
-        let details = whisper_transcriber.transcribe_with_confidence(&processed_samples)?;
-        
-        // Print word-level output with ANSI colors
-        println!();
-        for segment in &details.segments {
-            let t0_secs = segment.t0_cs as f64 / 100.0;
-            let t1_secs = segment.t1_cs as f64 / 100.0;
-            
-            let hours0 = (t0_secs / 3600.0) as u32;
-            let mins0 = ((t0_secs % 3600.0) / 60.0) as u32;
-            let secs0 = (t0_secs % 60.0) as u32;
-            let millis0 = ((t0_secs % 1.0) * 1000.0) as u32;
-            
-            let hours1 = (t1_secs / 3600.0) as u32;
-            let mins1 = ((t1_secs % 3600.0) / 60.0) as u32;
-            let secs1 = (t1_secs % 60.0) as u32;
-            let millis1 = ((t1_secs % 1.0) * 1000.0) as u32;
-            
-            let color_code = match segment.label {
-                transcribe::whisper::ConfidenceLabel::Red => "\x1b[91m",    // ANSI red
-                transcribe::whisper::ConfidenceLabel::Yellow => "\x1b[93m", // ANSI yellow
-                transcribe::whisper::ConfidenceLabel::Green => "\x1b[92m",  // ANSI green
-            };
-            let reset_code = "\x1b[0m";
-            
-            let label_str = match segment.label {
-                transcribe::whisper::ConfidenceLabel::Red => "red",
-                transcribe::whisper::ConfidenceLabel::Yellow => "yellow",
-                transcribe::whisper::ConfidenceLabel::Green => "green",
-            };
-            
-            println!(
-                "[{:02}:{:02}:{:02}.{:03} --> {:02}:{:02}:{:02}.{:03}] {}{}{}({}) p={:.4}",
-                hours0, mins0, secs0, millis0,
-                hours1, mins1, secs1, millis1,
-                color_code,
-                segment.text,
-                reset_code,
-                label_str,
-                segment.probability
-            );
-        }
-        
-        // Cluster into sentences and detect retry sections
-        let sentences = transcribe::whisper::cluster_into_sentences(&details.segments);
-        let retry_sections: Vec<_> = sentences
-            .iter()
-            .filter_map(|sentence| {
-                let (needs_retry, score, breakdown) = transcribe::whisper::sentence_needs_retry(sentence);
-                if needs_retry {
-                    Some((sentence, score, breakdown))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // Check if hybrid mode is enabled
+        if config.whisper.retry_model.is_some() {
+            tracing::info!("CLI: Hybrid mode detected, retry_model={:?}, using factory to create HybridTranscriber", config.whisper.retry_model);
+            // Hybrid mode - use factory to get HybridTranscriber
+            let transcriber = transcribe::create_transcriber(&config.whisper)?;
+            let result_text = transcriber.transcribe(&processed_samples)?;
+            println!("\n{}", result_text);
+            return Ok(());
+        } else {
+            tracing::info!("CLI: Single model mode detected, retry_model is None, using WhisperTranscriber directly");
+            // Single model mode - use WhisperTranscriber directly for detailed output
+            let whisper_transcriber =
+                transcribe::whisper::WhisperTranscriber::new(&config.whisper)?;
+            let details = whisper_transcriber.transcribe_with_confidence(&processed_samples)?;
 
-        if !retry_sections.is_empty() {
-            println!("\nSections requiring retry:");
-            for (sentence, score, _) in &retry_sections {
-                // Get first and last timestamps for the sentence
-                let t0_cs = sentence[0].t0_cs;
-                let t1_cs = sentence[sentence.len() - 1].t1_cs;
-                
-                let t0_secs = t0_cs as f64 / 100.0;
-                let t1_secs = t1_cs as f64 / 100.0;
-                
+            // Print word-level output with ANSI colors
+            println!();
+            for segment in &details.segments {
+                let t0_secs = segment.t0_cs as f64 / 100.0;
+                let t1_secs = segment.t1_cs as f64 / 100.0;
+
                 let hours0 = (t0_secs / 3600.0) as u32;
                 let mins0 = ((t0_secs % 3600.0) / 60.0) as u32;
                 let secs0 = (t0_secs % 60.0) as u32;
                 let millis0 = ((t0_secs % 1.0) * 1000.0) as u32;
-                
+
                 let hours1 = (t1_secs / 3600.0) as u32;
                 let mins1 = ((t1_secs % 3600.0) / 60.0) as u32;
                 let secs1 = (t1_secs % 60.0) as u32;
                 let millis1 = ((t1_secs % 1.0) * 1000.0) as u32;
-                
-                let sentence_text: String = sentence.iter().map(|seg| seg.text.as_str()).collect::<Vec<_>>().join(" ");
-                
+
+                let color_code = match segment.label {
+                    transcribe::whisper::ConfidenceLabel::Red => "\x1b[91m", // ANSI red
+                    transcribe::whisper::ConfidenceLabel::Yellow => "\x1b[93m", // ANSI yellow
+                    transcribe::whisper::ConfidenceLabel::Green => "\x1b[92m", // ANSI green
+                };
+                let reset_code = "\x1b[0m";
+
+                let label_str = match segment.label {
+                    transcribe::whisper::ConfidenceLabel::Red => "red",
+                    transcribe::whisper::ConfidenceLabel::Yellow => "yellow",
+                    transcribe::whisper::ConfidenceLabel::Green => "green",
+                };
+
                 println!(
-                    "  [{:02}:{:02}:{:02}.{:03} --> {:02}:{:02}:{:02}.{:03}] \"{}\" (score: {:.2})",
-                    hours0, mins0, secs0, millis0,
-                    hours1, mins1, secs1, millis1,
-                    sentence_text,
-                    score
+                    "[{:02}:{:02}:{:02}.{:03} --> {:02}:{:02}:{:02}.{:03}] {}{}{}({}) p={:.4}",
+                    hours0,
+                    mins0,
+                    secs0,
+                    millis0,
+                    hours1,
+                    mins1,
+                    secs1,
+                    millis1,
+                    color_code,
+                    segment.text,
+                    reset_code,
+                    label_str,
+                    segment.probability
                 );
             }
+
+            // Cluster into sentences and detect retry sections
+            let sentences = transcribe::whisper::cluster_into_sentences(&details.segments);
+            let retry_sections: Vec<_> = sentences
+                .iter()
+                .filter_map(|sentence| {
+                    let (needs_retry, score, breakdown) =
+                        transcribe::whisper::sentence_needs_retry(sentence);
+                    if needs_retry {
+                        Some((sentence, score, breakdown))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if !retry_sections.is_empty() {
+                println!("\nSections requiring retry:");
+                for (sentence, score, _) in &retry_sections {
+                    // Get first and last timestamps for the sentence
+                    let t0_cs = sentence[0].t0_cs;
+                    let t1_cs = sentence[sentence.len() - 1].t1_cs;
+
+                    let t0_secs = t0_cs as f64 / 100.0;
+                    let t1_secs = t1_cs as f64 / 100.0;
+
+                    let hours0 = (t0_secs / 3600.0) as u32;
+                    let mins0 = ((t0_secs % 3600.0) / 60.0) as u32;
+                    let secs0 = (t0_secs % 60.0) as u32;
+                    let millis0 = ((t0_secs % 1.0) * 1000.0) as u32;
+
+                    let hours1 = (t1_secs / 3600.0) as u32;
+                    let mins1 = ((t1_secs % 3600.0) / 60.0) as u32;
+                    let secs1 = (t1_secs % 60.0) as u32;
+                    let millis1 = ((t1_secs % 1.0) * 1000.0) as u32;
+
+                    let sentence_text: String = sentence
+                        .iter()
+                        .map(|seg| seg.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+
+                    println!(
+                        "  [{:02}:{:02}:{:02}.{:03} --> {:02}:{:02}:{:02}.{:03}] \"{}\" (score: {:.2})",
+                        hours0, mins0, secs0, millis0,
+                        hours1, mins1, secs1, millis1,
+                        sentence_text,
+                    score
+                    );
+                }
+            }
+
+            // Print final text summary
+            println!("\n{}", details.text);
         }
-        
-        // Print final text summary
-        println!("\n{}", details.text);
     } else {
         // Fallback to regular transcription for remote backend
         let transcriber = transcribe::create_transcriber(&config.whisper)?;
         let text = transcriber.transcribe(&processed_samples)?;
         println!("\n{}", text);
     }
-    
+
     Ok(())
 }
 
@@ -600,7 +652,10 @@ async fn run_status(
                     let new_state = new_state.trim().to_string();
                     if new_state != last_state {
                         if format == "json" {
-                            println!("{}", format_state_json(&new_state, &icons, ext_info.as_ref()));
+                            println!(
+                                "{}",
+                                format_state_json(&new_state, &icons, ext_info.as_ref())
+                            );
                         } else {
                             println!("{}", new_state);
                         }
@@ -615,7 +670,10 @@ async fn run_status(
                 // Check if daemon stopped (file deleted or process died)
                 if (!state_path.exists() || !is_daemon_running()) && last_state != "stopped" {
                     if format == "json" {
-                        println!("{}", format_state_json("stopped", &icons, ext_info.as_ref()));
+                        println!(
+                            "{}",
+                            format_state_json("stopped", &icons, ext_info.as_ref())
+                        );
                     } else {
                         println!("stopped");
                     }
@@ -725,8 +783,10 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
     println!("\n[status]");
     println!("  icon_theme = {:?}", config.status.icon_theme);
     let icons = config.status.resolve_icons();
-    println!("  (resolved icons: idle={:?} recording={:?} transcribing={:?} stopped={:?})",
-        icons.idle, icons.recording, icons.transcribing, icons.stopped);
+    println!(
+        "  (resolved icons: idle={:?} recording={:?} transcribing={:?} stopped={:?})",
+        icons.idle, icons.recording, icons.transcribing, icons.stopped
+    );
 
     if let Some(ref state_file) = config.state_file {
         println!("\n[integration]");

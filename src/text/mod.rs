@@ -206,10 +206,7 @@ mod tests {
         let processor = TextProcessor::new(&config);
 
         assert_eq!(processor.process("open paren test close paren"), "(test)");
-        assert_eq!(
-            processor.process("hello exclamation mark"),
-            "hello!"
-        );
+        assert_eq!(processor.process("hello exclamation mark"), "hello!");
     }
 
     #[test]
@@ -254,10 +251,7 @@ mod tests {
         let config = make_config(true, &[("voxtype", "Voxtype")]);
         let processor = TextProcessor::new(&config);
 
-        assert_eq!(
-            processor.process("I use voxtype period"),
-            "I use Voxtype."
-        );
+        assert_eq!(processor.process("I use voxtype period"), "I use Voxtype.");
     }
 
     #[test]
@@ -265,8 +259,14 @@ mod tests {
         let config = make_config(true, &[]);
         let processor = TextProcessor::new(&config);
 
-        assert_eq!(processor.process("function open paren close paren"), "function()");
-        assert_eq!(processor.process("array open bracket close bracket"), "array[]");
+        assert_eq!(
+            processor.process("function open paren close paren"),
+            "function()"
+        );
+        assert_eq!(
+            processor.process("array open bracket close bracket"),
+            "array[]"
+        );
         assert_eq!(processor.process("hash include"), "#include");
         assert_eq!(processor.process("user at sign example"), "user@example");
     }
@@ -276,7 +276,10 @@ mod tests {
         let config = make_config(true, &[]);
         let processor = TextProcessor::new(&config);
 
-        assert_eq!(processor.process("line one new line line two"), "line one\nline two");
+        assert_eq!(
+            processor.process("line one new line line two"),
+            "line one\nline two"
+        );
         assert_eq!(processor.process("col one tab col two"), "col one\tcol two");
     }
 }
