@@ -94,6 +94,10 @@ fallback_to_clipboard = true
 # 0 = fastest possible, increase if characters are dropped
 type_delay_ms = 0
 
+# Convert newlines to Shift+Enter instead of regular Enter
+# Useful for applications where Enter submits (e.g., Cursor IDE)
+# shift_enter_newlines = true
+
 # Output hooks for compositor integration (fixes modifier key interference)
 # When using compositor keybindings with modifiers (e.g., SUPER+CTRL+X),
 # these hooks switch to a submap/mode that blocks modifiers during typing.

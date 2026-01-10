@@ -687,6 +687,11 @@ pub struct OutputConfig {
     /// Pipes transcribed text through an external command before output
     #[serde(default)]
     pub post_process: Option<PostProcessConfig>,
+
+    /// Convert newlines to Shift+Enter instead of regular Enter
+    /// Useful for applications where Enter submits (e.g., Cursor IDE)
+    #[serde(default)]
+    pub shift_enter_newlines: bool,
 }
 
 /// Output mode selection
@@ -746,6 +751,7 @@ impl Default for Config {
                 pre_output_command: None,
                 post_output_command: None,
                 post_process: None,
+                shift_enter_newlines: false,
             },
             text: TextConfig::default(),
             status: StatusConfig::default(),

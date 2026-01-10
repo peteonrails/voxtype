@@ -43,6 +43,7 @@ pub fn create_output_chain(config: &OutputConfig) -> Vec<Box<dyn TextOutput>> {
             chain.push(Box::new(wtype::WtypeOutput::new(
                 config.notification.on_transcription,
                 config.auto_submit,
+                config.shift_enter_newlines,
             )));
 
             // Fallback: ydotool (works on X11/TTY, requires daemon)
