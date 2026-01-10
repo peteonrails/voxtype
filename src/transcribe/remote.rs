@@ -99,16 +99,17 @@ impl RemoteTranscriber {
         };
 
         let mut buffer = Cursor::new(Vec::new());
-        let mut writer = hound::WavWriter::new(&mut buffer, spec)
-            .map_err(|e| TranscribeError::AudioFormat(format!("Failed to create WAV writer: {}", e)))?;
+        let mut writer = hound::WavWriter::new(&mut buffer, spec).map_err(|e| {
+            TranscribeError::AudioFormat(format!("Failed to create WAV writer: {}", e))
+        })?;
 
         // Convert f32 [-1.0, 1.0] to i16
         for &sample in samples {
             let clamped = sample.clamp(-1.0, 1.0);
             let scaled = (clamped * i16::MAX as f32) as i16;
-            writer
-                .write_sample(scaled)
-                .map_err(|e| TranscribeError::AudioFormat(format!("Failed to write sample: {}", e)))?;
+            writer.write_sample(scaled).map_err(|e| {
+                TranscribeError::AudioFormat(format!("Failed to write sample: {}", e))
+            })?;
         }
 
         writer
@@ -119,20 +120,22 @@ impl RemoteTranscriber {
     }
 
     /// Build the multipart form body for the API request
-    fn build_multipart_body(
-        &self,
-        wav_data: &[u8],
-    ) -> (String, Vec<u8>) {
-        let boundary = format!("----VoxtypeBoundary{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos());
+    fn build_multipart_body(&self, wav_data: &[u8]) -> (String, Vec<u8>) {
+        let boundary = format!(
+            "----VoxtypeBoundary{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
 
         let mut body = Vec::new();
 
         // Add file field
         body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
-        body.extend_from_slice(b"Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n");
+        body.extend_from_slice(
+            b"Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n",
+        );
         body.extend_from_slice(b"Content-Type: audio/wav\r\n\r\n");
         body.extend_from_slice(wav_data);
         body.extend_from_slice(b"\r\n");
@@ -195,12 +198,10 @@ impl Transcriber for RemoteTranscriber {
         let url = format!("{}{}", self.endpoint.trim_end_matches('/'), path);
 
         // Build request
-        let mut request = ureq::post(&url)
-            .timeout(self.timeout)
-            .set(
-                "Content-Type",
-                &format!("multipart/form-data; boundary={}", boundary),
-            );
+        let mut request = ureq::post(&url).timeout(self.timeout).set(
+            "Content-Type",
+            &format!("multipart/form-data; boundary={}", boundary),
+        );
 
         // Add authorization if API key is configured
         if let Some(ref key) = self.api_key {
@@ -208,32 +209,27 @@ impl Transcriber for RemoteTranscriber {
         }
 
         // Send request
-        let response = request
-            .send_bytes(&body)
-            .map_err(|e| match e {
-                ureq::Error::Status(code, resp) => {
-                    let body = resp.into_string().unwrap_or_default();
-                    TranscribeError::RemoteError(format!("Server returned {}: {}", code, body))
-                }
-                ureq::Error::Transport(t) => {
-                    TranscribeError::NetworkError(format!("Request failed: {}", t))
-                }
-            })?;
+        let response = request.send_bytes(&body).map_err(|e| match e {
+            ureq::Error::Status(code, resp) => {
+                let body = resp.into_string().unwrap_or_default();
+                TranscribeError::RemoteError(format!("Server returned {}: {}", code, body))
+            }
+            ureq::Error::Transport(t) => {
+                TranscribeError::NetworkError(format!("Request failed: {}", t))
+            }
+        })?;
 
         // Parse JSON response
-        let json: serde_json::Value = response
-            .into_json()
-            .map_err(|e| TranscribeError::RemoteError(format!("Failed to parse response: {}", e)))?;
+        let json: serde_json::Value = response.into_json().map_err(|e| {
+            TranscribeError::RemoteError(format!("Failed to parse response: {}", e))
+        })?;
 
         // Extract text from response
         let text = json
             .get("text")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                TranscribeError::RemoteError(format!(
-                    "Response missing 'text' field: {}",
-                    json
-                ))
+                TranscribeError::RemoteError(format!("Response missing 'text' field: {}", json))
             })?
             .trim()
             .to_string();

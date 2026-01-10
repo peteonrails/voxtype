@@ -150,7 +150,9 @@ fn add_hooks_to_config(content: &str, hooks: &str) -> String {
         // or after a blank line following [output]
         if found_output_section && !hooks_inserted {
             let trimmed = line.trim();
-            if trimmed.is_empty() || (!trimmed.starts_with('#') && !trimmed.starts_with('[') && trimmed.contains('=')) {
+            if trimmed.is_empty()
+                || (!trimmed.starts_with('#') && !trimmed.starts_with('[') && trimmed.contains('='))
+            {
                 // Found a good place to insert - after this line
                 result.push('\n');
                 result.push_str("# Compositor integration hooks (modifier key fix)\n");
@@ -178,7 +180,11 @@ fn add_hooks_to_config(content: &str, hooks: &str) -> String {
 /// Run compositor setup command
 pub async fn run(compositor: &CompositorType) -> anyhow::Result<()> {
     match compositor {
-        CompositorType::Hyprland { uninstall, status, show } => {
+        CompositorType::Hyprland {
+            uninstall,
+            status,
+            show,
+        } => {
             if *show {
                 print_hyprland_config();
             } else if *status {
@@ -189,7 +195,11 @@ pub async fn run(compositor: &CompositorType) -> anyhow::Result<()> {
                 hyprland_install()?;
             }
         }
-        CompositorType::Sway { uninstall, status, show } => {
+        CompositorType::Sway {
+            uninstall,
+            status,
+            show,
+        } => {
             if *show {
                 print_sway_config();
             } else if *status {
@@ -200,7 +210,11 @@ pub async fn run(compositor: &CompositorType) -> anyhow::Result<()> {
                 sway_install()?;
             }
         }
-        CompositorType::River { uninstall, status, show } => {
+        CompositorType::River {
+            uninstall,
+            status,
+            show,
+        } => {
             if *show {
                 print_river_config();
             } else if *status {

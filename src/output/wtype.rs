@@ -20,14 +20,17 @@ pub struct WtypeOutput {
     notify: bool,
     /// Whether to send Enter key after output
     auto_submit: bool,
+    /// Whether to convert newlines to Shift+Enter
+    shift_enter_newlines: bool,
 }
 
 impl WtypeOutput {
     /// Create a new wtype output
-    pub fn new(notify: bool, auto_submit: bool) -> Self {
+    pub fn new(notify: bool, auto_submit: bool, shift_enter_newlines: bool) -> Self {
         Self {
             notify,
             auto_submit,
+            shift_enter_newlines,
         }
     }
 
@@ -53,6 +56,29 @@ impl WtypeOutput {
             .status()
             .await;
     }
+
+    /// Send Shift+Enter keypress using wtype
+    async fn send_shift_enter(&self) -> Result<(), OutputError> {
+        let output = Command::new("wtype")
+            .args(["-M", "shift", "-k", "Return", "-m", "shift"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| {
+                OutputError::InjectionFailed(format!("wtype Shift+Enter failed: {}", e))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(OutputError::InjectionFailed(format!(
+                "wtype Shift+Enter failed: {}",
+                stderr
+            )));
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -62,27 +88,69 @@ impl TextOutput for WtypeOutput {
             return Ok(());
         }
 
-        let output = Command::new("wtype")
-            .arg("--")
-            .arg(text)
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .output()
-            .await
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    OutputError::WtypeNotFound
-                } else {
-                    OutputError::InjectionFailed(e.to_string())
-                }
-            })?;
+        if self.shift_enter_newlines {
+            // Split text by newlines and output each segment with Shift+Enter between them
+            let segments: Vec<&str> = text.split('\n').collect();
+            
+            for (i, segment) in segments.iter().enumerate() {
+                // Output the segment (even if empty, to preserve newline positions)
+                if !segment.is_empty() {
+                    let output = Command::new("wtype")
+                        .arg("--")
+                        .arg(segment)
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::piped())
+                        .output()
+                        .await
+                        .map_err(|e| {
+                            if e.kind() == std::io::ErrorKind::NotFound {
+                                OutputError::WtypeNotFound
+                            } else {
+                                OutputError::InjectionFailed(e.to_string())
+                            }
+                        })?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(OutputError::InjectionFailed(format!(
-                "wtype failed: {}",
-                stderr
-            )));
+                    if !output.status.success() {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        return Err(OutputError::InjectionFailed(format!(
+                            "wtype failed: {}",
+                            stderr
+                        )));
+                    }
+                }
+
+                // Send Shift+Enter after each segment except the last one
+                if i < segments.len() - 1 {
+                    if let Err(e) = self.send_shift_enter().await {
+                        tracing::warn!("Failed to send Shift+Enter: {}", e);
+                        // Continue anyway - best effort
+                    }
+                }
+            }
+        } else {
+            // Original behavior: output text as-is
+            let output = Command::new("wtype")
+                .arg("--")
+                .arg(text)
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+                .await
+                .map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        OutputError::WtypeNotFound
+                    } else {
+                        OutputError::InjectionFailed(e.to_string())
+                    }
+                })?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(OutputError::InjectionFailed(format!(
+                    "wtype failed: {}",
+                    stderr
+                )));
+            }
         }
 
         // Send Enter key if configured
@@ -134,15 +202,25 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = WtypeOutput::new(true, false);
+        let output = WtypeOutput::new(true, false, false);
         assert!(output.notify);
         assert!(!output.auto_submit);
+        assert!(!output.shift_enter_newlines);
     }
 
     #[test]
     fn test_new_with_enter() {
-        let output = WtypeOutput::new(false, true);
+        let output = WtypeOutput::new(false, true, false);
         assert!(!output.notify);
         assert!(output.auto_submit);
+        assert!(!output.shift_enter_newlines);
+    }
+
+    #[test]
+    fn test_new_with_shift_enter_newlines() {
+        let output = WtypeOutput::new(false, false, true);
+        assert!(!output.notify);
+        assert!(!output.auto_submit);
+        assert!(output.shift_enter_newlines);
     }
 }

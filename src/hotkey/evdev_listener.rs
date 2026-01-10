@@ -50,9 +50,8 @@ impl EvdevListener {
             .transpose()?;
 
         // Verify we can access /dev/input (permission check)
-        std::fs::read_dir("/dev/input").map_err(|e| {
-            HotkeyError::DeviceAccess(format!("/dev/input: {}", e))
-        })?;
+        std::fs::read_dir("/dev/input")
+            .map_err(|e| HotkeyError::DeviceAccess(format!("/dev/input: {}", e)))?;
 
         Ok(Self {
             target_key,
@@ -76,7 +75,8 @@ impl HotkeyListener for EvdevListener {
 
         // Spawn the listener task
         tokio::task::spawn_blocking(move || {
-            if let Err(e) = evdev_listener_loop(target_key, modifier_keys, cancel_key, tx, stop_rx) {
+            if let Err(e) = evdev_listener_loop(target_key, modifier_keys, cancel_key, tx, stop_rx)
+            {
                 tracing::error!("Hotkey listener error: {}", e);
             }
         });
@@ -115,9 +115,7 @@ impl DeviceManager {
         inotify
             .watches()
             .add("/dev/input", WatchMask::CREATE | WatchMask::DELETE)
-            .map_err(|e| {
-                HotkeyError::DeviceAccess(format!("Failed to watch /dev/input: {}", e))
-            })?;
+            .map_err(|e| HotkeyError::DeviceAccess(format!("Failed to watch /dev/input: {}", e)))?;
 
         let mut manager = Self {
             devices: HashMap::new(),
@@ -138,9 +136,8 @@ impl DeviceManager {
 
     /// Enumerate all keyboard devices and open them
     fn enumerate_devices(&mut self) -> Result<(), HotkeyError> {
-        let input_dir = std::fs::read_dir("/dev/input").map_err(|e| {
-            HotkeyError::DeviceAccess(format!("/dev/input: {}", e))
-        })?;
+        let input_dir = std::fs::read_dir("/dev/input")
+            .map_err(|e| HotkeyError::DeviceAccess(format!("/dev/input: {}", e)))?;
 
         for entry in input_dir.flatten() {
             let path = entry.path();
@@ -264,10 +261,7 @@ impl DeviceManager {
             tracing::warn!("Device enumeration failed: {}", e);
         }
 
-        tracing::info!(
-            "Devices updated: {} keyboard(s) active",
-            self.devices.len()
-        );
+        tracing::info!("Devices updated: {} keyboard(s) active", self.devices.len());
     }
 
     /// Validate that all devices are still accessible
@@ -439,9 +433,8 @@ fn evdev_listener_loop(
 
             // Check target key
             if key == target_key {
-                let modifiers_satisfied = modifier_keys
-                    .iter()
-                    .all(|m| active_modifiers.contains(m));
+                let modifiers_satisfied =
+                    modifier_keys.iter().all(|m| active_modifiers.contains(m));
 
                 if modifiers_satisfied {
                     match value {

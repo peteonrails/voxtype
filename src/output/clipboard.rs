@@ -74,7 +74,7 @@ impl TextOutput for ClipboardOutput {
                 .write_all(text.as_bytes())
                 .await
                 .map_err(|e| OutputError::InjectionFailed(e.to_string()))?;
-            
+
             // Close stdin to signal EOF
             drop(stdin);
         }
