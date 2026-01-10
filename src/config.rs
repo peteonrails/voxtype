@@ -93,6 +93,10 @@ translate = false
 # This reduces transcription time by up to 2x for long recordings
 # speedup_enabled = true
 
+# Enable silence removal optimization with volume detection (default: true)
+# This reduces transcription time by removing silence periods
+# silence_removal_enabled = true
+
 # --- Remote backend settings (used when backend = "remote") ---
 #
 # Remote server endpoint URL (required for remote backend)
@@ -305,6 +309,10 @@ fn default_on_demand_loading() -> bool {
 }
 
 fn default_speedup_enabled() -> bool {
+    true
+}
+
+fn default_silence_removal_enabled() -> bool {
     true
 }
 
@@ -538,6 +546,11 @@ pub struct WhisperConfig {
     #[serde(default = "default_speedup_enabled")]
     pub speedup_enabled: bool,
 
+    /// Enable silence removal optimization with volume detection (default: true)
+    /// This reduces transcription time by removing silence periods
+    #[serde(default = "default_silence_removal_enabled")]
+    pub silence_removal_enabled: bool,
+
     // --- Remote backend settings ---
 
     /// Remote server endpoint URL (e.g., "http://192.168.1.100:8080")
@@ -696,6 +709,7 @@ impl Default for Config {
                 threads: None,
                 on_demand_loading: default_on_demand_loading(),
                 speedup_enabled: default_speedup_enabled(),
+                silence_removal_enabled: default_silence_removal_enabled(),
                 remote_endpoint: None,
                 remote_model: None,
                 remote_api_key: None,

@@ -293,10 +293,11 @@ impl Daemon {
                     *state = State::Transcribing { audio: samples.clone() };
                     self.update_state("transcribing");
 
-                    // Preprocess audio (apply speedup optimization if enabled)
+                    // Preprocess audio (apply silence removal and speedup optimizations if enabled)
                     let processed_samples = match preprocess::preprocess_audio(
                         &samples,
                         self.config.audio.sample_rate,
+                        self.config.whisper.silence_removal_enabled,
                         self.config.whisper.speedup_enabled,
                     ) {
                         Ok(processed) => {

@@ -294,10 +294,11 @@ fn transcribe_file(config: &config::Config, path: &PathBuf) -> anyhow::Result<()
         final_samples.len() as f32 / 16000.0
     );
 
-    // Preprocess audio (apply speedup optimization if enabled)
+    // Preprocess audio (apply silence removal and speedup optimizations if enabled)
     let processed_samples = match preprocess::preprocess_audio(
         &final_samples,
         16000,
+        config.whisper.silence_removal_enabled,
         config.whisper.speedup_enabled,
     ) {
         Ok(processed) => {
