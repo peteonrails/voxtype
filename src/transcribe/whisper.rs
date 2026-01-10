@@ -182,6 +182,7 @@ impl WhisperTranscriber {
     pub fn transcribe_with_confidence(
         &self,
         samples: &[f32],
+        initial_prompt: Option<&str>,
     ) -> Result<TranscriptionDetails, TranscribeError> {
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat(
@@ -217,8 +218,9 @@ impl WhisperTranscriber {
         params.set_translate(self.translate);
         params.set_n_threads(self.threads as i32);
 
-        // Set initial prompt if configured
-        if let Some(ref prompt) = self.initial_prompt {
+        // Set initial prompt (prefer passed prompt, fall back to config)
+        let prompt_to_use = initial_prompt.or(self.initial_prompt.as_deref());
+        if let Some(prompt) = prompt_to_use {
             params.set_initial_prompt(prompt);
             tracing::debug!("Using initial prompt for transcription with confidence");
         }
@@ -853,6 +855,46 @@ fn sentence_needs_retry_with_threshold(
     (needs_retry, score, breakdown)
 }
 
+/// Extract full text from high-confidence sentences for use as context prompt.
+///
+/// Returns concatenated text from sentences that pass the confidence threshold
+/// AND would NOT be retried. This keeps low-confidence sentences out of the
+/// prompt, avoiding anchoring the decoder to errors.
+///
+/// Args:
+/// - segments: Word segments to analyze
+/// - threshold: Sentence confidence threshold (default: 0.5)
+///
+/// Returns:
+/// Concatenated text from high-confidence sentences, preserving word order
+pub fn get_high_confidence_context(
+    segments: &[WordSegment],
+    threshold: f32,
+) -> String {
+    let sentences = cluster_into_sentences(segments);
+    let mut high_conf_parts: Vec<String> = Vec::new();
+    
+    for sentence in sentences {
+        let (score, _) = calculate_sentence_confidence(&sentence);
+        let (needs_retry, _, _) = sentence_needs_retry(&sentence);
+        
+        if score >= threshold && !needs_retry {
+            let sentence_text: String = sentence
+                .iter()
+                .map(|seg| seg.text.trim())
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            
+            if !sentence_text.is_empty() {
+                high_conf_parts.push(sentence_text);
+            }
+        }
+    }
+    
+    high_conf_parts.join(" ")
+}
+
 /// Replace segments in primary result with retry results for given time ranges.
 ///
 /// This function splices retry segments into the primary transcription by:
@@ -1002,7 +1044,7 @@ impl Transcriber for HybridTranscriber {
 
         // Step 1: Run primary model on full audio
         let primary_start = std::time::Instant::now();
-        let primary_details = self.primary.transcribe_with_confidence(samples)?;
+        let primary_details = self.primary.transcribe_with_confidence(samples, None)?;
         let primary_time = primary_start.elapsed();
 
         tracing::info!(
@@ -1027,6 +1069,18 @@ impl Transcriber for HybridTranscriber {
         for (i, (start_ms, end_ms)) in retry_sections.iter().enumerate() {
             tracing::debug!("  Retry section {}: {}ms - {}ms", i + 1, start_ms, end_ms);
         }
+
+        // Step 2.5: Extract high-confidence context for retry prompts
+        let context_prompt = {
+            let context = get_high_confidence_context(&primary_details.segments, 0.5);
+            if !context.is_empty() {
+                tracing::info!("Extracted high-confidence context: {} chars", context.len());
+                tracing::debug!("Context: {}", context);
+                Some(context)
+            } else {
+                None
+            }
+        };
 
         // Step 3: Re-transcribe retry sections with retry model
         let retry_start = std::time::Instant::now();
@@ -1060,8 +1114,10 @@ impl Transcriber for HybridTranscriber {
             )
             .map_err(|e| TranscribeError::AudioFormat(format!("Preprocessing failed: {}", e)))?;
 
-            // Transcribe preprocessed segment with retry model
-            let retry_details = self.retry.transcribe_with_confidence(&processed_samples)?;
+            // Transcribe preprocessed segment with retry model, using context prompt if available
+            let retry_details = self
+                .retry
+                .transcribe_with_confidence(&processed_samples, context_prompt.as_deref())?;
 
             // Adjust timestamps to be relative to original audio timeline
             let offset_cs = (start_ms / 10) as i64;

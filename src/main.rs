@@ -366,7 +366,7 @@ fn transcribe_file(config: &config::Config, path: &PathBuf) -> anyhow::Result<()
             // Single model mode - use WhisperTranscriber directly for detailed output
             let whisper_transcriber =
                 transcribe::whisper::WhisperTranscriber::new(&config.whisper)?;
-            let details = whisper_transcriber.transcribe_with_confidence(&processed_samples)?;
+            let details = whisper_transcriber.transcribe_with_confidence(&processed_samples, None)?;
 
             // Print word-level output with ANSI colors
             println!();
