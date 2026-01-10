@@ -4,8 +4,9 @@
 //! for transcription, enabling use of GPU servers for faster inference.
 
 use super::Transcriber;
-use crate::config::WhisperConfig;
+use crate::config::{RemoteTranscriptionMode, WhisperConfig};
 use crate::error::TranscribeError;
+use base64::Engine;
 use std::io::Cursor;
 use std::time::Duration;
 use ureq::serde_json;
@@ -25,6 +26,12 @@ pub struct RemoteTranscriber {
     api_key: Option<String>,
     /// Request timeout
     timeout: Duration,
+    /// Remote transcription mode
+    mode: RemoteTranscriptionMode,
+    /// Optional system prompt for chat mode
+    system_prompt: Option<String>,
+    /// Use data URI in image_url for chat mode
+    use_data_uri: bool,
 }
 
 impl RemoteTranscriber {
@@ -86,6 +93,13 @@ impl RemoteTranscriber {
             translate: config.translate,
             api_key,
             timeout,
+            mode: config.remote_mode,
+            system_prompt: config
+                .remote_system_prompt
+                .as_ref()
+                .map(|prompt| prompt.trim().to_string())
+                .filter(|prompt| !prompt.is_empty()),
+            use_data_uri: config.remote_use_data_uri,
         })
     }
 
@@ -99,16 +113,17 @@ impl RemoteTranscriber {
         };
 
         let mut buffer = Cursor::new(Vec::new());
-        let mut writer = hound::WavWriter::new(&mut buffer, spec)
-            .map_err(|e| TranscribeError::AudioFormat(format!("Failed to create WAV writer: {}", e)))?;
+        let mut writer = hound::WavWriter::new(&mut buffer, spec).map_err(|e| {
+            TranscribeError::AudioFormat(format!("Failed to create WAV writer: {}", e))
+        })?;
 
         // Convert f32 [-1.0, 1.0] to i16
         for &sample in samples {
             let clamped = sample.clamp(-1.0, 1.0);
             let scaled = (clamped * i16::MAX as f32) as i16;
-            writer
-                .write_sample(scaled)
-                .map_err(|e| TranscribeError::AudioFormat(format!("Failed to write sample: {}", e)))?;
+            writer.write_sample(scaled).map_err(|e| {
+                TranscribeError::AudioFormat(format!("Failed to write sample: {}", e))
+            })?;
         }
 
         writer
@@ -119,20 +134,22 @@ impl RemoteTranscriber {
     }
 
     /// Build the multipart form body for the API request
-    fn build_multipart_body(
-        &self,
-        wav_data: &[u8],
-    ) -> (String, Vec<u8>) {
-        let boundary = format!("----VoxtypeBoundary{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos());
+    fn build_multipart_body(&self, wav_data: &[u8]) -> (String, Vec<u8>) {
+        let boundary = format!(
+            "----VoxtypeBoundary{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
 
         let mut body = Vec::new();
 
         // Add file field
         body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
-        body.extend_from_slice(b"Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n");
+        body.extend_from_slice(
+            b"Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n",
+        );
         body.extend_from_slice(b"Content-Type: audio/wav\r\n\r\n");
         body.extend_from_slice(wav_data);
         body.extend_from_slice(b"\r\n");
@@ -161,6 +178,152 @@ impl RemoteTranscriber {
 
         (boundary, body)
     }
+
+    fn transcribe_whisper(&self, wav_data: &[u8]) -> Result<String, TranscribeError> {
+        let (boundary, body) = self.build_multipart_body(wav_data);
+
+        let path = if self.translate {
+            "/v1/audio/translations"
+        } else {
+            "/v1/audio/transcriptions"
+        };
+
+        let url = format!("{}{}", self.endpoint.trim_end_matches('/'), path);
+
+        let mut request = ureq::post(&url).timeout(self.timeout).set(
+            "Content-Type",
+            &format!("multipart/form-data; boundary={}", boundary),
+        );
+
+        if let Some(ref key) = self.api_key {
+            request = request.set("Authorization", &format!("Bearer {}", key));
+        }
+
+        let response = request.send_bytes(&body).map_err(|e| match e {
+            ureq::Error::Status(code, resp) => {
+                let body = resp.into_string().unwrap_or_default();
+                TranscribeError::RemoteError(format!("Server returned {}: {}", code, body))
+            }
+            ureq::Error::Transport(t) => {
+                TranscribeError::NetworkError(format!("Request failed: {}", t))
+            }
+        })?;
+
+        let json: serde_json::Value = response.into_json().map_err(|e| {
+            TranscribeError::RemoteError(format!("Failed to parse response: {}", e))
+        })?;
+
+        let text = json
+            .get("text")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                TranscribeError::RemoteError(format!("Response missing 'text' field: {}", json))
+            })?
+            .trim()
+            .to_string();
+
+        Ok(text)
+    }
+
+    fn build_chat_payload(&self, wav_data: &[u8]) -> serde_json::Value {
+        let audio_base64 = base64::engine::general_purpose::STANDARD.encode(wav_data);
+
+        let content = if self.use_data_uri {
+            serde_json::json!([
+                {
+                    "type": "text",
+                    "text": "Process this audio."
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:audio/wav;base64,{}", audio_base64)
+                    }
+                }
+            ])
+        } else {
+            serde_json::json!([
+                {
+                    "type": "text",
+                    "text": "Process this audio."
+                },
+                {
+                    "type": "input_audio",
+                    "input_audio": {
+                        "data": audio_base64,
+                        "format": "wav"
+                    }
+                }
+            ])
+        };
+
+        let mut messages = Vec::new();
+
+        if let Some(prompt) = self.system_prompt.as_ref() {
+            messages.push(serde_json::json!({
+                "role": "system",
+                "content": prompt
+            }));
+        }
+
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": content
+        }));
+
+        serde_json::json!({
+            "model": self.model,
+            "messages": messages
+        })
+    }
+
+    fn transcribe_chat(&self, wav_data: &[u8]) -> Result<String, TranscribeError> {
+        let url = format!(
+            "{}{}",
+            self.endpoint.trim_end_matches('/'),
+            "/v1/chat/completions"
+        );
+        let payload = self.build_chat_payload(wav_data);
+
+        let mut request = ureq::post(&url)
+            .timeout(self.timeout)
+            .set("Content-Type", "application/json");
+
+        if let Some(ref key) = self.api_key {
+            request = request.set("Authorization", &format!("Bearer {}", key));
+        }
+
+        let response = request.send_json(payload).map_err(|e| match e {
+            ureq::Error::Status(code, resp) => {
+                let body = resp.into_string().unwrap_or_default();
+                TranscribeError::RemoteError(format!("Server returned {}: {}", code, body))
+            }
+            ureq::Error::Transport(t) => {
+                TranscribeError::NetworkError(format!("Request failed: {}", t))
+            }
+        })?;
+
+        let json: serde_json::Value = response.into_json().map_err(|e| {
+            TranscribeError::RemoteError(format!("Failed to parse response: {}", e))
+        })?;
+
+        let text = json
+            .get("choices")
+            .and_then(|choices| choices.get(0))
+            .and_then(|choice| choice.get("message"))
+            .and_then(|message| message.get("content"))
+            .and_then(|content| content.as_str())
+            .ok_or_else(|| {
+                TranscribeError::RemoteError(format!(
+                    "Response missing choices[0].message.content: {}",
+                    json
+                ))
+            })?
+            .trim()
+            .to_string();
+
+        Ok(text)
+    }
 }
 
 impl Transcriber for RemoteTranscriber {
@@ -182,61 +345,10 @@ impl Transcriber for RemoteTranscriber {
         let wav_data = self.encode_wav(samples)?;
         tracing::debug!("Encoded WAV: {} bytes", wav_data.len());
 
-        // Build multipart form
-        let (boundary, body) = self.build_multipart_body(&wav_data);
-
-        // Determine the API path based on whether we're doing transcription or translation
-        let path = if self.translate {
-            "/v1/audio/translations"
-        } else {
-            "/v1/audio/transcriptions"
+        let text = match self.mode {
+            RemoteTranscriptionMode::Chat => self.transcribe_chat(&wav_data)?,
+            RemoteTranscriptionMode::Transcription => self.transcribe_whisper(&wav_data)?,
         };
-
-        let url = format!("{}{}", self.endpoint.trim_end_matches('/'), path);
-
-        // Build request
-        let mut request = ureq::post(&url)
-            .timeout(self.timeout)
-            .set(
-                "Content-Type",
-                &format!("multipart/form-data; boundary={}", boundary),
-            );
-
-        // Add authorization if API key is configured
-        if let Some(ref key) = self.api_key {
-            request = request.set("Authorization", &format!("Bearer {}", key));
-        }
-
-        // Send request
-        let response = request
-            .send_bytes(&body)
-            .map_err(|e| match e {
-                ureq::Error::Status(code, resp) => {
-                    let body = resp.into_string().unwrap_or_default();
-                    TranscribeError::RemoteError(format!("Server returned {}: {}", code, body))
-                }
-                ureq::Error::Transport(t) => {
-                    TranscribeError::NetworkError(format!("Request failed: {}", t))
-                }
-            })?;
-
-        // Parse JSON response
-        let json: serde_json::Value = response
-            .into_json()
-            .map_err(|e| TranscribeError::RemoteError(format!("Failed to parse response: {}", e)))?;
-
-        // Extract text from response
-        let text = json
-            .get("text")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                TranscribeError::RemoteError(format!(
-                    "Response missing 'text' field: {}",
-                    json
-                ))
-            })?
-            .trim()
-            .to_string();
 
         tracing::info!(
             "Remote transcription completed in {:.2}s: {:?}",
@@ -269,6 +381,9 @@ mod tests {
             remote_model: None,
             remote_api_key: None,
             remote_timeout_secs: None,
+            remote_mode: RemoteTranscriptionMode::Transcription,
+            remote_system_prompt: None,
+            remote_use_data_uri: false,
         };
 
         let transcriber = RemoteTranscriber::new(&config).unwrap();
@@ -301,6 +416,9 @@ mod tests {
             remote_model: None,
             remote_api_key: None,
             remote_timeout_secs: None,
+            remote_mode: RemoteTranscriptionMode::Transcription,
+            remote_system_prompt: None,
+            remote_use_data_uri: false,
         };
 
         let result = RemoteTranscriber::new(&config);
@@ -321,6 +439,9 @@ mod tests {
             remote_model: None,
             remote_api_key: None,
             remote_timeout_secs: None,
+            remote_mode: RemoteTranscriptionMode::Transcription,
+            remote_system_prompt: None,
+            remote_use_data_uri: false,
         };
 
         let result = RemoteTranscriber::new(&config);
@@ -341,6 +462,9 @@ mod tests {
             remote_model: Some("large-v3".to_string()),
             remote_api_key: None,
             remote_timeout_secs: None,
+            remote_mode: RemoteTranscriptionMode::Transcription,
+            remote_system_prompt: None,
+            remote_use_data_uri: false,
         };
 
         let transcriber = RemoteTranscriber::new(&config).unwrap();
@@ -364,6 +488,75 @@ mod tests {
     }
 
     #[test]
+    fn test_chat_payload_with_harvard_wav() {
+        let config = WhisperConfig {
+            backend: crate::config::WhisperBackend::Remote,
+            model: "base.en".to_string(),
+            language: "en".to_string(),
+            translate: false,
+            threads: None,
+            on_demand_loading: false,
+            remote_endpoint: Some("http://localhost:8080".to_string()),
+            remote_model: Some("gemini-2.5-flash".to_string()),
+            remote_api_key: None,
+            remote_timeout_secs: None,
+            remote_mode: RemoteTranscriptionMode::Chat,
+            remote_system_prompt: Some("Translate to French.".to_string()),
+            remote_use_data_uri: true,
+        };
+
+        let transcriber = RemoteTranscriber::new(&config).unwrap();
+        let wav_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("harvard.wav");
+        let wav_data = std::fs::read(&wav_path).expect("Failed to read harvard.wav");
+
+        let payload = transcriber.build_chat_payload(&wav_data);
+
+        assert_eq!(
+            payload.get("model").and_then(|v| v.as_str()),
+            Some("gemini-2.5-flash")
+        );
+
+        let messages = payload
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .expect("messages should be an array");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[0].get("role").and_then(|v| v.as_str()),
+            Some("system")
+        );
+        assert_eq!(
+            messages[0].get("content").and_then(|v| v.as_str()),
+            Some("Translate to French.")
+        );
+
+        let content = messages[1]
+            .get("content")
+            .and_then(|v| v.as_array())
+            .expect("user content should be an array");
+        assert_eq!(content.len(), 2);
+        assert_eq!(
+            content[0].get("type").and_then(|v| v.as_str()),
+            Some("text")
+        );
+        assert_eq!(
+            content[0].get("text").and_then(|v| v.as_str()),
+            Some("Process this audio.")
+        );
+        let image_url = content[1]
+            .get("image_url")
+            .and_then(|v| v.get("url"))
+            .and_then(|v| v.as_str())
+            .expect("image_url should include url");
+
+        let expected = format!(
+            "data:audio/wav;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&wav_data)
+        );
+        assert_eq!(image_url, expected);
+    }
+
+    #[test]
     fn test_translate_false_uses_transcriptions_endpoint() {
         let config = WhisperConfig {
             backend: crate::config::WhisperBackend::Remote,
@@ -376,6 +569,9 @@ mod tests {
             remote_model: None,
             remote_api_key: None,
             remote_timeout_secs: None,
+            remote_mode: RemoteTranscriptionMode::Transcription,
+            remote_system_prompt: None,
+            remote_use_data_uri: false,
         };
 
         let transcriber = RemoteTranscriber::new(&config).unwrap();
@@ -405,6 +601,9 @@ mod tests {
             remote_model: None,
             remote_api_key: None,
             remote_timeout_secs: None,
+            remote_mode: RemoteTranscriptionMode::Transcription,
+            remote_system_prompt: None,
+            remote_use_data_uri: false,
         };
 
         let transcriber = RemoteTranscriber::new(&config).unwrap();
@@ -434,6 +633,9 @@ mod tests {
             remote_model: None,
             remote_api_key: Some("sk-test-key-123".to_string()),
             remote_timeout_secs: None,
+            remote_mode: RemoteTranscriptionMode::Transcription,
+            remote_system_prompt: None,
+            remote_use_data_uri: false,
         };
 
         let transcriber = RemoteTranscriber::new(&config).unwrap();
@@ -453,6 +655,9 @@ mod tests {
             remote_model: None,
             remote_api_key: None,
             remote_timeout_secs: Some(60),
+            remote_mode: RemoteTranscriptionMode::Transcription,
+            remote_system_prompt: None,
+            remote_use_data_uri: false,
         };
 
         let transcriber = RemoteTranscriber::new(&config).unwrap();
@@ -472,6 +677,9 @@ mod tests {
             remote_model: None,
             remote_api_key: None,
             remote_timeout_secs: None,
+            remote_mode: RemoteTranscriptionMode::Transcription,
+            remote_system_prompt: None,
+            remote_use_data_uri: false,
         };
 
         let transcriber = RemoteTranscriber::new(&config).unwrap();
