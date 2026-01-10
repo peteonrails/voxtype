@@ -63,6 +63,7 @@ impl TextOutput for WtypeOutput {
         }
 
         let output = Command::new("wtype")
+            .args(["-s", "200"]) // delay after init to prevent first char drop
             .arg("--")
             .arg(text)
             .stdout(Stdio::null())
