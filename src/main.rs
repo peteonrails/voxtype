@@ -318,11 +318,63 @@ fn transcribe_file(config: &config::Config, path: &PathBuf) -> anyhow::Result<()
         }
     };
 
-    // Create transcriber and transcribe
-    let transcriber = transcribe::create_transcriber(&config.whisper)?;
-    let text = transcriber.transcribe(&processed_samples)?;
-
-    println!("\n{}", text);
+    // Create transcriber and transcribe with confidence
+    // For local backend, use confidence-aware transcription
+    use config::WhisperBackend;
+    if matches!(config.whisper.backend, WhisperBackend::Local) {
+        let whisper_transcriber = transcribe::whisper::WhisperTranscriber::new(&config.whisper)?;
+        let details = whisper_transcriber.transcribe_with_confidence(&processed_samples)?;
+        
+        // Print word-level output with ANSI colors
+        println!();
+        for segment in &details.segments {
+            let t0_secs = segment.t0_cs as f64 / 100.0;
+            let t1_secs = segment.t1_cs as f64 / 100.0;
+            
+            let hours0 = (t0_secs / 3600.0) as u32;
+            let mins0 = ((t0_secs % 3600.0) / 60.0) as u32;
+            let secs0 = (t0_secs % 60.0) as u32;
+            let millis0 = ((t0_secs % 1.0) * 1000.0) as u32;
+            
+            let hours1 = (t1_secs / 3600.0) as u32;
+            let mins1 = ((t1_secs % 3600.0) / 60.0) as u32;
+            let secs1 = (t1_secs % 60.0) as u32;
+            let millis1 = ((t1_secs % 1.0) * 1000.0) as u32;
+            
+            let color_code = match segment.label {
+                transcribe::whisper::ConfidenceLabel::Red => "\x1b[91m",    // ANSI red
+                transcribe::whisper::ConfidenceLabel::Yellow => "\x1b[93m", // ANSI yellow
+                transcribe::whisper::ConfidenceLabel::Green => "\x1b[92m",  // ANSI green
+            };
+            let reset_code = "\x1b[0m";
+            
+            let label_str = match segment.label {
+                transcribe::whisper::ConfidenceLabel::Red => "red",
+                transcribe::whisper::ConfidenceLabel::Yellow => "yellow",
+                transcribe::whisper::ConfidenceLabel::Green => "green",
+            };
+            
+            println!(
+                "[{:02}:{:02}:{:02}.{:03} --> {:02}:{:02}:{:02}.{:03}] {}{}{}({}) p={:.4}",
+                hours0, mins0, secs0, millis0,
+                hours1, mins1, secs1, millis1,
+                color_code,
+                segment.text,
+                reset_code,
+                label_str,
+                segment.probability
+            );
+        }
+        
+        // Print final text summary
+        println!("\n{}", details.text);
+    } else {
+        // Fallback to regular transcription for remote backend
+        let transcriber = transcribe::create_transcriber(&config.whisper)?;
+        let text = transcriber.transcribe(&processed_samples)?;
+        println!("\n{}", text);
+    }
+    
     Ok(())
 }
 

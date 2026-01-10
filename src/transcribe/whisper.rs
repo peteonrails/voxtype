@@ -8,6 +8,31 @@ use crate::error::TranscribeError;
 use std::path::PathBuf;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+/// Represents a single word segment with its metadata
+#[derive(Debug, Clone)]
+pub struct WordSegment {
+    pub text: String,
+    pub t0_cs: i64,  // start time in centiseconds
+    pub t1_cs: i64,  // end time in centiseconds
+    pub probability: f32,
+    pub label: ConfidenceLabel,
+}
+
+/// Confidence label for a word segment
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfidenceLabel {
+    Red,
+    Yellow,
+    Green,
+}
+
+/// Detailed transcription result with word-level confidence
+#[derive(Debug)]
+pub struct TranscriptionDetails {
+    pub text: String,
+    pub segments: Vec<WordSegment>,
+}
+
 /// Whisper-based transcriber
 pub struct WhisperTranscriber {
     /// Whisper context (holds the model)
@@ -143,6 +168,137 @@ impl Transcriber for WhisperTranscriber {
     }
 }
 
+impl WhisperTranscriber {
+    /// Transcribe audio samples with word-level confidence information
+    pub fn transcribe_with_confidence(&self, samples: &[f32]) -> Result<TranscriptionDetails, TranscribeError> {
+        if samples.is_empty() {
+            return Err(TranscribeError::AudioFormat("Empty audio buffer".to_string()));
+        }
+
+        let duration_secs = samples.len() as f32 / 16000.0;
+        tracing::debug!(
+            "Transcribing {:.2}s of audio ({} samples) with confidence",
+            duration_secs,
+            samples.len()
+        );
+
+        let start = std::time::Instant::now();
+
+        // Create state for this transcription
+        let mut state = self
+            .ctx
+            .create_state()
+            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
+
+        // Configure parameters
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+
+        // Set language (handle "auto" for auto-detection)
+        if self.language == "auto" {
+            params.set_language(None);
+        } else {
+            params.set_language(Some(&self.language));
+        }
+
+        params.set_translate(self.translate);
+        params.set_n_threads(self.threads as i32);
+
+        // Disable output we don't need
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+
+        // Improve transcription quality
+        params.set_suppress_blank(true);
+        params.set_suppress_nst(true);
+
+        // Enable word-level segmentation
+        params.set_token_timestamps(true);
+        params.set_max_len(1);  // One word per segment
+        params.set_split_on_word(true);
+
+        // For short recordings, use single segment mode
+        if duration_secs < 30.0 {
+            params.set_single_segment(true);
+        }
+
+        // Optimize context window for short clips
+        if let Some(audio_ctx) = calculate_audio_ctx(duration_secs) {
+            params.set_audio_ctx(audio_ctx);
+            tracing::info!(
+                "Audio context optimization: using audio_ctx={} for {:.2}s clip",
+                audio_ctx,
+                duration_secs
+            );
+        }
+
+        // Run inference
+        state
+            .full(params, samples)
+            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
+
+        // Collect segments with confidence information
+        let mut segments = Vec::new();
+        let mut text = String::new();
+
+        for segment in state.as_iter() {
+            let segment_text = segment
+                .to_str()
+                .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
+
+            // Skip empty segments
+            if segment_text.trim().is_empty() {
+                continue;
+            }
+
+            // Get timestamps (in centiseconds)
+            let t0_cs = segment.start_timestamp();
+            let t1_cs = segment.end_timestamp();
+
+            // Calculate geometric mean of token probabilities
+            let n_tokens = segment.n_tokens();
+            let mut token_probs = Vec::with_capacity(n_tokens as usize);
+            for i in 0..n_tokens {
+                if let Some(token) = segment.get_token(i) {
+                    token_probs.push(token.token_probability());
+                }
+            }
+
+            let probability = if token_probs.is_empty() {
+                f32::NAN
+            } else {
+                geometric_mean(&token_probs)
+            };
+
+            let label = probability_to_label(probability);
+
+            segments.push(WordSegment {
+                text: segment_text.to_string(),
+                t0_cs,
+                t1_cs,
+                probability,
+                label,
+            });
+
+            text.push_str(segment_text);
+        }
+
+        let result_text = text.trim().to_string();
+
+        tracing::info!(
+            "Transcription completed in {:.2}s: {} words",
+            start.elapsed().as_secs_f32(),
+            segments.len()
+        );
+
+        Ok(TranscriptionDetails {
+            text: result_text,
+            segments,
+        })
+    }
+}
+
 /// Resolve model name to file path
 fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
     // If it's already an absolute path, use it directly
@@ -241,6 +397,29 @@ pub fn get_model_url(model: &str) -> String {
         "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
         filename
     )
+}
+
+/// Map a probability value to a confidence label
+fn probability_to_label(probability: f32) -> ConfidenceLabel {
+    if probability.is_nan() {
+        return ConfidenceLabel::Yellow;
+    }
+    if probability < 0.33 {
+        ConfidenceLabel::Red
+    } else if probability < 0.66 {
+        ConfidenceLabel::Yellow
+    } else {
+        ConfidenceLabel::Green
+    }
+}
+
+/// Calculate geometric mean of token probabilities
+fn geometric_mean(probabilities: &[f32]) -> f32 {
+    if probabilities.is_empty() {
+        return f32::NAN;
+    }
+    let product: f32 = probabilities.iter().product();
+    product.powf(1.0 / probabilities.len() as f32)
 }
 
 #[cfg(test)]
