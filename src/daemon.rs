@@ -897,6 +897,12 @@ impl Daemon {
                     }
                 }
 
+                // Clean up stale cancel file when idle (in case cancel was called while not recording)
+                _ = tokio::time::sleep(Duration::from_millis(500)), if matches!(state, State::Idle) => {
+                    // Silently consume any stale cancel request
+                    let _ = check_cancel_requested();
+                }
+
                 // Handle graceful shutdown (SIGINT from Ctrl+C)
                 _ = tokio::signal::ctrl_c() => {
                     tracing::info!("Received SIGINT, shutting down...");
