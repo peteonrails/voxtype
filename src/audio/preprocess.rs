@@ -410,7 +410,7 @@ pub fn preprocess_audio(
         let mean_db = detect_mean_volume(&processed_samples, sample_rate)?;
         // Use max() to ensure threshold never goes below -44.0 dB
         // This prevents the threshold from being too low for microphones with higher noise floors
-        let threshold_db = (mean_db - 20.0).max(-44.0);
+        let threshold_db = (mean_db - 20.0).max(-44.5);
         debug!(
             "Removing silence: mean_volume={:.2} dB, threshold={:.2} dB",
             mean_db, threshold_db
