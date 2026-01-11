@@ -89,6 +89,24 @@ translate = false
 # Number of CPU threads for inference (omit for auto-detection)
 # threads = 4
 
+# Enable speedup optimization for recordings longer than 29 seconds (default: true)
+# This reduces transcription time by up to 2x for long recordings
+# speedup_enabled = true
+
+# Enable silence removal optimization with volume detection (default: true)
+# This reduces transcription time by removing silence periods
+# silence_removal_enabled = true
+
+# Retry model for hybrid transcription (optional)
+# When set, low-confidence sections are re-transcribed with this model
+# Enables hybrid mode: primary model runs on full audio, retry model runs on low-confidence sections
+# retry_model = "medium.en"
+
+# Optional initial prompt for improved transcription accuracy (optional)
+# Provide context like technical terms, names, preferences, or domain vocabulary
+# Example: "I write code in JavaScript and Python. Technical terms: Kubernetes, FastAPI, PostgreSQL."
+# initial_prompt = "I write code in JavaScript and Python. I prefer metric measurements."
+
 # --- Remote backend settings (used when backend = "remote") ---
 #
 # Remote server endpoint URL (required for remote backend)
@@ -300,6 +318,14 @@ fn default_on_demand_loading() -> bool {
     false
 }
 
+fn default_speedup_enabled() -> bool {
+    true
+}
+
+fn default_silence_removal_enabled() -> bool {
+    true
+}
+
 impl Default for AudioFeedbackConfig {
     fn default() -> Self {
         Self {
@@ -395,10 +421,10 @@ fn load_icon_theme(theme: &str) -> ResolvedIcons {
         },
         "omarchy" => ResolvedIcons {
             // Material Design icons matching Omarchy waybar config
-            idle: "\u{ec12}".to_string(),     // nf-md-microphone_outline
+            idle: "\u{ec12}".to_string(), // nf-md-microphone_outline
             recording: "\u{f036c}".to_string(), // nf-md-microphone
             transcribing: "\u{f051f}".to_string(), // nf-md-timer_sand
-            stopped: "\u{ec12}".to_string(),  // nf-md-microphone_outline
+            stopped: "\u{ec12}".to_string(), // nf-md-microphone_outline
         },
         "minimal" => ResolvedIcons {
             idle: "○".to_string(),
@@ -512,6 +538,12 @@ pub struct WhisperConfig {
     /// Can also be an absolute path to a .bin file
     pub model: String,
 
+    /// Retry model for hybrid transcription (optional)
+    /// When set, low-confidence sections are re-transcribed with this model
+    /// Enables hybrid mode: primary model runs on full audio, retry model runs on low-confidence sections
+    #[serde(default)]
+    pub retry_model: Option<String>,
+
     /// Language code (en, es, fr, auto, etc.)
     pub language: String,
 
@@ -526,8 +558,21 @@ pub struct WhisperConfig {
     #[serde(default = "default_on_demand_loading")]
     pub on_demand_loading: bool,
 
-    // --- Remote backend settings ---
+    /// Enable speedup optimization for recordings longer than 29 seconds (default: true)
+    #[serde(default = "default_speedup_enabled")]
+    pub speedup_enabled: bool,
 
+    /// Enable silence removal optimization with volume detection (default: true)
+    /// This reduces transcription time by removing silence periods
+    #[serde(default = "default_silence_removal_enabled")]
+    pub silence_removal_enabled: bool,
+
+    /// Optional initial prompt to provide context for transcription
+    /// Helps improve accuracy for technical terms, names, and domain-specific vocabulary
+    #[serde(default)]
+    pub initial_prompt: Option<String>,
+
+    // --- Remote backend settings ---
     /// Remote server endpoint URL (e.g., "http://192.168.1.100:8080")
     /// Required when backend = "remote"
     #[serde(default)]
@@ -642,6 +687,11 @@ pub struct OutputConfig {
     /// Pipes transcribed text through an external command before output
     #[serde(default)]
     pub post_process: Option<PostProcessConfig>,
+
+    /// Convert newlines to Shift+Enter instead of regular Enter
+    /// Useful for applications where Enter submits (e.g., Cursor IDE)
+    #[serde(default)]
+    pub shift_enter_newlines: bool,
 }
 
 /// Output mode selection
@@ -679,10 +729,14 @@ impl Default for Config {
             whisper: WhisperConfig {
                 backend: WhisperBackend::default(),
                 model: "base.en".to_string(),
+                retry_model: None,
                 language: "en".to_string(),
                 translate: false,
                 threads: None,
                 on_demand_loading: default_on_demand_loading(),
+                speedup_enabled: default_speedup_enabled(),
+                silence_removal_enabled: default_silence_removal_enabled(),
+                initial_prompt: None,
                 remote_endpoint: None,
                 remote_model: None,
                 remote_api_key: None,
@@ -697,6 +751,7 @@ impl Default for Config {
                 pre_output_command: None,
                 post_output_command: None,
                 post_process: None,
+                shift_enter_newlines: false,
             },
             text: TextConfig::default(),
             status: StatusConfig::default(),

@@ -52,9 +52,8 @@ pub fn install() -> Result<(), VoxtypeError> {
     };
 
     // Read current config
-    let config_content = fs::read_to_string(&config_path).map_err(|e| {
-        VoxtypeError::Config(format!("Failed to read waybar config: {}", e))
-    })?;
+    let config_content = fs::read_to_string(&config_path)
+        .map_err(|e| VoxtypeError::Config(format!("Failed to read waybar config: {}", e)))?;
 
     // Check if voxtype module already exists
     if config_content.contains("\"custom/voxtype\"") {
@@ -80,16 +79,14 @@ pub fn install() -> Result<(), VoxtypeError> {
 
     // Create backup
     let backup_path = format!("{}.voxtype-backup", config_path.display());
-    fs::copy(&config_path, &backup_path).map_err(|e| {
-        VoxtypeError::Config(format!("Failed to create backup: {}", e))
-    })?;
+    fs::copy(&config_path, &backup_path)
+        .map_err(|e| VoxtypeError::Config(format!("Failed to create backup: {}", e)))?;
     println!("Created backup: {}", backup_path);
 
     // Inject module into config
     let new_config = inject_module_into_config(&config_content)?;
-    fs::write(&config_path, new_config).map_err(|e| {
-        VoxtypeError::Config(format!("Failed to write config: {}", e))
-    })?;
+    fs::write(&config_path, new_config)
+        .map_err(|e| VoxtypeError::Config(format!("Failed to write config: {}", e)))?;
     println!("Added voxtype module to Waybar config.");
 
     // Add CSS if style file exists and doesn't already have voxtype styles
@@ -100,9 +97,8 @@ pub fn install() -> Result<(), VoxtypeError> {
                 .append(true)
                 .open(&style_path)
                 .map_err(|e| VoxtypeError::Config(format!("Failed to open style.css: {}", e)))?;
-            writeln!(file, "\n{}", get_css_config()).map_err(|e| {
-                VoxtypeError::Config(format!("Failed to write CSS: {}", e))
-            })?;
+            writeln!(file, "\n{}", get_css_config())
+                .map_err(|e| VoxtypeError::Config(format!("Failed to write CSS: {}", e)))?;
             println!("Added voxtype styling to Waybar CSS.");
         }
     }
@@ -131,9 +127,8 @@ pub fn uninstall() -> Result<(), VoxtypeError> {
         }
     };
 
-    let config_content = fs::read_to_string(&config_path).map_err(|e| {
-        VoxtypeError::Config(format!("Failed to read waybar config: {}", e))
-    })?;
+    let config_content = fs::read_to_string(&config_path)
+        .map_err(|e| VoxtypeError::Config(format!("Failed to read waybar config: {}", e)))?;
 
     if !config_content.contains("\"custom/voxtype\"") {
         println!("Voxtype module not found in Waybar config.");
@@ -153,9 +148,8 @@ pub fn uninstall() -> Result<(), VoxtypeError> {
 
     // Remove module from config
     let new_config = remove_module_from_config(&config_content);
-    fs::write(&config_path, new_config).map_err(|e| {
-        VoxtypeError::Config(format!("Failed to write config: {}", e))
-    })?;
+    fs::write(&config_path, new_config)
+        .map_err(|e| VoxtypeError::Config(format!("Failed to write config: {}", e)))?;
     println!("Removed voxtype module from Waybar config.");
 
     // Remove CSS
@@ -163,9 +157,8 @@ pub fn uninstall() -> Result<(), VoxtypeError> {
         let style_content = fs::read_to_string(&style_path).unwrap_or_default();
         if style_content.contains("#custom-voxtype") {
             let new_style = remove_css_from_style(&style_content);
-            fs::write(&style_path, new_style).map_err(|e| {
-                VoxtypeError::Config(format!("Failed to write style.css: {}", e))
-            })?;
+            fs::write(&style_path, new_style)
+                .map_err(|e| VoxtypeError::Config(format!("Failed to write style.css: {}", e)))?;
             println!("Removed voxtype styling from Waybar CSS.");
         }
     }
@@ -217,9 +210,7 @@ fn inject_module_into_config(content: &str) -> Result<String, VoxtypeError> {
         // Check if we need to add a comma after the previous module
         // Look backwards from the last brace to find the previous }
         let before_last = &result[..last_brace];
-        let needs_comma = before_last
-            .trim_end()
-            .ends_with('}');
+        let needs_comma = before_last.trim_end().ends_with('}');
 
         let module_def = if needs_comma {
             r#",
@@ -354,7 +345,11 @@ fn remove_css_from_style(content: &str) -> String {
             let trailing_ws = after.chars().take_while(|c| c.is_whitespace()).count();
             // Remove the block including leading whitespace
             let before = &result[..start];
-            let leading_ws = before.chars().rev().take_while(|c| *c == ' ' || *c == '\t' || *c == '\n').count();
+            let leading_ws = before
+                .chars()
+                .rev()
+                .take_while(|c| *c == ' ' || *c == '\t' || *c == '\n')
+                .count();
             let actual_start = start.saturating_sub(leading_ws);
             let actual_end = end + trailing_ws;
             result = format!("{}{}", &result[..actual_start], &result[actual_end..]);
@@ -387,7 +382,11 @@ fn remove_css_from_style(content: &str) -> String {
             let after = &result[end..];
             let trailing_ws = after.chars().take_while(|c| c.is_whitespace()).count();
             let before = &result[..start];
-            let leading_ws = before.chars().rev().take_while(|c| *c == ' ' || *c == '\t' || *c == '\n').count();
+            let leading_ws = before
+                .chars()
+                .rev()
+                .take_while(|c| *c == ' ' || *c == '\t' || *c == '\n')
+                .count();
             let actual_start = start.saturating_sub(leading_ws);
             let actual_end = end + trailing_ws;
             result = format!("{}{}", &result[..actual_start], &result[actual_end..]);
@@ -418,13 +417,15 @@ pub fn print_config() {
     println!("   In the \"modules-right\" (or left/center) array, add: \"custom/voxtype\"\n");
 
     println!("   Then add this module configuration:\n");
-    println!(r#"   "custom/voxtype": {{
+    println!(
+        r#"   "custom/voxtype": {{
        "exec": "voxtype status --follow --format json",
        "return-type": "json",
        "format": "{{}}",
        "tooltip": true,
        "on-click": "systemctl --user restart voxtype"
-   }}"#);
+   }}"#
+    );
 
     println!("\n\n2. Add this to your Waybar style.css:\n");
     println!(
@@ -464,9 +465,12 @@ pub fn print_config() {
     println!("---");
     println!("\nCustomizing Icons:");
     println!("------------------");
-    println!("Voxtype outputs an \"alt\" field in JSON that enables Waybar's format-icons feature.");
+    println!(
+        "Voxtype outputs an \"alt\" field in JSON that enables Waybar's format-icons feature."
+    );
     println!("To use custom icons (e.g., Nerd Fonts), configure your Waybar module like this:\n");
-    println!(r#"   "custom/voxtype": {{
+    println!(
+        r#"   "custom/voxtype": {{
        "exec": "voxtype status --follow --format json",
        "return-type": "json",
        "format": "{{icon}}",
@@ -477,7 +481,8 @@ pub fn print_config() {
            "stopped": "\uf131"
        }},
        "tooltip": true
-   }}"#);
+   }}"#
+    );
     println!("\n   Nerd Font codepoints: U+F130 (mic), U+F111 (dot), U+F110 (spinner), U+F131 (mic-slash)");
     println!("\nAlternatively, configure icons in voxtype's config.toml:\n");
     println!("   [status]");

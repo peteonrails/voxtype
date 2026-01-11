@@ -83,7 +83,11 @@ pub fn detect_available_backends() -> Vec<Backend> {
         }
     } else {
         // Simple mode: CPU binary at /usr/bin/voxtype or backed up
-        if Path::new(VOXTYPE_BIN).is_file() && !fs::symlink_metadata(VOXTYPE_BIN).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        if Path::new(VOXTYPE_BIN).is_file()
+            && !fs::symlink_metadata(VOXTYPE_BIN)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
+        {
             available.push(Backend::Cpu);
         } else if Path::new(VOXTYPE_CPU_BACKUP).exists() {
             available.push(Backend::Cpu);
@@ -208,9 +212,8 @@ fn enable_simple_mode() -> anyhow::Result<()> {
     }
 
     // Ensure lib dir exists
-    fs::create_dir_all(VOXTYPE_LIB_DIR).map_err(|e| {
-        anyhow::anyhow!("Failed to create {}: {}", VOXTYPE_LIB_DIR, e)
-    })?;
+    fs::create_dir_all(VOXTYPE_LIB_DIR)
+        .map_err(|e| anyhow::anyhow!("Failed to create {}: {}", VOXTYPE_LIB_DIR, e))?;
 
     // Backup the CPU binary
     if Path::new(VOXTYPE_BIN).exists() {
@@ -290,7 +293,9 @@ pub fn show_status() {
             if backend == Backend::Vulkan || (tiered && backend != Backend::Cpu) {
                 println!(
                     "  Binary: {}",
-                    Path::new(VOXTYPE_LIB_DIR).join(backend.binary_name()).display()
+                    Path::new(VOXTYPE_LIB_DIR)
+                        .join(backend.binary_name())
+                        .display()
                 );
             } else {
                 println!("  Binary: {}", VOXTYPE_BIN);
@@ -304,7 +309,11 @@ pub fn show_status() {
     // Installation mode
     println!(
         "\nInstallation mode: {}",
-        if tiered { "tiered (pre-built)" } else { "simple (source build)" }
+        if tiered {
+            "tiered (pre-built)"
+        } else {
+            "simple (source build)"
+        }
     );
 
     // Available backends

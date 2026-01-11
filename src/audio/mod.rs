@@ -5,6 +5,7 @@
 
 pub mod cpal_capture;
 pub mod feedback;
+pub mod preprocess;
 
 use crate::config::AudioConfig;
 use crate::error::AudioError;

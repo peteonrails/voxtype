@@ -1,9 +1,9 @@
-//! Clipboard-based text output
+//! xclip-based text output for X11
 //!
-//! Uses wl-copy to copy text to the Wayland clipboard.
-//! This is the most reliable fallback as it works on all Wayland compositors.
+//! Uses xclip to copy text to the X11 clipboard.
+//! This is a fallback for X11 environments where wl-copy is unavailable.
 //!
-//! Requires: wl-clipboard package installed
+//! Requires: xclip package installed
 
 use super::TextOutput;
 use crate::error::OutputError;
@@ -11,14 +11,14 @@ use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-/// Clipboard-based text output
-pub struct ClipboardOutput {
+/// xclip-based text output for X11
+pub struct XclipOutput {
     /// Whether to show a desktop notification
     notify: bool,
 }
 
-impl ClipboardOutput {
-    /// Create a new clipboard output
+impl XclipOutput {
+    /// Create a new xclip output
     pub fn new(notify: bool) -> Self {
         Self { notify }
     }
@@ -48,21 +48,23 @@ impl ClipboardOutput {
 }
 
 #[async_trait::async_trait]
-impl TextOutput for ClipboardOutput {
+impl TextOutput for XclipOutput {
     async fn output(&self, text: &str) -> Result<(), OutputError> {
         if text.is_empty() {
             return Ok(());
         }
 
-        // Spawn wl-copy with stdin pipe
-        let mut child = Command::new("wl-copy")
+        // Spawn xclip with stdin pipe
+        // -selection clipboard uses the CLIPBOARD selection (standard clipboard)
+        let mut child = Command::new("xclip")
+            .args(["-selection", "clipboard"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    OutputError::WlCopyNotFound
+                    OutputError::XclipNotFound
                 } else {
                     OutputError::InjectionFailed(e.to_string())
                 }
@@ -74,7 +76,7 @@ impl TextOutput for ClipboardOutput {
                 .write_all(text.as_bytes())
                 .await
                 .map_err(|e| OutputError::InjectionFailed(e.to_string()))?;
-
+            
             // Close stdin to signal EOF
             drop(stdin);
         }
@@ -87,7 +89,7 @@ impl TextOutput for ClipboardOutput {
 
         if !status.success() {
             return Err(OutputError::InjectionFailed(
-                "wl-copy exited with error".to_string(),
+                "xclip exited with error".to_string(),
             ));
         }
 
@@ -96,13 +98,13 @@ impl TextOutput for ClipboardOutput {
             self.send_notification(text).await;
         }
 
-        tracing::info!("Text copied to clipboard ({} chars)", text.len());
+        tracing::info!("Text copied to clipboard via xclip ({} chars)", text.len());
         Ok(())
     }
 
     async fn is_available(&self) -> bool {
         Command::new("which")
-            .arg("wl-copy")
+            .arg("xclip")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -112,7 +114,7 @@ impl TextOutput for ClipboardOutput {
     }
 
     fn name(&self) -> &'static str {
-        "clipboard (wl-copy)"
+        "clipboard (xclip)"
     }
 }
 
@@ -122,10 +124,11 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = ClipboardOutput::new(true);
+        let output = XclipOutput::new(true);
         assert!(output.notify);
 
-        let output = ClipboardOutput::new(false);
+        let output = XclipOutput::new(false);
         assert!(!output.notify);
     }
 }
+

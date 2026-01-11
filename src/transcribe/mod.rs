@@ -18,13 +18,30 @@ pub trait Transcriber: Send + Sync {
 }
 
 /// Factory function to create transcriber based on configured backend
-pub fn create_transcriber(
-    config: &WhisperConfig,
-) -> Result<Box<dyn Transcriber>, TranscribeError> {
+pub fn create_transcriber(config: &WhisperConfig) -> Result<Box<dyn Transcriber>, TranscribeError> {
+    tracing::info!(
+        "Creating transcriber: backend={:?}, model={}, retry_model={:?}",
+        config.backend,
+        config.model,
+        config.retry_model
+    );
+    
     match config.backend {
         WhisperBackend::Local => {
-            tracing::info!("Using local whisper transcription backend");
-            Ok(Box::new(whisper::WhisperTranscriber::new(config)?))
+            if let Some(ref retry_model) = config.retry_model {
+                tracing::info!(
+                    "Hybrid mode enabled: using hybrid transcription with primary={} and retry={}",
+                    config.model,
+                    retry_model
+                );
+                Ok(Box::new(whisper::HybridTranscriber::new(config)?))
+            } else {
+                tracing::info!(
+                    "Single model mode: using local whisper transcription backend with model={}",
+                    config.model
+                );
+                Ok(Box::new(whisper::WhisperTranscriber::new(config)?))
+            }
         }
         WhisperBackend::Remote => {
             tracing::info!("Using remote whisper transcription backend");

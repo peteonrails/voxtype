@@ -108,11 +108,7 @@ pub fn detect_display_server() -> DisplayServer {
 
 /// Get the path to a command if it exists
 pub async fn get_command_path(cmd: &str) -> Option<String> {
-    let output = Command::new("which")
-        .arg(cmd)
-        .output()
-        .await
-        .ok()?;
+    let output = Command::new("which").arg(cmd).output().await.ok()?;
 
     if output.status.success() {
         Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -260,7 +256,10 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
     println!("  Display server:  {}", ds_info);
 
     // wtype
-    print_tool_status(&status.wtype, status.display_server == DisplayServer::Wayland);
+    print_tool_status(
+        &status.wtype,
+        status.display_server == DisplayServer::Wayland,
+    );
 
     // ydotool
     if status.ydotool.installed {
@@ -271,9 +270,15 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
         };
         if let Some(ref path) = status.ydotool.path {
             if status.ydotool.available {
-                println!("  ydotool:         \x1b[32m✓\x1b[0m installed ({}), {}", path, daemon_status);
+                println!(
+                    "  ydotool:         \x1b[32m✓\x1b[0m installed ({}), {}",
+                    path, daemon_status
+                );
             } else {
-                println!("  ydotool:         \x1b[33m⚠\x1b[0m installed ({}), {}", path, daemon_status);
+                println!(
+                    "  ydotool:         \x1b[33m⚠\x1b[0m installed ({}), {}",
+                    path, daemon_status
+                );
             }
         }
     } else {
@@ -281,7 +286,10 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
     }
 
     // wl-copy
-    print_tool_status(&status.wl_copy, status.display_server == DisplayServer::Wayland);
+    print_tool_status(
+        &status.wl_copy,
+        status.display_server == DisplayServer::Wayland,
+    );
 
     // xclip (only show on X11 or if installed)
     if status.display_server == DisplayServer::X11 || status.xclip.installed {
@@ -307,24 +315,31 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
 fn print_tool_status(tool: &OutputToolStatus, is_relevant: bool) {
     if tool.installed {
         let path = tool.path.as_deref().unwrap_or("?");
-        let note = tool.note.as_deref().map(|n| format!(" ({})", n)).unwrap_or_default();
+        let note = tool
+            .note
+            .as_deref()
+            .map(|n| format!(" ({})", n))
+            .unwrap_or_default();
 
         if tool.available {
-            println!("  {}:{}  \x1b[32m✓\x1b[0m installed ({}){}",
+            println!(
+                "  {}:{}  \x1b[32m✓\x1b[0m installed ({}){}",
                 tool.name,
                 " ".repeat(14 - tool.name.len()),
                 path,
                 note
             );
         } else if is_relevant {
-            println!("  {}:{}  \x1b[33m⚠\x1b[0m installed ({}){}",
+            println!(
+                "  {}:{}  \x1b[33m⚠\x1b[0m installed ({}){}",
                 tool.name,
                 " ".repeat(14 - tool.name.len()),
                 path,
                 note
             );
         } else {
-            println!("  {}:{}  \x1b[90m✓ installed ({}){}\x1b[0m",
+            println!(
+                "  {}:{}  \x1b[90m✓ installed ({}){}\x1b[0m",
                 tool.name,
                 " ".repeat(14 - tool.name.len()),
                 path,
@@ -332,12 +347,14 @@ fn print_tool_status(tool: &OutputToolStatus, is_relevant: bool) {
             );
         }
     } else if is_relevant {
-        println!("  {}:{}  \x1b[31m✗\x1b[0m not installed",
+        println!(
+            "  {}:{}  \x1b[31m✗\x1b[0m not installed",
             tool.name,
             " ".repeat(14 - tool.name.len())
         );
     } else {
-        println!("  {}:{}  \x1b[90m- not installed\x1b[0m",
+        println!(
+            "  {}:{}  \x1b[90m- not installed\x1b[0m",
             tool.name,
             " ".repeat(14 - tool.name.len())
         );
@@ -401,11 +418,7 @@ pub async fn run_setup(
             // Validate the model name
             if !model::is_valid_model(name) {
                 let valid = model::valid_model_names().join(", ");
-                anyhow::bail!(
-                    "Unknown model '{}'. Valid models are: {}",
-                    name,
-                    valid
-                );
+                anyhow::bail!("Unknown model '{}'. Valid models are: {}", name, valid);
             }
             name
         }
@@ -420,10 +433,7 @@ pub async fn run_setup(
             let size = std::fs::metadata(&model_path)
                 .map(|m| m.len() as f64 / 1024.0 / 1024.0)
                 .unwrap_or(0.0);
-            print_success(&format!(
-                "Model ready: {} ({:.0} MB)",
-                model_name, size
-            ));
+            print_success(&format!("Model ready: {} ({:.0} MB)", model_name, size));
         }
         // If user explicitly requested this model, update config even if already downloaded
         if model_override.is_some() {
@@ -460,7 +470,9 @@ pub async fn run_setup(
         println!();
         println!("Next steps:");
         println!("  1. Set up a compositor keybinding to trigger recording:");
-        println!("     Example for Hyprland: bind = , XF86AudioRecord, exec, voxtype record-toggle\n");
+        println!(
+            "     Example for Hyprland: bind = , XF86AudioRecord, exec, voxtype record-toggle\n"
+        );
         println!("  2. Start the daemon: voxtype daemon\n");
         println!("Optional:");
         println!("  voxtype setup check      - Verify system configuration");
@@ -564,7 +576,10 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
         let size = std::fs::metadata(&model_path)
             .map(|m| m.len() as f64 / 1024.0 / 1024.0)
             .unwrap_or(0.0);
-        print_success(&format!("Model '{}' installed ({:.0} MB)", model_name, size));
+        print_success(&format!(
+            "Model '{}' installed ({:.0} MB)",
+            model_name, size
+        ));
     } else {
         print_failure(&format!("Model '{}' not found", model_name));
         println!("       Run: voxtype setup --download");
