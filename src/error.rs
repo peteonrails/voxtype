@@ -102,13 +102,16 @@ pub enum OutputError {
     #[error("wl-copy not found in PATH. Install wl-clipboard via your package manager.")]
     WlCopyNotFound,
 
+    #[error("xclip not found in PATH. Install via your package manager.")]
+    XclipNotFound,
+
     #[error("Text injection failed: {0}")]
     InjectionFailed(String),
 
     #[error("Ctrl+V simulation failed: {0}")]
     CtrlVFailed(String),
 
-    #[error("All output methods failed. Ensure wtype, ydotool, or wl-copy is available.")]
+    #[error("All output methods failed. Ensure wtype, ydotool, wl-copy, or xclip is available.")]
     AllMethodsFailed,
 }
 

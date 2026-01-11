@@ -5,7 +5,7 @@
 //! Fallback chain for `mode = "type"`:
 //! 1. wtype - Wayland-native, best Unicode/CJK support, no daemon needed
 //! 2. ydotool - Works on X11/Wayland/TTY, requires daemon
-//! 3. clipboard - Universal fallback via wl-copy
+//! 3. clipboard - Universal fallback via wl-copy (Wayland) or xclip (X11)
 //!
 //! Paste mode (clipboard + Ctrl+V) helps with system with non US keyboard layouts.
 
@@ -13,6 +13,7 @@ pub mod clipboard;
 pub mod paste;
 pub mod post_process;
 pub mod wtype;
+pub mod xclip;
 pub mod ydotool;
 
 use crate::config::OutputConfig;
@@ -53,14 +54,18 @@ pub fn create_output_chain(config: &OutputConfig) -> Vec<Box<dyn TextOutput>> {
                 config.auto_submit,
             )));
 
-            // Last resort: clipboard
+            // Last resort: clipboard (Wayland first, then X11)
             if config.fallback_to_clipboard {
                 chain.push(Box::new(clipboard::ClipboardOutput::new(false)));
+                chain.push(Box::new(xclip::XclipOutput::new(false)));
             }
         }
         crate::config::OutputMode::Clipboard => {
-            // Only clipboard
+            // Clipboard: try Wayland first, then X11
             chain.push(Box::new(clipboard::ClipboardOutput::new(
+                config.notification.on_transcription,
+            )));
+            chain.push(Box::new(xclip::XclipOutput::new(
                 config.notification.on_transcription,
             )));
         }
