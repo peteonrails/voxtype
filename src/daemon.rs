@@ -546,6 +546,13 @@ impl Daemon {
                                         };
                                         self.update_state("recording");
                                         self.play_feedback(SoundEvent::RecordingStart);
+
+                                        // Run pre-recording hook (e.g., enter compositor submap for cancel)
+                                        if let Some(cmd) = &self.config.output.pre_recording_command {
+                                            if let Err(e) = output::run_hook(cmd, "pre_recording").await {
+                                                tracing::warn!("{}", e);
+                                            }
+                                        }
                                     }
                                     Err(e) => {
                                         tracing::error!("Failed to create audio capture: {}", e);
@@ -635,6 +642,13 @@ impl Daemon {
                                         };
                                         self.update_state("recording");
                                         self.play_feedback(SoundEvent::RecordingStart);
+
+                                        // Run pre-recording hook (e.g., enter compositor submap for cancel)
+                                        if let Some(cmd) = &self.config.output.pre_recording_command {
+                                            if let Err(e) = output::run_hook(cmd, "pre_recording").await {
+                                                tracing::warn!("{}", e);
+                                            }
+                                        }
                                     }
                                     Err(e) => {
                                         tracing::error!("Failed to create audio capture: {}", e);
@@ -810,6 +824,13 @@ impl Daemon {
                                     };
                                     self.update_state("recording");
                                     self.play_feedback(SoundEvent::RecordingStart);
+
+                                    // Run pre-recording hook (e.g., enter compositor submap for cancel)
+                                    if let Some(cmd) = &self.config.output.pre_recording_command {
+                                        if let Err(e) = output::run_hook(cmd, "pre_recording").await {
+                                            tracing::warn!("{}", e);
+                                        }
+                                    }
                                 }
                             }
                             Err(e) => {

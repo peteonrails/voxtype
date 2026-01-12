@@ -103,11 +103,17 @@ type_delay_ms = 0
 # consistent fix is to use F12 or another key instead.
 wtype_delay_ms = 0
 
-# Output hooks for compositor integration (fixes modifier key interference)
-# When using compositor keybindings with modifiers (e.g., SUPER+CTRL+X),
-# these hooks switch to a submap/mode that blocks modifiers during typing.
+# Compositor integration hooks
 # Use `voxtype setup compositor hyprland|sway|river` for automatic setup.
 #
+# pre_recording_command: Runs when recording starts. Switch to a submap/mode
+#   where F12 can cancel recording/transcription.
+# pre_output_command: Runs before typing output. Switch to a submap/mode that
+#   blocks modifier keys from triggering compositor shortcuts during typing.
+# post_output_command: Runs after typing output. Reset to normal mode.
+#
+# Example (Hyprland):
+# pre_recording_command = "hyprctl dispatch submap voxtype_recording"
 # pre_output_command = "hyprctl dispatch submap voxtype_suppress"
 # post_output_command = "hyprctl dispatch submap reset"
 

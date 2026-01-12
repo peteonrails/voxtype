@@ -76,8 +76,8 @@ pub fn create_output_chain(config: &OutputConfig) -> Vec<Box<dyn TextOutput>> {
     chain
 }
 
-/// Run a shell command (for pre/post output hooks)
-async fn run_hook(command: &str, hook_name: &str) -> Result<(), String> {
+/// Run a shell command (for pre/post hooks)
+pub async fn run_hook(command: &str, hook_name: &str) -> Result<(), String> {
     tracing::debug!("Running {} hook: {}", hook_name, command);
 
     let output = Command::new("sh")

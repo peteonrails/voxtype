@@ -633,6 +633,11 @@ pub struct OutputConfig {
     #[serde(default)]
     pub auto_submit: bool,
 
+    /// Command to run when recording starts (e.g., switch to compositor submap)
+    /// Useful for entering a mode where cancel keybindings are effective
+    #[serde(default)]
+    pub pre_recording_command: Option<String>,
+
     /// Command to run before typing output (e.g., compositor submap switch)
     /// Useful for blocking modifier keys at the compositor level
     #[serde(default)]
@@ -700,6 +705,7 @@ impl Default for Config {
                 type_delay_ms: 0,
                 wtype_delay_ms: 0,
                 auto_submit: false,
+                pre_recording_command: None,
                 pre_output_command: None,
                 post_output_command: None,
                 post_process: None,
