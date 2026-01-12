@@ -61,6 +61,38 @@
 
             <!-- v0.4.x Era Posts -->
 
+            <article class="news-article" id="v0412">
+                <div class="article-meta">
+                    <time datetime="2026-01-11">January 11, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v0.4.12: Compositor Integration Fix</h2>
+                <div class="article-body">
+                    <p>Voxtype 0.4.12 fixes compositor submap handling when recordings are cancelled or too short.</p>
+
+                    <h3>Pre-recording Hook</h3>
+                    <p>A new <code>pre_recording_command</code> hook runs when recording starts. This pairs with the existing <code>pre_output_command</code> and <code>post_output_command</code> hooks to provide complete control over compositor state throughout the recording lifecycle.</p>
+
+                    <p><strong>Why use it:</strong> Enter a compositor submap when recording starts so cancel bindings (like F12) work during both recording and transcription phases.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[output]
+pre_recording_command = "hyprctl dispatch submap voxtype_recording"
+pre_output_command = "hyprctl dispatch submap voxtype_suppress"
+post_output_command = "hyprctl dispatch submap reset"</code></pre>
+                    </div>
+
+                    <p>Run <code>voxtype setup compositor hyprland|sway|river</code> to automatically configure these hooks.</p>
+
+                    <h3>Bug Fixes</h3>
+                    <ul>
+                        <li>Fixed compositor submap getting stuck when recording is too short or cancelled</li>
+                        <li>The <code>post_output_command</code> hook now runs in all early-exit scenarios (recording too short, no audio, cancel, timeout, transcription errors)</li>
+                    </ul>
+                </div>
+            </article>
+
             <article class="news-article" id="v0411">
                 <div class="article-meta">
                     <time datetime="2026-01-10">January 10, 2026</time>
