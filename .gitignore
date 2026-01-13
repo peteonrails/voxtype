@@ -34,3 +34,6 @@ CLAUDE.md
 /result
 /result-*
 docker/
+
+# Git worktrees
+.worktrees/
