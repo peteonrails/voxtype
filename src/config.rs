@@ -661,6 +661,11 @@ pub struct OutputConfig {
     /// Pipes transcribed text through an external command before output
     #[serde(default)]
     pub post_process: Option<PostProcessConfig>,
+
+    /// Keystroke to simulate for paste mode (e.g., "ctrl+v", "shift+insert", "ctrl+shift+v")
+    /// Defaults to "ctrl+v" if not specified
+    #[serde(default)]
+    pub paste_keys: Option<String>,
 }
 
 /// Output mode selection
@@ -719,6 +724,7 @@ impl Default for Config {
                 pre_output_command: None,
                 post_output_command: None,
                 post_process: None,
+                paste_keys: None,
             },
             text: TextConfig::default(),
             status: StatusConfig::default(),

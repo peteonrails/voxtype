@@ -558,9 +558,9 @@ Controls how transcribed text is delivered.
 Primary output method.
 
 **Values:**
-- `type` - Simulate keyboard input at cursor position (requires ydotool)
+- `type` - Simulate keyboard input at cursor position (requires wtype or ydotool)
 - `clipboard` - Copy text to clipboard (requires wl-copy)
-- `paste` - Copy to clipboard then paste with Ctrl+V (requires wl-copy and ydotool)
+- `paste` - Copy to clipboard then simulate paste keystroke (requires wl-copy, and wtype or ydotool)
 
 **Example:**
 ```toml
@@ -569,7 +569,34 @@ mode = "paste"
 ```
 
 **Note about paste mode:**
-The `paste` mode is designed to work around non-US keyboard layout issues. Instead of typing characters directly (which assumes US keyboard layout), it copies text to the clipboard and then simulates Ctrl+V to paste it. This works regardless of keyboard layout but requires both wl-copy (for clipboard access) and ydotool (for Ctrl+V simulation).
+The `paste` mode is designed to work around non-US keyboard layout issues. Instead of typing characters directly (which assumes US keyboard layout), it copies text to the clipboard and then simulates a paste keystroke. This works regardless of keyboard layout. Requires wl-copy for clipboard access, plus wtype (preferred, no daemon needed) or ydotool (requires ydotoold daemon) for keystroke simulation.
+
+### paste_keys
+
+**Type:** String
+**Default:** `"ctrl+v"`
+**Required:** No
+
+Keystroke to simulate for paste mode. Change this if your environment uses a different paste shortcut.
+
+**Format:** `"modifier+key"` or `"modifier+modifier+key"` (case-insensitive)
+
+**Common values:**
+- `"ctrl+v"` - Standard paste (default)
+- `"shift+insert"` - Universal paste for Hyprland/Omarchy
+- `"ctrl+shift+v"` - Some terminal emulators
+
+**Example:**
+```toml
+[output]
+mode = "paste"
+paste_keys = "shift+insert"  # For Hyprland/Omarchy
+```
+
+**Supported keys:**
+- Modifiers: `ctrl`, `shift`, `alt`, `super` (also `leftctrl`, `rightctrl`, etc.)
+- Letters: `a-z`
+- Special: `insert`, `enter`
 
 ### fallback_to_clipboard
 

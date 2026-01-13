@@ -69,6 +69,7 @@ pub fn create_output_chain(config: &OutputConfig) -> Vec<Box<dyn TextOutput>> {
             chain.push(Box::new(paste::PasteOutput::new(
                 config.notification.on_transcription,
                 config.auto_submit,
+                config.paste_keys.clone(),
             )));
         }
     }

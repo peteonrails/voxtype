@@ -86,9 +86,9 @@ on_demand_loading = false
 
 [output]
 # Primary output mode: "type", "clipboard", or "paste"
-# - type: Simulates keyboard input at cursor position (requires ydotool)
+# - type: Simulates keyboard input at cursor position (requires wtype or ydotool)
 # - clipboard: Copies text to clipboard (requires wl-copy)
-# - paste: Copies to clipboard then pastes with Ctrl+V (requires wl-copy and ydotool)
+# - paste: Copies to clipboard then simulates paste keystroke (requires wl-copy and wtype or ydotool)
 mode = "type"
 
 # Fall back to clipboard if typing fails
@@ -106,6 +106,14 @@ type_delay_ms = 0
 # had success with Escape bound by increasing this delay, but the most
 # consistent fix is to use F12 or another key instead.
 wtype_delay_ms = 0
+
+# Keystroke for paste mode (when mode = "paste")
+# Default is "ctrl+v". Change for environments with different paste shortcuts.
+# Examples:
+#   paste_keys = "ctrl+v"        # Standard (default)
+#   paste_keys = "shift+insert"  # Hyprland/Omarchy universal paste
+#   paste_keys = "ctrl+shift+v"  # Some terminal emulators
+# paste_keys = "ctrl+v"
 
 # Compositor integration hooks
 # Use `voxtype setup compositor hyprland|sway|river` for automatic setup.
