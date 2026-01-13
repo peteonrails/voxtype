@@ -1,0 +1,20 @@
+# Exclude build artifacts
+target/
+
+# Git
+.git/
+
+# IDE
+.idea/
+.vscode/
+
+# Releases (keep parakeet-test for testing)
+releases/*
+!releases/parakeet-test/
+
+# Local test files
+*.wav
+*.mp3
+
+# OS files
+.DS_Store

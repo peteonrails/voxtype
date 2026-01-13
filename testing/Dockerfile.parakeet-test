@@ -1,0 +1,61 @@
+# Test container for voxtype parakeet transcription
+#
+# Usage:
+#   docker build -f testing/Dockerfile.parakeet-test -t voxtype-parakeet-test .
+#   docker run --rm -v /path/to/audio:/audio voxtype-parakeet-test /audio/test.wav
+#
+FROM ubuntu:24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    libasound2t64 \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create model directory
+RUN mkdir -p /root/.local/share/voxtype/models
+
+# Copy the prebuilt parakeet binary
+COPY releases/parakeet-test/voxtype-0.4.11-linux-x86_64-parakeet /usr/local/bin/voxtype
+RUN chmod +x /usr/local/bin/voxtype
+
+# Download Parakeet CTC model from onnx-community (compatible with parakeet-rs)
+# WARNING: This is the full model (~2.4GB), downloads take time
+WORKDIR /root/.local/share/voxtype/models/parakeet-ctc-0.6b
+RUN curl -L -o model.onnx https://huggingface.co/onnx-community/parakeet-ctc-0.6b-ONNX/resolve/main/onnx/model.onnx \
+    && curl -L -o model.onnx_data https://huggingface.co/onnx-community/parakeet-ctc-0.6b-ONNX/resolve/main/onnx/model.onnx_data \
+    && curl -L -o config.json https://huggingface.co/onnx-community/parakeet-ctc-0.6b-ONNX/resolve/main/config.json \
+    && curl -L -o tokenizer.json https://huggingface.co/onnx-community/parakeet-ctc-0.6b-ONNX/resolve/main/tokenizer.json \
+    && curl -L -o tokenizer_config.json https://huggingface.co/onnx-community/parakeet-ctc-0.6b-ONNX/resolve/main/tokenizer_config.json \
+    && curl -L -o preprocessor_config.json https://huggingface.co/onnx-community/parakeet-ctc-0.6b-ONNX/resolve/main/preprocessor_config.json
+
+# Create config file for parakeet backend
+RUN mkdir -p /root/.config/voxtype && \
+    echo 'backend = "parakeet"' > /root/.config/voxtype/config.toml && \
+    echo '' >> /root/.config/voxtype/config.toml && \
+    echo '[hotkey]' >> /root/.config/voxtype/config.toml && \
+    echo 'enabled = false' >> /root/.config/voxtype/config.toml && \
+    echo '' >> /root/.config/voxtype/config.toml && \
+    echo '[audio]' >> /root/.config/voxtype/config.toml && \
+    echo 'device = "default"' >> /root/.config/voxtype/config.toml && \
+    echo 'sample_rate = 16000' >> /root/.config/voxtype/config.toml && \
+    echo 'max_duration_secs = 60' >> /root/.config/voxtype/config.toml && \
+    echo '' >> /root/.config/voxtype/config.toml && \
+    echo '[whisper]' >> /root/.config/voxtype/config.toml && \
+    echo 'model = "base.en"' >> /root/.config/voxtype/config.toml && \
+    echo 'language = "en"' >> /root/.config/voxtype/config.toml && \
+    echo '' >> /root/.config/voxtype/config.toml && \
+    echo '[parakeet]' >> /root/.config/voxtype/config.toml && \
+    echo 'model = "/root/.local/share/voxtype/models/parakeet-ctc-0.6b"' >> /root/.config/voxtype/config.toml && \
+    echo '' >> /root/.config/voxtype/config.toml && \
+    echo '[output]' >> /root/.config/voxtype/config.toml && \
+    echo 'mode = "clipboard"' >> /root/.config/voxtype/config.toml
+
+WORKDIR /app
+
+# Default: transcribe a file
+ENTRYPOINT ["voxtype", "transcribe"]
+CMD ["--help"]

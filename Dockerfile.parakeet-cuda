@@ -1,0 +1,69 @@
+# Build environment for voxtype with Parakeet CUDA support
+#
+# Builds voxtype with --features parakeet-cuda for NVIDIA GPU acceleration.
+# Uses NVIDIA CUDA base image with cuDNN for optimal ONNX Runtime performance.
+#
+# Usage:
+#   docker build -f Dockerfile.parakeet-cuda -t voxtype-parakeet-cuda-builder .
+#   docker run --rm -v $(pwd)/releases:/output voxtype-parakeet-cuda-builder
+#
+# The resulting binary requires:
+#   - NVIDIA GPU with CUDA support
+#   - CUDA drivers installed on host
+#   - libcudart.so and libcudnn.so at runtime (or use LD_LIBRARY_PATH)
+#
+FROM nvidia/cuda:12.6.1-cudnn-devel-ubuntu24.04
+
+ARG VERSION=0.4.11
+ARG DEBIAN_FRONTEND=noninteractive
+
+ENV VERSION=${VERSION}
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    clang \
+    cmake \
+    pkg-config \
+    libasound2-dev \
+    libssl-dev \
+    protobuf-compiler \
+    libprotobuf-dev \
+    git \
+    binutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /build
+
+# Copy source code
+COPY . .
+
+# ONNX Runtime CUDA settings
+# The ort crate will download CUDA-enabled ONNX Runtime
+ENV ORT_STRATEGY=download
+
+# Disable LTO for faster builds
+# Build with parakeet-cuda feature for NVIDIA GPU support
+RUN cargo build --release --features parakeet-cuda \
+    --config 'profile.release.lto=false' \
+    --config 'profile.release.codegen-units=8' \
+    && cp target/release/voxtype /tmp/voxtype-parakeet-cuda
+
+# Verify binary
+RUN echo "=== Verifying Parakeet CUDA binary ===" \
+    && /tmp/voxtype-parakeet-cuda --version \
+    && echo "=== Binary size ===" \
+    && ls -lh /tmp/voxtype-parakeet-cuda \
+    && echo "=== Checking CUDA libraries linked ===" \
+    && ldd /tmp/voxtype-parakeet-cuda | grep -iE 'cuda|cudnn|onnx' || echo "Note: CUDA libs may be loaded dynamically at runtime"
+
+# Output stage
+CMD mkdir -p /output \
+    && cp /tmp/voxtype-parakeet-cuda /output/voxtype-${VERSION}-linux-x86_64-parakeet-cuda \
+    && echo "Binary copied to /output:" \
+    && ls -la /output/voxtype-*

@@ -76,6 +76,9 @@ gpu-metal = ["whisper-rs/metal"]
 gpu-hipblas = ["whisper-rs/hipblas"]
 # Parakeet backend (ONNX-based, alternative to Whisper)
 parakeet = ["dep:parakeet-rs"]
+parakeet-cuda = ["parakeet", "parakeet-rs/cuda"]
+parakeet-tensorrt = ["parakeet", "parakeet-rs/tensorrt"]
+parakeet-rocm = ["parakeet", "parakeet-rs/rocm"]
 
 [build-dependencies]
 clap = { version = "4", features = ["derive"] }

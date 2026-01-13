@@ -1,0 +1,85 @@
+# Build environment for voxtype with Parakeet (ONNX) support
+#
+# Builds voxtype with --features parakeet for NVIDIA Parakeet ASR model support.
+# Uses Ubuntu 24.04 for glibc 2.39+ (required by ONNX Runtime prebuilt binaries).
+#
+# NOTE: Building on i9-9900K (no AVX-512) ensures clean binaries.
+#
+# Usage:
+#   docker build -f Dockerfile.parakeet -t voxtype-parakeet-builder .
+#   docker run --rm -v $(pwd)/releases:/output voxtype-parakeet-builder
+#
+# For CUDA support, use Dockerfile.parakeet-cuda instead.
+#
+FROM ubuntu:24.04
+
+ARG VERSION=0.4.11
+ARG DEBIAN_FRONTEND=noninteractive
+
+ENV VERSION=${VERSION}
+
+# Install build dependencies
+# - Standard build tools
+# - ALSA for audio (cpal)
+# - OpenSSL for ureq/tokenizers
+# - Protobuf for ONNX Runtime
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    clang \
+    cmake \
+    pkg-config \
+    libasound2-dev \
+    libssl-dev \
+    protobuf-compiler \
+    libprotobuf-dev \
+    git \
+    binutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /build
+
+# Copy source code
+COPY . .
+
+# Build flags for Zen 3 compatibility (no AVX-512)
+ENV RUSTFLAGS="-C target-cpu=haswell -C target-feature=-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl,-gfni"
+ENV GGML_NATIVE=OFF
+ENV GGML_AVX512=OFF
+ENV GGML_AVX_VNNI=OFF
+ENV GGML_AVX512_VNNI=OFF
+
+# ONNX Runtime will be downloaded during build by the ort crate
+# Set ORT_STRATEGY to download (default behavior)
+ENV ORT_STRATEGY=download
+
+# Disable LTO for faster builds (can hang on TrueNAS)
+# Build with parakeet feature
+RUN cargo build --release --features parakeet \
+    --config 'profile.release.lto=false' \
+    --config 'profile.release.codegen-units=8' \
+    && cp target/release/voxtype /tmp/voxtype-parakeet
+
+# Verify binary
+RUN echo "=== Verifying Parakeet binary ===" \
+    && /tmp/voxtype-parakeet --version \
+    && echo "=== Checking for AVX-512 instructions ===" \
+    && zmm_count=$(objdump -d /tmp/voxtype-parakeet | grep -c zmm || echo 0) \
+    && echo "  zmm registers: $zmm_count" \
+    && if [ "$zmm_count" -gt 0 ]; then \
+         echo "WARNING: Binary contains AVX-512 instructions"; \
+       else \
+         echo "✓ Binary is clean (no AVX-512)"; \
+       fi \
+    && echo "=== Binary size ===" \
+    && ls -lh /tmp/voxtype-parakeet
+
+# Output stage
+CMD mkdir -p /output \
+    && cp /tmp/voxtype-parakeet /output/voxtype-${VERSION}-linux-x86_64-parakeet \
+    && echo "Binary copied to /output:" \
+    && ls -la /output/voxtype-*
