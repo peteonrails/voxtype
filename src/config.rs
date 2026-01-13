@@ -395,10 +395,10 @@ fn load_icon_theme(theme: &str) -> ResolvedIcons {
         },
         "omarchy" => ResolvedIcons {
             // Material Design icons matching Omarchy waybar config
-            idle: "\u{ec12}".to_string(),     // nf-md-microphone_outline
+            idle: "\u{ec12}".to_string(), // nf-md-microphone_outline
             recording: "\u{f036c}".to_string(), // nf-md-microphone
             transcribing: "\u{f051f}".to_string(), // nf-md-timer_sand
-            stopped: "\u{ec12}".to_string(),  // nf-md-microphone_outline
+            stopped: "\u{ec12}".to_string(), // nf-md-microphone_outline
         },
         "minimal" => ResolvedIcons {
             idle: "○".to_string(),
@@ -494,11 +494,14 @@ fn load_custom_icon_theme(path: &str) -> Result<ResolvedIcons, String> {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum WhisperBackend {
-    /// Local transcription using whisper.cpp
+    /// Local transcription using whisper.cpp via whisper-rs FFI
     #[default]
     Local,
     /// Remote transcription via OpenAI-compatible API
     Remote,
+    /// CLI transcription using whisper-cli subprocess
+    /// Fallback for systems where whisper-rs FFI doesn't work (e.g., glibc 2.42)
+    Cli,
 }
 
 /// Whisper speech-to-text configuration
@@ -536,7 +539,6 @@ pub struct WhisperConfig {
     pub gpu_isolation: bool,
 
     // --- Remote backend settings ---
-
     /// Remote server endpoint URL (e.g., "http://192.168.1.100:8080")
     /// Required when backend = "remote"
     #[serde(default)]
@@ -553,6 +555,12 @@ pub struct WhisperConfig {
     /// Timeout for remote requests in seconds (default: 30)
     #[serde(default)]
     pub remote_timeout_secs: Option<u64>,
+
+    // --- CLI backend settings ---
+    /// Path to whisper-cli binary (optional, will search PATH if not set)
+    /// Required when backend = "cli"
+    #[serde(default)]
+    pub whisper_cli_path: Option<String>,
 }
 
 /// Text processing configuration
@@ -707,6 +715,7 @@ impl Default for Config {
                 remote_model: None,
                 remote_api_key: None,
                 remote_timeout_secs: None,
+                whisper_cli_path: None,
             },
             output: OutputConfig {
                 mode: OutputMode::Type,
