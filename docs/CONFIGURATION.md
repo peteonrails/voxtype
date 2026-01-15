@@ -454,6 +454,48 @@ gpu_isolation = true  # Release GPU memory between transcriptions
 
 **Note:** This setting only applies when using the local whisper backend (`backend = "local"`). It has no effect with remote transcription since no local GPU is used.
 
+### context_window_optimization
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Optimizes Whisper's context window size for short recordings. When enabled, clips under 22.5 seconds use a smaller context window proportional to their length, significantly speeding up transcription.
+
+**Values:**
+- `true` (default) - Use optimized context window for short clips. Faster transcription.
+- `false` - Always use Whisper's full 30-second context window (1500 tokens).
+
+**Performance impact:**
+
+| Mode | ~1.5s clip (CPU) | ~1.5s clip (GPU) |
+|------|------------------|------------------|
+| Enabled (`true`) | ~8s | ~0.28s |
+| Disabled (`false`) | ~15s | ~0.46s |
+
+The optimization provides roughly 1.6-1.9x speedup for short recordings on both CPU and GPU.
+
+**When to disable (`false`):**
+- You experience transcription quality issues with short clips (rare)
+- Debugging transcription problems and want to rule out this optimization
+- Testing or benchmarking against default Whisper behavior
+
+Most users should leave this enabled. The optimization has been tested extensively and should not affect transcription quality.
+
+**Example:**
+```toml
+[whisper]
+model = "large-v3-turbo"
+context_window_optimization = false  # Use full context window (not recommended)
+```
+
+**CLI override:**
+```bash
+voxtype --no-whisper-context-optimization daemon
+```
+
+**Note:** This setting only applies when using the local whisper backend (`backend = "local"`). It has no effect with remote transcription.
+
 ---
 
 ## Remote Backend Settings
