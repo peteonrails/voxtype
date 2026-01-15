@@ -101,6 +101,17 @@ impl Transcriber for WhisperTranscriber {
             params.set_single_segment(true);
         }
 
+        // Optimize context window for short clips
+        if let Some(audio_ctx) = calculate_audio_ctx(duration_secs) {
+            params.set_audio_ctx(audio_ctx);
+            tracing::info!(
+                "Audio context optimization: using audio_ctx={} for {:.2}s clip (formula: {:.2}s * 50 + 64)",
+                audio_ctx,
+                duration_secs,
+                duration_secs
+            );
+        }
+
         // Run inference
         state
             .full(params, samples)
@@ -194,6 +205,20 @@ fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
     )))
 }
 
+/// Calculate audio_ctx parameter for short clips (≤22.5s).
+/// Formula: duration_seconds * 50 + 64
+///
+/// This optimization reduces transcription time for short recordings by
+/// telling Whisper to use a smaller context window proportional to the
+/// actual audio length, rather than the full 30-second batch window.
+fn calculate_audio_ctx(duration_secs: f32) -> Option<i32> {
+    if duration_secs <= 22.5 {
+        Some((duration_secs * 50.0) as i32 + 64)
+    } else {
+        None
+    }
+}
+
 /// Get the filename for a model
 pub fn get_model_filename(model: &str) -> String {
     match model {
@@ -231,5 +256,32 @@ mod tests {
         let url = get_model_url("base.en");
         assert!(url.contains("ggml-base.en.bin"));
         assert!(url.contains("huggingface.co"));
+    }
+
+    #[test]
+    fn test_calculate_audio_ctx_short_clips() {
+        // Very short clip: 1s -> 1 * 50 + 64 = 114
+        assert_eq!(calculate_audio_ctx(1.0), Some(114));
+
+        // 5 second clip: 5 * 50 + 64 = 314
+        assert_eq!(calculate_audio_ctx(5.0), Some(314));
+
+        // 10 second clip: 10 * 50 + 64 = 564
+        assert_eq!(calculate_audio_ctx(10.0), Some(564));
+
+        // At threshold: 22.5 * 50 + 64 = 1189
+        assert_eq!(calculate_audio_ctx(22.5), Some(1189));
+    }
+
+    #[test]
+    fn test_calculate_audio_ctx_long_clips() {
+        // Just over threshold: no optimization
+        assert_eq!(calculate_audio_ctx(22.6), None);
+
+        // 30 second clip: no optimization
+        assert_eq!(calculate_audio_ctx(30.0), None);
+
+        // 60 second clip: no optimization
+        assert_eq!(calculate_audio_ctx(60.0), None);
     }
 }
