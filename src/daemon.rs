@@ -13,6 +13,7 @@ use crate::output::post_process::PostProcessor;
 use crate::state::State;
 use crate::text::TextProcessor;
 use crate::transcribe;
+use pidlock::Pidlock;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -429,6 +430,23 @@ impl Daemon {
         Config::ensure_directories().map_err(|e| {
             crate::error::VoxtypeError::Config(format!("Failed to create directories: {}", e))
         })?;
+
+        // Check if another instance is already running (single-instance safeguard)
+        let lock_path = Config::runtime_dir().join("voxtype.lock");
+        let lock_path_str = lock_path.to_string_lossy().to_string();
+        let mut pidlock = Pidlock::new(&lock_path_str);
+
+        match pidlock.acquire() {
+            Ok(_) => {
+                tracing::debug!("Acquired PID lock at {:?}", lock_path);
+            }
+            Err(e) => {
+                tracing::error!("Failed to acquire lock: another voxtype instance is already running");
+                return Err(crate::error::VoxtypeError::Config(
+                    format!("Another voxtype instance is already running (lock error: {:?})", e)
+                ).into());
+            }
+        }
 
         tracing::info!("Output mode: {:?}", self.config.output.mode);
 
