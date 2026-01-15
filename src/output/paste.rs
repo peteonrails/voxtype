@@ -164,11 +164,13 @@ pub struct PasteOutput {
     auto_submit: bool,
     /// Parsed paste keystroke
     keystroke: ParsedKeystroke,
+    /// Delay between key events in milliseconds (from config type_delay_ms)
+    key_delay_ms: u32,
 }
 
 impl PasteOutput {
     /// Create a new paste output
-    pub fn new(notify: bool, auto_submit: bool, paste_keys: Option<String>) -> Self {
+    pub fn new(notify: bool, auto_submit: bool, paste_keys: Option<String>, key_delay_ms: u32) -> Self {
         let keystroke_str = paste_keys.as_deref().unwrap_or("ctrl+v");
         let keystroke = ParsedKeystroke::parse(keystroke_str).unwrap_or_else(|e| {
             tracing::warn!("Invalid paste_keys '{}': {}, using ctrl+v", keystroke_str, e);
@@ -181,6 +183,7 @@ impl PasteOutput {
             notify,
             auto_submit,
             keystroke,
+            key_delay_ms,
         }
     }
 
@@ -329,10 +332,17 @@ impl PasteOutput {
             OutputError::CtrlVFailed(format!("Cannot convert keystroke for ydotool: {}", e))
         })?;
 
-        tracing::debug!("Running: ydotool key {}", args.join(" "));
+        tracing::debug!("Running: ydotool key {}, {}ms", args.join(" "), self.key_delay_ms);
 
-        let output = Command::new("ydotool")
-            .arg("key")
+        let mut cmd = Command::new("ydotool");
+        cmd.arg("key");
+
+        // Only add delay parameter if configured
+        if self.key_delay_ms > 0 {
+            cmd.arg(format!("-d {}", self.key_delay_ms));
+        }
+
+        let output = cmd
             .args(&args)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -446,7 +456,8 @@ impl TextOutput for PasteOutput {
         self.copy_to_clipboard(text).await?;
 
         // Small delay to ensure clipboard is set before pasting
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Increased from 100ms to 200ms to improve reliability with ydotool
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         // Step 2: Simulate paste keystroke
         self.simulate_paste_keystroke().await?;
