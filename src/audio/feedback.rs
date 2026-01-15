@@ -15,6 +15,8 @@ pub enum SoundEvent {
     RecordingStart,
     /// Recording stopped
     RecordingStop,
+    /// Recording/transcription cancelled
+    Cancelled,
     /// Error occurred
     Error,
 }
@@ -31,6 +33,7 @@ pub struct AudioFeedback {
 struct SoundTheme {
     start: Vec<u8>,
     stop: Vec<u8>,
+    cancel: Vec<u8>,
     error: Vec<u8>,
 }
 
@@ -59,6 +62,7 @@ impl AudioFeedback {
         let sound_data = match event {
             SoundEvent::RecordingStart => &self.theme.start,
             SoundEvent::RecordingStop => &self.theme.stop,
+            SoundEvent::Cancelled => &self.theme.cancel,
             SoundEvent::Error => &self.theme.error,
         };
 
@@ -114,6 +118,7 @@ fn load_custom_theme(path: &str) -> Result<SoundTheme, String> {
     Ok(SoundTheme {
         start: load_file("start.wav"),
         stop: load_file("stop.wav"),
+        cancel: load_file("cancel.wav"),
         error: load_file("error.wav"),
     })
 }
@@ -235,6 +240,8 @@ fn generate_default_theme() -> SoundTheme {
         start: generate_two_tone_wav(440.0, 880.0, 150, 20),
         // Falling two-tone: 880Hz -> 440Hz (completion)
         stop: generate_two_tone_wav(880.0, 440.0, 150, 20),
+        // Quick descending triple-beep for cancel (distinct from stop)
+        cancel: generate_tone_wav(600.0, 80, 10),
         // Low warning tone
         error: generate_two_tone_wav(300.0, 200.0, 200, 30),
     }
@@ -247,6 +254,8 @@ fn generate_subtle_theme() -> SoundTheme {
         start: generate_tone_wav(1200.0, 50, 10),
         // Soft low click
         stop: generate_tone_wav(800.0, 50, 10),
+        // Quick mid-tone for cancel
+        cancel: generate_tone_wav(600.0, 40, 8),
         // Double low click
         error: generate_two_tone_wav(400.0, 300.0, 100, 15),
     }
@@ -259,6 +268,8 @@ fn generate_mechanical_theme() -> SoundTheme {
         start: generate_click_wav(30),
         // Softer click
         stop: generate_click_wav(20),
+        // Double click for cancel
+        cancel: generate_click_wav(15),
         // Buzzer
         error: generate_tone_wav(150.0, 150, 20),
     }
@@ -282,12 +293,15 @@ mod tests {
         let default = generate_default_theme();
         assert!(!default.start.is_empty());
         assert!(!default.stop.is_empty());
+        assert!(!default.cancel.is_empty());
         assert!(!default.error.is_empty());
 
         let subtle = generate_subtle_theme();
         assert!(!subtle.start.is_empty());
+        assert!(!subtle.cancel.is_empty());
 
         let mechanical = generate_mechanical_theme();
         assert!(!mechanical.start.is_empty());
+        assert!(!mechanical.cancel.is_empty());
     }
 }

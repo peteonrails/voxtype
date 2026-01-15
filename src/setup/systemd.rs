@@ -1,6 +1,6 @@
 //! Systemd user service management for voxtype
 
-use super::{get_voxtype_path, print_failure, print_info, print_success};
+use super::{get_voxtype_service_path, print_failure, print_info, print_success};
 use std::path::PathBuf;
 use tokio::process::Command;
 
@@ -20,7 +20,7 @@ fn service_path() -> PathBuf {
 
 /// Generate the systemd service file content
 fn generate_service_file() -> String {
-    let voxtype_path = get_voxtype_path();
+    let voxtype_path = get_voxtype_service_path();
 
     format!(
         r#"[Unit]
@@ -170,4 +170,19 @@ pub async fn status() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Regenerate the service file content (used after backend switches)
+///
+/// Returns true if the service file was updated, false if no service was installed.
+pub fn regenerate_service_file() -> anyhow::Result<bool> {
+    let service_path = service_path();
+
+    if !service_path.exists() {
+        return Ok(false); // No service installed, nothing to update
+    }
+
+    let content = generate_service_file();
+    std::fs::write(&service_path, &content)?;
+    Ok(true)
 }

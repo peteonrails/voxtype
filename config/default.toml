@@ -80,11 +80,20 @@ translate = false
 # When false, model is kept in memory for faster response times (default)
 on_demand_loading = false
 
+# GPU memory isolation mode
+# Enable on laptops with hybrid graphics to let dGPU sleep between transcriptions.
+# gpu_isolation = true
+
+# Context window optimization for short recordings (enabled by default)
+# Speeds up transcription for clips under 22.5 seconds. Disable only if you
+# experience accuracy issues with short recordings (rare).
+# context_window_optimization = false
+
 [output]
 # Primary output mode: "type", "clipboard", or "paste"
-# - type: Simulates keyboard input at cursor position (requires ydotool)
+# - type: Simulates keyboard input at cursor position (requires wtype or ydotool)
 # - clipboard: Copies text to clipboard (requires wl-copy)
-# - paste: Copies to clipboard then pastes with Ctrl+V (requires wl-copy and ydotool)
+# - paste: Copies to clipboard then simulates paste keystroke (requires wl-copy and wtype or ydotool)
 mode = "type"
 
 # Fall back to clipboard if typing fails
@@ -94,11 +103,34 @@ fallback_to_clipboard = true
 # 0 = fastest possible, increase if characters are dropped
 type_delay_ms = 0
 
-# Output hooks for compositor integration (fixes modifier key interference)
-# When using compositor keybindings with modifiers (e.g., SUPER+CTRL+X),
-# these hooks switch to a submap/mode that blocks modifiers during typing.
+# Delay before wtype starts typing (ms)
+# Allows virtual keyboard to initialize. Some users report this helps prevent
+# the first character from being dropped on text insertion. Try 100-200ms.
+# Note: When using compositor integration (via `voxtype setup compositor`),
+# best results come from not binding Escape in the submap. Some users have
+# had success with Escape bound by increasing this delay, but the most
+# consistent fix is to use F12 or another key instead.
+wtype_delay_ms = 0
+
+# Keystroke for paste mode (when mode = "paste")
+# Default is "ctrl+v". Change for environments with different paste shortcuts.
+# Examples:
+#   paste_keys = "ctrl+v"        # Standard (default)
+#   paste_keys = "shift+insert"  # Hyprland/Omarchy universal paste
+#   paste_keys = "ctrl+shift+v"  # Some terminal emulators
+# paste_keys = "ctrl+v"
+
+# Compositor integration hooks
 # Use `voxtype setup compositor hyprland|sway|river` for automatic setup.
 #
+# pre_recording_command: Runs when recording starts. Switch to a submap/mode
+#   where F12 can cancel recording/transcription.
+# pre_output_command: Runs before typing output. Switch to a submap/mode that
+#   blocks modifier keys from triggering compositor shortcuts during typing.
+# post_output_command: Runs after typing output. Reset to normal mode.
+#
+# Example (Hyprland):
+# pre_recording_command = "hyprctl dispatch submap voxtype_recording"
 # pre_output_command = "hyprctl dispatch submap voxtype_suppress"
 # post_output_command = "hyprctl dispatch submap reset"
 

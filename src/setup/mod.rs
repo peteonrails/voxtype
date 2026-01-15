@@ -73,6 +73,26 @@ pub fn get_voxtype_path() -> String {
         .unwrap_or_else(|_| "voxtype".to_string())
 }
 
+/// Get the voxtype binary path for service files
+///
+/// In tiered mode (DEB/RPM packages), returns /usr/bin/voxtype (the symlink)
+/// so backend switching only requires a service restart rather than regenerating
+/// the service file.
+pub fn get_voxtype_service_path() -> String {
+    const VOXTYPE_BIN: &str = "/usr/bin/voxtype";
+
+    // If /usr/bin/voxtype exists (either as symlink or binary), use it
+    // This allows backend switching to work with just a service restart
+    if std::path::Path::new(VOXTYPE_BIN).exists()
+        || std::fs::symlink_metadata(VOXTYPE_BIN).is_ok()
+    {
+        return VOXTYPE_BIN.to_string();
+    }
+
+    // Fallback to current exe (for non-standard installations)
+    get_voxtype_path()
+}
+
 /// Print a success message
 pub fn print_success(msg: &str) {
     println!("  \x1b[32m✓\x1b[0m {}", msg);
@@ -347,9 +367,17 @@ fn print_tool_status(tool: &OutputToolStatus, is_relevant: bool) {
 /// Run setup tasks (non-blocking, no red X errors)
 ///
 /// Flags:
+/// - `download`: Download model if missing
+/// - `model_override`: Specific model to download (use with `download`)
 /// - `quiet`: Suppress ALL output (for scripting/automation)
 /// - `no_post_install`: Suppress only "Next steps" instructions
-pub async fn run_setup(config: &Config, download: bool, quiet: bool, no_post_install: bool) -> anyhow::Result<()> {
+pub async fn run_setup(
+    config: &Config,
+    download: bool,
+    model_override: Option<&str>,
+    quiet: bool,
+    no_post_install: bool,
+) -> anyhow::Result<()> {
     if !quiet {
         println!("Voxtype Setup\n");
         println!("=============\n");
@@ -386,7 +414,24 @@ pub async fn run_setup(config: &Config, download: bool, quiet: bool, no_post_ins
         println!("\nWhisper model...");
     }
     let models_dir = Config::models_dir();
-    let model_name = &config.whisper.model;
+
+    // Use model_override if provided, otherwise use config default
+    let model_name: &str = match model_override {
+        Some(name) => {
+            // Validate the model name
+            if !model::is_valid_model(name) {
+                let valid = model::valid_model_names().join(", ");
+                anyhow::bail!(
+                    "Unknown model '{}'. Valid models are: {}",
+                    name,
+                    valid
+                );
+            }
+            name
+        }
+        None => &config.whisper.model,
+    };
+
     let model_filename = crate::transcribe::whisper::get_model_filename(model_name);
     let model_path = models_dir.join(&model_filename);
 
@@ -400,11 +445,25 @@ pub async fn run_setup(config: &Config, download: bool, quiet: bool, no_post_ins
                 model_name, size
             ));
         }
+        // If user explicitly requested this model, update config even if already downloaded
+        if model_override.is_some() {
+            model::set_model_config(model_name)?;
+            if !quiet {
+                print_success(&format!("Config updated to use '{}'", model_name));
+            }
+        }
     } else if download {
         if !quiet {
             println!("  Downloading {}...", model_name);
         }
         model::download_model(model_name)?;
+        // Update config to use the downloaded model
+        if model_override.is_some() {
+            model::set_model_config(model_name)?;
+            if !quiet {
+                print_success(&format!("Config updated to use '{}'", model_name));
+            }
+        }
     } else if !quiet {
         print_info(&format!("Model '{}' not downloaded yet", model_name));
         println!("       Run: voxtype setup --download");

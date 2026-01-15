@@ -20,14 +20,17 @@ pub struct WtypeOutput {
     notify: bool,
     /// Whether to send Enter key after output
     auto_submit: bool,
+    /// Delay before typing starts (ms), allows virtual keyboard to initialize
+    delay_ms: u32,
 }
 
 impl WtypeOutput {
     /// Create a new wtype output
-    pub fn new(notify: bool, auto_submit: bool) -> Self {
+    pub fn new(notify: bool, auto_submit: bool, delay_ms: u32) -> Self {
         Self {
             notify,
             auto_submit,
+            delay_ms,
         }
     }
 
@@ -62,7 +65,14 @@ impl TextOutput for WtypeOutput {
             return Ok(());
         }
 
-        let output = Command::new("wtype")
+        let mut cmd = Command::new("wtype");
+
+        // Add delay before typing if configured (helps prevent first character drop)
+        if self.delay_ms > 0 {
+            cmd.arg("-s").arg(self.delay_ms.to_string());
+        }
+
+        let output = cmd
             .arg("--")
             .arg(text)
             .stdout(Stdio::null())
@@ -134,15 +144,24 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = WtypeOutput::new(true, false);
+        let output = WtypeOutput::new(true, false, 0);
         assert!(output.notify);
         assert!(!output.auto_submit);
+        assert_eq!(output.delay_ms, 0);
     }
 
     #[test]
     fn test_new_with_enter() {
-        let output = WtypeOutput::new(false, true);
+        let output = WtypeOutput::new(false, true, 0);
         assert!(!output.notify);
         assert!(output.auto_submit);
+    }
+
+    #[test]
+    fn test_new_with_delay() {
+        let output = WtypeOutput::new(false, false, 200);
+        assert!(!output.notify);
+        assert!(!output.auto_submit);
+        assert_eq!(output.delay_ms, 200);
     }
 }

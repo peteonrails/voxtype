@@ -17,6 +17,9 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
+    // Check if this is the worker command (needs stderr-only logging)
+    let is_worker = matches!(cli.command, Some(Commands::TranscribeWorker { .. }));
+
     // Initialize logging
     let log_level = if cli.quiet {
         "error"
@@ -28,13 +31,25 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(format!("voxtype={},warn", log_level))),
-        )
-        .with_target(false)
-        .init();
+    if is_worker {
+        // Worker uses stderr for logging (stdout is reserved for IPC protocol)
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| EnvFilter::new(format!("voxtype={},warn", log_level))),
+            )
+            .with_target(false)
+            .with_writer(std::io::stderr)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| EnvFilter::new(format!("voxtype={},warn", log_level))),
+            )
+            .with_target(false)
+            .init();
+    }
 
     // Load configuration
     let mut config = config::load_config(cli.config.as_deref())?;
@@ -55,6 +70,12 @@ async fn main() -> anyhow::Result<()> {
     if cli.toggle {
         config.hotkey.mode = config::ActivationMode::Toggle;
     }
+    if let Some(delay) = cli.wtype_delay {
+        config.output.wtype_delay_ms = delay;
+    }
+    if cli.no_whisper_context_optimization {
+        config.whisper.context_window_optimization = false;
+    }
 
     // Run the appropriate command
     match cli.command.unwrap_or(Commands::Daemon) {
@@ -67,7 +88,32 @@ async fn main() -> anyhow::Result<()> {
             transcribe_file(&config, &file)?;
         }
 
-        Commands::Setup { action, download, quiet, no_post_install } => {
+        Commands::TranscribeWorker {
+            model,
+            language,
+            translate,
+            threads,
+        } => {
+            // Internal command: run transcription worker process
+            // This is spawned by the daemon when gpu_isolation is enabled
+            // Use command-line overrides if provided, otherwise use config
+            let mut whisper_config = config.whisper.clone();
+            if let Some(m) = model {
+                whisper_config.model = m;
+            }
+            if let Some(l) = language {
+                whisper_config.language = l;
+            }
+            if translate {
+                whisper_config.translate = true;
+            }
+            if let Some(t) = threads {
+                whisper_config.threads = Some(t);
+            }
+            transcribe::worker::run_worker(&whisper_config)?;
+        }
+
+        Commands::Setup { action, download, model, quiet, no_post_install } => {
             match action {
                 Some(SetupAction::Check) => {
                     setup::run_checks(&config).await?;
@@ -125,7 +171,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 None => {
                     // Default: run setup (non-blocking)
-                    setup::run_setup(&config, download, quiet, no_post_install).await?;
+                    setup::run_setup(&config, download, model.as_deref(), quiet, no_post_install).await?;
                 }
             }
         }
@@ -146,10 +192,11 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Send a record command to the running daemon via Unix signals
+/// Send a record command to the running daemon via Unix signals or file triggers
 fn send_record_command(config: &config::Config, action: RecordAction) -> anyhow::Result<()> {
     use nix::sys::signal::{kill, Signal};
     use nix::unistd::Pid;
+    use voxtype::OutputModeOverride;
 
     // Read PID from the pid file
     let pid_file = config::Config::runtime_dir().join("pid");
@@ -177,11 +224,31 @@ fn send_record_command(config: &config::Config, action: RecordAction) -> anyhow:
         std::process::exit(1);
     }
 
+    // Handle cancel separately (uses file trigger instead of signal)
+    if matches!(action, RecordAction::Cancel) {
+        let cancel_file = config::Config::runtime_dir().join("cancel");
+        std::fs::write(&cancel_file, "cancel")
+            .map_err(|e| anyhow::anyhow!("Failed to write cancel file: {}", e))?;
+        return Ok(());
+    }
+
+    // Write output mode override file if specified
+    if let Some(mode_override) = action.output_mode_override() {
+        let override_file = config::Config::runtime_dir().join("output_mode_override");
+        let mode_str = match mode_override {
+            OutputModeOverride::Type => "type",
+            OutputModeOverride::Clipboard => "clipboard",
+            OutputModeOverride::Paste => "paste",
+        };
+        std::fs::write(&override_file, mode_str)
+            .map_err(|e| anyhow::anyhow!("Failed to write output mode override: {}", e))?;
+    }
+
     // For toggle, we need to read current state to decide which signal to send
-    let signal = match action {
-        RecordAction::Start => Signal::SIGUSR1,
-        RecordAction::Stop => Signal::SIGUSR2,
-        RecordAction::Toggle => {
+    let signal = match &action {
+        RecordAction::Start { .. } => Signal::SIGUSR1,
+        RecordAction::Stop { .. } => Signal::SIGUSR2,
+        RecordAction::Toggle { .. } => {
             // Read current state to determine action
             let state_file = match config.resolve_state_file() {
                 Some(path) => path,
@@ -207,6 +274,7 @@ fn send_record_command(config: &config::Config, action: RecordAction) -> anyhow:
                 Signal::SIGUSR1 // Start
             }
         }
+        RecordAction::Cancel => unreachable!(), // Handled above
     };
 
     kill(Pid::from_raw(pid), signal)
@@ -563,6 +631,7 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
         config.output.fallback_to_clipboard
     );
     println!("  type_delay_ms = {}", config.output.type_delay_ms);
+    println!("  wtype_delay_ms = {}", config.output.wtype_delay_ms);
 
     println!("\n[output.notification]");
     println!(

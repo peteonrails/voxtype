@@ -56,6 +56,10 @@ pub struct Cli {
     #[arg(long, value_name = "MODEL")]
     pub model: Option<String>,
 
+    /// Disable context window optimization for short recordings
+    #[arg(long)]
+    pub no_whisper_context_optimization: bool,
+
     /// Override hotkey (e.g., SCROLLLOCK, PAUSE, F13)
     #[arg(long, value_name = "KEY")]
     pub hotkey: Option<String>,
@@ -63,6 +67,10 @@ pub struct Cli {
     /// Use toggle mode (press to start/stop) instead of push-to-talk (hold to record)
     #[arg(long)]
     pub toggle: bool,
+
+    /// Delay before wtype starts typing (ms), helps prevent first character drop
+    #[arg(long, value_name = "MS")]
+    pub wtype_delay: Option<u32>,
 
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -79,6 +87,27 @@ pub enum Commands {
         file: std::path::PathBuf,
     },
 
+    /// Internal: Worker process for GPU-isolated transcription
+    /// Reads audio from stdin, writes transcription result to stdout
+    #[command(hide = true)]
+    TranscribeWorker {
+        /// Model name or path (passed from parent process)
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Language code (passed from parent process)
+        #[arg(long)]
+        language: Option<String>,
+
+        /// Enable translation to English (passed from parent process)
+        #[arg(long)]
+        translate: bool,
+
+        /// Number of threads for inference (passed from parent process)
+        #[arg(long)]
+        threads: Option<usize>,
+    },
+
     /// Setup and installation utilities
     Setup {
         #[command(subcommand)]
@@ -87,6 +116,10 @@ pub enum Commands {
         /// Download model if missing (shorthand for basic setup)
         #[arg(long)]
         download: bool,
+
+        /// Specify which model to download (use with --download)
+        #[arg(long, value_name = "NAME")]
+        model: Option<String>,
 
         /// Suppress all output (for scripting/automation)
         #[arg(long)]
@@ -126,14 +159,82 @@ pub enum Commands {
     },
 }
 
+/// Output mode override for record commands
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputModeOverride {
+    Type,
+    Clipboard,
+    Paste,
+}
+
 #[derive(Subcommand)]
 pub enum RecordAction {
     /// Start recording (send SIGUSR1 to daemon)
-    Start,
+    Start {
+        /// Override output mode to simulate keyboard typing
+        #[arg(long = "type", group = "output_mode")]
+        type_mode: bool,
+
+        /// Override output mode to clipboard only
+        #[arg(long, group = "output_mode")]
+        clipboard: bool,
+
+        /// Override output mode to paste (clipboard + Ctrl+V)
+        #[arg(long, group = "output_mode")]
+        paste: bool,
+    },
     /// Stop recording and transcribe (send SIGUSR2 to daemon)
-    Stop,
+    Stop {
+        /// Override output mode to simulate keyboard typing
+        #[arg(long = "type", group = "output_mode")]
+        type_mode: bool,
+
+        /// Override output mode to clipboard only
+        #[arg(long, group = "output_mode")]
+        clipboard: bool,
+
+        /// Override output mode to paste (clipboard + Ctrl+V)
+        #[arg(long, group = "output_mode")]
+        paste: bool,
+    },
     /// Toggle recording state
-    Toggle,
+    Toggle {
+        /// Override output mode to simulate keyboard typing
+        #[arg(long = "type", group = "output_mode")]
+        type_mode: bool,
+
+        /// Override output mode to clipboard only
+        #[arg(long, group = "output_mode")]
+        clipboard: bool,
+
+        /// Override output mode to paste (clipboard + Ctrl+V)
+        #[arg(long, group = "output_mode")]
+        paste: bool,
+    },
+    /// Cancel current recording or transcription (discard without output)
+    Cancel,
+}
+
+impl RecordAction {
+    /// Extract the output mode override from the action flags
+    pub fn output_mode_override(&self) -> Option<OutputModeOverride> {
+        let (type_mode, clipboard, paste) = match self {
+            RecordAction::Start { type_mode, clipboard, paste } => (*type_mode, *clipboard, *paste),
+            RecordAction::Stop { type_mode, clipboard, paste } => (*type_mode, *clipboard, *paste),
+            RecordAction::Toggle { type_mode, clipboard, paste } => (*type_mode, *clipboard, *paste),
+            RecordAction::Cancel => return None,
+        };
+
+        if type_mode {
+            Some(OutputModeOverride::Type)
+        } else if clipboard {
+            Some(OutputModeOverride::Clipboard)
+        } else if paste {
+            Some(OutputModeOverride::Paste)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -354,6 +455,122 @@ mod tests {
                 assert!(restart, "should have restart=true");
             }
             _ => panic!("Expected Setup Model command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_download_with_model() {
+        let cli = Cli::parse_from(["voxtype", "setup", "--download", "--model", "large-v3-turbo"]);
+        match cli.command {
+            Some(Commands::Setup { download, model, .. }) => {
+                assert!(download, "should have download=true");
+                assert_eq!(model, Some("large-v3-turbo".to_string()));
+            }
+            _ => panic!("Expected Setup command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_model_without_download() {
+        // --model can be specified without --download (for validation/config update of existing model)
+        let cli = Cli::parse_from(["voxtype", "setup", "--model", "small.en"]);
+        match cli.command {
+            Some(Commands::Setup { download, model, .. }) => {
+                assert!(!download, "download should be false");
+                assert_eq!(model, Some("small.en".to_string()));
+            }
+            _ => panic!("Expected Setup command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_download_model_quiet() {
+        // Full non-interactive setup command
+        let cli = Cli::parse_from(["voxtype", "setup", "--download", "--model", "large-v3-turbo", "--quiet"]);
+        match cli.command {
+            Some(Commands::Setup { download, model, quiet, .. }) => {
+                assert!(download, "should have download=true");
+                assert_eq!(model, Some("large-v3-turbo".to_string()));
+                assert!(quiet, "should have quiet=true");
+            }
+            _ => panic!("Expected Setup command"),
+        }
+    }
+
+    #[test]
+    fn test_record_cancel() {
+        let cli = Cli::parse_from(["voxtype", "record", "cancel"]);
+        match cli.command {
+            Some(Commands::Record { action: RecordAction::Cancel }) => {
+                // Success - cancel action parsed correctly
+            }
+            _ => panic!("Expected Record Cancel command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_no_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "start"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.output_mode_override(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_paste_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--paste"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::Paste));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_clipboard_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--clipboard"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::Clipboard));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_type_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--type"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::Type));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_stop_paste_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "stop", "--paste"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::Paste));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_toggle_paste_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "toggle", "--paste"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::Paste));
+            }
+            _ => panic!("Expected Record command"),
         }
     }
 }

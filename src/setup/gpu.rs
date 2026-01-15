@@ -398,6 +398,11 @@ pub fn enable() -> anyhow::Result<()> {
         enable_simple_mode()?;
     }
 
+    // Regenerate systemd service if it exists
+    if super::systemd::regenerate_service_file()? {
+        println!("Updated systemd service to use GPU backend.");
+    }
+
     println!("Switched to GPU (Vulkan) backend.");
     println!();
     println!("Restart voxtype to use GPU acceleration:");
@@ -416,6 +421,11 @@ pub fn disable() -> anyhow::Result<()> {
     } else {
         disable_simple_mode()?;
         println!("Switched to CPU (native) backend.");
+    }
+
+    // Regenerate systemd service if it exists
+    if super::systemd::regenerate_service_file()? {
+        println!("Updated systemd service to use CPU backend.");
     }
 
     println!();

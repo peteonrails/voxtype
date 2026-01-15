@@ -12,8 +12,8 @@ Hold a hotkey (default: ScrollLock) while speaking, release to transcribe and ou
 
 ## Features
 
-- **Works on any Linux desktop** - Uses kernel-level input (evdev). Works on Wayland and X11
-- **Fully offline** - Uses whisper.cpp for local transcription, no internet required
+- **Works on any Linux desktop** - Uses compositor keybindings (Hyprland, Sway, River) with evdev fallback for X11 and other environments
+- **Fully offline by default** - Uses whisper.cpp for local transcription, with optional remote server support
 - **Fallback chain** - Types via wtype (best CJK support), falls back to ydotool, then clipboard
 - **Push-to-talk or Toggle mode** - Hold to record, or press once to start/stop
 - **Audio feedback** - Optional sound cues when recording starts/stops
@@ -543,6 +543,8 @@ We want to hear from you! Voxtype is a young project and your feedback helps mak
 - [Peter Jackson](https://github.com/peteonrails) - Creator and maintainer
 - [jvantillo](https://github.com/jvantillo) - GPU acceleration patch, whisper-rs 0.15.1 compatibility
 - [materemias](https://github.com/materemias) - Paste output mode, on-demand model loading, PKGBUILD fix
+- [Dan Heuckeroth](https://github.com/danheuck) - NixOS Home Manager module design
+- [Kevin Miller](https://github.com/digunix) - NixOS module enhancements, ROCm support
 - [reisset](https://github.com/reisset) - Testing and feedback on post-processing feature
 - [Goodroot](https://github.com/goodroot) - Testing, feedback, and documentation updates
 - [robzolkos](https://github.com/robzolkos) - Auto-submit feature for AI agent workflows

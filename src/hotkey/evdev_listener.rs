@@ -25,6 +25,8 @@ pub struct EvdevListener {
     target_key: Key,
     /// Modifier keys that must be held
     modifier_keys: HashSet<Key>,
+    /// Optional cancel key
+    cancel_key: Option<Key>,
     /// Signal to stop the listener task
     stop_signal: Option<oneshot::Sender<()>>,
 }
@@ -40,6 +42,13 @@ impl EvdevListener {
             .map(|k| parse_key_name(k))
             .collect::<Result<HashSet<_>, _>>()?;
 
+        // Parse optional cancel key
+        let cancel_key = config
+            .cancel_key
+            .as_ref()
+            .map(|k| parse_key_name(k))
+            .transpose()?;
+
         // Verify we can access /dev/input (permission check)
         std::fs::read_dir("/dev/input").map_err(|e| {
             HotkeyError::DeviceAccess(format!("/dev/input: {}", e))
@@ -48,6 +57,7 @@ impl EvdevListener {
         Ok(Self {
             target_key,
             modifier_keys,
+            cancel_key,
             stop_signal: None,
         })
     }
@@ -62,10 +72,11 @@ impl HotkeyListener for EvdevListener {
 
         let target_key = self.target_key;
         let modifier_keys = self.modifier_keys.clone();
+        let cancel_key = self.cancel_key;
 
         // Spawn the listener task
         tokio::task::spawn_blocking(move || {
-            if let Err(e) = evdev_listener_loop(target_key, modifier_keys, tx, stop_rx) {
+            if let Err(e) = evdev_listener_loop(target_key, modifier_keys, cancel_key, tx, stop_rx) {
                 tracing::error!("Hotkey listener error: {}", e);
             }
         });
@@ -331,6 +342,7 @@ impl DeviceManager {
 fn evdev_listener_loop(
     target_key: Key,
     modifier_keys: HashSet<Key>,
+    cancel_key: Option<Key>,
     tx: mpsc::Sender<HotkeyEvent>,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<(), HotkeyError> {
@@ -342,12 +354,22 @@ fn evdev_listener_loop(
     // Track if we're currently "pressed" (to handle repeat events)
     let mut is_pressed = false;
 
-    tracing::info!(
-        "Listening for {:?} (with modifiers: {:?}) on {} device(s)",
-        target_key,
-        modifier_keys,
-        manager.devices.len()
-    );
+    if let Some(cancel) = cancel_key {
+        tracing::info!(
+            "Listening for {:?} (with modifiers: {:?}) and cancel key {:?} on {} device(s)",
+            target_key,
+            modifier_keys,
+            cancel,
+            manager.devices.len()
+        );
+    } else {
+        tracing::info!(
+            "Listening for {:?} (with modifiers: {:?}) on {} device(s)",
+            target_key,
+            modifier_keys,
+            manager.devices.len()
+        );
+    }
 
     loop {
         // Check for stop signal (non-blocking)
@@ -400,6 +422,18 @@ fn evdev_listener_loop(
                         active_modifiers.remove(&key);
                     }
                     _ => {}
+                }
+            }
+
+            // Check cancel key first (if configured)
+            if let Some(cancel) = cancel_key {
+                if key == cancel && value == 1 {
+                    // Cancel key pressed (ignore repeats and releases)
+                    tracing::debug!("Cancel key pressed");
+                    if tx.blocking_send(HotkeyEvent::Cancel).is_err() {
+                        return Ok(()); // Channel closed
+                    }
+                    continue;
                 }
             }
 

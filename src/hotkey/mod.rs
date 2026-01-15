@@ -19,6 +19,8 @@ pub enum HotkeyEvent {
     Pressed,
     /// The hotkey was released
     Released,
+    /// The cancel key was pressed (abort recording/transcription)
+    Cancel,
 }
 
 /// Trait for hotkey detection implementations

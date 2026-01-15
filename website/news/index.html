@@ -5,6 +5,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Voxtype news and updates. Development progress, new features, and announcements for the Linux voice-to-text tool.">
     <meta name="keywords" content="voxtype, linux voice to text, speech recognition, wayland, whisper, updates, changelog">
+
+    <!-- Open Graph / Social Media -->
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://voxtype.io/news/">
+    <meta property="og:title" content="Voxtype 0.4.14: Configurable Paste Keystroke">
+    <meta property="og:description" content="Paste mode now supports custom keystrokes and uses wtype as the primary backend, eliminating the need for ydotoold.">
+    <meta property="og:image" content="https://voxtype.io/images/gpu-isolation.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Voxtype 0.4.14: Configurable Paste Keystroke">
+    <meta name="twitter:description" content="Paste mode now supports custom keystrokes and uses wtype as the primary backend, eliminating the need for ydotoold.">
+    <meta name="twitter:image" content="https://voxtype.io/images/gpu-isolation.png">
+
     <title>News & Updates | Voxtype</title>
     <link rel="stylesheet" href="../css/style.css">
     <link rel="stylesheet" href="../css/news.css">
@@ -60,6 +76,246 @@
         <div class="container">
 
             <!-- v0.4.x Era Posts -->
+
+            <article class="news-article" id="v0414">
+                <div class="article-meta">
+                    <time datetime="2026-01-14">January 14, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v0.4.14: Configurable Paste Keystroke</h2>
+                <div class="article-body">
+                    <p>Voxtype 0.4.14 adds configurable paste keystrokes and switches to wtype as the primary backend for keystroke simulation.</p>
+
+                    <h3>Configurable Paste Keystroke</h3>
+                    <p>Paste mode now supports custom keystrokes via the <code>paste_keys</code> config option. The default remains <code>ctrl+v</code>, but you can configure alternatives like <code>shift+insert</code> for environments where that works better.</p>
+
+                    <p><strong>Why use it:</strong> Some desktop environments use universal paste shortcuts that differ from the standard Ctrl+V. Hyprland and Omarchy users often prefer Shift+Insert. This lets you match your system's paste behavior.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[output]
+mode = "paste"
+paste_keys = "shift+insert"  # Or "ctrl+shift+v" for terminals</code></pre>
+                    </div>
+
+                    <h3>wtype as Primary Keystroke Backend</h3>
+                    <p>Paste mode now prefers wtype over ydotool for simulating keystrokes. This means you no longer need ydotoold running as a daemon for paste mode to work.</p>
+
+                    <p><strong>Why it matters:</strong> ydotool requires its daemon (ydotoold) to be running, which adds complexity. wtype works without a daemon and handles the keystroke simulation directly. If wtype isn't available, Voxtype falls back to ydotool automatically.</p>
+
+                    <h3>Contributors</h3>
+                    <p>This release adds contributor credits to the project for those who have contributed code via co-authored commits: Dan Heuckeroth, Igor Warzocha, Julian Kaiser, Kevin Miller, konnsim, and reisset.</p>
+                </div>
+            </article>
+
+            <article class="news-article" id="v0413">
+                <div class="article-meta">
+                    <time datetime="2026-01-13">January 13, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v0.4.13: GPU Memory Isolation</h2>
+                <div class="article-body">
+                    <p>Voxtype 0.4.13 adds GPU memory isolation for laptop users with hybrid graphics.</p>
+
+                    <img src="../images/gpu-isolation.png" alt="GPU memory comparison: without gpu_isolation the GPU stays at 1.6GB, with gpu_isolation it drops to zero between transcriptions" style="max-width: 100%; height: auto; border-radius: 8px; margin: 1.5rem 0;">
+
+                    <h3>GPU Isolation Mode</h3>
+                    <p>When enabled, transcription runs in a subprocess that exits after each recording. This fully releases GPU memory between transcriptions, allowing your discrete GPU to power down when not in use.</p>
+
+                    <p><strong>Why use it:</strong> Laptops with NVIDIA Optimus or AMD switchable graphics keep the dGPU active when Voxtype holds GPU memory. GPU isolation lets the dGPU sleep between transcriptions, saving battery.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[whisper]
+gpu_isolation = true</code></pre>
+                    </div>
+
+                    <h3>Performance</h3>
+                    <p>The model loads while you speak, so there's minimal perceived latency. Benchmarks on an AMD Radeon RX 7800 XT with large-v3-turbo:</p>
+
+                    <table class="performance-table">
+                        <thead>
+                            <tr>
+                                <th>Mode</th>
+                                <th>Transcription Latency</th>
+                                <th>Idle RAM</th>
+                                <th>Idle GPU Memory</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>Standard</td>
+                                <td>0.49s avg</td>
+                                <td>~1.6 GB</td>
+                                <td>409 MB</td>
+                            </tr>
+                            <tr>
+                                <td>GPU Isolation</td>
+                                <td>0.50s avg</td>
+                                <td>0</td>
+                                <td>0</td>
+                            </tr>
+                        </tbody>
+                    </table>
+
+                    <p>GPU isolation adds about 10ms (2%) to transcription time while completely releasing memory between recordings.</p>
+                </div>
+            </article>
+
+            <article class="news-article" id="v0412">
+                <div class="article-meta">
+                    <time datetime="2026-01-11">January 11, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v0.4.12: Compositor Integration Fix</h2>
+                <div class="article-body">
+                    <p>Voxtype 0.4.12 fixes compositor submap handling when recordings are cancelled or too short.</p>
+
+                    <h3>Pre-recording Hook</h3>
+                    <p>A new <code>pre_recording_command</code> hook runs when recording starts. This pairs with the existing <code>pre_output_command</code> and <code>post_output_command</code> hooks to provide complete control over compositor state throughout the recording lifecycle.</p>
+
+                    <p><strong>Why use it:</strong> Enter a compositor submap when recording starts so cancel bindings (like F12) work during both recording and transcription phases.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[output]
+pre_recording_command = "hyprctl dispatch submap voxtype_recording"
+pre_output_command = "hyprctl dispatch submap voxtype_suppress"
+post_output_command = "hyprctl dispatch submap reset"</code></pre>
+                    </div>
+
+                    <p>Run <code>voxtype setup compositor hyprland|sway|river</code> to automatically configure these hooks.</p>
+
+                    <h3>Bug Fixes</h3>
+                    <ul>
+                        <li>Fixed compositor submap getting stuck when recording is too short or cancelled</li>
+                        <li>The <code>post_output_command</code> hook now runs in all early-exit scenarios (recording too short, no audio, cancel, timeout, transcription errors)</li>
+                    </ul>
+                </div>
+            </article>
+
+            <article class="news-article" id="v0411">
+                <div class="article-meta">
+                    <time datetime="2026-01-10">January 10, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v0.4.11: Remote Whisper, Cancel Transcription, Output Mode Override</h2>
+                <div class="article-body">
+                    <p>Voxtype 0.4.11 brings remote transcription servers, the ability to cancel mid-recording, and per-command output mode control.</p>
+
+                    <h3>Remote Whisper Server Support</h3>
+                    <p>Run transcription on a powerful server instead of your local machine. Voxtype now supports any OpenAI-compatible Whisper API, including self-hosted servers (whisper.cpp, faster-whisper, NVIDIA Parakeet) and cloud providers like OpenAI.</p>
+
+                    <p><strong>Why use it:</strong> Offload CPU/GPU work to a home server. Get ~1.5s transcription instead of 15-20s on CPU. Share one GPU across multiple machines.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>Self-hosted server</span></div>
+                        <pre><code>[whisper]
+backend = "remote"
+remote_endpoint = "http://your-server:8080"</code></pre>
+                    </div>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>OpenAI cloud API</span></div>
+                        <pre><code>[whisper]
+backend = "remote"
+remote_endpoint = "https://api.openai.com"
+remote_api_key = "sk-your-openai-key"
+remote_model = "whisper-1"</code></pre>
+                    </div>
+
+                    <p><strong>Privacy note:</strong> Voxtype is designed to be local-first. Your voice data never leaves your machine by default. Using a remote endpoint outside your trusted local network means your audio is transmitted to that server. Only use cloud APIs if you understand and accept this tradeoff.</p>
+
+                    <h3>Cancel Transcription</h3>
+                    <p>Changed your mind? Cancel recording or transcription with a single command.</p>
+
+                    <p><strong>Why use it:</strong> Stop a recording you don't want without waiting for transcription. No more unwanted text appearing at your cursor.</p>
+
+                    <div class="code-block">
+                        <pre><code># Bind to Escape in your compositor
+voxtype record cancel</code></pre>
+                    </div>
+
+                    <p>The <code>voxtype setup compositor</code> command now adds an Escape binding to cancel automatically.</p>
+
+                    <h3>Output Mode Override</h3>
+                    <p>Override the output mode on a per-command basis. Type by default, but paste this one time.</p>
+
+                    <p><strong>Why use it:</strong> Different contexts need different output. Type into your terminal, but paste into a web form that fights with simulated keystrokes.</p>
+
+                    <div class="code-block">
+                        <pre><code># Type (default)
+voxtype record start
+
+# Paste this time only
+voxtype record start --paste
+
+# Clipboard this time only
+voxtype record stop --clipboard</code></pre>
+                    </div>
+
+                    <h3>Setup Improvements</h3>
+                    <p>The <code>--model</code> flag lets you specify which Whisper model to download non-interactively. Perfect for automated setups and Omarchy integration.</p>
+
+                    <div class="code-block">
+                        <pre><code>voxtype setup --download --model large-v3-turbo --quiet</code></pre>
+                    </div>
+
+                    <h3>Bug Fixes</h3>
+                    <ul>
+                        <li>Fixed stale cancel file causing next recording to cancel unexpectedly</li>
+                        <li>Added 14 new tests for cancel and output mode override logic</li>
+                    </ul>
+                </div>
+            </article>
+
+            <article class="news-article" id="v0410">
+                <div class="article-meta">
+                    <time datetime="2026-01-08">January 8, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v0.4.10: Compositor Integration, Auto-Submit</h2>
+                <div class="article-body">
+                    <p>Voxtype 0.4.10 fixes the modifier key interference problem and adds auto-submit for LLM workflows.</p>
+
+                    <h3>Compositor Integration</h3>
+                    <p>If you use keybindings with modifiers (like Super+Ctrl+X), releasing keys slowly could cause modifiers to interfere with typed text. This release adds compositor-level integration to fix it.</p>
+
+                    <p><strong>Why use it:</strong> Eliminates "super+h" appearing instead of "h" when your fingers are slow to release modifier keys.</p>
+
+                    <div class="code-block">
+                        <pre><code># Generate compositor config for Hyprland, Sway, or River
+voxtype setup compositor hyprland
+
+# Or let it auto-detect
+voxtype setup compositor</code></pre>
+                    </div>
+
+                    <p>This creates a submap that suppresses modifier keys during text output. Pre/post output hooks handle the switching automatically.</p>
+
+                    <h3>Auto-Submit</h3>
+                    <p>Send Enter automatically after transcription. Contributed by Rob Zolkos.</p>
+
+                    <p><strong>Why use it:</strong> Voice-driven LLM prompting. Dictate your question and have it submit immediately to Claude, ChatGPT, or your local Ollama.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[output]
+auto_submit = true</code></pre>
+                    </div>
+
+                    <h3>How to Update</h3>
+                    <p>Update via your package manager or download from <a href="https://github.com/peteonrails/voxtype/releases">GitHub Releases</a>.</p>
+
+                    <div class="code-block">
+                        <pre><code># Arch (AUR)
+yay -S voxtype
+
+# After updating, regenerate compositor config
+voxtype setup compositor</code></pre>
+                    </div>
+                </div>
+            </article>
 
             <article class="news-article" id="man-pages">
                 <div class="article-meta">

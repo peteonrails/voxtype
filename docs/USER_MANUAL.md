@@ -10,7 +10,9 @@ Voxtype is a push-to-talk voice-to-text tool for Linux. Optimized for Wayland, w
 - [Configuration](#configuration)
 - [Hotkeys](#hotkeys)
 - [Compositor Keybindings](#compositor-keybindings)
+- [Canceling Transcription](#canceling-transcription)
 - [Whisper Models](#whisper-models)
+- [Remote Whisper Servers](#remote-whisper-servers)
 - [Output Modes](#output-modes)
 - [Post-Processing with LLMs](#post-processing-with-llms)
 - [Tips & Best Practices](#tips--best-practices)
@@ -168,6 +170,7 @@ Control recording from external sources (compositor keybindings, scripts).
 voxtype record start   # Start recording (sends SIGUSR1 to daemon)
 voxtype record stop    # Stop recording and transcribe (sends SIGUSR2 to daemon)
 voxtype record toggle  # Toggle recording state
+voxtype record cancel  # Cancel recording or transcription in progress
 ```
 
 This command is designed for use with compositor keybindings (Hyprland, Sway) instead of the built-in hotkey detection. See [Compositor Keybindings](#compositor-keybindings) for setup instructions.
@@ -423,6 +426,56 @@ If you use a multi-key combination (e.g., `SUPER+CTRL+X`) and release keys slowl
 
 ---
 
+## Canceling Transcription
+
+You can cancel recording or transcription at any time. When canceled, no text is output.
+
+### With Compositor Keybindings
+
+Use `voxtype record cancel` bound to a key (typically Escape):
+
+**Hyprland** (in your submap):
+```hyprlang
+bind = , Escape, exec, voxtype record cancel
+bind = , Escape, submap, reset
+```
+
+**Sway** (in your mode):
+```
+bindsym Escape exec voxtype record cancel; mode "default"
+```
+
+**River**:
+```bash
+riverctl map voxtype_suppress None Escape spawn "voxtype record cancel"
+riverctl map voxtype_suppress None Escape enter-mode normal
+```
+
+If you use `voxtype setup compositor`, these bindings are generated automatically.
+
+### With Evdev Hotkeys
+
+Configure a cancel key in your `~/.config/voxtype/config.toml`:
+
+```toml
+[hotkey]
+key = "SCROLLLOCK"
+cancel_key = "ESC"  # Press Escape to cancel
+```
+
+Any valid evdev key name works. Common choices:
+- `ESC` - Escape key
+- `BACKSPACE` - Backspace key
+- `F12` - Function key
+
+### What Gets Canceled
+
+- **During recording**: Audio capture stops, recorded audio is discarded
+- **During transcription**: Transcription is aborted, no text is output
+- **While idle**: No effect
+
+---
+
 ## Whisper Models
 
 ### Model Comparison
@@ -457,6 +510,149 @@ Point to any whisper.cpp compatible model:
 ```toml
 [whisper]
 model = "/path/to/my/custom-model.bin"
+```
+
+---
+
+## Remote Whisper Servers
+
+Voxtype can offload transcription to a remote server running whisper.cpp or any OpenAI-compatible Whisper API. This feature was designed for users who self-host Whisper servers on their own hardware (e.g., a home GPU server), but it can also connect to cloud-based services.
+
+> **Privacy Notice**
+>
+> When using remote transcription, your audio is transmitted over the network to the configured server. **If privacy is a concern, you should carefully consider who operates the remote server and how your data is handled.**
+>
+> - **Self-hosted servers**: You maintain full control over your data
+> - **Cloud services (OpenAI, etc.)**: Your audio is processed by third parties and may be subject to their privacy policies, data retention, and usage terms
+>
+> For maximum privacy, use Voxtype's default local transcription mode, which processes all audio entirely on your machine with no network connectivity.
+
+### Why Use Remote Transcription?
+
+Remote transcription is valuable when:
+
+1. **Your local hardware is too slow**: Larger Whisper models (large-v3, large-v3-turbo) require significant compute. A laptop CPU might take 10-30x the audio duration, while a remote GPU can transcribe in real-time or faster.
+
+2. **You have a home GPU server**: Many users have a separate machine with a powerful GPU. Remote transcription lets you leverage that hardware while using Voxtype's superior output method (virtual keyboard instead of clipboard paste).
+
+3. **Teams sharing infrastructure**: Organizations with centralized ML inference servers can share a single Whisper deployment.
+
+4. **Thin clients**: Use Voxtype on a lightweight laptop while offloading compute to more powerful hardware on your network.
+
+### Setting Up a Self-Hosted Whisper Server
+
+The recommended server is **whisper.cpp server**, which implements the OpenAI Whisper API:
+
+```bash
+# Clone whisper.cpp
+git clone https://github.com/ggerganov/whisper.cpp
+cd whisper.cpp
+
+# Build the server
+make server
+
+# Download a model
+./models/download-ggml-model.sh large-v3-turbo
+
+# Run the server (adjust for your GPU)
+./server -m models/ggml-large-v3-turbo.bin --host 0.0.0.0 --port 8080
+```
+
+For GPU acceleration, build with CUDA, Vulkan, or Metal support:
+
+```bash
+# CUDA (NVIDIA)
+make server GGML_CUDA=1
+
+# Vulkan (AMD/NVIDIA/Intel)
+make server GGML_VULKAN=1
+
+# Metal (macOS)
+make server GGML_METAL=1
+```
+
+### Configuring Voxtype for Remote Transcription
+
+Edit your `~/.config/voxtype/config.toml`:
+
+```toml
+[whisper]
+# Switch to remote backend
+backend = "remote"
+
+# Language setting still applies
+language = "en"
+
+# Your whisper.cpp server address
+remote_endpoint = "http://192.168.1.100:8080"
+
+# Model name sent to server (whisper.cpp ignores this, but OpenAI requires it)
+remote_model = "whisper-1"
+
+# Request timeout in seconds (increase for large files or slow networks)
+remote_timeout_secs = 30
+
+# Optional: API key (not needed for whisper.cpp, required for OpenAI)
+# remote_api_key = "your-api-key"
+```
+
+### Using with Cloud Services (OpenAI, etc.)
+
+While this feature was built for self-hosted servers, it also works with OpenAI's hosted Whisper API and other compatible services:
+
+```toml
+[whisper]
+backend = "remote"
+language = "en"
+remote_endpoint = "https://api.openai.com"
+remote_model = "whisper-1"
+remote_timeout_secs = 30
+```
+
+Set your API key via environment variable (more secure than config file):
+
+```bash
+export VOXTYPE_WHISPER_API_KEY="sk-..."
+```
+
+> **Cloud Service Considerations**
+>
+> - **Cost**: OpenAI charges per minute of audio (~$0.006/min)
+> - **Privacy**: Your audio is transmitted to and processed by OpenAI's servers
+> - **Latency**: Network round-trip adds delay compared to local processing
+> - **Reliability**: Depends on internet connectivity and service availability
+>
+> For most users, local transcription with GPU acceleration provides better privacy, lower latency, and no ongoing costs.
+
+### Security Recommendations
+
+1. **Use HTTPS for non-local servers**: Voxtype warns if you configure an HTTP endpoint for non-localhost addresses, as audio would be transmitted unencrypted.
+
+2. **Prefer environment variables for API keys**: Use `VOXTYPE_WHISPER_API_KEY` instead of putting keys in config files.
+
+3. **Firewall your self-hosted server**: If running whisper.cpp server, ensure it's only accessible from trusted networks.
+
+### Troubleshooting Remote Transcription
+
+**Connection refused**:
+- Verify the server is running and listening on the expected port
+- Check firewall rules on both client and server
+- Ensure the endpoint URL includes the protocol (`http://` or `https://`)
+
+**Timeout errors**:
+- Increase `remote_timeout_secs` in your config
+- Check network latency between client and server
+- For large audio files, the server may need more time to process
+
+**Authentication errors**:
+- Verify your API key is correct
+- Check if the key is set via environment variable or config
+- Ensure the `Authorization: Bearer` header is being sent
+
+**Run with verbose logging** to diagnose issues:
+
+```bash
+voxtype -vv
 ```
 
 ---

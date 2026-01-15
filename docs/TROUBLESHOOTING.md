@@ -250,6 +250,22 @@ model = "base.en"  # For English
 language = "en"
 ```
 
+#### 4. Context window optimization (rare)
+
+If you experience accuracy issues specifically with short recordings, try disabling context window optimization:
+
+```toml
+[whisper]
+context_window_optimization = false
+```
+
+Or via command line:
+```bash
+voxtype --no-whisper-context-optimization daemon
+```
+
+This is rarely needed. The optimization speeds up transcription for short clips and should not affect quality. Only try this if other solutions don't help and the issue is specific to short recordings.
+
 ### Transcription includes "[BLANK_AUDIO]" or similar
 
 **Cause:** Recording contains mostly silence.

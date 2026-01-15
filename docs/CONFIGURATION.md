@@ -139,6 +139,30 @@ bindsym --release $mod+v exec voxtype record stop
 
 See [User Manual - Compositor Keybindings](USER_MANUAL.md#compositor-keybindings) for complete setup instructions.
 
+### cancel_key
+
+**Type:** String
+**Default:** None (disabled)
+**Required:** No
+
+Optional key to cancel recording or transcription in progress. When pressed, any active recording is discarded and any in-progress transcription is aborted. No text is output.
+
+**Example:**
+```toml
+[hotkey]
+key = "SCROLLLOCK"
+cancel_key = "ESC"  # Press Escape to cancel
+```
+
+**Valid key names:** Same as the `key` option - any valid Linux evdev key name.
+
+**Common cancel keys:**
+- `ESC` - Escape key
+- `BACKSPACE` - Backspace key
+- `F12` - Function key
+
+**Note:** This only applies when using evdev hotkey detection (`enabled = true`). When using compositor keybindings, use `voxtype record cancel` instead. See [User Manual - Canceling Transcription](USER_MANUAL.md#canceling-transcription).
+
 ---
 
 ## [audio]
@@ -251,6 +275,27 @@ volume = 0.8
 ## [whisper]
 
 Controls the Whisper speech-to-text engine.
+
+### backend
+
+**Type:** String
+**Default:** `"local"`
+**Required:** No
+
+Selects the transcription backend.
+
+**Values:**
+- `local` - Use whisper.cpp locally on your machine (default, fully offline)
+- `remote` - Send audio to a remote server for transcription
+
+> **Privacy Notice**: When using `remote` backend, audio is transmitted over the network. See [User Manual - Remote Whisper Servers](USER_MANUAL.md#remote-whisper-servers) for privacy considerations.
+
+**Example:**
+```toml
+[whisper]
+backend = "remote"
+remote_endpoint = "http://192.168.1.100:8080"
+```
 
 ### model
 
@@ -366,6 +411,180 @@ on_demand_loading = true  # Free VRAM when not transcribing
 
 **Performance note:** On modern systems with SSDs, model loading typically takes under 1 second for base/small models. Larger models (medium, large-v3) may take 2-3 seconds to load.
 
+### gpu_isolation
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+GPU memory isolation mode. When enabled, transcription runs in a subprocess that exits after each recording, fully releasing GPU memory between transcriptions.
+
+**Values:**
+- `false` (default) - Model stays loaded in the daemon process. Fastest response, but GPU memory is held continuously.
+- `true` - Model loads in a subprocess when recording starts, subprocess exits after transcription. Releases all GPU/VRAM between recordings.
+
+**When to use `gpu_isolation = true`:**
+- Laptops with hybrid graphics (NVIDIA Optimus, AMD switchable)
+- You want the discrete GPU to power down when not transcribing
+- Battery life is a priority
+- You're running other GPU-intensive applications alongside Voxtype
+
+**When to keep default (`false`):**
+- Desktop systems with dedicated GPUs
+- You transcribe frequently and want zero latency
+- Power consumption is not a concern
+
+**Performance impact:**
+
+Benchmarks on AMD Radeon RX 7800 XT with large-v3-turbo:
+
+| Mode | Transcription Latency | Idle RAM | Idle GPU Memory |
+|------|----------------------|----------|-----------------|
+| Standard (`false`) | 0.49s avg | ~1.6 GB | 409 MB |
+| GPU Isolation (`true`) | 0.50s avg | 0 | 0 |
+
+The model loads while you speak (0.38-0.42s), so the additional latency is only ~10ms (2%) after recording stops. The delay should be barely perceptible because model loading overlaps with speaking time.
+
+**Example:**
+```toml
+[whisper]
+model = "large-v3-turbo"
+gpu_isolation = true  # Release GPU memory between transcriptions
+```
+
+**Note:** This setting only applies when using the local whisper backend (`backend = "local"`). It has no effect with remote transcription since no local GPU is used.
+
+### context_window_optimization
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Optimizes Whisper's context window size for short recordings. When enabled, clips under 22.5 seconds use a smaller context window proportional to their length, significantly speeding up transcription.
+
+**Values:**
+- `true` (default) - Use optimized context window for short clips. Faster transcription.
+- `false` - Always use Whisper's full 30-second context window (1500 tokens).
+
+**Performance impact:**
+
+| Mode | ~1.5s clip (CPU) | ~1.5s clip (GPU) |
+|------|------------------|------------------|
+| Enabled (`true`) | ~8s | ~0.28s |
+| Disabled (`false`) | ~15s | ~0.46s |
+
+The optimization provides roughly 1.6-1.9x speedup for short recordings on both CPU and GPU.
+
+**When to disable (`false`):**
+- You experience transcription quality issues with short clips (rare)
+- Debugging transcription problems and want to rule out this optimization
+- Testing or benchmarking against default Whisper behavior
+
+Most users should leave this enabled. The optimization has been tested extensively and should not affect transcription quality.
+
+**Example:**
+```toml
+[whisper]
+model = "large-v3-turbo"
+context_window_optimization = false  # Use full context window (not recommended)
+```
+
+**CLI override:**
+```bash
+voxtype --no-whisper-context-optimization daemon
+```
+
+**Note:** This setting only applies when using the local whisper backend (`backend = "local"`). It has no effect with remote transcription.
+
+---
+
+## Remote Backend Settings
+
+The following options are used when `backend = "remote"`. They have no effect when using local transcription.
+
+> **Privacy Notice**: Remote transcription sends your audio over the network. This feature was designed for users who self-host Whisper servers on their own hardware. While it can also connect to cloud services like OpenAI, users with privacy concerns should carefully consider the implications. See [User Manual - Remote Whisper Servers](USER_MANUAL.md#remote-whisper-servers) for details.
+
+### remote_endpoint
+
+**Type:** String
+**Default:** None
+**Required:** Yes (when `backend = "remote"`)
+
+The base URL of the remote Whisper server. Must include the protocol (`http://` or `https://`).
+
+**Examples:**
+```toml
+[whisper]
+backend = "remote"
+
+# Self-hosted whisper.cpp server
+remote_endpoint = "http://192.168.1.100:8080"
+
+# OpenAI API
+remote_endpoint = "https://api.openai.com"
+```
+
+**Security note:** Voxtype logs a warning if you use HTTP (unencrypted) for non-localhost endpoints, as your audio would be transmitted in the clear.
+
+### remote_model
+
+**Type:** String
+**Default:** `"whisper-1"`
+**Required:** No
+
+The model name to send to the remote server.
+
+- For **whisper.cpp server**: This is ignored (the server uses whatever model it was started with)
+- For **OpenAI API**: Must be `"whisper-1"`
+- For **other providers**: Check their documentation
+
+**Example:**
+```toml
+[whisper]
+backend = "remote"
+remote_endpoint = "https://api.openai.com"
+remote_model = "whisper-1"
+```
+
+### remote_api_key
+
+**Type:** String
+**Default:** None
+**Required:** No (depends on server)
+
+API key for authenticating with the remote server. Sent as a Bearer token in the Authorization header.
+
+**Recommendation:** Use the `VOXTYPE_WHISPER_API_KEY` environment variable instead of putting keys in your config file.
+
+**Example using environment variable:**
+```bash
+export VOXTYPE_WHISPER_API_KEY="sk-..."
+```
+
+**Example in config (less secure):**
+```toml
+[whisper]
+backend = "remote"
+remote_endpoint = "https://api.openai.com"
+remote_api_key = "sk-..."
+```
+
+### remote_timeout_secs
+
+**Type:** Integer
+**Default:** `30`
+**Required:** No
+
+Maximum time in seconds to wait for the remote server to respond. Increase for slow networks or when transcribing long audio.
+
+**Example:**
+```toml
+[whisper]
+backend = "remote"
+remote_endpoint = "http://192.168.1.100:8080"
+remote_timeout_secs = 60  # 60 second timeout for long recordings
+```
+
 ---
 
 ## [output]
@@ -381,9 +600,9 @@ Controls how transcribed text is delivered.
 Primary output method.
 
 **Values:**
-- `type` - Simulate keyboard input at cursor position (requires ydotool)
+- `type` - Simulate keyboard input at cursor position (requires wtype or ydotool)
 - `clipboard` - Copy text to clipboard (requires wl-copy)
-- `paste` - Copy to clipboard then paste with Ctrl+V (requires wl-copy and ydotool)
+- `paste` - Copy to clipboard then simulate paste keystroke (requires wl-copy, and wtype or ydotool)
 
 **Example:**
 ```toml
@@ -392,7 +611,34 @@ mode = "paste"
 ```
 
 **Note about paste mode:**
-The `paste` mode is designed to work around non-US keyboard layout issues. Instead of typing characters directly (which assumes US keyboard layout), it copies text to the clipboard and then simulates Ctrl+V to paste it. This works regardless of keyboard layout but requires both wl-copy (for clipboard access) and ydotool (for Ctrl+V simulation).
+The `paste` mode is designed to work around non-US keyboard layout issues. Instead of typing characters directly (which assumes US keyboard layout), it copies text to the clipboard and then simulates a paste keystroke. This works regardless of keyboard layout. Requires wl-copy for clipboard access, plus wtype (preferred, no daemon needed) or ydotool (requires ydotoold daemon) for keystroke simulation.
+
+### paste_keys
+
+**Type:** String
+**Default:** `"ctrl+v"`
+**Required:** No
+
+Keystroke to simulate for paste mode. Change this if your environment uses a different paste shortcut.
+
+**Format:** `"modifier+key"` or `"modifier+modifier+key"` (case-insensitive)
+
+**Common values:**
+- `"ctrl+v"` - Standard paste (default)
+- `"shift+insert"` - Universal paste for Hyprland/Omarchy
+- `"ctrl+shift+v"` - Some terminal emulators
+
+**Example:**
+```toml
+[output]
+mode = "paste"
+paste_keys = "shift+insert"  # For Hyprland/Omarchy
+```
+
+**Supported keys:**
+- Modifiers: `ctrl`, `shift`, `alt`, `super` (also `leftctrl`, `rightctrl`, etc.)
+- Letters: `a-z`
+- Special: `insert`, `enter`
 
 ### fallback_to_clipboard
 
@@ -955,6 +1201,16 @@ XDG_DATA_HOME=/custom/data voxtype
 # Models stored in: /custom/data/voxtype/models/
 ```
 
+### VOXTYPE_WHISPER_API_KEY
+
+API key for remote Whisper server authentication. Used when `backend = "remote"`.
+
+```bash
+export VOXTYPE_WHISPER_API_KEY="sk-..."
+```
+
+This is the recommended way to provide API keys instead of putting them in the config file.
+
 ---
 
 ## Example Configurations
@@ -1010,6 +1266,20 @@ on_demand_loading = true  # Free VRAM when not transcribing
 enabled = true  # Helpful feedback since model loading adds brief delay
 theme = "default"
 ```
+
+### Laptop with Hybrid Graphics (GPU Isolation)
+
+```toml
+[whisper]
+model = "large-v3-turbo"
+gpu_isolation = true  # Release GPU memory between transcriptions
+
+[audio.feedback]
+enabled = true
+theme = "default"
+```
+
+GPU isolation runs transcription in a subprocess that exits after each recording, allowing the discrete GPU to power down. The model loads while you speak, so perceived latency is nearly identical to standard mode.
 
 ### Custom Hotkey
 
@@ -1086,3 +1356,38 @@ bindr = SUPER, V, exec, voxtype record stop
 bindsym $mod+v exec voxtype record start
 bindsym --release $mod+v exec voxtype record stop
 ```
+
+### Remote Transcription (Self-Hosted)
+
+Offload transcription to a GPU server on your local network:
+
+```toml
+[whisper]
+backend = "remote"
+language = "en"
+
+# Your whisper.cpp server
+remote_endpoint = "http://192.168.1.100:8080"
+remote_timeout_secs = 30
+```
+
+On your GPU server, run whisper.cpp server:
+```bash
+./server -m models/ggml-large-v3-turbo.bin --host 0.0.0.0 --port 8080
+```
+
+### Remote Transcription (OpenAI Cloud)
+
+Use OpenAI's hosted Whisper API (requires API key, has privacy implications):
+
+```toml
+[whisper]
+backend = "remote"
+language = "en"
+remote_endpoint = "https://api.openai.com"
+remote_model = "whisper-1"
+remote_timeout_secs = 30
+# API key set via: export VOXTYPE_WHISPER_API_KEY="sk-..."
+```
+
+> **Note**: Cloud-based transcription sends your audio to third-party servers. See [User Manual - Remote Whisper Servers](USER_MANUAL.md#remote-whisper-servers) for privacy considerations.
