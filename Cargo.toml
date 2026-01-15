@@ -64,6 +64,9 @@ num_cpus = "1.16"
 # File watching for status --follow
 notify = "6"
 
+# Single instance check
+pidlock = "0.1"
+
 [features]
 default = []
 gpu-vulkan = ["whisper-rs/vulkan"]
