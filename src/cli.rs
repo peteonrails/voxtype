@@ -182,6 +182,10 @@ pub enum RecordAction {
         /// Override output mode to paste (clipboard + Ctrl+V)
         #[arg(long, group = "output_mode")]
         paste: bool,
+
+        /// Write the transcription to a file instead of outputting it
+        #[arg(long = "output-file", value_name = "FILE", group = "output_mode")]
+        output_file: Option<std::path::PathBuf>,
     },
     /// Stop recording and transcribe (send SIGUSR2 to daemon)
     Stop {
@@ -219,9 +223,22 @@ impl RecordAction {
     /// Extract the output mode override from the action flags
     pub fn output_mode_override(&self) -> Option<OutputModeOverride> {
         let (type_mode, clipboard, paste) = match self {
-            RecordAction::Start { type_mode, clipboard, paste } => (*type_mode, *clipboard, *paste),
-            RecordAction::Stop { type_mode, clipboard, paste } => (*type_mode, *clipboard, *paste),
-            RecordAction::Toggle { type_mode, clipboard, paste } => (*type_mode, *clipboard, *paste),
+            RecordAction::Start {
+                type_mode,
+                clipboard,
+                paste,
+                ..
+            } => (*type_mode, *clipboard, *paste),
+            RecordAction::Stop {
+                type_mode,
+                clipboard,
+                paste,
+            } => (*type_mode, *clipboard, *paste),
+            RecordAction::Toggle {
+                type_mode,
+                clipboard,
+                paste,
+            } => (*type_mode, *clipboard, *paste),
             RecordAction::Cancel => return None,
         };
 
@@ -233,6 +250,13 @@ impl RecordAction {
             Some(OutputModeOverride::Paste)
         } else {
             None
+        }
+    }
+
+    pub fn output_file_override(&self) -> Option<&std::path::PathBuf> {
+        match self {
+            RecordAction::Start { output_file, .. } => output_file.as_ref(),
+            RecordAction::Stop { .. } | RecordAction::Toggle { .. } | RecordAction::Cancel => None,
         }
     }
 }
@@ -568,9 +592,96 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "record", "toggle", "--paste"]);
         match cli.command {
             Some(Commands::Record { action }) => {
-                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::Paste));
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::Paste)
+                );
             }
             _ => panic!("Expected Record command"),
         }
+    }
+
+    #[test]
+    fn test_record_start_output_file_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--output-file", "out.txt"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.output_mode_override(), None);
+                assert_eq!(
+                    action.output_file_override().unwrap(),
+                    &std::path::PathBuf::from("out.txt")
+                );
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_output_file_with_absolute_path() {
+        let cli = Cli::parse_from([
+            "voxtype",
+            "record",
+            "start",
+            "--output-file",
+            "/tmp/output.txt",
+        ]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.output_mode_override(), None);
+                assert_eq!(
+                    action.output_file_override().unwrap(),
+                    &std::path::PathBuf::from("/tmp/output.txt")
+                );
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_output_file_mutually_exclusive_with_paste() {
+        let result = Cli::try_parse_from([
+            "voxtype",
+            "record",
+            "start",
+            "--output-file",
+            "out.txt",
+            "--paste",
+        ]);
+        assert!(
+            result.is_err(),
+            "Should not allow both --output-file and --paste"
+        );
+    }
+
+    #[test]
+    fn test_record_start_output_file_mutually_exclusive_with_clipboard() {
+        let result = Cli::try_parse_from([
+            "voxtype",
+            "record",
+            "start",
+            "--output-file",
+            "out.txt",
+            "--clipboard",
+        ]);
+        assert!(
+            result.is_err(),
+            "Should not allow both --output-file and --clipboard"
+        );
+    }
+
+    #[test]
+    fn test_record_start_output_file_mutually_exclusive_with_type() {
+        let result = Cli::try_parse_from([
+            "voxtype",
+            "record",
+            "start",
+            "--output-file",
+            "out.txt",
+            "--type",
+        ]);
+        assert!(
+            result.is_err(),
+            "Should not allow both --output-file and --type"
+        );
     }
 }

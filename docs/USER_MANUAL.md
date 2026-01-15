@@ -167,10 +167,11 @@ voxtype setup gpu --disable  # Switch back to CPU backend (requires sudo)
 Control recording from external sources (compositor keybindings, scripts).
 
 ```bash
-voxtype record start   # Start recording (sends SIGUSR1 to daemon)
-voxtype record stop    # Stop recording and transcribe (sends SIGUSR2 to daemon)
-voxtype record toggle  # Toggle recording state
-voxtype record cancel  # Cancel recording or transcription in progress
+voxtype record start                       # Start recording (sends SIGUSR1 to daemon)
+voxtype record start --output-file out.txt # Write transcription to a file
+voxtype record stop                        # Stop recording and transcribe (sends SIGUSR2 to daemon)
+voxtype record toggle                      # Toggle recording state
+voxtype record cancel                      # Cancel recording or transcription in progress
 ```
 
 This command is designed for use with compositor keybindings (Hyprland, Sway) instead of the built-in hotkey detection. See [Compositor Keybindings](#compositor-keybindings) for setup instructions.

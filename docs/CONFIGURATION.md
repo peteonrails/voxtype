@@ -116,9 +116,10 @@ enabled = false  # Use compositor keybindings instead
 
 When `enabled = false`, control recording via CLI:
 ```bash
-voxtype record start   # Start recording
-voxtype record stop    # Stop and transcribe
-voxtype record toggle  # Toggle recording state
+voxtype record start                       # Start recording
+voxtype record start --output-file out.txt # Write transcription to a file
+voxtype record stop                        # Stop and transcribe
+voxtype record toggle                      # Toggle recording state
 ```
 
 Bind these commands in your compositor config:

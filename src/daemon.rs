@@ -153,9 +153,44 @@ fn read_output_mode_override() -> Option<OutputMode> {
     }
 }
 
+/// Read and consume the output file override
+fn read_output_file_override() -> Option<PathBuf> {
+    let override_file = Config::runtime_dir().join("output_file_override");
+    if !override_file.exists() {
+        return None;
+    }
+
+    let path_str = match std::fs::read_to_string(&override_file) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("Failed to read output file override: {}", e);
+            return None;
+        }
+    };
+
+    if let Err(e) = std::fs::remove_file(&override_file) {
+        tracing::warn!("Failed to remove output file override: {}", e);
+    }
+
+    let trimmed = path_str.trim();
+    if trimmed.is_empty() {
+        tracing::warn!("Output file override was empty");
+        return None;
+    }
+
+    tracing::info!("Using output file override: {}", trimmed);
+    Some(PathBuf::from(trimmed))
+}
+
 /// Remove the output mode override file if it exists (for cleanup on cancel/error)
 fn cleanup_output_mode_override() {
     let override_file = Config::runtime_dir().join("output_mode_override");
+    let _ = std::fs::remove_file(&override_file);
+}
+
+/// Remove the output file override if it exists (for cleanup on cancel/error)
+fn cleanup_output_file_override() {
+    let override_file = Config::runtime_dir().join("output_file_override");
     let _ = std::fs::remove_file(&override_file);
 }
 
@@ -253,6 +288,7 @@ impl Daemon {
     /// Call this when exiting from recording/transcribing without normal output flow
     async fn reset_to_idle(&self, state: &mut State) {
         cleanup_output_mode_override();
+        cleanup_output_file_override();
         *state = State::Idle;
         self.update_state("idle");
 
@@ -360,6 +396,45 @@ impl Daemon {
                     } else {
                         processed_text
                     };
+
+                    if let Some(output_path) = read_output_file_override() {
+                        *state = State::Outputting {
+                            text: final_text.clone(),
+                        };
+
+                        if let Some(parent) = output_path.parent() {
+                            if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                                tracing::error!(
+                                    "Failed to create output directory {:?}: {}",
+                                    parent,
+                                    e
+                                );
+                                *state = State::Idle;
+                                self.update_state("idle");
+                                return;
+                            }
+                        }
+
+                        let output_text = if final_text.ends_with('\n') {
+                            final_text.clone()
+                        } else {
+                            format!("{}\n", final_text)
+                        };
+
+                        if let Err(e) = tokio::fs::write(&output_path, output_text).await {
+                            tracing::error!(
+                                "Failed to write transcription to {:?}: {}",
+                                output_path,
+                                e
+                            );
+                        } else {
+                            tracing::info!("Wrote transcription to {:?}", output_path);
+                        }
+
+                        *state = State::Idle;
+                        self.update_state("idle");
+                        return;
+                    }
 
                     // Create output chain with potential override
                     let output_config = if let Some(mode_override) = read_output_mode_override() {
@@ -1141,6 +1216,18 @@ mod tests {
     }
 
     #[test]
+    fn test_output_file_override_trimmed() {
+        with_test_runtime_dir(|dir| {
+            let override_file = dir.join("output_file_override");
+
+            fs::write(&override_file, "  out.txt  \n").unwrap();
+            let content = fs::read_to_string(&override_file).unwrap();
+
+            assert_eq!(content.trim(), "out.txt");
+        });
+    }
+
+    #[test]
     fn test_output_mode_override_file_consumed_after_read() {
         with_test_runtime_dir(|dir| {
             let override_file = dir.join("output_mode_override");
@@ -1190,6 +1277,21 @@ mod tests {
             // Cleanup on non-existent file should not error
             let _ = fs::remove_file(&override_file);
             // Should not panic
+        });
+    }
+
+    #[test]
+    fn test_cleanup_output_file_override() {
+        with_test_runtime_dir(|dir| {
+            let override_file = dir.join("output_file_override");
+
+            fs::write(&override_file, "out.txt").unwrap();
+            assert!(override_file.exists());
+
+            let _ = fs::remove_file(&override_file);
+            assert!(!override_file.exists());
+
+            let _ = fs::remove_file(&override_file);
         });
     }
 }

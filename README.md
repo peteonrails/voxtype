@@ -233,9 +233,10 @@ Status options:
   voxtype status --icon-theme THEME  Icon theme (emoji, nerd-font, material, etc.)
 
 Record subcommands (for compositor keybindings):
-  voxtype record start   Start recording (send SIGUSR1 to daemon)
-  voxtype record stop    Stop recording and transcribe (send SIGUSR2 to daemon)
-  voxtype record toggle  Toggle recording state
+  voxtype record start                     Start recording (send SIGUSR1 to daemon)
+  voxtype record start --output-file PATH  Write transcription to a file
+  voxtype record stop                      Stop recording and transcribe (send SIGUSR2 to daemon)
+  voxtype record toggle                    Toggle recording state
 
 Options:
   -c, --config <FILE>  Path to config file
