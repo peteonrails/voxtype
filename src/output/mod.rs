@@ -70,6 +70,7 @@ pub fn create_output_chain(config: &OutputConfig) -> Vec<Box<dyn TextOutput>> {
                 config.notification.on_transcription,
                 config.auto_submit,
                 config.paste_keys.clone(),
+                config.type_delay_ms,
             )));
         }
     }
