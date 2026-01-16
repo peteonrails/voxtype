@@ -16,7 +16,8 @@ This document helps Claude Code (and human contributors) understand the voxtype 
 - [AUR Packages](#aur-packages)
 - [Release Notes and Website News](#release-notes-and-website-news)
 - [Website](#website)
-- [Social Media Posts](#social-media-posts)
+- [Development Notes](#development-notes)
+- [Smoke Tests](#smoke-tests)
 
 ---
 
@@ -328,6 +329,7 @@ Based on open issues and project direction:
 - **Multi-model support** ([#81](https://github.com/peteonrails/voxtype/issues/81)) - Load multiple Whisper models and switch between them
 - **Multiple post-processing profiles** ([#79](https://github.com/peteonrails/voxtype/issues/79)) - Different LLM prompts for different contexts
 - **KDE Wayland compatibility docs** ([#85](https://github.com/peteonrails/voxtype/issues/85)) - Document wtype alternatives for KDE
+- **Deterministic integration tests** - Automated smoke tests using pre-recorded audio files that can run in CI without LLM/human interaction
 
 **Medium Term:**
 - **Audio caching** ([#28](https://github.com/peteonrails/voxtype/issues/28)) - Save recordings for replay/re-transcription
@@ -623,19 +625,260 @@ option = "value"</code></pre>
 
 The website at voxtype.io is hosted via GitHub Pages. It deploys automatically when changes to `website/` are merged to main. No separate deployment step is needed.
 
-## Social Media Posts
+## Development Notes
 
-**Writing style for X, LinkedIn, and other social media:**
+### Killing the Daemon
 
-- All the "Avoid AI writing patterns" rules from release notes apply here too
-- No sentence fragments or incomplete sentences used for emphasis at the end of paragraphs
-- Every sentence must be grammatically complete with a subject and verb
-- If a closing thought doesn't warrant a full sentence, cut it entirely rather than leaving a fragment
+When using `pkill voxtype` or manually killing the daemon, Waybar status followers (`voxtype status --follow`) will also be terminated. After restarting the daemon:
 
-**Bad:** "Your audio stays on your machine until you press the hotkey. No cloud services involved unless you set one up yourself."
+```bash
+# Either reload Waybar entirely
+pkill -SIGUSR2 waybar
 
-**Good:** "Your audio stays on your machine until you press the hotkey, and no cloud services are involved unless you configure one yourself."
+# Or the followers will reconnect on next Waybar restart
+```
 
-**Also good:** "Your audio stays on your machine until you press the hotkey." (just omit the fragment)
+The systemd unit restart (`systemctl --user restart voxtype`) handles this gracefully, but manual kills require Waybar attention.
 
-Keep the tone direct and informative. Avoid marketing-speak and hype.
+### Binary Location Priority
+
+The PATH typically has `~/.local/bin` before `/usr/local/bin`. When testing new builds:
+
+```bash
+# Check which binary is active
+which voxtype
+
+# Remove stale local copy if needed
+rm ~/.local/bin/voxtype
+hash -r  # Clear shell's command cache
+```
+
+## Smoke Tests
+
+Run these tests after installing a new build to verify core functionality.
+
+### Basic Verification
+
+```bash
+# Version and help
+voxtype --version
+voxtype --help
+voxtype daemon --help
+voxtype record --help
+voxtype setup --help
+
+# Show current config
+voxtype config
+
+# Check status
+voxtype status
+```
+
+### Recording Cycle
+
+```bash
+# Basic record start/stop
+voxtype record start
+sleep 3
+voxtype record stop
+
+# Toggle mode
+voxtype record toggle  # starts recording
+sleep 3
+voxtype record toggle  # stops and transcribes
+
+# Cancel recording (should not transcribe)
+voxtype record start
+sleep 2
+voxtype record cancel
+# Verify no transcription in logs:
+journalctl --user -u voxtype --since "30 seconds ago" | grep -i transcri
+```
+
+### CLI Overrides
+
+```bash
+# Output mode override
+voxtype record start --output clipboard
+sleep 2
+voxtype record stop
+# Verify clipboard has text: wl-paste
+
+# Model override (requires model to be downloaded)
+voxtype record start --model base.en
+sleep 2
+voxtype record stop
+```
+
+### GPU Isolation Mode
+
+Tests subprocess-based GPU memory release (for laptops with hybrid graphics):
+
+```bash
+# 1. Enable gpu_isolation in config.toml:
+#    [whisper]
+#    gpu_isolation = true
+
+# 2. Restart daemon
+systemctl --user restart voxtype
+
+# 3. Record and transcribe
+voxtype record start && sleep 3 && voxtype record stop
+
+# 4. Check logs for subprocess spawning:
+journalctl --user -u voxtype --since "1 minute ago" | grep -i subprocess
+
+# 5. Verify GPU memory is released after transcription:
+#    (AMD) watch -n1 "cat /sys/class/drm/card*/device/mem_info_vram_used"
+#    (NVIDIA) nvidia-smi
+```
+
+### On-Demand Model Loading
+
+Tests loading model only when needed (reduces idle memory):
+
+```bash
+# 1. Enable on_demand_loading in config.toml:
+#    [whisper]
+#    on_demand_loading = true
+
+# 2. Restart daemon
+systemctl --user restart voxtype
+
+# 3. Check memory before recording (model not loaded):
+systemctl --user status voxtype | grep Memory
+
+# 4. Record and transcribe
+voxtype record start && sleep 3 && voxtype record stop
+
+# 5. Check logs for model load/unload:
+journalctl --user -u voxtype --since "1 minute ago" | grep -E "Loading|Unloading"
+```
+
+### Model Switching
+
+```bash
+# Download a different model if not present
+voxtype setup model  # Interactive selection
+
+# Or specify directly
+voxtype setup model small.en
+
+# Test with different models (edit config.toml or use --model flag)
+```
+
+### Remote Transcription
+
+```bash
+# 1. Configure remote backend in config.toml:
+#    [whisper]
+#    backend = "remote"
+#    remote_endpoint = "http://your-server:8080"
+
+# 2. Restart and test
+systemctl --user restart voxtype
+voxtype record start && sleep 3 && voxtype record stop
+
+# 3. Check logs for remote transcription:
+journalctl --user -u voxtype --since "1 minute ago" | grep -i remote
+```
+
+### Output Drivers
+
+```bash
+# Test wtype (Wayland native)
+# Should work by default on Wayland
+
+# Test ydotool fallback (unset WAYLAND_DISPLAY or rename wtype)
+sudo mv /usr/bin/wtype /usr/bin/wtype.bak
+voxtype record start && sleep 2 && voxtype record stop
+journalctl --user -u voxtype --since "30 seconds ago" | grep ydotool
+sudo mv /usr/bin/wtype.bak /usr/bin/wtype
+
+# Test clipboard mode
+# Edit config.toml: mode = "clipboard"
+systemctl --user restart voxtype
+voxtype record start && sleep 2 && voxtype record stop
+wl-paste  # Should show transcribed text
+
+# Test paste mode
+# Edit config.toml: mode = "paste"
+systemctl --user restart voxtype
+voxtype record start && sleep 2 && voxtype record stop
+```
+
+### Delay Options
+
+```bash
+# Test type delays (edit config.toml):
+#    type_delay_ms = 50       # Inter-keystroke delay
+#    pre_type_delay_ms = 200  # Pre-typing delay
+
+systemctl --user restart voxtype
+voxtype record start && sleep 2 && voxtype record stop
+
+# Check debug logs for delay application:
+journalctl --user -u voxtype --since "30 seconds ago" | grep -E "delay|sleeping"
+```
+
+### Audio Feedback
+
+```bash
+# Enable audio feedback in config.toml:
+#    [audio.feedback]
+#    enabled = true
+#    theme = "default"
+#    volume = 0.5
+
+systemctl --user restart voxtype
+voxtype record start  # Should hear start beep
+sleep 2
+voxtype record stop   # Should hear stop beep
+```
+
+### Compositor Hooks
+
+```bash
+# Verify hooks run (check Hyprland submap changes):
+voxtype record start
+hyprctl submap  # Should show voxtype_recording
+sleep 2
+voxtype record stop
+hyprctl submap  # Should show empty (reset)
+```
+
+### Transcribe Command (File Input)
+
+```bash
+# Transcribe a WAV file directly (useful for testing without mic)
+voxtype transcribe /path/to/audio.wav
+
+# With model override
+voxtype transcribe --model large-v3-turbo /path/to/audio.wav
+```
+
+### Quick Smoke Test Script
+
+```bash
+#!/bin/bash
+# quick-smoke-test.sh - Run after new build install
+
+set -e
+echo "=== Voxtype Smoke Tests ==="
+
+echo -n "Version: "
+voxtype --version
+
+echo -n "Status: "
+voxtype status
+
+echo "Recording 3 seconds..."
+voxtype record start
+sleep 3
+voxtype record stop
+echo "Done."
+
+echo ""
+echo "Check logs:"
+journalctl --user -u voxtype --since "30 seconds ago" --no-pager | tail -10
+```
