@@ -1210,4 +1210,58 @@ mod tests {
             // Should not panic
         });
     }
+
+    #[test]
+    fn test_pidlock_acquisition_succeeds() {
+        with_test_runtime_dir(|dir| {
+            let lock_path = dir.join("voxtype.lock");
+            let lock_path_str = lock_path.to_string_lossy().to_string();
+
+            let mut pidlock = Pidlock::new(&lock_path_str);
+            let result = pidlock.acquire();
+
+            assert!(result.is_ok(), "Lock acquisition should succeed");
+            assert!(lock_path.exists(), "Lock file should be created");
+        });
+    }
+
+    #[test]
+    fn test_pidlock_blocks_second_instance() {
+        with_test_runtime_dir(|dir| {
+            let lock_path = dir.join("voxtype.lock");
+            let lock_path_str = lock_path.to_string_lossy().to_string();
+
+            // First lock acquisition
+            let mut pidlock1 = Pidlock::new(&lock_path_str);
+            pidlock1.acquire().expect("First lock should succeed");
+
+            // Second lock acquisition should fail
+            let mut pidlock2 = Pidlock::new(&lock_path_str);
+            let result = pidlock2.acquire();
+
+            assert!(result.is_err(), "Second lock acquisition should fail");
+        });
+    }
+
+    #[test]
+    fn test_pidlock_released_on_drop() {
+        with_test_runtime_dir(|dir| {
+            let lock_path = dir.join("voxtype.lock");
+            let lock_path_str = lock_path.to_string_lossy().to_string();
+
+            // Acquire and explicitly release lock in inner scope
+            {
+                let mut pidlock = Pidlock::new(&lock_path_str);
+                pidlock.acquire().expect("Lock should succeed");
+                // Explicitly release before drop
+                let _ = pidlock.release();
+            }
+
+            // New lock acquisition should succeed after previous lock was released
+            let mut pidlock2 = Pidlock::new(&lock_path_str);
+            let result = pidlock2.acquire();
+
+            assert!(result.is_ok(), "Lock acquisition should succeed after previous lock released: {:?}", result.err());
+        });
+    }
 }
