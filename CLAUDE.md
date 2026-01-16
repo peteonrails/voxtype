@@ -889,6 +889,204 @@ voxtype transcribe /path/to/audio.wav
 voxtype transcribe --model large-v3-turbo /path/to/audio.wav
 ```
 
+### Multilingual Model Verification
+
+Tests that non-.en models load correctly and detect language:
+
+```bash
+# Use a multilingual model (without .en suffix)
+voxtype --model small record start
+sleep 3
+voxtype record stop
+
+# Check logs for language auto-detection:
+journalctl --user -u voxtype --since "30 seconds ago" | grep "auto-detected language"
+
+# Verify model menu shows multilingual options:
+echo "0" | voxtype setup model  # Should show tiny, base, small, medium (multilingual)
+```
+
+### Invalid Model Rejection
+
+Verify bad model names warn and fall back to default:
+
+```bash
+# Should warn, send notification, and fall back to default model
+voxtype --model nonexistent record start
+sleep 2
+voxtype record cancel
+
+# Expected behavior:
+# 1. Warning logged: "Unknown model 'nonexistent', using default model 'base.en'"
+# 2. Desktop notification via notify-send
+# 3. Recording proceeds with the default model
+
+# Check logs for warning:
+journalctl --user -u voxtype --since "30 seconds ago" | grep -i "unknown model"
+
+# The setup --set command should still reject invalid models:
+voxtype setup model --set nonexistent
+# Expected: error about model not installed
+```
+
+### GPU Backend Switching
+
+Test transitions between CPU and Vulkan backends:
+
+```bash
+# Interactive GPU setup
+voxtype setup gpu
+
+# Check current backend in logs after restart:
+journalctl --user -u voxtype --since "1 minute ago" | grep -E "backend|Vulkan|CPU"
+```
+
+### Waybar JSON Output
+
+Test the status follower with JSON format for Waybar integration:
+
+```bash
+# Should output JSON status updates (Ctrl+C to stop)
+timeout 3 voxtype status --follow --format json || true
+
+# Expected output format:
+# {"text":"idle","class":"idle","tooltip":"Voxtype: idle"}
+
+# Test during recording:
+voxtype record start &
+sleep 1
+timeout 2 voxtype status --follow --format json || true
+voxtype record cancel
+```
+
+### Single Instance Enforcement
+
+Verify only one daemon can run at a time:
+
+```bash
+# With daemon already running via systemd, try starting another:
+voxtype daemon
+# Should fail with error about existing instance / PID lock
+
+# Check PID file:
+cat ~/.local/share/voxtype/voxtype.pid
+ps aux | grep voxtype
+```
+
+### Post-Processing Command
+
+Tests LLM cleanup if configured:
+
+```bash
+# 1. Configure post-processing in config.toml:
+#    [output]
+#    post_process_command = "your-llm-cleanup-script"
+
+# 2. Restart daemon
+systemctl --user restart voxtype
+
+# 3. Record and transcribe
+voxtype record start && sleep 3 && voxtype record stop
+
+# 4. Check logs for post-processing:
+journalctl --user -u voxtype --since "1 minute ago" | grep -i "post.process"
+```
+
+### Config Validation
+
+Verify malformed config files produce clear errors:
+
+```bash
+# Backup current config
+cp ~/.config/voxtype/config.toml ~/.config/voxtype/config.toml.bak
+
+# Test with invalid TOML syntax
+echo "invalid toml [[[" >> ~/.config/voxtype/config.toml
+voxtype config  # Should show parse error with line number
+
+# Test with unknown field (should warn but continue)
+echo 'unknown_field = "value"' >> ~/.config/voxtype/config.toml
+voxtype config
+
+# Restore config
+mv ~/.config/voxtype/config.toml.bak ~/.config/voxtype/config.toml
+```
+
+### Signal Handling
+
+Test direct signal control of the daemon:
+
+```bash
+# Get daemon PID
+DAEMON_PID=$(cat ~/.local/share/voxtype/voxtype.pid)
+
+# Start recording via SIGUSR1
+kill -USR1 $DAEMON_PID
+voxtype status  # Should show "recording"
+sleep 2
+
+# Stop recording via SIGUSR2
+kill -USR2 $DAEMON_PID
+voxtype status  # Should show "transcribing" then "idle"
+
+# Check logs:
+journalctl --user -u voxtype --since "30 seconds ago" | grep -E "USR1|USR2|signal"
+```
+
+### Rapid Successive Recordings
+
+Stress test with quick start/stop cycles:
+
+```bash
+# Run multiple quick recordings in succession
+for i in {1..5}; do
+    echo "Recording $i..."
+    voxtype record start
+    sleep 1
+    voxtype record cancel
+done
+
+# Verify daemon is still healthy
+voxtype status
+journalctl --user -u voxtype --since "1 minute ago" | grep -iE "error|panic"
+```
+
+### Long Recording
+
+Test recording near the max_duration_secs limit:
+
+```bash
+# Check current max duration
+voxtype config | grep max_duration
+
+# Start a long recording (default max is 60s)
+# The daemon should auto-stop at the limit
+voxtype record start
+echo "Recording... will auto-stop at max_duration_secs"
+# Wait or manually stop before limit:
+sleep 10
+voxtype record stop
+
+# To test auto-cutoff, set max_duration_secs = 5 in config and record longer
+```
+
+### Service Restart Cycle
+
+Test systemd service restarts:
+
+```bash
+# Multiple restart cycles
+for i in {1..3}; do
+    echo "Restart cycle $i..."
+    systemctl --user restart voxtype
+    sleep 2
+    voxtype status
+done
+
+# Verify clean restarts in logs:
+journalctl --user -u voxtype --since "1 minute ago" | grep -E "Starting|Ready|shutdown"
+```
+
 ### Quick Smoke Test Script
 
 ```bash
