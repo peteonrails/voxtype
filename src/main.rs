@@ -6,6 +6,7 @@
 
 use clap::Parser;
 use std::path::PathBuf;
+use std::process::Command;
 use tracing_subscriber::EnvFilter;
 use voxtype::{config, cpu, daemon, setup, transcribe, Cli, Commands, RecordAction, SetupAction};
 
@@ -62,7 +63,25 @@ async fn main() -> anyhow::Result<()> {
         config.output.mode = config::OutputMode::Paste;
     }
     if let Some(model) = cli.model {
-        config.whisper.model = model;
+        if setup::model::is_valid_model(&model) {
+            config.whisper.model = model;
+        } else {
+            let default_model = &config.whisper.model;
+            tracing::warn!(
+                "Unknown model '{}', using default model '{}'",
+                model,
+                default_model
+            );
+            // Send desktop notification
+            let _ = Command::new("notify-send")
+                .args([
+                    "--app-name=Voxtype",
+                    "--expire-time=5000",
+                    "Voxtype: Invalid Model",
+                    &format!("Unknown model '{}', using '{}'", model, default_model),
+                ])
+                .spawn();
+        }
     }
     if let Some(hotkey) = cli.hotkey {
         config.hotkey.key = hotkey;

@@ -52,7 +52,7 @@ pub struct Cli {
     #[arg(long)]
     pub paste: bool,
 
-    /// Override whisper model (tiny, base, small, medium, large-v3, large-v3-turbo)
+    /// Override whisper model (tiny, tiny.en, base, base.en, small, small.en, medium, medium.en, large-v3, large-v3-turbo)
     #[arg(long, value_name = "MODEL")]
     pub model: Option<String>,
 
