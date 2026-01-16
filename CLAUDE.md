@@ -561,6 +561,23 @@ This caused the v0.4.5 incident where users had cached PKGBUILDs with old checks
 
 When publishing a release to GitHub, also add a matching article to `website/news/index.html`. The content should mirror the GitHub release notes.
 
+### Capturing All Features
+
+Before writing release notes, review all commits since the last release to ensure nothing is missed:
+
+```bash
+git log --oneline v0.4.14..HEAD  # Replace with previous version tag
+```
+
+Check for:
+- New features and configuration options
+- Bug fixes
+- Performance improvements
+- Deprecations
+- Contributors to credit
+
+Don't just document the most recent work - capture everything that shipped since the last release.
+
 ### Style Guide (follow v0.4.10 and v0.4.11 as examples)
 
 **Avoid AI writing patterns:**
