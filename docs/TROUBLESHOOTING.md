@@ -9,6 +9,7 @@ Solutions to common issues when using Voxtype.
 - [Audio Problems](#audio-problems)
 - [Transcription Issues](#transcription-issues)
 - [Output Problems](#output-problems)
+  - [wtype not working on KDE Plasma or GNOME Wayland](#wtype-not-working-on-kde-plasma-or-gnome-wayland)
 - [Performance Issues](#performance-issues)
 - [Systemd Service Issues](#systemd-service-issues)
 - [Debug Mode](#debug-mode)
@@ -287,6 +288,56 @@ This is rarely needed. The optimization speeds up transcription for short clips 
 ---
 
 ## Output Problems
+
+### wtype not working on KDE Plasma or GNOME Wayland
+
+**Symptom:** wtype fails with "Compositor does not support the virtual keyboard protocol"
+
+**Cause:** KDE Plasma and GNOME do not implement the `zwp_virtual_keyboard_v1` Wayland protocol that wtype requires. This is a compositor limitation, not a voxtype bug.
+
+**What happens:** Voxtype detects this failure and automatically falls back to ydotool. If ydotool isn't set up, it falls back to clipboard mode.
+
+**Solution:** Set up ydotool as your typing backend. Unlike wtype, ydotool requires a daemon to be running:
+
+```bash
+# 1. Install ydotool
+# Arch:
+sudo pacman -S ydotool
+# Fedora:
+sudo dnf install ydotool
+# Ubuntu/Debian:
+sudo apt install ydotool
+
+# 2. Enable and start the daemon (required!)
+systemctl --user enable --now ydotool
+
+# 3. Verify it's running
+systemctl --user status ydotool
+```
+
+**Important:** Simply having ydotool installed is not enough. The daemon must be running for the fallback to work. If the daemon isn't running, voxtype will fall back to clipboard-only output.
+
+**Alternative:** Use clipboard or paste mode instead of type mode:
+
+```toml
+[output]
+mode = "clipboard"  # Copies to clipboard, you paste manually
+# or
+mode = "paste"      # Copies to clipboard, then simulates Ctrl+V
+```
+
+**Compositor compatibility:**
+
+| Desktop | wtype | ydotool | Recommended |
+|---------|-------|---------|-------------|
+| Hyprland | ✓ | ✓ | wtype |
+| Sway | ✓ | ✓ | wtype |
+| River | ✓ | ✓ | wtype |
+| KDE Plasma (Wayland) | ✗ | ✓ | ydotool |
+| GNOME (Wayland) | ✗ | ✓ | ydotool |
+| X11 (any desktop) | ✗ | ✓ | ydotool |
+
+---
 
 ### "ydotool daemon not running"
 

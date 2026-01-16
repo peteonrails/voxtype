@@ -350,7 +350,15 @@ sudo apt install ydotool
 systemctl --user enable --now ydotool
 ```
 
-Voxtype uses wtype on Wayland (no daemon needed), ydotool on X11, and falls back to clipboard if neither is available.
+**On KDE Plasma or GNOME (Wayland):** wtype does not work on these desktops because they don't support the virtual keyboard protocol. You must use ydotool instead:
+
+```bash
+# Install ydotool (see commands above for your distro)
+# Then enable and start the daemon (required!)
+systemctl --user enable --now ydotool
+```
+
+Voxtype uses wtype on Wayland (no daemon needed), ydotool on X11, and falls back to clipboard if neither is available. On KDE/GNOME Wayland, wtype will fail and voxtype will use ydotool if the daemon is running.
 
 ### 3. Verify audio setup
 

@@ -690,6 +690,25 @@ systemctl --user enable --now ydotool
 - ydotool requires daemon and cannot output CJK characters
 - May be slow in some applications (increase `type_delay_ms`)
 
+**Compositor Compatibility:**
+
+wtype does not work on all Wayland compositors. KDE Plasma and GNOME do not support the virtual keyboard protocol that wtype requires.
+
+| Desktop | wtype | ydotool | Notes |
+|---------|-------|---------|-------|
+| Hyprland, Sway, River | ✓ | ✓ | wtype recommended (best CJK support) |
+| KDE Plasma (Wayland) | ✗ | ✓ | Use ydotool (daemon required) |
+| GNOME (Wayland) | ✗ | ✓ | Use ydotool (daemon required) |
+| X11 (any) | ✗ | ✓ | Use ydotool (daemon required) |
+
+**KDE Plasma and GNOME users:** You must set up ydotool for type mode to work. Install ydotool and start the daemon:
+
+```bash
+systemctl --user enable --now ydotool
+```
+
+See [Troubleshooting: wtype not working on KDE/GNOME](TROUBLESHOOTING.md#wtype-not-working-on-kde-plasma-or-gnome-wayland) for details.
+
 ### Clipboard Mode
 
 Copies transcribed text to the clipboard.

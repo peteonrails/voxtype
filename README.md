@@ -483,6 +483,8 @@ systemctl --user start ydotool
 systemctl --user enable ydotool  # Start on login
 ```
 
+**KDE Plasma / GNOME users:** wtype does not work on these desktops. You must use ydotool with the daemon running. See [Troubleshooting](docs/TROUBLESHOOTING.md#wtype-not-working-on-kde-plasma-or-gnome-wayland) for setup instructions.
+
 ### No audio captured
 
 Check your default audio input:

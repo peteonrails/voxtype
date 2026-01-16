@@ -610,6 +610,9 @@ Primary output method.
 mode = "paste"
 ```
 
+**Note about wtype compatibility:**
+wtype does not work on KDE Plasma or GNOME Wayland because these compositors don't support the virtual keyboard protocol. On these desktops, voxtype automatically falls back to ydotool, but the ydotool daemon must be running (`systemctl --user enable --now ydotool`). See [Troubleshooting](TROUBLESHOOTING.md#wtype-not-working-on-kde-plasma-or-gnome-wayland) for details.
+
 **Note about paste mode:**
 The `paste` mode is designed to work around non-US keyboard layout issues. Instead of typing characters directly (which assumes US keyboard layout), it copies text to the clipboard and then simulates a paste keystroke. This works regardless of keyboard layout. Requires wl-copy for clipboard access, plus wtype (preferred, no daemon needed) or ydotool (requires ydotoold daemon) for keystroke simulation.
 

@@ -66,6 +66,19 @@ For **type mode**: Most applications work. Some may have issues:
 
 For **clipboard mode**: Works universally (you just need to paste manually).
 
+### Does wtype work on KDE Plasma or GNOME?
+
+No. KDE Plasma and GNOME (on Wayland) do not support the virtual keyboard protocol that wtype requires. You'll see the error: "Compositor does not support the virtual keyboard protocol."
+
+**Solution:** Use ydotool instead. Voxtype automatically falls back to ydotool when wtype fails, but ydotool requires its daemon to be running:
+
+```bash
+# Install ydotool, then start the daemon
+systemctl --user enable --now ydotool
+```
+
+Without the daemon running, you'll only get clipboard output. See [Troubleshooting](TROUBLESHOOTING.md#wtype-not-working-on-kde-plasma-or-gnome-wayland) for complete setup instructions.
+
 ---
 
 ## Features
