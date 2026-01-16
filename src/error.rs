@@ -96,6 +96,9 @@ pub enum OutputError {
     #[error("ydotool not found in PATH. Install via your package manager.")]
     YdotoolNotFound,
 
+    #[error("dotool not found in PATH. Install from https://sr.ht/~geb/dotool/")]
+    DotoolNotFound,
+
     #[error("wtype not found in PATH. Install via your package manager.")]
     WtypeNotFound,
 
@@ -108,7 +111,7 @@ pub enum OutputError {
     #[error("Ctrl+V simulation failed: {0}")]
     CtrlVFailed(String),
 
-    #[error("All output methods failed. Ensure wtype, ydotool, or wl-copy is available.")]
+    #[error("All output methods failed. Ensure wtype, dotool, ydotool, or wl-copy is available.")]
     AllMethodsFailed,
 }
 

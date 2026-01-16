@@ -4,12 +4,14 @@
 //!
 //! Fallback chain for `mode = "type"`:
 //! 1. wtype - Wayland-native, best Unicode/CJK support, no daemon needed
-//! 2. ydotool - Works on X11/Wayland/TTY, requires daemon
-//! 3. clipboard - Universal fallback via wl-copy
+//! 2. dotool - Works on X11/Wayland/TTY, supports keyboard layouts, no daemon needed
+//! 3. ydotool - Works on X11/Wayland/TTY, requires daemon
+//! 4. clipboard - Universal fallback via wl-copy
 //!
 //! Paste mode (clipboard + Ctrl+V) helps with system with non US keyboard layouts.
 
 pub mod clipboard;
+pub mod dotool;
 pub mod paste;
 pub mod post_process;
 pub mod wtype;
@@ -50,7 +52,17 @@ pub fn create_output_chain(config: &OutputConfig) -> Vec<Box<dyn TextOutput>> {
                 pre_type_delay_ms,
             )));
 
-            // Fallback: ydotool (works on X11/TTY, requires daemon)
+            // Fallback 1: dotool (supports keyboard layouts, no daemon needed)
+            chain.push(Box::new(dotool::DotoolOutput::new(
+                config.type_delay_ms,
+                pre_type_delay_ms,
+                false, // no notification, wtype handles it if available
+                config.auto_submit,
+                config.dotool_xkb_layout.clone(),
+                config.dotool_xkb_variant.clone(),
+            )));
+
+            // Fallback 2: ydotool (works on X11/TTY, requires daemon)
             chain.push(Box::new(ydotool::YdotoolOutput::new(
                 config.type_delay_ms,
                 pre_type_delay_ms,

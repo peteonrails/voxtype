@@ -681,6 +681,15 @@ pub struct OutputConfig {
     /// Defaults to "ctrl+v" if not specified
     #[serde(default)]
     pub paste_keys: Option<String>,
+
+    /// Keyboard layout for dotool (e.g., "de" for German, "fr" for French)
+    /// Required for non-US keyboard layouts when using dotool
+    #[serde(default)]
+    pub dotool_xkb_layout: Option<String>,
+
+    /// Keyboard layout variant for dotool (e.g., "nodeadkeys")
+    #[serde(default)]
+    pub dotool_xkb_variant: Option<String>,
 }
 
 impl OutputConfig {
@@ -767,6 +776,8 @@ impl Default for Config {
                 post_output_command: None,
                 post_process: None,
                 paste_keys: None,
+                dotool_xkb_layout: None,
+                dotool_xkb_variant: None,
             },
             text: TextConfig::default(),
             status: StatusConfig::default(),

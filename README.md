@@ -14,7 +14,7 @@ Hold a hotkey (default: ScrollLock) while speaking, release to transcribe and ou
 
 - **Works on any Linux desktop** - Uses compositor keybindings (Hyprland, Sway, River) with evdev fallback for X11 and other environments
 - **Fully offline by default** - Uses whisper.cpp for local transcription, with optional remote server support
-- **Fallback chain** - Types via wtype (best CJK support), falls back to ydotool, then clipboard
+- **Fallback chain** - Types via wtype (best CJK support), falls back to dotool (keyboard layout support), ydotool, then clipboard
 - **Push-to-talk or Toggle mode** - Hold to record, or press once to start/stop
 - **Audio feedback** - Optional sound cues when recording starts/stops
 - **Configurable** - Choose your hotkey, model size, output mode, and more
@@ -361,6 +361,7 @@ Results vary by hardware. Example on AMD RX 6800:
 
 - **PipeWire** or **PulseAudio** (for audio capture)
 - **wtype** (for typing output on Wayland) - *recommended, best CJK/Unicode support*
+- **dotool** - *for non-US keyboard layouts (German, French, etc.) - supports XKB layouts*
 - **ydotool** + daemon - *for X11 or as Wayland fallback*
 - **wl-clipboard** (for clipboard fallback on Wayland)
 
@@ -472,18 +473,23 @@ sudo usermod -aG input $USER
 
 ### Text not appearing / typing not working
 
-Voxtype uses wtype (preferred) or ydotool as fallback for typing output:
+Voxtype uses wtype (preferred), dotool, or ydotool for typing output:
 
 ```bash
-# Check if wtype is installed
-which wtype
+# Check available typing backends
+which wtype dotool ydotool
+
+# For non-US keyboard layouts, install dotool and configure:
+# In ~/.config/voxtype/config.toml:
+# [output]
+# dotool_xkb_layout = "de"  # Your layout (de, fr, es, etc.)
 
 # If using ydotool fallback (X11/TTY), start the daemon:
 systemctl --user start ydotool
 systemctl --user enable ydotool  # Start on login
 ```
 
-**KDE Plasma / GNOME users:** wtype does not work on these desktops. You must use ydotool with the daemon running. See [Troubleshooting](docs/TROUBLESHOOTING.md#wtype-not-working-on-kde-plasma-or-gnome-wayland) for setup instructions.
+**KDE Plasma / GNOME users:** wtype does not work on these desktops. Voxtype automatically falls back to dotool (recommended for non-US layouts) or ydotool. See [Troubleshooting](docs/TROUBLESHOOTING.md#wtype-not-working-on-kde-plasma-or-gnome-wayland) for setup instructions.
 
 ### No audio captured
 
@@ -516,7 +522,7 @@ flowchart LR
         Audio --> Whisper["Whisper<br/>(whisper-rs)"]
         Whisper --> PostProcess["Post-Process<br/>(optional)"]
         PostProcess --> PreHook["Pre-Output<br/>Hook"]
-        PreHook --> Output["Output<br/>(wtype/ydotool)"]
+        PreHook --> Output["Output<br/>(wtype/dotool/ydotool)"]
         Output --> PostHook["Post-Output<br/>Hook"]
         PreHook -.-> Compositor["Compositor<br/>(submap/mode)"]
         PostHook -.-> Compositor
@@ -527,7 +533,7 @@ flowchart LR
 
 **Fallback: evdev hotkey.** For X11 or compositors without key-release support, voxtype includes a built-in hotkey using evdev (the Linux input subsystem). This requires the user to be in the `input` group.
 
-**Why wtype + ydotool?** On Wayland, wtype uses the virtual-keyboard protocol for text input, with excellent Unicode/CJK support and no daemon required. On X11 (or as a fallback), ydotool uses uinput for text injection. This combination ensures Voxtype works on any Linux desktop.
+**Why wtype + dotool + ydotool?** On Wayland, wtype uses the virtual-keyboard protocol for text input, with excellent Unicode/CJK support and no daemon required. When wtype fails (KDE/GNOME), dotool provides keyboard layout support via XKB for non-US layouts. As a final fallback, ydotool uses uinput for text injection on X11/TTY. This combination ensures Voxtype works on any Linux desktop with proper keyboard layout support.
 
 **Post-processing.** Transcriptions can optionally be piped through an external command before output. Use this to integrate local LLMs (Ollama, llama.cpp) for grammar correction, text expansion, or domain-specific vocabulary. Any command that reads stdin and writes stdout works.
 
