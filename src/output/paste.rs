@@ -164,13 +164,21 @@ pub struct PasteOutput {
     auto_submit: bool,
     /// Parsed paste keystroke
     keystroke: ParsedKeystroke,
-    /// Delay between key events in milliseconds (from config type_delay_ms)
-    key_delay_ms: u32,
+    /// Delay between key events in milliseconds
+    type_delay_ms: u32,
+    /// Delay before pasting (after clipboard copy) in milliseconds
+    pre_type_delay_ms: u32,
 }
 
 impl PasteOutput {
     /// Create a new paste output
-    pub fn new(notify: bool, auto_submit: bool, paste_keys: Option<String>, key_delay_ms: u32) -> Self {
+    pub fn new(
+        notify: bool,
+        auto_submit: bool,
+        paste_keys: Option<String>,
+        type_delay_ms: u32,
+        pre_type_delay_ms: u32,
+    ) -> Self {
         let keystroke_str = paste_keys.as_deref().unwrap_or("ctrl+v");
         let keystroke = ParsedKeystroke::parse(keystroke_str).unwrap_or_else(|e| {
             tracing::warn!("Invalid paste_keys '{}': {}, using ctrl+v", keystroke_str, e);
@@ -183,7 +191,8 @@ impl PasteOutput {
             notify,
             auto_submit,
             keystroke,
-            key_delay_ms,
+            type_delay_ms,
+            pre_type_delay_ms,
         }
     }
 
@@ -332,14 +341,14 @@ impl PasteOutput {
             OutputError::CtrlVFailed(format!("Cannot convert keystroke for ydotool: {}", e))
         })?;
 
-        tracing::debug!("Running: ydotool key {}, {}ms", args.join(" "), self.key_delay_ms);
+        tracing::debug!("Running: ydotool key {}, {}ms", args.join(" "), self.type_delay_ms);
 
         let mut cmd = Command::new("ydotool");
         cmd.arg("key");
 
         // Only add delay parameter if configured
-        if self.key_delay_ms > 0 {
-            cmd.arg("-d").arg(self.key_delay_ms.to_string());
+        if self.type_delay_ms > 0 {
+            cmd.arg("-d").arg(self.type_delay_ms.to_string());
         }
 
         let output = cmd
@@ -455,8 +464,14 @@ impl TextOutput for PasteOutput {
         // Step 1: Copy to clipboard
         self.copy_to_clipboard(text).await?;
 
-        // Small delay to ensure clipboard is set before pasting
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Pre-paste delay to ensure clipboard is set before pasting
+        // Default to 100ms if not configured (minimum needed for reliability)
+        let delay = if self.pre_type_delay_ms > 0 {
+            self.pre_type_delay_ms
+        } else {
+            100
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(delay as u64)).await;
 
         // Step 2: Simulate paste keystroke
         self.simulate_paste_keystroke().await?;

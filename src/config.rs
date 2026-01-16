@@ -642,8 +642,12 @@ pub struct OutputConfig {
     #[serde(default)]
     pub type_delay_ms: u32,
 
-    /// Delay before wtype starts typing (ms), allows virtual keyboard to initialize
+    /// Delay before typing starts (ms), allows virtual keyboard to initialize
     /// Helps prevent first character from being dropped on some compositors
+    #[serde(default)]
+    pub pre_type_delay_ms: u32,
+
+    /// DEPRECATED: Use pre_type_delay_ms instead. Kept for backwards compatibility.
     #[serde(default)]
     pub wtype_delay_ms: u32,
 
@@ -677,6 +681,31 @@ pub struct OutputConfig {
     /// Defaults to "ctrl+v" if not specified
     #[serde(default)]
     pub paste_keys: Option<String>,
+}
+
+impl OutputConfig {
+    /// Get the effective pre-type delay, handling deprecated wtype_delay_ms
+    pub fn effective_pre_type_delay_ms(&self) -> u32 {
+        if self.wtype_delay_ms > 0 {
+            if self.pre_type_delay_ms > 0 {
+                // Both set - prefer new option, warn about deprecated
+                tracing::warn!(
+                    "Both pre_type_delay_ms and wtype_delay_ms are set. \
+                     Using pre_type_delay_ms={}. wtype_delay_ms is deprecated.",
+                    self.pre_type_delay_ms
+                );
+                self.pre_type_delay_ms
+            } else {
+                // Only deprecated option set - use it with warning
+                tracing::warn!(
+                    "wtype_delay_ms is deprecated, use pre_type_delay_ms instead"
+                );
+                self.wtype_delay_ms
+            }
+        } else {
+            self.pre_type_delay_ms
+        }
+    }
 }
 
 /// Output mode selection
@@ -730,6 +759,7 @@ impl Default for Config {
                 fallback_to_clipboard: true,
                 notification: NotificationConfig::default(),
                 type_delay_ms: 0,
+                pre_type_delay_ms: 0,
                 wtype_delay_ms: 0,
                 auto_submit: false,
                 pre_recording_command: None,

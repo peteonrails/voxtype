@@ -103,14 +103,14 @@ fallback_to_clipboard = true
 # 0 = fastest possible, increase if characters are dropped
 type_delay_ms = 0
 
-# Delay before wtype starts typing (ms)
+# Delay before typing starts (ms)
 # Allows virtual keyboard to initialize. Some users report this helps prevent
 # the first character from being dropped on text insertion. Try 100-200ms.
 # Note: When using compositor integration (via `voxtype setup compositor`),
 # best results come from not binding Escape in the submap. Some users have
 # had success with Escape bound by increasing this delay, but the most
 # consistent fix is to use F12 or another key instead.
-wtype_delay_ms = 0
+pre_type_delay_ms = 0
 
 # Keystroke for paste mode (when mode = "paste")
 # Default is "ctrl+v". Change for environments with different paste shortcuts.

@@ -11,12 +11,15 @@
 use super::TextOutput;
 use crate::error::OutputError;
 use std::process::Stdio;
+use std::time::Duration;
 use tokio::process::Command;
 
 /// ydotool-based text output
 pub struct YdotoolOutput {
     /// Delay between keypresses in milliseconds
-    delay_ms: u32,
+    type_delay_ms: u32,
+    /// Delay before typing starts in milliseconds
+    pre_type_delay_ms: u32,
     /// Whether to show a desktop notification
     notify: bool,
     /// Whether ydotool supports --key-hold flag (added in newer versions)
@@ -29,7 +32,7 @@ impl YdotoolOutput {
     /// Create a new ydotool output
     ///
     /// Detects ydotool capabilities at construction time.
-    pub fn new(delay_ms: u32, notify: bool, auto_submit: bool) -> Self {
+    pub fn new(type_delay_ms: u32, pre_type_delay_ms: u32, notify: bool, auto_submit: bool) -> Self {
         let supports_key_hold = Self::detect_key_hold_support();
         if supports_key_hold {
             tracing::debug!("ydotool supports --key-hold flag");
@@ -37,7 +40,8 @@ impl YdotoolOutput {
             tracing::debug!("ydotool does not support --key-hold flag, using --key-delay only");
         }
         Self {
-            delay_ms,
+            type_delay_ms,
+            pre_type_delay_ms,
             notify,
             supports_key_hold,
             auto_submit,
@@ -91,15 +95,20 @@ impl TextOutput for YdotoolOutput {
             return Ok(());
         }
 
+        // Pre-typing delay if configured
+        if self.pre_type_delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(self.pre_type_delay_ms as u64)).await;
+        }
+
         let mut cmd = Command::new("ydotool");
         cmd.arg("type");
 
         // Always set delay explicitly (ydotool defaults to 12ms if not specified)
-        cmd.arg("--key-delay").arg(self.delay_ms.to_string());
+        cmd.arg("--key-delay").arg(self.type_delay_ms.to_string());
 
         // Use --key-hold only if supported (older versions silently ignore unknown flags)
         if self.supports_key_hold {
-            cmd.arg("--key-hold").arg(self.delay_ms.to_string());
+            cmd.arg("--key-hold").arg(self.type_delay_ms.to_string());
         }
 
         // The -- ensures text starting with - isn't treated as an option
@@ -194,8 +203,9 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = YdotoolOutput::new(10, true, false);
-        assert_eq!(output.delay_ms, 10);
+        let output = YdotoolOutput::new(10, 0, true, false);
+        assert_eq!(output.type_delay_ms, 10);
+        assert_eq!(output.pre_type_delay_ms, 0);
         assert!(output.notify);
         assert!(!output.auto_submit);
         // supports_key_hold depends on system ydotool version, so we just check it's set
@@ -204,10 +214,17 @@ mod tests {
 
     #[test]
     fn test_new_with_enter() {
-        let output = YdotoolOutput::new(0, false, true);
-        assert_eq!(output.delay_ms, 0);
+        let output = YdotoolOutput::new(0, 0, false, true);
+        assert_eq!(output.type_delay_ms, 0);
         assert!(!output.notify);
         assert!(output.auto_submit);
+    }
+
+    #[test]
+    fn test_new_with_pre_type_delay() {
+        let output = YdotoolOutput::new(0, 200, false, false);
+        assert_eq!(output.type_delay_ms, 0);
+        assert_eq!(output.pre_type_delay_ms, 200);
     }
 
     #[test]

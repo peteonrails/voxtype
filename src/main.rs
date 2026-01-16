@@ -70,8 +70,12 @@ async fn main() -> anyhow::Result<()> {
     if cli.toggle {
         config.hotkey.mode = config::ActivationMode::Toggle;
     }
+    if let Some(delay) = cli.pre_type_delay {
+        config.output.pre_type_delay_ms = delay;
+    }
     if let Some(delay) = cli.wtype_delay {
-        config.output.wtype_delay_ms = delay;
+        tracing::warn!("--wtype-delay is deprecated, use --pre-type-delay instead");
+        config.output.pre_type_delay_ms = delay;
     }
     if cli.no_whisper_context_optimization {
         config.whisper.context_window_optimization = false;
@@ -631,7 +635,7 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
         config.output.fallback_to_clipboard
     );
     println!("  type_delay_ms = {}", config.output.type_delay_ms);
-    println!("  wtype_delay_ms = {}", config.output.wtype_delay_ms);
+    println!("  pre_type_delay_ms = {}", config.output.pre_type_delay_ms);
 
     println!("\n[output.notification]");
     println!(

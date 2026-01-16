@@ -37,18 +37,23 @@ pub trait TextOutput: Send + Sync {
 pub fn create_output_chain(config: &OutputConfig) -> Vec<Box<dyn TextOutput>> {
     let mut chain: Vec<Box<dyn TextOutput>> = Vec::new();
 
+    // Get effective pre_type_delay_ms (handles deprecated wtype_delay_ms)
+    let pre_type_delay_ms = config.effective_pre_type_delay_ms();
+
     match config.mode {
         crate::config::OutputMode::Type => {
             // Primary: wtype for Wayland (best Unicode/CJK support, no daemon)
             chain.push(Box::new(wtype::WtypeOutput::new(
                 config.notification.on_transcription,
                 config.auto_submit,
-                config.wtype_delay_ms,
+                config.type_delay_ms,
+                pre_type_delay_ms,
             )));
 
             // Fallback: ydotool (works on X11/TTY, requires daemon)
             chain.push(Box::new(ydotool::YdotoolOutput::new(
                 config.type_delay_ms,
+                pre_type_delay_ms,
                 false, // no notification, wtype handles it if available
                 config.auto_submit,
             )));
@@ -71,6 +76,7 @@ pub fn create_output_chain(config: &OutputConfig) -> Vec<Box<dyn TextOutput>> {
                 config.auto_submit,
                 config.paste_keys.clone(),
                 config.type_delay_ms,
+                pre_type_delay_ms,
             )));
         }
     }

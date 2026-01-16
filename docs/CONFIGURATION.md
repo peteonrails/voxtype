@@ -711,6 +711,22 @@ Delay in milliseconds between each typed character. Increase if characters are b
 type_delay_ms = 10  # 10ms delay between characters
 ```
 
+### pre_type_delay_ms
+
+**Type:** Integer
+**Default:** `0`
+**Required:** No
+
+Delay in milliseconds before typing starts. This allows the virtual keyboard to initialize and helps prevent the first character from being dropped on some compositors. Try 100-200ms if you experience issues.
+
+> **Note:** When using compositor integration (via `voxtype setup compositor`), best results come from not binding Escape in the submap. Some users have had success with Escape bound by increasing this delay, but the most consistent fix is to use F12 or another key instead.
+
+**Example:**
+```toml
+[output]
+pre_type_delay_ms = 100  # 100ms delay before typing starts
+```
+
 ### auto_submit
 
 **Type:** Boolean
@@ -1391,3 +1407,14 @@ remote_timeout_secs = 30
 ```
 
 > **Note**: Cloud-based transcription sends your audio to third-party servers. See [User Manual - Remote Whisper Servers](USER_MANUAL.md#remote-whisper-servers) for privacy considerations.
+
+---
+
+## Deprecated Options
+
+The following configuration options are deprecated but still supported for backwards compatibility. They will log a warning when used.
+
+| Deprecated Option | Replacement | Notes |
+|-------------------|-------------|-------|
+| `wtype_delay_ms` | `pre_type_delay_ms` | Renamed for clarity (applies to all output drivers, not just wtype) |
+| `--wtype-delay` CLI flag | `--pre-type-delay` | CLI equivalent of the above |
