@@ -10,7 +10,7 @@
 use super::Transcriber;
 use crate::config::{ParakeetConfig, ParakeetModelType};
 use crate::error::TranscribeError;
-#[cfg(feature = "parakeet-cuda")]
+#[cfg(any(feature = "parakeet-cuda", feature = "parakeet-rocm", feature = "parakeet-tensorrt"))]
 use parakeet_rs::ExecutionProvider;
 use parakeet_rs::{ExecutionConfig, Parakeet, ParakeetTDT, Transcriber as ParakeetTranscriberTrait};
 use std::path::PathBuf;
@@ -153,11 +153,23 @@ impl Transcriber for ParakeetTranscriber {
 fn build_execution_config() -> Option<ExecutionConfig> {
     #[cfg(feature = "parakeet-cuda")]
     {
-        tracing::info!("Configuring CUDA execution provider for GPU acceleration");
-        Some(ExecutionConfig::new().with_execution_provider(ExecutionProvider::Cuda))
+        tracing::info!("Configuring CUDA execution provider for NVIDIA GPU acceleration");
+        return Some(ExecutionConfig::new().with_execution_provider(ExecutionProvider::Cuda));
     }
 
-    #[cfg(not(feature = "parakeet-cuda"))]
+    #[cfg(feature = "parakeet-tensorrt")]
+    {
+        tracing::info!("Configuring TensorRT execution provider for NVIDIA GPU acceleration");
+        return Some(ExecutionConfig::new().with_execution_provider(ExecutionProvider::TensorRT));
+    }
+
+    #[cfg(feature = "parakeet-rocm")]
+    {
+        tracing::info!("Configuring ROCm execution provider for AMD GPU acceleration");
+        return Some(ExecutionConfig::new().with_execution_provider(ExecutionProvider::ROCm));
+    }
+
+    #[cfg(not(any(feature = "parakeet-cuda", feature = "parakeet-tensorrt", feature = "parakeet-rocm")))]
     {
         None
     }
