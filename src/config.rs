@@ -205,6 +205,15 @@ pub struct Config {
     pub whisper: WhisperConfig,
     pub output: OutputConfig,
 
+    /// Transcription engine: "whisper" (default) or "parakeet"
+    /// Parakeet requires: cargo build --features parakeet
+    #[serde(default)]
+    pub engine: TranscriptionEngine,
+
+    /// Parakeet configuration (optional, only used when engine = "parakeet")
+    #[serde(default)]
+    pub parakeet: Option<ParakeetConfig>,
+
     /// Text processing configuration (replacements, spoken punctuation)
     #[serde(default)]
     pub text: TextConfig,
@@ -494,23 +503,28 @@ fn load_custom_icon_theme(path: &str) -> Result<ResolvedIcons, String> {
     })
 }
 
-/// Whisper transcription backend
+/// Whisper execution mode (how whisper runs)
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
-pub enum WhisperBackend {
-    /// Local transcription using whisper.cpp
+pub enum WhisperMode {
+    /// Local transcription using whisper.cpp FFI
     #[default]
     Local,
     /// Remote transcription via OpenAI-compatible API
     Remote,
+    // Future: Cli variant for whisper-cli subprocess (PR #77)
 }
 
 /// Whisper speech-to-text configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WhisperConfig {
-    /// Transcription backend: "local" or "remote"
+    /// Execution mode: "local" or "remote" (preferred field name)
     #[serde(default)]
-    pub backend: WhisperBackend,
+    pub mode: Option<WhisperMode>,
+
+    /// DEPRECATED: Use `mode` instead. Kept for backwards compatibility.
+    #[serde(default)]
+    pub backend: Option<WhisperMode>,
 
     /// Model name: tiny, base, small, medium, large-v3, large-v3-turbo
     /// Can also be an absolute path to a .bin file
@@ -535,7 +549,7 @@ pub struct WhisperConfig {
     /// transcription, ensuring GPU memory is fully released between recordings.
     /// This is especially useful on laptops with hybrid graphics to prevent
     /// the GPU from staying active when not in use.
-    /// Note: This option only applies when backend = "local".
+    /// Note: This option only applies when mode = "local".
     #[serde(default)]
     pub gpu_isolation: bool,
 
@@ -546,10 +560,10 @@ pub struct WhisperConfig {
     #[serde(default = "default_context_window_optimization")]
     pub context_window_optimization: bool,
 
-    // --- Remote backend settings ---
+    // --- Remote mode settings ---
 
     /// Remote server endpoint URL (e.g., "http://192.168.1.100:8080")
-    /// Required when backend = "remote"
+    /// Required when mode = "remote"
     #[serde(default)]
     pub remote_endpoint: Option<String>,
 
@@ -564,6 +578,87 @@ pub struct WhisperConfig {
     /// Timeout for remote requests in seconds (default: 30)
     #[serde(default)]
     pub remote_timeout_secs: Option<u64>,
+}
+
+impl WhisperConfig {
+    /// Get the effective execution mode, preferring `mode` over deprecated `backend`
+    pub fn effective_mode(&self) -> WhisperMode {
+        // Prefer `mode` if set
+        if let Some(mode) = self.mode {
+            return mode;
+        }
+        // Fall back to deprecated `backend` with warning
+        if let Some(backend) = self.backend {
+            tracing::warn!(
+                "DEPRECATED: [whisper] backend is deprecated, use 'mode' instead"
+            );
+            tracing::warn!(
+                "  Change 'backend = \"{}\"' to 'mode = \"{}\"' in config.toml",
+                match backend {
+                    WhisperMode::Local => "local",
+                    WhisperMode::Remote => "remote",
+                },
+                match backend {
+                    WhisperMode::Local => "local",
+                    WhisperMode::Remote => "remote",
+                }
+            );
+            return backend;
+        }
+        WhisperMode::default()
+    }
+}
+
+/// Parakeet model architecture type
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ParakeetModelType {
+    /// CTC (Connectionist Temporal Classification) - faster, character-level output
+    Ctc,
+    /// TDT (Token-Duration-Transducer) - recommended, proper punctuation and word boundaries
+    #[default]
+    Tdt,
+}
+
+/// Parakeet speech-to-text configuration (ONNX-based, alternative to Whisper)
+/// Requires: cargo build --features parakeet
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ParakeetConfig {
+    /// Path to model directory containing ONNX model files
+    /// For TDT: encoder-model.onnx, decoder_joint-model.onnx, vocab.txt
+    /// For CTC: model.onnx, tokenizer.json
+    pub model: String,
+
+    /// Model architecture type: "tdt" (default, recommended) or "ctc"
+    /// Auto-detected from model directory structure if not specified
+    #[serde(default)]
+    pub model_type: Option<ParakeetModelType>,
+
+    /// Load model on-demand when recording starts (true) or keep loaded (false)
+    #[serde(default = "default_on_demand_loading")]
+    pub on_demand_loading: bool,
+}
+
+impl Default for ParakeetConfig {
+    fn default() -> Self {
+        Self {
+            model: "parakeet-tdt-0.6b-v3".to_string(),
+            model_type: None, // Auto-detect
+            on_demand_loading: false,
+        }
+    }
+}
+
+/// Transcription engine selection (which ASR technology to use)
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TranscriptionEngine {
+    /// Use Whisper (whisper.cpp via whisper-rs) - default
+    #[default]
+    Whisper,
+    /// Use Parakeet (NVIDIA's FastConformer via ONNX Runtime)
+    /// Requires: cargo build --features parakeet
+    Parakeet,
 }
 
 /// Text processing configuration
@@ -741,7 +836,8 @@ impl Default for Config {
                 feedback: AudioFeedbackConfig::default(),
             },
             whisper: WhisperConfig {
-                backend: WhisperBackend::default(),
+                mode: None,    // Defaults to Local via effective_mode()
+                backend: None, // Deprecated alias
                 model: "base.en".to_string(),
                 language: "en".to_string(),
                 translate: false,
@@ -768,6 +864,8 @@ impl Default for Config {
                 post_process: None,
                 paste_keys: None,
             },
+            engine: TranscriptionEngine::default(),
+            parakeet: None,
             text: TextConfig::default(),
             status: StatusConfig::default(),
             state_file: Some("auto".to_string()),
@@ -837,6 +935,30 @@ impl Config {
         tracing::debug!("Ensured models directory exists: {:?}", models_dir);
 
         Ok(())
+    }
+
+    /// Check if on-demand model loading is enabled for the active engine
+    pub fn on_demand_loading(&self) -> bool {
+        match self.engine {
+            TranscriptionEngine::Whisper => self.whisper.on_demand_loading,
+            TranscriptionEngine::Parakeet => self
+                .parakeet
+                .as_ref()
+                .map(|p| p.on_demand_loading)
+                .unwrap_or(false),
+        }
+    }
+
+    /// Get the model name/path for the active engine (for logging)
+    pub fn model_name(&self) -> &str {
+        match self.engine {
+            TranscriptionEngine::Whisper => &self.whisper.model,
+            TranscriptionEngine::Parakeet => self
+                .parakeet
+                .as_ref()
+                .map(|p| p.model.as_str())
+                .unwrap_or("parakeet (not configured)"),
+        }
     }
 }
 
@@ -1330,5 +1452,374 @@ mod tests {
 
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.whisper.context_window_optimization);
+    }
+
+    // =========================================================================
+    // Engine and Mode Tests (v5 config schema)
+    // =========================================================================
+
+    #[test]
+    fn test_parse_engine_whisper() {
+        let toml_str = r#"
+            engine = "whisper"
+
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.engine, TranscriptionEngine::Whisper);
+    }
+
+    #[test]
+    fn test_parse_engine_parakeet() {
+        let toml_str = r#"
+            engine = "parakeet"
+
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [parakeet]
+            model = "parakeet-tdt-0.6b-v3"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.engine, TranscriptionEngine::Parakeet);
+        assert!(config.parakeet.is_some());
+        assert_eq!(config.parakeet.as_ref().unwrap().model, "parakeet-tdt-0.6b-v3");
+    }
+
+    #[test]
+    fn test_engine_defaults_to_whisper() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.engine, TranscriptionEngine::Whisper);
+    }
+
+    #[test]
+    fn test_parse_whisper_mode_local() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            mode = "local"
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.whisper.mode, Some(WhisperMode::Local));
+        assert_eq!(config.whisper.effective_mode(), WhisperMode::Local);
+    }
+
+    #[test]
+    fn test_parse_whisper_mode_remote() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            mode = "remote"
+            model = "base.en"
+            language = "en"
+            remote_endpoint = "http://localhost:8080"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.whisper.mode, Some(WhisperMode::Remote));
+        assert_eq!(config.whisper.effective_mode(), WhisperMode::Remote);
+    }
+
+    #[test]
+    fn test_whisper_backend_alias_local() {
+        // Test that deprecated 'backend' field still works
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            backend = "local"
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.whisper.backend, Some(WhisperMode::Local));
+        assert!(config.whisper.mode.is_none());
+        // effective_mode should return the backend value
+        assert_eq!(config.whisper.effective_mode(), WhisperMode::Local);
+    }
+
+    #[test]
+    fn test_whisper_backend_alias_remote() {
+        // Test that deprecated 'backend' field still works for remote
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            backend = "remote"
+            model = "base.en"
+            language = "en"
+            remote_endpoint = "http://localhost:8080"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.whisper.backend, Some(WhisperMode::Remote));
+        assert!(config.whisper.mode.is_none());
+        // effective_mode should return the backend value
+        assert_eq!(config.whisper.effective_mode(), WhisperMode::Remote);
+    }
+
+    #[test]
+    fn test_whisper_mode_takes_precedence_over_backend() {
+        // When both mode and backend are set, mode should take precedence
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            mode = "local"
+            backend = "remote"
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.whisper.mode, Some(WhisperMode::Local));
+        assert_eq!(config.whisper.backend, Some(WhisperMode::Remote));
+        // mode takes precedence
+        assert_eq!(config.whisper.effective_mode(), WhisperMode::Local);
+    }
+
+    #[test]
+    fn test_whisper_effective_mode_defaults_to_local() {
+        // When neither mode nor backend is set, effective_mode defaults to Local
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.whisper.mode.is_none());
+        assert!(config.whisper.backend.is_none());
+        assert_eq!(config.whisper.effective_mode(), WhisperMode::Local);
+    }
+
+    // =========================================================================
+    // ParakeetConfig and ParakeetModelType Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_parakeet_model_type_tdt() {
+        let toml_str = r#"
+            engine = "parakeet"
+
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [parakeet]
+            model = "parakeet-tdt-0.6b-v3"
+            model_type = "tdt"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let parakeet = config.parakeet.unwrap();
+        assert_eq!(parakeet.model, "parakeet-tdt-0.6b-v3");
+        assert_eq!(parakeet.model_type, Some(ParakeetModelType::Tdt));
+    }
+
+    #[test]
+    fn test_parse_parakeet_model_type_ctc() {
+        let toml_str = r#"
+            engine = "parakeet"
+
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [parakeet]
+            model = "parakeet-ctc-0.6b"
+            model_type = "ctc"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let parakeet = config.parakeet.unwrap();
+        assert_eq!(parakeet.model, "parakeet-ctc-0.6b");
+        assert_eq!(parakeet.model_type, Some(ParakeetModelType::Ctc));
+    }
+
+    #[test]
+    fn test_parakeet_model_type_defaults_to_none_for_auto_detection() {
+        let toml_str = r#"
+            engine = "parakeet"
+
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [parakeet]
+            model = "parakeet-tdt-0.6b-v3"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let parakeet = config.parakeet.unwrap();
+        // model_type should be None (will be auto-detected at runtime)
+        assert!(parakeet.model_type.is_none());
+    }
+
+    #[test]
+    fn test_parakeet_config_default() {
+        let config = ParakeetConfig::default();
+        assert_eq!(config.model, "parakeet-tdt-0.6b-v3");
+        assert!(config.model_type.is_none());
+        assert!(!config.on_demand_loading);
+    }
+
+    #[test]
+    fn test_parakeet_model_type_enum_default() {
+        // ParakeetModelType defaults to Tdt
+        assert_eq!(ParakeetModelType::default(), ParakeetModelType::Tdt);
+    }
+
+    #[test]
+    fn test_config_on_demand_loading_whisper() {
+        let config = Config::default();
+        assert_eq!(config.engine, TranscriptionEngine::Whisper);
+        // on_demand_loading method should return whisper's value
+        assert!(!config.on_demand_loading());
+    }
+
+    #[test]
+    fn test_config_model_name_whisper() {
+        let config = Config::default();
+        assert_eq!(config.model_name(), "base.en");
     }
 }

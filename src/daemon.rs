@@ -476,11 +476,11 @@ impl Daemon {
         );
         drop(default_chain); // Not used; chain is created per-transcription
 
-        // Pre-load whisper model if on_demand_loading is disabled
+        // Pre-load transcription model if on_demand_loading is disabled
         let mut transcriber_preloaded = None;
-        if !self.config.whisper.on_demand_loading {
-            tracing::info!("Loading transcription model: {}", self.config.whisper.model);
-            transcriber_preloaded = Some(Arc::new(transcribe::create_transcriber(&self.config.whisper)?));
+        if !self.config.on_demand_loading() {
+            tracing::info!("Loading transcription model: {}", self.config.model_name());
+            transcriber_preloaded = Some(Arc::new(transcribe::create_transcriber(&self.config)?));
             tracing::info!("Model loaded, ready for voice input");
         } else {
             tracing::info!("On-demand loading enabled, model will be loaded when recording starts");
@@ -541,8 +541,8 @@ impl Daemon {
                                 }
 
                                 // Start model loading in background if on-demand loading is enabled
-                                if self.config.whisper.on_demand_loading {
-                                    let config = self.config.whisper.clone();
+                                if self.config.on_demand_loading() {
+                                    let config = self.config.clone();
                                     self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                         transcribe::create_transcriber(&config)
                                     }));
@@ -592,7 +592,7 @@ impl Daemon {
                             tracing::debug!("Received HotkeyEvent::Released (push-to-talk), state.is_recording() = {}", state.is_recording());
                             if state.is_recording() {
                                 // Wait for model loading task if on-demand loading is enabled
-                                let transcriber = if self.config.whisper.on_demand_loading {
+                                let transcriber = if self.config.on_demand_loading() {
                                     if let Some(task) = self.model_load_task.take() {
                                         match task.await {
                                             Ok(Ok(transcriber)) => {
@@ -647,8 +647,8 @@ impl Daemon {
                                 }
 
                                 // Start model loading in background if on-demand loading is enabled
-                                if self.config.whisper.on_demand_loading {
-                                    let config = self.config.whisper.clone();
+                                if self.config.on_demand_loading() {
+                                    let config = self.config.clone();
                                     self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                         transcribe::create_transcriber(&config)
                                     }));
@@ -690,7 +690,7 @@ impl Daemon {
                                 }
                             } else if state.is_recording() {
                                 // Wait for model loading task if on-demand loading is enabled
-                                let transcriber = if self.config.whisper.on_demand_loading {
+                                let transcriber = if self.config.on_demand_loading() {
                                     if let Some(task) = self.model_load_task.take() {
                                         match task.await {
                                             Ok(Ok(transcriber)) => {
@@ -871,8 +871,8 @@ impl Daemon {
                         }
 
                         // Start model loading in background if on-demand loading is enabled
-                        if self.config.whisper.on_demand_loading {
-                            let config = self.config.whisper.clone();
+                        if self.config.on_demand_loading() {
+                            let config = self.config.clone();
                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                 transcribe::create_transcriber(&config)
                             }));
@@ -918,7 +918,7 @@ impl Daemon {
                     tracing::debug!("Received SIGUSR2 (stop recording)");
                     if state.is_recording() {
                         // Wait for model loading task if on-demand loading is enabled
-                        let transcriber = if self.config.whisper.on_demand_loading {
+                        let transcriber = if self.config.on_demand_loading() {
                             if let Some(task) = self.model_load_task.take() {
                                 match task.await {
                                     Ok(Ok(transcriber)) => {

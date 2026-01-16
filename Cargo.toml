@@ -3,7 +3,7 @@ members = ["xtask"]
 
 [package]
 name = "voxtype"
-version = "0.4.15"
+version = "0.5.0-beta.2"
 edition = "2021"
 authors = ["Peter Jackson", "Jean-Paul van Tillo", "Máté Rémiás", "Rob Zolkos", "Dan Heuckeroth", "Igor Warzocha", "Julian Kaiser", "Kevin Miller", "konnsim", "reisset"]
 description = "Push-to-talk voice-to-text for Wayland"
@@ -57,6 +57,9 @@ rodio = { version = "0.19", default-features = false, features = ["wav"] }
 # Whisper speech-to-text
 whisper-rs = "0.15.1"
 
+# Parakeet speech-to-text (optional, ONNX-based)
+parakeet-rs = { version = "0.2.9", optional = true }
+
 
 # CPU count for thread detection
 num_cpus = "1.16"
@@ -73,6 +76,11 @@ gpu-vulkan = ["whisper-rs/vulkan"]
 gpu-cuda = ["whisper-rs/cuda"]
 gpu-metal = ["whisper-rs/metal"]
 gpu-hipblas = ["whisper-rs/hipblas"]
+# Parakeet backend (ONNX-based, alternative to Whisper)
+parakeet = ["dep:parakeet-rs"]
+parakeet-cuda = ["parakeet", "parakeet-rs/cuda"]
+parakeet-tensorrt = ["parakeet", "parakeet-rs/tensorrt"]
+parakeet-rocm = ["parakeet", "parakeet-rs/rocm"]
 
 [build-dependencies]
 clap = { version = "4", features = ["derive"] }

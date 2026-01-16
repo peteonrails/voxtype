@@ -3,6 +3,11 @@
 # Location: ~/.config/voxtype/config.toml
 # All settings can be overridden via CLI flags
 
+# Transcription engine: "whisper" (default) or "parakeet"
+# Whisper: whisper.cpp via whisper-rs (most compatible)
+# Parakeet: NVIDIA FastConformer via ONNX Runtime (requires --features parakeet)
+# engine = "whisper"
+
 # State file for external integrations (Waybar, polybar, etc.)
 # Use "auto" for default location ($XDG_RUNTIME_DIR/voxtype/state),
 # a custom path, or "disabled" to turn off. The daemon writes state
@@ -58,7 +63,12 @@ max_duration_secs = 60
 # volume = 0.7
 
 [whisper]
-# Model to use for transcription
+# Execution mode: "local" (default) or "remote"
+# - local: Use whisper.cpp locally via FFI
+# - remote: Send audio to OpenAI-compatible API endpoint
+# mode = "local"
+
+# Model to use for transcription (local mode)
 # Options: tiny, tiny.en, base, base.en, small, small.en, medium, medium.en, large-v3, large-v3-turbo
 # .en models are English-only but faster and more accurate for English
 # Or provide absolute path to a custom .bin model file
@@ -88,6 +98,25 @@ on_demand_loading = false
 # Speeds up transcription for clips under 22.5 seconds. Disable only if you
 # experience accuracy issues with short recordings (rare).
 # context_window_optimization = false
+
+# --- Remote mode settings (used when mode = "remote") ---
+# remote_endpoint = "http://192.168.1.100:8080"  # Required
+# remote_model = "whisper-1"                      # Model to request from server
+# remote_api_key = "sk-..."                       # Or use VOXTYPE_WHISPER_API_KEY env var
+# remote_timeout_secs = 30
+
+# [parakeet]
+# Parakeet configuration (only used when engine = "parakeet")
+# Requires: cargo build --features parakeet
+#
+# Model name (from ~/.local/share/voxtype/models/) or absolute path
+# model = "parakeet-tdt-0.6b-v3"
+#
+# Model type: "tdt" (recommended, proper punctuation) or "ctc" (faster, char-level)
+# Auto-detected from model directory if not specified
+# model_type = "tdt"
+#
+# on_demand_loading = false
 
 [output]
 # Primary output mode: "type", "clipboard", or "paste"

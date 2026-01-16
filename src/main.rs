@@ -64,6 +64,16 @@ async fn main() -> anyhow::Result<()> {
     if let Some(model) = cli.model {
         config.whisper.model = model;
     }
+    if let Some(engine) = cli.engine {
+        match engine.to_lowercase().as_str() {
+            "whisper" => config.engine = config::TranscriptionEngine::Whisper,
+            "parakeet" => config.engine = config::TranscriptionEngine::Parakeet,
+            _ => {
+                eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet", engine);
+                std::process::exit(1);
+            }
+        }
+    }
     if let Some(hotkey) = cli.hotkey {
         config.hotkey.key = hotkey;
     }
@@ -345,7 +355,7 @@ fn transcribe_file(config: &config::Config, path: &PathBuf) -> anyhow::Result<()
     );
 
     // Create transcriber and transcribe
-    let transcriber = transcribe::create_transcriber(&config.whisper)?;
+    let transcriber = transcribe::create_transcriber(&config)?;
     let text = transcriber.transcribe(&final_samples)?;
 
     println!("\n{}", text);

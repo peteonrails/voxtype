@@ -60,6 +60,10 @@ pub struct Cli {
     #[arg(long)]
     pub no_whisper_context_optimization: bool,
 
+    /// Override transcription engine (whisper or parakeet)
+    #[arg(long, value_name = "ENGINE")]
+    pub engine: Option<String>,
+
     /// Override hotkey (e.g., SCROLLLOCK, PAUSE, F13)
     #[arg(long, value_name = "KEY")]
     pub hotkey: Option<String>,
@@ -576,5 +580,48 @@ mod tests {
             }
             _ => panic!("Expected Record command"),
         }
+    }
+
+    // =========================================================================
+    // Engine flag tests
+    // =========================================================================
+
+    #[test]
+    fn test_engine_flag_whisper() {
+        let cli = Cli::parse_from(["voxtype", "--engine", "whisper"]);
+        assert_eq!(cli.engine, Some("whisper".to_string()));
+    }
+
+    #[test]
+    fn test_engine_flag_parakeet() {
+        let cli = Cli::parse_from(["voxtype", "--engine", "parakeet"]);
+        assert_eq!(cli.engine, Some("parakeet".to_string()));
+    }
+
+    #[test]
+    fn test_engine_flag_not_set() {
+        let cli = Cli::parse_from(["voxtype"]);
+        assert!(cli.engine.is_none());
+    }
+
+    #[test]
+    fn test_engine_flag_with_daemon_command() {
+        let cli = Cli::parse_from(["voxtype", "--engine", "parakeet", "daemon"]);
+        assert_eq!(cli.engine, Some("parakeet".to_string()));
+        assert!(matches!(cli.command, Some(Commands::Daemon)));
+    }
+
+    #[test]
+    fn test_engine_flag_with_model_flag() {
+        let cli = Cli::parse_from(["voxtype", "--engine", "whisper", "--model", "large-v3"]);
+        assert_eq!(cli.engine, Some("whisper".to_string()));
+        assert_eq!(cli.model, Some("large-v3".to_string()));
+    }
+
+    #[test]
+    fn test_engine_flag_case_preserved() {
+        // The CLI should preserve case as-is; main.rs handles case-insensitive matching
+        let cli = Cli::parse_from(["voxtype", "--engine", "PARAKEET"]);
+        assert_eq!(cli.engine, Some("PARAKEET".to_string()));
     }
 }
