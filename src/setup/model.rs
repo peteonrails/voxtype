@@ -4,6 +4,7 @@ use super::{print_failure, print_info, print_success, print_warning};
 use crate::config::Config;
 use crate::transcribe::whisper::{get_model_filename, get_model_url};
 use std::io::{self, Write};
+use std::path::Path;
 use std::process::Command;
 
 /// Model information for display
@@ -82,7 +83,52 @@ const MODELS: &[ModelInfo] = &[
     },
 ];
 
-/// Check if a model name is valid
+// =============================================================================
+// Parakeet Model Definitions
+// =============================================================================
+
+/// Parakeet model information for display and download
+struct ParakeetModelInfo {
+    name: &'static str,
+    size_mb: u32,
+    description: &'static str,
+    files: &'static [(&'static str, u64)], // (filename, expected_size_bytes)
+    huggingface_repo: &'static str,
+}
+
+const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
+    ParakeetModelInfo {
+        name: "parakeet-tdt-0.6b-v3",
+        size_mb: 2600,
+        description: "TDT model with punctuation (recommended)",
+        files: &[
+            ("encoder-model.onnx", 43_825_971),
+            ("encoder-model.onnx.data", 2_620_260_352),
+            ("decoder_joint-model.onnx", 76_023_939),
+            ("vocab.txt", 96_179),
+            ("config.json", 97),
+        ],
+        huggingface_repo: "istupakov/parakeet-tdt-0.6b-v3-onnx",
+    },
+    ParakeetModelInfo {
+        name: "parakeet-tdt-0.6b-v3-int8",
+        size_mb: 670,
+        description: "TDT quantized, smaller/faster",
+        files: &[
+            ("encoder-model.int8.onnx", 683_671_552),
+            ("decoder_joint-model.int8.onnx", 19_087_667),
+            ("vocab.txt", 96_179),
+            ("config.json", 97),
+        ],
+        huggingface_repo: "istupakov/parakeet-tdt-0.6b-v3-onnx",
+    },
+];
+
+// =============================================================================
+// Whisper Model Functions
+// =============================================================================
+
+/// Check if a model name is valid (Whisper models)
 pub fn is_valid_model(name: &str) -> bool {
     MODELS.iter().any(|m| m.name == name)
 }
@@ -92,10 +138,56 @@ pub fn valid_model_names() -> Vec<&'static str> {
     MODELS.iter().map(|m| m.name).collect()
 }
 
-/// Run interactive model selection
+/// Run interactive engine and model selection
 pub async fn interactive_select() -> anyhow::Result<()> {
     println!("Voxtype Model Selection\n");
     println!("=======================\n");
+
+    // Check if parakeet feature is enabled
+    let parakeet_available = cfg!(feature = "parakeet");
+
+    println!("Select transcription engine:\n");
+    println!("  [1] Whisper  - OpenAI's speech recognition (99+ languages)");
+
+    if parakeet_available {
+        println!("  [2] Parakeet - NVIDIA FastConformer (English, faster)");
+    } else {
+        println!("  \x1b[90m[2] Parakeet - (not available, rebuild with --features parakeet)\x1b[0m");
+    }
+
+    println!("\n  [0] Cancel\n");
+
+    print!("Select engine [1]: ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+
+    let selection: usize = input.trim().parse().unwrap_or(1);
+
+    match selection {
+        0 => {
+            println!("\nCancelled.");
+            Ok(())
+        }
+        1 | _ if selection > 2 => interactive_select_whisper().await,
+        2 if parakeet_available => interactive_select_parakeet().await,
+        2 => {
+            println!("\nParakeet support is not available in this build.");
+            println!("Rebuild with: cargo build --features parakeet");
+            Ok(())
+        }
+        _ => {
+            println!("\nCancelled.");
+            Ok(())
+        }
+    }
+}
+
+/// Run interactive Whisper model selection
+async fn interactive_select_whisper() -> anyhow::Result<()> {
+    println!("\nWhisper Models\n");
+    println!("--------------\n");
 
     let models_dir = Config::models_dir();
     println!("Models directory: {:?}\n", models_dir);
@@ -204,7 +296,116 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Download a specific model using curl
+/// Run interactive Parakeet model selection
+async fn interactive_select_parakeet() -> anyhow::Result<()> {
+    println!("\nParakeet Models (EXPERIMENTAL)\n");
+    println!("------------------------------\n");
+
+    let models_dir = Config::models_dir();
+    println!("Models directory: {:?}\n", models_dir);
+
+    // Show available models with status
+    println!("Available Parakeet Models:\n");
+
+    for (i, model) in PARAKEET_MODELS.iter().enumerate() {
+        let model_path = models_dir.join(model.name);
+        let installed = model_path.exists() && validate_parakeet_model(&model_path).is_ok();
+
+        let status = if installed {
+            "\x1b[32m[installed]\x1b[0m"
+        } else {
+            ""
+        };
+
+        println!(
+            "  [{:>2}] {:<28} ({:>4} MB) - {} {}",
+            i + 1,
+            model.name,
+            model.size_mb,
+            model.description,
+            status
+        );
+    }
+
+    println!("\n  [ 0] Cancel\n");
+
+    // Get user selection
+    print!("Select model to download [0-{}]: ", PARAKEET_MODELS.len());
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+
+    let selection: usize = input.trim().parse().unwrap_or(0);
+
+    if selection == 0 || selection > PARAKEET_MODELS.len() {
+        println!("\nCancelled.");
+        return Ok(());
+    }
+
+    let model = &PARAKEET_MODELS[selection - 1];
+    let model_path = models_dir.join(model.name);
+
+    // Check if already installed
+    if model_path.exists() && validate_parakeet_model(&model_path).is_ok() {
+        println!("\nModel '{}' is already installed.\n", model.name);
+        println!("  [1] Set as default model (update config)");
+        println!("  [2] Re-download");
+        println!("  [0] Cancel\n");
+
+        print!("Select option [1]: ");
+        io::stdout().flush()?;
+
+        let mut choice = String::new();
+        io::stdin().read_line(&mut choice)?;
+        let choice = choice.trim();
+
+        match choice {
+            "" | "1" => {
+                // Set as default without re-downloading
+                update_config_parakeet(model.name)?;
+                println!("\n---");
+                println!("Model setup complete!");
+                print_info("Restart daemon to use new model: systemctl --user restart voxtype");
+                return Ok(());
+            }
+            "2" => {
+                // Continue to download below
+            }
+            _ => {
+                println!("Cancelled.");
+                return Ok(());
+            }
+        }
+    }
+
+    // Download the model
+    download_parakeet_model_by_info(model)?;
+
+    // Offer to update config
+    println!("\nWould you like to set this as your default model?");
+    print!("Update config to use {}? [Y/n]: ", model.name);
+    io::stdout().flush()?;
+
+    let mut update_config = String::new();
+    io::stdin().read_line(&mut update_config)?;
+
+    if update_config.trim().is_empty() || update_config.trim().eq_ignore_ascii_case("y") {
+        update_config_parakeet(model.name)?;
+    }
+
+    println!("\n---");
+    println!("Model setup complete!");
+    print_info("Restart daemon to use new model: systemctl --user restart voxtype");
+
+    Ok(())
+}
+
+// =============================================================================
+// Whisper Download Functions
+// =============================================================================
+
+/// Download a specific Whisper model using curl
 pub fn download_model(model_name: &str) -> anyhow::Result<()> {
     let models_dir = Config::models_dir();
     let filename = get_model_filename(model_name);
@@ -393,6 +594,282 @@ fn update_model_in_config(config: &str, model_name: &str) -> String {
     result
 }
 
+// =============================================================================
+// Parakeet Model Functions
+// =============================================================================
+
+/// Check if a model name is a Parakeet model
+pub fn is_parakeet_model(name: &str) -> bool {
+    PARAKEET_MODELS.iter().any(|m| m.name == name)
+}
+
+/// Get list of valid Parakeet model names
+pub fn valid_parakeet_model_names() -> Vec<&'static str> {
+    PARAKEET_MODELS.iter().map(|m| m.name).collect()
+}
+
+/// Validate that a Parakeet model directory has the required files
+pub fn validate_parakeet_model(path: &Path) -> anyhow::Result<()> {
+    if !path.exists() {
+        anyhow::bail!("Model directory does not exist: {:?}", path);
+    }
+
+    // Check for TDT structure: encoder + decoder + vocab
+    let has_encoder = path.join("encoder-model.onnx").exists()
+        || path.join("encoder-model.onnx.data").exists()
+        || path.join("encoder-model.int8.onnx").exists();
+    let has_decoder = path.join("decoder_joint-model.onnx").exists()
+        || path.join("decoder_joint-model.int8.onnx").exists();
+    let has_vocab = path.join("vocab.txt").exists();
+
+    if has_encoder && has_decoder && has_vocab {
+        Ok(())
+    } else {
+        let mut missing = Vec::new();
+        if !has_encoder {
+            missing.push("encoder model");
+        }
+        if !has_decoder {
+            missing.push("decoder model");
+        }
+        if !has_vocab {
+            missing.push("vocab.txt");
+        }
+        anyhow::bail!("Incomplete Parakeet model, missing: {}", missing.join(", "))
+    }
+}
+
+/// Download a Parakeet model by name (public API for run_setup)
+pub fn download_parakeet_model(model_name: &str) -> anyhow::Result<()> {
+    let model = PARAKEET_MODELS
+        .iter()
+        .find(|m| m.name == model_name)
+        .ok_or_else(|| anyhow::anyhow!("Unknown Parakeet model: {}", model_name))?;
+
+    download_parakeet_model_by_info(model)
+}
+
+/// Download a Parakeet model using its info struct
+fn download_parakeet_model_by_info(model: &ParakeetModelInfo) -> anyhow::Result<()> {
+    let models_dir = Config::models_dir();
+    let model_path = models_dir.join(model.name);
+
+    // Create model directory
+    std::fs::create_dir_all(&model_path)?;
+
+    println!("\nDownloading {} ({} MB)...\n", model.name, model.size_mb);
+
+    for (filename, _expected_size) in model.files {
+        let file_path = model_path.join(filename);
+
+        if file_path.exists() {
+            println!("  {} already exists, skipping", filename);
+            continue;
+        }
+
+        let url = format!(
+            "https://huggingface.co/{}/resolve/main/{}",
+            model.huggingface_repo, filename
+        );
+
+        println!("Downloading {}...", filename);
+
+        let status = Command::new("curl")
+            .args([
+                "-L",
+                "--progress-bar",
+                "-o",
+                file_path.to_str().unwrap_or("file"),
+                &url,
+            ])
+            .status();
+
+        match status {
+            Ok(exit_status) if exit_status.success() => {
+                // Success, continue
+            }
+            Ok(exit_status) => {
+                print_failure(&format!(
+                    "Download failed: curl exited with code {}",
+                    exit_status.code().unwrap_or(-1)
+                ));
+                // Clean up partial download
+                let _ = std::fs::remove_file(&file_path);
+                anyhow::bail!("Download failed for {}", filename)
+            }
+            Err(e) => {
+                print_failure(&format!("Failed to run curl: {}", e));
+                print_info("Please ensure curl is installed (e.g., 'sudo pacman -S curl')");
+                anyhow::bail!("curl not available: {}", e)
+            }
+        }
+    }
+
+    // Validate all files are present
+    validate_parakeet_model(&model_path)?;
+    print_success(&format!("Model '{}' downloaded to {:?}", model.name, model_path));
+
+    Ok(())
+}
+
+/// Update config to use Parakeet engine and a specific model (with status messages)
+fn update_config_parakeet(model_name: &str) -> anyhow::Result<()> {
+    if let Some(config_path) = Config::default_path() {
+        if config_path.exists() {
+            let content = std::fs::read_to_string(&config_path)?;
+            let updated = update_parakeet_in_config(&content, model_name);
+            std::fs::write(&config_path, updated)?;
+            print_success(&format!(
+                "Config updated: engine = \"parakeet\", model = \"{}\"",
+                model_name
+            ));
+            Ok(())
+        } else {
+            print_info("No config file found. Run 'voxtype setup' first.");
+            Ok(())
+        }
+    } else {
+        anyhow::bail!("Could not determine config path")
+    }
+}
+
+/// Update config to use Parakeet engine and a specific model (quiet, no output)
+pub fn set_parakeet_config(model_name: &str) -> anyhow::Result<()> {
+    if let Some(config_path) = Config::default_path() {
+        if config_path.exists() {
+            let content = std::fs::read_to_string(&config_path)?;
+            let updated = update_parakeet_in_config(&content, model_name);
+            std::fs::write(&config_path, updated)?;
+        }
+        Ok(())
+    } else {
+        anyhow::bail!("Could not determine config path")
+    }
+}
+
+/// Update the config to use Parakeet engine with a specific model
+fn update_parakeet_in_config(config: &str, model_name: &str) -> String {
+    let mut result = String::new();
+    let mut has_engine_line = false;
+    let mut has_parakeet_section = false;
+    let mut in_parakeet_section = false;
+    let mut parakeet_model_updated = false;
+
+    for line in config.lines() {
+        let trimmed = line.trim();
+
+        // Track sections
+        if trimmed.starts_with('[') {
+            // If we were in parakeet section and didn't update model, add it
+            if in_parakeet_section && !parakeet_model_updated {
+                result.push_str(&format!("model = \"{}\"\n", model_name));
+                parakeet_model_updated = true;
+            }
+            in_parakeet_section = trimmed == "[parakeet]";
+            if in_parakeet_section {
+                has_parakeet_section = true;
+            }
+        }
+
+        // Update or add engine line at the top level
+        if trimmed.starts_with("engine") && !trimmed.starts_with('[') {
+            result.push_str("engine = \"parakeet\"\n");
+            has_engine_line = true;
+        }
+        // Update model line in parakeet section
+        else if in_parakeet_section && trimmed.starts_with("model") {
+            result.push_str(&format!("model = \"{}\"\n", model_name));
+            parakeet_model_updated = true;
+        } else {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+
+    // If we were in parakeet section at EOF and didn't update model, add it
+    if in_parakeet_section && !parakeet_model_updated {
+        result.push_str(&format!("model = \"{}\"\n", model_name));
+    }
+
+    // Add engine line if not present (at the very beginning after any comments)
+    if !has_engine_line {
+        // Find first non-comment, non-empty line or section
+        let mut new_result = String::new();
+        let mut engine_added = false;
+        for line in result.lines() {
+            let trimmed = line.trim();
+            if !engine_added
+                && !trimmed.is_empty()
+                && !trimmed.starts_with('#')
+                && !trimmed.starts_with("engine")
+            {
+                new_result.push_str("engine = \"parakeet\"\n\n");
+                engine_added = true;
+            }
+            new_result.push_str(line);
+            new_result.push('\n');
+        }
+        result = new_result;
+    }
+
+    // Add [parakeet] section if not present
+    if !has_parakeet_section {
+        result.push_str(&format!(
+            "\n[parakeet]\nmodel = \"{}\"\n",
+            model_name
+        ));
+    }
+
+    // Remove trailing newline if original didn't have one
+    if !config.ends_with('\n') && result.ends_with('\n') {
+        result.pop();
+    }
+
+    result
+}
+
+/// List installed Parakeet models
+pub fn list_installed_parakeet() {
+    println!("\nInstalled Parakeet Models (EXPERIMENTAL)\n");
+    println!("=========================================\n");
+
+    let models_dir = Config::models_dir();
+
+    if !models_dir.exists() {
+        println!("No models directory found: {:?}", models_dir);
+        return;
+    }
+
+    let mut found = false;
+
+    for model in PARAKEET_MODELS {
+        let model_path = models_dir.join(model.name);
+
+        if model_path.exists() && validate_parakeet_model(&model_path).is_ok() {
+            let size = std::fs::read_dir(&model_path)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .filter_map(|e| e.metadata().ok())
+                        .map(|m| m.len() as f64 / 1024.0 / 1024.0)
+                        .sum::<f64>()
+                })
+                .unwrap_or(0.0);
+
+            println!(
+                "  {} ({:.0} MB) - {}",
+                model.name, size, model.description
+            );
+            found = true;
+        }
+    }
+
+    if !found {
+        println!("  No Parakeet models installed.");
+        println!("\n  Run 'voxtype setup model' and select Parakeet to download.");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,5 +995,161 @@ language = "en"
         assert!(names.contains(&"tiny.en"));
         assert!(names.contains(&"large-v3-turbo"));
         assert_eq!(names.len(), MODELS.len());
+    }
+
+    // =========================================================================
+    // Parakeet Model Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parakeet_models_list_contains_expected_models() {
+        let model_names: Vec<&str> = PARAKEET_MODELS.iter().map(|m| m.name).collect();
+        assert!(model_names.contains(&"parakeet-tdt-0.6b-v3"));
+        assert!(model_names.contains(&"parakeet-tdt-0.6b-v3-int8"));
+    }
+
+    #[test]
+    fn test_parakeet_model_info_sizes_are_reasonable() {
+        for model in PARAKEET_MODELS {
+            // All models should have positive size
+            assert!(model.size_mb > 0, "Model {} has invalid size", model.name);
+            // Full model should be larger than quantized
+            if model.name == "parakeet-tdt-0.6b-v3" {
+                assert!(model.size_mb > 2000);
+            }
+            if model.name == "parakeet-tdt-0.6b-v3-int8" {
+                assert!(model.size_mb < 1000);
+            }
+        }
+    }
+
+    #[test]
+    fn test_parakeet_models_have_files() {
+        for model in PARAKEET_MODELS {
+            assert!(
+                !model.files.is_empty(),
+                "Model {} should have file definitions",
+                model.name
+            );
+            // All TDT models should have vocab.txt
+            assert!(
+                model.files.iter().any(|(f, _)| *f == "vocab.txt"),
+                "Model {} should have vocab.txt",
+                model.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_parakeet_model() {
+        // Valid Parakeet models
+        assert!(is_parakeet_model("parakeet-tdt-0.6b-v3"));
+        assert!(is_parakeet_model("parakeet-tdt-0.6b-v3-int8"));
+
+        // Invalid models
+        assert!(!is_parakeet_model("base.en"));
+        assert!(!is_parakeet_model("large-v3"));
+        assert!(!is_parakeet_model("parakeet")); // Not a full model name
+        assert!(!is_parakeet_model(""));
+    }
+
+    #[test]
+    fn test_valid_parakeet_model_names() {
+        let names = valid_parakeet_model_names();
+        assert!(names.contains(&"parakeet-tdt-0.6b-v3"));
+        assert!(names.contains(&"parakeet-tdt-0.6b-v3-int8"));
+        assert_eq!(names.len(), PARAKEET_MODELS.len());
+    }
+
+    #[test]
+    fn test_update_parakeet_in_config_basic() {
+        let config = r#"[hotkey]
+key = "SCROLLLOCK"
+
+[whisper]
+model = "base.en"
+language = "en"
+
+[output]
+mode = "type"
+"#;
+        let result = update_parakeet_in_config(config, "parakeet-tdt-0.6b-v3");
+
+        // Should add engine = "parakeet"
+        assert!(result.contains(r#"engine = "parakeet""#));
+        // Should add [parakeet] section with model
+        assert!(result.contains("[parakeet]"));
+        assert!(result.contains(r#"model = "parakeet-tdt-0.6b-v3""#));
+        // Should preserve existing sections
+        assert!(result.contains("[whisper]"));
+        assert!(result.contains("[hotkey]"));
+        assert!(result.contains("[output]"));
+    }
+
+    #[test]
+    fn test_update_parakeet_in_config_updates_existing() {
+        let config = r#"engine = "whisper"
+
+[hotkey]
+key = "SCROLLLOCK"
+
+[whisper]
+model = "base.en"
+language = "en"
+
+[parakeet]
+model = "old-model"
+
+[output]
+mode = "type"
+"#;
+        let result = update_parakeet_in_config(config, "parakeet-tdt-0.6b-v3-int8");
+
+        // Should update engine to parakeet
+        assert!(result.contains(r#"engine = "parakeet""#));
+        assert!(!result.contains(r#"engine = "whisper""#));
+        // Should update existing parakeet model
+        assert!(result.contains(r#"model = "parakeet-tdt-0.6b-v3-int8""#));
+        assert!(!result.contains(r#"model = "old-model""#));
+    }
+
+    #[test]
+    fn test_update_parakeet_preserves_whisper_section() {
+        let config = r#"[whisper]
+model = "large-v3"
+language = "en"
+translate = false
+"#;
+        let result = update_parakeet_in_config(config, "parakeet-tdt-0.6b-v3");
+
+        // Whisper section should be preserved
+        assert!(result.contains("[whisper]"));
+        assert!(result.contains(r#"model = "large-v3""#));
+        assert!(result.contains(r#"language = "en""#));
+        // Parakeet section should be added separately
+        assert!(result.contains("[parakeet]"));
+    }
+
+    #[test]
+    fn test_whisper_and_parakeet_models_dont_overlap() {
+        // Ensure no model name is valid for both Whisper and Parakeet
+        let whisper_names = valid_model_names();
+        let parakeet_names = valid_parakeet_model_names();
+
+        for name in &whisper_names {
+            assert!(
+                !parakeet_names.contains(name),
+                "Model '{}' should not be in both Whisper and Parakeet lists",
+                name
+            );
+        }
+
+        for name in &parakeet_names {
+            assert!(
+                !whisper_names.contains(name),
+                "Model '{}' should not be in both Whisper and Parakeet lists",
+                name
+            );
+        }
     }
 }

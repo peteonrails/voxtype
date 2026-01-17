@@ -52,7 +52,9 @@ pub struct Cli {
     #[arg(long)]
     pub paste: bool,
 
-    /// Override whisper model (tiny, tiny.en, base, base.en, small, small.en, medium, medium.en, large-v3, large-v3-turbo)
+    /// Override model for transcription.
+    /// Whisper: tiny, base, small, medium, large-v3, large-v3-turbo (and .en variants).
+    /// Parakeet: parakeet-tdt-0.6b-v3, parakeet-tdt-0.6b-v3-int8
     #[arg(long, value_name = "MODEL")]
     pub model: Option<String>,
 
@@ -125,7 +127,9 @@ pub enum Commands {
         #[arg(long)]
         download: bool,
 
-        /// Specify which model to download (use with --download)
+        /// Specify which model to download (use with --download).
+        /// Whisper: tiny, base, small, medium, large-v3, large-v3-turbo (and .en variants).
+        /// Parakeet: parakeet-tdt-0.6b-v3, parakeet-tdt-0.6b-v3-int8
         #[arg(long, value_name = "NAME")]
         model: Option<String>,
 
