@@ -1818,6 +1818,7 @@ version = "0.4.16"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "clap",
  "clap_mangen",
  "cpal",
