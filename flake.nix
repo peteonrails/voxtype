@@ -76,7 +76,11 @@
               export CMAKE_BUILD_PARALLEL_LEVEL=$NIX_BUILD_CORES
             '';
 
-            # Install shell completions and systemd service
+            # Install shell completions and default config
+            # Note: systemd service is NOT installed here because it contains
+            # hardcoded FHS paths (/usr/bin/voxtype) that don't work on NixOS.
+            # Use the Home Manager module with service.enable = true instead,
+            # which generates a service with the correct Nix store path.
             postInstall = ''
               # Shell completions
               install -Dm644 packaging/completions/voxtype.bash \
@@ -85,10 +89,6 @@
                 $out/share/zsh/site-functions/_voxtype
               install -Dm644 packaging/completions/voxtype.fish \
                 $out/share/fish/vendor_completions.d/voxtype.fish
-
-              # Systemd user service
-              install -Dm644 packaging/systemd/voxtype.service \
-                $out/lib/systemd/user/voxtype.service
 
               # Default config
               install -Dm644 config/default.toml \

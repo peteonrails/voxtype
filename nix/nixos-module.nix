@@ -1,7 +1,7 @@
 # NixOS module for VoxType
 #
-# This module provides system-level configuration for VoxType.
-# For user-level configuration with full options, use the Home Manager module.
+# This module installs the VoxType package system-wide.
+# For the systemd user service and full configuration, use the Home Manager module.
 #
 # Usage in your configuration.nix or flake:
 #
@@ -10,6 +10,16 @@
 #   programs.voxtype = {
 #     enable = true;
 #     package = voxtype.packages.${system}.vulkan;
+#   };
+#
+# For the systemd service, use the Home Manager module with service.enable = true:
+#
+#   imports = [ voxtype.homeManagerModules.default ];
+#
+#   programs.voxtype = {
+#     enable = true;
+#     package = voxtype.packages.${system}.vulkan;
+#     service.enable = true;  # Creates systemd user service with correct Nix store path
 #   };
 #
 # For evdev hotkey support, add your user to the input group:
