@@ -16,8 +16,6 @@ use tokio::process::Command;
 
 /// wtype-based text output
 pub struct WtypeOutput {
-    /// Whether to show a desktop notification
-    notify: bool,
     /// Whether to send Enter key after output
     auto_submit: bool,
     /// Delay between keystrokes in milliseconds
@@ -28,36 +26,12 @@ pub struct WtypeOutput {
 
 impl WtypeOutput {
     /// Create a new wtype output
-    pub fn new(notify: bool, auto_submit: bool, type_delay_ms: u32, pre_type_delay_ms: u32) -> Self {
+    pub fn new(auto_submit: bool, type_delay_ms: u32, pre_type_delay_ms: u32) -> Self {
         Self {
-            notify,
             auto_submit,
             type_delay_ms,
             pre_type_delay_ms,
         }
-    }
-
-    /// Send a desktop notification
-    async fn send_notification(&self, text: &str) {
-        // Truncate preview for notification
-        let preview: String = text.chars().take(100).collect();
-        let preview = if text.chars().count() > 100 {
-            format!("{}...", preview)
-        } else {
-            preview
-        };
-
-        let _ = Command::new("notify-send")
-            .args([
-                "--app-name=Voxtype",
-                "--expire-time=3000",
-                "Transcribed",
-                &preview,
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
     }
 }
 
@@ -126,11 +100,6 @@ impl TextOutput for WtypeOutput {
             }
         }
 
-        // Send notification if enabled
-        if self.notify {
-            self.send_notification(text).await;
-        }
-
         Ok(())
     }
 
@@ -159,8 +128,7 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = WtypeOutput::new(true, false, 0, 0);
-        assert!(output.notify);
+        let output = WtypeOutput::new(false, 0, 0);
         assert!(!output.auto_submit);
         assert_eq!(output.type_delay_ms, 0);
         assert_eq!(output.pre_type_delay_ms, 0);
@@ -168,15 +136,13 @@ mod tests {
 
     #[test]
     fn test_new_with_enter() {
-        let output = WtypeOutput::new(false, true, 0, 0);
-        assert!(!output.notify);
+        let output = WtypeOutput::new(true, 0, 0);
         assert!(output.auto_submit);
     }
 
     #[test]
     fn test_new_with_type_delay() {
-        let output = WtypeOutput::new(false, false, 50, 0);
-        assert!(!output.notify);
+        let output = WtypeOutput::new(false, 50, 0);
         assert!(!output.auto_submit);
         assert_eq!(output.type_delay_ms, 50);
         assert_eq!(output.pre_type_delay_ms, 0);
@@ -184,7 +150,7 @@ mod tests {
 
     #[test]
     fn test_new_with_pre_type_delay() {
-        let output = WtypeOutput::new(false, false, 0, 200);
+        let output = WtypeOutput::new(false, 0, 200);
         assert_eq!(output.type_delay_ms, 0);
         assert_eq!(output.pre_type_delay_ms, 200);
     }

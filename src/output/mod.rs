@@ -18,7 +18,70 @@ pub mod ydotool;
 use crate::config::OutputConfig;
 use crate::error::OutputError;
 use std::process::Stdio;
+use std::fs;
 use tokio::process::Command;
+
+/// Path to the voxtype symlink
+const VOXTYPE_BIN: &str = "/usr/lib/voxtype/voxtype";
+
+/// Check if the active binary is a Parakeet build
+pub fn is_parakeet_binary_active() -> bool {
+    if let Ok(link_target) = fs::read_link(VOXTYPE_BIN) {
+        if let Some(target_name) = link_target.file_name() {
+            if let Some(name) = target_name.to_str() {
+                return name.contains("parakeet");
+            }
+        }
+    }
+    // If we can't read the symlink, check if parakeet feature is enabled
+    #[cfg(feature = "parakeet")]
+    {
+        return true;
+    }
+    #[cfg(not(feature = "parakeet"))]
+    {
+        false
+    }
+}
+
+/// Get the engine icon for notifications
+/// Returns 🦜 for Parakeet, 🗣️ for Whisper
+pub fn engine_icon() -> &'static str {
+    if is_parakeet_binary_active() {
+        "🦜"
+    } else {
+        "🗣️"
+    }
+}
+
+/// Send a transcription notification with optional engine icon
+pub async fn send_transcription_notification(text: &str, show_engine_icon: bool) {
+    // Truncate preview for notification (use chars() to handle multi-byte UTF-8)
+    let preview = if text.chars().count() > 80 {
+        format!("{}...", text.chars().take(80).collect::<String>())
+    } else {
+        text.to_string()
+    };
+
+    let title = if show_engine_icon {
+        format!("{} Transcribed", engine_icon())
+    } else {
+        "Transcribed".to_string()
+    };
+
+    let _ = Command::new("notify-send")
+        .args([
+            "--app-name=Voxtype",
+            "--urgency=low",
+            "--expire-time=3000",
+            &title,
+            &preview,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
+}
 
 /// Trait for text output implementations
 #[async_trait::async_trait]
@@ -44,7 +107,6 @@ pub fn create_output_chain(config: &OutputConfig) -> Vec<Box<dyn TextOutput>> {
         crate::config::OutputMode::Type => {
             // Primary: wtype for Wayland (best Unicode/CJK support, no daemon)
             chain.push(Box::new(wtype::WtypeOutput::new(
-                config.notification.on_transcription,
                 config.auto_submit,
                 config.type_delay_ms,
                 pre_type_delay_ms,
@@ -54,25 +116,21 @@ pub fn create_output_chain(config: &OutputConfig) -> Vec<Box<dyn TextOutput>> {
             chain.push(Box::new(ydotool::YdotoolOutput::new(
                 config.type_delay_ms,
                 pre_type_delay_ms,
-                false, // no notification, wtype handles it if available
                 config.auto_submit,
             )));
 
             // Last resort: clipboard
             if config.fallback_to_clipboard {
-                chain.push(Box::new(clipboard::ClipboardOutput::new(false)));
+                chain.push(Box::new(clipboard::ClipboardOutput::new()));
             }
         }
         crate::config::OutputMode::Clipboard => {
             // Only clipboard
-            chain.push(Box::new(clipboard::ClipboardOutput::new(
-                config.notification.on_transcription,
-            )));
+            chain.push(Box::new(clipboard::ClipboardOutput::new()));
         }
         crate::config::OutputMode::Paste => {
             // Only paste mode (no fallback as requested)
             chain.push(Box::new(paste::PasteOutput::new(
-                config.notification.on_transcription,
                 config.auto_submit,
                 config.paste_keys.clone(),
                 config.type_delay_ms,

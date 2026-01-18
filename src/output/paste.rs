@@ -158,8 +158,6 @@ fn key_name_to_evdev(name: &str) -> Result<u16, String> {
 
 /// Paste-based text output (clipboard + paste keystroke)
 pub struct PasteOutput {
-    /// Whether to show a desktop notification
-    notify: bool,
     /// Whether to send Enter key after output
     auto_submit: bool,
     /// Parsed paste keystroke
@@ -173,7 +171,6 @@ pub struct PasteOutput {
 impl PasteOutput {
     /// Create a new paste output
     pub fn new(
-        notify: bool,
         auto_submit: bool,
         paste_keys: Option<String>,
         type_delay_ms: u32,
@@ -188,35 +185,11 @@ impl PasteOutput {
         tracing::debug!("Paste keystroke configured: {:?}", keystroke);
 
         Self {
-            notify,
             auto_submit,
             keystroke,
             type_delay_ms,
             pre_type_delay_ms,
         }
-    }
-
-    /// Send a desktop notification
-    async fn send_notification(&self, text: &str) {
-        // Truncate preview for notification (use chars() to handle multi-byte UTF-8)
-        let preview = if text.chars().count() > 80 {
-            format!("{}...", text.chars().take(80).collect::<String>())
-        } else {
-            text.to_string()
-        };
-
-        let _ = Command::new("notify-send")
-            .args([
-                "--app-name=Voxtype",
-                "--urgency=low",
-                "--expire-time=3000",
-                "Pasted text",
-                &preview,
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
     }
 
     /// Copy text to clipboard using wl-copy
@@ -479,11 +452,6 @@ impl TextOutput for PasteOutput {
         // Send Enter key if configured
         if self.auto_submit {
             self.send_enter().await?;
-        }
-
-        // Send notification if enabled
-        if self.notify {
-            self.send_notification(text).await;
         }
 
         tracing::info!(

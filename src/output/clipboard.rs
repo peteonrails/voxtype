@@ -12,38 +12,18 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 /// Clipboard-based text output
-pub struct ClipboardOutput {
-    /// Whether to show a desktop notification
-    notify: bool,
-}
+pub struct ClipboardOutput;
 
 impl ClipboardOutput {
     /// Create a new clipboard output
-    pub fn new(notify: bool) -> Self {
-        Self { notify }
+    pub fn new() -> Self {
+        Self
     }
+}
 
-    /// Send a desktop notification
-    async fn send_notification(&self, text: &str) {
-        // Truncate preview for notification (use chars() to handle multi-byte UTF-8)
-        let preview = if text.chars().count() > 80 {
-            format!("{}...", text.chars().take(80).collect::<String>())
-        } else {
-            text.to_string()
-        };
-
-        let _ = Command::new("notify-send")
-            .args([
-                "--app-name=Voxtype",
-                "--urgency=low",
-                "--expire-time=3000",
-                "Copied to clipboard",
-                &preview,
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
+impl Default for ClipboardOutput {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -91,11 +71,6 @@ impl TextOutput for ClipboardOutput {
             ));
         }
 
-        // Send notification if enabled
-        if self.notify {
-            self.send_notification(text).await;
-        }
-
         tracing::info!("Text copied to clipboard ({} chars)", text.len());
         Ok(())
     }
@@ -122,10 +97,13 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = ClipboardOutput::new(true);
-        assert!(output.notify);
+        let _output = ClipboardOutput::new();
+        // ClipboardOutput is a unit struct, just verify it can be created
+    }
 
-        let output = ClipboardOutput::new(false);
-        assert!(!output.notify);
+    #[test]
+    fn test_default() {
+        let _output = ClipboardOutput::default();
+        // Verify Default trait implementation
     }
 }

@@ -21,13 +21,19 @@ use std::time::Duration;
 use tokio::process::Command;
 use tokio::signal::unix::{signal, SignalKind};
 
-/// Send a desktop notification
-async fn send_notification(title: &str, body: &str) {
+/// Send a desktop notification with optional engine icon
+async fn send_notification(title: &str, body: &str, show_engine_icon: bool) {
+    let title = if show_engine_icon {
+        format!("{} {}", crate::output::engine_icon(), title)
+    } else {
+        title.to_string()
+    };
+
     let _ = Command::new("notify-send")
         .args([
             "--app-name=Voxtype",
             "--expire-time=2000",
-            title,
+            &title,
             body,
         ])
         .stdout(Stdio::null())
@@ -281,7 +287,7 @@ impl Daemon {
 
         // Send notification if enabled
         if self.config.output.notification.on_recording_stop {
-            send_notification("Recording Stopped", "Transcribing...").await;
+            send_notification("Recording Stopped", "Transcribing...", self.config.output.notification.show_engine_icon).await;
         }
 
         // Stop recording and get samples
@@ -386,6 +392,12 @@ impl Daemon {
                         output_options,
                     ).await {
                         tracing::error!("Output failed: {}", e);
+                    } else if self.config.output.notification.on_transcription {
+                        // Send notification on successful output
+                        output::send_transcription_notification(
+                            &final_text,
+                            self.config.output.notification.show_engine_icon,
+                        ).await;
                     }
 
                     *state = State::Idle;
@@ -537,7 +549,7 @@ impl Daemon {
 
                                 // Send notification if enabled
                                 if self.config.output.notification.on_recording_start {
-                                    send_notification("Push to Talk Active", "Recording...").await;
+                                    send_notification("Push to Talk Active", "Recording...", self.config.output.notification.show_engine_icon).await;
                                 }
 
                                 // Start model loading in background if on-demand loading is enabled
@@ -643,7 +655,7 @@ impl Daemon {
                                 tracing::info!("Recording started (toggle mode)");
 
                                 if self.config.output.notification.on_recording_start {
-                                    send_notification("Recording Started", "Press hotkey again to stop").await;
+                                    send_notification("Recording Started", "Press hotkey again to stop", self.config.output.notification.show_engine_icon).await;
                                 }
 
                                 // Start model loading in background if on-demand loading is enabled
@@ -767,7 +779,7 @@ impl Daemon {
                                 }
 
                                 if self.config.output.notification.on_recording_stop {
-                                    send_notification("Cancelled", "Recording discarded").await;
+                                    send_notification("Cancelled", "Recording discarded", self.config.output.notification.show_engine_icon).await;
                                 }
                             } else if matches!(state, State::Transcribing { .. }) {
                                 tracing::info!("Transcription cancelled via hotkey");
@@ -790,7 +802,7 @@ impl Daemon {
                                 }
 
                                 if self.config.output.notification.on_recording_stop {
-                                    send_notification("Cancelled", "Transcription aborted").await;
+                                    send_notification("Cancelled", "Transcription aborted", self.config.output.notification.show_engine_icon).await;
                                 }
                             } else {
                                 tracing::trace!("Cancel ignored - not recording or transcribing");
@@ -828,7 +840,7 @@ impl Daemon {
                         }
 
                         if self.config.output.notification.on_recording_stop {
-                            send_notification("Cancelled", "Recording discarded").await;
+                            send_notification("Cancelled", "Recording discarded", self.config.output.notification.show_engine_icon).await;
                         }
 
                         continue;
@@ -867,7 +879,7 @@ impl Daemon {
                         tracing::info!("Recording started (external trigger)");
 
                         if self.config.output.notification.on_recording_start {
-                            send_notification("Recording Started", "External trigger").await;
+                            send_notification("Recording Started", "External trigger", self.config.output.notification.show_engine_icon).await;
                         }
 
                         // Start model loading in background if on-demand loading is enabled
@@ -993,7 +1005,7 @@ impl Daemon {
                         }
 
                         if self.config.output.notification.on_recording_stop {
-                            send_notification("Cancelled", "Transcription aborted").await;
+                            send_notification("Cancelled", "Transcription aborted", self.config.output.notification.show_engine_icon).await;
                         }
                     }
                 }

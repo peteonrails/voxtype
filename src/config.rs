@@ -688,6 +688,10 @@ pub struct NotificationConfig {
     /// Notify with transcribed text after transcription completes
     #[serde(default = "default_true")]
     pub on_transcription: bool,
+
+    /// Show engine icon in notification title (🦜 for Parakeet, 🗣️ for Whisper)
+    #[serde(default)]
+    pub show_engine_icon: bool,
 }
 
 impl Default for NotificationConfig {
@@ -696,6 +700,7 @@ impl Default for NotificationConfig {
             on_recording_start: false,
             on_recording_stop: false,
             on_transcription: true,
+            show_engine_icon: false,
         }
     }
 }
