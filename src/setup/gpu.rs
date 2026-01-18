@@ -3,6 +3,9 @@
 //! Supports two installation modes:
 //! 1. Tiered mode (DEB/RPM pre-built): Multiple CPU binaries (avx2, avx512) + vulkan in /usr/lib/voxtype/
 //! 2. Simple mode (AUR source build): Native CPU binary at /usr/bin/voxtype + vulkan in /usr/lib/voxtype/
+//!
+//! Engine-aware: In Parakeet mode, switches between parakeet-cuda and parakeet-avx*.
+//! In Whisper mode, switches between vulkan and avx*.
 
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -12,6 +15,18 @@ use std::process::Command;
 const VOXTYPE_LIB_DIR: &str = "/usr/lib/voxtype";
 const VOXTYPE_BIN: &str = "/usr/bin/voxtype";
 const VOXTYPE_CPU_BACKUP: &str = "/usr/lib/voxtype/voxtype-cpu";
+
+/// Check if the current symlink points to a Parakeet binary
+fn is_parakeet_binary_active() -> bool {
+    if let Ok(link_target) = fs::read_link(VOXTYPE_BIN) {
+        if let Some(target_name) = link_target.file_name() {
+            if let Some(name) = target_name.to_str() {
+                return name.contains("parakeet");
+            }
+        }
+    }
+    false
+}
 
 /// Available backend variants
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -370,67 +385,123 @@ pub fn show_status() {
     }
 }
 
-/// Enable GPU (Vulkan) backend
+/// Enable GPU backend (engine-aware: Vulkan for Whisper, CUDA for Parakeet)
 pub fn enable() -> anyhow::Result<()> {
-    // Check Vulkan binary exists
-    let vulkan_path = Path::new(VOXTYPE_LIB_DIR).join("voxtype-vulkan");
-    if !vulkan_path.exists() {
-        anyhow::bail!(
-            "Vulkan backend not installed.\n\
-             The voxtype-vulkan binary was not found in {}",
-            VOXTYPE_LIB_DIR
-        );
-    }
+    // Check which engine is active by looking at the current symlink
+    let is_parakeet = is_parakeet_binary_active();
 
-    // Check Vulkan runtime
-    if !check_vulkan_runtime() {
-        println!("Warning: Vulkan runtime (libvulkan.so.1) not found.");
-        println!("You may need to install vulkan-icd-loader:");
-        println!("  Fedora: sudo dnf install vulkan-loader");
-        println!("  Arch:   sudo pacman -S vulkan-icd-loader");
-        println!("  Ubuntu: sudo apt install libvulkan1");
+    if is_parakeet {
+        // Parakeet mode: switch to CUDA backend
+        let cuda_path = Path::new(VOXTYPE_LIB_DIR).join("voxtype-parakeet-cuda");
+        if !cuda_path.exists() {
+            anyhow::bail!(
+                "Parakeet CUDA backend not installed.\n\
+                 The voxtype-parakeet-cuda binary was not found in {}\n\n\
+                 GPU acceleration for Parakeet requires NVIDIA CUDA.\n\
+                 Install a Parakeet CUDA-enabled package or use CPU inference.",
+                VOXTYPE_LIB_DIR
+            );
+        }
+
+        switch_backend_tiered_parakeet("voxtype-parakeet-cuda")?;
+
+        // Regenerate systemd service if it exists
+        if super::systemd::regenerate_service_file()? {
+            println!("Updated systemd service to use Parakeet CUDA backend.");
+        }
+
+        println!("Switched to Parakeet (CUDA) backend.");
         println!();
-    }
-
-    if is_tiered_mode() {
-        switch_backend_tiered(Backend::Vulkan)?;
+        println!("Restart voxtype to use GPU acceleration:");
+        println!("  systemctl --user restart voxtype");
     } else {
-        enable_simple_mode()?;
-    }
+        // Whisper mode: switch to Vulkan backend
+        let vulkan_path = Path::new(VOXTYPE_LIB_DIR).join("voxtype-vulkan");
+        if !vulkan_path.exists() {
+            anyhow::bail!(
+                "Vulkan backend not installed.\n\
+                 The voxtype-vulkan binary was not found in {}",
+                VOXTYPE_LIB_DIR
+            );
+        }
 
-    // Regenerate systemd service if it exists
-    if super::systemd::regenerate_service_file()? {
-        println!("Updated systemd service to use GPU backend.");
-    }
+        // Check Vulkan runtime
+        if !check_vulkan_runtime() {
+            println!("Warning: Vulkan runtime (libvulkan.so.1) not found.");
+            println!("You may need to install vulkan-icd-loader:");
+            println!("  Fedora: sudo dnf install vulkan-loader");
+            println!("  Arch:   sudo pacman -S vulkan-icd-loader");
+            println!("  Ubuntu: sudo apt install libvulkan1");
+            println!();
+        }
 
-    println!("Switched to GPU (Vulkan) backend.");
-    println!();
-    println!("Restart voxtype to use GPU acceleration:");
-    println!("  systemctl --user restart voxtype");
+        if is_tiered_mode() {
+            switch_backend_tiered(Backend::Vulkan)?;
+        } else {
+            enable_simple_mode()?;
+        }
+
+        // Regenerate systemd service if it exists
+        if super::systemd::regenerate_service_file()? {
+            println!("Updated systemd service to use GPU backend.");
+        }
+
+        println!("Switched to GPU (Vulkan) backend.");
+        println!();
+        println!("Restart voxtype to use GPU acceleration:");
+        println!("  systemctl --user restart voxtype");
+    }
 
     Ok(())
 }
 
-/// Disable GPU backend (switch back to best CPU backend)
+/// Disable GPU backend (engine-aware: switch to best CPU backend)
 pub fn disable() -> anyhow::Result<()> {
-    if is_tiered_mode() {
-        // Detect best CPU backend
-        let best_cpu = detect_best_cpu_backend();
-        switch_backend_tiered(best_cpu)?;
-        println!("Switched to {} backend.", best_cpu.display_name());
+    // Check which engine is active by looking at the current symlink
+    let is_parakeet = is_parakeet_binary_active();
+
+    if is_parakeet {
+        // Parakeet mode: switch to best Parakeet CPU backend
+        let best_backend = detect_best_parakeet_cpu_backend();
+        if let Some(backend_name) = best_backend {
+            switch_backend_tiered_parakeet(backend_name)?;
+            println!("Switched to Parakeet ({}) backend.", backend_name.trim_start_matches("voxtype-parakeet-"));
+        } else {
+            anyhow::bail!(
+                "No Parakeet CPU backend found.\n\
+                 Install voxtype-parakeet-avx2 or voxtype-parakeet-avx512."
+            );
+        }
+
+        // Regenerate systemd service if it exists
+        if super::systemd::regenerate_service_file()? {
+            println!("Updated systemd service to use Parakeet CPU backend.");
+        }
+
+        println!();
+        println!("Restart voxtype to use CPU inference:");
+        println!("  systemctl --user restart voxtype");
     } else {
-        disable_simple_mode()?;
-        println!("Switched to CPU (native) backend.");
-    }
+        // Whisper mode: existing logic
+        if is_tiered_mode() {
+            // Detect best CPU backend
+            let best_cpu = detect_best_cpu_backend();
+            switch_backend_tiered(best_cpu)?;
+            println!("Switched to {} backend.", best_cpu.display_name());
+        } else {
+            disable_simple_mode()?;
+            println!("Switched to CPU (native) backend.");
+        }
 
-    // Regenerate systemd service if it exists
-    if super::systemd::regenerate_service_file()? {
-        println!("Updated systemd service to use CPU backend.");
-    }
+        // Regenerate systemd service if it exists
+        if super::systemd::regenerate_service_file()? {
+            println!("Updated systemd service to use CPU backend.");
+        }
 
-    println!();
-    println!("Restart voxtype to use CPU inference:");
-    println!("  systemctl --user restart voxtype");
+        println!();
+        println!("Restart voxtype to use CPU inference:");
+        println!("  systemctl --user restart voxtype");
+    }
 
     Ok(())
 }
@@ -448,4 +519,63 @@ fn detect_best_cpu_backend() -> Backend {
     }
 
     Backend::Avx2
+}
+
+/// Detect the best Parakeet CPU backend for this system
+fn detect_best_parakeet_cpu_backend() -> Option<&'static str> {
+    // Check for AVX-512 support
+    if let Ok(cpuinfo) = fs::read_to_string("/proc/cpuinfo") {
+        if cpuinfo.contains("avx512f") {
+            let avx512_path = Path::new(VOXTYPE_LIB_DIR).join("voxtype-parakeet-avx512");
+            if avx512_path.exists() {
+                return Some("voxtype-parakeet-avx512");
+            }
+        }
+    }
+
+    // Fall back to AVX2
+    let avx2_path = Path::new(VOXTYPE_LIB_DIR).join("voxtype-parakeet-avx2");
+    if avx2_path.exists() {
+        return Some("voxtype-parakeet-avx2");
+    }
+
+    None
+}
+
+/// Switch to a Parakeet backend binary (tiered mode)
+fn switch_backend_tiered_parakeet(binary_name: &str) -> anyhow::Result<()> {
+    let binary_path = Path::new(VOXTYPE_LIB_DIR).join(binary_name);
+
+    if !binary_path.exists() {
+        anyhow::bail!(
+            "Parakeet backend not found: {}\n\
+             Install the appropriate voxtype-parakeet package.",
+            binary_path.display()
+        );
+    }
+
+    // Remove existing symlink
+    if Path::new(VOXTYPE_BIN).exists() || fs::symlink_metadata(VOXTYPE_BIN).is_ok() {
+        fs::remove_file(VOXTYPE_BIN).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to remove existing symlink (need sudo?): {}\n\
+                 Try: sudo voxtype setup gpu --enable",
+                e
+            )
+        })?;
+    }
+
+    // Create new symlink
+    symlink(&binary_path, VOXTYPE_BIN).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to create symlink (need sudo?): {}\n\
+             Try: sudo voxtype setup gpu --enable",
+            e
+        )
+    })?;
+
+    // Restore SELinux context if available
+    let _ = Command::new("restorecon").arg(VOXTYPE_BIN).status();
+
+    Ok(())
 }
