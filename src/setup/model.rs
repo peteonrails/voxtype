@@ -1,7 +1,7 @@
 //! Interactive model selection and download
 
 use super::{print_failure, print_info, print_success, print_warning};
-use crate::config::Config;
+use crate::config::{Config, TranscriptionEngine};
 use crate::transcribe::whisper::{get_model_filename, get_model_url};
 use std::io::{self, Write};
 use std::path::Path;
@@ -146,6 +146,13 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let models_dir = Config::models_dir();
     println!("Models directory: {:?}\n", models_dir);
 
+    // Load current config to determine active model
+    let config = crate::config::load_config(Config::default_path().as_deref()).unwrap_or_default();
+    let is_whisper_engine = matches!(config.engine, TranscriptionEngine::Whisper);
+    let is_parakeet_engine = matches!(config.engine, TranscriptionEngine::Parakeet);
+    let current_whisper_model = &config.whisper.model;
+    let current_parakeet_model = config.parakeet.as_ref().map(|p| p.model.as_str());
+
     let parakeet_available = cfg!(feature = "parakeet");
     let whisper_count = MODELS.len();
     let parakeet_count = PARAKEET_MODELS.len();
@@ -159,6 +166,9 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         let model_path = models_dir.join(&filename);
         let installed = model_path.exists();
 
+        let is_current = is_whisper_engine && model.name == current_whisper_model;
+        let star = if is_current { "*" } else { " " };
+
         let status = if installed {
             "\x1b[32m[installed]\x1b[0m"
         } else {
@@ -168,7 +178,8 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         let lang = if model.english_only { "en" } else { "multi" };
 
         println!(
-            "  [{:>2}] {:<16} ({:>4} MB) {} - {} {}",
+            " {}[{:>2}] {:<16} ({:>4} MB) {} - {} {}",
+            star,
             i + 1,
             model.name,
             model.size_mb,
@@ -186,6 +197,9 @@ pub async fn interactive_select() -> anyhow::Result<()> {
             let model_path = models_dir.join(model.name);
             let installed = model_path.exists() && validate_parakeet_model(&model_path).is_ok();
 
+            let is_current = is_parakeet_engine && current_parakeet_model == Some(model.name);
+            let star = if is_current { "*" } else { " " };
+
             let status = if installed {
                 "\x1b[32m[installed]\x1b[0m"
             } else {
@@ -193,7 +207,8 @@ pub async fn interactive_select() -> anyhow::Result<()> {
             };
 
             println!(
-                "  [{:>2}] {:<28} ({:>4} MB) - {} {}",
+                " {}[{:>2}] {:<28} ({:>4} MB) - {} {}",
+                star,
                 whisper_count + i + 1,
                 model.name,
                 model.size_mb,
@@ -266,8 +281,7 @@ async fn handle_whisper_selection(selection: usize) -> anyhow::Result<()> {
             "" | "1" => {
                 // Set as default without re-downloading
                 update_config_model(model.name)?;
-                println!("\n---");
-                println!("Model setup complete! Run 'voxtype' to start using it.");
+                restart_daemon_if_running().await;
                 return Ok(());
             }
             "2" => {
@@ -283,20 +297,9 @@ async fn handle_whisper_selection(selection: usize) -> anyhow::Result<()> {
     // Download the model
     download_model(model.name)?;
 
-    // Offer to update config
-    println!("\nWould you like to set this as your default model?");
-    print!("Update config to use {}? [Y/n]: ", model.name);
-    io::stdout().flush()?;
-
-    let mut update_config = String::new();
-    io::stdin().read_line(&mut update_config)?;
-
-    if update_config.trim().is_empty() || update_config.trim().eq_ignore_ascii_case("y") {
-        update_config_model(model.name)?;
-    }
-
-    println!("\n---");
-    println!("Model setup complete! Run 'voxtype' to start using it.");
+    // Update config and restart daemon
+    update_config_model(model.name)?;
+    restart_daemon_if_running().await;
 
     Ok(())
 }
@@ -331,9 +334,7 @@ async fn handle_parakeet_selection(selection: usize) -> anyhow::Result<()> {
             "" | "1" => {
                 // Set as default without re-downloading
                 update_config_parakeet(model.name)?;
-                println!("\n---");
-                println!("Model setup complete!");
-                print_info("Restart daemon to use new model: systemctl --user restart voxtype");
+                restart_daemon_if_running().await;
                 return Ok(());
             }
             "2" => {
@@ -349,23 +350,42 @@ async fn handle_parakeet_selection(selection: usize) -> anyhow::Result<()> {
     // Download the model
     download_parakeet_model_by_info(model)?;
 
-    // Offer to update config
-    println!("\nWould you like to set this as your default model?");
-    print!("Update config to use {}? [Y/n]: ", model.name);
-    io::stdout().flush()?;
-
-    let mut update_config = String::new();
-    io::stdin().read_line(&mut update_config)?;
-
-    if update_config.trim().is_empty() || update_config.trim().eq_ignore_ascii_case("y") {
-        update_config_parakeet(model.name)?;
-    }
-
-    println!("\n---");
-    println!("Model setup complete!");
-    print_info("Restart daemon to use new model: systemctl --user restart voxtype");
+    // Update config and restart daemon
+    update_config_parakeet(model.name)?;
+    restart_daemon_if_running().await;
 
     Ok(())
+}
+
+/// Restart the voxtype daemon if it's running
+async fn restart_daemon_if_running() {
+    // Check if daemon is running via systemd
+    let status = tokio::process::Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", "voxtype"])
+        .status()
+        .await;
+
+    if status.map(|s| s.success()).unwrap_or(false) {
+        // Daemon is running, restart it
+        println!("\nRestarting voxtype daemon...");
+        let restart = tokio::process::Command::new("systemctl")
+            .args(["--user", "restart", "voxtype"])
+            .status()
+            .await;
+
+        match restart {
+            Ok(s) if s.success() => {
+                print_success("Daemon restarted with new model");
+            }
+            _ => {
+                print_warning("Could not restart daemon");
+                print_info("Restart manually: systemctl --user restart voxtype");
+            }
+        }
+    } else {
+        println!("\n---");
+        println!("Model setup complete!");
+    }
 }
 
 // =============================================================================
@@ -1118,5 +1138,75 @@ translate = false
                 name
             );
         }
+    }
+
+    // =========================================================================
+    // Star Indicator Tests (for model selection menu)
+    // =========================================================================
+
+    #[test]
+    fn test_star_indicator_whisper_model_selected() {
+        use crate::config::TranscriptionEngine;
+
+        // Simulate: engine=Whisper, current model="base.en"
+        let is_whisper_engine = matches!(TranscriptionEngine::Whisper, TranscriptionEngine::Whisper);
+        let current_whisper_model = "base.en";
+
+        // "base.en" should have star
+        let is_current = is_whisper_engine && "base.en" == current_whisper_model;
+        assert!(is_current, "base.en should show star when it's the current Whisper model");
+
+        // "small.en" should NOT have star
+        let is_current = is_whisper_engine && "small.en" == current_whisper_model;
+        assert!(!is_current, "small.en should not show star when base.en is current");
+    }
+
+    #[test]
+    fn test_star_indicator_parakeet_model_selected() {
+        use crate::config::TranscriptionEngine;
+
+        // Simulate: engine=Parakeet, current model="parakeet-tdt-0.6b-v3"
+        let is_parakeet_engine = matches!(TranscriptionEngine::Parakeet, TranscriptionEngine::Parakeet);
+        let current_parakeet_model: Option<&str> = Some("parakeet-tdt-0.6b-v3");
+
+        // "parakeet-tdt-0.6b-v3" should have star
+        let is_current = is_parakeet_engine && current_parakeet_model == Some("parakeet-tdt-0.6b-v3");
+        assert!(is_current, "parakeet-tdt-0.6b-v3 should show star when it's the current Parakeet model");
+
+        // "parakeet-tdt-0.6b-v3-int8" should NOT have star
+        let is_current = is_parakeet_engine && current_parakeet_model == Some("parakeet-tdt-0.6b-v3-int8");
+        assert!(!is_current, "parakeet-tdt-0.6b-v3-int8 should not show star when other model is current");
+    }
+
+    #[test]
+    fn test_star_indicator_engine_mismatch() {
+        use crate::config::TranscriptionEngine;
+
+        // When engine is Parakeet, Whisper models should NOT show star
+        let is_whisper_engine = matches!(TranscriptionEngine::Parakeet, TranscriptionEngine::Whisper);
+        let current_whisper_model = "base.en";
+
+        let is_current = is_whisper_engine && "base.en" == current_whisper_model;
+        assert!(!is_current, "Whisper models should not show star when engine is Parakeet");
+
+        // When engine is Whisper, Parakeet models should NOT show star
+        let is_parakeet_engine = matches!(TranscriptionEngine::Whisper, TranscriptionEngine::Parakeet);
+        let current_parakeet_model: Option<&str> = Some("parakeet-tdt-0.6b-v3");
+
+        let is_current = is_parakeet_engine && current_parakeet_model == Some("parakeet-tdt-0.6b-v3");
+        assert!(!is_current, "Parakeet models should not show star when engine is Whisper");
+    }
+
+    #[test]
+    fn test_star_indicator_no_parakeet_config() {
+        use crate::config::TranscriptionEngine;
+
+        // When parakeet config is None (not configured)
+        let is_parakeet_engine = matches!(TranscriptionEngine::Parakeet, TranscriptionEngine::Parakeet);
+        let current_parakeet_model: Option<&str> = None;
+
+        // No model should show star when no parakeet config exists
+        let is_current = is_parakeet_engine && current_parakeet_model == Some("parakeet-tdt-0.6b-v3");
+        assert!(!is_current, "No star should show when parakeet config is not set");
     }
 }
