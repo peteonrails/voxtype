@@ -44,18 +44,17 @@ pub fn is_parakeet_binary_active() -> bool {
     }
 }
 
-/// Get the engine icon for notifications
+/// Get the engine icon for notifications based on configured engine
 /// Returns 🦜 for Parakeet, 🗣️ for Whisper
-pub fn engine_icon() -> &'static str {
-    if is_parakeet_binary_active() {
-        "🦜"
-    } else {
-        "🗣️"
+pub fn engine_icon(engine: crate::config::TranscriptionEngine) -> &'static str {
+    match engine {
+        crate::config::TranscriptionEngine::Parakeet => "🦜",
+        crate::config::TranscriptionEngine::Whisper => "🗣️",
     }
 }
 
 /// Send a transcription notification with optional engine icon
-pub async fn send_transcription_notification(text: &str, show_engine_icon: bool) {
+pub async fn send_transcription_notification(text: &str, show_engine_icon: bool, engine: crate::config::TranscriptionEngine) {
     // Truncate preview for notification (use chars() to handle multi-byte UTF-8)
     let preview = if text.chars().count() > 80 {
         format!("{}...", text.chars().take(80).collect::<String>())
@@ -64,7 +63,7 @@ pub async fn send_transcription_notification(text: &str, show_engine_icon: bool)
     };
 
     let title = if show_engine_icon {
-        format!("{} Transcribed", engine_icon())
+        format!("{} Transcribed", engine_icon(engine))
     } else {
         "Transcribed".to_string()
     };
