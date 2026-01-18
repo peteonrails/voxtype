@@ -550,28 +550,38 @@ pub fn set_model_config(model_name: &str) -> anyhow::Result<()> {
     }
 }
 
-/// Update the model setting in a config string
+/// Update the model setting in a config string (also sets engine to whisper)
 fn update_model_in_config(config: &str, model_name: &str) -> String {
     // Simple regex-free replacement for the model line
     let mut result = String::new();
     let mut in_whisper_section = false;
+    let mut engine_updated = false;
 
     for line in config.lines() {
         let trimmed = line.trim();
 
-        // Track if we're in the [whisper] section
+        // Track if we're in a section
         if trimmed.starts_with('[') {
             in_whisper_section = trimmed == "[whisper]";
         }
 
+        // Update engine line to whisper (at top level, before any section)
+        if trimmed.starts_with("engine") && !trimmed.starts_with('[') {
+            result.push_str("engine = \"whisper\"\n");
+            engine_updated = true;
+        }
         // Replace model line in whisper section
-        if in_whisper_section && trimmed.starts_with("model") {
+        else if in_whisper_section && trimmed.starts_with("model") {
             result.push_str(&format!("model = \"{}\"\n", model_name));
         } else {
             result.push_str(line);
             result.push('\n');
         }
     }
+
+    // If no engine line existed, we don't need to add one (whisper is the default)
+    // But if engine was set to something else, we've already updated it above
+    let _ = engine_updated; // suppress unused warning
 
     // Remove trailing newline if original didn't have one
     if !config.ends_with('\n') && result.ends_with('\n') {
@@ -870,6 +880,28 @@ language = "en"
         let result = update_model_in_config(config, "large-v3");
         assert!(result.contains(r#"model = "large-v3""#));
         assert!(!result.contains("base.en"));
+    }
+
+    #[test]
+    fn test_update_model_in_config_switches_engine_to_whisper() {
+        // When switching to a Whisper model, engine should be set to whisper
+        let config = r#"engine = "parakeet"
+
+[whisper]
+model = "small"
+
+[parakeet]
+model = "parakeet-tdt-0.6b-v3"
+"#;
+        let result = update_model_in_config(config, "base.en");
+        // Engine should now be whisper
+        assert!(result.contains(r#"engine = "whisper""#));
+        assert!(!result.contains(r#"engine = "parakeet""#));
+        // Whisper model should be updated
+        assert!(result.contains(r#"model = "base.en""#));
+        // Parakeet section should be preserved
+        assert!(result.contains("[parakeet]"));
+        assert!(result.contains(r#"model = "parakeet-tdt-0.6b-v3""#));
     }
 
     #[test]
