@@ -690,6 +690,16 @@ pub struct OutputConfig {
     /// Keyboard layout variant for dotool (e.g., "nodeadkeys")
     #[serde(default)]
     pub dotool_xkb_variant: Option<String>,
+
+    /// File path for file output mode (required when mode = "file")
+    /// Also used as default path for --output-file CLI flag
+    #[serde(default)]
+    pub file_path: Option<PathBuf>,
+
+    /// File write mode: "overwrite" (default) or "append"
+    /// Applies to both config-based file output and --output-file CLI flag
+    #[serde(default)]
+    pub file_mode: FileMode,
 }
 
 impl OutputConfig {
@@ -727,6 +737,19 @@ pub enum OutputMode {
     Clipboard,
     /// Copy to clipboard then paste with Ctrl+V (requires wl-copy and ydotool)
     Paste,
+    /// Write transcription to a file
+    File,
+}
+
+/// File write mode when using file output
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FileMode {
+    /// Overwrite the file on each transcription (default)
+    #[default]
+    Overwrite,
+    /// Append to the file on each transcription
+    Append,
 }
 
 fn default_true() -> bool {
@@ -778,6 +801,8 @@ impl Default for Config {
                 paste_keys: None,
                 dotool_xkb_layout: None,
                 dotool_xkb_variant: None,
+                file_path: None,
+                file_mode: FileMode::default(),
             },
             text: TextConfig::default(),
             status: StatusConfig::default(),

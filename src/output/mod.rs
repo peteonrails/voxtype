@@ -91,6 +91,16 @@ pub fn create_output_chain(config: &OutputConfig) -> Vec<Box<dyn TextOutput>> {
                 pre_type_delay_ms,
             )));
         }
+        crate::config::OutputMode::File => {
+            // File output is handled in the daemon before reaching the output chain.
+            // If we get here, it means mode = "file" but no file_path is configured.
+            tracing::warn!(
+                "Output mode is 'file' but no file_path configured. Falling back to clipboard."
+            );
+            chain.push(Box::new(clipboard::ClipboardOutput::new(
+                config.notification.on_transcription,
+            )));
+        }
     }
 
     chain

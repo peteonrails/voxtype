@@ -256,25 +256,23 @@ fn send_record_command(config: &config::Config, action: RecordAction) -> anyhow:
     }
 
     // Write output mode override file if specified
+    // For file mode, format is "file" or "file:/path/to/file"
     if let Some(mode_override) = action.output_mode_override() {
         let override_file = config::Config::runtime_dir().join("output_mode_override");
         let mode_str = match mode_override {
-            OutputModeOverride::Type => "type",
-            OutputModeOverride::Clipboard => "clipboard",
-            OutputModeOverride::Paste => "paste",
+            OutputModeOverride::Type => "type".to_string(),
+            OutputModeOverride::Clipboard => "clipboard".to_string(),
+            OutputModeOverride::Paste => "paste".to_string(),
+            OutputModeOverride::File => {
+                // Check if explicit path was provided with --file=path
+                match action.file_path() {
+                    Some(path) if !path.is_empty() => format!("file:{}", path),
+                    _ => "file".to_string(),
+                }
+            }
         };
         std::fs::write(&override_file, mode_str)
             .map_err(|e| anyhow::anyhow!("Failed to write output mode override: {}", e))?;
-    }
-
-    // Write output file override if specified
-    if let Some(output_file) = action.output_file_override() {
-        let override_file = config::Config::runtime_dir().join("output_file_override");
-        let path_str = output_file
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid output file path (not valid UTF-8)"))?;
-        std::fs::write(&override_file, path_str)
-            .map_err(|e| anyhow::anyhow!("Failed to write output file override: {}", e))?;
     }
 
     // For toggle, we need to read current state to decide which signal to send

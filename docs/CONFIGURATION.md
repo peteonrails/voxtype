@@ -116,10 +116,11 @@ enabled = false  # Use compositor keybindings instead
 
 When `enabled = false`, control recording via CLI:
 ```bash
-voxtype record start                       # Start recording
-voxtype record start --output-file out.txt # Write transcription to a file
-voxtype record stop                        # Stop and transcribe
-voxtype record toggle                      # Toggle recording state
+voxtype record start                # Start recording
+voxtype record start --file=out.txt # Write transcription to a file
+voxtype record start --file         # Write to file_path from config
+voxtype record stop                 # Stop and transcribe
+voxtype record toggle               # Toggle recording state
 ```
 
 Bind these commands in your compositor config:
@@ -604,11 +605,20 @@ Primary output method.
 - `type` - Simulate keyboard input at cursor position (uses wtype, dotool, or ydotool)
 - `clipboard` - Copy text to clipboard (requires wl-copy)
 - `paste` - Copy to clipboard then simulate paste keystroke (requires wl-copy, and wtype, dotool, or ydotool)
+- `file` - Write transcription to a file (requires `file_path` to be set)
 
 **Example:**
 ```toml
 [output]
 mode = "paste"
+```
+
+**Example (file output):**
+```toml
+[output]
+mode = "file"
+file_path = "~/transcriptions/output.txt"
+file_mode = "append"
 ```
 
 **Note about wtype compatibility:**
@@ -701,6 +711,47 @@ Keyboard layout variant for dotool. Use this for layout variations like `nodeadk
 [output]
 dotool_xkb_layout = "de"
 dotool_xkb_variant = "nodeadkeys"  # German without dead keys
+```
+
+### file_path
+
+**Type:** String (path)
+**Default:** None
+**Required:** Only when `mode = "file"`
+
+File path for file output mode. When `mode = "file"`, transcriptions are written to this file instead of being typed or copied to clipboard.
+
+This path is also used as the default for the `--output-file` CLI flag when appending.
+
+**Example:**
+```toml
+[output]
+mode = "file"
+file_path = "~/transcriptions/output.txt"
+```
+
+**Note:** Parent directories are created automatically if they don't exist.
+
+### file_mode
+
+**Type:** String
+**Default:** `"overwrite"`
+**Required:** No
+
+Controls how file output handles existing files.
+
+**Values:**
+- `overwrite` - Replace the file contents on each transcription (default)
+- `append` - Add transcription to the end of the file
+
+This setting applies to both config-based file output (`mode = "file"`) and the `--output-file` CLI flag.
+
+**Example:**
+```toml
+[output]
+mode = "file"
+file_path = "~/transcriptions/log.txt"
+file_mode = "append"  # Build a running log of transcriptions
 ```
 
 ---
