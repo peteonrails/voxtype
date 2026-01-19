@@ -125,7 +125,8 @@ async fn main() -> anyhow::Result<()> {
                 whisper_config.model = m;
             }
             if let Some(l) = language {
-                whisper_config.language = l;
+                // Parse comma-separated language string back to LanguageConfig
+                whisper_config.language = config::LanguageConfig::from_comma_separated(&l);
             }
             if translate {
                 whisper_config.translate = true;
@@ -136,7 +137,13 @@ async fn main() -> anyhow::Result<()> {
             transcribe::worker::run_worker(&whisper_config)?;
         }
 
-        Commands::Setup { action, download, model, quiet, no_post_install } => {
+        Commands::Setup {
+            action,
+            download,
+            model,
+            quiet,
+            no_post_install,
+        } => {
             match action {
                 Some(SetupAction::Check) => {
                     setup::run_checks(&config).await?;
@@ -177,7 +184,11 @@ async fn main() -> anyhow::Result<()> {
                         setup::model::interactive_select().await?;
                     }
                 }
-                Some(SetupAction::Gpu { enable, disable, status }) => {
+                Some(SetupAction::Gpu {
+                    enable,
+                    disable,
+                    status,
+                }) => {
                     if status {
                         setup::gpu::show_status();
                     } else if enable {
@@ -194,7 +205,8 @@ async fn main() -> anyhow::Result<()> {
                 }
                 None => {
                     // Default: run setup (non-blocking)
-                    setup::run_setup(&config, download, model.as_deref(), quiet, no_post_install).await?;
+                    setup::run_setup(&config, download, model.as_deref(), quiet, no_post_install)
+                        .await?;
                 }
             }
         }
@@ -203,7 +215,12 @@ async fn main() -> anyhow::Result<()> {
             show_config(&config).await?;
         }
 
-        Commands::Status { follow, format, extended, icon_theme } => {
+        Commands::Status {
+            follow,
+            format,
+            extended,
+            icon_theme,
+        } => {
             run_status(&config, follow, &format, extended, icon_theme).await?;
         }
 
@@ -288,8 +305,8 @@ fn send_record_command(config: &config::Config, action: RecordAction) -> anyhow:
                 }
             };
 
-            let current_state = std::fs::read_to_string(&state_file)
-                .unwrap_or_else(|_| "idle".to_string());
+            let current_state =
+                std::fs::read_to_string(&state_file).unwrap_or_else(|_| "idle".to_string());
 
             if current_state.trim() == "recording" {
                 Signal::SIGUSR2 // Stop
@@ -348,10 +365,7 @@ fn transcribe_file(config: &config::Config, path: &PathBuf) -> anyhow::Result<()
 
     // Resample to 16kHz if needed
     let final_samples = if spec.sample_rate != 16000 {
-        println!(
-            "Resampling from {} Hz to 16000 Hz...",
-            spec.sample_rate
-        );
+        println!("Resampling from {} Hz to 16000 Hz...", spec.sample_rate);
         resample(&mono_samples, spec.sample_rate, 16000)
     } else {
         mono_samples
@@ -547,7 +561,10 @@ async fn run_status(
                     let new_state = new_state.trim().to_string();
                     if new_state != last_state {
                         if format == "json" {
-                            println!("{}", format_state_json(&new_state, &icons, ext_info.as_ref()));
+                            println!(
+                                "{}",
+                                format_state_json(&new_state, &icons, ext_info.as_ref())
+                            );
                         } else {
                             println!("{}", new_state);
                         }
@@ -562,7 +579,10 @@ async fn run_status(
                 // Check if daemon stopped (file deleted or process died)
                 if (!state_path.exists() || !is_daemon_running()) && last_state != "stopped" {
                     if format == "json" {
-                        println!("{}", format_state_json("stopped", &icons, ext_info.as_ref()));
+                        println!(
+                            "{}",
+                            format_state_json("stopped", &icons, ext_info.as_ref())
+                        );
                     } else {
                         println!("stopped");
                     }
@@ -673,8 +693,10 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
     println!("\n[status]");
     println!("  icon_theme = {:?}", config.status.icon_theme);
     let icons = config.status.resolve_icons();
-    println!("  (resolved icons: idle={:?} recording={:?} transcribing={:?} stopped={:?})",
-        icons.idle, icons.recording, icons.transcribing, icons.stopped);
+    println!(
+        "  (resolved icons: idle={:?} recording={:?} transcribing={:?} stopped={:?})",
+        icons.idle, icons.recording, icons.transcribing, icons.stopped
+    );
 
     if let Some(ref state_file) = config.state_file {
         println!("\n[integration]");

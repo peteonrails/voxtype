@@ -32,7 +32,12 @@ impl YdotoolOutput {
     /// Create a new ydotool output
     ///
     /// Detects ydotool capabilities at construction time.
-    pub fn new(type_delay_ms: u32, pre_type_delay_ms: u32, notify: bool, auto_submit: bool) -> Self {
+    pub fn new(
+        type_delay_ms: u32,
+        pre_type_delay_ms: u32,
+        notify: bool,
+        auto_submit: bool,
+    ) -> Self {
         let supports_key_hold = Self::detect_key_hold_support();
         if supports_key_hold {
             tracing::debug!("ydotool supports --key-hold flag");
@@ -97,7 +102,10 @@ impl TextOutput for YdotoolOutput {
 
         // Pre-typing delay if configured
         if self.pre_type_delay_ms > 0 {
-            tracing::debug!("ydotool: sleeping {}ms before typing", self.pre_type_delay_ms);
+            tracing::debug!(
+                "ydotool: sleeping {}ms before typing",
+                self.pre_type_delay_ms
+            );
             tokio::time::sleep(Duration::from_millis(self.pre_type_delay_ms as u64)).await;
         }
 
@@ -118,7 +126,11 @@ impl TextOutput for YdotoolOutput {
         tracing::debug!(
             "Running: ydotool type --key-delay {} {} -- \"{}\"",
             self.type_delay_ms,
-            if self.supports_key_hold { format!("--key-hold {}", self.type_delay_ms) } else { String::new() },
+            if self.supports_key_hold {
+                format!("--key-hold {}", self.type_delay_ms)
+            } else {
+                String::new()
+            },
             text.chars().take(20).collect::<String>()
         );
 

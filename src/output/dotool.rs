@@ -109,7 +109,10 @@ impl TextOutput for DotoolOutput {
 
         // Pre-typing delay if configured
         if self.pre_type_delay_ms > 0 {
-            tracing::debug!("dotool: sleeping {}ms before typing", self.pre_type_delay_ms);
+            tracing::debug!(
+                "dotool: sleeping {}ms before typing",
+                self.pre_type_delay_ms
+            );
             tokio::time::sleep(Duration::from_millis(self.pre_type_delay_ms as u64)).await;
         }
 
@@ -143,10 +146,9 @@ impl TextOutput for DotoolOutput {
 
         // Write commands to stdin
         if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(commands.as_bytes())
-                .await
-                .map_err(|e| OutputError::InjectionFailed(format!("Failed to write to dotool stdin: {}", e)))?;
+            stdin.write_all(commands.as_bytes()).await.map_err(|e| {
+                OutputError::InjectionFailed(format!("Failed to write to dotool stdin: {}", e))
+            })?;
             // Close stdin to signal end of input
             drop(stdin);
         }

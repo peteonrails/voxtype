@@ -1,9 +1,14 @@
 //! Whisper-based speech-to-text transcription
 //!
 //! Uses whisper.cpp via the whisper-rs crate for fast, local transcription.
+//!
+//! Supports three language modes:
+//! - Single language: Use a specific language for transcription
+//! - Auto-detect: Let Whisper detect from all ~99 supported languages
+//! - Constrained auto-detect: Detect from a user-specified subset of languages
 
 use super::Transcriber;
-use crate::config::{Config, WhisperConfig};
+use crate::config::{Config, LanguageConfig, WhisperConfig};
 use crate::error::TranscribeError;
 use std::path::PathBuf;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
@@ -12,8 +17,8 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 pub struct WhisperTranscriber {
     /// Whisper context (holds the model)
     ctx: WhisperContext,
-    /// Language for transcription
-    language: String,
+    /// Language configuration (single, auto, or array)
+    language: LanguageConfig,
     /// Whether to translate to English
     translate: bool,
     /// Number of threads to use
@@ -40,9 +45,7 @@ impl WhisperTranscriber {
 
         tracing::info!("Model loaded in {:.2}s", start.elapsed().as_secs_f32());
 
-        let threads = config
-            .threads
-            .unwrap_or_else(|| num_cpus::get().min(4));
+        let threads = config.threads.unwrap_or_else(|| num_cpus::get().min(4));
 
         Ok(Self {
             ctx,
@@ -52,12 +55,74 @@ impl WhisperTranscriber {
             context_window_optimization: config.context_window_optimization,
         })
     }
+
+    /// Select the best language from allowed languages using Whisper's language detection.
+    ///
+    /// This runs the mel spectrogram computation and language detection head to get
+    /// probabilities for all languages, then picks the highest-probability language
+    /// from the user's allowed set.
+    fn select_language_from_allowed(
+        &self,
+        state: &mut whisper_rs::WhisperState,
+        samples: &[f32],
+        allowed: &[String],
+    ) -> Result<String, TranscribeError> {
+        // Run pcm_to_mel to prepare the spectrogram for language detection
+        state
+            .pcm_to_mel(samples, self.threads)
+            .map_err(|e| TranscribeError::InferenceFailed(format!("pcm_to_mel failed: {}", e)))?;
+
+        // Run language detection to get probabilities for all languages
+        let (detected_id, probs) = state
+            .lang_detect(0, self.threads)
+            .map_err(|e| TranscribeError::InferenceFailed(format!("lang_detect failed: {}", e)))?;
+
+        // Find the highest-probability language from our allowed set
+        let mut best_lang = None;
+        let mut best_prob = -1.0f32;
+
+        for lang in allowed {
+            if let Some(lang_id) = whisper_rs::get_lang_id(lang) {
+                if let Some(&prob) = probs.get(lang_id as usize) {
+                    if prob > best_prob {
+                        best_prob = prob;
+                        best_lang = Some(lang.clone());
+                    }
+                }
+            } else {
+                tracing::warn!("Unknown language code '{}' in language array", lang);
+            }
+        }
+
+        let selected = best_lang.unwrap_or_else(|| {
+            tracing::warn!(
+                "No valid languages found in allowed set {:?}, using first: {}",
+                allowed,
+                allowed.first().map(|s| s.as_str()).unwrap_or("en")
+            );
+            allowed.first().cloned().unwrap_or_else(|| "en".to_string())
+        });
+
+        // Log the detection result
+        let detected_lang = whisper_rs::get_lang_str(detected_id).unwrap_or("unknown");
+        tracing::info!(
+            "Language detection: Whisper detected '{}', selected '{}' (prob={:.1}%) from allowed {:?}",
+            detected_lang,
+            selected,
+            best_prob * 100.0,
+            allowed
+        );
+
+        Ok(selected)
+    }
 }
 
 impl Transcriber for WhisperTranscriber {
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         if samples.is_empty() {
-            return Err(TranscribeError::AudioFormat("Empty audio buffer".to_string()));
+            return Err(TranscribeError::AudioFormat(
+                "Empty audio buffer".to_string(),
+            ));
         }
 
         let duration_secs = samples.len() as f32 / 16000.0;
@@ -75,15 +140,30 @@ impl Transcriber for WhisperTranscriber {
             .create_state()
             .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
 
+        // Determine language based on configuration mode
+        let selected_language: Option<String> = if self.language.is_auto() {
+            // Unconstrained auto-detection: let Whisper detect from all languages
+            tracing::debug!("Using unconstrained language auto-detection");
+            None
+        } else if self.language.is_multiple() {
+            // Constrained auto-detection: detect from allowed set only
+            let allowed = self.language.as_vec();
+            tracing::debug!("Using constrained language detection from: {:?}", allowed);
+            Some(self.select_language_from_allowed(&mut state, samples, &allowed)?)
+        } else {
+            // Single language: use it directly
+            let lang = self.language.primary().to_string();
+            tracing::debug!("Using specified language: {}", lang);
+            Some(lang)
+        };
+
         // Configure parameters
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
 
-        // Set language (handle "auto" for auto-detection)
-        if self.language == "auto" {
-            // Pass None to enable auto-detection
-            params.set_language(None);
-        } else {
-            params.set_language(Some(&self.language));
+        // Set language
+        match &selected_language {
+            Some(lang) => params.set_language(Some(lang)),
+            None => params.set_language(None),
         }
 
         params.set_translate(self.translate);
@@ -313,6 +393,9 @@ mod tests {
 
         // Verify the optimization provides significant reduction
         let ratio = WHISPER_DEFAULT_AUDIO_CTX as f32 / optimized_ctx.unwrap() as f32;
-        assert!(ratio > 10.0, "Optimization should reduce context by >10x for 1s clips");
+        assert!(
+            ratio > 10.0,
+            "Optimization should reduce context by >10x for 1s clips"
+        );
     }
 }

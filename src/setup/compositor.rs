@@ -170,7 +170,9 @@ fn add_hooks_to_config(content: &str, hooks: &str) -> String {
         // or after a blank line following [output]
         if found_output_section && !hooks_inserted {
             let trimmed = line.trim();
-            if trimmed.is_empty() || (!trimmed.starts_with('#') && !trimmed.starts_with('[') && trimmed.contains('=')) {
+            if trimmed.is_empty()
+                || (!trimmed.starts_with('#') && !trimmed.starts_with('[') && trimmed.contains('='))
+            {
                 // Found a good place to insert - after this line
                 result.push('\n');
                 result.push_str("# Compositor integration hooks (modifier key fix)\n");
@@ -198,7 +200,11 @@ fn add_hooks_to_config(content: &str, hooks: &str) -> String {
 /// Run compositor setup command
 pub async fn run(compositor: &CompositorType) -> anyhow::Result<()> {
     match compositor {
-        CompositorType::Hyprland { uninstall, status, show } => {
+        CompositorType::Hyprland {
+            uninstall,
+            status,
+            show,
+        } => {
             if *show {
                 print_hyprland_config();
             } else if *status {
@@ -209,7 +215,11 @@ pub async fn run(compositor: &CompositorType) -> anyhow::Result<()> {
                 hyprland_install()?;
             }
         }
-        CompositorType::Sway { uninstall, status, show } => {
+        CompositorType::Sway {
+            uninstall,
+            status,
+            show,
+        } => {
             if *show {
                 print_sway_config();
             } else if *status {
@@ -220,7 +230,11 @@ pub async fn run(compositor: &CompositorType) -> anyhow::Result<()> {
                 sway_install()?;
             }
         }
-        CompositorType::River { uninstall, status, show } => {
+        CompositorType::River {
+            uninstall,
+            status,
+            show,
+        } => {
             if *show {
                 print_river_config();
             } else if *status {
@@ -350,9 +364,13 @@ fn hyprland_status() {
             if content.contains("pre_recording_command") && content.contains("hyprctl") {
                 print_success("Voxtype hooks: configured for Hyprland (with recording hook)");
             } else if content.contains("pre_output_command") && content.contains("hyprctl") {
-                print_warning("Voxtype hooks: configured for Hyprland (missing pre_recording_command)");
+                print_warning(
+                    "Voxtype hooks: configured for Hyprland (missing pre_recording_command)",
+                );
                 println!("       Add to [output] section:\n");
-                println!("       pre_recording_command = \"hyprctl dispatch submap voxtype_recording\"");
+                println!(
+                    "       pre_recording_command = \"hyprctl dispatch submap voxtype_recording\""
+                );
             } else if content.contains("pre_output_command") {
                 print_warning("Voxtype hooks: configured (but not for Hyprland)");
             } else {
@@ -663,9 +681,13 @@ fn river_status() {
             if content.contains("pre_recording_command") && content.contains("riverctl") {
                 print_success("Voxtype hooks: configured for River (with recording hook)");
             } else if content.contains("pre_output_command") && content.contains("riverctl") {
-                print_warning("Voxtype hooks: configured for River (missing pre_recording_command)");
+                print_warning(
+                    "Voxtype hooks: configured for River (missing pre_recording_command)",
+                );
                 println!("       Add to [output] section:\n");
-                println!("       pre_recording_command = \"riverctl enter-mode voxtype_recording\"");
+                println!(
+                    "       pre_recording_command = \"riverctl enter-mode voxtype_recording\""
+                );
             } else if content.contains("pre_output_command") {
                 print_warning("Voxtype hooks: configured (but not for River)");
             } else {

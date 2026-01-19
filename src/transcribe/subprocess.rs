@@ -96,7 +96,10 @@ impl SubprocessTranscriber {
 
         // Pass essential config via command-line arguments
         cmd.arg("--model").arg(&self.config.model);
-        cmd.arg("--language").arg(&self.config.language);
+        // Serialize language config as comma-separated string for CLI
+        // Single: "en", Auto: "auto", Multiple: "en,fr,de"
+        let language_str = self.config.language.as_vec().join(",");
+        cmd.arg("--language").arg(&language_str);
         if self.config.translate {
             cmd.arg("--translate");
         }
@@ -116,9 +119,10 @@ impl SubprocessTranscriber {
         })?;
 
         // Get handles
-        let stdin = child.stdin.take().ok_or_else(|| {
-            TranscribeError::InitFailed("Worker stdin not available".to_string())
-        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| TranscribeError::InitFailed("Worker stdin not available".to_string()))?;
 
         let stdout = child.stdout.take().ok_or_else(|| {
             TranscribeError::InitFailed("Worker stdout not available".to_string())
@@ -287,7 +291,9 @@ impl Transcriber for SubprocessTranscriber {
             })
         } else {
             Err(TranscribeError::InferenceFailed(
-                response.error.unwrap_or_else(|| "Unknown worker error".to_string()),
+                response
+                    .error
+                    .unwrap_or_else(|| "Unknown worker error".to_string()),
             ))
         }
     }

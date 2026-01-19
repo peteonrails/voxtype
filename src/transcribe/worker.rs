@@ -60,10 +60,10 @@ pub fn run_worker(config: &WhisperConfig) -> anyhow::Result<()> {
         Ok(t) => t,
         Err(e) => {
             // Write error and exit - parent will see no READY signal
-            write_response_to(&mut stdout_lock, WorkerResponse::error(format!(
-                "Failed to load model: {}",
-                e
-            )));
+            write_response_to(
+                &mut stdout_lock,
+                WorkerResponse::error(format!("Failed to load model: {}", e)),
+            );
             return Ok(());
         }
     };
@@ -108,7 +108,10 @@ pub fn run_worker(config: &WhisperConfig) -> anyhow::Result<()> {
     }
 
     if sample_count == 0 {
-        write_response_to(&mut stdout_lock, WorkerResponse::error("Empty audio buffer"));
+        write_response_to(
+            &mut stdout_lock,
+            WorkerResponse::error("Empty audio buffer"),
+        );
         return Ok(());
     }
 

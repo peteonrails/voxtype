@@ -24,12 +24,7 @@ use tokio::signal::unix::{signal, SignalKind};
 /// Send a desktop notification
 async fn send_notification(title: &str, body: &str) {
     let _ = Command::new("notify-send")
-        .args([
-            "--app-name=Voxtype",
-            "--expire-time=2000",
-            title,
-            body,
-        ])
+        .args(["--app-name=Voxtype", "--expire-time=2000", title, body])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -172,7 +167,14 @@ pub struct Daemon {
     text_processor: TextProcessor,
     post_processor: Option<PostProcessor>,
     // Background task for loading model on-demand
-    model_load_task: Option<tokio::task::JoinHandle<std::result::Result<Box<dyn crate::transcribe::Transcriber>, crate::error::TranscribeError>>>,
+    model_load_task: Option<
+        tokio::task::JoinHandle<
+            std::result::Result<
+                Box<dyn crate::transcribe::Transcriber>,
+                crate::error::TranscribeError,
+            >,
+        >,
+    >,
     // Background task for transcription (allows cancel during transcription)
     transcription_task: Option<tokio::task::JoinHandle<TranscriptionResult>>,
 }
@@ -292,26 +294,21 @@ impl Daemon {
 
                     // Skip if too short (likely accidental press)
                     if audio_duration < 0.3 {
-                        tracing::debug!(
-                            "Recording too short ({:.2}s), ignoring",
-                            audio_duration
-                        );
+                        tracing::debug!("Recording too short ({:.2}s), ignoring", audio_duration);
                         self.reset_to_idle(state).await;
                         return false;
                     }
 
-                    tracing::info!(
-                        "Transcribing {:.1}s of audio...",
-                        audio_duration
-                    );
-                    *state = State::Transcribing { audio: samples.clone() };
+                    tracing::info!("Transcribing {:.1}s of audio...", audio_duration);
+                    *state = State::Transcribing {
+                        audio: samples.clone(),
+                    };
                     self.update_state("transcribing");
 
                     // Spawn transcription task (non-blocking)
                     if let Some(t) = transcriber {
-                        self.transcription_task = Some(tokio::task::spawn_blocking(move || {
-                            t.transcribe(&samples)
-                        }));
+                        self.transcription_task =
+                            Some(tokio::task::spawn_blocking(move || t.transcribe(&samples)));
                         return true;
                     } else {
                         tracing::error!("No transcriber available");
@@ -373,18 +370,19 @@ impl Daemon {
                     let output_chain = output::create_output_chain(&output_config);
 
                     // Output the text
-                    *state = State::Outputting { text: final_text.clone() };
+                    *state = State::Outputting {
+                        text: final_text.clone(),
+                    };
 
                     let output_options = output::OutputOptions {
                         pre_output_command: output_config.pre_output_command.as_deref(),
                         post_output_command: output_config.post_output_command.as_deref(),
                     };
 
-                    if let Err(e) = output::output_with_fallback(
-                        &output_chain,
-                        &final_text,
-                        output_options,
-                    ).await {
+                    if let Err(e) =
+                        output::output_with_fallback(&output_chain, &final_text, output_options)
+                            .await
+                    {
                         tracing::error!("Output failed: {}", e);
                     }
 
@@ -419,12 +417,15 @@ impl Daemon {
         self.pid_file_path = write_pid_file();
 
         // Set up signal handlers for external control
-        let mut sigusr1 = signal(SignalKind::user_defined1())
-            .map_err(|e| crate::error::VoxtypeError::Config(format!("Failed to set up SIGUSR1 handler: {}", e)))?;
-        let mut sigusr2 = signal(SignalKind::user_defined2())
-            .map_err(|e| crate::error::VoxtypeError::Config(format!("Failed to set up SIGUSR2 handler: {}", e)))?;
-        let mut sigterm = signal(SignalKind::terminate())
-            .map_err(|e| crate::error::VoxtypeError::Config(format!("Failed to set up SIGTERM handler: {}", e)))?;
+        let mut sigusr1 = signal(SignalKind::user_defined1()).map_err(|e| {
+            crate::error::VoxtypeError::Config(format!("Failed to set up SIGUSR1 handler: {}", e))
+        })?;
+        let mut sigusr2 = signal(SignalKind::user_defined2()).map_err(|e| {
+            crate::error::VoxtypeError::Config(format!("Failed to set up SIGUSR2 handler: {}", e))
+        })?;
+        let mut sigterm = signal(SignalKind::terminate()).map_err(|e| {
+            crate::error::VoxtypeError::Config(format!("Failed to set up SIGTERM handler: {}", e))
+        })?;
 
         // Ensure required directories exist
         Config::ensure_directories().map_err(|e| {
@@ -441,10 +442,14 @@ impl Daemon {
                 tracing::debug!("Acquired PID lock at {:?}", lock_path);
             }
             Err(e) => {
-                tracing::error!("Failed to acquire lock: another voxtype instance is already running");
-                return Err(crate::error::VoxtypeError::Config(
-                    format!("Another voxtype instance is already running (lock error: {:?})", e)
-                ).into());
+                tracing::error!(
+                    "Failed to acquire lock: another voxtype instance is already running"
+                );
+                return Err(crate::error::VoxtypeError::Config(format!(
+                    "Another voxtype instance is already running (lock error: {:?})",
+                    e
+                ))
+                .into());
             }
         }
 
@@ -460,7 +465,9 @@ impl Daemon {
             tracing::info!("Hotkey: {}", self.config.hotkey.key);
             Some(hotkey::create_listener(&self.config.hotkey)?)
         } else {
-            tracing::info!("Built-in hotkey disabled, use 'voxtype record' commands or compositor keybindings");
+            tracing::info!(
+                "Built-in hotkey disabled, use 'voxtype record' commands or compositor keybindings"
+            );
             None
         };
 
@@ -480,7 +487,9 @@ impl Daemon {
         let mut transcriber_preloaded = None;
         if !self.config.whisper.on_demand_loading {
             tracing::info!("Loading transcription model: {}", self.config.whisper.model);
-            transcriber_preloaded = Some(Arc::new(transcribe::create_transcriber(&self.config.whisper)?));
+            transcriber_preloaded = Some(Arc::new(transcribe::create_transcriber(
+                &self.config.whisper,
+            )?));
             tracing::info!("Model loaded, ready for voice input");
         } else {
             tracing::info!("On-demand loading enabled, model will be loaded when recording starts");
@@ -1261,7 +1270,11 @@ mod tests {
             let mut pidlock2 = Pidlock::new(&lock_path_str);
             let result = pidlock2.acquire();
 
-            assert!(result.is_ok(), "Lock acquisition should succeed after previous lock released: {:?}", result.err());
+            assert!(
+                result.is_ok(),
+                "Lock acquisition should succeed after previous lock released: {:?}",
+                result.err()
+            );
         });
     }
 }

@@ -33,9 +33,7 @@ pub trait Transcriber: Send + Sync {
 }
 
 /// Factory function to create transcriber based on configured backend
-pub fn create_transcriber(
-    config: &WhisperConfig,
-) -> Result<Box<dyn Transcriber>, TranscribeError> {
+pub fn create_transcriber(config: &WhisperConfig) -> Result<Box<dyn Transcriber>, TranscribeError> {
     create_transcriber_with_config_path(config, None)
 }
 
@@ -48,7 +46,9 @@ pub fn create_transcriber_with_config_path(
     match config.backend {
         WhisperBackend::Local => {
             if config.gpu_isolation {
-                tracing::info!("Using subprocess-isolated whisper transcription (gpu_isolation=true)");
+                tracing::info!(
+                    "Using subprocess-isolated whisper transcription (gpu_isolation=true)"
+                );
                 Ok(Box::new(subprocess::SubprocessTranscriber::new(
                     config,
                     config_path,

@@ -327,26 +327,50 @@ model = "/home/user/models/custom-whisper.bin"
 
 ### language
 
-**Type:** String
+**Type:** String or Array of Strings
 **Default:** `"en"`
 **Required:** No
 
-Language code for transcription.
+Language code for transcription. Supports three modes:
+
+1. **Single language** - Use a specific language for all transcriptions
+2. **Auto-detect** - Let Whisper detect from all ~99 supported languages
+3. **Constrained auto-detect** - Detect from a specific set of allowed languages
 
 **Common values:**
-- `en` - English
-- `auto` - Auto-detect language
-- `es` - Spanish
-- `fr` - French
-- `de` - German
-- `ja` - Japanese
-- `zh` - Chinese
+- `"en"` - English
+- `"auto"` - Auto-detect from all languages
+- `"es"` - Spanish
+- `"fr"` - French
+- `"de"` - German
+- `"ja"` - Japanese
+- `"zh"` - Chinese
+- `["en", "fr"]` - Auto-detect between English and French only
 
-**Example:**
+**Examples:**
 ```toml
 [whisper]
-language = "auto"  # Auto-detect spoken language
+# Single language (fastest, most accurate for monolingual use)
+language = "en"
+
+# Auto-detect from all languages
+language = "auto"
+
+# Constrained auto-detect (recommended for multilingual users)
+# Whisper sometimes misdetects language for short sentences.
+# This limits detection to your known languages for better accuracy.
+language = ["en", "fr"]
+
+# Works with any number of languages
+language = ["en", "fr", "de", "es"]
 ```
+
+**When to use constrained auto-detect:**
+- You regularly speak in 2-3 languages
+- Whisper misdetects language for short sentences
+- You want faster detection than full auto-detect
+
+**Note:** Remote backends (OpenAI API) don't support language arrays. When using remote backend with an array, the first language is used.
 
 ### translate
 

@@ -28,7 +28,12 @@ pub struct WtypeOutput {
 
 impl WtypeOutput {
     /// Create a new wtype output
-    pub fn new(notify: bool, auto_submit: bool, type_delay_ms: u32, pre_type_delay_ms: u32) -> Self {
+    pub fn new(
+        notify: bool,
+        auto_submit: bool,
+        type_delay_ms: u32,
+        pre_type_delay_ms: u32,
+    ) -> Self {
         Self {
             notify,
             auto_submit,
