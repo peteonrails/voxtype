@@ -50,6 +50,7 @@ hound = "3"  # WAV file reading/writing
 
 # HTTP client for remote transcription
 ureq = { version = "2", features = ["json"] }
+base64 = "0.22"
 
 # Audio playback (for feedback sounds)
 rodio = { version = "0.19", default-features = false, features = ["wav"] }
