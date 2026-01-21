@@ -148,6 +148,7 @@ async fn main() -> anyhow::Result<()> {
                 Some(SetupAction::Check) => {
                     setup::run_checks(&config).await?;
                 }
+                #[cfg(target_os = "linux")]
                 Some(SetupAction::Systemd { uninstall, status }) => {
                     if status {
                         setup::systemd::status().await?;
@@ -157,6 +158,12 @@ async fn main() -> anyhow::Result<()> {
                         setup::systemd::install().await?;
                     }
                 }
+                #[cfg(not(target_os = "linux"))]
+                Some(SetupAction::Systemd { .. }) => {
+                    eprintln!("Error: systemd setup is only available on Linux.");
+                    std::process::exit(1);
+                }
+                #[cfg(target_os = "linux")]
                 Some(SetupAction::Waybar {
                     json,
                     css,
@@ -175,6 +182,11 @@ async fn main() -> anyhow::Result<()> {
                         setup::waybar::print_config();
                     }
                 }
+                #[cfg(not(target_os = "linux"))]
+                Some(SetupAction::Waybar { .. }) => {
+                    eprintln!("Error: Waybar setup is only available on Linux.");
+                    std::process::exit(1);
+                }
                 Some(SetupAction::Model { list, set, restart }) => {
                     if list {
                         setup::model::list_installed();
@@ -184,6 +196,7 @@ async fn main() -> anyhow::Result<()> {
                         setup::model::interactive_select().await?;
                     }
                 }
+                #[cfg(target_os = "linux")]
                 Some(SetupAction::Gpu {
                     enable,
                     disable,
@@ -200,8 +213,20 @@ async fn main() -> anyhow::Result<()> {
                         setup::gpu::show_status();
                     }
                 }
+                #[cfg(not(target_os = "linux"))]
+                Some(SetupAction::Gpu { .. }) => {
+                    eprintln!("Error: GPU backend management is only available on Linux.");
+                    eprintln!("On macOS, use --features gpu-metal when building.");
+                    std::process::exit(1);
+                }
+                #[cfg(target_os = "linux")]
                 Some(SetupAction::Compositor { compositor_type }) => {
                     setup::compositor::run(&compositor_type).await?;
+                }
+                #[cfg(not(target_os = "linux"))]
+                Some(SetupAction::Compositor { .. }) => {
+                    eprintln!("Error: Compositor setup is only available on Linux.");
+                    std::process::exit(1);
                 }
                 None => {
                     // Default: run setup (non-blocking)
@@ -233,6 +258,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Send a record command to the running daemon via Unix signals or file triggers
+#[cfg(target_os = "linux")]
 fn send_record_command(config: &config::Config, action: RecordAction) -> anyhow::Result<()> {
     use nix::sys::signal::{kill, Signal};
     use nix::unistd::Pid;
@@ -327,6 +353,110 @@ fn send_record_command(config: &config::Config, action: RecordAction) -> anyhow:
 
     kill(Pid::from_raw(pid), signal)
         .map_err(|e| anyhow::anyhow!("Failed to send signal to daemon: {}", e))?;
+
+    Ok(())
+}
+
+/// Send a record command to the running daemon via Unix signals or file triggers (macOS version)
+#[cfg(target_os = "macos")]
+fn send_record_command(config: &config::Config, action: RecordAction) -> anyhow::Result<()> {
+    use voxtype::OutputModeOverride;
+
+    // Read PID from the pid file
+    let pid_file = config::Config::runtime_dir().join("pid");
+
+    if !pid_file.exists() {
+        eprintln!("Error: Voxtype daemon is not running.");
+        eprintln!("Start it with: voxtype daemon");
+        std::process::exit(1);
+    }
+
+    let pid_str = std::fs::read_to_string(&pid_file)
+        .map_err(|e| anyhow::anyhow!("Failed to read PID file: {}", e))?;
+
+    let pid: i32 = pid_str
+        .trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid PID in file: {}", e))?;
+
+    // Check if the process is actually running using libc::kill with signal 0
+    let process_exists = unsafe { libc::kill(pid, 0) } == 0;
+    if !process_exists {
+        // Process doesn't exist, clean up stale PID file
+        let _ = std::fs::remove_file(&pid_file);
+        eprintln!("Error: Voxtype daemon is not running (stale PID file removed).");
+        eprintln!("Start it with: voxtype daemon");
+        std::process::exit(1);
+    }
+
+    // Handle cancel separately (uses file trigger instead of signal)
+    if matches!(action, RecordAction::Cancel) {
+        let cancel_file = config::Config::runtime_dir().join("cancel");
+        std::fs::write(&cancel_file, "cancel")
+            .map_err(|e| anyhow::anyhow!("Failed to write cancel file: {}", e))?;
+        return Ok(());
+    }
+
+    // Write output mode override file if specified
+    // For file mode, format is "file" or "file:/path/to/file"
+    if let Some(mode_override) = action.output_mode_override() {
+        let override_file = config::Config::runtime_dir().join("output_mode_override");
+        let mode_str = match mode_override {
+            OutputModeOverride::Type => "type".to_string(),
+            OutputModeOverride::Clipboard => "clipboard".to_string(),
+            OutputModeOverride::Paste => "paste".to_string(),
+            OutputModeOverride::File => {
+                // Check if explicit path was provided with --file=path
+                match action.file_path() {
+                    Some(path) if !path.is_empty() => format!("file:{}", path),
+                    _ => "file".to_string(),
+                }
+            }
+        };
+        std::fs::write(&override_file, mode_str)
+            .map_err(|e| anyhow::anyhow!("Failed to write output mode override: {}", e))?;
+    }
+
+    // For toggle, we need to read current state to decide which signal to send
+    let signal = match &action {
+        RecordAction::Start { .. } => libc::SIGUSR1,
+        RecordAction::Stop { .. } => libc::SIGUSR2,
+        RecordAction::Toggle { .. } => {
+            // Read current state to determine action
+            let state_file = match config.resolve_state_file() {
+                Some(path) => path,
+                None => {
+                    eprintln!("Error: Cannot toggle recording without state_file configured.");
+                    eprintln!();
+                    eprintln!("Add to your config.toml:");
+                    eprintln!("  state_file = \"auto\"");
+                    eprintln!();
+                    eprintln!("Or use explicit start/stop commands:");
+                    eprintln!("  voxtype record start");
+                    eprintln!("  voxtype record stop");
+                    std::process::exit(1);
+                }
+            };
+
+            let current_state =
+                std::fs::read_to_string(&state_file).unwrap_or_else(|_| "idle".to_string());
+
+            if current_state.trim() == "recording" {
+                libc::SIGUSR2 // Stop
+            } else {
+                libc::SIGUSR1 // Start
+            }
+        }
+        RecordAction::Cancel => unreachable!(), // Handled above
+    };
+
+    let result = unsafe { libc::kill(pid, signal) };
+    if result != 0 {
+        return Err(anyhow::anyhow!(
+            "Failed to send signal to daemon: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
 
     Ok(())
 }
@@ -428,6 +558,7 @@ struct ExtendedStatusInfo {
 }
 
 impl ExtendedStatusInfo {
+    #[cfg(target_os = "linux")]
     fn from_config(config: &config::Config) -> Self {
         let backend = setup::gpu::detect_current_backend()
             .map(|b| match b {
@@ -445,9 +576,25 @@ impl ExtendedStatusInfo {
             backend,
         }
     }
+
+    #[cfg(target_os = "macos")]
+    fn from_config(config: &config::Config) -> Self {
+        // On macOS, determine backend from build features
+        #[cfg(feature = "gpu-metal")]
+        let backend = "GPU (Metal)".to_string();
+        #[cfg(not(feature = "gpu-metal"))]
+        let backend = "CPU".to_string();
+
+        Self {
+            model: config.whisper.model.clone(),
+            device: config.audio.device.clone(),
+            backend,
+        }
+    }
 }
 
-/// Check if the daemon is actually running by verifying the PID file
+/// Check if the daemon is actually running by verifying the PID file (Linux version)
+#[cfg(target_os = "linux")]
 fn is_daemon_running() -> bool {
     let pid_path = config::Config::runtime_dir().join("pid");
 
@@ -464,6 +611,26 @@ fn is_daemon_running() -> bool {
 
     // Check if process exists by testing /proc/{pid}
     std::path::Path::new(&format!("/proc/{}", pid)).exists()
+}
+
+/// Check if the daemon is actually running by verifying the PID file (macOS version)
+#[cfg(target_os = "macos")]
+fn is_daemon_running() -> bool {
+    let pid_path = config::Config::runtime_dir().join("pid");
+
+    // Read PID from file
+    let pid_str = match std::fs::read_to_string(&pid_path) {
+        Ok(s) => s,
+        Err(_) => return false, // No PID file = not running
+    };
+
+    let pid: i32 = match pid_str.trim().parse() {
+        Ok(p) => p,
+        Err(_) => return false, // Invalid PID = not running
+    };
+
+    // Check if process exists using kill with signal 0
+    unsafe { libc::kill(pid, 0) == 0 }
 }
 
 /// Run the status command - show current daemon state
@@ -714,9 +881,19 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
         }
     }
 
-    // Show output chain status
-    let output_status = setup::detect_output_chain().await;
-    setup::print_output_chain_status(&output_status);
+    // Show output chain status (Linux only)
+    #[cfg(target_os = "linux")]
+    {
+        let output_status = setup::detect_output_chain().await;
+        setup::print_output_chain_status(&output_status);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        println!("\nOutput Chain:");
+        println!("  Platform: macOS");
+        println!("  Note: Text output via external tools not yet implemented on macOS");
+    }
 
     println!("\n---");
     println!(
