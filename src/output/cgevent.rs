@@ -15,8 +15,6 @@
 
 use super::TextOutput;
 use crate::error::OutputError;
-use core_foundation::base::TCFType;
-use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use std::time::Duration;
