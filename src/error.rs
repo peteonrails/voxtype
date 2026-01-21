@@ -52,6 +52,12 @@ pub enum AudioError {
     #[error("Audio device not found: '{0}'. List devices with: pactl list sources short")]
     DeviceNotFound(String),
 
+    #[error("Audio device not found: '{requested}'.\n{available}")]
+    DeviceNotFoundWithList {
+        requested: String,
+        available: String,
+    },
+
     #[error("Recording timeout: exceeded {0} seconds")]
     Timeout(u32),
 

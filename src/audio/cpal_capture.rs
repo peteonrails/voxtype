@@ -48,6 +48,102 @@ impl CpalCapture {
     }
 }
 
+/// Find an audio input device by name with flexible matching.
+///
+/// Matching strategy (in order):
+/// 1. Exact match (case-sensitive)
+/// 2. Exact match (case-insensitive)
+/// 3. Substring match: device name contains the search term (case-insensitive)
+///
+/// This allows users to specify either:
+/// - Full cpal device names: "alsa_input.pci-0000_00_1f.3.analog-stereo"
+/// - PipeWire/PulseAudio short names: "vox_buffer"
+/// - Partial device names: "analog-stereo"
+fn find_audio_device(host: &cpal::Host, device_name: &str) -> Result<cpal::Device, AudioError> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+
+    let devices: Vec<cpal::Device> = host
+        .input_devices()
+        .map_err(|e| AudioError::Connection(e.to_string()))?
+        .collect();
+
+    // Collect device names for error message
+    let device_names: Vec<String> = devices.iter().filter_map(|d| d.name().ok()).collect();
+
+    let search_lower = device_name.to_lowercase();
+
+    // 1. Try exact match (case-sensitive)
+    for device in &devices {
+        if let Ok(name) = device.name() {
+            if name == device_name {
+                tracing::debug!("Found audio device by exact match: {}", name);
+                return host
+                    .input_devices()
+                    .map_err(|e| AudioError::Connection(e.to_string()))?
+                    .find(|d| d.name().map(|n| n == device_name).unwrap_or(false))
+                    .ok_or_else(|| AudioError::DeviceNotFound(device_name.to_string()));
+            }
+        }
+    }
+
+    // 2. Try exact match (case-insensitive)
+    for device in &devices {
+        if let Ok(name) = device.name() {
+            if name.to_lowercase() == search_lower {
+                tracing::debug!(
+                    "Found audio device by case-insensitive match: {} (searched for: {})",
+                    name,
+                    device_name
+                );
+                let matched_name = name.clone();
+                return host
+                    .input_devices()
+                    .map_err(|e| AudioError::Connection(e.to_string()))?
+                    .find(|d| d.name().map(|n| n == matched_name).unwrap_or(false))
+                    .ok_or_else(|| AudioError::DeviceNotFound(device_name.to_string()));
+            }
+        }
+    }
+
+    // 3. Try substring match (case-insensitive)
+    for device in &devices {
+        if let Ok(name) = device.name() {
+            if name.to_lowercase().contains(&search_lower) {
+                tracing::debug!(
+                    "Found audio device by substring match: {} (searched for: {})",
+                    name,
+                    device_name
+                );
+                let matched_name = name.clone();
+                return host
+                    .input_devices()
+                    .map_err(|e| AudioError::Connection(e.to_string()))?
+                    .find(|d| d.name().map(|n| n == matched_name).unwrap_or(false))
+                    .ok_or_else(|| AudioError::DeviceNotFound(device_name.to_string()));
+            }
+        }
+    }
+
+    // No match found - provide helpful error with available devices
+    let available = if device_names.is_empty() {
+        "No audio input devices found.".to_string()
+    } else {
+        format!(
+            "Available devices:\n{}",
+            device_names
+                .iter()
+                .map(|n| format!("  - {}", n))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
+
+    Err(AudioError::DeviceNotFoundWithList {
+        requested: device_name.to_string(),
+        available,
+    })
+}
+
 #[async_trait::async_trait]
 impl AudioCapture for CpalCapture {
     async fn start(&mut self) -> Result<mpsc::Receiver<Vec<f32>>, AudioError> {
@@ -60,10 +156,7 @@ impl AudioCapture for CpalCapture {
             host.default_input_device()
                 .ok_or_else(|| AudioError::DeviceNotFound("default".to_string()))?
         } else {
-            host.input_devices()
-                .map_err(|e| AudioError::Connection(e.to_string()))?
-                .find(|d| d.name().map(|n| n == self.config.device).unwrap_or(false))
-                .ok_or_else(|| AudioError::DeviceNotFound(self.config.device.clone()))?
+            find_audio_device(&host, &self.config.device)?
         };
 
         let device_name = device.name().unwrap_or_else(|_| "unknown".to_string());
