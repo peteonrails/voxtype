@@ -196,10 +196,6 @@ pub enum RecordAction {
         /// Override output mode to paste (clipboard + Ctrl+V)
         #[arg(long, group = "output_mode")]
         paste: bool,
-
-        /// Use a specific model for this transcription (e.g., large-v3-turbo)
-        #[arg(long, value_name = "MODEL")]
-        model: Option<String>,
     },
     /// Toggle recording state
     Toggle {
@@ -245,12 +241,12 @@ impl RecordAction {
     }
 
     /// Extract the model override from the action flags
+    /// Note: --model is only available on start/toggle, not stop (model is selected at recording start)
     pub fn model_override(&self) -> Option<&str> {
         match self {
             RecordAction::Start { model, .. } => model.as_deref(),
-            RecordAction::Stop { model, .. } => model.as_deref(),
             RecordAction::Toggle { model, .. } => model.as_deref(),
-            RecordAction::Cancel => None,
+            RecordAction::Stop { .. } | RecordAction::Cancel => None,
         }
     }
 }
