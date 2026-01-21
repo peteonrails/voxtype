@@ -175,6 +175,22 @@ voxtype record toggle               # Toggle recording state
 voxtype record cancel               # Cancel recording or transcription in progress
 ```
 
+**Model override:** Use `--model` to specify which model to use for this recording:
+
+```bash
+voxtype record start --model large-v3-turbo  # Use a specific model
+voxtype record stop                          # Transcribes with the model specified at start
+```
+
+The model must be configured as `model`, `secondary_model`, or listed in `available_models` in your config. See [Multi-Model Configuration](CONFIGURATION.md#secondary_model) for setup.
+
+**Output mode override:** Use `--type`, `--clipboard`, or `--paste` to override the output mode:
+
+```bash
+voxtype record start --clipboard  # Output to clipboard instead of typing
+voxtype record toggle --paste     # Use paste mode for this recording
+```
+
 **File output:** The `--file` flag writes transcription to a file instead of typing or using clipboard. Use `--file=path.txt` for a specific file, or `--file` alone to use `file_path` from config. By default, the file is overwritten on each transcription. To append instead, set `file_mode = "append"` in your config file:
 
 ```toml

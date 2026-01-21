@@ -13,10 +13,13 @@ use crate::error::HotkeyError;
 use tokio::sync::mpsc;
 
 /// Events emitted by the hotkey listener
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HotkeyEvent {
-    /// The hotkey was pressed
-    Pressed,
+    /// The hotkey was pressed, optionally with a model override
+    Pressed {
+        /// Model to use for this transcription (None = use default)
+        model_override: Option<String>,
+    },
     /// The hotkey was released
     Released,
     /// The cancel key was pressed (abort recording/transcription)
@@ -35,6 +38,11 @@ pub trait HotkeyListener: Send + Sync {
 }
 
 /// Factory function to create the appropriate hotkey listener
-pub fn create_listener(config: &HotkeyConfig) -> Result<Box<dyn HotkeyListener>, HotkeyError> {
-    Ok(Box::new(evdev_listener::EvdevListener::new(config)?))
+pub fn create_listener(
+    config: &HotkeyConfig,
+    secondary_model: Option<String>,
+) -> Result<Box<dyn HotkeyListener>, HotkeyError> {
+    let mut listener = evdev_listener::EvdevListener::new(config)?;
+    listener.set_secondary_model(secondary_model);
+    Ok(Box::new(listener))
 }

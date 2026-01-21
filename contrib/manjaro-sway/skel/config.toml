@@ -1,0 +1,22 @@
+# Voxtype configuration for Manjaro Sway
+# Default config placed at ~/.config/voxtype/config.toml
+#
+# Full documentation: https://voxtype.io/docs/configuration
+
+# Whisper model (download on first use)
+# Options: tiny, tiny.en, base, base.en, small, small.en, medium, medium.en, large
+model = "base.en"
+
+# Audio input device ("default" uses PipeWire/PulseAudio default)
+device = "default"
+
+# Output method for transcribed text
+# Options: wtype (Wayland native), ydotool, xdotool, clipboard
+output_method = "wtype"
+
+# Enable state file for Waybar integration
+state_file = "auto"
+
+# Icon theme for status display (Manjaro Sway uses Nerd Fonts)
+[status]
+icon_theme = "nerd-font"

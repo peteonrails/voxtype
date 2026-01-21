@@ -1,0 +1,24 @@
+/* Voxtype voice-to-text status indicator
+ * Add to ~/.config/waybar/style.css or system waybar styles
+ */
+
+#custom-voxtype {
+    padding: 0 8px;
+}
+
+#custom-voxtype.idle {
+    color: @theme_text_color;
+}
+
+#custom-voxtype.recording {
+    color: @error_color;
+    animation: blink-critical 1s ease-in-out infinite;
+}
+
+#custom-voxtype.transcribing {
+    color: @warning_color;
+}
+
+#custom-voxtype.stopped {
+    color: alpha(@theme_text_color, 0.5);
+}

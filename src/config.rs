@@ -44,6 +44,11 @@ modifiers = []
 # When disabled, use `voxtype record start/stop/toggle` to control recording
 # enabled = true
 
+# Modifier key to select secondary model (evdev input mode only)
+# When held while pressing the hotkey, uses whisper.secondary_model instead
+# Example: model_modifier = "LEFTSHIFT"  # Shift+hotkey uses secondary model
+# model_modifier = "LEFTSHIFT"
+
 [audio]
 # Audio input device ("default" uses system default)
 # List devices with: pactl list sources short
@@ -93,6 +98,22 @@ translate = false
 
 # Number of CPU threads for inference (omit for auto-detection)
 # threads = 4
+
+# --- Multi-model settings ---
+#
+# Secondary model for difficult audio (used with hotkey.model_modifier or CLI --model)
+# secondary_model = "large-v3-turbo"
+#
+# List of available models that can be requested via CLI --model flag
+# available_models = ["large-v3-turbo", "medium.en"]
+#
+# Maximum models to keep loaded in memory (LRU eviction when exceeded)
+# Default: 2 (primary + one secondary). Only applies when gpu_isolation = false.
+# max_loaded_models = 2
+#
+# Seconds before unloading idle secondary models (0 = never auto-unload)
+# Default: 300 (5 minutes). Only applies when gpu_isolation = false.
+# cold_model_timeout_secs = 300
 
 # --- Remote backend settings (used when backend = "remote") ---
 #
@@ -254,6 +275,12 @@ pub struct HotkeyConfig {
     /// Examples: "ESC", "BACKSPACE", "F12"
     #[serde(default)]
     pub cancel_key: Option<String>,
+
+    /// Optional modifier key for secondary model selection (evdev KEY_* name, without KEY_ prefix)
+    /// When held while pressing the hotkey, uses secondary_model instead of the default model
+    /// Examples: "LEFTSHIFT", "RIGHTALT", "LEFTCTRL"
+    #[serde(default)]
+    pub model_modifier: Option<String>,
 }
 
 /// Audio capture configuration
@@ -307,6 +334,14 @@ fn default_on_demand_loading() -> bool {
 
 fn default_context_window_optimization() -> bool {
     true
+}
+
+fn default_max_loaded_models() -> usize {
+    2 // Primary model + one secondary
+}
+
+fn default_cold_model_timeout() -> u64 {
+    300 // 5 minutes
 }
 
 impl Default for AudioFeedbackConfig {
@@ -617,6 +652,30 @@ pub struct WhisperConfig {
     #[serde(default = "default_context_window_optimization")]
     pub context_window_optimization: bool,
 
+    // --- Multi-model settings ---
+
+    /// Secondary model to use when hotkey.model_modifier is held
+    /// Example: "large-v3-turbo" for difficult audio
+    #[serde(default)]
+    pub secondary_model: Option<String>,
+
+    /// List of available models that can be selected via CLI --model flag
+    /// These models can be loaded on-demand when requested
+    #[serde(default)]
+    pub available_models: Vec<String>,
+
+    /// Maximum number of models to keep loaded in memory (LRU eviction)
+    /// Default: 2 (primary model + one secondary)
+    /// Only applies when gpu_isolation = false
+    #[serde(default = "default_max_loaded_models")]
+    pub max_loaded_models: usize,
+
+    /// Seconds before unloading idle secondary models from memory
+    /// Default: 300 (5 minutes). Set to 0 to never auto-unload.
+    /// Only applies when gpu_isolation = false
+    #[serde(default = "default_cold_model_timeout")]
+    pub cold_model_timeout_secs: u64,
+
     // --- Remote backend settings ---
     /// Remote server endpoint URL (e.g., "http://192.168.1.100:8080")
     /// Required when backend = "remote"
@@ -634,6 +693,29 @@ pub struct WhisperConfig {
     /// Timeout for remote requests in seconds (default: 30)
     #[serde(default)]
     pub remote_timeout_secs: Option<u64>,
+}
+
+impl Default for WhisperConfig {
+    fn default() -> Self {
+        Self {
+            backend: WhisperBackend::default(),
+            model: "base.en".to_string(),
+            language: LanguageConfig::default(),
+            translate: false,
+            threads: None,
+            on_demand_loading: default_on_demand_loading(),
+            gpu_isolation: false,
+            context_window_optimization: default_context_window_optimization(),
+            secondary_model: None,
+            available_models: vec![],
+            max_loaded_models: default_max_loaded_models(),
+            cold_model_timeout_secs: default_cold_model_timeout(),
+            remote_endpoint: None,
+            remote_model: None,
+            remote_api_key: None,
+            remote_timeout_secs: None,
+        }
+    }
 }
 
 /// Text processing configuration
@@ -833,6 +915,7 @@ impl Default for Config {
                 mode: ActivationMode::default(),
                 enabled: true,
                 cancel_key: None,
+                model_modifier: None,
             },
             audio: AudioConfig {
                 device: "default".to_string(),
@@ -849,6 +932,10 @@ impl Default for Config {
                 on_demand_loading: default_on_demand_loading(),
                 gpu_isolation: false,
                 context_window_optimization: default_context_window_optimization(),
+                secondary_model: None,
+                available_models: vec![],
+                max_loaded_models: default_max_loaded_models(),
+                cold_model_timeout_secs: default_cold_model_timeout(),
                 remote_endpoint: None,
                 remote_model: None,
                 remote_api_key: None,

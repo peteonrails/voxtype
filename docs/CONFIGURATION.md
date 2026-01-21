@@ -141,6 +141,33 @@ bindsym --release $mod+v exec voxtype record stop
 
 See [User Manual - Compositor Keybindings](USER_MANUAL.md#compositor-keybindings) for complete setup instructions.
 
+### model_modifier
+
+**Type:** String
+**Default:** None (disabled)
+**Required:** No
+
+Optional modifier key that triggers the secondary model when held while pressing the hotkey. Requires `secondary_model` to be set in the `[whisper]` section.
+
+**Example:**
+```toml
+[hotkey]
+key = "SCROLLLOCK"
+model_modifier = "LEFTSHIFT"  # Hold Shift + hotkey for secondary model
+
+[whisper]
+model = "base.en"
+secondary_model = "large-v3-turbo"
+```
+
+**Valid key names:** Same modifier keys as `modifiers` option:
+- `LEFTSHIFT`, `RIGHTSHIFT`
+- `LEFTCTRL`, `RIGHTCTRL`
+- `LEFTALT`, `RIGHTALT`
+- `LEFTMETA`, `RIGHTMETA`
+
+**Note:** This only applies when using evdev hotkey detection (`enabled = true`). When using compositor keybindings, use `voxtype record start --model <model>` instead.
+
 ### cancel_key
 
 **Type:** String
@@ -521,6 +548,94 @@ voxtype --no-whisper-context-optimization daemon
 ```
 
 **Note:** This setting only applies when using the local whisper backend (`backend = "local"`). It has no effect with remote transcription.
+
+### secondary_model
+
+**Type:** String
+**Default:** None (disabled)
+**Required:** No
+
+A secondary Whisper model that can be triggered on-demand using the `model_modifier` hotkey or the `--model` CLI flag. Useful for having a fast model for everyday use and a more accurate model available when needed.
+
+**Example:**
+```toml
+[hotkey]
+model_modifier = "LEFTSHIFT"
+
+[whisper]
+model = "base.en"             # Fast model for everyday use
+secondary_model = "large-v3-turbo"  # Accurate model when needed
+```
+
+**Usage:**
+- Hold `model_modifier` while pressing the hotkey to use the secondary model
+- Or use CLI: `voxtype record start --model large-v3-turbo`
+
+### available_models
+
+**Type:** Array of strings
+**Default:** `[]`
+**Required:** No
+
+Additional models that can be requested via the `--model` CLI flag. The primary `model` and `secondary_model` are always available; this list adds more options.
+
+**Example:**
+```toml
+[whisper]
+model = "base.en"
+secondary_model = "large-v3-turbo"
+available_models = ["medium.en", "small.en"]  # Additional models for CLI
+```
+
+**Usage:**
+```bash
+voxtype record start --model medium.en
+```
+
+**Note:** Models must be downloaded before use. Run `voxtype setup --download --model <name>` to download.
+
+### max_loaded_models
+
+**Type:** Integer
+**Default:** `2`
+**Required:** No
+
+Maximum number of models to keep loaded in memory simultaneously. When this limit is reached and a new model is requested, the least recently used non-primary model is evicted.
+
+**Example:**
+```toml
+[whisper]
+model = "base.en"
+secondary_model = "large-v3-turbo"
+max_loaded_models = 3  # Keep up to 3 models in memory
+```
+
+**Notes:**
+- The primary model is never evicted
+- Only applies when `gpu_isolation = false` (subprocess mode doesn't cache models)
+- Higher values use more memory but reduce model loading latency
+
+### cold_model_timeout_secs
+
+**Type:** Integer
+**Default:** `300` (5 minutes)
+**Required:** No
+
+Time in seconds after which idle non-primary models are automatically evicted from memory. Set to `0` to disable auto-eviction.
+
+**Example:**
+```toml
+[whisper]
+model = "base.en"
+secondary_model = "large-v3-turbo"
+cold_model_timeout_secs = 60  # Evict unused models after 1 minute
+```
+
+**Notes:**
+- Only evicts models that haven't been used within the timeout period
+- The primary model is never evicted
+- Helps free memory when switching models infrequently
+>>>>>>> 81-multi-model-support
 
 ---
 
@@ -1528,6 +1643,43 @@ remote_timeout_secs = 30
 ```
 
 > **Note**: Cloud-based transcription sends your audio to third-party servers. See [User Manual - Remote Whisper Servers](USER_MANUAL.md#remote-whisper-servers) for privacy considerations.
+
+### Multi-Model Setup
+
+Use a fast model for everyday dictation with a more accurate model available on-demand:
+
+```toml
+[hotkey]
+key = "SCROLLLOCK"
+model_modifier = "LEFTSHIFT"  # Hold Shift + hotkey for secondary model
+
+[whisper]
+model = "base.en"                    # Fast model, always ready
+secondary_model = "large-v3-turbo"   # Accurate model on-demand
+available_models = ["medium.en"]     # Additional models for CLI
+max_loaded_models = 2                # Keep 2 models in memory
+cold_model_timeout_secs = 300        # Evict unused models after 5 min
+
+[audio.feedback]
+enabled = true  # Helpful when switching models
+```
+
+**Usage:**
+- Normal hotkey press: Uses `base.en` (fast)
+- Hold Shift + hotkey: Uses `large-v3-turbo` (accurate)
+- CLI override: `voxtype record start --model medium.en`
+
+**Download models first:**
+```bash
+voxtype setup --download --model base.en
+voxtype setup --download --model large-v3-turbo
+voxtype setup --download --model medium.en
+```
+
+**Compatibility:** Multi-model works with all modes:
+- `on_demand_loading = true`: Models load in background during recording
+- `gpu_isolation = true`: Fresh subprocess per transcription with requested model
+- `backend = "remote"`: Model name passed to remote server
 
 ---
 

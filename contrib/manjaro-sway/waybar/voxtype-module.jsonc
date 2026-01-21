@@ -1,0 +1,15 @@
+// Voxtype voice-to-text module for Manjaro Sway Waybar
+// Add to modules-right (recommended position: near pulseaudio)
+//
+// In modules-right array:
+//   "custom/voxtype",
+//
+// Module definition:
+"custom/voxtype": {
+    "exec": "voxtype status --follow --format json --icon-theme nerd-font",
+    "return-type": "json",
+    "format": "{}",
+    "tooltip": true,
+    "on-click": "voxtype record toggle",
+    "on-click-right": "systemctl --user restart voxtype"
+}

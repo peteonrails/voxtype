@@ -27,6 +27,10 @@ pub struct EvdevListener {
     modifier_keys: HashSet<Key>,
     /// Optional cancel key
     cancel_key: Option<Key>,
+    /// Optional model modifier key (when held, use secondary model)
+    model_modifier: Option<Key>,
+    /// Secondary model to use when model_modifier is held
+    secondary_model: Option<String>,
     /// Signal to stop the listener task
     stop_signal: Option<oneshot::Sender<()>>,
 }
@@ -49,6 +53,13 @@ impl EvdevListener {
             .map(|k| parse_key_name(k))
             .transpose()?;
 
+        // Parse optional model modifier key
+        let model_modifier = config
+            .model_modifier
+            .as_ref()
+            .map(|k| parse_key_name(k))
+            .transpose()?;
+
         // Verify we can access /dev/input (permission check)
         std::fs::read_dir("/dev/input")
             .map_err(|e| HotkeyError::DeviceAccess(format!("/dev/input: {}", e)))?;
@@ -57,8 +68,15 @@ impl EvdevListener {
             target_key,
             modifier_keys,
             cancel_key,
+            model_modifier,
+            secondary_model: None, // Set later via set_secondary_model
             stop_signal: None,
         })
+    }
+
+    /// Set the secondary model to use when model_modifier is held
+    pub fn set_secondary_model(&mut self, model: Option<String>) {
+        self.secondary_model = model;
     }
 }
 
@@ -72,11 +90,20 @@ impl HotkeyListener for EvdevListener {
         let target_key = self.target_key;
         let modifier_keys = self.modifier_keys.clone();
         let cancel_key = self.cancel_key;
+        let model_modifier = self.model_modifier;
+        let secondary_model = self.secondary_model.clone();
 
         // Spawn the listener task
         tokio::task::spawn_blocking(move || {
-            if let Err(e) = evdev_listener_loop(target_key, modifier_keys, cancel_key, tx, stop_rx)
-            {
+            if let Err(e) = evdev_listener_loop(
+                target_key,
+                modifier_keys,
+                cancel_key,
+                model_modifier,
+                secondary_model,
+                tx,
+                stop_rx,
+            ) {
                 tracing::error!("Hotkey listener error: {}", e);
             }
         });
@@ -337,6 +364,8 @@ fn evdev_listener_loop(
     target_key: Key,
     modifier_keys: HashSet<Key>,
     cancel_key: Option<Key>,
+    model_modifier: Option<Key>,
+    secondary_model: Option<String>,
     tx: mpsc::Sender<HotkeyEvent>,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<(), HotkeyError> {
@@ -344,6 +373,9 @@ fn evdev_listener_loop(
 
     // Track currently held modifier keys
     let mut active_modifiers: HashSet<Key> = HashSet::new();
+
+    // Track if model modifier is currently held
+    let mut model_modifier_held = false;
 
     // Track if we're currently "pressed" (to handle repeat events)
     let mut is_pressed = false;
@@ -365,6 +397,16 @@ fn evdev_listener_loop(
         );
     }
 
+    if let Some(mm) = model_modifier {
+        if let Some(ref model) = secondary_model {
+            tracing::info!(
+                "Model modifier {:?} configured for secondary model '{}'",
+                mm,
+                model
+            );
+        }
+    }
+
     loop {
         // Check for stop signal (non-blocking)
         match stop_rx.try_recv() {
@@ -379,6 +421,7 @@ fn evdev_listener_loop(
         if manager.check_for_device_changes() {
             // Clear state when devices change
             active_modifiers.clear();
+            model_modifier_held = false;
             is_pressed = false;
             manager.handle_device_changes();
         }
@@ -388,6 +431,7 @@ fn evdev_listener_loop(
             if manager.validate_devices() {
                 // Devices were removed, clear state
                 active_modifiers.clear();
+                model_modifier_held = false;
                 is_pressed = false;
                 tracing::debug!("Stale devices removed during validation");
             }
@@ -419,6 +463,17 @@ fn evdev_listener_loop(
                 }
             }
 
+            // Track model modifier state
+            if let Some(mm) = model_modifier {
+                if key == mm {
+                    match value {
+                        1 => model_modifier_held = true,
+                        0 => model_modifier_held = false,
+                        _ => {}
+                    }
+                }
+            }
+
             // Check cancel key first (if configured)
             if let Some(cancel) = cancel_key {
                 if key == cancel && value == 1 {
@@ -441,8 +496,27 @@ fn evdev_listener_loop(
                         1 if !is_pressed => {
                             // Key press (not repeat)
                             is_pressed = true;
-                            tracing::debug!("Hotkey pressed");
-                            if tx.blocking_send(HotkeyEvent::Pressed).is_err() {
+
+                            // Determine model override based on model_modifier state
+                            let model_override = if model_modifier_held {
+                                secondary_model.clone()
+                            } else {
+                                None
+                            };
+
+                            if model_override.is_some() {
+                                tracing::debug!(
+                                    "Hotkey pressed with model override: {:?}",
+                                    model_override
+                                );
+                            } else {
+                                tracing::debug!("Hotkey pressed");
+                            }
+
+                            if tx
+                                .blocking_send(HotkeyEvent::Pressed { model_override })
+                                .is_err()
+                            {
                                 return Ok(()); // Channel closed
                             }
                         }

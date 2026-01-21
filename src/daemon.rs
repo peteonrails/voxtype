@@ -8,11 +8,12 @@ use crate::audio::{self, AudioCapture};
 use crate::config::{ActivationMode, Config, FileMode, OutputMode};
 use crate::error::Result;
 use crate::hotkey::{self, HotkeyEvent};
+use crate::model_manager::ModelManager;
 use crate::output;
 use crate::output::post_process::PostProcessor;
 use crate::state::State;
 use crate::text::TextProcessor;
-use crate::transcribe;
+use crate::transcribe::Transcriber;
 use pidlock::Pidlock;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -220,33 +221,65 @@ async fn write_transcription_to_file(
     Ok(())
 }
 
+/// Read and consume the model override file
+/// Returns the model name if the file exists, None otherwise
+fn read_model_override() -> Option<String> {
+    let override_file = Config::runtime_dir().join("model_override");
+    if !override_file.exists() {
+        return None;
+    }
+
+    let model_str = match std::fs::read_to_string(&override_file) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("Failed to read model override file: {}", e);
+            return None;
+        }
+    };
+
+    // Consume the file (delete it after reading)
+    if let Err(e) = std::fs::remove_file(&override_file) {
+        tracing::warn!("Failed to remove model override file: {}", e);
+    }
+
+    let model = model_str.trim().to_string();
+    if model.is_empty() {
+        None
+    } else {
+        tracing::info!("Using model override: {}", model);
+        Some(model)
+    }
+}
+
+/// Remove the model override file if it exists (for cleanup on cancel/error)
+fn cleanup_model_override() {
+    let override_file = Config::runtime_dir().join("model_override");
+    let _ = std::fs::remove_file(&override_file);
+}
+
 /// Result type for transcription task
 type TranscriptionResult = std::result::Result<String, crate::error::TranscribeError>;
 
 /// Main daemon that orchestrates all components
 pub struct Daemon {
     config: Config,
+    config_path: Option<PathBuf>,
     state_file_path: Option<PathBuf>,
     pid_file_path: Option<PathBuf>,
     audio_feedback: Option<AudioFeedback>,
     text_processor: TextProcessor,
     post_processor: Option<PostProcessor>,
+    // Model manager for multi-model support
+    model_manager: Option<ModelManager>,
     // Background task for loading model on-demand
-    model_load_task: Option<
-        tokio::task::JoinHandle<
-            std::result::Result<
-                Box<dyn crate::transcribe::Transcriber>,
-                crate::error::TranscribeError,
-            >,
-        >,
-    >,
+    model_load_task: Option<tokio::task::JoinHandle<std::result::Result<Arc<dyn Transcriber>, crate::error::TranscribeError>>>,
     // Background task for transcription (allows cancel during transcription)
     transcription_task: Option<tokio::task::JoinHandle<TranscriptionResult>>,
 }
 
 impl Daemon {
     /// Create a new daemon with the given configuration
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, config_path: Option<PathBuf>) -> Self {
         let state_file_path = config.resolve_state_file();
 
         // Initialize audio feedback if enabled
@@ -293,11 +326,13 @@ impl Daemon {
 
         Self {
             config,
+            config_path,
             state_file_path,
             pid_file_path: None,
             audio_feedback,
             text_processor,
             post_processor,
+            model_manager: None,
             model_load_task: None,
             transcription_task: None,
         }
@@ -321,6 +356,7 @@ impl Daemon {
     /// Call this when exiting from recording/transcribing without normal output flow
     async fn reset_to_idle(&self, state: &mut State) {
         cleanup_output_mode_override();
+                            cleanup_model_override();
         *state = State::Idle;
         self.update_state("idle");
 
@@ -338,7 +374,7 @@ impl Daemon {
         &mut self,
         state: &mut State,
         audio_capture: &mut Option<Box<dyn AudioCapture>>,
-        transcriber: Option<Arc<Box<dyn crate::transcribe::Transcriber>>>,
+        transcriber: Option<Arc<dyn Transcriber>>,
     ) -> bool {
         let duration = state.recording_duration().unwrap_or_default();
         tracing::info!("Recording stopped ({:.1}s)", duration.as_secs_f32());
@@ -583,7 +619,8 @@ impl Daemon {
         // Initialize hotkey listener (if enabled)
         let mut hotkey_listener = if self.config.hotkey.enabled {
             tracing::info!("Hotkey: {}", self.config.hotkey.key);
-            Some(hotkey::create_listener(&self.config.hotkey)?)
+            let secondary_model = self.config.whisper.secondary_model.clone();
+            Some(hotkey::create_listener(&self.config.hotkey, secondary_model)?)
         } else {
             tracing::info!(
                 "Built-in hotkey disabled, use 'voxtype record' commands or compositor keybindings"
@@ -603,17 +640,30 @@ impl Daemon {
         );
         drop(default_chain); // Not used; chain is created per-transcription
 
-        // Pre-load whisper model if on_demand_loading is disabled
-        let mut transcriber_preloaded = None;
+        // Initialize model manager for multi-model support
+        let mut model_manager = ModelManager::new(&self.config.whisper, self.config_path.clone());
+
+        // Preload primary model if configured (handles on_demand_loading and gpu_isolation checks internally)
         if !self.config.whisper.on_demand_loading {
             tracing::info!("Loading transcription model: {}", self.config.whisper.model);
-            transcriber_preloaded = Some(Arc::new(transcribe::create_transcriber(
-                &self.config.whisper,
-            )?));
+            if let Err(e) = model_manager.preload_primary() {
+                tracing::error!("Failed to preload model: {}", e);
+                return Err(crate::error::VoxtypeError::Transcribe(e));
+            }
             tracing::info!("Model loaded, ready for voice input");
         } else {
             tracing::info!("On-demand loading enabled, model will be loaded when recording starts");
         }
+
+        // Log secondary model if configured
+        if let Some(ref secondary) = self.config.whisper.secondary_model {
+            tracing::info!("Secondary model configured: {}", secondary);
+            if let Some(ref modifier) = self.config.hotkey.model_modifier {
+                tracing::info!("Model modifier key: {}", modifier);
+            }
+        }
+
+        self.model_manager = Some(model_manager);
 
         // Start hotkey listener (if enabled)
         let mut hotkey_rx = if let Some(ref mut listener) = hotkey_listener {
@@ -659,8 +709,9 @@ impl Daemon {
                 } => {
                     match (hotkey_event, activation_mode) {
                         // === PUSH-TO-TALK MODE ===
-                        (HotkeyEvent::Pressed, ActivationMode::PushToTalk) => {
-                            tracing::debug!("Received HotkeyEvent::Pressed (push-to-talk), state.is_idle() = {}", state.is_idle());
+                        (HotkeyEvent::Pressed { model_override }, ActivationMode::PushToTalk) => {
+                            tracing::debug!("Received HotkeyEvent::Pressed (push-to-talk), state.is_idle() = {}, model_override = {:?}",
+                                state.is_idle(), model_override);
                             if state.is_idle() {
                                 tracing::info!("Recording started");
 
@@ -669,20 +720,24 @@ impl Daemon {
                                     send_notification("Push to Talk Active", "Recording...").await;
                                 }
 
-                                // Start model loading in background if on-demand loading is enabled
-                                if self.config.whisper.on_demand_loading {
-                                    let config = self.config.whisper.clone();
-                                    self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                        transcribe::create_transcriber(&config)
-                                    }));
-                                    tracing::debug!("Started background model loading");
-                                } else if let Some(ref t) = transcriber_preloaded {
-                                    // For gpu_isolation mode: prepare the subprocess now
-                                    // (spawns worker and loads model while user speaks)
-                                    let transcriber = t.clone();
-                                    tokio::task::spawn_blocking(move || {
-                                        transcriber.prepare();
-                                    });
+                                // Prepare model for transcription
+                                if let Some(ref mut mm) = self.model_manager {
+                                    if self.config.whisper.on_demand_loading {
+                                        // Start model loading in background
+                                        let config = self.config.whisper.clone();
+                                        let config_path = self.config_path.clone();
+                                        let model_to_load = model_override.clone();
+                                        self.model_load_task = Some(tokio::task::spawn_blocking(move || {
+                                            let mut temp_manager = ModelManager::new(&config, config_path);
+                                            temp_manager.get_transcriber(model_to_load.as_deref())
+                                        }));
+                                        tracing::debug!("Started background model loading");
+                                    } else {
+                                        // Prepare model (spawns subprocess for gpu_isolation mode)
+                                        if let Err(e) = mm.prepare_model(model_override.as_deref()) {
+                                            tracing::warn!("Failed to prepare model: {}", e);
+                                        }
+                                    }
                                 }
 
                                 // Create and start audio capture
@@ -698,6 +753,7 @@ impl Daemon {
                                         audio_capture = Some(capture);
                                         state = State::Recording {
                                             started_at: std::time::Instant::now(),
+                                            model_override: model_override.clone(),
                                         };
                                         self.update_state("recording");
                                         self.play_feedback(SoundEvent::RecordingStart);
@@ -719,14 +775,15 @@ impl Daemon {
 
                         (HotkeyEvent::Released, ActivationMode::PushToTalk) => {
                             tracing::debug!("Received HotkeyEvent::Released (push-to-talk), state.is_recording() = {}", state.is_recording());
-                            if state.is_recording() {
-                                // Wait for model loading task if on-demand loading is enabled
+                            if let State::Recording { model_override, .. } = &state {
+                                // Get transcriber for this recording
                                 let transcriber = if self.config.whisper.on_demand_loading {
+                                    // Use transcriber from background loading task
                                     if let Some(task) = self.model_load_task.take() {
                                         match task.await {
                                             Ok(Ok(transcriber)) => {
                                                 tracing::info!("Model loaded successfully");
-                                                Some(Arc::new(transcriber))
+                                                Some(transcriber)
                                             }
                                             Ok(Err(e)) => {
                                                 tracing::error!("Model loading failed: {}", e);
@@ -751,7 +808,25 @@ impl Daemon {
                                         continue;
                                     }
                                 } else {
-                                    transcriber_preloaded.clone()
+                                    // Get prepared transcriber from model manager
+                                    if let Some(ref mut mm) = self.model_manager {
+                                        match mm.get_prepared_transcriber(model_override.as_deref()) {
+                                            Ok(t) => Some(t),
+                                            Err(e) => {
+                                                tracing::error!("Failed to get transcriber: {}", e);
+                                                self.play_feedback(SoundEvent::Error);
+                                                state = State::Idle;
+                                                self.update_state("idle");
+                                                continue;
+                                            }
+                                        }
+                                    } else {
+                                        tracing::error!("Model manager not initialized");
+                                        self.play_feedback(SoundEvent::Error);
+                                        state = State::Idle;
+                                        self.update_state("idle");
+                                        continue;
+                                    }
                                 };
 
                                 self.start_transcription_task(
@@ -763,9 +838,9 @@ impl Daemon {
                         }
 
                         // === TOGGLE MODE ===
-                        (HotkeyEvent::Pressed, ActivationMode::Toggle) => {
-                            tracing::debug!("Received HotkeyEvent::Pressed (toggle), state.is_idle() = {}, state.is_recording() = {}",
-                                state.is_idle(), state.is_recording());
+                        (HotkeyEvent::Pressed { model_override }, ActivationMode::Toggle) => {
+                            tracing::debug!("Received HotkeyEvent::Pressed (toggle), state.is_idle() = {}, state.is_recording() = {}, model_override = {:?}",
+                                state.is_idle(), state.is_recording(), model_override);
 
                             if state.is_idle() {
                                 // Start recording
@@ -775,20 +850,24 @@ impl Daemon {
                                     send_notification("Recording Started", "Press hotkey again to stop").await;
                                 }
 
-                                // Start model loading in background if on-demand loading is enabled
-                                if self.config.whisper.on_demand_loading {
-                                    let config = self.config.whisper.clone();
-                                    self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                        transcribe::create_transcriber(&config)
-                                    }));
-                                    tracing::debug!("Started background model loading");
-                                } else if let Some(ref t) = transcriber_preloaded {
-                                    // For gpu_isolation mode: prepare the subprocess now
-                                    // (spawns worker and loads model while user speaks)
-                                    let transcriber = t.clone();
-                                    tokio::task::spawn_blocking(move || {
-                                        transcriber.prepare();
-                                    });
+                                // Prepare model for transcription
+                                if let Some(ref mut mm) = self.model_manager {
+                                    if self.config.whisper.on_demand_loading {
+                                        // Start model loading in background
+                                        let config = self.config.whisper.clone();
+                                        let config_path = self.config_path.clone();
+                                        let model_to_load = model_override.clone();
+                                        self.model_load_task = Some(tokio::task::spawn_blocking(move || {
+                                            let mut temp_manager = ModelManager::new(&config, config_path);
+                                            temp_manager.get_transcriber(model_to_load.as_deref())
+                                        }));
+                                        tracing::debug!("Started background model loading");
+                                    } else {
+                                        // Prepare model (spawns subprocess for gpu_isolation mode)
+                                        if let Err(e) = mm.prepare_model(model_override.as_deref()) {
+                                            tracing::warn!("Failed to prepare model: {}", e);
+                                        }
+                                    }
                                 }
 
                                 match audio::create_capture(&self.config.audio) {
@@ -801,6 +880,7 @@ impl Daemon {
                                         audio_capture = Some(capture);
                                         state = State::Recording {
                                             started_at: std::time::Instant::now(),
+                                            model_override: model_override.clone(),
                                         };
                                         self.update_state("recording");
                                         self.play_feedback(SoundEvent::RecordingStart);
@@ -817,14 +897,15 @@ impl Daemon {
                                         self.play_feedback(SoundEvent::Error);
                                     }
                                 }
-                            } else if state.is_recording() {
-                                // Wait for model loading task if on-demand loading is enabled
+                            } else if let State::Recording { model_override: current_model_override, .. } = &state {
+                                // Get transcriber for this recording
                                 let transcriber = if self.config.whisper.on_demand_loading {
+                                    // Use transcriber from background loading task
                                     if let Some(task) = self.model_load_task.take() {
                                         match task.await {
                                             Ok(Ok(transcriber)) => {
                                                 tracing::info!("Model loaded successfully");
-                                                Some(Arc::new(transcriber))
+                                                Some(transcriber)
                                             }
                                             Ok(Err(e)) => {
                                                 tracing::error!("Model loading failed: {}", e);
@@ -849,7 +930,25 @@ impl Daemon {
                                         continue;
                                     }
                                 } else {
-                                    transcriber_preloaded.clone()
+                                    // Get prepared transcriber from model manager
+                                    if let Some(ref mut mm) = self.model_manager {
+                                        match mm.get_prepared_transcriber(current_model_override.as_deref()) {
+                                            Ok(t) => Some(t),
+                                            Err(e) => {
+                                                tracing::error!("Failed to get transcriber: {}", e);
+                                                self.play_feedback(SoundEvent::Error);
+                                                state = State::Idle;
+                                                self.update_state("idle");
+                                                continue;
+                                            }
+                                        }
+                                    } else {
+                                        tracing::error!("Model manager not initialized");
+                                        self.play_feedback(SoundEvent::Error);
+                                        state = State::Idle;
+                                        self.update_state("idle");
+                                        continue;
+                                    }
                                 };
 
                                 // Stop recording and start transcription
@@ -884,6 +983,7 @@ impl Daemon {
                                 }
 
                                 cleanup_output_mode_override();
+                            cleanup_model_override();
                                 state = State::Idle;
                                 self.update_state("idle");
                                 self.play_feedback(SoundEvent::Cancelled);
@@ -907,6 +1007,7 @@ impl Daemon {
                                 }
 
                                 cleanup_output_mode_override();
+                            cleanup_model_override();
                                 state = State::Idle;
                                 self.update_state("idle");
                                 self.play_feedback(SoundEvent::Cancelled);
@@ -945,6 +1046,7 @@ impl Daemon {
                         }
 
                         cleanup_output_mode_override();
+                            cleanup_model_override();
                         state = State::Idle;
                         self.update_state("idle");
                         self.play_feedback(SoundEvent::Cancelled);
@@ -976,6 +1078,7 @@ impl Daemon {
                                 let _ = capture.stop().await;
                             }
                             cleanup_output_mode_override();
+                            cleanup_model_override();
                             state = State::Idle;
                             self.update_state("idle");
 
@@ -993,25 +1096,31 @@ impl Daemon {
                 _ = sigusr1.recv() => {
                     tracing::debug!("Received SIGUSR1 (start recording)");
                     if state.is_idle() {
-                        tracing::info!("Recording started (external trigger)");
+                        // Read model override from file (set by `voxtype record start --model X`)
+                        let model_override = read_model_override();
+                        tracing::info!("Recording started (external trigger), model_override = {:?}", model_override);
 
                         if self.config.output.notification.on_recording_start {
                             send_notification("Recording Started", "External trigger").await;
                         }
 
-                        // Start model loading in background if on-demand loading is enabled
-                        if self.config.whisper.on_demand_loading {
-                            let config = self.config.whisper.clone();
-                            self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                transcribe::create_transcriber(&config)
-                            }));
-                        } else if let Some(ref t) = transcriber_preloaded {
-                            // For gpu_isolation mode: prepare the subprocess now
-                            // (spawns worker and loads model while user speaks)
-                            let transcriber = t.clone();
-                            tokio::task::spawn_blocking(move || {
-                                transcriber.prepare();
-                            });
+                        // Prepare model for transcription
+                        if let Some(ref mut mm) = self.model_manager {
+                            if self.config.whisper.on_demand_loading {
+                                // Start model loading in background
+                                let config = self.config.whisper.clone();
+                                let config_path = self.config_path.clone();
+                                let model_to_load = model_override.clone();
+                                self.model_load_task = Some(tokio::task::spawn_blocking(move || {
+                                    let mut temp_manager = ModelManager::new(&config, config_path);
+                                    temp_manager.get_transcriber(model_to_load.as_deref())
+                                }));
+                            } else {
+                                // Prepare model (spawns subprocess for gpu_isolation mode)
+                                if let Err(e) = mm.prepare_model(model_override.as_deref()) {
+                                    tracing::warn!("Failed to prepare model: {}", e);
+                                }
+                            }
                         }
 
                         match audio::create_capture(&self.config.audio) {
@@ -1022,6 +1131,7 @@ impl Daemon {
                                     audio_capture = Some(capture);
                                     state = State::Recording {
                                         started_at: std::time::Instant::now(),
+                                        model_override,
                                     };
                                     self.update_state("recording");
                                     self.play_feedback(SoundEvent::RecordingStart);
@@ -1045,14 +1155,15 @@ impl Daemon {
                 // Handle SIGUSR2 - stop recording (for compositor keybindings)
                 _ = sigusr2.recv() => {
                     tracing::debug!("Received SIGUSR2 (stop recording)");
-                    if state.is_recording() {
-                        // Wait for model loading task if on-demand loading is enabled
+                    if let State::Recording { model_override, .. } = &state {
+                        // Get transcriber for this recording
                         let transcriber = if self.config.whisper.on_demand_loading {
+                            // Use transcriber from background loading task
                             if let Some(task) = self.model_load_task.take() {
                                 match task.await {
                                     Ok(Ok(transcriber)) => {
                                         tracing::info!("Model loaded successfully");
-                                        Some(Arc::new(transcriber))
+                                        Some(transcriber)
                                     }
                                     Ok(Err(e)) => {
                                         tracing::error!("Model loading failed: {}", e);
@@ -1077,7 +1188,25 @@ impl Daemon {
                                 continue;
                             }
                         } else {
-                            transcriber_preloaded.clone()
+                            // Get prepared transcriber from model manager
+                            if let Some(ref mut mm) = self.model_manager {
+                                match mm.get_prepared_transcriber(model_override.as_deref()) {
+                                    Ok(t) => Some(t),
+                                    Err(e) => {
+                                        tracing::error!("Failed to get transcriber: {}", e);
+                                        self.play_feedback(SoundEvent::Error);
+                                        state = State::Idle;
+                                        self.update_state("idle");
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                tracing::error!("Model manager not initialized");
+                                self.play_feedback(SoundEvent::Error);
+                                state = State::Idle;
+                                self.update_state("idle");
+                                continue;
+                            }
                         };
 
                         self.start_transcription_task(
@@ -1110,6 +1239,7 @@ impl Daemon {
                         }
 
                         cleanup_output_mode_override();
+                            cleanup_model_override();
                         state = State::Idle;
                         self.update_state("idle");
                         self.play_feedback(SoundEvent::Cancelled);
@@ -1127,10 +1257,20 @@ impl Daemon {
                     }
                 }
 
-                // Clean up stale cancel file when idle (in case cancel was called while not recording)
+                // Clean up stale cancel file when idle and evict idle models
                 _ = tokio::time::sleep(Duration::from_millis(500)), if matches!(state, State::Idle) => {
                     // Silently consume any stale cancel request
                     let _ = check_cancel_requested();
+
+                    // Periodically evict idle models (every ~60s when idle)
+                    // The check interval is 500ms, so we use a counter to approximate 60s
+                    static EVICTION_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                    let count = EVICTION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if count % 120 == 0 {  // 500ms * 120 = 60s
+                        if let Some(ref mut mm) = self.model_manager {
+                            mm.evict_idle_models();
+                        }
+                    }
                 }
 
                 // Handle graceful shutdown (SIGINT from Ctrl+C)

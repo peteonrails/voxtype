@@ -192,6 +192,10 @@ pub enum RecordAction {
         /// Use --file alone to use file_path from config, or --file=path.txt for explicit path
         #[arg(long, value_name = "FILE", group = "output_mode", num_args = 0..=1, default_missing_value = "")]
         file: Option<String>,
+
+        /// Use a specific model for this transcription (e.g., large-v3-turbo)
+        #[arg(long, value_name = "MODEL")]
+        model: Option<String>,
     },
     /// Stop recording and transcribe (send SIGUSR2 to daemon)
     Stop {
@@ -220,6 +224,10 @@ pub enum RecordAction {
         /// Override output mode to paste (clipboard + Ctrl+V)
         #[arg(long, group = "output_mode")]
         paste: bool,
+
+        /// Use a specific model for this transcription (e.g., large-v3-turbo)
+        #[arg(long, value_name = "MODEL")]
+        model: Option<String>,
     },
     /// Cancel current recording or transcription (discard without output)
     Cancel,
@@ -235,6 +243,7 @@ impl RecordAction {
                 clipboard,
                 paste,
                 file,
+                ..
             } => (*type_mode, *clipboard, *paste, file.as_ref()),
             RecordAction::Stop {
                 type_mode,
@@ -245,6 +254,7 @@ impl RecordAction {
                 type_mode,
                 clipboard,
                 paste,
+                ..
             } => (*type_mode, *clipboard, *paste, None),
             RecordAction::Cancel => return None,
         };
@@ -270,6 +280,16 @@ impl RecordAction {
         match self {
             RecordAction::Start { file, .. } => file.as_deref(),
             RecordAction::Stop { .. } | RecordAction::Toggle { .. } | RecordAction::Cancel => None,
+        }
+    }
+
+    /// Extract the model override from the action flags
+    /// Note: --model is only available on start/toggle, not stop (model is selected at recording start)
+    pub fn model_override(&self) -> Option<&str> {
+        match self {
+            RecordAction::Start { model, .. } => model.as_deref(),
+            RecordAction::Toggle { model, .. } => model.as_deref(),
+            RecordAction::Stop { .. } | RecordAction::Cancel => None,
         }
     }
 }
@@ -709,6 +729,18 @@ mod tests {
     }
 
     #[test]
+    fn test_record_start_model_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--model", "large-v3-turbo"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.model_override(), Some("large-v3-turbo"));
+                assert_eq!(action.output_mode_override(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
     fn test_record_start_file_without_path() {
         let cli = Cli::parse_from(["voxtype", "record", "start", "--file"]);
         match cli.command {
@@ -721,12 +753,35 @@ mod tests {
     }
 
     #[test]
+    fn test_record_start_model_and_output_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--model", "large-v3-turbo", "--clipboard"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.model_override(), Some("large-v3-turbo"));
+                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::Clipboard));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
     fn test_record_start_file_with_absolute_path() {
         let cli = Cli::parse_from(["voxtype", "record", "start", "--file=/tmp/output.txt"]);
         match cli.command {
             Some(Commands::Record { action }) => {
                 assert_eq!(action.output_mode_override(), Some(OutputModeOverride::File));
                 assert_eq!(action.file_path(), Some("/tmp/output.txt"));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_toggle_model_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "toggle", "--model", "medium.en"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.model_override(), Some("medium.en"));
             }
             _ => panic!("Expected Record command"),
         }
@@ -775,5 +830,16 @@ mod tests {
             result.is_err(),
             "Should not allow both --file and --type"
         );
+    }
+
+    #[test]
+    fn test_record_cancel_no_model() {
+        let cli = Cli::parse_from(["voxtype", "record", "cancel"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.model_override(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
     }
 }

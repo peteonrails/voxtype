@@ -75,6 +75,7 @@ pub mod cpu;
 pub mod daemon;
 pub mod error;
 pub mod hotkey;
+pub mod model_manager;
 pub mod output;
 pub mod setup;
 pub mod state;

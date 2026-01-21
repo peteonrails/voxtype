@@ -53,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Load configuration
+    let config_path = cli.config.clone().or_else(config::Config::default_path);
     let mut config = config::load_config(cli.config.as_deref())?;
 
     // Apply CLI overrides
@@ -103,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
     // Run the appropriate command
     match cli.command.unwrap_or(Commands::Daemon) {
         Commands::Daemon => {
-            let mut daemon = daemon::Daemon::new(config);
+            let mut daemon = daemon::Daemon::new(config, config_path);
             daemon.run().await?;
         }
 
@@ -290,6 +291,13 @@ fn send_record_command(config: &config::Config, action: RecordAction) -> anyhow:
         };
         std::fs::write(&override_file, mode_str)
             .map_err(|e| anyhow::anyhow!("Failed to write output mode override: {}", e))?;
+    }
+
+    // Write model override file if specified
+    if let Some(model) = action.model_override() {
+        let override_file = config::Config::runtime_dir().join("model_override");
+        std::fs::write(&override_file, model)
+            .map_err(|e| anyhow::anyhow!("Failed to write model override: {}", e))?;
     }
 
     // For toggle, we need to read current state to decide which signal to send

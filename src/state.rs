@@ -18,6 +18,8 @@ pub enum State {
     Recording {
         /// When recording started
         started_at: Instant,
+        /// Optional model override for this recording
+        model_override: Option<String>,
     },
 
     /// Hotkey released, transcribing audio
@@ -52,7 +54,7 @@ impl State {
     /// Get recording duration if currently recording
     pub fn recording_duration(&self) -> Option<std::time::Duration> {
         match self {
-            State::Recording { started_at } => Some(started_at.elapsed()),
+            State::Recording { started_at, .. } => Some(started_at.elapsed()),
             _ => None,
         }
     }
@@ -68,7 +70,7 @@ impl std::fmt::Display for State {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             State::Idle => write!(f, "Idle"),
-            State::Recording { started_at } => {
+            State::Recording { started_at, .. } => {
                 write!(f, "Recording ({:.1}s)", started_at.elapsed().as_secs_f32())
             }
             State::Transcribing { audio } => {
@@ -102,6 +104,7 @@ mod tests {
     fn test_recording_state() {
         let state = State::Recording {
             started_at: Instant::now(),
+            model_override: None,
         };
         assert!(state.is_recording());
         assert!(!state.is_idle());
@@ -121,6 +124,7 @@ mod tests {
 
         let state = State::Recording {
             started_at: Instant::now(),
+            model_override: None,
         };
         assert!(format!("{}", state).starts_with("Recording"));
     }
