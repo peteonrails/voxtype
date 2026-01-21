@@ -19,8 +19,48 @@ pub mod ydotool;
 
 use crate::config::OutputConfig;
 use crate::error::OutputError;
+use std::borrow::Cow;
 use std::process::Stdio;
 use tokio::process::Command;
+
+/// Normalize Unicode curly quotes to ASCII equivalents.
+///
+/// Whisper sometimes outputs curly/smart quotes which can cause issues with
+/// keyboard simulation tools (wtype, dotool, ydotool). This function converts
+/// them to standard ASCII quotes to prevent unexpected line breaks or other
+/// typing artifacts.
+fn normalize_quotes(text: &str) -> Cow<'_, str> {
+    // Quick check to avoid allocation if no normalization needed
+    let needs_normalization = text.chars().any(|c| {
+        matches!(
+            c,
+            '\u{2018}'  // LEFT SINGLE QUOTATION MARK
+            | '\u{2019}'  // RIGHT SINGLE QUOTATION MARK (curly apostrophe)
+            | '\u{201B}'  // SINGLE HIGH-REVERSED-9 QUOTATION MARK
+            | '\u{2032}'  // PRIME
+            | '\u{201C}'  // LEFT DOUBLE QUOTATION MARK
+            | '\u{201D}'  // RIGHT DOUBLE QUOTATION MARK
+            | '\u{201F}'  // DOUBLE HIGH-REVERSED-9 QUOTATION MARK
+            | '\u{2033}'  // DOUBLE PRIME
+        )
+    });
+
+    if !needs_normalization {
+        return Cow::Borrowed(text);
+    }
+
+    Cow::Owned(
+        text.chars()
+            .map(|c| match c {
+                // Single quotes/apostrophes -> ASCII apostrophe
+                '\u{2018}' | '\u{2019}' | '\u{201B}' | '\u{2032}' => '\'',
+                // Double quotes -> ASCII double quote
+                '\u{201C}' | '\u{201D}' | '\u{201F}' | '\u{2033}' => '"',
+                other => other,
+            })
+            .collect(),
+    )
+}
 
 /// Trait for text output implementations
 #[async_trait::async_trait]
@@ -141,6 +181,9 @@ pub async fn output_with_fallback(
     text: &str,
     options: OutputOptions<'_>,
 ) -> Result<(), OutputError> {
+    // Normalize curly quotes to ASCII to prevent line break issues with keyboard tools
+    let normalized_text = normalize_quotes(text);
+
     // Run pre-output hook if configured (e.g., switch to modifier-suppressing submap)
     if let Some(cmd) = options.pre_output_command {
         if let Err(e) = run_hook(cmd, "pre_output").await {
@@ -157,7 +200,7 @@ pub async fn output_with_fallback(
             continue;
         }
 
-        match output.output(text).await {
+        match output.output(&normalized_text).await {
             Ok(()) => {
                 tracing::debug!("Text output via {}", output.name());
                 result = Ok(());
@@ -178,4 +221,61 @@ pub async fn output_with_fallback(
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_quotes_no_change() {
+        let text = "Hello, world! It's a test.";
+        let result = normalize_quotes(text);
+        assert!(matches!(result, Cow::Borrowed(_)));
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn test_normalize_quotes_curly_apostrophe() {
+        let text = "It\u{2019}s a test";
+        let result = normalize_quotes(text);
+        assert!(matches!(result, Cow::Owned(_)));
+        assert_eq!(result, "It's a test");
+    }
+
+    #[test]
+    fn test_normalize_quotes_all_single() {
+        let text = "\u{2018}hello\u{2019} \u{201B}world\u{2032}";
+        let result = normalize_quotes(text);
+        assert_eq!(result, "'hello' 'world'");
+    }
+
+    #[test]
+    fn test_normalize_quotes_all_double() {
+        let text = "\u{201C}hello\u{201D} \u{201F}world\u{2033}";
+        let result = normalize_quotes(text);
+        assert_eq!(result, "\"hello\" \"world\"");
+    }
+
+    #[test]
+    fn test_normalize_quotes_mixed() {
+        let text = "\u{201C}Don\u{2019}t worry,\u{201D} she said.";
+        let result = normalize_quotes(text);
+        assert_eq!(result, "\"Don't worry,\" she said.");
+    }
+
+    #[test]
+    fn test_normalize_quotes_empty() {
+        let text = "";
+        let result = normalize_quotes(text);
+        assert!(matches!(result, Cow::Borrowed(_)));
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_normalize_quotes_unicode_preserved() {
+        let text = "Café \u{2019} emoji 😀";
+        let result = normalize_quotes(text);
+        assert_eq!(result, "Café ' emoji 😀");
+    }
 }
