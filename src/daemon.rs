@@ -374,23 +374,23 @@ impl Daemon {
                     if let Some(t) = transcriber {
                         self.transcription_task =
                             Some(tokio::task::spawn_blocking(move || t.transcribe(&samples)));
-                        return true;
+                        true
                     } else {
                         tracing::error!("No transcriber available");
                         self.play_feedback(SoundEvent::Error);
                         self.reset_to_idle(state).await;
-                        return false;
+                        false
                     }
                 }
                 Err(e) => {
                     tracing::warn!("Recording error: {}", e);
                     self.reset_to_idle(state).await;
-                    return false;
+                    false
                 }
             }
         } else {
             self.reset_to_idle(state).await;
-            return false;
+            false
         }
     }
 
@@ -565,8 +565,7 @@ impl Daemon {
                 return Err(crate::error::VoxtypeError::Config(format!(
                     "Another voxtype instance is already running (lock error: {:?})",
                     e
-                ))
-                .into());
+                )));
             }
         }
 
@@ -1354,6 +1353,7 @@ mod tests {
         });
     }
 
+    #[allow(dead_code)]
     fn test_pidlock_acquisition_succeeds() {
         with_test_runtime_dir(|dir| {
             let lock_path = dir.join("voxtype.lock");
