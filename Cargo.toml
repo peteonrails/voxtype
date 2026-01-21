@@ -38,10 +38,8 @@ regex = "1"
 # Async traits
 async-trait = "0.1"
 
-# Input handling (evdev for kernel-level key events)
-evdev = "0.12"
+# Cross-platform utilities
 libc = "0.2"
-inotify = "0.10"  # Watch /dev/input for device hotplug
 nix = { version = "0.29", features = ["signal", "process"] }  # Unix signals for IPC
 
 # Audio capture
@@ -77,6 +75,14 @@ gpu-hipblas = ["whisper-rs/hipblas"]
 [build-dependencies]
 clap = { version = "4", features = ["derive"] }
 clap_mangen = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.12"
+inotify = "0.10"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.24"
+core-foundation = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

@@ -451,18 +451,15 @@ impl Daemon {
                         };
 
                         let file_mode = &self.config.output.file_mode;
-                        match write_transcription_to_file(&output_path, &final_text, file_mode).await
+                        match write_transcription_to_file(&output_path, &final_text, file_mode)
+                            .await
                         {
                             Ok(()) => {
                                 let mode_str = match file_mode {
                                     FileMode::Overwrite => "wrote",
                                     FileMode::Append => "appended",
                                 };
-                                tracing::info!(
-                                    "{} transcription to {:?}",
-                                    mode_str,
-                                    output_path
-                                );
+                                tracing::info!("{} transcription to {:?}", mode_str, output_path);
                             }
                             Err(e) => {
                                 tracing::error!(
@@ -1356,7 +1353,7 @@ mod tests {
             // Should not panic
         });
     }
-  
+
     fn test_pidlock_acquisition_succeeds() {
         with_test_runtime_dir(|dir| {
             let lock_path = dir.join("voxtype.lock");

@@ -701,7 +701,10 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "record", "start", "--file=out.txt"]);
         match cli.command {
             Some(Commands::Record { action }) => {
-                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::File));
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::File)
+                );
                 assert_eq!(action.file_path(), Some("out.txt"));
             }
             _ => panic!("Expected Record command"),
@@ -713,7 +716,10 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "record", "start", "--file"]);
         match cli.command {
             Some(Commands::Record { action }) => {
-                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::File));
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::File)
+                );
                 assert_eq!(action.file_path(), Some("")); // Empty string means use config path
             }
             _ => panic!("Expected Record command"),
@@ -725,7 +731,10 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "record", "start", "--file=/tmp/output.txt"]);
         match cli.command {
             Some(Commands::Record { action }) => {
-                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::File));
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::File)
+                );
                 assert_eq!(action.file_path(), Some("/tmp/output.txt"));
             }
             _ => panic!("Expected Record command"),
@@ -734,17 +743,9 @@ mod tests {
 
     #[test]
     fn test_record_start_file_mutually_exclusive_with_paste() {
-        let result = Cli::try_parse_from([
-            "voxtype",
-            "record",
-            "start",
-            "--file=out.txt",
-            "--paste",
-        ]);
-        assert!(
-            result.is_err(),
-            "Should not allow both --file and --paste"
-        );
+        let result =
+            Cli::try_parse_from(["voxtype", "record", "start", "--file=out.txt", "--paste"]);
+        assert!(result.is_err(), "Should not allow both --file and --paste");
     }
 
     #[test]
@@ -764,16 +765,8 @@ mod tests {
 
     #[test]
     fn test_record_start_file_mutually_exclusive_with_type() {
-        let result = Cli::try_parse_from([
-            "voxtype",
-            "record",
-            "start",
-            "--file=out.txt",
-            "--type",
-        ]);
-        assert!(
-            result.is_err(),
-            "Should not allow both --file and --type"
-        );
+        let result =
+            Cli::try_parse_from(["voxtype", "record", "start", "--file=out.txt", "--type"]);
+        assert!(result.is_err(), "Should not allow both --file and --type");
     }
 }

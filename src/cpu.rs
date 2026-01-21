@@ -4,17 +4,21 @@
 //! particularly in virtualized environments where the hypervisor may not
 //! expose all host CPU features.
 //!
-//! The SIGILL handler is installed via a .init_array constructor, which runs
-//! before main() - this is critical because AVX-512 instructions can appear
-//! in library initialization code, before our Rust main() even starts.
+//! On Linux, the SIGILL handler is installed via a .init_array constructor,
+//! which runs before main() - this is critical because AVX-512 instructions
+//! can appear in library initialization code, before our Rust main() even starts.
+//!
+//! On macOS, this functionality is not needed as macOS builds target different
+//! CPU instruction sets.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static SIGILL_HANDLER_INSTALLED: AtomicBool = AtomicBool::new(false);
 
-/// Constructor function that runs before main() via .init_array
+/// Constructor function that runs before main() via .init_array (Linux only)
 /// This ensures the SIGILL handler is installed before any library
 /// initialization code that might use unsupported instructions.
+#[cfg(target_os = "linux")]
 #[used]
 #[link_section = ".init_array"]
 static INIT_SIGILL_HANDLER: extern "C" fn() = {
