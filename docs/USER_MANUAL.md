@@ -15,6 +15,7 @@ Voxtype is a push-to-talk voice-to-text tool for Linux. Optimized for Wayland, w
 - [Remote Whisper Servers](#remote-whisper-servers)
 - [Output Modes](#output-modes)
 - [Post-Processing with LLMs](#post-processing-with-llms)
+- [Profiles](#profiles)
 - [Tips & Best Practices](#tips--best-practices)
 - [Keyboard Shortcuts](#keyboard-shortcuts)
 - [Integration Examples](#integration-examples)
@@ -1001,6 +1002,103 @@ You'll see log messages like:
 [DEBUG] After text processing: "um so I think we should um fix the bug"
 [DEBUG] Post-processed (47 -> 32 chars)
 [DEBUG] After post-processing: "I think we should fix the bug"
+```
+
+---
+
+## Profiles
+
+Profiles let you define named configurations for different contexts, each with its own post-processing command and output mode. Instead of changing your config file when switching between tasks, use profiles to switch behavior on the fly.
+
+### When to Use Profiles
+
+Profiles are useful when you need different post-processing for different contexts:
+
+- **Slack/Teams**: Casual tone, emoji-friendly formatting
+- **Code comments**: Technical terminology, specific formatting
+- **Email**: Professional tone, proper salutations
+- **Notes**: Bullet points, timestamps
+
+### Defining Profiles
+
+Add profile sections to your `~/.config/voxtype/config.toml`:
+
+```toml
+[profiles.slack]
+post_process_command = "ollama run llama3.2:1b 'Format this for Slack. Keep it casual and concise:'"
+
+[profiles.code]
+post_process_command = "ollama run llama3.2:1b 'Format as a code comment. Be technical and precise:'"
+output_mode = "clipboard"  # Override output mode for this profile
+
+[profiles.email]
+post_process_command = "ollama run llama3.2:1b 'Format as professional email text:'"
+post_process_timeout_ms = 45000  # Allow more time for longer responses
+```
+
+### Using Profiles
+
+Specify a profile when starting a recording:
+
+```bash
+# Use the slack profile for this recording
+voxtype record start --profile slack
+voxtype record stop
+
+# Or with toggle mode
+voxtype record toggle --profile code
+```
+
+**With compositor keybindings (Hyprland example):**
+
+```hyprlang
+# Different keybindings for different profiles
+bind = SUPER, V, exec, voxtype record start
+bindr = SUPER, V, exec, voxtype record stop
+
+bind = SUPER SHIFT, V, exec, voxtype record start --profile slack
+bindr = SUPER SHIFT, V, exec, voxtype record stop
+
+bind = SUPER CTRL, V, exec, voxtype record start --profile code
+bindr = SUPER CTRL, V, exec, voxtype record stop
+```
+
+### Profile Options
+
+Each profile can override these settings:
+
+| Option | Description |
+|--------|-------------|
+| `post_process_command` | Shell command for text processing (overrides `[output.post_process].command`) |
+| `post_process_timeout_ms` | Timeout in milliseconds (overrides `[output.post_process].timeout_ms`) |
+| `output_mode` | Output mode: `type`, `clipboard`, or `paste` (overrides `[output].mode`) |
+
+### Profile Behavior
+
+- If a profile doesn't specify an option, the default from your config is used
+- Unknown profile names log a warning and fall back to default behavior
+- Profiles work with all recording modes (evdev hotkey, compositor keybindings)
+
+### Example: Context-Aware Dictation
+
+```toml
+# Default post-processing for general use
+[output.post_process]
+command = "ollama run llama3.2:1b 'Clean up grammar and punctuation:'"
+timeout_ms = 30000
+
+# Slack: casual, concise
+[profiles.slack]
+post_process_command = "ollama run llama3.2:1b 'Rewrite for Slack. Casual tone, keep it brief:'"
+
+# Code: technical, clipboard output (for pasting into IDE)
+[profiles.code]
+post_process_command = "ollama run llama3.2:1b 'Format as a code comment in the style of the surrounding code:'"
+output_mode = "clipboard"
+
+# Meeting notes: bullet points
+[profiles.notes]
+post_process_command = "ollama run llama3.2:1b 'Convert to bullet points. Be concise:'"
 ```
 
 ---

@@ -1144,6 +1144,93 @@ Make it executable: `chmod +x ~/.config/voxtype/lm-studio-cleanup.sh`
 
 ---
 
+## [profiles.*]
+
+Named profiles for context-specific settings. Profiles allow you to define different post-processing commands and output modes for different use cases, selectable at recording time via `--profile`.
+
+### Defining Profiles
+
+Each profile is a TOML table under `[profiles]`:
+
+```toml
+[profiles.slack]
+post_process_command = "ollama run llama3.2:1b 'Format for Slack:'"
+
+[profiles.code]
+post_process_command = "ollama run llama3.2:1b 'Format as code comment:'"
+output_mode = "clipboard"
+
+[profiles.email]
+post_process_command = "ollama run llama3.2:1b 'Format as professional email:'"
+post_process_timeout_ms = 45000
+```
+
+### Profile Options
+
+#### post_process_command
+
+**Type:** String
+**Default:** None (uses `[output.post_process].command`)
+**Required:** No
+
+Shell command for post-processing. Overrides the default `[output.post_process].command` when this profile is active.
+
+#### post_process_timeout_ms
+
+**Type:** Integer
+**Default:** None (uses `[output.post_process].timeout_ms` or 30000)
+**Required:** No
+
+Timeout in milliseconds for the post-processing command.
+
+#### output_mode
+
+**Type:** String
+**Default:** None (uses `[output].mode`)
+**Required:** No
+
+Output mode override. Valid values: `type`, `clipboard`, `paste`.
+
+### Using Profiles
+
+Specify a profile when starting a recording:
+
+```bash
+voxtype record start --profile slack
+voxtype record toggle --profile code
+```
+
+### Behavior
+
+- Options not specified in a profile inherit from the main config
+- Unknown profile names log a warning and use default settings
+- Profiles have no effect on `record stop` or `record cancel`
+
+### Example
+
+```toml
+# Default post-processing
+[output.post_process]
+command = "ollama run llama3.2:1b 'Clean up:'"
+timeout_ms = 30000
+
+# Profile: casual chat
+[profiles.slack]
+post_process_command = "ollama run llama3.2:1b 'Rewrite casually for Slack:'"
+
+# Profile: code comments, output to clipboard
+[profiles.code]
+post_process_command = "ollama run llama3.2:1b 'Format as code comment:'"
+output_mode = "clipboard"
+
+# Profile: meeting notes with longer timeout
+[profiles.notes]
+post_process_command = "ollama run llama3.2:1b 'Convert to bullet points:'"
+post_process_timeout_ms = 60000
+```
+
+---
+
 ## [text]
 
 Controls text post-processing after transcription.
