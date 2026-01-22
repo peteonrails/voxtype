@@ -1,14 +1,12 @@
-//! macOS-based hotkey listener using CGEventTap and IOHIDManager
+//! macOS-based hotkey listener using CGEventTap
 //!
 //! Uses the macOS Quartz Event Services (CGEventTap) to capture global key events.
-//! For the FN/Globe key, uses IOHIDManager for low-level HID access since the FN key
-//! is handled at the firmware level and doesn't generate normal CGEvent key events.
+//! For the FN/Globe key, monitors the SecondaryFn modifier flag changes.
 //!
 //! This approach requires Accessibility permissions to be granted to the application.
 //! The user must grant Accessibility access in System Preferences > Security & Privacy >
 //! Privacy > Accessibility for voxtype to receive global key events.
 
-use super::iohid::FnKeyListener;
 use super::{HotkeyEvent, HotkeyListener};
 use crate::config::HotkeyConfig;
 use crate::error::HotkeyError;
@@ -249,7 +247,7 @@ impl VirtualKeyCode {
     }
 }
 
-/// macOS-based hotkey listener using CGEventTap and IOHIDManager
+/// macOS-based hotkey listener using CGEventTap
 pub struct MacOSListener {
     /// The key to listen for
     target_key: VirtualKeyCode,
@@ -261,19 +259,12 @@ pub struct MacOSListener {
     stop_signal: Option<oneshot::Sender<()>>,
     /// Flag to signal stop from callback
     stop_flag: Arc<AtomicBool>,
-    /// Whether to use FN key via IOHIDManager
-    use_fn_key: bool,
-    /// FN key listener (if using FN key)
-    fn_listener: Option<FnKeyListener>,
 }
 
 impl MacOSListener {
     /// Create a new macOS listener for the configured hotkey
     pub fn new(config: &HotkeyConfig) -> Result<Self, HotkeyError> {
         let target_key = parse_key_name(&config.key)?;
-
-        // Check if we should use FN key via IOHIDManager
-        let use_fn_key = target_key == VirtualKeyCode::KEY_FN;
 
         let modifier_flags = config
             .modifiers
@@ -301,26 +292,12 @@ impl MacOSListener {
             ));
         }
 
-        // If using FN key, verify we have an Apple keyboard
-        if use_fn_key {
-            if !super::iohid::has_apple_fn_keyboard() {
-                return Err(HotkeyError::DeviceAccess(
-                    "FN key hotkey requires an Apple keyboard (MacBook internal or Magic Keyboard). \
-                     No compatible keyboard found. Try using RIGHTOPTION as the hotkey instead."
-                        .to_string(),
-                ));
-            }
-            tracing::info!("Using FN/Globe key via IOHIDManager (Apple keyboard detected)");
-        }
-
         Ok(Self {
             target_key,
             modifier_flags,
             cancel_key,
             stop_signal: None,
             stop_flag: Arc::new(AtomicBool::new(false)),
-            use_fn_key,
-            fn_listener: None,
         })
     }
 }
@@ -338,16 +315,6 @@ fn check_accessibility_permissions() -> bool {
 #[async_trait::async_trait]
 impl HotkeyListener for MacOSListener {
     async fn start(&mut self) -> Result<mpsc::Receiver<HotkeyEvent>, HotkeyError> {
-        // If using FN key, use IOHIDManager-based listener
-        if self.use_fn_key {
-            let mut fn_listener = FnKeyListener::new();
-            let rx = fn_listener.start()?;
-            self.fn_listener = Some(fn_listener);
-            tracing::info!("Listening for FN/Globe key (IOHIDManager)");
-            return Ok(rx);
-        }
-
-        // Otherwise, use CGEventTap
         let (tx, rx) = mpsc::channel(32);
         let (stop_tx, stop_rx) = oneshot::channel();
         self.stop_signal = Some(stop_tx);
@@ -376,19 +343,13 @@ impl HotkeyListener for MacOSListener {
     }
 
     async fn stop(&mut self) -> Result<(), HotkeyError> {
-        // Stop FN listener if active
-        if let Some(mut fn_listener) = self.fn_listener.take() {
-            fn_listener.stop();
-            return Ok(());
-        }
-
-        // Stop CGEventTap listener
         self.stop_flag.store(true, Ordering::SeqCst);
         if let Some(stop) = self.stop_signal.take() {
             let _ = stop.send(());
         }
         // Give the run loop a moment to stop
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tracing::debug!("macOS hotkey listener stopping");
         Ok(())
     }
 }
@@ -457,9 +418,20 @@ fn macos_listener_loop(
                 }
             }
             CGEventType::FlagsChanged => {
-                // Handle modifier key changes (for cases where the hotkey IS a modifier)
-                if key_code == target_key as u16 {
-                    // Check if modifier is now pressed or released based on flags
+                // Special handling for FN key - detect via flag, not key code
+                if target_key == VirtualKeyCode::KEY_FN {
+                    let fn_pressed = current_flags.contains(CGEventFlags::CGEventFlagSecondaryFn);
+                    if fn_pressed && !is_pressed_clone.load(Ordering::SeqCst) {
+                        is_pressed_clone.store(true, Ordering::SeqCst);
+                        tracing::debug!("FN key pressed (macOS)");
+                        let _ = event_tx.send(HotkeyEvent::Pressed);
+                    } else if !fn_pressed && is_pressed_clone.load(Ordering::SeqCst) {
+                        is_pressed_clone.store(false, Ordering::SeqCst);
+                        tracing::debug!("FN key released (macOS)");
+                        let _ = event_tx.send(HotkeyEvent::Released);
+                    }
+                } else if key_code == target_key as u16 {
+                    // Handle other modifier key changes
                     let is_modifier_pressed = check_modifier_pressed(key_code, current_flags);
 
                     if is_modifier_pressed && !is_pressed_clone.load(Ordering::SeqCst) {

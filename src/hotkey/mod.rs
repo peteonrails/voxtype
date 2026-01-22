@@ -12,9 +12,6 @@
 pub mod evdev_listener;
 
 #[cfg(target_os = "macos")]
-pub mod iohid;
-
-#[cfg(target_os = "macos")]
 pub mod macos;
 
 use crate::config::HotkeyConfig;
