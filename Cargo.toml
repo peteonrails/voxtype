@@ -41,7 +41,6 @@ async-trait = "0.1"
 # Input handling (evdev for kernel-level key events)
 evdev = "0.12"
 libc = "0.2"
-inotify = "0.10"  # Watch /dev/input for device hotplug
 nix = { version = "0.29", features = ["signal", "process"] }  # Unix signals for IPC
 
 # Audio capture
@@ -64,7 +63,7 @@ parakeet-rs = { version = "0.2.9", optional = true }
 # CPU count for thread detection
 num_cpus = "1.16"
 
-# File watching for status --follow
+# File and device watching (status --follow, device hotplug)
 notify = "6"
 
 # Single instance check
