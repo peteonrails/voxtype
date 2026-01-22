@@ -96,6 +96,10 @@ translate = false
 # Number of CPU threads for inference (omit for auto-detection)
 # threads = 4
 
+# Custom vocabulary to help Whisper recognize specific words correctly
+# These words are provided as an initial prompt to bias the model
+# vocabulary = ["voxtype", "Fortran", "krystophny"]
+
 # --- Remote backend settings (used when backend = "remote") ---
 #
 # Remote server endpoint URL (required for remote backend)
@@ -628,6 +632,12 @@ pub struct WhisperConfig {
     #[serde(default = "default_context_window_optimization")]
     pub context_window_optimization: bool,
 
+    /// Custom vocabulary words to help Whisper recognize correctly
+    /// These words are provided as an initial prompt to bias the model.
+    /// Example: ["voxtype", "Fortran", "krystophny"]
+    #[serde(default)]
+    pub vocabulary: Vec<String>,
+
     // --- Remote backend settings ---
     /// Remote server endpoint URL (e.g., "http://192.168.1.100:8080")
     /// Required when backend = "remote"
@@ -860,6 +870,7 @@ impl Default for Config {
                 on_demand_loading: default_on_demand_loading(),
                 gpu_isolation: false,
                 context_window_optimization: default_context_window_optimization(),
+                vocabulary: Vec::new(),
                 remote_endpoint: None,
                 remote_model: None,
                 remote_api_key: None,
@@ -1545,5 +1556,49 @@ mod tests {
         assert!(!config.is_auto());
         assert!(!config.is_multiple());
         assert_eq!(config.primary(), "en");
+    }
+
+    #[test]
+    fn test_vocabulary_empty_by_default() {
+        let config = Config::default();
+        assert!(config.whisper.vocabulary.is_empty());
+    }
+
+    #[test]
+    fn test_vocabulary_can_be_set() {
+        let toml_str = r#"
+            [whisper]
+            model = "base.en"
+            vocabulary = ["voxtype", "Fortran", "krystophny"]
+        "#;
+
+        #[derive(Deserialize)]
+        struct TestConfig {
+            whisper: WhisperConfig,
+        }
+
+        let config: TestConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.whisper.vocabulary.len(), 3);
+        assert_eq!(config.whisper.vocabulary[0], "voxtype");
+        assert_eq!(config.whisper.vocabulary[1], "Fortran");
+        assert_eq!(config.whisper.vocabulary[2], "krystophny");
+    }
+
+    #[test]
+    fn test_vocabulary_single_word() {
+        let toml_str = r#"
+            [whisper]
+            model = "base.en"
+            vocabulary = ["voxtype"]
+        "#;
+
+        #[derive(Deserialize)]
+        struct TestConfig {
+            whisper: WhisperConfig,
+        }
+
+        let config: TestConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.whisper.vocabulary.len(), 1);
+        assert_eq!(config.whisper.vocabulary[0], "voxtype");
     }
 }

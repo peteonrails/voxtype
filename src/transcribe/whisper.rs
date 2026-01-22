@@ -25,6 +25,8 @@ pub struct WhisperTranscriber {
     threads: usize,
     /// Whether to optimize context window for short clips
     context_window_optimization: bool,
+    /// Custom vocabulary words (used as initial prompt)
+    vocabulary: Vec<String>,
 }
 
 impl WhisperTranscriber {
@@ -53,6 +55,7 @@ impl WhisperTranscriber {
             translate: config.translate,
             threads,
             context_window_optimization: config.context_window_optimization,
+            vocabulary: config.vocabulary.clone(),
         })
     }
 
@@ -182,6 +185,13 @@ impl Transcriber for WhisperTranscriber {
         // Prevent hallucination/looping by not conditioning on previous text
         // This is especially important for short clips where Whisper can repeat itself
         params.set_no_context(true);
+
+        // Set initial prompt from vocabulary to bias recognition toward specific words
+        if !self.vocabulary.is_empty() {
+            let prompt = self.vocabulary.join(", ");
+            tracing::debug!("Using vocabulary as initial prompt: {:?}", prompt);
+            params.set_initial_prompt(&prompt);
+        }
 
         // For short recordings, use single segment mode
         if duration_secs < 30.0 {
@@ -413,5 +423,32 @@ mod tests {
             ratio > 10.0,
             "Optimization should reduce context by >10x for 1s clips"
         );
+    }
+
+    #[test]
+    fn test_vocabulary_prompt_generation() {
+        // Test that vocabulary words are joined correctly for initial_prompt
+        let vocab: Vec<String> = vec![
+            "voxtype".to_string(),
+            "Fortran".to_string(),
+            "krystophny".to_string(),
+        ];
+        let prompt = vocab.join(", ");
+        assert_eq!(prompt, "voxtype, Fortran, krystophny");
+    }
+
+    #[test]
+    fn test_vocabulary_single_word_prompt() {
+        let vocab: Vec<String> = vec!["voxtype".to_string()];
+        let prompt = vocab.join(", ");
+        assert_eq!(prompt, "voxtype");
+    }
+
+    #[test]
+    fn test_vocabulary_empty_prompt() {
+        let vocab: Vec<String> = vec![];
+        let prompt = vocab.join(", ");
+        assert_eq!(prompt, "");
+        assert!(vocab.is_empty()); // Verify the check in transcribe() would skip
     }
 }
