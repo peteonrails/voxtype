@@ -1,7 +1,5 @@
 # Voxtype
 
-> **Note:** Git history was rewritten on 2025-01-07 to remove large binary files. If you have a fork or clone from before this date and encounter issues, see [issue #35](https://github.com/peteonrails/voxtype/issues/35) for instructions.
-
 [![Voxtype - Voice to Text for Linux](website/images/og-preview.png)](https://voxtype.io)
 
 **[voxtype.io](https://voxtype.io)**
