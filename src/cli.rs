@@ -205,6 +205,11 @@ pub enum RecordAction {
         /// Use a specific model for this transcription (e.g., large-v3-turbo)
         #[arg(long, value_name = "MODEL")]
         model: Option<String>,
+
+        /// Use a named profile for post-processing (e.g., --profile slack)
+        /// Profiles are defined in config.toml under [profiles.name]
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
     },
     /// Stop recording and transcribe (send SIGUSR2 to daemon)
     Stop {
@@ -237,6 +242,11 @@ pub enum RecordAction {
         /// Use a specific model for this transcription (e.g., large-v3-turbo)
         #[arg(long, value_name = "MODEL")]
         model: Option<String>,
+
+        /// Use a named profile for post-processing (e.g., --profile slack)
+        /// Profiles are defined in config.toml under [profiles.name]
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
     },
     /// Cancel current recording or transcription (discard without output)
     Cancel,
@@ -298,6 +308,16 @@ impl RecordAction {
         match self {
             RecordAction::Start { model, .. } => model.as_deref(),
             RecordAction::Toggle { model, .. } => model.as_deref(),
+            RecordAction::Stop { .. } | RecordAction::Cancel => None,
+        }
+    }
+
+    /// Get the profile name from --profile flag
+    /// Returns the profile name if specified on start or toggle commands
+    pub fn profile(&self) -> Option<&str> {
+        match self {
+            RecordAction::Start { profile, .. } => profile.as_deref(),
+            RecordAction::Toggle { profile, .. } => profile.as_deref(),
             RecordAction::Stop { .. } | RecordAction::Cancel => None,
         }
     }
@@ -867,6 +887,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_record_start_with_profile() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--profile", "slack"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.profile(), Some("slack"));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
     // =========================================================================
     // Engine flag tests
     // =========================================================================
@@ -908,5 +939,67 @@ mod tests {
         // The CLI should preserve case as-is; main.rs handles case-insensitive matching
         let cli = Cli::parse_from(["voxtype", "--engine", "PARAKEET"]);
         assert_eq!(cli.engine, Some("PARAKEET".to_string()));
+    }
+
+    // =========================================================================
+    // Profile flag tests
+    // =========================================================================
+
+    #[test]
+    fn test_record_toggle_with_profile() {
+        let cli = Cli::parse_from(["voxtype", "record", "toggle", "--profile", "code"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.profile(), Some("code"));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_without_profile() {
+        let cli = Cli::parse_from(["voxtype", "record", "start"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.profile(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_stop_has_no_profile() {
+        // Stop command doesn't have --profile flag
+        let cli = Cli::parse_from(["voxtype", "record", "stop"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.profile(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_cancel_has_no_profile() {
+        let cli = Cli::parse_from(["voxtype", "record", "cancel"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.profile(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_profile_with_output_mode() {
+        // Profile can be used together with output mode overrides
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--profile", "slack", "--clipboard"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.profile(), Some("slack"));
+                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::Clipboard));
+            }
+            _ => panic!("Expected Record command"),
+        }
     }
 }

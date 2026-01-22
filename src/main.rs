@@ -326,6 +326,31 @@ fn send_record_command(config: &config::Config, action: RecordAction) -> anyhow:
             .map_err(|e| anyhow::anyhow!("Failed to write model override: {}", e))?;
     }
 
+    // Write profile override file if specified
+    if let Some(profile_name) = action.profile() {
+        // Validate that the profile exists in config
+        if config.get_profile(profile_name).is_none() {
+            let available = config.profile_names();
+            if available.is_empty() {
+                eprintln!("Error: Profile '{}' not found.", profile_name);
+                eprintln!();
+                eprintln!("No profiles are configured. Add profiles to your config.toml:");
+                eprintln!();
+                eprintln!("  [profiles.{}]", profile_name);
+                eprintln!("  post_process_command = \"your-command-here\"");
+            } else {
+                eprintln!("Error: Profile '{}' not found.", profile_name);
+                eprintln!();
+                eprintln!("Available profiles: {}", available.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
+            }
+            std::process::exit(1);
+        }
+
+        let profile_file = config::Config::runtime_dir().join("profile_override");
+        std::fs::write(&profile_file, profile_name)
+            .map_err(|e| anyhow::anyhow!("Failed to write profile override: {}", e))?;
+    }
+
     // For toggle, we need to read current state to decide which signal to send
     let signal = match &action {
         RecordAction::Start { .. } => Signal::SIGUSR1,

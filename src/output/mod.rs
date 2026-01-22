@@ -151,6 +151,7 @@ pub fn create_output_chain(config: &OutputConfig) -> Vec<Box<dyn TextOutput>> {
                 config.auto_submit,
                 config.type_delay_ms,
                 pre_type_delay_ms,
+                config.shift_enter_newlines,
             )));
 
             // Fallback 1: dotool (supports keyboard layouts, no daemon needed)

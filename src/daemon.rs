@@ -193,6 +193,42 @@ fn cleanup_output_mode_override() {
     let _ = std::fs::remove_file(&override_file);
 }
 
+/// Read and consume the profile override file
+/// Returns the profile name if the file exists and is valid, None otherwise
+fn read_profile_override() -> Option<String> {
+    let profile_file = Config::runtime_dir().join("profile_override");
+    if !profile_file.exists() {
+        return None;
+    }
+
+    let content = match std::fs::read_to_string(&profile_file) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("Failed to read profile override file: {}", e);
+            return None;
+        }
+    };
+
+    // Consume the file (delete it after reading)
+    if let Err(e) = std::fs::remove_file(&profile_file) {
+        tracing::warn!("Failed to remove profile override file: {}", e);
+    }
+
+    let profile_name = content.trim().to_string();
+    if profile_name.is_empty() {
+        return None;
+    }
+
+    tracing::info!("Using profile override: {}", profile_name);
+    Some(profile_name)
+}
+
+/// Remove the profile override file if it exists (for cleanup on cancel/error)
+fn cleanup_profile_override() {
+    let profile_file = Config::runtime_dir().join("profile_override");
+    let _ = std::fs::remove_file(&profile_file);
+}
+
 /// Write transcription to a file, respecting file_mode (overwrite or append)
 async fn write_transcription_to_file(
     path: &std::path::Path,
@@ -367,7 +403,8 @@ impl Daemon {
     /// Call this when exiting from recording/transcribing without normal output flow
     async fn reset_to_idle(&self, state: &mut State) {
         cleanup_output_mode_override();
-                            cleanup_model_override();
+        cleanup_model_override();
+        cleanup_profile_override();
         *state = State::Idle;
         self.update_state("idle");
 
@@ -461,8 +498,51 @@ impl Daemon {
                         tracing::debug!("After text processing: {:?}", processed_text);
                     }
 
-                    // Apply post-processing command if configured
-                    let final_text = if let Some(ref post_processor) = self.post_processor {
+                    // Check for profile override from CLI flags
+                    let profile_override = read_profile_override();
+                    let active_profile = profile_override
+                        .as_ref()
+                        .and_then(|name| self.config.get_profile(name));
+
+                    if let Some(profile_name) = &profile_override {
+                        if active_profile.is_none() {
+                            tracing::warn!(
+                                "Profile '{}' not found in config, using default settings",
+                                profile_name
+                            );
+                        }
+                    }
+
+                    // Apply post-processing command (profile overrides default)
+                    let final_text = if let Some(profile) = active_profile {
+                        if let Some(ref cmd) = profile.post_process_command {
+                            let timeout_ms = profile
+                                .post_process_timeout_ms
+                                .unwrap_or(30000);
+                            let profile_config = crate::config::PostProcessConfig {
+                                command: cmd.clone(),
+                                timeout_ms,
+                            };
+                            let profile_processor = PostProcessor::new(&profile_config);
+                            tracing::info!(
+                                "Post-processing with profile: {:?}",
+                                profile_override.as_ref().unwrap()
+                            );
+                            let result = profile_processor.process(&processed_text).await;
+                            tracing::info!("Post-processed: {:?}", result);
+                            result
+                        } else {
+                            // Profile exists but has no post_process_command, use default
+                            if let Some(ref post_processor) = self.post_processor {
+                                tracing::info!("Post-processing: {:?}", processed_text);
+                                let result = post_processor.process(&processed_text).await;
+                                tracing::info!("Post-processed: {:?}", result);
+                                result
+                            } else {
+                                processed_text
+                            }
+                        }
+                    } else if let Some(ref post_processor) = self.post_processor {
                         tracing::info!("Post-processing: {:?}", processed_text);
                         let result = post_processor.process(&processed_text).await;
                         tracing::info!("Post-processed: {:?}", result);
@@ -474,8 +554,11 @@ impl Daemon {
                     // Check for output mode override from CLI flags
                     let output_override = read_output_mode_override();
 
+                    // Check if profile specifies output mode override
+                    let profile_output_mode = active_profile.and_then(|p| p.output_mode.clone());
+
                     // Determine file output path (if file mode)
-                    // Priority: 1. CLI --file=path, 2. CLI --file (config path), 3. config mode=file
+                    // Priority: 1. CLI --file=path, 2. CLI --file (config path), 3. profile output_mode, 4. config mode=file
                     let file_output_path: Option<PathBuf> = match &output_override {
                         Some(OutputOverride::FileWithPath(path)) => {
                             // CLI --file=path.txt
@@ -483,6 +566,10 @@ impl Daemon {
                         }
                         Some(OutputOverride::Mode(OutputMode::File)) => {
                             // CLI --file (no path) - use config's file_path
+                            self.config.output.file_path.clone()
+                        }
+                        None if profile_output_mode == Some(OutputMode::File) => {
+                            // Profile specifies file mode
                             self.config.output.file_path.clone()
                         }
                         None if self.config.output.mode == OutputMode::File => {
@@ -526,13 +613,22 @@ impl Daemon {
                     }
 
                     // Create output chain with potential mode override (for non-file modes)
+                    // Priority: 1. CLI override, 2. profile output_mode, 3. config default
                     let output_config = match output_override {
                         Some(OutputOverride::Mode(mode)) => {
                             let mut config = self.config.output.clone();
                             config.mode = mode;
                             config
                         }
-                        _ => self.config.output.clone(),
+                        _ => {
+                            if let Some(mode) = profile_output_mode {
+                                let mut config = self.config.output.clone();
+                                config.mode = mode;
+                                config
+                            } else {
+                                self.config.output.clone()
+                            }
+                        }
                     };
                     let output_chain = output::create_output_chain(&output_config);
 
@@ -1053,7 +1149,8 @@ impl Daemon {
                                 }
 
                                 cleanup_output_mode_override();
-                            cleanup_model_override();
+                                cleanup_model_override();
+                                cleanup_profile_override();
                                 state = State::Idle;
                                 self.update_state("idle");
                                 self.play_feedback(SoundEvent::Cancelled);
@@ -1077,7 +1174,8 @@ impl Daemon {
                                 }
 
                                 cleanup_output_mode_override();
-                            cleanup_model_override();
+                                cleanup_model_override();
+                                cleanup_profile_override();
                                 state = State::Idle;
                                 self.update_state("idle");
                                 self.play_feedback(SoundEvent::Cancelled);
@@ -1116,7 +1214,8 @@ impl Daemon {
                         }
 
                         cleanup_output_mode_override();
-                            cleanup_model_override();
+                        cleanup_model_override();
+                        cleanup_profile_override();
                         state = State::Idle;
                         self.update_state("idle");
                         self.play_feedback(SoundEvent::Cancelled);
@@ -1149,6 +1248,7 @@ impl Daemon {
                             }
                             cleanup_output_mode_override();
                             cleanup_model_override();
+                            cleanup_profile_override();
                             state = State::Idle;
                             self.update_state("idle");
 
@@ -1330,7 +1430,8 @@ impl Daemon {
                         }
 
                         cleanup_output_mode_override();
-                            cleanup_model_override();
+                        cleanup_model_override();
+                        cleanup_profile_override();
                         state = State::Idle;
                         self.update_state("idle");
                         self.play_feedback(SoundEvent::Cancelled);
