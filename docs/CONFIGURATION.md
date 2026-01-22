@@ -1175,6 +1175,32 @@ auto_submit = true  # Press Enter after transcription
 
 **Note:** This works with all output modes (`type`, `paste`) but has no effect in `clipboard` mode since clipboard-only output doesn't simulate keypresses.
 
+### shift_enter_newlines
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Convert newlines in transcribed text to Shift+Enter instead of regular Enter. This is useful for applications where pressing Enter submits the message or form, but you want to insert line breaks within your text.
+
+**Why use it:**
+
+Many chat and messaging applications (Slack, Discord, Teams, etc.) and some IDEs (Cursor AI chat) use Enter to submit/send and Shift+Enter to insert a line break. When dictating multi-line text, regular newlines would submit prematurely. This option ensures line breaks are inserted without triggering submission.
+
+**Example:**
+```toml
+[output]
+shift_enter_newlines = true  # Use Shift+Enter for newlines
+```
+
+**Common use cases:**
+- Slack, Discord, Microsoft Teams chat
+- AI coding assistants (Cursor, GitHub Copilot Chat)
+- Web forms where Enter submits
+- Any application where Enter has special meaning
+
+**Note:** This only affects the wtype output driver. When combined with `auto_submit = true`, the final Enter (to submit) is still sent as a regular Enter after all Shift+Enter line breaks.
+
 ### pre_output_command
 
 **Type:** String

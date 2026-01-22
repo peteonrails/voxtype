@@ -1035,6 +1035,38 @@ voxtype --driver=ydotool,clipboard daemon
 
 When `driver_order` is set, `fallback_to_clipboard` is ignored—the driver list explicitly defines what's tried and in what order.
 
+### Typing Options
+
+Additional options for controlling how text is typed:
+
+**Auto-submit (send Enter after typing):**
+
+```toml
+[output]
+auto_submit = true  # Press Enter after transcription
+```
+
+Useful for chat applications or command lines where you want to submit immediately after dictating.
+
+**Shift+Enter for newlines:**
+
+```toml
+[output]
+shift_enter_newlines = true  # Use Shift+Enter instead of Enter for line breaks
+```
+
+Many chat apps (Slack, Discord, Teams) and AI assistants (Cursor) use Enter to send and Shift+Enter for line breaks. Enable this when dictating multi-line messages to prevent premature submission.
+
+**Combining both options:**
+
+```toml
+[output]
+shift_enter_newlines = true  # Line breaks as Shift+Enter
+auto_submit = true           # Final Enter to submit
+```
+
+This lets you dictate multi-line messages that are automatically submitted when complete.
+
 ---
 
 ## Output Hooks (Compositor Integration)
