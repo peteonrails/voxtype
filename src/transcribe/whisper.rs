@@ -179,6 +179,10 @@ impl Transcriber for WhisperTranscriber {
         params.set_suppress_blank(true);
         params.set_suppress_nst(true);
 
+        // Prevent hallucination/looping by not conditioning on previous text
+        // This is especially important for short clips where Whisper can repeat itself
+        params.set_no_context(true);
+
         // For short recordings, use single segment mode
         if duration_secs < 30.0 {
             params.set_single_segment(true);

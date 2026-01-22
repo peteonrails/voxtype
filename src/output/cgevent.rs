@@ -129,10 +129,14 @@ impl CGEventOutput {
         let key_up = CGEvent::new_keyboard_event(source.clone(), keycode, false)
             .map_err(|_| OutputError::InjectionFailed("Failed to create key up event".into()))?;
 
-        // Set shift modifier if needed
+        // Set flags: shift if needed, otherwise explicitly clear all modifiers
+        // This prevents interference from Caps Lock or stuck modifier keys
         if shift_needed {
             key_down.set_flags(CGEventFlags::CGEventFlagShift);
             key_up.set_flags(CGEventFlags::CGEventFlagShift);
+        } else {
+            key_down.set_flags(CGEventFlags::CGEventFlagNull);
+            key_up.set_flags(CGEventFlags::CGEventFlagNull);
         }
 
         // Post the events
