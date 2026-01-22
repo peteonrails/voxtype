@@ -15,6 +15,35 @@ Voxtype looks for configuration in the following locations (in order):
 
 ---
 
+## engine
+
+**Type:** String
+**Default:** `"whisper"`
+**Required:** No
+
+Selects which speech-to-text engine to use for transcription.
+
+**Values:**
+- `whisper` - OpenAI Whisper via whisper.cpp (default, recommended)
+- `parakeet` - NVIDIA Parakeet via ONNX Runtime (experimental, requires special binary)
+
+**Example:**
+```toml
+engine = "whisper"
+```
+
+**CLI override:**
+```bash
+voxtype --engine parakeet daemon
+```
+
+**Notes:**
+- Parakeet requires a Parakeet-enabled binary (`voxtype-*-parakeet-*`)
+- When using Parakeet, you must also configure the `[parakeet]` section
+- See [PARAKEET.md](PARAKEET.md) for detailed Parakeet setup instructions
+
+---
+
 ## [hotkey]
 
 Controls which key triggers push-to-talk recording.
@@ -723,6 +752,78 @@ Maximum time in seconds to wait for the remote server to respond. Increase for s
 backend = "remote"
 remote_endpoint = "http://192.168.1.100:8080"
 remote_timeout_secs = 60  # 60 second timeout for long recordings
+```
+
+---
+
+## [parakeet]
+
+Configuration for the Parakeet speech-to-text engine. This section is only used when `engine = "parakeet"`.
+
+> **Note:** Parakeet support is experimental. See [PARAKEET.md](PARAKEET.md) for detailed setup instructions.
+
+### model
+
+**Type:** String
+**Default:** `"parakeet-tdt-0.6b-v3"`
+**Required:** No
+
+The Parakeet model to use. Can be a model name (looked up in `~/.local/share/voxtype/models/`) or an absolute path to a model directory.
+
+**Example:**
+```toml
+[parakeet]
+model = "parakeet-tdt-0.6b-v3"
+```
+
+**Using absolute path:**
+```toml
+[parakeet]
+model = "/opt/models/parakeet-tdt-0.6b-v3"
+```
+
+### model_type
+
+**Type:** String
+**Default:** Auto-detected from model files
+**Required:** No
+
+The model architecture type. Usually auto-detected based on files present in the model directory.
+
+**Values:**
+- `tdt` - Token-Duration-Transducer (recommended, proper punctuation)
+- `ctc` - Connectionist Temporal Classification (faster, character-level)
+
+**Example:**
+```toml
+[parakeet]
+model = "parakeet-tdt-0.6b-v3"
+model_type = "tdt"
+```
+
+### on_demand_loading
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Same behavior as `[whisper].on_demand_loading`. When `true`, loads the model only when recording starts and unloads after transcription.
+
+**Example:**
+```toml
+[parakeet]
+model = "parakeet-tdt-0.6b-v3"
+on_demand_loading = true  # Free memory when not transcribing
+```
+
+### Complete Example
+
+```toml
+engine = "parakeet"
+
+[parakeet]
+model = "parakeet-tdt-0.6b-v3"
+on_demand_loading = false  # Keep model loaded for fast response
 ```
 
 ---

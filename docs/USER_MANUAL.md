@@ -11,6 +11,8 @@ Voxtype is a push-to-talk voice-to-text tool for Linux. Optimized for Wayland, w
 - [Hotkeys](#hotkeys)
 - [Compositor Keybindings](#compositor-keybindings)
 - [Canceling Transcription](#canceling-transcription)
+- [Transcription Engines](#transcription-engines)
+- [Multi-Model Support](#multi-model-support)
 - [Whisper Models](#whisper-models)
 - [Remote Whisper Servers](#remote-whisper-servers)
 - [Output Modes](#output-modes)
@@ -514,6 +516,125 @@ Any valid evdev key name works. Common choices:
 - **During recording**: Audio capture stops, recorded audio is discarded
 - **During transcription**: Transcription is aborted, no text is output
 - **While idle**: No effect
+
+---
+
+## Transcription Engines
+
+Voxtype supports two speech-to-text engines:
+
+| Engine | Best For | GPU Required | Languages |
+|--------|----------|--------------|-----------|
+| **Whisper** (default) | Most users, multilingual | Optional (faster with GPU) | 99+ languages |
+| **Parakeet** (experimental) | Fast CPU inference, English | Optional (CUDA available) | English only |
+
+### Selecting an Engine
+
+**Via config file** (`~/.config/voxtype/config.toml`):
+
+```toml
+# Default - use Whisper
+engine = "whisper"
+
+# Or use Parakeet (requires Parakeet-enabled binary)
+engine = "parakeet"
+```
+
+**Via CLI flag** (overrides config):
+
+```bash
+voxtype --engine whisper daemon
+voxtype --engine parakeet daemon
+```
+
+### Whisper (Default)
+
+Whisper is OpenAI's speech recognition model, running locally via whisper.cpp. It offers:
+
+- Excellent accuracy across many languages
+- Multiple model sizes (tiny to large)
+- GPU acceleration via Vulkan (AMD/Intel) or CUDA (NVIDIA)
+- Active community and frequent updates
+
+This is the recommended engine for most users.
+
+### Parakeet (Experimental)
+
+Parakeet is NVIDIA's FastConformer-based ASR model. It offers:
+
+- Very fast CPU inference (30x realtime on AVX-512)
+- Good accuracy for English dictation
+- Proper punctuation and capitalization
+- No GPU required (though CUDA acceleration available)
+
+**Requirements:**
+- A Parakeet-enabled binary (`voxtype-*-parakeet-*`)
+- The Parakeet model downloaded (~600MB)
+- English-only use case
+
+See [PARAKEET.md](PARAKEET.md) for detailed setup instructions.
+
+---
+
+## Multi-Model Support
+
+Voxtype can manage multiple Whisper models, letting you switch between them on the fly. Use a fast model for everyday dictation and a more accurate model when precision matters.
+
+### Configuration
+
+```toml
+[hotkey]
+model_modifier = "LEFTSHIFT"  # Hold Shift + hotkey for secondary model
+
+[whisper]
+model = "base.en"                    # Primary model (fast, always loaded)
+secondary_model = "large-v3-turbo"   # Secondary model (accurate, on-demand)
+available_models = ["medium.en"]     # Additional models for CLI access
+max_loaded_models = 2                # Keep up to 2 models in memory
+cold_model_timeout_secs = 300        # Evict unused models after 5 minutes
+```
+
+### Using Multiple Models
+
+**With hotkey modifier** (evdev mode):
+- Normal hotkey press → uses primary model (`base.en`)
+- Hold Shift + hotkey → uses secondary model (`large-v3-turbo`)
+
+**With CLI** (compositor keybindings):
+```bash
+# Use primary model
+voxtype record start
+
+# Use secondary model
+voxtype record start --model large-v3-turbo
+
+# Use any available model
+voxtype record start --model medium.en
+```
+
+### Memory Management
+
+Voxtype caches loaded models to avoid reload delays:
+
+- `max_loaded_models`: Maximum models to keep in memory (default: 2)
+- `cold_model_timeout_secs`: Auto-evict unused models after this time (default: 300s)
+- Primary model is never evicted
+- Models load in the background while you speak
+
+### Example: Speed vs Accuracy
+
+```toml
+[hotkey]
+key = "SCROLLLOCK"
+model_modifier = "LEFTSHIFT"
+
+[whisper]
+model = "tiny.en"                   # Lightning fast for quick notes
+secondary_model = "large-v3-turbo"  # High accuracy when needed
+
+[audio.feedback]
+enabled = true  # Helpful audio cues when switching models
+```
 
 ---
 
