@@ -31,7 +31,7 @@ Parakeet support requires a specially compiled binary. Download from the release
 | `voxtype-*-parakeet-avx512` | Modern CPUs with AVX-512 (Intel Ice Lake+, AMD Zen 4+) |
 | `voxtype-*-parakeet-cuda` | NVIDIA GPU acceleration with CPU fallback |
 
-The AVX2 binary works on all modern x86_64 CPUs. Use AVX-512 if your CPU supports it for ~20% better performance.
+The AVX2 binary works on most modern x86_64 CPUs. Use AVX-512 if your CPU supports it for better performance.
 
 ## Downloading the Model
 
@@ -193,9 +193,19 @@ ls ~/.local/share/voxtype/models/parakeet-tdt-0.6b-v3/
 # Should show: encoder-model.onnx, encoder-model.onnx.data, decoder_joint-model.onnx
 ```
 
-### Poor performance on older CPUs
+### SIGILL crash on older CPUs
 
-The AVX2 binary includes ONNX Runtime code with AVX-512 instructions, but ONNX Runtime detects your CPU at runtime and uses appropriate code paths. If performance is poor, ensure you're not running other CPU-intensive tasks during transcription.
+Parakeet binaries include ONNX Runtime, which contains AVX-512 optimized code paths. ONNX Runtime performs CPU feature detection at runtime and should only execute instructions your CPU supports.
+
+If you experience a SIGILL (illegal instruction) crash, this is likely a bug in ONNX Runtime's CPU detection rather than a fundamental incompatibility. As a workaround, switch to a Whisper binary:
+
+- `voxtype-*-avx2` - Works on Intel Haswell+ and AMD Zen+
+- `voxtype-*-vulkan` - GPU acceleration for AMD/Intel GPUs
+
+Please report the issue at https://github.com/peteonrails/voxtype/issues with:
+- Your CPU model (`cat /proc/cpuinfo | grep "model name" | head -1`)
+- Which Parakeet binary you were using
+- The full error output
 
 ## Feedback
 
