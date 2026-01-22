@@ -635,7 +635,6 @@ cold_model_timeout_secs = 60  # Evict unused models after 1 minute
 - Only evicts models that haven't been used within the timeout period
 - The primary model is never evicted
 - Helps free memory when switching models infrequently
->>>>>>> 81-multi-model-support
 
 ---
 
