@@ -190,6 +190,21 @@ async fn main() -> anyhow::Result<()> {
                         setup::waybar::print_config();
                     }
                 }
+                Some(SetupAction::Dms {
+                    install,
+                    uninstall,
+                    qml,
+                }) => {
+                    if install {
+                        setup::dms::install()?;
+                    } else if uninstall {
+                        setup::dms::uninstall()?;
+                    } else if qml {
+                        println!("{}", setup::dms::get_qml_config());
+                    } else {
+                        setup::dms::print_config();
+                    }
+                }
                 Some(SetupAction::Model { list, set, restart }) => {
                     if list {
                         setup::model::list_installed();

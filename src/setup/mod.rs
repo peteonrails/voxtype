@@ -10,6 +10,7 @@
 //! - Compositor integration (modifier key fix)
 
 pub mod compositor;
+pub mod dms;
 pub mod gpu;
 pub mod model;
 pub mod parakeet;
