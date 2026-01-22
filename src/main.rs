@@ -114,6 +114,9 @@ async fn main() -> anyhow::Result<()> {
     if cli.no_whisper_context_optimization {
         config.whisper.context_window_optimization = false;
     }
+    if let Some(prompt) = cli.initial_prompt {
+        config.whisper.initial_prompt = Some(prompt);
+    }
 
     // Run the appropriate command
     match cli.command.unwrap_or(Commands::Daemon) {

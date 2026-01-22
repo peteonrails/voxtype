@@ -63,6 +63,11 @@ pub struct Cli {
     #[arg(long)]
     pub no_whisper_context_optimization: bool,
 
+    /// Initial prompt to provide context for transcription.
+    /// Hints at terminology, proper nouns, or formatting conventions.
+    #[arg(long, value_name = "PROMPT")]
+    pub initial_prompt: Option<String>,
+
     /// Override transcription engine: "whisper" (default) or "parakeet" (EXPERIMENTAL)
     #[arg(long, value_name = "ENGINE")]
     pub engine: Option<String>,

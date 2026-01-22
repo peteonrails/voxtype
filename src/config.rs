@@ -99,6 +99,11 @@ translate = false
 # Number of CPU threads for inference (omit for auto-detection)
 # threads = 4
 
+# Initial prompt to provide context for transcription
+# Use this to hint at terminology, proper nouns, or formatting conventions.
+# Example: "Technical discussion about Rust, TypeScript, and Kubernetes."
+# initial_prompt = ""
+
 # --- Multi-model settings ---
 #
 # Secondary model for difficult audio (used with hotkey.model_modifier or CLI --model)
@@ -692,6 +697,12 @@ pub struct WhisperConfig {
     #[serde(default = "default_context_window_optimization")]
     pub context_window_optimization: bool,
 
+    /// Initial prompt to provide context for transcription
+    /// Use this to hint at terminology, proper nouns, or formatting conventions.
+    /// Example: "Technical discussion about Rust, TypeScript, and Kubernetes."
+    #[serde(default)]
+    pub initial_prompt: Option<String>,
+
     // --- Multi-model settings ---
 
     /// Secondary model to use when hotkey.model_modifier is held
@@ -776,6 +787,7 @@ impl Default for WhisperConfig {
             on_demand_loading: default_on_demand_loading(),
             gpu_isolation: false,
             context_window_optimization: default_context_window_optimization(),
+            initial_prompt: None,
             secondary_model: None,
             available_models: vec![],
             max_loaded_models: default_max_loaded_models(),
@@ -1097,6 +1109,7 @@ impl Default for Config {
                 on_demand_loading: default_on_demand_loading(),
                 gpu_isolation: false,
                 context_window_optimization: default_context_window_optimization(),
+                initial_prompt: None,
                 secondary_model: None,
                 available_models: vec![],
                 max_loaded_models: default_max_loaded_models(),

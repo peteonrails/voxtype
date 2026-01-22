@@ -25,6 +25,8 @@ pub struct WhisperTranscriber {
     threads: usize,
     /// Whether to optimize context window for short clips
     context_window_optimization: bool,
+    /// Initial prompt to provide context for transcription
+    initial_prompt: Option<String>,
 }
 
 impl WhisperTranscriber {
@@ -53,6 +55,7 @@ impl WhisperTranscriber {
             translate: config.translate,
             threads,
             context_window_optimization: config.context_window_optimization,
+            initial_prompt: config.initial_prompt.clone(),
         })
     }
 
@@ -178,6 +181,12 @@ impl Transcriber for WhisperTranscriber {
         // Improve transcription quality
         params.set_suppress_blank(true);
         params.set_suppress_nst(true);
+
+        // Set initial prompt if configured
+        if let Some(prompt) = &self.initial_prompt {
+            params.set_initial_prompt(prompt);
+            tracing::debug!("Using initial prompt: {:?}", prompt);
+        }
 
         // For short recordings, use single segment mode
         if duration_secs < 30.0 {
