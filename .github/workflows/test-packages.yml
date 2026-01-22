@@ -78,7 +78,9 @@ jobs:
           STAGING="/tmp/voxtype-package"
 
           rm -rf "$STAGING"
-          mkdir -p "$STAGING"/{usr/bin,usr/lib/voxtype,etc/voxtype,usr/lib/systemd/user,usr/share/doc/voxtype}
+          # Note: Don't create usr/bin - the symlink is created by post-install script
+          # Including usr/bin would make the package "own" /usr/bin, conflicting with filesystem package
+          mkdir -p "$STAGING"/{usr/lib/voxtype,etc/voxtype,usr/lib/systemd/user,usr/share/doc/voxtype}
           mkdir -p "$STAGING"/usr/share/{bash-completion/completions,zsh/site-functions,fish/vendor_completions.d}
 
           # Copy tiered binaries
