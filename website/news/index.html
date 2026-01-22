@@ -9,16 +9,16 @@
     <!-- Open Graph / Social Media -->
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://voxtype.io/news/">
-    <meta property="og:title" content="Voxtype 0.4.16: dotool Output Driver with Keyboard Layout Support">
-    <meta property="og:description" content="New dotool output driver in the fallback chain, bringing keyboard layout support for non-US keyboards and better KDE/GNOME compatibility.">
+    <meta property="og:title" content="Voxtype 0.5.0: Multi-model, Parakeet Engine, Profiles, and More">
+    <meta property="og:description" content="Major release with multi-model support, experimental Parakeet engine, named profiles for post-processing, and customizable output drivers.">
     <meta property="og:image" content="https://voxtype.io/images/gpu-isolation.png">
     <meta property="og:image:width" content="1200">
     <meta property="og:image:height" content="630">
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="Voxtype 0.4.16: dotool Output Driver with Keyboard Layout Support">
-    <meta name="twitter:description" content="New dotool output driver in the fallback chain, bringing keyboard layout support for non-US keyboards and better KDE/GNOME compatibility.">
+    <meta name="twitter:title" content="Voxtype 0.5.0: Multi-model, Parakeet Engine, Profiles, and More">
+    <meta name="twitter:description" content="Major release with multi-model support, experimental Parakeet engine, named profiles for post-processing, and customizable output drivers.">
     <meta name="twitter:image" content="https://voxtype.io/images/gpu-isolation.png">
 
     <title>News & Updates | Voxtype</title>
@@ -74,6 +74,102 @@
     <!-- News Articles -->
     <main class="news-content">
         <div class="container">
+
+            <!-- v0.5.x Era Posts -->
+
+            <article class="news-article" id="v050">
+                <div class="article-meta">
+                    <time datetime="2026-01-22">January 22, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v0.5.0: Multi-model, Parakeet Engine, Profiles, and More</h2>
+                <div class="article-body">
+                    <p>Voxtype 0.5.0 is a major release with several new features for power users: switch between Whisper models on the fly, try the experimental Parakeet transcription engine, set up profiles for different contexts, and customize how text gets typed.</p>
+
+                    <h3>Multi-Model Support</h3>
+                    <p>You can now load multiple Whisper models and switch between them without restarting the daemon. Use a fast model for everyday dictation and a more accurate model when precision matters.</p>
+
+                    <p><strong>Why use it:</strong> Keep <code>base.en</code> loaded for quick notes, then hold Shift while pressing your hotkey to use <code>large-v3-turbo</code> for important dictation.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[whisper]
+model = "base.en"
+secondary_model = "large-v3-turbo"
+
+[hotkey]
+model_modifier = "LEFTSHIFT"</code></pre>
+                    </div>
+
+                    <h3>Parakeet Transcription Engine (Experimental)</h3>
+                    <p>Parakeet is NVIDIA's FastConformer-based speech recognition model. It offers fast CPU inference (30x realtime on AVX-512) with proper punctuation and capitalization out of the box.</p>
+
+                    <p><strong>Why use it:</strong> If you only need English transcription and want speed without a GPU, Parakeet is worth trying. It's faster than Whisper on CPU and competitive with Whisper on GPU.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>engine = "parakeet"
+
+[parakeet]
+model = "parakeet-tdt-0.6b-v3"</code></pre>
+                    </div>
+
+                    <p>Requires a Parakeet-enabled binary. See the <a href="https://github.com/peteonrails/voxtype/blob/main/docs/PARAKEET.md">Parakeet documentation</a> for setup instructions.</p>
+
+                    <h3>Named Profiles for Post-Processing</h3>
+                    <p>Define named profiles with different post-processing settings for different contexts. Each profile can have its own LLM cleanup command and initial prompt.</p>
+
+                    <p><strong>Why use it:</strong> Use <code>--profile slack</code> for casual messages that get cleaned up one way, and <code>--profile code</code> for technical dictation with different formatting.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[profiles.slack]
+post_process_command = "llm-cleanup --casual"
+initial_prompt = "Casual workplace chat message"
+
+[profiles.code]
+post_process_command = "llm-cleanup --technical"
+shift_enter_newlines = true</code></pre>
+                    </div>
+
+                    <h3>Customizable Output Driver Order</h3>
+                    <p>Configure which output drivers voxtype tries and in what order. Force a specific driver or rearrange the fallback chain to match your system.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[output]
+driver_order = ["dotool", "ydotool", "clipboard"]</code></pre>
+                    </div>
+
+                    <h3>Initial Prompt for Transcription Hints</h3>
+                    <p>Provide context to Whisper to improve accuracy for domain-specific vocabulary, proper nouns, or technical terms.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[whisper]
+initial_prompt = "Technical discussion about Kubernetes and Terraform"</code></pre>
+                    </div>
+
+                    <h3>Other New Features</h3>
+                    <ul>
+                        <li><strong>File output mode:</strong> Write transcriptions directly to a file with <code>--file</code></li>
+                        <li><strong>Shift+Enter for newlines:</strong> For chat apps where Enter sends the message</li>
+                        <li><strong>xclip support:</strong> X11 clipboard fallback for non-Wayland environments</li>
+                        <li><strong>Constrained language detection:</strong> Limit auto-detection to specific languages</li>
+                    </ul>
+
+                    <h3>Bug Fixes</h3>
+                    <ul>
+                        <li>Fix apostrophes causing unexpected line breaks</li>
+                        <li>Fix audio device selection for PipeWire loopback devices</li>
+                        <li>Fix notification icon showing wrong engine type</li>
+                        <li>Fix NixOS systemd service path issue</li>
+                    </ul>
+
+                    <p>Thanks to <a href="https://github.com/lypanov">@lypanov</a> for contributions incorporated into this release.</p>
+
+                </div>
+            </article>
 
             <!-- v0.4.x Era Posts -->
 
