@@ -41,6 +41,9 @@ pub enum HotkeyError {
 
     #[error("evdev error: {0}")]
     Evdev(String),
+
+    #[error("Hotkey detection not supported: {0}")]
+    NotSupported(String),
 }
 
 /// Errors related to audio capture
@@ -118,6 +121,7 @@ pub enum OutputError {
 /// Result type alias using VoxtypeError
 pub type Result<T> = std::result::Result<T, VoxtypeError>;
 
+#[cfg(target_os = "linux")]
 impl From<evdev::Error> for HotkeyError {
     fn from(e: evdev::Error) -> Self {
         HotkeyError::Evdev(e.to_string())
