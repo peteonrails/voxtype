@@ -38,8 +38,7 @@ regex = "1"
 # Async traits
 async-trait = "0.1"
 
-# Input handling (evdev for kernel-level key events)
-evdev = "0.12"
+# Cross-platform system interface
 libc = "0.2"
 nix = { version = "0.29", features = ["signal", "process"] }  # Unix signals for IPC
 
@@ -68,6 +67,15 @@ notify = "6"
 
 # Single instance check
 pidlock = "0.1"
+
+# Linux-specific dependencies
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.12"  # Input handling (kernel-level key events)
+
+# macOS-specific dependencies
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.24"  # CGEvent for hotkey capture and text injection
+core-foundation = "0.10"  # Core Foundation types
 
 [features]
 default = []

@@ -1,20 +1,27 @@
 //! Setup module for voxtype installation and configuration
 //!
 //! Provides subcommands for:
-//! - systemd service installation
-//! - Waybar configuration generation
+//! - systemd service installation (Linux only)
+//! - Waybar configuration generation (Linux only)
+//! - DMS configuration (Linux only)
 //! - Interactive model selection
 //! - Output chain detection
-//! - GPU backend management
-//! - Parakeet backend management
-//! - Compositor integration (modifier key fix)
+//! - GPU backend management (Linux only)
+//! - Parakeet backend management (Linux only)
+//! - Compositor integration (modifier key fix, Linux only)
 
+#[cfg(target_os = "linux")]
 pub mod compositor;
+#[cfg(target_os = "linux")]
 pub mod dms;
+#[cfg(target_os = "linux")]
 pub mod gpu;
 pub mod model;
+#[cfg(target_os = "linux")]
 pub mod parakeet;
+#[cfg(target_os = "linux")]
 pub mod systemd;
+#[cfg(target_os = "linux")]
 pub mod waybar;
 
 use crate::config::Config;
@@ -61,7 +68,8 @@ pub struct OutputChainStatus {
     pub primary_method: Option<String>,
 }
 
-/// Check if user is in a specific group
+/// Check if user is in a specific group (Unix-specific)
+#[cfg(unix)]
 pub fn user_in_group(group: &str) -> bool {
     std::process::Command::new("groups")
         .output()
@@ -649,35 +657,48 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
         }
     }
 
-    // Check input group
-    println!("\nInput:");
-    if user_in_group("input") {
-        print_success("User is in 'input' group (evdev hotkeys available)");
-    } else {
-        print_warning("User is not in 'input' group (evdev hotkeys unavailable)");
-        println!("       Required only for evdev hotkey mode, not compositor keybindings");
-        println!("       To enable: sudo usermod -aG input $USER && logout");
+    // Check input group (Linux-specific evdev support)
+    #[cfg(target_os = "linux")]
+    {
+        println!("\nInput:");
+        if user_in_group("input") {
+            print_success("User is in 'input' group (evdev hotkeys available)");
+        } else {
+            print_warning("User is not in 'input' group (evdev hotkeys unavailable)");
+            println!("       Required only for evdev hotkey mode, not compositor keybindings");
+            println!("       To enable: sudo usermod -aG input $USER && logout");
+        }
     }
 
-    // Check output chain
-    let output_status = detect_output_chain().await;
-    print_output_chain_status(&output_status);
+    // Check output chain (Linux tools)
+    #[cfg(target_os = "linux")]
+    {
+        let output_status = detect_output_chain().await;
+        print_output_chain_status(&output_status);
 
-    if output_status.primary_method.is_none() {
-        print_failure("No text output method available");
-        if output_status.display_server == DisplayServer::Wayland {
-            println!("       Install wtype: sudo pacman -S wtype");
-        } else {
-            println!("       Install ydotool: sudo pacman -S ydotool");
+        if output_status.primary_method.is_none() {
+            print_failure("No text output method available");
+            if output_status.display_server == DisplayServer::Wayland {
+                println!("       Install wtype: sudo pacman -S wtype");
+            } else {
+                println!("       Install ydotool: sudo pacman -S ydotool");
+            }
+            all_ok = false;
+        } else if output_status.primary_method.as_deref() == Some("clipboard") {
+            print_warning("Only clipboard mode available - typing won't work");
+            if output_status.display_server == DisplayServer::Wayland {
+                println!("       Install wtype: sudo pacman -S wtype");
+            } else {
+                println!("       Install ydotool: sudo pacman -S ydotool");
+            }
         }
-        all_ok = false;
-    } else if output_status.primary_method.as_deref() == Some("clipboard") {
-        print_warning("Only clipboard mode available - typing won't work");
-        if output_status.display_server == DisplayServer::Wayland {
-            println!("       Install wtype: sudo pacman -S wtype");
-        } else {
-            println!("       Install ydotool: sudo pacman -S ydotool");
-        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        println!("\nPlatform:");
+        print_info("Running on macOS - text output via external tools not yet implemented");
+        print_info("Use 'voxtype record' commands with external keybindings");
     }
 
     // Check whisper model

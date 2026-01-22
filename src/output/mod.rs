@@ -2,14 +2,18 @@
 //!
 //! Provides text output via keyboard simulation or clipboard.
 //!
-//! Fallback chain for `mode = "type"`:
+//! Fallback chain for `mode = "type"` on Linux:
 //! 1. wtype - Wayland-native, best Unicode/CJK support, no daemon needed
 //! 2. dotool - Works on X11/Wayland/TTY, supports keyboard layouts, no daemon needed
 //! 3. ydotool - Works on X11/Wayland/TTY, requires daemon
 //! 4. clipboard (wl-copy) - Wayland clipboard fallback
 //! 5. xclip - X11 clipboard fallback
 //!
-//! Paste mode (clipboard + Ctrl+V) helps with system with non US keyboard layouts.
+//! On macOS:
+//! 1. cgevent - Native CGEvent API for keyboard simulation
+//! 2. clipboard - Fallback (requires pbcopy/pbpaste)
+//!
+//! Paste mode (clipboard + Ctrl+V) helps with systems with non US keyboard layouts.
 
 pub mod clipboard;
 pub mod dotool;
@@ -18,6 +22,9 @@ pub mod post_process;
 pub mod wtype;
 pub mod xclip;
 pub mod ydotool;
+
+#[cfg(target_os = "macos")]
+pub mod cgevent;
 
 use crate::config::{OutputConfig, OutputDriver};
 use crate::error::OutputError;
@@ -201,45 +208,66 @@ pub fn create_output_chain_with_override(
 
     match config.mode {
         crate::config::OutputMode::Type => {
-            // Determine driver order: CLI override > config > default
-            let driver_order: &[OutputDriver] = driver_override
-                .or(config.driver_order.as_deref())
-                .unwrap_or(DEFAULT_DRIVER_ORDER);
+            // Platform-specific output methods
+            #[cfg(target_os = "macos")]
+            {
+                // macOS: CGEvent is the primary (and only) method
+                chain.push(Box::new(cgevent::CGEventOutput::new(
+                    config.type_delay_ms,
+                    pre_type_delay_ms,
+                    config.notification.on_transcription,
+                    config.auto_submit,
+                )));
 
-            if let Some(custom_order) = driver_override.or(config.driver_order.as_deref()) {
-                tracing::info!(
-                    "Using custom driver order: {}",
-                    custom_order
-                        .iter()
-                        .map(|d| d.to_string())
-                        .collect::<Vec<_>>()
-                        .join(" -> ")
-                );
+                // Clipboard fallback on macOS
+                if config.fallback_to_clipboard {
+                    chain.push(Box::new(clipboard::ClipboardOutput::new(false)));
+                }
             }
 
-            // Build chain based on driver order
-            for (i, driver) in driver_order.iter().enumerate() {
-                // Skip clipboard if it's in the middle and fallback_to_clipboard is false
-                // (clipboard should only be added if explicitly in the order OR fallback is enabled and it's last)
-                let is_last = i == driver_order.len() - 1;
-                if *driver == OutputDriver::Clipboard && !is_last && !config.fallback_to_clipboard {
-                    continue;
+            #[cfg(not(target_os = "macos"))]
+            {
+                // Determine driver order: CLI override > config > default
+                let driver_order: &[OutputDriver] = driver_override
+                    .or(config.driver_order.as_deref())
+                    .unwrap_or(DEFAULT_DRIVER_ORDER);
+
+                if let Some(custom_order) = driver_override.or(config.driver_order.as_deref()) {
+                    tracing::info!(
+                        "Using custom driver order: {}",
+                        custom_order
+                            .iter()
+                            .map(|d| d.to_string())
+                            .collect::<Vec<_>>()
+                            .join(" -> ")
+                    );
                 }
 
-                chain.push(create_driver_output(
-                    *driver,
-                    config,
-                    pre_type_delay_ms,
-                    i == 0,
-                ));
-            }
+                // Build chain based on driver order
+                for (i, driver) in driver_order.iter().enumerate() {
+                    // Skip clipboard if it's in the middle and fallback_to_clipboard is false
+                    // (clipboard should only be added if explicitly in the order OR fallback is enabled and it's last)
+                    let is_last = i == driver_order.len() - 1;
+                    if *driver == OutputDriver::Clipboard && !is_last && !config.fallback_to_clipboard
+                    {
+                        continue;
+                    }
 
-            // If fallback_to_clipboard is true but clipboard wasn't in the custom order, add it
-            if config.fallback_to_clipboard
-                && config.driver_order.is_some()
-                && !driver_order.contains(&OutputDriver::Clipboard)
-            {
-                chain.push(Box::new(clipboard::ClipboardOutput::new(false)));
+                    chain.push(create_driver_output(
+                        *driver,
+                        config,
+                        pre_type_delay_ms,
+                        i == 0,
+                    ));
+                }
+
+                // If fallback_to_clipboard is true but clipboard wasn't in the custom order, add it
+                if config.fallback_to_clipboard
+                    && config.driver_order.is_some()
+                    && !driver_order.contains(&OutputDriver::Clipboard)
+                {
+                    chain.push(Box::new(clipboard::ClipboardOutput::new(false)));
+                }
             }
         }
         crate::config::OutputMode::Clipboard => {

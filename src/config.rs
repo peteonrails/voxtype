@@ -26,9 +26,11 @@ state_file = "auto"
 
 [hotkey]
 # Key to hold for push-to-talk
-# Common choices: SCROLLLOCK, PAUSE, RIGHTALT, F13-F24
-# Use `evtest` to find key names for your keyboard
-key = "SCROLLLOCK"
+# Default: FN/Globe on macOS, SCROLLLOCK on Linux
+# macOS options: FN/GLOBE, RIGHTOPTION, CAPSLOCK, F13-F20
+# Linux options: SCROLLLOCK, PAUSE, RIGHTALT, F13-F24
+# key = "FN"  # macOS default
+# key = "SCROLLLOCK"  # Linux default
 
 # Optional modifier keys that must also be held
 # Example: modifiers = ["LEFTCTRL", "LEFTALT"]
@@ -295,8 +297,10 @@ pub struct Config {
 /// Hotkey detection configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HotkeyConfig {
-    /// Key name (evdev KEY_* constant name, without the KEY_ prefix)
-    /// Examples: "SCROLLLOCK", "RIGHTALT", "PAUSE", "F24"
+    /// Key name (without KEY_ prefix)
+    /// Default: "FN" on macOS, "SCROLLLOCK" on Linux
+    /// macOS: "FN", "GLOBE", "RIGHTOPTION", "CAPSLOCK", "F13"-"F20"
+    /// Linux: "SCROLLLOCK", "PAUSE", "RIGHTALT", "F13"-"F24"
     #[serde(default = "default_hotkey_key")]
     pub key: String,
 
@@ -362,7 +366,14 @@ pub struct AudioFeedbackConfig {
 }
 
 fn default_hotkey_key() -> String {
-    "SCROLLLOCK".to_string()
+    #[cfg(target_os = "macos")]
+    {
+        "FN".to_string()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "SCROLLLOCK".to_string()
+    }
 }
 
 fn default_sound_theme() -> String {
@@ -887,7 +898,7 @@ pub struct NotificationConfig {
     pub on_recording_stop: bool,
 
     /// Notify with transcribed text after transcription completes
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub on_transcription: bool,
 
     /// Show engine icon in notification title (🦜 for Parakeet, 🗣️ for Whisper)

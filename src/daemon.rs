@@ -458,23 +458,23 @@ impl Daemon {
                     if let Some(t) = transcriber {
                         self.transcription_task =
                             Some(tokio::task::spawn_blocking(move || t.transcribe(&samples)));
-                        return true;
+                        true
                     } else {
                         tracing::error!("No transcriber available");
                         self.play_feedback(SoundEvent::Error);
                         self.reset_to_idle(state).await;
-                        return false;
+                        false
                     }
                 }
                 Err(e) => {
                     tracing::warn!("Recording error: {}", e);
                     self.reset_to_idle(state).await;
-                    return false;
+                    false
                 }
             }
         } else {
             self.reset_to_idle(state).await;
-            return false;
+            false
         }
     }
 
@@ -585,18 +585,15 @@ impl Daemon {
                         };
 
                         let file_mode = &self.config.output.file_mode;
-                        match write_transcription_to_file(&output_path, &final_text, file_mode).await
+                        match write_transcription_to_file(&output_path, &final_text, file_mode)
+                            .await
                         {
                             Ok(()) => {
                                 let mode_str = match file_mode {
                                     FileMode::Overwrite => "wrote",
                                     FileMode::Append => "appended",
                                 };
-                                tracing::info!(
-                                    "{} transcription to {:?}",
-                                    mode_str,
-                                    output_path
-                                );
+                                tracing::info!("{} transcription to {:?}", mode_str, output_path);
                             }
                             Err(e) => {
                                 tracing::error!(
@@ -718,8 +715,7 @@ impl Daemon {
                 return Err(crate::error::VoxtypeError::Config(format!(
                     "Another voxtype instance is already running (lock error: {:?})",
                     e
-                ))
-                .into());
+                )));
             }
         }
 
@@ -1688,7 +1684,8 @@ mod tests {
             // Should not panic
         });
     }
-  
+
+    #[allow(dead_code)]
     fn test_pidlock_acquisition_succeeds() {
         with_test_runtime_dir(|dir| {
             let lock_path = dir.join("voxtype.lock");
