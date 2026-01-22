@@ -154,7 +154,7 @@ on_recording_start = false
 on_recording_stop = false
 
 # Show notification with transcribed text after transcription completes
-on_transcription = true
+on_transcription = false
 
 # [text]
 # Text processing options (word replacements, spoken punctuation)
@@ -661,7 +661,7 @@ pub struct NotificationConfig {
     pub on_recording_stop: bool,
 
     /// Notify with transcribed text after transcription completes
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub on_transcription: bool,
 }
 
@@ -670,7 +670,7 @@ impl Default for NotificationConfig {
         Self {
             on_recording_start: false,
             on_recording_stop: false,
-            on_transcription: true,
+            on_transcription: false,
         }
     }
 }

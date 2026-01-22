@@ -198,7 +198,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_output_fallback() {
-        // printf with empty string outputs nothing, which should trigger fallback
+        // printf with empty string outputs nothing, triggering fallback
+        // Note: printf is POSIX-compliant and works on both Linux and macOS
         let config = make_config("printf ''", 5000);
         let processor = PostProcessor::new(&config);
         let result = processor.process("original text").await;
