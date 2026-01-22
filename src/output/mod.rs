@@ -2,13 +2,17 @@
 //!
 //! Provides text output via keyboard simulation or clipboard.
 //!
-//! Fallback chain for `mode = "type"`:
+//! Fallback chain for `mode = "type"` on Linux:
 //! 1. wtype - Wayland-native, best Unicode/CJK support, no daemon needed
 //! 2. dotool - Works on X11/Wayland/TTY, supports keyboard layouts, no daemon needed
 //! 3. ydotool - Works on X11/Wayland/TTY, requires daemon
 //! 4. clipboard - Universal fallback via wl-copy
 //!
-//! Paste mode (clipboard + Ctrl+V) helps with system with non US keyboard layouts.
+//! On macOS:
+//! 1. cgevent - Native CGEvent API for keyboard simulation
+//! 2. clipboard - Fallback (requires pbcopy/pbpaste)
+//!
+//! Paste mode (clipboard + Ctrl+V) helps with systems with non US keyboard layouts.
 
 pub mod clipboard;
 pub mod dotool;
@@ -16,6 +20,9 @@ pub mod paste;
 pub mod post_process;
 pub mod wtype;
 pub mod ydotool;
+
+#[cfg(target_os = "macos")]
+pub mod cgevent;
 
 use crate::config::OutputConfig;
 use crate::error::OutputError;
@@ -44,33 +51,48 @@ pub fn create_output_chain(config: &OutputConfig) -> Vec<Box<dyn TextOutput>> {
 
     match config.mode {
         crate::config::OutputMode::Type => {
-            // Primary: wtype for Wayland (best Unicode/CJK support, no daemon)
-            chain.push(Box::new(wtype::WtypeOutput::new(
-                config.notification.on_transcription,
-                config.auto_submit,
-                config.type_delay_ms,
-                pre_type_delay_ms,
-            )));
+            // Platform-specific output methods
+            #[cfg(target_os = "macos")]
+            {
+                // macOS: CGEvent is the primary method
+                chain.push(Box::new(cgevent::CGEventOutput::new(
+                    config.type_delay_ms,
+                    pre_type_delay_ms,
+                    config.notification.on_transcription,
+                    config.auto_submit,
+                )));
+            }
 
-            // Fallback 1: dotool (supports keyboard layouts, no daemon needed)
-            chain.push(Box::new(dotool::DotoolOutput::new(
-                config.type_delay_ms,
-                pre_type_delay_ms,
-                false, // no notification, wtype handles it if available
-                config.auto_submit,
-                config.dotool_xkb_layout.clone(),
-                config.dotool_xkb_variant.clone(),
-            )));
+            #[cfg(not(target_os = "macos"))]
+            {
+                // Linux: wtype for Wayland (best Unicode/CJK support, no daemon)
+                chain.push(Box::new(wtype::WtypeOutput::new(
+                    config.notification.on_transcription,
+                    config.auto_submit,
+                    config.type_delay_ms,
+                    pre_type_delay_ms,
+                )));
 
-            // Fallback 2: ydotool (works on X11/TTY, requires daemon)
-            chain.push(Box::new(ydotool::YdotoolOutput::new(
-                config.type_delay_ms,
-                pre_type_delay_ms,
-                false, // no notification, wtype handles it if available
-                config.auto_submit,
-            )));
+                // Fallback 1: dotool (supports keyboard layouts, no daemon needed)
+                chain.push(Box::new(dotool::DotoolOutput::new(
+                    config.type_delay_ms,
+                    pre_type_delay_ms,
+                    false, // no notification, wtype handles it if available
+                    config.auto_submit,
+                    config.dotool_xkb_layout.clone(),
+                    config.dotool_xkb_variant.clone(),
+                )));
 
-            // Last resort: clipboard
+                // Fallback 2: ydotool (works on X11/TTY, requires daemon)
+                chain.push(Box::new(ydotool::YdotoolOutput::new(
+                    config.type_delay_ms,
+                    pre_type_delay_ms,
+                    false, // no notification, wtype handles it if available
+                    config.auto_submit,
+                )));
+            }
+
+            // Last resort: clipboard (cross-platform)
             if config.fallback_to_clipboard {
                 chain.push(Box::new(clipboard::ClipboardOutput::new(false)));
             }
