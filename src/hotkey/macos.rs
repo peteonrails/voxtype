@@ -9,7 +9,7 @@
 use super::{HotkeyEvent, HotkeyListener};
 use crate::config::HotkeyConfig;
 use crate::error::HotkeyError;
-use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
+use core_foundation::runloop::{kCFRunLoopCommonModes, kCFRunLoopDefaultMode, CFRunLoop};
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
     CGEventType, EventField,
@@ -515,7 +515,7 @@ fn macos_listener_loop(
     // Run with a timeout to periodically check stop flag
     while !stop_flag.load(Ordering::SeqCst) {
         CFRunLoop::run_in_mode(
-            unsafe { kCFRunLoopCommonModes },
+            unsafe { kCFRunLoopDefaultMode },
             std::time::Duration::from_millis(100),
             true,
         );
