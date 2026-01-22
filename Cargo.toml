@@ -57,11 +57,6 @@ whisper-rs = "0.15.1"
 # CPU count for thread detection
 num_cpus = "1.16"
 
-# macOS CGEvent support
-[target.'cfg(target_os = "macos")'.dependencies]
-core-graphics = "0.24"
-core-foundation = "0.10"
-
 # File watching for status --follow
 notify = "6"
 
@@ -70,16 +65,14 @@ pidlock = "0.1"
 
 # Linux-specific dependencies
 [target.'cfg(target_os = "linux")'.dependencies]
-# Input handling (evdev for kernel-level key events)
-evdev = "0.12"
+evdev = "0.12"  # Input handling (kernel-level key events)
 inotify = "0.10"  # Watch /dev/input for device hotplug
 nix = { version = "0.29", features = ["signal", "process"] }  # Unix signals for IPC
 
 # macOS-specific dependencies
 [target.'cfg(target_os = "macos")'.dependencies]
-# Core frameworks for future macOS-specific features (hotkey, accessibility)
-core-graphics = "0.24"
-core-foundation = "0.10"
+core-graphics = "0.24"  # CGEvent for hotkey capture and text injection
+core-foundation = "0.10"  # Core Foundation types
 
 [features]
 default = []
