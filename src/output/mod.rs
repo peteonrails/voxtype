@@ -17,7 +17,7 @@ pub mod post_process;
 pub mod wtype;
 pub mod ydotool;
 
-use crate::config::OutputConfig;
+use crate::config::{OutputConfig, OutputDriver};
 use crate::error::OutputError;
 use std::process::Stdio;
 use tokio::process::Command;
@@ -35,8 +35,59 @@ pub trait TextOutput: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
+/// Default driver order for type mode
+const DEFAULT_DRIVER_ORDER: &[OutputDriver] = &[
+    OutputDriver::Wtype,
+    OutputDriver::Dotool,
+    OutputDriver::Ydotool,
+    OutputDriver::Clipboard,
+];
+
+/// Create a TextOutput implementation for a specific driver
+fn create_driver_output(
+    driver: OutputDriver,
+    config: &OutputConfig,
+    pre_type_delay_ms: u32,
+    is_first: bool,
+) -> Box<dyn TextOutput> {
+    // Only the first driver in the chain should show notifications
+    let show_notification = is_first && config.notification.on_transcription;
+
+    match driver {
+        OutputDriver::Wtype => Box::new(wtype::WtypeOutput::new(
+            show_notification,
+            config.auto_submit,
+            config.type_delay_ms,
+            pre_type_delay_ms,
+        )),
+        OutputDriver::Dotool => Box::new(dotool::DotoolOutput::new(
+            config.type_delay_ms,
+            pre_type_delay_ms,
+            show_notification,
+            config.auto_submit,
+            config.dotool_xkb_layout.clone(),
+            config.dotool_xkb_variant.clone(),
+        )),
+        OutputDriver::Ydotool => Box::new(ydotool::YdotoolOutput::new(
+            config.type_delay_ms,
+            pre_type_delay_ms,
+            show_notification,
+            config.auto_submit,
+        )),
+        OutputDriver::Clipboard => Box::new(clipboard::ClipboardOutput::new(show_notification)),
+    }
+}
+
 /// Factory function that returns a fallback chain of output methods
 pub fn create_output_chain(config: &OutputConfig) -> Vec<Box<dyn TextOutput>> {
+    create_output_chain_with_override(config, None)
+}
+
+/// Factory function that returns a fallback chain of output methods with an optional driver override
+pub fn create_output_chain_with_override(
+    config: &OutputConfig,
+    driver_override: Option<&[OutputDriver]>,
+) -> Vec<Box<dyn TextOutput>> {
     let mut chain: Vec<Box<dyn TextOutput>> = Vec::new();
 
     // Get effective pre_type_delay_ms (handles deprecated wtype_delay_ms)
@@ -44,34 +95,44 @@ pub fn create_output_chain(config: &OutputConfig) -> Vec<Box<dyn TextOutput>> {
 
     match config.mode {
         crate::config::OutputMode::Type => {
-            // Primary: wtype for Wayland (best Unicode/CJK support, no daemon)
-            chain.push(Box::new(wtype::WtypeOutput::new(
-                config.notification.on_transcription,
-                config.auto_submit,
-                config.type_delay_ms,
-                pre_type_delay_ms,
-            )));
+            // Determine driver order: CLI override > config > default
+            let driver_order: &[OutputDriver] = driver_override
+                .or(config.driver_order.as_deref())
+                .unwrap_or(DEFAULT_DRIVER_ORDER);
 
-            // Fallback 1: dotool (supports keyboard layouts, no daemon needed)
-            chain.push(Box::new(dotool::DotoolOutput::new(
-                config.type_delay_ms,
-                pre_type_delay_ms,
-                false, // no notification, wtype handles it if available
-                config.auto_submit,
-                config.dotool_xkb_layout.clone(),
-                config.dotool_xkb_variant.clone(),
-            )));
+            if let Some(custom_order) = driver_override.or(config.driver_order.as_deref()) {
+                tracing::info!(
+                    "Using custom driver order: {}",
+                    custom_order
+                        .iter()
+                        .map(|d| d.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" -> ")
+                );
+            }
 
-            // Fallback 2: ydotool (works on X11/TTY, requires daemon)
-            chain.push(Box::new(ydotool::YdotoolOutput::new(
-                config.type_delay_ms,
-                pre_type_delay_ms,
-                false, // no notification, wtype handles it if available
-                config.auto_submit,
-            )));
+            // Build chain based on driver order
+            for (i, driver) in driver_order.iter().enumerate() {
+                // Skip clipboard if it's in the middle and fallback_to_clipboard is false
+                // (clipboard should only be added if explicitly in the order OR fallback is enabled and it's last)
+                let is_last = i == driver_order.len() - 1;
+                if *driver == OutputDriver::Clipboard && !is_last && !config.fallback_to_clipboard {
+                    continue;
+                }
 
-            // Last resort: clipboard
-            if config.fallback_to_clipboard {
+                chain.push(create_driver_output(
+                    *driver,
+                    config,
+                    pre_type_delay_ms,
+                    i == 0,
+                ));
+            }
+
+            // If fallback_to_clipboard is true but clipboard wasn't in the custom order, add it
+            if config.fallback_to_clipboard
+                && config.driver_order.is_some()
+                && !driver_order.contains(&OutputDriver::Clipboard)
+            {
                 chain.push(Box::new(clipboard::ClipboardOutput::new(false)));
             }
         }

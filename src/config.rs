@@ -120,6 +120,16 @@ mode = "type"
 # Fall back to clipboard if typing fails
 fallback_to_clipboard = true
 
+# Custom driver order for type mode (optional)
+# Default order: wtype -> dotool -> ydotool -> clipboard
+# Customize to prefer a specific driver or change the fallback order.
+# Available drivers: wtype, dotool, ydotool, clipboard
+# Example: prefer ydotool over dotool:
+#   driver_order = ["wtype", "ydotool", "dotool", "clipboard"]
+# Example: use only ydotool, no fallback:
+#   driver_order = ["ydotool"]
+# driver_order = ["wtype", "dotool", "ydotool", "clipboard"]
+
 # Delay between typed characters in milliseconds
 # 0 = fastest possible, increase if characters are dropped
 type_delay_ms = 0
@@ -704,6 +714,12 @@ pub struct OutputConfig {
     #[serde(default = "default_true")]
     pub fallback_to_clipboard: bool,
 
+    /// Custom driver order for type mode (overrides default: wtype -> dotool -> ydotool -> clipboard)
+    /// Specify which drivers to try and in what order.
+    /// Example: ["ydotool", "wtype"] to prefer ydotool over wtype
+    #[serde(default)]
+    pub driver_order: Option<Vec<OutputDriver>>,
+
     /// Notification settings
     #[serde(default)]
     pub notification: NotificationConfig,
@@ -809,6 +825,49 @@ pub enum OutputMode {
     File,
 }
 
+/// Output driver for typing text
+/// Used to specify preferred drivers in the fallback chain
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputDriver {
+    /// wtype - Wayland-native, best Unicode/CJK support
+    Wtype,
+    /// dotool - Works on X11/Wayland/TTY, supports keyboard layouts
+    Dotool,
+    /// ydotool - Works on X11/Wayland/TTY, requires daemon
+    Ydotool,
+    /// Clipboard via wl-copy (universal fallback)
+    Clipboard,
+}
+
+impl std::fmt::Display for OutputDriver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OutputDriver::Wtype => write!(f, "wtype"),
+            OutputDriver::Dotool => write!(f, "dotool"),
+            OutputDriver::Ydotool => write!(f, "ydotool"),
+            OutputDriver::Clipboard => write!(f, "clipboard"),
+        }
+    }
+}
+
+impl std::str::FromStr for OutputDriver {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "wtype" => Ok(OutputDriver::Wtype),
+            "dotool" => Ok(OutputDriver::Dotool),
+            "ydotool" => Ok(OutputDriver::Ydotool),
+            "clipboard" => Ok(OutputDriver::Clipboard),
+            _ => Err(format!(
+                "Unknown driver '{}'. Valid options: wtype, dotool, ydotool, clipboard",
+                s
+            )),
+        }
+    }
+}
+
 /// File write mode when using file output
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -857,6 +916,7 @@ impl Default for Config {
             output: OutputConfig {
                 mode: OutputMode::Type,
                 fallback_to_clipboard: true,
+                driver_order: None,
                 notification: NotificationConfig::default(),
                 type_delay_ms: 0,
                 pre_type_delay_ms: 0,
@@ -1534,5 +1594,110 @@ mod tests {
         assert!(!config.is_auto());
         assert!(!config.is_multiple());
         assert_eq!(config.primary(), "en");
+    }
+
+    #[test]
+    fn test_output_driver_from_str() {
+        assert_eq!("wtype".parse::<OutputDriver>().unwrap(), OutputDriver::Wtype);
+        assert_eq!("dotool".parse::<OutputDriver>().unwrap(), OutputDriver::Dotool);
+        assert_eq!("ydotool".parse::<OutputDriver>().unwrap(), OutputDriver::Ydotool);
+        assert_eq!("clipboard".parse::<OutputDriver>().unwrap(), OutputDriver::Clipboard);
+        // Case insensitive
+        assert_eq!("WTYPE".parse::<OutputDriver>().unwrap(), OutputDriver::Wtype);
+        assert_eq!("Ydotool".parse::<OutputDriver>().unwrap(), OutputDriver::Ydotool);
+        // Invalid
+        assert!("invalid".parse::<OutputDriver>().is_err());
+    }
+
+    #[test]
+    fn test_output_driver_display() {
+        assert_eq!(OutputDriver::Wtype.to_string(), "wtype");
+        assert_eq!(OutputDriver::Dotool.to_string(), "dotool");
+        assert_eq!(OutputDriver::Ydotool.to_string(), "ydotool");
+        assert_eq!(OutputDriver::Clipboard.to_string(), "clipboard");
+    }
+
+    #[test]
+    fn test_parse_driver_order_from_toml() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+            driver_order = ["ydotool", "wtype", "clipboard"]
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let driver_order = config.output.driver_order.unwrap();
+        assert_eq!(driver_order.len(), 3);
+        assert_eq!(driver_order[0], OutputDriver::Ydotool);
+        assert_eq!(driver_order[1], OutputDriver::Wtype);
+        assert_eq!(driver_order[2], OutputDriver::Clipboard);
+    }
+
+    #[test]
+    fn test_driver_order_not_set_by_default() {
+        let config = Config::default();
+        assert!(config.output.driver_order.is_none());
+    }
+
+    #[test]
+    fn test_parse_config_without_driver_order() {
+        // Ensure backwards compatibility - config without driver_order should work
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.output.driver_order.is_none());
+    }
+
+    #[test]
+    fn test_parse_single_driver_order() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+            driver_order = ["ydotool"]
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let driver_order = config.output.driver_order.unwrap();
+        assert_eq!(driver_order.len(), 1);
+        assert_eq!(driver_order[0], OutputDriver::Ydotool);
     }
 }

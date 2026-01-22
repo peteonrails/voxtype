@@ -76,6 +76,12 @@ pub struct Cli {
     #[arg(long, value_name = "MS", hide = true)]
     pub wtype_delay: Option<u32>,
 
+    /// Output driver order for type mode (comma-separated)
+    /// Overrides config driver_order. Available: wtype, dotool, ydotool, clipboard
+    /// Example: --driver=ydotool,wtype,clipboard
+    #[arg(long, value_name = "DRIVERS")]
+    pub driver: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -775,5 +781,23 @@ mod tests {
             result.is_err(),
             "Should not allow both --file and --type"
         );
+    }
+
+    #[test]
+    fn test_driver_flag() {
+        let cli = Cli::parse_from(["voxtype", "--driver=ydotool,wtype"]);
+        assert_eq!(cli.driver, Some("ydotool,wtype".to_string()));
+    }
+
+    #[test]
+    fn test_driver_flag_single() {
+        let cli = Cli::parse_from(["voxtype", "--driver=ydotool"]);
+        assert_eq!(cli.driver, Some("ydotool".to_string()));
+    }
+
+    #[test]
+    fn test_driver_flag_not_set() {
+        let cli = Cli::parse_from(["voxtype"]);
+        assert!(cli.driver.is_none());
     }
 }

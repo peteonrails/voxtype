@@ -10,6 +10,13 @@ use std::process::Command;
 use tracing_subscriber::EnvFilter;
 use voxtype::{config, cpu, daemon, setup, transcribe, Cli, Commands, RecordAction, SetupAction};
 
+/// Parse a comma-separated list of driver names into OutputDriver vec
+fn parse_driver_order(s: &str) -> Result<Vec<config::OutputDriver>, String> {
+    s.split(',')
+        .map(|d| d.trim().parse::<config::OutputDriver>())
+        .collect()
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Install SIGILL handler early to catch illegal instruction crashes
@@ -98,6 +105,17 @@ async fn main() -> anyhow::Result<()> {
     }
     if cli.no_whisper_context_optimization {
         config.whisper.context_window_optimization = false;
+    }
+    if let Some(ref driver_str) = cli.driver {
+        match parse_driver_order(driver_str) {
+            Ok(drivers) => {
+                config.output.driver_order = Some(drivers);
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
     }
 
     // Run the appropriate command
@@ -681,6 +699,18 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
         "  fallback_to_clipboard = {}",
         config.output.fallback_to_clipboard
     );
+    if let Some(ref driver_order) = config.output.driver_order {
+        println!(
+            "  driver_order = [{}]",
+            driver_order
+                .iter()
+                .map(|d| format!("{:?}", d))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    } else {
+        println!("  driver_order = (default: wtype -> dotool -> ydotool -> clipboard)");
+    }
     println!("  type_delay_ms = {}", config.output.type_delay_ms);
     println!("  pre_type_delay_ms = {}", config.output.pre_type_delay_ms);
 
