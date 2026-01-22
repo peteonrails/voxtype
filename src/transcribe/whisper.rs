@@ -188,6 +188,10 @@ impl Transcriber for WhisperTranscriber {
             tracing::debug!("Using initial prompt: {:?}", prompt);
         }
 
+        // Prevent hallucination/looping by not conditioning on previous text
+        // This is especially important for short clips where Whisper can repeat itself
+        params.set_no_context(true);
+
         // For short recordings, use single segment mode
         if duration_secs < 30.0 {
             params.set_single_segment(true);
