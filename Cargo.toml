@@ -58,6 +58,11 @@ whisper-rs = "0.15.1"
 # CPU count for thread detection
 num_cpus = "1.16"
 
+# macOS CGEvent support
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.24"
+core-foundation = "0.10"
+
 # File watching for status --follow
 notify = "6"
 
