@@ -1,8 +1,9 @@
 //! macOS-based hotkey listener using CGEventTap
 //!
 //! Uses the macOS Quartz Event Services (CGEventTap) to capture global key events.
-//! This approach requires Accessibility permissions to be granted to the application.
+//! For the FN/Globe key, monitors the SecondaryFn modifier flag changes.
 //!
+//! This approach requires Accessibility permissions to be granted to the application.
 //! The user must grant Accessibility access in System Preferences > Security & Privacy >
 //! Privacy > Accessibility for voxtype to receive global key events.
 
@@ -348,6 +349,7 @@ impl HotkeyListener for MacOSListener {
         }
         // Give the run loop a moment to stop
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tracing::debug!("macOS hotkey listener stopping");
         Ok(())
     }
 }
@@ -416,9 +418,22 @@ fn macos_listener_loop(
                 }
             }
             CGEventType::FlagsChanged => {
-                // Handle modifier key changes (for cases where the hotkey IS a modifier)
-                if key_code == target_key as u16 {
-                    // Check if modifier is now pressed or released based on flags
+                // Special handling for FN key - detect via flag, not key code
+                if target_key == VirtualKeyCode::KEY_FN {
+                    let fn_pressed = current_flags.contains(CGEventFlags::CGEventFlagSecondaryFn);
+                    let was_pressed = is_pressed_clone.load(Ordering::SeqCst);
+                    tracing::debug!("FN flag check: fn_pressed={}, was_pressed={}", fn_pressed, was_pressed);
+                    if fn_pressed && !was_pressed {
+                        is_pressed_clone.store(true, Ordering::SeqCst);
+                        tracing::debug!("FN key pressed (macOS)");
+                        let _ = event_tx.send(HotkeyEvent::Pressed);
+                    } else if !fn_pressed && is_pressed_clone.load(Ordering::SeqCst) {
+                        is_pressed_clone.store(false, Ordering::SeqCst);
+                        tracing::debug!("FN key released (macOS)");
+                        let _ = event_tx.send(HotkeyEvent::Released);
+                    }
+                } else if key_code == target_key as u16 {
+                    // Handle other modifier key changes
                     let is_modifier_pressed = check_modifier_pressed(key_code, current_flags);
 
                     if is_modifier_pressed && !is_pressed_clone.load(Ordering::SeqCst) {
@@ -592,7 +607,7 @@ fn parse_key_name(name: &str) -> Result<VirtualKeyCode, HotkeyError> {
             VirtualKeyCode::KEY_COMMAND
         }
         "RIGHTMETA" | "RMETA" | "RIGHTCOMMAND" | "RCMD" => VirtualKeyCode::KEY_RIGHTCOMMAND,
-        "FN" | "FUNCTION" => VirtualKeyCode::KEY_FN,
+        "FN" | "FUNCTION" | "GLOBE" => VirtualKeyCode::KEY_FN,
 
         // Function keys (F13-F20 are good hotkey choices on macOS)
         "F1" => VirtualKeyCode::KEY_F1,

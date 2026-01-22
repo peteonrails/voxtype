@@ -2,10 +2,11 @@
 //!
 //! Provides cross-platform hotkey detection:
 //! - Linux: Uses kernel-level evdev interface for key event detection
-//! - macOS: Uses CGEventTap for global key event capture (requires Accessibility permissions)
+//! - macOS: Uses CGEventTap for global key event capture, or IOHIDManager for FN/Globe key
 //!
 //! On Linux, the user must be in the 'input' group.
 //! On macOS, Accessibility permissions must be granted in System Settings.
+//! The FN/Globe key (default on macOS) requires an Apple keyboard.
 
 #[cfg(target_os = "linux")]
 pub mod evdev_listener;
