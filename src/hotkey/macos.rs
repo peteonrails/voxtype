@@ -421,7 +421,9 @@ fn macos_listener_loop(
                 // Special handling for FN key - detect via flag, not key code
                 if target_key == VirtualKeyCode::KEY_FN {
                     let fn_pressed = current_flags.contains(CGEventFlags::CGEventFlagSecondaryFn);
-                    if fn_pressed && !is_pressed_clone.load(Ordering::SeqCst) {
+                    let was_pressed = is_pressed_clone.load(Ordering::SeqCst);
+                    tracing::debug!("FN flag check: fn_pressed={}, was_pressed={}", fn_pressed, was_pressed);
+                    if fn_pressed && !was_pressed {
                         is_pressed_clone.store(true, Ordering::SeqCst);
                         tracing::debug!("FN key pressed (macOS)");
                         let _ = event_tx.send(HotkeyEvent::Pressed);
