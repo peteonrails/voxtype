@@ -3,8 +3,9 @@
 //! Uses the Linux evdev interface to detect key presses at the kernel level.
 //! This works on all Wayland compositors because it bypasses the display server.
 //!
-//! Uses inotify to detect device changes (hotplug, screenlock, suspend/resume)
-//! and automatically re-enumerates devices when needed.
+//! Uses the notify crate to detect device changes (hotplug, screenlock, suspend/resume)
+//! and automatically re-enumerates devices when needed. The notify crate provides
+//! cross-platform filesystem watching (inotify on Linux, FSEvents on macOS).
 //!
 //! The user must be in the 'input' group to access /dev/input/* devices.
 
@@ -12,10 +13,11 @@ use super::{HotkeyEvent, HotkeyListener};
 use crate::config::HotkeyConfig;
 use crate::error::HotkeyError;
 use evdev::{Device, InputEventKind, Key};
-use inotify::{Inotify, WatchMask};
+use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::{HashMap, HashSet};
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
+use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 
@@ -119,35 +121,49 @@ impl HotkeyListener for EvdevListener {
     }
 }
 
-/// Manages input devices with hotplug detection via inotify
+/// Manages input devices with hotplug detection via notify crate
 struct DeviceManager {
     /// Map of device path to opened device
     devices: HashMap<PathBuf, Device>,
-    /// inotify instance watching /dev/input
-    inotify: Inotify,
-    /// Buffer for inotify events
-    inotify_buffer: [u8; 1024],
+    /// Filesystem watcher for /dev/input (kept alive to maintain watch)
+    #[allow(dead_code)]
+    watcher: RecommendedWatcher,
+    /// Receiver for filesystem events
+    fs_event_rx: std_mpsc::Receiver<Result<notify::Event, notify::Error>>,
     /// Last time we did a full validation
     last_validation: Instant,
 }
 
 impl DeviceManager {
-    /// Create a new device manager with inotify watcher
+    /// Create a new device manager with filesystem watcher
     fn new() -> Result<Self, HotkeyError> {
-        let inotify = Inotify::init().map_err(|e| {
-            HotkeyError::DeviceAccess(format!("Failed to initialize inotify: {}", e))
+        // Set up channel for filesystem events
+        let (tx, rx) = std_mpsc::channel();
+
+        // Create filesystem watcher using the notify crate
+        // On Linux this uses inotify internally, on macOS it uses FSEvents
+        let mut watcher = RecommendedWatcher::new(
+            move |res| {
+                let _ = tx.send(res);
+            },
+            NotifyConfig::default(),
+        )
+        .map_err(|e| {
+            HotkeyError::DeviceAccess(format!("Failed to initialize filesystem watcher: {}", e))
         })?;
 
         // Watch /dev/input for device creation and deletion
-        inotify
-            .watches()
-            .add("/dev/input", WatchMask::CREATE | WatchMask::DELETE)
+        watcher
+            .watch(
+                std::path::Path::new("/dev/input"),
+                RecursiveMode::NonRecursive,
+            )
             .map_err(|e| HotkeyError::DeviceAccess(format!("Failed to watch /dev/input: {}", e)))?;
 
         let mut manager = Self {
             devices: HashMap::new(),
-            inotify,
-            inotify_buffer: [0u8; 1024],
+            watcher,
+            fs_event_rx: rx,
             last_validation: Instant::now(),
         };
 
@@ -233,44 +249,50 @@ impl DeviceManager {
         }
     }
 
-    /// Check inotify for device changes (non-blocking)
+    /// Check for device changes (non-blocking)
     /// Returns true if devices changed
     fn check_for_device_changes(&mut self) -> bool {
-        // Set inotify to non-blocking for this check
-        let fd = self.inotify.as_raw_fd();
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFL);
-            if flags != -1 {
-                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-            }
-        }
-
-        let events = match self.inotify.read_events(&mut self.inotify_buffer) {
-            Ok(events) => events,
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                return false;
-            }
-            Err(e) => {
-                tracing::warn!("inotify read error: {}", e);
-                return false;
-            }
-        };
-
         let mut changed = false;
-        for event in events {
-            if let Some(name) = event.name {
-                let name_str = name.to_string_lossy();
-                if name_str.starts_with("event") {
-                    let path = PathBuf::from("/dev/input").join(&*name_str);
 
-                    if event.mask.contains(inotify::EventMask::CREATE) {
-                        tracing::debug!("Device created: {:?}", path);
-                        changed = true;
-                    } else if event.mask.contains(inotify::EventMask::DELETE) {
-                        tracing::debug!("Device removed: {:?}", path);
-                        self.devices.remove(&path);
-                        changed = true;
+        // Drain all pending filesystem events (non-blocking)
+        loop {
+            match self.fs_event_rx.try_recv() {
+                Ok(Ok(event)) => {
+                    // Check if this is a create or remove event for an event* device
+                    for path in event.paths {
+                        let is_event_device = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.starts_with("event"));
+
+                        if !is_event_device {
+                            continue;
+                        }
+
+                        match event.kind {
+                            notify::EventKind::Create(_) => {
+                                tracing::debug!("Device created: {:?}", path);
+                                changed = true;
+                            }
+                            notify::EventKind::Remove(_) => {
+                                tracing::debug!("Device removed: {:?}", path);
+                                self.devices.remove(&path);
+                                changed = true;
+                            }
+                            _ => {}
+                        }
                     }
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("Filesystem watch error: {}", e);
+                }
+                Err(std_mpsc::TryRecvError::Empty) => {
+                    // No more events pending
+                    break;
+                }
+                Err(std_mpsc::TryRecvError::Disconnected) => {
+                    tracing::warn!("Filesystem watcher disconnected");
+                    break;
                 }
             }
         }
@@ -417,7 +439,7 @@ fn evdev_listener_loop(
             Err(oneshot::error::TryRecvError::Empty) => {}
         }
 
-        // Check inotify for device changes
+        // Check for device changes (filesystem events)
         if manager.check_for_device_changes() {
             // Clear state when devices change
             active_modifiers.clear();
@@ -660,5 +682,60 @@ mod tests {
     #[test]
     fn test_parse_key_name_error() {
         assert!(parse_key_name("INVALID_KEY_NAME").is_err());
+    }
+
+    #[test]
+    fn test_is_event_device_filter() {
+        // Test the device path filtering logic used in check_for_device_changes
+        let test_cases = [
+            ("/dev/input/event0", true),
+            ("/dev/input/event123", true),
+            ("/dev/input/mouse0", false),
+            ("/dev/input/js0", false),
+            ("/dev/input/by-id/usb-keyboard", false),
+            ("/dev/input/eventfoo", true), // starts with event
+        ];
+
+        for (path_str, expected) in test_cases {
+            let path = PathBuf::from(path_str);
+            let is_event = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("event"));
+            assert_eq!(
+                is_event, expected,
+                "Path {} should be event device: {}",
+                path_str, expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_notify_event_kind_matching() {
+        // Verify we correctly identify Create and Remove event kinds
+        // This tests the pattern matching used in check_for_device_changes
+        use notify::event::{CreateKind, RemoveKind};
+
+        let create_event = notify::EventKind::Create(CreateKind::File);
+        let remove_event = notify::EventKind::Remove(RemoveKind::File);
+        let modify_event = notify::EventKind::Modify(notify::event::ModifyKind::Any);
+
+        // Test Create matching
+        let is_create = matches!(create_event, notify::EventKind::Create(_));
+        assert!(is_create, "Create event should match Create pattern");
+
+        // Test Remove matching
+        let is_remove = matches!(remove_event, notify::EventKind::Remove(_));
+        assert!(is_remove, "Remove event should match Remove pattern");
+
+        // Test that Modify does not match Create or Remove
+        let is_create_or_remove = matches!(
+            modify_event,
+            notify::EventKind::Create(_) | notify::EventKind::Remove(_)
+        );
+        assert!(
+            !is_create_or_remove,
+            "Modify event should not match Create or Remove"
+        );
     }
 }
