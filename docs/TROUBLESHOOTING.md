@@ -231,6 +231,29 @@ curl -L -o ~/.local/share/voxtype/models/ggml-base.en.bin \
     https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
 ```
 
+### Voxtype crashes during transcription
+
+**Cause:** On some systems (particularly with glibc 2.42+ like Ubuntu 25.10), the whisper-rs FFI bindings crash due to C++ exceptions crossing the FFI boundary.
+
+**Solution:** Use the CLI backend which runs whisper-cli as a subprocess:
+
+```toml
+[whisper]
+backend = "cli"
+```
+
+This requires `whisper-cli` to be installed. Build it from [whisper.cpp](https://github.com/ggerganov/whisper.cpp):
+
+```bash
+git clone https://github.com/ggerganov/whisper.cpp
+cd whisper.cpp
+cmake -B build
+cmake --build build --config Release
+sudo cp build/bin/whisper-cli /usr/local/bin/
+```
+
+See [CLI Backend](USER_MANUAL.md#cli-backend-whisper-cli) in the User Manual for details.
+
 ### Poor transcription accuracy
 
 **Possible causes:**

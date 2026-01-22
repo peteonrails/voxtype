@@ -592,7 +592,9 @@ pub enum WhisperMode {
     Local,
     /// Remote transcription via OpenAI-compatible API
     Remote,
-    // Future: Cli variant for whisper-cli subprocess (PR #77)
+    /// CLI transcription using whisper-cli subprocess
+    /// Fallback for systems where whisper-rs FFI doesn't work (e.g., glibc 2.42+)
+    Cli,
 }
 
 /// Language configuration supporting single language or array of allowed languages
@@ -754,6 +756,12 @@ pub struct WhisperConfig {
     /// Timeout for remote requests in seconds (default: 30)
     #[serde(default)]
     pub remote_timeout_secs: Option<u64>,
+
+    // --- CLI backend settings ---
+    /// Path to whisper-cli binary (optional, searches PATH if not set)
+    /// Used when mode = "cli"
+    #[serde(default)]
+    pub whisper_cli_path: Option<String>,
 }
 
 impl WhisperConfig {
@@ -773,10 +781,12 @@ impl WhisperConfig {
                 match backend {
                     WhisperMode::Local => "local",
                     WhisperMode::Remote => "remote",
+                    WhisperMode::Cli => "cli",
                 },
                 match backend {
                     WhisperMode::Local => "local",
                     WhisperMode::Remote => "remote",
+                    WhisperMode::Cli => "cli",
                 }
             );
             return backend;
@@ -806,6 +816,7 @@ impl Default for WhisperConfig {
             remote_model: None,
             remote_api_key: None,
             remote_timeout_secs: None,
+            whisper_cli_path: None,
         }
     }
 }
@@ -1181,6 +1192,7 @@ impl Default for Config {
                 remote_model: None,
                 remote_api_key: None,
                 remote_timeout_secs: None,
+                whisper_cli_path: None,
             },
             output: OutputConfig {
                 mode: OutputMode::Type,

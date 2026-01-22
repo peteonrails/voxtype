@@ -16,6 +16,7 @@ Voxtype is a push-to-talk voice-to-text tool for Linux. Optimized for Wayland, w
 - [Improving Transcription Accuracy](#improving-transcription-accuracy)
 - [Whisper Models](#whisper-models)
 - [Remote Whisper Servers](#remote-whisper-servers)
+- [CLI Backend (whisper-cli)](#cli-backend-whisper-cli)
 - [Output Modes](#output-modes)
 - [Post-Processing with LLMs](#post-processing-with-llms)
 - [Profiles](#profiles)
@@ -871,6 +872,69 @@ export VOXTYPE_WHISPER_API_KEY="sk-..."
 ```bash
 voxtype -vv
 ```
+
+---
+
+## CLI Backend (whisper-cli)
+
+The CLI backend uses `whisper-cli` from whisper.cpp as a subprocess instead of the built-in whisper-rs FFI bindings. This is a fallback for systems where the FFI bindings crash.
+
+### When to Use CLI Backend
+
+Use the CLI backend if:
+
+1. **Voxtype crashes during transcription**: Some systems with glibc 2.42+ (e.g., Ubuntu 25.10) experience crashes due to C++ exceptions crossing the FFI boundary. whisper.cpp works fine when run as a standalone binary.
+
+2. **You want to use a custom whisper.cpp build**: If you've compiled whisper.cpp with specific optimizations or features not available in the bundled whisper-rs bindings.
+
+3. **Debugging transcription issues**: Running whisper-cli as a subprocess makes it easier to isolate and diagnose problems.
+
+### Setting Up CLI Backend
+
+1. Install whisper-cli from [whisper.cpp](https://github.com/ggerganov/whisper.cpp):
+
+```bash
+git clone https://github.com/ggerganov/whisper.cpp
+cd whisper.cpp
+cmake -B build
+cmake --build build --config Release
+sudo cp build/bin/whisper-cli /usr/local/bin/
+```
+
+2. Configure voxtype to use CLI backend:
+
+```toml
+[whisper]
+backend = "cli"
+model = "base.en"
+language = "en"
+
+# Optional: specify path if not in PATH
+# whisper_cli_path = "/usr/local/bin/whisper-cli"
+```
+
+3. Restart the voxtype daemon:
+
+```bash
+systemctl --user restart voxtype
+```
+
+### How It Works
+
+When using CLI backend, voxtype:
+
+1. Writes recorded audio to a temporary WAV file
+2. Runs `whisper-cli` with the configured model and options
+3. Parses the JSON output from whisper-cli
+4. Cleans up temporary files
+
+This adds minimal overhead compared to the FFI approach since file I/O is fast on modern systems.
+
+### Limitations
+
+- Slightly higher latency than FFI (file I/O overhead)
+- Requires separate whisper-cli installation
+- No GPU isolation mode (whisper-cli manages its own GPU memory)
 
 ---
 

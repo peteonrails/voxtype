@@ -51,6 +51,15 @@ hound = "3"  # WAV file reading/writing
 # HTTP client for remote transcription
 ureq = { version = "2", features = ["json"] }
 
+# JSON parsing (for CLI backend)
+serde_json = "1"
+
+# CLI path resolution (for CLI backend)
+which = "7"
+
+# Temp files (for CLI backend audio)
+tempfile = "3"
+
 # Audio playback (for feedback sounds)
 rodio = { version = "0.19", default-features = false, features = ["wav"] }
 
@@ -87,7 +96,6 @@ clap = { version = "4", features = ["derive"] }
 clap_mangen = "0.2"
 
 [dev-dependencies]
-tempfile = "3"
 
 [profile.release]
 lto = true

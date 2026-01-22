@@ -105,6 +105,12 @@ on_demand_loading = false
 # remote_api_key = "sk-..."                       # Or use VOXTYPE_WHISPER_API_KEY env var
 # remote_timeout_secs = 30
 
+# --- CLI mode settings (used when mode = "cli") ---
+# Uses whisper-cli subprocess instead of whisper-rs FFI bindings.
+# Fallback for systems where whisper-rs crashes (e.g., glibc 2.42+ on Ubuntu 25.10).
+# Requires whisper-cli from whisper.cpp: https://github.com/ggerganov/whisper.cpp
+# whisper_cli_path = "/usr/local/bin/whisper-cli"  # Optional, searches PATH if not set
+
 # [parakeet]
 # Parakeet configuration (only used when engine = "parakeet")
 # Requires: cargo build --features parakeet
