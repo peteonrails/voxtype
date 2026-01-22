@@ -41,7 +41,6 @@ async-trait = "0.1"
 # Input handling (evdev for kernel-level key events)
 evdev = "0.12"
 libc = "0.2"
-inotify = "0.10"  # Watch /dev/input for device hotplug
 nix = { version = "0.29", features = ["signal", "process"] }  # Unix signals for IPC
 
 # Audio capture

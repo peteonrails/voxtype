@@ -521,7 +521,7 @@ async fn run_status(
         return Ok(());
     }
 
-    // Follow mode: watch for changes using inotify
+    // Follow mode: watch for changes using notify crate
     use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
     use std::sync::mpsc::channel;
     use std::time::Duration;
