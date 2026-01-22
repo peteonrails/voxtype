@@ -359,6 +359,28 @@ Based on open issues and project direction:
 - **Pull requests with unsigned commits will be rejected.** Every commit in a PR must be signed.
 - If GPG signing fails, stop and inform the user rather than bypassing signing.
 
+### Crediting Contributors
+
+When work builds on contributions from others, always include appropriate credit:
+
+- **Use `Co-authored-by:` trailers** for commits that incorporate someone else's work, even if substantially modified
+- **When in doubt, give credit.** It's better to over-attribute than to omit someone's contribution
+- **Credit applies broadly:** code, ideas, bug reports, design feedback, and review comments all warrant acknowledgment
+- **Check PR and issue history** to identify contributors whose work influenced the commit
+
+Examples of when to add co-author credit:
+- Cherry-picking or rebasing commits from a PR (even if you resolve conflicts or make changes)
+- Implementing a feature based on someone's detailed issue or design proposal
+- Fixing a bug that someone else identified and diagnosed
+- Incorporating code snippets or approaches suggested in review comments
+
+Format:
+```
+Co-authored-by: Name <email@example.com>
+```
+
+Multiple co-authors are fine when several people contributed to the work.
+
 ## Version Bumping
 
 **When bumping the version in Cargo.toml, ALWAYS update Cargo.lock before committing.**
