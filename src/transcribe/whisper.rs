@@ -300,14 +300,20 @@ fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
 }
 
 /// Calculate audio_ctx parameter for short clips (≤22.5s).
-/// Formula: duration_seconds * 50 + 64
+/// Formula: duration_seconds * 50 + 64, rounded up to next multiple of 8
 ///
 /// This optimization reduces transcription time for short recordings by
 /// telling Whisper to use a smaller context window proportional to the
 /// actual audio length, rather than the full 30-second batch window.
+///
+/// The result is aligned to 8 to satisfy Metal backend alignment requirements
+/// (GGML requires nb01 % 8 == 0 for Metal operations).
 fn calculate_audio_ctx(duration_secs: f32) -> Option<i32> {
     if duration_secs <= 22.5 {
-        Some((duration_secs * 50.0) as i32 + 64)
+        let raw_ctx = (duration_secs * 50.0) as i32 + 64;
+        // Round up to next multiple of 8 for Metal backend alignment
+        let aligned_ctx = (raw_ctx + 7) / 8 * 8;
+        Some(aligned_ctx)
     } else {
         None
     }
@@ -354,17 +360,23 @@ mod tests {
 
     #[test]
     fn test_calculate_audio_ctx_short_clips() {
-        // Very short clip: 1s -> 1 * 50 + 64 = 114
-        assert_eq!(calculate_audio_ctx(1.0), Some(114));
+        // Very short clip: 1s -> (1 * 50 + 64 = 114) rounded up to 120
+        assert_eq!(calculate_audio_ctx(1.0), Some(120));
 
-        // 5 second clip: 5 * 50 + 64 = 314
-        assert_eq!(calculate_audio_ctx(5.0), Some(314));
+        // 5 second clip: (5 * 50 + 64 = 314) rounded up to 320
+        assert_eq!(calculate_audio_ctx(5.0), Some(320));
 
-        // 10 second clip: 10 * 50 + 64 = 564
-        assert_eq!(calculate_audio_ctx(10.0), Some(564));
+        // 10 second clip: (10 * 50 + 64 = 564) rounded up to 568
+        assert_eq!(calculate_audio_ctx(10.0), Some(568));
 
-        // At threshold: 22.5 * 50 + 64 = 1189
-        assert_eq!(calculate_audio_ctx(22.5), Some(1189));
+        // At threshold: (22.5 * 50 + 64 = 1189) rounded up to 1192
+        assert_eq!(calculate_audio_ctx(22.5), Some(1192));
+
+        // Verify all results are aligned to 8 (for Metal backend)
+        for duration in [1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 15.0, 20.0, 22.5] {
+            let ctx = calculate_audio_ctx(duration).unwrap();
+            assert_eq!(ctx % 8, 0, "audio_ctx {} not aligned to 8 for {}s", ctx, duration);
+        }
     }
 
     #[test]
@@ -386,14 +398,14 @@ mod tests {
         // (the full 30-second context window).
         //
         // This test verifies the optimization logic by demonstrating:
-        // 1. When enabled: short clips get optimized audio_ctx (e.g., 114 for 1s)
+        // 1. When enabled: short clips get optimized audio_ctx (e.g., 120 for 1s)
         // 2. When disabled: Whisper's default 1500 is used (not set explicitly)
 
         const WHISPER_DEFAULT_AUDIO_CTX: i32 = 1500;
 
-        // With optimization enabled, 1s clip would use audio_ctx=114
+        // With optimization enabled, 1s clip would use audio_ctx=120 (aligned to 8)
         let optimized_ctx = calculate_audio_ctx(1.0);
-        assert_eq!(optimized_ctx, Some(114));
+        assert_eq!(optimized_ctx, Some(120));
         assert!(optimized_ctx.unwrap() < WHISPER_DEFAULT_AUDIO_CTX);
 
         // With optimization disabled, we don't call calculate_audio_ctx,
