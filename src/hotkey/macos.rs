@@ -406,7 +406,7 @@ fn macos_listener_loop(
                     if modifiers_match && !is_pressed_clone.load(Ordering::SeqCst) {
                         is_pressed_clone.store(true, Ordering::SeqCst);
                         tracing::debug!("Hotkey pressed (macOS)");
-                        let _ = event_tx.send(HotkeyEvent::Pressed);
+                        let _ = event_tx.send(HotkeyEvent::Pressed { model_override: None });
                     }
                 }
             }
@@ -426,7 +426,7 @@ fn macos_listener_loop(
                     if fn_pressed && !was_pressed {
                         is_pressed_clone.store(true, Ordering::SeqCst);
                         tracing::debug!("FN key pressed (macOS)");
-                        let _ = event_tx.send(HotkeyEvent::Pressed);
+                        let _ = event_tx.send(HotkeyEvent::Pressed { model_override: None });
                     } else if !fn_pressed && is_pressed_clone.load(Ordering::SeqCst) {
                         is_pressed_clone.store(false, Ordering::SeqCst);
                         tracing::debug!("FN key released (macOS)");
@@ -439,7 +439,7 @@ fn macos_listener_loop(
                     if is_modifier_pressed && !is_pressed_clone.load(Ordering::SeqCst) {
                         is_pressed_clone.store(true, Ordering::SeqCst);
                         tracing::debug!("Modifier hotkey pressed (macOS)");
-                        let _ = event_tx.send(HotkeyEvent::Pressed);
+                        let _ = event_tx.send(HotkeyEvent::Pressed { model_override: None });
                     } else if !is_modifier_pressed && is_pressed_clone.load(Ordering::SeqCst) {
                         is_pressed_clone.store(false, Ordering::SeqCst);
                         tracing::debug!("Modifier hotkey released (macOS)");
