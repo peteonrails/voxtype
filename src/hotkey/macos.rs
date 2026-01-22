@@ -1,11 +1,14 @@
-//! macOS-based hotkey listener using CGEventTap
+//! macOS-based hotkey listener using CGEventTap and IOHIDManager
 //!
 //! Uses the macOS Quartz Event Services (CGEventTap) to capture global key events.
-//! This approach requires Accessibility permissions to be granted to the application.
+//! For the FN/Globe key, uses IOHIDManager for low-level HID access since the FN key
+//! is handled at the firmware level and doesn't generate normal CGEvent key events.
 //!
+//! This approach requires Accessibility permissions to be granted to the application.
 //! The user must grant Accessibility access in System Preferences > Security & Privacy >
 //! Privacy > Accessibility for voxtype to receive global key events.
 
+use super::iohid::FnKeyListener;
 use super::{HotkeyEvent, HotkeyListener};
 use crate::config::HotkeyConfig;
 use crate::error::HotkeyError;
@@ -246,7 +249,7 @@ impl VirtualKeyCode {
     }
 }
 
-/// macOS-based hotkey listener using CGEventTap
+/// macOS-based hotkey listener using CGEventTap and IOHIDManager
 pub struct MacOSListener {
     /// The key to listen for
     target_key: VirtualKeyCode,
@@ -258,12 +261,19 @@ pub struct MacOSListener {
     stop_signal: Option<oneshot::Sender<()>>,
     /// Flag to signal stop from callback
     stop_flag: Arc<AtomicBool>,
+    /// Whether to use FN key via IOHIDManager
+    use_fn_key: bool,
+    /// FN key listener (if using FN key)
+    fn_listener: Option<FnKeyListener>,
 }
 
 impl MacOSListener {
     /// Create a new macOS listener for the configured hotkey
     pub fn new(config: &HotkeyConfig) -> Result<Self, HotkeyError> {
         let target_key = parse_key_name(&config.key)?;
+
+        // Check if we should use FN key via IOHIDManager
+        let use_fn_key = target_key == VirtualKeyCode::KEY_FN;
 
         let modifier_flags = config
             .modifiers
@@ -291,12 +301,26 @@ impl MacOSListener {
             ));
         }
 
+        // If using FN key, verify we have an Apple keyboard
+        if use_fn_key {
+            if !super::iohid::has_apple_fn_keyboard() {
+                return Err(HotkeyError::DeviceAccess(
+                    "FN key hotkey requires an Apple keyboard (MacBook internal or Magic Keyboard). \
+                     No compatible keyboard found. Try using RIGHTOPTION as the hotkey instead."
+                        .to_string(),
+                ));
+            }
+            tracing::info!("Using FN/Globe key via IOHIDManager (Apple keyboard detected)");
+        }
+
         Ok(Self {
             target_key,
             modifier_flags,
             cancel_key,
             stop_signal: None,
             stop_flag: Arc::new(AtomicBool::new(false)),
+            use_fn_key,
+            fn_listener: None,
         })
     }
 }
@@ -314,6 +338,16 @@ fn check_accessibility_permissions() -> bool {
 #[async_trait::async_trait]
 impl HotkeyListener for MacOSListener {
     async fn start(&mut self) -> Result<mpsc::Receiver<HotkeyEvent>, HotkeyError> {
+        // If using FN key, use IOHIDManager-based listener
+        if self.use_fn_key {
+            let mut fn_listener = FnKeyListener::new();
+            let rx = fn_listener.start()?;
+            self.fn_listener = Some(fn_listener);
+            tracing::info!("Listening for FN/Globe key (IOHIDManager)");
+            return Ok(rx);
+        }
+
+        // Otherwise, use CGEventTap
         let (tx, rx) = mpsc::channel(32);
         let (stop_tx, stop_rx) = oneshot::channel();
         self.stop_signal = Some(stop_tx);
@@ -342,6 +376,13 @@ impl HotkeyListener for MacOSListener {
     }
 
     async fn stop(&mut self) -> Result<(), HotkeyError> {
+        // Stop FN listener if active
+        if let Some(mut fn_listener) = self.fn_listener.take() {
+            fn_listener.stop();
+            return Ok(());
+        }
+
+        // Stop CGEventTap listener
         self.stop_flag.store(true, Ordering::SeqCst);
         if let Some(stop) = self.stop_signal.take() {
             let _ = stop.send(());
@@ -592,7 +633,7 @@ fn parse_key_name(name: &str) -> Result<VirtualKeyCode, HotkeyError> {
             VirtualKeyCode::KEY_COMMAND
         }
         "RIGHTMETA" | "RMETA" | "RIGHTCOMMAND" | "RCMD" => VirtualKeyCode::KEY_RIGHTCOMMAND,
-        "FN" | "FUNCTION" => VirtualKeyCode::KEY_FN,
+        "FN" | "FUNCTION" | "GLOBE" => VirtualKeyCode::KEY_FN,
 
         // Function keys (F13-F20 are good hotkey choices on macOS)
         "F1" => VirtualKeyCode::KEY_F1,
