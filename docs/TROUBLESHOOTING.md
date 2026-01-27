@@ -10,6 +10,7 @@ Solutions to common issues when using Voxtype.
 - [Transcription Issues](#transcription-issues)
 - [Output Problems](#output-problems)
   - [wtype not working on KDE Plasma or GNOME Wayland](#wtype-not-working-on-kde-plasma-or-gnome-wayland)
+  - [Wrong characters on non-US keyboard layouts](#wrong-characters-on-non-us-keyboard-layouts-yz-swapped-qwertz-azerty)
 - [Performance Issues](#performance-issues)
 - [Systemd Service Issues](#systemd-service-issues)
 - [Debug Mode](#debug-mode)
@@ -394,6 +395,66 @@ mode = "paste"      # Copies to clipboard, then simulates Ctrl+V
 | KDE Plasma (Wayland) | ✗ | ✓ | ✓ | dotool |
 | GNOME (Wayland) | ✗ | ✓ | ✓ | dotool |
 | X11 (any desktop) | ✗ | ✓ | ✓ | dotool |
+
+---
+
+### Wrong characters on non-US keyboard layouts (y/z swapped, QWERTZ, AZERTY)
+
+**Symptom:** Transcribed text has wrong characters. For example, on a German keyboard, "Python" becomes "Pzthon" and "zebra" becomes "yebra" (y and z are swapped).
+
+**Cause:** ydotool sends raw US keycodes and doesn't support keyboard layouts. When voxtype falls back to ydotool (e.g., on X11, Cinnamon, or when wtype fails), characters are typed as if you had a US keyboard layout.
+
+**Solution:** Install dotool and configure your keyboard layout. Unlike ydotool, dotool supports keyboard layouts via XKB:
+
+```bash
+# 1. Install dotool
+# Arch (AUR):
+yay -S dotool
+# Ubuntu/Debian (from source):
+# See https://sr.ht/~geb/dotool/ for instructions
+# Fedora (from source):
+# See https://sr.ht/~geb/dotool/ for instructions
+
+# 2. Add user to input group (required for uinput access)
+sudo usermod -aG input $USER
+# Log out and back in for group change to take effect
+
+# 3. Configure your keyboard layout in config.toml:
+```
+
+Add to `~/.config/voxtype/config.toml`:
+
+```toml
+[output]
+dotool_xkb_layout = "de"  # German QWERTZ
+```
+
+Common layout codes:
+- `de` - German (QWERTZ)
+- `fr` - French (AZERTY)
+- `es` - Spanish
+- `uk` - Ukrainian
+- `ru` - Russian
+- `pl` - Polish
+- `it` - Italian
+- `pt` - Portuguese
+
+For layout variants (e.g., German without dead keys):
+
+```toml
+[output]
+dotool_xkb_layout = "de"
+dotool_xkb_variant = "nodeadkeys"
+```
+
+**Alternative:** Use paste mode, which copies text to the clipboard and simulates Ctrl+V. This works regardless of keyboard layout:
+
+```toml
+[output]
+mode = "paste"
+```
+
+**Note:** The keyboard layout fix requires voxtype v0.5.0 or later. If you're on an older version, upgrade first.
 
 ---
 
