@@ -74,8 +74,14 @@ pub mod config;
 pub mod cpu;
 pub mod daemon;
 pub mod error;
+#[cfg(target_os = "linux")]
 pub mod hotkey;
+#[cfg(target_os = "macos")]
+pub mod hotkey_macos;
 pub mod model_manager;
+#[cfg(target_os = "macos")]
+pub mod menubar;
+pub mod notification;
 pub mod output;
 pub mod setup;
 pub mod state;

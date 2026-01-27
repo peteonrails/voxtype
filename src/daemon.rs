@@ -7,8 +7,12 @@ use crate::audio::feedback::{AudioFeedback, SoundEvent};
 use crate::audio::{self, AudioCapture};
 use crate::config::{ActivationMode, Config, FileMode, OutputMode};
 use crate::error::Result;
+#[cfg(target_os = "linux")]
 use crate::hotkey::{self, HotkeyEvent};
+#[cfg(target_os = "macos")]
+use crate::hotkey_macos::{self as hotkey, HotkeyEvent};
 use crate::model_manager::ModelManager;
+use crate::notification;
 use crate::output;
 use crate::output::post_process::PostProcessor;
 use crate::state::State;
@@ -16,10 +20,12 @@ use crate::text::TextProcessor;
 use crate::transcribe::Transcriber;
 use pidlock::Pidlock;
 use std::path::PathBuf;
-use std::process::Stdio;
+#[cfg(unix)]
+use nix::sys::signal::{kill, Signal};
+#[cfg(unix)]
+use nix::unistd::Pid;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::process::Command;
 use tokio::signal::unix::{signal, SignalKind};
 
 /// Send a desktop notification with optional engine icon
@@ -30,17 +36,7 @@ async fn send_notification(title: &str, body: &str, show_engine_icon: bool, engi
         title.to_string()
     };
 
-    let _ = Command::new("notify-send")
-        .args([
-            "--app-name=Voxtype",
-            "--expire-time=2000",
-            &title,
-            body,
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await;
+    notification::send(&title, body).await;
 }
 
 /// Write state to file for external integrations (e.g., Waybar)
@@ -89,6 +85,33 @@ fn write_pid_file() -> Option<PathBuf> {
 
     tracing::debug!("PID file written: {:?} (pid={})", pid_path, pid);
     Some(pid_path)
+}
+
+/// Check if a PID is still running
+#[cfg(unix)]
+fn is_pid_running(pid: i32) -> bool {
+    // kill with signal 0 checks if process exists without sending a signal
+    kill(Pid::from_raw(pid), Signal::SIGCONT).is_ok()
+        || kill(Pid::from_raw(pid), None).is_ok()
+}
+
+/// Check if lockfile is stale (PID no longer running) and remove it if so
+#[cfg(unix)]
+fn cleanup_stale_lockfile(lock_path: &std::path::Path) -> bool {
+    if let Ok(contents) = std::fs::read_to_string(lock_path) {
+        if let Ok(pid) = contents.trim().parse::<i32>() {
+            if pid > 0 && !is_pid_running(pid) {
+                tracing::info!(
+                    "Removing stale lockfile (PID {} is no longer running)",
+                    pid
+                );
+                if std::fs::remove_file(lock_path).is_ok() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Remove PID file on shutdown
@@ -530,18 +553,18 @@ impl Daemon {
                         tracing::error!("No transcriber available");
                         self.play_feedback(SoundEvent::Error);
                         self.reset_to_idle(state).await;
-                        return false;
+                        false
                     }
                 }
                 Err(e) => {
                     tracing::warn!("Recording error: {}", e);
                     self.reset_to_idle(state).await;
-                    return false;
+                    false
                 }
             }
         } else {
             self.reset_to_idle(state).await;
-            return false;
+            false
         }
     }
 
@@ -778,15 +801,32 @@ impl Daemon {
             Ok(_) => {
                 tracing::debug!("Acquired PID lock at {:?}", lock_path);
             }
-            Err(e) => {
-                tracing::error!(
-                    "Failed to acquire lock: another voxtype instance is already running"
-                );
-                return Err(crate::error::VoxtypeError::Config(format!(
-                    "Another voxtype instance is already running (lock error: {:?})",
-                    e
-                ))
-                .into());
+            Err(_) => {
+                // Check if the lock is stale (previous daemon crashed)
+                #[cfg(unix)]
+                if cleanup_stale_lockfile(&lock_path) {
+                    // Try again after removing stale lock
+                    pidlock = Pidlock::new(&lock_path_str);
+                    if let Err(e) = pidlock.acquire() {
+                        tracing::error!("Failed to acquire lock after stale cleanup: {:?}", e);
+                        return Err(crate::error::VoxtypeError::Config(
+                            format!("Another voxtype instance is already running (lock error: {:?})", e)
+                        ).into());
+                    }
+                    tracing::debug!("Acquired PID lock at {:?} (after stale cleanup)", lock_path);
+                } else {
+                    tracing::error!("Failed to acquire lock: another voxtype instance is already running");
+                    return Err(crate::error::VoxtypeError::Config(
+                        "Another voxtype instance is already running".to_string()
+                    ).into());
+                }
+                #[cfg(not(unix))]
+                {
+                    tracing::error!("Failed to acquire lock: another voxtype instance is already running");
+                    return Err(crate::error::VoxtypeError::Config(
+                        "Another voxtype instance is already running".to_string()
+                    ).into());
+                }
             }
         }
 
@@ -797,8 +837,9 @@ impl Daemon {
             tracing::info!("State file: {:?}", path);
         }
 
-        // Initialize hotkey listener (if enabled)
-        let mut hotkey_listener = if self.config.hotkey.enabled {
+        // Initialize hotkey listener (Linux: evdev, macOS: rdev)
+        #[cfg(target_os = "linux")]
+        let mut hotkey_listener: Option<Box<dyn hotkey::HotkeyListener>> = if self.config.hotkey.enabled {
             tracing::info!("Hotkey: {}", self.config.hotkey.key);
             let secondary_model = self.config.whisper.secondary_model.clone();
             Some(hotkey::create_listener(&self.config.hotkey, secondary_model)?)
@@ -806,6 +847,30 @@ impl Daemon {
             tracing::info!(
                 "Built-in hotkey disabled, use 'voxtype record' commands or compositor keybindings"
             );
+            None
+        };
+
+        #[cfg(target_os = "macos")]
+        let mut hotkey_listener: Option<Box<dyn hotkey::HotkeyListener>> = if self.config.hotkey.enabled {
+            tracing::info!("Hotkey: {}", self.config.hotkey.key);
+            match hotkey::create_listener(&self.config.hotkey) {
+                Ok(listener) => Some(listener),
+                Err(e) => {
+                    tracing::warn!("Failed to create hotkey listener: {}. Use 'voxtype record' commands instead.", e);
+                    None
+                }
+            }
+        } else {
+            tracing::info!(
+                "Built-in hotkey disabled, use 'voxtype record' commands or compositor keybindings"
+            );
+            None
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let hotkey_listener: Option<()> = {
+            if self.config.hotkey.enabled {
+                tracing::warn!("Built-in hotkey not supported on this platform, use 'voxtype record' commands");
+            }
             None
         };
 
@@ -857,11 +922,20 @@ impl Daemon {
         self.model_manager = Some(model_manager);
 
         // Start hotkey listener (if enabled)
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let mut hotkey_rx = if let Some(ref mut listener) = hotkey_listener {
-            Some(listener.start().await?)
+            match listener.start() {
+                Ok(rx) => Some(rx),
+                Err(e) => {
+                    tracing::warn!("Failed to start hotkey listener: {}. Use 'voxtype record' commands instead.", e);
+                    None
+                }
+            }
         } else {
             None
         };
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let mut hotkey_rx: Option<tokio::sync::mpsc::Receiver<HotkeyEvent>> = None;
 
         // Current state
         let mut state = State::Idle;
@@ -1426,10 +1500,13 @@ impl Daemon {
             }
         }
 
-        // Cleanup
+        // Cleanup hotkey listener
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some(mut listener) = hotkey_listener {
-            listener.stop().await?;
+            let _ = listener.stop(); // Best effort cleanup
         }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let _ = hotkey_listener; // Silence unused variable warning
 
         // Abort any pending transcription task
         if let Some(task) = self.transcription_task.take() {
@@ -1690,6 +1767,39 @@ mod tests {
                 "Lock acquisition should succeed after previous lock released: {:?}",
                 result.err()
             );
+        });
+    }
+
+    #[test]
+    fn test_stale_lockfile_cleanup() {
+        with_test_runtime_dir(|dir| {
+            let lock_path = dir.join("voxtype.lock");
+
+            // Write a stale lockfile with a PID that doesn't exist
+            // PID 99999999 is very unlikely to exist
+            std::fs::write(&lock_path, "99999999").expect("Failed to write stale lockfile");
+            assert!(lock_path.exists(), "Stale lockfile should exist");
+
+            // cleanup_stale_lockfile should detect and remove it
+            let cleaned = cleanup_stale_lockfile(&lock_path);
+            assert!(cleaned, "Stale lockfile should be cleaned up");
+            assert!(!lock_path.exists(), "Stale lockfile should be removed");
+        });
+    }
+
+    #[test]
+    fn test_stale_lockfile_not_cleaned_if_pid_running() {
+        with_test_runtime_dir(|dir| {
+            let lock_path = dir.join("voxtype.lock");
+
+            // Write a lockfile with our own PID (which is running)
+            let our_pid = std::process::id();
+            std::fs::write(&lock_path, our_pid.to_string()).expect("Failed to write lockfile");
+
+            // cleanup_stale_lockfile should NOT remove it (PID is running)
+            let cleaned = cleanup_stale_lockfile(&lock_path);
+            assert!(!cleaned, "Lockfile with running PID should not be cleaned");
+            assert!(lock_path.exists(), "Lockfile should still exist");
         });
     }
 }

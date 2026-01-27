@@ -417,7 +417,11 @@ pub struct StatusConfig {
 }
 
 fn default_icon_theme() -> String {
-    "emoji".to_string()
+    if cfg!(target_os = "macos") {
+        "nerd-font".to_string()
+    } else {
+        "emoji".to_string()
+    }
 }
 
 impl Default for StatusConfig {

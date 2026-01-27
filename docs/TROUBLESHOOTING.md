@@ -10,8 +10,6 @@ Solutions to common issues when using Voxtype.
 - [Transcription Issues](#transcription-issues)
 - [Output Problems](#output-problems)
   - [wtype not working on KDE Plasma or GNOME Wayland](#wtype-not-working-on-kde-plasma-or-gnome-wayland)
-  - [Text output not working on X11](#text-output-not-working-on-x11)
-  - [Wrong characters on non-US keyboard layouts](#wrong-characters-on-non-us-keyboard-layouts-yz-swapped-qwertz-azerty)
 - [Performance Issues](#performance-issues)
 - [Systemd Service Issues](#systemd-service-issues)
 - [Debug Mode](#debug-mode)
@@ -233,29 +231,6 @@ curl -L -o ~/.local/share/voxtype/models/ggml-base.en.bin \
     https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
 ```
 
-### Voxtype crashes during transcription
-
-**Cause:** On some systems (particularly with glibc 2.42+ like Ubuntu 25.10), the whisper-rs FFI bindings crash due to C++ exceptions crossing the FFI boundary.
-
-**Solution:** Use the CLI backend which runs whisper-cli as a subprocess:
-
-```toml
-[whisper]
-backend = "cli"
-```
-
-This requires `whisper-cli` to be installed. Build it from [whisper.cpp](https://github.com/ggerganov/whisper.cpp):
-
-```bash
-git clone https://github.com/ggerganov/whisper.cpp
-cd whisper.cpp
-cmake -B build
-cmake --build build --config Release
-sudo cp build/bin/whisper-cli /usr/local/bin/
-```
-
-See [CLI Backend](USER_MANUAL.md#cli-backend-whisper-cli) in the User Manual for details.
-
 ### Poor transcription accuracy
 
 **Possible causes:**
@@ -399,203 +374,21 @@ mode = "paste"      # Copies to clipboard, then simulates Ctrl+V
 
 ---
 
-### Text output not working on X11
-
-**Symptom:** You're running X11 (not Wayland) and see errors like:
-```
-WARN  wtype failed: Wayland connection failed
-WARN  clipboard (wl-copy) failed: Text injection failed
-ERROR Output failed: All output methods failed.
-```
-
-**Cause:** wtype and wl-copy are Wayland-only tools. On X11, voxtype needs dotool, ydotool, or xclip installed.
-
-**Solution:** Install one of these X11-compatible tools:
-
-**Option 1 (Recommended): Install dotool**
-
-dotool works on X11, supports keyboard layouts, and doesn't need a daemon:
-
-```bash
-# Ubuntu/Debian (from source):
-sudo apt install libxkbcommon-dev
-git clone https://git.sr.ht/~geb/dotool
-cd dotool && ./build.sh && sudo cp dotool /usr/local/bin/
-
-# Arch (AUR):
-yay -S dotool
-
-# Add user to input group
-sudo usermod -aG input $USER
-# Log out and back in
-```
-
-**Option 2: Install ydotool**
-
-ydotool works on X11 but requires a running daemon:
-
-```bash
-# Ubuntu/Debian:
-sudo apt install ydotool
-
-# Start the daemon (see "ydotool daemon not running" section for Fedora)
-systemctl --user enable --now ydotool
-```
-
-**Option 3: Use clipboard mode with xclip**
-
-For clipboard-only output (you paste manually with Ctrl+V):
-
-```bash
-# Ubuntu/Debian:
-sudo apt install xclip
-```
-
-Then configure voxtype to use clipboard mode:
-```toml
-[output]
-mode = "clipboard"
-```
-
-**Verify your setup:**
-
-```bash
-voxtype setup
-```
-
-This shows which output tools are installed and available.
-
----
-
-### Wrong characters on non-US keyboard layouts (y/z swapped, QWERTZ, AZERTY)
-
-**Symptom:** Transcribed text has wrong characters. For example, on a German keyboard, "Python" becomes "Pzthon" and "zebra" becomes "yebra" (y and z are swapped).
-
-**Cause:** ydotool sends raw US keycodes and doesn't support keyboard layouts. When voxtype falls back to ydotool (e.g., on X11, Cinnamon, or when wtype fails), characters are typed as if you had a US keyboard layout.
-
-**Solution:** Install dotool and configure your keyboard layout. Unlike ydotool, dotool supports keyboard layouts via XKB:
-
-```bash
-# 1. Install dotool
-# Arch (AUR):
-yay -S dotool
-# Ubuntu/Debian (from source):
-# See https://sr.ht/~geb/dotool/ for instructions
-# Fedora (from source):
-# See https://sr.ht/~geb/dotool/ for instructions
-
-# 2. Add user to input group (required for uinput access)
-sudo usermod -aG input $USER
-# Log out and back in for group change to take effect
-
-# 3. Configure your keyboard layout in config.toml:
-```
-
-Add to `~/.config/voxtype/config.toml`:
-
-```toml
-[output]
-dotool_xkb_layout = "de"  # German QWERTZ
-```
-
-Common layout codes:
-- `de` - German (QWERTZ)
-- `fr` - French (AZERTY)
-- `es` - Spanish
-- `uk` - Ukrainian
-- `ru` - Russian
-- `pl` - Polish
-- `it` - Italian
-- `pt` - Portuguese
-
-For layout variants (e.g., German without dead keys):
-
-```toml
-[output]
-dotool_xkb_layout = "de"
-dotool_xkb_variant = "nodeadkeys"
-```
-
-**Alternative:** Use paste mode, which copies text to the clipboard and simulates Ctrl+V. This works regardless of keyboard layout:
-
-```toml
-[output]
-mode = "paste"
-```
-
-**Note:** The keyboard layout fix requires voxtype v0.5.0 or later. If you're on an older version, upgrade first.
-
----
-
 ### "ydotool daemon not running"
 
-**Cause:** ydotool systemd service not started, or configured incorrectly for your distribution.
+**Cause:** ydotool systemd service not started.
 
-**Solution:** The setup varies by distribution:
-
-#### Arch Linux (user service)
-
-Arch provides a user-level service that runs in your session:
-
+**Solution:**
 ```bash
-# Enable and start ydotool as a user service
+# Enable and start ydotool
 systemctl --user enable --now ydotool
 
 # Verify it's running
 systemctl --user status ydotool
+
+# Check for errors
+journalctl --user -u ydotool
 ```
-
-#### Fedora (system service)
-
-Fedora provides a system-level service that requires additional configuration to work with your user:
-
-```bash
-# 1. Enable and start the system service
-sudo systemctl enable --now ydotool
-
-# 2. Edit the service to allow your user to access the socket
-sudo systemctl edit ydotool
-```
-
-Add this content (replace `1000` with your user/group ID from `id -u` and `id -g`):
-
-```ini
-[Service]
-ExecStart=
-ExecStart=/usr/bin/ydotoold --socket-path="/run/user/1000/.ydotool_socket" --socket-own="1000:1000"
-```
-
-Then restart:
-
-```bash
-sudo systemctl restart ydotool
-
-# Verify it's running
-systemctl status ydotool
-```
-
-#### Ubuntu/Debian
-
-Check which service type is available:
-
-```bash
-# Check for user service
-systemctl --user status ydotool
-
-# If not found, check for system service
-systemctl status ydotool
-```
-
-If only a system service exists, follow the Fedora instructions above.
-
-#### Verify ydotool works
-
-```bash
-# Test that ydotool can type
-ydotool type "test"
-```
-
-If you see "Failed to connect to socket", the daemon isn't running or the socket permissions are wrong.
 
 ### Text not typed / nothing happens
 

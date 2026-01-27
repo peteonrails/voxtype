@@ -360,28 +360,16 @@ Controls the Whisper speech-to-text engine.
 Selects the transcription backend.
 
 **Values:**
-- `local` - Use whisper.cpp locally via FFI bindings (default, fully offline)
+- `local` - Use whisper.cpp locally on your machine (default, fully offline)
 - `remote` - Send audio to a remote server for transcription
-- `cli` - Use whisper-cli subprocess (fallback for systems where FFI crashes)
 
 > **Privacy Notice**: When using `remote` backend, audio is transmitted over the network. See [User Manual - Remote Whisper Servers](USER_MANUAL.md#remote-whisper-servers) for privacy considerations.
 
-**When to use `cli` backend:**
-The `cli` backend is a workaround for systems where the whisper-rs FFI bindings crash due to C++ exceptions crossing the FFI boundary. This affects some systems with glibc 2.42+ (e.g., Ubuntu 25.10). If voxtype crashes during transcription, try the `cli` backend.
-
-Requires `whisper-cli` from [whisper.cpp](https://github.com/ggerganov/whisper.cpp).
-
-**Examples:**
+**Example:**
 ```toml
 [whisper]
 backend = "remote"
 remote_endpoint = "http://192.168.1.100:8080"
-```
-
-```toml
-[whisper]
-backend = "cli"
-whisper_cli_path = "/usr/local/bin/whisper-cli"  # Optional
 ```
 
 ### model
@@ -836,39 +824,6 @@ Maximum time in seconds to wait for the remote server to respond. Increase for s
 backend = "remote"
 remote_endpoint = "http://192.168.1.100:8080"
 remote_timeout_secs = 60  # 60 second timeout for long recordings
-```
-
-### whisper_cli_path
-
-**Type:** String
-**Default:** Auto-detected from PATH
-**Required:** No
-
-Path to the `whisper-cli` binary. Only used when `backend = "cli"`.
-
-If not specified, voxtype searches for `whisper-cli` or `whisper` in:
-1. Your `$PATH`
-2. Common system locations (`/usr/local/bin`, `/usr/bin`)
-3. Current directory
-4. `~/.local/bin`
-
-**Example:**
-```toml
-[whisper]
-backend = "cli"
-whisper_cli_path = "/opt/whisper.cpp/build/bin/whisper-cli"
-```
-
-**Installing whisper-cli:**
-
-Build from source at [github.com/ggerganov/whisper.cpp](https://github.com/ggerganov/whisper.cpp):
-
-```bash
-git clone https://github.com/ggerganov/whisper.cpp
-cd whisper.cpp
-cmake -B build
-cmake --build build --config Release
-sudo cp build/bin/whisper-cli /usr/local/bin/
 ```
 
 ---

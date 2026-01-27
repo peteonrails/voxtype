@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Voxtype Updates</title>
+    <link>https://voxtype.io/appcast.xml</link>
+    <description>Push-to-talk voice-to-text for macOS</description>
+    <language>en</language>
+
+    <!-- Latest release -->
+    <item>
+      <title>Version 0.5.0</title>
+      <sparkle:version>0.5.0</sparkle:version>
+      <sparkle:shortVersionString>0.5.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>11.0</sparkle:minimumSystemVersion>
+      <pubDate>Mon, 20 Jan 2026 00:00:00 +0000</pubDate>
+      <description><![CDATA[
+        <h2>Voxtype 0.5.0 - macOS Release</h2>
+        <p>First official macOS release of Voxtype!</p>
+        <ul>
+          <li>Universal binary (Intel + Apple Silicon)</li>
+          <li>Metal GPU acceleration for fast transcription</li>
+          <li>LaunchAgent for automatic startup</li>
+        </ul>
+        <p>For more details, visit <a href="https://voxtype.io/news">voxtype.io/news</a></p>
+      ]]></description>
+      <enclosure
+        url="https://github.com/peteonrails/voxtype/releases/download/v0.5.0/voxtype-0.5.0-macos-universal.dmg"
+        sparkle:edSignature="PLACEHOLDER_SIGNATURE"
+        length="15000000"
+        type="application/octet-stream"/>
+    </item>
+
+    <!-- Add older releases below as they accumulate -->
+
+  </channel>
+</rss>
