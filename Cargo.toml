@@ -90,6 +90,8 @@ parakeet = ["dep:parakeet-rs"]
 parakeet-cuda = ["parakeet", "parakeet-rs/cuda"]
 parakeet-tensorrt = ["parakeet", "parakeet-rs/tensorrt"]
 parakeet-rocm = ["parakeet", "parakeet-rs/rocm"]
+# Dynamic loading for system ONNX Runtime (used by Nix builds)
+parakeet-load-dynamic = ["parakeet", "parakeet-rs/load-dynamic"]
 
 [build-dependencies]
 clap = { version = "4", features = ["derive"] }

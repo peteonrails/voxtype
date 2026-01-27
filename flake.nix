@@ -48,11 +48,26 @@
           inherit (pkg) meta;
         };
 
+        # Wrap a parakeet package with runtime dependencies and ORT_DYLIB_PATH
+        # Parakeet uses ONNX Runtime, which needs to know where to find the library
+        libExt = if pkgs.stdenv.isDarwin then "dylib" else "so";
+        wrapParakeet = pkg: pkgs.symlinkJoin {
+          name = "${pkg.pname or "voxtype"}-wrapped-${pkg.version}";
+          paths = [ pkg ];
+          buildInputs = [ pkgs.makeWrapper ];
+          postBuild = ''
+            wrapProgram $out/bin/voxtype \
+              --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps} \
+              --set ORT_DYLIB_PATH "${pkgs.onnxruntime}/lib/libonnxruntime.${libExt}"
+          '';
+          inherit (pkg) meta;
+        };
+
         # Base derivation for voxtype (unwrapped)
         mkVoxtypeUnwrapped = { pname ? "voxtype", features ? [], extraNativeBuildInputs ? [], extraBuildInputs ? [] }:
           pkgs.rustPlatform.buildRustPackage {
             inherit pname;
-            version = "0.4.9";
+            version = "0.5.0";
 
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
@@ -160,6 +175,40 @@
           '';
         });
 
+        # Build the Parakeet variant (CPU, uses ONNX Runtime)
+        # Uses load-dynamic feature to load system ONNX Runtime at runtime
+        parakeetUnwrapped = mkVoxtypeUnwrapped {
+          pname = "voxtype-parakeet";
+          features = [ "parakeet-load-dynamic" ];
+          extraBuildInputs = with pkgs; [ onnxruntime ];
+        };
+
+        # Build the Parakeet + CUDA variant for NVIDIA GPUs
+        parakeetCudaUnwrapped = mkVoxtypeUnwrapped {
+          pname = "voxtype-parakeet-cuda";
+          features = [ "parakeet-load-dynamic" "parakeet-cuda" ];
+          extraNativeBuildInputs = with pkgs; [ cudaPackages.cuda_nvcc ];
+          extraBuildInputs = with pkgs; [
+            onnxruntime
+            cudaPackages.cudatoolkit
+            cudaPackages.cudnn
+          ];
+        };
+
+        # Build the Parakeet + ROCm variant for AMD GPUs
+        parakeetRocmUnwrapped = mkVoxtypeUnwrapped {
+          pname = "voxtype-parakeet-rocm";
+          features = [ "parakeet-load-dynamic" "parakeet-rocm" ];
+          extraNativeBuildInputs = with pkgs; [
+            rocmPackages.clr
+          ];
+          extraBuildInputs = with pkgs; [
+            onnxruntime
+            rocmPackages.clr
+            rocmPackages.rocblas
+          ];
+        };
+
       in {
         packages = {
           # Wrapped packages (ready to use, runtime deps in PATH)
@@ -168,10 +217,19 @@
           vulkan = wrapVoxtype vulkanUnwrapped;
           rocm = wrapVoxtype rocmUnwrapped;
 
+          # Parakeet variants (ONNX-based speech recognition)
+          # Uses NVIDIA's Parakeet models instead of Whisper
+          parakeet = wrapParakeet parakeetUnwrapped;
+          parakeet-cuda = wrapParakeet parakeetCudaUnwrapped;
+          parakeet-rocm = wrapParakeet parakeetRocmUnwrapped;
+
           # Unwrapped packages (for custom wrapping scenarios)
           voxtype-unwrapped = mkVoxtypeUnwrapped {};
           voxtype-vulkan-unwrapped = vulkanUnwrapped;
           voxtype-rocm-unwrapped = rocmUnwrapped;
+          voxtype-parakeet-unwrapped = parakeetUnwrapped;
+          voxtype-parakeet-cuda-unwrapped = parakeetCudaUnwrapped;
+          voxtype-parakeet-rocm-unwrapped = parakeetRocmUnwrapped;
         };
 
         # Development shell with all dependencies
