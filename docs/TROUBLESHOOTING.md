@@ -251,21 +251,23 @@ model = "base.en"  # For English
 language = "en"
 ```
 
-#### 4. Context window optimization (rare)
+#### 4. Context window optimization
 
-If you experience accuracy issues specifically with short recordings, try disabling context window optimization:
+Context window optimization is disabled by default because it can cause phrase repetition with some models (especially large-v3 and large-v3-turbo).
+
+If you want faster transcription and your model works well with it, you can enable it:
 
 ```toml
 [whisper]
-context_window_optimization = false
+context_window_optimization = true
 ```
 
 Or via command line:
 ```bash
-voxtype --no-whisper-context-optimization daemon
+voxtype --whisper-context-optimization daemon
 ```
 
-This is rarely needed. The optimization speeds up transcription for short clips and should not affect quality. Only try this if other solutions don't help and the issue is specific to short recordings.
+If you experience phrase repetition (e.g., "word word word"), make sure this setting is disabled (the default).
 
 ### Transcription includes "[BLANK_AUDIO]" or similar
 
@@ -284,6 +286,21 @@ This is rarely needed. The optimization speeds up transcription for short clips 
 1. Use a larger model for better accuracy
 2. Avoid recording ambient noise
 3. Keep recordings short and speech-focused
+
+### Phrase repetition (same words repeated multiple times)
+
+**Cause:** Known issue with Whisper large-v3 models, especially when context window optimization is enabled.
+
+**Example:** Saying "increase the limit" produces "increase the limit increase the limit increase the limit"
+
+**Solutions:**
+1. Ensure `context_window_optimization` is disabled (the default):
+   ```toml
+   [whisper]
+   context_window_optimization = false
+   ```
+2. Try a different model (large-v3-turbo and large-v3 are most affected)
+3. If using context optimization and experiencing issues, disable it
 
 ---
 

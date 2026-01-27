@@ -94,10 +94,11 @@ on_demand_loading = false
 # Enable on laptops with hybrid graphics to let dGPU sleep between transcriptions.
 # gpu_isolation = true
 
-# Context window optimization for short recordings (enabled by default)
-# Speeds up transcription for clips under 22.5 seconds. Disable only if you
-# experience accuracy issues with short recordings (rare).
-# context_window_optimization = false
+# Context window optimization for short recordings (disabled by default)
+# Speeds up transcription for clips under 22.5 seconds. Disabled by default
+# because some models (especially large-v3/turbo) may experience repetition
+# loops. Enable if you want faster transcription and don't experience issues.
+# context_window_optimization = true
 
 # --- Remote mode settings (used when mode = "remote") ---
 # remote_endpoint = "http://192.168.1.100:8080"  # Required

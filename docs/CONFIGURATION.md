@@ -539,14 +539,14 @@ gpu_isolation = true  # Release GPU memory between transcriptions
 ### context_window_optimization
 
 **Type:** Boolean
-**Default:** `true`
+**Default:** `false`
 **Required:** No
 
-Optimizes Whisper's context window size for short recordings. When enabled, clips under 22.5 seconds use a smaller context window proportional to their length, significantly speeding up transcription.
+Optimizes Whisper's context window size for short recordings. When enabled, clips under 22.5 seconds use a smaller context window proportional to their length, speeding up transcription. Also sets `no_context=true` to prevent phrase repetition.
 
 **Values:**
-- `true` (default) - Use optimized context window for short clips. Faster transcription.
-- `false` - Always use Whisper's full 30-second context window (1500 tokens).
+- `false` (default) - Use Whisper's full 30-second context window (1500 tokens). Most compatible.
+- `true` - Use optimized context window for short clips. Faster but may cause issues with some models.
 
 **Performance impact:**
 
@@ -557,23 +557,26 @@ Optimizes Whisper's context window size for short recordings. When enabled, clip
 
 The optimization provides roughly 1.6-1.9x speedup for short recordings on both CPU and GPU.
 
-**When to disable (`false`):**
-- You experience transcription quality issues with short clips (rare)
-- Debugging transcription problems and want to rule out this optimization
-- Testing or benchmarking against default Whisper behavior
+**When to enable (`true`):**
+- You want faster transcription for short clips
+- Your model doesn't exhibit repetition issues (test before enabling)
+- You're using smaller models (tiny, base, small) which are more stable
 
-Most users should leave this enabled. The optimization has been tested extensively and should not affect transcription quality.
+**When to keep disabled (`false`):**
+- You use large-v3 or large-v3-turbo models (known repetition issues)
+- You experience phrase repetition like "word word word"
+- You want maximum compatibility across all models
 
 **Example:**
 ```toml
 [whisper]
-model = "large-v3-turbo"
-context_window_optimization = false  # Use full context window (not recommended)
+model = "base.en"
+context_window_optimization = true  # Enable for faster transcription
 ```
 
 **CLI override:**
 ```bash
-voxtype --no-whisper-context-optimization daemon
+voxtype --whisper-context-optimization daemon
 ```
 
 **Note:** This setting only applies when using the local whisper backend (`backend = "local"`). It has no effect with remote transcription.

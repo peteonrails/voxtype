@@ -195,12 +195,15 @@ impl Transcriber for WhisperTranscriber {
 
         // Optimize context window for short clips
         if self.context_window_optimization {
+            // Prevent hallucination/looping by not conditioning on previous text
+            // This is especially important for short clips where Whisper can repeat itself
+            params.set_no_context(true);
+
             if let Some(audio_ctx) = calculate_audio_ctx(duration_secs) {
                 params.set_audio_ctx(audio_ctx);
                 tracing::info!(
-                    "Audio context optimization: using audio_ctx={} for {:.2}s clip (formula: {:.2}s * 50 + 64)",
+                    "Audio context optimization: using audio_ctx={} for {:.2}s clip",
                     audio_ctx,
-                    duration_secs,
                     duration_secs
                 );
             }
@@ -300,14 +303,25 @@ fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
 }
 
 /// Calculate audio_ctx parameter for short clips (≤22.5s).
-/// Formula: duration_seconds * 50 + 64
+/// Formula: max(duration_seconds * 50 + 128, 384), rounded up to multiple of 8
 ///
 /// This optimization reduces transcription time for short recordings by
 /// telling Whisper to use a smaller context window proportional to the
 /// actual audio length, rather than the full 30-second batch window.
+///
+/// The conservative formula includes:
+/// - Increased padding (128 instead of 64) for stability
+/// - Minimum threshold of 384 (~7.7s context) to avoid instability with very short clips
+/// - Alignment to multiple of 8 for GPU backend compatibility (Metal, Vulkan)
 fn calculate_audio_ctx(duration_secs: f32) -> Option<i32> {
+    const MIN_AUDIO_CTX: i32 = 384; // ~7.7s minimum context
+
     if duration_secs <= 22.5 {
-        Some((duration_secs * 50.0) as i32 + 64)
+        let raw_ctx = (duration_secs * 50.0) as i32 + 128;
+        let bounded_ctx = raw_ctx.max(MIN_AUDIO_CTX);
+        // Round up to next multiple of 8 for GPU backend alignment
+        let aligned_ctx = (bounded_ctx + 7) / 8 * 8;
+        Some(aligned_ctx)
     } else {
         None
     }
@@ -354,17 +368,18 @@ mod tests {
 
     #[test]
     fn test_calculate_audio_ctx_short_clips() {
-        // Very short clip: 1s -> 1 * 50 + 64 = 114
-        assert_eq!(calculate_audio_ctx(1.0), Some(114));
+        // Very short clips use minimum threshold (384), aligned to 8
+        // 1s: max(50 + 128, 384) = 384, already aligned
+        assert_eq!(calculate_audio_ctx(1.0), Some(384));
 
-        // 5 second clip: 5 * 50 + 64 = 314
-        assert_eq!(calculate_audio_ctx(5.0), Some(314));
+        // 5s: max(250 + 128, 384) = 384, already aligned
+        assert_eq!(calculate_audio_ctx(5.0), Some(384));
 
-        // 10 second clip: 10 * 50 + 64 = 564
-        assert_eq!(calculate_audio_ctx(10.0), Some(564));
+        // 10s: max(500 + 128, 384) = 628, aligned to 632
+        assert_eq!(calculate_audio_ctx(10.0), Some(632));
 
-        // At threshold: 22.5 * 50 + 64 = 1189
-        assert_eq!(calculate_audio_ctx(22.5), Some(1189));
+        // At threshold: max(1125 + 128, 384) = 1253, aligned to 1256
+        assert_eq!(calculate_audio_ctx(22.5), Some(1256));
     }
 
     #[test]
@@ -386,25 +401,41 @@ mod tests {
         // (the full 30-second context window).
         //
         // This test verifies the optimization logic by demonstrating:
-        // 1. When enabled: short clips get optimized audio_ctx (e.g., 114 for 1s)
+        // 1. When enabled: short clips get optimized audio_ctx (e.g., 384 min for short clips)
         // 2. When disabled: Whisper's default 1500 is used (not set explicitly)
 
         const WHISPER_DEFAULT_AUDIO_CTX: i32 = 1500;
 
-        // With optimization enabled, 1s clip would use audio_ctx=114
+        // With optimization enabled, 1s clip uses minimum threshold (384)
         let optimized_ctx = calculate_audio_ctx(1.0);
-        assert_eq!(optimized_ctx, Some(114));
+        assert_eq!(optimized_ctx, Some(384));
         assert!(optimized_ctx.unwrap() < WHISPER_DEFAULT_AUDIO_CTX);
 
         // With optimization disabled, we don't call calculate_audio_ctx,
         // so Whisper uses its default of 1500. This is handled in transcribe()
         // by checking self.context_window_optimization before applying.
 
-        // Verify the optimization provides significant reduction
+        // Verify the optimization provides reduction (conservative formula still saves ~75%)
         let ratio = WHISPER_DEFAULT_AUDIO_CTX as f32 / optimized_ctx.unwrap() as f32;
         assert!(
-            ratio > 10.0,
-            "Optimization should reduce context by >10x for 1s clips"
+            ratio > 3.0,
+            "Optimization should reduce context by >3x for 1s clips"
         );
+    }
+
+    #[test]
+    fn test_audio_ctx_alignment() {
+        // Verify all results are aligned to multiple of 8 for GPU compatibility
+        for duration in [1.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 22.5] {
+            if let Some(ctx) = calculate_audio_ctx(duration) {
+                assert_eq!(
+                    ctx % 8,
+                    0,
+                    "audio_ctx {} for {}s should be aligned to 8",
+                    ctx,
+                    duration
+                );
+            }
+        }
     }
 }

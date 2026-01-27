@@ -378,7 +378,7 @@ fn default_on_demand_loading() -> bool {
 }
 
 fn default_context_window_optimization() -> bool {
-    true
+    false
 }
 
 fn default_max_loaded_models() -> usize {
@@ -1750,14 +1750,15 @@ mod tests {
     }
 
     #[test]
-    fn test_context_window_optimization_default_true() {
-        // Default config should have context_window_optimization enabled
+    fn test_context_window_optimization_default_false() {
+        // Default config should have context_window_optimization disabled
+        // (disabled by default due to repetition issues with some models)
         let config = Config::default();
-        assert!(config.whisper.context_window_optimization);
+        assert!(!config.whisper.context_window_optimization);
     }
 
     #[test]
-    fn test_context_window_optimization_can_be_disabled() {
+    fn test_context_window_optimization_can_be_enabled() {
         let toml_str = r#"
             [hotkey]
             key = "SCROLLLOCK"
@@ -1770,7 +1771,32 @@ mod tests {
             [whisper]
             model = "base.en"
             language = "en"
-            context_window_optimization = false
+            context_window_optimization = true
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.whisper.context_window_optimization);
+    }
+
+    #[test]
+    fn test_context_window_optimization_defaults_when_omitted() {
+        // When not specified in config, should default to false
+        // (disabled by default due to repetition issues with some models)
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
 
             [output]
             mode = "type"
@@ -1778,30 +1804,6 @@ mod tests {
 
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(!config.whisper.context_window_optimization);
-    }
-
-    #[test]
-    fn test_context_window_optimization_defaults_when_omitted() {
-        // When not specified in config, should default to true
-        let toml_str = r#"
-            [hotkey]
-            key = "SCROLLLOCK"
-
-            [audio]
-            device = "default"
-            sample_rate = 16000
-            max_duration_secs = 60
-
-            [whisper]
-            model = "base.en"
-            language = "en"
-
-            [output]
-            mode = "type"
-        "#;
-
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(config.whisper.context_window_optimization);
     }
 
     #[test]
