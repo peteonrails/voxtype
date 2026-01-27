@@ -12,11 +12,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static SIGILL_HANDLER_INSTALLED: AtomicBool = AtomicBool::new(false);
 
-/// Constructor function that runs before main() via .init_array
+/// Constructor function that runs before main() via platform-specific init section
 /// This ensures the SIGILL handler is installed before any library
 /// initialization code that might use unsupported instructions.
 #[used]
-#[link_section = ".init_array"]
+#[cfg_attr(target_os = "linux", link_section = ".init_array")]
+#[cfg_attr(target_os = "macos", link_section = "__DATA,__mod_init_func")]
 static INIT_SIGILL_HANDLER: extern "C" fn() = {
     extern "C" fn init() {
         install_sigill_handler();

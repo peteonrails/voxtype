@@ -91,6 +91,9 @@ pub enum TranscribeError {
 
     #[error("Remote server error: {0}")]
     RemoteError(String),
+
+    #[error("{0}")]
+    LicenseRequired(String),
 }
 
 /// Errors related to text output

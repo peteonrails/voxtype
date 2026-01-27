@@ -5,7 +5,7 @@ members = ["xtask"]
 name = "voxtype"
 version = "0.5.0"
 edition = "2021"
-authors = ["Peter Jackson", "Jean-Paul van Tillo", "Máté Rémiás", "Rob Zolkos", "Dan Heuckeroth", "Igor Warzocha", "Julian Kaiser", "Kevin Miller", "konnsim", "reisset", "Zubair"]
+authors = ["Peter Jackson", "Christopher Albert", "Jean-Paul van Tillo", "Máté Rémiás", "Rob Zolkos", "Dan Heuckeroth", "Igor Warzocha", "Julian Kaiser", "Kevin Miller", "konnsim", "reisset", "Zubair"]
 description = "Push-to-talk voice-to-text for Wayland"
 license = "MIT"
 readme = "README.md"
@@ -38,27 +38,21 @@ regex = "1"
 # Async traits
 async-trait = "0.1"
 
-# Input handling (evdev for kernel-level key events)
-evdev = "0.12"
+# Cross-platform system interface
 libc = "0.2"
-inotify = "0.10"  # Watch /dev/input for device hotplug
-nix = { version = "0.29", features = ["signal", "process"] }  # Unix signals for IPC
 
 # Audio capture
 cpal = "0.15"
 hound = "3"  # WAV file reading/writing
 
-# HTTP client for remote transcription
+# HTTP client for remote transcription and update checks
 ureq = { version = "2", features = ["json"] }
 
-# JSON parsing (for CLI backend)
+# Semantic versioning for update checks
+semver = "1"
+
+# JSON parsing
 serde_json = "1"
-
-# CLI path resolution (for CLI backend)
-which = "7"
-
-# Temp files (for CLI backend audio)
-tempfile = "3"
 
 # Audio playback (for feedback sounds)
 rodio = { version = "0.19", default-features = false, features = ["wav"] }
@@ -78,6 +72,20 @@ notify = "6"
 
 # Single instance check
 pidlock = "0.1"
+dirs = "6.0.0"
+rdev = "0.5.3"
+tray-icon = "0.21.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tao = "0.32"
+core-graphics = "0.24"
+core-foundation = "0.10"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Input handling (evdev for kernel-level key events)
+evdev = "0.12"
+inotify = "0.10"  # Watch /dev/input for device hotplug
+nix = { version = "0.29", features = ["signal", "process"] }  # Unix signals for IPC
 
 [features]
 default = []
@@ -90,14 +98,13 @@ parakeet = ["dep:parakeet-rs"]
 parakeet-cuda = ["parakeet", "parakeet-rs/cuda"]
 parakeet-tensorrt = ["parakeet", "parakeet-rs/tensorrt"]
 parakeet-rocm = ["parakeet", "parakeet-rs/rocm"]
-# Dynamic loading for system ONNX Runtime (used by Nix builds)
-parakeet-load-dynamic = ["parakeet", "parakeet-rs/load-dynamic"]
 
 [build-dependencies]
 clap = { version = "4", features = ["derive"] }
 clap_mangen = "0.2"
 
 [dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 lto = true

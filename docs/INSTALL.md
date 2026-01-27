@@ -346,11 +346,9 @@ sudo pacman -S ydotool
 # Ubuntu:
 sudo apt install ydotool
 
-# Enable and start the daemon (Arch)
+# Enable and start the daemon
 systemctl --user enable --now ydotool
 ```
-
-> **Note (Fedora):** Fedora's ydotool uses a system service that requires additional configuration. See [Troubleshooting - ydotool daemon not running](TROUBLESHOOTING.md#ydotool-daemon-not-running) for Fedora-specific setup.
 
 **On KDE Plasma or GNOME (Wayland):** wtype does not work on these desktops because they don't support the virtual keyboard protocol. Install dotool (recommended) or use ydotool:
 
@@ -366,8 +364,7 @@ For ydotool:
 ```bash
 # Install ydotool (see commands above for your distro)
 # Then enable and start the daemon (required!)
-systemctl --user enable --now ydotool  # Arch
-# For Fedora, see Troubleshooting guide for system service setup
+systemctl --user enable --now ydotool
 ```
 
 Voxtype uses wtype on Wayland (no daemon needed), with dotool and ydotool as fallbacks, and clipboard as the last resort. On KDE/GNOME Wayland, wtype will fail and voxtype will use dotool or ydotool.
