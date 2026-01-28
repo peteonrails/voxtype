@@ -416,7 +416,11 @@ pub struct StatusConfig {
 }
 
 fn default_icon_theme() -> String {
-    "emoji".to_string()
+    if cfg!(target_os = "macos") {
+        "nerd-font".to_string()
+    } else {
+        "emoji".to_string()
+    }
 }
 
 impl Default for StatusConfig {
@@ -592,9 +596,7 @@ pub enum WhisperMode {
     Local,
     /// Remote transcription via OpenAI-compatible API
     Remote,
-    /// CLI transcription using whisper-cli subprocess
-    /// Fallback for systems where whisper-rs FFI doesn't work (e.g., glibc 2.42+)
-    Cli,
+    // Future: Cli variant for whisper-cli subprocess (PR #77)
 }
 
 /// Language configuration supporting single language or array of allowed languages
@@ -756,12 +758,6 @@ pub struct WhisperConfig {
     /// Timeout for remote requests in seconds (default: 30)
     #[serde(default)]
     pub remote_timeout_secs: Option<u64>,
-
-    // --- CLI backend settings ---
-    /// Path to whisper-cli binary (optional, searches PATH if not set)
-    /// Used when mode = "cli"
-    #[serde(default)]
-    pub whisper_cli_path: Option<String>,
 }
 
 impl WhisperConfig {
@@ -781,12 +777,10 @@ impl WhisperConfig {
                 match backend {
                     WhisperMode::Local => "local",
                     WhisperMode::Remote => "remote",
-                    WhisperMode::Cli => "cli",
                 },
                 match backend {
                     WhisperMode::Local => "local",
                     WhisperMode::Remote => "remote",
-                    WhisperMode::Cli => "cli",
                 }
             );
             return backend;
@@ -816,7 +810,6 @@ impl Default for WhisperConfig {
             remote_model: None,
             remote_api_key: None,
             remote_timeout_secs: None,
-            whisper_cli_path: None,
         }
     }
 }
@@ -1192,7 +1185,6 @@ impl Default for Config {
                 remote_model: None,
                 remote_api_key: None,
                 remote_timeout_secs: None,
-                whisper_cli_path: None,
             },
             output: OutputConfig {
                 mode: OutputMode::Type,
@@ -1607,7 +1599,11 @@ mod tests {
     #[test]
     fn test_status_config_default() {
         let status = StatusConfig::default();
-        assert_eq!(status.icon_theme, "emoji");
+        if cfg!(target_os = "macos") {
+            assert_eq!(status.icon_theme, "nerd-font");
+        } else {
+            assert_eq!(status.icon_theme, "emoji");
+        }
         assert!(status.icons.idle.is_none());
         assert!(status.icons.recording.is_none());
     }

@@ -1,0 +1,291 @@
+name: Build Linux
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (without v prefix)'
+        required: true
+        default: '0.5.0'
+
+jobs:
+  # AVX2 build - uses Docker for clean toolchain (no AVX-512 contamination)
+  build-avx2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build AVX2 binary in Docker
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          docker build -f Dockerfile.build -t voxtype-avx2 --build-arg VERSION=${VERSION} .
+          mkdir -p releases/${VERSION}
+          docker run --rm -v $(pwd)/releases/${VERSION}:/output voxtype-avx2
+
+      - name: Verify binary
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          chmod +x releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx2
+          releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx2 --version
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-avx2
+          path: releases/${{ steps.version.outputs.version }}/voxtype-*-linux-x86_64-avx2
+
+  # Vulkan build - uses Docker for clean toolchain
+  build-vulkan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build Vulkan binary in Docker
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          docker build -f Dockerfile.vulkan -t voxtype-vulkan --build-arg VERSION=${VERSION} .
+          mkdir -p releases/${VERSION}
+          docker run --rm -v $(pwd)/releases/${VERSION}:/output voxtype-vulkan
+
+      - name: Verify binary
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          chmod +x releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-vulkan
+          releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-vulkan --version
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-vulkan
+          path: releases/${{ steps.version.outputs.version }}/voxtype-*-linux-x86_64-vulkan
+
+  # Parakeet AVX2 build - uses Docker for clean toolchain
+  build-parakeet-avx2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build Parakeet AVX2 binary in Docker
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          docker build -f Dockerfile.parakeet -t voxtype-parakeet-avx2 --build-arg VERSION=${VERSION} .
+          mkdir -p releases/${VERSION}
+          docker run --rm -v $(pwd)/releases/${VERSION}:/output voxtype-parakeet-avx2
+
+      - name: Verify binary
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          chmod +x releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-parakeet-avx2
+          releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-parakeet-avx2 --version
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-parakeet-avx2
+          path: releases/${{ steps.version.outputs.version }}/voxtype-*-linux-x86_64-parakeet-avx2
+
+  # AVX-512 build - requires AVX-512 capable runner (best effort)
+  build-avx512:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for AVX-512 support
+        id: check-avx512
+        run: |
+          if grep -q avx512f /proc/cpuinfo; then
+            echo "supported=true" >> $GITHUB_OUTPUT
+            echo "AVX-512 is supported on this runner"
+          else
+            echo "supported=false" >> $GITHUB_OUTPUT
+            echo "AVX-512 is NOT supported on this runner - skipping build"
+          fi
+
+      - name: Determine version
+        if: steps.check-avx512.outputs.supported == 'true'
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install Rust
+        if: steps.check-avx512.outputs.supported == 'true'
+        uses: dtolnay/rust-action@stable
+
+      - name: Install dependencies
+        if: steps.check-avx512.outputs.supported == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev clang cmake
+
+      - name: Build AVX-512 binary
+        if: steps.check-avx512.outputs.supported == 'true'
+        env:
+          RUSTFLAGS: "-C target-cpu=native"
+        run: |
+          cargo build --release
+          VERSION=${{ steps.version.outputs.version }}
+          mkdir -p releases/${VERSION}
+          cp target/release/voxtype releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx512
+
+      - name: Verify binary
+        if: steps.check-avx512.outputs.supported == 'true'
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx512 --version
+
+      - name: Upload artifact
+        if: steps.check-avx512.outputs.supported == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-avx512
+          path: releases/${{ steps.version.outputs.version }}/voxtype-*-linux-x86_64-avx512
+
+  # Parakeet AVX-512 build - requires AVX-512 capable runner (best effort)
+  build-parakeet-avx512:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for AVX-512 support
+        id: check-avx512
+        run: |
+          if grep -q avx512f /proc/cpuinfo; then
+            echo "supported=true" >> $GITHUB_OUTPUT
+            echo "AVX-512 is supported on this runner"
+          else
+            echo "supported=false" >> $GITHUB_OUTPUT
+            echo "AVX-512 is NOT supported on this runner - skipping build"
+          fi
+
+      - name: Determine version
+        if: steps.check-avx512.outputs.supported == 'true'
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install Rust
+        if: steps.check-avx512.outputs.supported == 'true'
+        uses: dtolnay/rust-action@stable
+
+      - name: Install dependencies
+        if: steps.check-avx512.outputs.supported == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev clang cmake
+
+      - name: Build Parakeet AVX-512 binary
+        if: steps.check-avx512.outputs.supported == 'true'
+        env:
+          RUSTFLAGS: "-C target-cpu=native"
+        run: |
+          cargo build --release --features parakeet
+          VERSION=${{ steps.version.outputs.version }}
+          mkdir -p releases/${VERSION}
+          cp target/release/voxtype releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-parakeet-avx512
+
+      - name: Verify binary
+        if: steps.check-avx512.outputs.supported == 'true'
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-parakeet-avx512 --version
+
+      - name: Upload artifact
+        if: steps.check-avx512.outputs.supported == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-parakeet-avx512
+          path: releases/${{ steps.version.outputs.version }}/voxtype-*-linux-x86_64-parakeet-avx512
+
+  # Collect all artifacts and create release
+  release:
+    needs: [build-avx2, build-vulkan, build-parakeet-avx2, build-avx512, build-parakeet-avx512]
+    if: always() && needs.build-avx2.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect binaries
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          mkdir -p releases/${VERSION}
+
+          # Move all binaries to releases directory
+          find artifacts -name 'voxtype-*' -type f -exec mv {} releases/${VERSION}/ \;
+
+          # List collected binaries
+          echo "Collected binaries:"
+          ls -la releases/${VERSION}/
+
+      - name: Generate checksums
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          cd releases/${VERSION}
+          sha256sum voxtype-* > SHA256SUMS.txt
+          echo "Checksums:"
+          cat SHA256SUMS.txt
+
+      - name: Upload combined artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-release-all
+          path: |
+            releases/${{ steps.version.outputs.version }}/voxtype-*
+            releases/${{ steps.version.outputs.version }}/SHA256SUMS.txt
+
+      - name: Upload to release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            releases/${{ steps.version.outputs.version }}/voxtype-*
+            releases/${{ steps.version.outputs.version }}/SHA256SUMS.txt

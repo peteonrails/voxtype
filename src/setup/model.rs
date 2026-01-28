@@ -144,6 +144,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     println!("=======================\n");
 
     let models_dir = Config::models_dir();
+
     println!("Models directory: {:?}\n", models_dir);
 
     // Load current config to determine active model

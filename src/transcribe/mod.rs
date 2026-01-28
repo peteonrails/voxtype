@@ -3,11 +3,9 @@
 //! Provides transcription via:
 //! - Local whisper.cpp inference (whisper-rs crate)
 //! - Remote OpenAI-compatible Whisper API (whisper.cpp server, OpenAI, etc.)
-//! - CLI subprocess using whisper-cli (fallback for glibc 2.42+ compatibility)
 //! - Subprocess isolation for GPU memory release
 //! - Optionally NVIDIA Parakeet via ONNX Runtime (when `parakeet` feature is enabled)
 
-pub mod cli;
 pub mod remote;
 pub mod subprocess;
 pub mod whisper;
@@ -18,7 +16,6 @@ pub mod parakeet;
 
 use crate::config::{Config, TranscriptionEngine, WhisperConfig, WhisperMode};
 use crate::error::TranscribeError;
-use crate::setup::gpu;
 
 /// Trait for speech-to-text implementations
 pub trait Transcriber: Send + Sync {
@@ -73,12 +70,6 @@ pub fn create_transcriber_with_config_path(
     config: &WhisperConfig,
     config_path: Option<std::path::PathBuf>,
 ) -> Result<Box<dyn Transcriber>, TranscribeError> {
-    // Apply GPU selection from VOXTYPE_VULKAN_DEVICE environment variable
-    // This sets VK_LOADER_DRIVERS_SELECT to filter Vulkan drivers
-    if let Some(vendor) = gpu::apply_gpu_selection() {
-        tracing::info!("GPU selection: {} (via VOXTYPE_VULKAN_DEVICE)", vendor.display_name());
-    }
-
     match config.effective_mode() {
         WhisperMode::Local => {
             if config.gpu_isolation {
@@ -97,10 +88,6 @@ pub fn create_transcriber_with_config_path(
         WhisperMode::Remote => {
             tracing::info!("Using remote whisper transcription mode");
             Ok(Box::new(remote::RemoteTranscriber::new(config)?))
-        }
-        WhisperMode::Cli => {
-            tracing::info!("Using whisper-cli subprocess backend");
-            Ok(Box::new(cli::CliTranscriber::new(config)?))
         }
     }
 }
