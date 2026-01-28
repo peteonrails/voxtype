@@ -4,17 +4,27 @@
 #
 #   imports = [ voxtype.homeManagerModules.default ];
 #
+#   # Whisper example (default engine):
 #   programs.voxtype = {
 #     enable = true;
 #     package = voxtype.packages.${system}.vulkan;
 #     model.name = "base.en";
 #     service.enable = true;
-#
-#     # All config options go in settings (converted to config.toml)
 #     settings = {
-#       hotkey.enabled = false;  # Use compositor keybindings instead
-#       output.mode = "type";
+#       hotkey.enabled = false;
 #       whisper.language = "en";
+#     };
+#   };
+#
+#   # Parakeet example:
+#   programs.voxtype = {
+#     enable = true;
+#     engine = "parakeet";
+#     package = voxtype.packages.${system}.parakeet-cuda;
+#     model.path = "/path/to/parakeet-tdt-1.1b";
+#     service.enable = true;
+#     settings = {
+#       hotkey.enabled = false;
 #     };
 #   };
 #
@@ -40,11 +50,14 @@ let
     else if cfg.model.name != null then fetchedModel
     else null;
 
-  # Build the config TOML from settings, injecting model path
+  # Build the config TOML from settings, injecting engine and model path
   configFile = tomlFormat.generate "voxtype-config.toml" (
     lib.recursiveUpdate
-      (lib.optionalAttrs (resolvedModelPath != null) {
-        whisper.model = toString resolvedModelPath;
+      (lib.filterAttrs (_: v: v != null) {
+        engine = cfg.engine;
+        ${cfg.engine} = lib.optionalAttrs (resolvedModelPath != null) {
+          model = toString resolvedModelPath;
+        };
       })
       cfg.settings
   );
@@ -53,16 +66,35 @@ in {
   options.programs.voxtype = {
     enable = lib.mkEnableOption "VoxType push-to-talk voice-to-text";
 
+    engine = lib.mkOption {
+      type = lib.types.enum [ "whisper" "parakeet" ];
+      default = "whisper";
+      description = ''
+        Speech recognition engine to use.
+        - whisper: Local transcription via whisper.cpp (default)
+        - parakeet: NVIDIA Parakeet models via ONNX Runtime
+
+        When using parakeet, set model.name to null and use model.path
+        to point to your Parakeet model directory.
+      '';
+    };
+
     package = lib.mkOption {
       type = lib.types.package;
       description = ''
         The VoxType package to use. Use the flake's wrapped packages:
-        - packages.default: CPU-only (works everywhere)
+
+        Whisper packages:
+        - packages.default: CPU-only Whisper (works everywhere)
         - packages.vulkan: Vulkan GPU acceleration (AMD/NVIDIA/Intel)
         - packages.rocm: ROCm/HIP acceleration (AMD only)
 
-        These packages include all runtime dependencies (wtype, ydotool, etc.)
-        in their PATH.
+        Parakeet packages (set engine = "parakeet"):
+        - packages.parakeet: CPU-only Parakeet
+        - packages.parakeet-cuda: CUDA acceleration (NVIDIA)
+        - packages.parakeet-rocm: ROCm acceleration (AMD)
+
+        All packages include runtime dependencies (wtype, ydotool, etc.).
       '';
       example = lib.literalExpression "voxtype.packages.\${system}.vulkan";
     };
@@ -70,10 +102,10 @@ in {
     model = {
       name = lib.mkOption {
         type = lib.types.nullOr (lib.types.enum (builtins.attrNames modelDefs));
-        default = "base.en";
+        default = null;
         description = ''
-          Whisper model to download from HuggingFace. Set to null to manage
-          the model yourself via model.path or let voxtype download on first run.
+          Whisper model to download from HuggingFace. Only used when engine = "whisper".
+          Set to null when using Parakeet or managing models manually.
 
           Available: tiny, tiny.en, base, base.en, small, small.en,
           medium, medium.en, large-v3, large-v3-turbo
@@ -83,8 +115,14 @@ in {
       path = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
         default = null;
-        description = "Path to a custom whisper model file (overrides model.name).";
-        example = "/home/user/.local/share/voxtype/models/ggml-custom.bin";
+        description = ''
+          Path to a model file or directory.
+          - For Whisper: path to a .bin model file
+          - For Parakeet: path to the model directory containing ONNX files
+
+          Overrides model.name when set.
+        '';
+        example = "/home/user/.local/share/voxtype/models/parakeet-tdt-1.1b";
       };
     };
 
@@ -102,10 +140,15 @@ in {
             enabled = false;  # Use compositor keybindings
             key = "SCROLLLOCK";
           };
+          # For Whisper engine:
           whisper = {
             language = "en";
             translate = false;
           };
+          # For Parakeet engine:
+          # parakeet = {
+          #   model_type = "tdt";
+          # };
           output = {
             mode = "type";
             fallback_to_clipboard = true;
@@ -130,6 +173,10 @@ in {
       {
         assertion = !(cfg.model.name != null && cfg.model.path != null);
         message = "programs.voxtype: cannot set both model.name and model.path";
+      }
+      {
+        assertion = !(cfg.engine == "parakeet" && cfg.model.name != null);
+        message = "programs.voxtype: model.name is only for Whisper models. Use model.path for Parakeet.";
       }
     ];
 

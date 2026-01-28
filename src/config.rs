@@ -258,6 +258,7 @@ pub enum ActivationMode {
 pub struct Config {
     pub hotkey: HotkeyConfig,
     pub audio: AudioConfig,
+    #[serde(default)]
     pub whisper: WhisperConfig,
     pub output: OutputConfig,
 
@@ -2323,6 +2324,30 @@ mod tests {
     fn test_parakeet_model_type_enum_default() {
         // ParakeetModelType defaults to Tdt
         assert_eq!(ParakeetModelType::default(), ParakeetModelType::Tdt);
+    }
+
+    #[test]
+    fn test_whisper_section_is_optional() {
+        // The [whisper] section should be optional for Parakeet users
+        // See: https://github.com/peteonrails/voxtype/issues/137
+        //
+        // We test this by deserializing into a struct that mirrors Config
+        // but only has the fields we want to test (avoiding all required fields)
+        #[derive(Debug, Deserialize)]
+        struct PartialConfig {
+            engine: TranscriptionEngine,
+            #[serde(default)]
+            whisper: WhisperConfig,
+        }
+
+        let toml = r#"
+            engine = "parakeet"
+        "#;
+
+        let config: PartialConfig =
+            toml::from_str(toml).expect("whisper section should be optional");
+        assert_eq!(config.engine, TranscriptionEngine::Parakeet);
+        assert_eq!(config.whisper.model, "base.en"); // Default value
     }
 
     #[test]
