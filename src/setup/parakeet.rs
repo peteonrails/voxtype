@@ -17,6 +17,7 @@ pub enum ParakeetBackend {
     Avx2,
     Avx512,
     Cuda,
+    Rocm,
 }
 
 impl ParakeetBackend {
@@ -25,6 +26,7 @@ impl ParakeetBackend {
             ParakeetBackend::Avx2 => "voxtype-parakeet-avx2",
             ParakeetBackend::Avx512 => "voxtype-parakeet-avx512",
             ParakeetBackend::Cuda => "voxtype-parakeet-cuda",
+            ParakeetBackend::Rocm => "voxtype-parakeet-rocm",
         }
     }
 
@@ -33,6 +35,7 @@ impl ParakeetBackend {
             ParakeetBackend::Avx2 => "Parakeet (AVX2)",
             ParakeetBackend::Avx512 => "Parakeet (AVX-512)",
             ParakeetBackend::Cuda => "Parakeet (CUDA)",
+            ParakeetBackend::Rocm => "Parakeet (ROCm)",
         }
     }
 
@@ -41,6 +44,7 @@ impl ParakeetBackend {
             ParakeetBackend::Avx2 => "voxtype-avx2",
             ParakeetBackend::Avx512 => "voxtype-avx512",
             ParakeetBackend::Cuda => "voxtype-vulkan", // CUDA users likely have GPU, fall back to vulkan
+            ParakeetBackend::Rocm => "voxtype-vulkan", // ROCm users have AMD GPU, fall back to vulkan
         }
     }
 }
@@ -65,6 +69,7 @@ pub fn detect_current_parakeet_backend() -> Option<ParakeetBackend> {
             "voxtype-parakeet-avx2" => Some(ParakeetBackend::Avx2),
             "voxtype-parakeet-avx512" => Some(ParakeetBackend::Avx512),
             "voxtype-parakeet-cuda" => Some(ParakeetBackend::Cuda),
+            "voxtype-parakeet-rocm" => Some(ParakeetBackend::Rocm),
             _ => None,
         };
     }
@@ -90,7 +95,12 @@ fn detect_current_whisper_backend() -> Option<&'static str> {
 pub fn detect_available_backends() -> Vec<ParakeetBackend> {
     let mut available = Vec::new();
 
-    for backend in [ParakeetBackend::Avx2, ParakeetBackend::Avx512, ParakeetBackend::Cuda] {
+    for backend in [
+        ParakeetBackend::Avx2,
+        ParakeetBackend::Avx512,
+        ParakeetBackend::Cuda,
+        ParakeetBackend::Rocm,
+    ] {
         let path = Path::new(VOXTYPE_LIB_DIR).join(backend.binary_name());
         if path.exists() {
             available.push(backend);
@@ -111,6 +121,11 @@ fn detect_best_parakeet_backend() -> Option<ParakeetBackend> {
     // Prefer CUDA if available and NVIDIA GPU detected
     if available.contains(&ParakeetBackend::Cuda) && detect_nvidia_gpu() {
         return Some(ParakeetBackend::Cuda);
+    }
+
+    // Prefer ROCm if available and AMD GPU detected
+    if available.contains(&ParakeetBackend::Rocm) && detect_amd_gpu() {
+        return Some(ParakeetBackend::Rocm);
     }
 
     // Check for AVX-512 support
@@ -140,6 +155,40 @@ fn detect_nvidia_gpu() -> bool {
 
     // Check for NVIDIA device nodes
     Path::new("/dev/nvidia0").exists()
+}
+
+/// Detect if AMD GPU is present
+fn detect_amd_gpu() -> bool {
+    // Check for AMD GPU via lspci
+    if let Ok(output) = Command::new("lspci").output() {
+        if output.status.success() {
+            let output_str = String::from_utf8_lossy(&output.stdout).to_lowercase();
+            if output_str.contains("amd") || output_str.contains("radeon") {
+                return true;
+            }
+        }
+    }
+
+    // Check for AMD DRI render nodes
+    if let Ok(entries) = fs::read_dir("/dev/dri") {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with("renderD") {
+                    // Check if it's an AMD device via sysfs
+                    let card_num = name.trim_start_matches("renderD");
+                    let vendor_path = format!("/sys/class/drm/card{}/device/vendor", card_num.parse::<i32>().unwrap_or(0) - 128);
+                    if let Ok(vendor) = fs::read_to_string(&vendor_path) {
+                        // AMD vendor ID is 0x1002
+                        if vendor.trim() == "0x1002" {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    false
 }
 
 /// Switch symlink to a different binary
@@ -210,7 +259,12 @@ pub fn show_status() {
         println!("  No Parakeet binaries installed.");
         println!("\n  Install a Parakeet-enabled package to use this feature.");
     } else {
-        for backend in [ParakeetBackend::Avx2, ParakeetBackend::Avx512, ParakeetBackend::Cuda] {
+        for backend in [
+            ParakeetBackend::Avx2,
+            ParakeetBackend::Avx512,
+            ParakeetBackend::Cuda,
+            ParakeetBackend::Rocm,
+        ] {
             let installed = available.contains(&backend);
             let active = current == Some(backend);
 
@@ -226,12 +280,18 @@ pub fn show_status() {
         }
     }
 
-    // NVIDIA GPU detection for CUDA
+    // GPU detection for CUDA/ROCm
     println!();
-    if detect_nvidia_gpu() {
+    let has_nvidia = detect_nvidia_gpu();
+    let has_amd = detect_amd_gpu();
+    if has_nvidia {
         println!("NVIDIA GPU: detected");
-    } else {
-        println!("NVIDIA GPU: not detected");
+    }
+    if has_amd {
+        println!("AMD GPU: detected");
+    }
+    if !has_nvidia && !has_amd {
+        println!("GPU: not detected");
     }
 
     // Usage hints
@@ -341,6 +401,7 @@ mod tests {
         assert_eq!(ParakeetBackend::Avx2.binary_name(), "voxtype-parakeet-avx2");
         assert_eq!(ParakeetBackend::Avx512.binary_name(), "voxtype-parakeet-avx512");
         assert_eq!(ParakeetBackend::Cuda.binary_name(), "voxtype-parakeet-cuda");
+        assert_eq!(ParakeetBackend::Rocm.binary_name(), "voxtype-parakeet-rocm");
     }
 
     #[test]
@@ -348,6 +409,7 @@ mod tests {
         assert_eq!(ParakeetBackend::Avx2.display_name(), "Parakeet (AVX2)");
         assert_eq!(ParakeetBackend::Avx512.display_name(), "Parakeet (AVX-512)");
         assert_eq!(ParakeetBackend::Cuda.display_name(), "Parakeet (CUDA)");
+        assert_eq!(ParakeetBackend::Rocm.display_name(), "Parakeet (ROCm)");
     }
 
     #[test]
@@ -355,6 +417,7 @@ mod tests {
         assert_eq!(ParakeetBackend::Avx2.whisper_equivalent(), "voxtype-avx2");
         assert_eq!(ParakeetBackend::Avx512.whisper_equivalent(), "voxtype-avx512");
         assert_eq!(ParakeetBackend::Cuda.whisper_equivalent(), "voxtype-vulkan");
+        assert_eq!(ParakeetBackend::Rocm.whisper_equivalent(), "voxtype-vulkan");
     }
 
     #[test]
@@ -370,7 +433,7 @@ mod tests {
         let backends = detect_available_backends();
         // On most dev machines, no parakeet binaries are installed
         // Just verify it returns a valid vector
-        assert!(backends.len() <= 3);
+        assert!(backends.len() <= 4);
     }
 
     #[test]
