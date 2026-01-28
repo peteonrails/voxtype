@@ -87,6 +87,7 @@
               lockFile = ./Cargo.lock;
               outputHashes = {
                 "parakeet-rs-0.3.0" = "sha256-rq/COzeNGAcS6sfwcB280lxTmy4UhuARUWg5ZbXCFrY=";
+                "ort-2.0.0-rc.11" = "sha256-c8ye9/Pj8iPRFU92gn2d9WIiLodHhV2ow2Z/MfhqgN0=";
               };
             };
 

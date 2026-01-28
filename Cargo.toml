@@ -108,6 +108,11 @@ opt-level = 3
 [profile.dev]
 opt-level = 1  # Faster dev builds, whisper still usable
 
+[patch.crates-io]
+# Fix MIGraphX provider options for ROCm support
+# https://github.com/pykeio/ort/issues/509
+ort = { git = "https://github.com/pykeio/ort" }
+
 [[bin]]
 name = "voxtype"
 path = "src/main.rs"
