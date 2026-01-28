@@ -83,7 +83,12 @@
             version = "0.5.0";
 
             src = ./.;
-            cargoLock.lockFile = ./Cargo.lock;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              outputHashes = {
+                "parakeet-rs-0.3.0" = "sha256-rq/COzeNGAcS6sfwcB280lxTmy4UhuARUWg5ZbXCFrY=";
+              };
+            };
 
             nativeBuildInputs = commonNativeBuildInputs ++ extraNativeBuildInputs;
             buildInputs = commonBuildInputs ++ extraBuildInputs;
