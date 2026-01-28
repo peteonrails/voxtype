@@ -117,7 +117,12 @@
             version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
 
             src = ./.;
-            cargoLock.lockFile = ./Cargo.lock;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              outputHashes = {
+                "ort-2.0.0-rc.11" = "sha256-3v6wRi3mU/Fbd3fuiGxTRAXHj+VnUTsahU/oc7eiw18=";
+              };
+            };
 
             nativeBuildInputs = commonNativeBuildInputs ++ extraNativeBuildInputs;
             buildInputs = commonBuildInputs ++ extraBuildInputs;
