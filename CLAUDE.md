@@ -332,9 +332,6 @@ Existing packages: Arch (AUR: `voxtype`, `voxtype-bin`), Debian (.deb), Fedora (
 Based on open issues and project direction:
 
 **Near Term:**
-- **Multi-model support** ([#81](https://github.com/peteonrails/voxtype/issues/81)) - Load multiple Whisper models and switch between them
-- **Multiple post-processing profiles** ([#79](https://github.com/peteonrails/voxtype/issues/79)) - Different LLM prompts for different contexts
-- **KDE Wayland compatibility docs** ([#85](https://github.com/peteonrails/voxtype/issues/85)) - Document wtype alternatives for KDE
 - **Deterministic integration tests** - Automated smoke tests using pre-recorded audio files that can run in CI without LLM/human interaction
 
 **Medium Term:**
@@ -344,6 +341,9 @@ Based on open issues and project direction:
 **Exploratory:**
 - **Nemotron Speech backend** ([#47](https://github.com/peteonrails/voxtype/issues/47)) - Alternative ASR engine
 - **Foreign exception handling** ([#30](https://github.com/peteonrails/voxtype/issues/30)) - Investigate whisper.cpp crash recovery
+
+**Blocked/Waiting:**
+- **Parakeet MIGraphX acceleration** - When parakeet-rs 0.3.0 releases on crates.io, update AMD GPU builds to use MIGraphX instead of ROCm. The current ROCm EP has upstream ONNX Runtime compatibility issues. Consider renaming `parakeet-rocm` feature to `parakeet-migraphx`. Also check nixpkgs onnxruntime for MIGraphX support options.
 
 ### Non-Goals
 
