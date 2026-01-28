@@ -83,7 +83,12 @@
             version = "0.5.0";
 
             src = ./.;
-            cargoLock.lockFile = ./Cargo.lock;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              outputHashes = {
+                "ort-2.0.0-rc.11" = "sha256-kmXP44mgHgCIMI49YJpCOE8sgpNTKGPzvjtFnqWeTDQ=";
+              };
+            };
 
             nativeBuildInputs = commonNativeBuildInputs ++ extraNativeBuildInputs;
             buildInputs = commonBuildInputs ++ extraBuildInputs;
