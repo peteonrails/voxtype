@@ -60,17 +60,21 @@
         # Wrap a parakeet package with runtime dependencies and ORT_DYLIB_PATH
         # Parakeet uses ONNX Runtime, which needs to know where to find the library
         libExt = if pkgs.stdenv.isDarwin then "dylib" else "so";
-        wrapParakeet = pkg: pkgs.symlinkJoin {
+        wrapParakeet = { onnxruntime ? pkgs.onnxruntime, pkg }: pkgs.symlinkJoin {
           name = "${pkg.pname or "voxtype"}-wrapped-${pkg.version}";
           paths = [ pkg ];
           buildInputs = [ pkgs.makeWrapper ];
           postBuild = ''
             wrapProgram $out/bin/voxtype \
               --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps} \
-              --set ORT_DYLIB_PATH "${pkgs.onnxruntime}/lib/libonnxruntime.${libExt}"
+              --set ORT_DYLIB_PATH "${onnxruntime}/lib/libonnxruntime.${libExt}"
           '';
           inherit (pkg) meta;
         };
+
+        # ONNX Runtime variants for different GPU backends
+        onnxruntimeCuda = pkgsUnfree.onnxruntime.override { cudaSupport = true; };
+        onnxruntimeRocm = pkgs.onnxruntime.override { rocmSupport = true; };
 
         # Base derivation for voxtype (unwrapped)
         mkVoxtypeUnwrapped = { pname ? "voxtype", features ? [], extraNativeBuildInputs ? [], extraBuildInputs ? [] }:
@@ -199,7 +203,7 @@
           features = [ "parakeet-load-dynamic" "parakeet-cuda" ];
           extraNativeBuildInputs = [ pkgsUnfree.cudaPackages.cuda_nvcc ];
           extraBuildInputs = [
-            pkgs.onnxruntime
+            onnxruntimeCuda
             pkgsUnfree.cudaPackages.cudatoolkit
             pkgsUnfree.cudaPackages.cudnn
           ];
@@ -212,10 +216,10 @@
           extraNativeBuildInputs = with pkgs; [
             rocmPackages.clr
           ];
-          extraBuildInputs = with pkgs; [
-            onnxruntime
-            rocmPackages.clr
-            rocmPackages.rocblas
+          extraBuildInputs = [
+            onnxruntimeRocm
+            pkgs.rocmPackages.clr
+            pkgs.rocmPackages.rocblas
           ];
         };
 
@@ -229,9 +233,9 @@
 
           # Parakeet variants (ONNX-based speech recognition)
           # Uses NVIDIA's Parakeet models instead of Whisper
-          parakeet = wrapParakeet parakeetUnwrapped;
-          parakeet-cuda = wrapParakeet parakeetCudaUnwrapped;
-          parakeet-rocm = wrapParakeet parakeetRocmUnwrapped;
+          parakeet = wrapParakeet { pkg = parakeetUnwrapped; };
+          parakeet-cuda = wrapParakeet { onnxruntime = onnxruntimeCuda; pkg = parakeetCudaUnwrapped; };
+          parakeet-rocm = wrapParakeet { onnxruntime = onnxruntimeRocm; pkg = parakeetRocmUnwrapped; };
 
           # Unwrapped packages (for custom wrapping scenarios)
           voxtype-unwrapped = mkVoxtypeUnwrapped {};
