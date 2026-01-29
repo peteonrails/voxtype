@@ -69,6 +69,9 @@ whisper-rs = "0.15.1"
 # Parakeet speech-to-text (optional, ONNX-based)
 parakeet-rs = { version = "0.2.9", optional = true }
 
+# Voice Activity Detection for Parakeet (optional, uses bundled Silero VAD)
+voice_activity_detector = { version = "0.2", optional = true }
+
 
 # CPU count for thread detection
 num_cpus = "1.16"
@@ -86,7 +89,7 @@ gpu-cuda = ["whisper-rs/cuda"]
 gpu-metal = ["whisper-rs/metal"]
 gpu-hipblas = ["whisper-rs/hipblas"]
 # Parakeet backend (ONNX-based, alternative to Whisper)
-parakeet = ["dep:parakeet-rs"]
+parakeet = ["dep:parakeet-rs", "dep:voice_activity_detector"]
 parakeet-cuda = ["parakeet", "parakeet-rs/cuda"]
 parakeet-tensorrt = ["parakeet", "parakeet-rs/tensorrt"]
 parakeet-rocm = ["parakeet", "parakeet-rs/rocm"]

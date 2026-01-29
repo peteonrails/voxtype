@@ -205,6 +205,21 @@ on_transcription = true
 # Custom word replacements (case-insensitive)
 # replacements = { "vox type" = "voxtype" }
 
+# [vad]
+# Voice Activity Detection - filter silence-only recordings before transcription
+# Prevents Whisper hallucinations when processing silence
+#
+# Enable VAD (default: false)
+# enabled = false
+#
+# Speech detection threshold (0.0-1.0, default: 0.5)
+# Higher values require more confident speech detection
+# threshold = 0.5
+#
+# Minimum speech duration in milliseconds (default: 100)
+# Recordings with less speech than this are rejected
+# min_speech_duration_ms = 100
+
 # [status]
 # Status display icons for Waybar/tray integrations
 #
@@ -274,6 +289,11 @@ pub struct Config {
     /// Text processing configuration (replacements, spoken punctuation)
     #[serde(default)]
     pub text: TextConfig,
+
+    /// Voice Activity Detection configuration
+    /// When enabled, filters silence-only recordings before transcription
+    #[serde(default)]
+    pub vad: VadConfig,
 
     /// Status display configuration (icons for Waybar/tray integrations)
     #[serde(default)]
@@ -717,7 +737,6 @@ pub struct WhisperConfig {
     pub initial_prompt: Option<String>,
 
     // --- Multi-model settings ---
-
     /// Secondary model to use when hotkey.model_modifier is held
     /// Example: "large-v3-turbo" for difficult audio
     #[serde(default)]
@@ -774,9 +793,7 @@ impl WhisperConfig {
         }
         // Fall back to deprecated `backend` with warning
         if let Some(backend) = self.backend {
-            tracing::warn!(
-                "DEPRECATED: [whisper] backend is deprecated, use 'mode' instead"
-            );
+            tracing::warn!("DEPRECATED: [whisper] backend is deprecated, use 'mode' instead");
             tracing::warn!(
                 "  Change 'backend = \"{}\"' to 'mode = \"{}\"' in config.toml",
                 match backend {
@@ -872,6 +889,53 @@ pub enum TranscriptionEngine {
     /// Use Parakeet (NVIDIA's FastConformer via ONNX Runtime)
     /// Requires: cargo build --features parakeet
     Parakeet,
+}
+
+/// Voice Activity Detection configuration
+///
+/// VAD filters silence-only recordings before transcription to prevent
+/// Whisper hallucinations when processing silence.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VadConfig {
+    /// Enable Voice Activity Detection (default: false)
+    /// When enabled, recordings with no detected speech are rejected before transcription
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Speech detection threshold (0.0-1.0, default: 0.5)
+    /// Higher values require more confident speech detection
+    #[serde(default = "default_vad_threshold")]
+    pub threshold: f32,
+
+    /// Minimum speech duration in milliseconds (default: 100)
+    /// Recordings with less speech than this are rejected
+    #[serde(default = "default_min_speech_duration_ms")]
+    pub min_speech_duration_ms: u32,
+
+    /// Path to VAD model file (optional)
+    /// If not set, uses the default model location (~/.local/share/voxtype/models/)
+    /// Auto-selects appropriate model based on transcription engine
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+fn default_vad_threshold() -> f32 {
+    0.5
+}
+
+fn default_min_speech_duration_ms() -> u32 {
+    100
+}
+
+impl Default for VadConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold: default_vad_threshold(),
+            min_speech_duration_ms: default_min_speech_duration_ms(),
+            model: None,
+        }
+    }
 }
 
 /// Text processing configuration
@@ -1218,6 +1282,7 @@ impl Default for Config {
             engine: TranscriptionEngine::default(),
             parakeet: None,
             text: TextConfig::default(),
+            vad: VadConfig::default(),
             status: StatusConfig::default(),
             state_file: Some("auto".to_string()),
             profiles: HashMap::new(),
@@ -1975,7 +2040,10 @@ mod tests {
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.engine, TranscriptionEngine::Parakeet);
         assert!(config.parakeet.is_some());
-        assert_eq!(config.parakeet.as_ref().unwrap().model, "parakeet-tdt-0.6b-v3");
+        assert_eq!(
+            config.parakeet.as_ref().unwrap().model,
+            "parakeet-tdt-0.6b-v3"
+        );
     }
 
     #[test]
@@ -2003,15 +2071,39 @@ mod tests {
 
     #[test]
     fn test_output_driver_from_str() {
-        assert_eq!("wtype".parse::<OutputDriver>().unwrap(), OutputDriver::Wtype);
-        assert_eq!("dotool".parse::<OutputDriver>().unwrap(), OutputDriver::Dotool);
-        assert_eq!("ydotool".parse::<OutputDriver>().unwrap(), OutputDriver::Ydotool);
-        assert_eq!("clipboard".parse::<OutputDriver>().unwrap(), OutputDriver::Clipboard);
-        assert_eq!("xclip".parse::<OutputDriver>().unwrap(), OutputDriver::Xclip);
+        assert_eq!(
+            "wtype".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Wtype
+        );
+        assert_eq!(
+            "dotool".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Dotool
+        );
+        assert_eq!(
+            "ydotool".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Ydotool
+        );
+        assert_eq!(
+            "clipboard".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Clipboard
+        );
+        assert_eq!(
+            "xclip".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Xclip
+        );
         // Case insensitive
-        assert_eq!("WTYPE".parse::<OutputDriver>().unwrap(), OutputDriver::Wtype);
-        assert_eq!("Ydotool".parse::<OutputDriver>().unwrap(), OutputDriver::Ydotool);
-        assert_eq!("XCLIP".parse::<OutputDriver>().unwrap(), OutputDriver::Xclip);
+        assert_eq!(
+            "WTYPE".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Wtype
+        );
+        assert_eq!(
+            "Ydotool".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Ydotool
+        );
+        assert_eq!(
+            "XCLIP".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Xclip
+        );
         // Invalid
         assert!("invalid".parse::<OutputDriver>().is_err());
     }
@@ -2405,11 +2497,17 @@ mod tests {
         assert_eq!(config.profiles.len(), 2);
 
         let slack = config.get_profile("slack").unwrap();
-        assert_eq!(slack.post_process_command, Some("cleanup-for-slack.sh".to_string()));
+        assert_eq!(
+            slack.post_process_command,
+            Some("cleanup-for-slack.sh".to_string())
+        );
         assert!(slack.output_mode.is_none());
 
         let code = config.get_profile("code").unwrap();
-        assert_eq!(code.post_process_command, Some("cleanup-for-code.sh".to_string()));
+        assert_eq!(
+            code.post_process_command,
+            Some("cleanup-for-code.sh".to_string())
+        );
         assert_eq!(code.output_mode, Some(OutputMode::Clipboard));
     }
 
@@ -2438,7 +2536,10 @@ mod tests {
 
         let config: Config = toml::from_str(toml_str).unwrap();
         let slow = config.get_profile("slow").unwrap();
-        assert_eq!(slow.post_process_command, Some("slow-llm-command".to_string()));
+        assert_eq!(
+            slow.post_process_command,
+            Some("slow-llm-command".to_string())
+        );
         assert_eq!(slow.post_process_timeout_ms, Some(60000));
     }
 

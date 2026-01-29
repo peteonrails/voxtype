@@ -14,6 +14,7 @@ Voxtype is a push-to-talk voice-to-text tool for Linux. Optimized for Wayland, w
 - [Transcription Engines](#transcription-engines)
 - [Multi-Model Support](#multi-model-support)
 - [Improving Transcription Accuracy](#improving-transcription-accuracy)
+- [Voice Activity Detection](#voice-activity-detection)
 - [Whisper Models](#whisper-models)
 - [Remote Whisper Servers](#remote-whisper-servers)
 - [CLI Backend (whisper-cli)](#cli-backend-whisper-cli)
@@ -691,6 +692,82 @@ voxtype --initial-prompt "Discussion about Terraform and AWS Lambda" daemon
 - Update the prompt when your context changes (different project, client, or domain)
 - Combine with a larger model (`small.en` or `medium.en`) for best results on difficult vocabulary
 - The prompt guides Whisper's expectations but doesn't guarantee exact transcription
+
+---
+
+## Voice Activity Detection
+
+Voice Activity Detection (VAD) filters silence-only recordings before sending them to Whisper. This prevents Whisper "hallucinations" where it generates text from silence, such as "(music playing)" or random phrases.
+
+### When to Use VAD
+
+Enable VAD if you experience:
+
+- **Hallucinations from silence**: Whisper generating text when you didn't speak
+- **Accidental recordings**: You press the hotkey but don't say anything
+- **Noisy environments**: Where brief non-speech sounds trigger recordings
+
+VAD is disabled by default to preserve existing behavior. It's opt-in.
+
+### Setup
+
+First, download the VAD model:
+
+```bash
+voxtype setup vad
+```
+
+Then enable VAD in your config:
+
+```toml
+[vad]
+enabled = true
+```
+
+Or use the CLI flag for a single session:
+
+```bash
+voxtype --vad daemon
+```
+
+### How It Works
+
+After you release the push-to-talk key:
+
+1. Voxtype captures the audio
+2. VAD analyzes the audio for speech content
+3. If speech is detected, proceeds to transcription
+4. If no speech is detected, plays the "Cancelled" audio feedback and returns to idle
+
+### Configuration Options
+
+```toml
+[vad]
+enabled = true
+threshold = 0.5           # 0.0-1.0, higher = stricter
+min_speech_duration_ms = 100  # Minimum speech required
+```
+
+**threshold**: How confident VAD must be that speech is present. Lower values (0.3) are more permissive, higher values (0.7) are stricter but may reject quiet speech.
+
+**min_speech_duration_ms**: Minimum duration of detected speech required. Helps filter out brief noise spikes.
+
+### CLI Overrides
+
+```bash
+# Enable VAD for this session
+voxtype --vad daemon
+
+# Enable with custom threshold
+voxtype --vad --vad-threshold 0.3 daemon
+```
+
+### Backends
+
+VAD uses different backends depending on your transcription engine:
+
+- **Whisper engine**: Uses whisper-rs built-in VAD (GGML format, requires model download)
+- **Parakeet engine**: Uses bundled Silero VAD (no separate download needed)
 
 ---
 

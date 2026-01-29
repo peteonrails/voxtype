@@ -81,6 +81,7 @@ pub mod setup;
 pub mod state;
 pub mod text;
 pub mod transcribe;
+pub mod vad;
 
 pub use cli::{Cli, Commands, CompositorType, OutputModeOverride, RecordAction, SetupAction};
 pub use config::Config;

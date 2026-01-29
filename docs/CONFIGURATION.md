@@ -1590,6 +1590,103 @@ If Whisper transcribes "vox type" (or "Vox Type"), it will be replaced with "vox
 
 ---
 
+## [vad]
+
+Voice Activity Detection settings. VAD filters silence-only recordings before transcription, preventing Whisper hallucinations when processing silence.
+
+### enabled
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Enable Voice Activity Detection. When enabled, recordings with no detected speech are rejected before transcription, and the "Cancelled" audio feedback is played.
+
+**Example:**
+```toml
+[vad]
+enabled = true
+```
+
+**CLI override:**
+```bash
+voxtype --vad daemon
+```
+
+### threshold
+
+**Type:** Float
+**Default:** `0.5`
+**Required:** No
+
+Speech detection threshold from 0.0 to 1.0. Higher values require more confident speech detection (stricter), lower values are more permissive.
+
+**Example:**
+```toml
+[vad]
+enabled = true
+threshold = 0.6  # More strict, may reject soft speech
+```
+
+**CLI override:**
+```bash
+voxtype --vad --vad-threshold 0.3 daemon  # More permissive
+```
+
+### min_speech_duration_ms
+
+**Type:** Integer
+**Default:** `100`
+**Required:** No
+
+Minimum speech duration in milliseconds. Recordings with less detected speech than this are rejected. Helps filter out brief noise spikes.
+
+**Example:**
+```toml
+[vad]
+enabled = true
+min_speech_duration_ms = 200  # Require at least 200ms of speech
+```
+
+### model
+
+**Type:** String (path)
+**Default:** Auto-detected based on engine
+**Required:** No
+
+Path to a custom VAD model file. If not set, uses the default model location (`~/.local/share/voxtype/models/`).
+
+- **Whisper engine:** Uses `ggml-silero-vad.bin` (GGML format)
+- **Parakeet engine:** Uses bundled Silero model (no external file needed)
+
+**Example:**
+```toml
+[vad]
+enabled = true
+model = "/custom/path/to/vad-model.bin"
+```
+
+### Setup
+
+Download the VAD model before enabling:
+
+```bash
+voxtype setup vad
+```
+
+This downloads the appropriate model for your configured transcription engine.
+
+### Example Configuration
+
+```toml
+[vad]
+enabled = true
+threshold = 0.5
+min_speech_duration_ms = 100
+```
+
+---
+
 ## [status]
 
 Controls status display icons for Waybar and other tray integrations.
@@ -1770,6 +1867,8 @@ Most configuration options can be overridden via command line:
 | whisper.model | `--model` |
 | output.mode = "clipboard" | `--clipboard` |
 | output.mode = "paste" | `--paste` |
+| vad.enabled | `--vad` |
+| vad.threshold | `--vad-threshold` |
 | status.icon_theme | `--icon-theme` (status subcommand) |
 | Verbosity | `-v`, `-vv`, `-q` |
 

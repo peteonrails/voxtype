@@ -114,7 +114,12 @@ impl GpuVendor {
     /// Parse vendor from GPU name string
     fn from_name(name: &str) -> Self {
         let lower = name.to_lowercase();
-        if lower.contains("nvidia") || lower.contains("geforce") || lower.contains("quadro") || lower.contains("rtx") || lower.contains("gtx") {
+        if lower.contains("nvidia")
+            || lower.contains("geforce")
+            || lower.contains("quadro")
+            || lower.contains("rtx")
+            || lower.contains("gtx")
+        {
             GpuVendor::Nvidia
         } else if lower.contains("amd") || lower.contains("radeon") || lower.contains("rx ") {
             GpuVendor::Amd
@@ -286,14 +291,14 @@ pub fn detect_gpu() -> Option<String> {
 
 /// Parse VOXTYPE_VULKAN_DEVICE environment variable and return the appropriate vendor
 pub fn get_selected_gpu_vendor() -> Option<GpuVendor> {
-    std::env::var("VOXTYPE_VULKAN_DEVICE").ok().and_then(|val| {
-        match val.to_lowercase().as_str() {
+    std::env::var("VOXTYPE_VULKAN_DEVICE")
+        .ok()
+        .and_then(|val| match val.to_lowercase().as_str() {
             "nvidia" | "nv" => Some(GpuVendor::Nvidia),
             "amd" | "radeon" => Some(GpuVendor::Amd),
             "intel" => Some(GpuVendor::Intel),
             _ => None,
-        }
-    })
+        })
 }
 
 /// Apply GPU selection environment variables based on VOXTYPE_VULKAN_DEVICE
@@ -600,7 +605,10 @@ pub fn show_status() {
         if gpus.len() > 1 {
             println!();
             if let Some(selected) = get_selected_gpu_vendor() {
-                println!("GPU selection: {} (via VOXTYPE_VULKAN_DEVICE)", selected.display_name());
+                println!(
+                    "GPU selection: {} (via VOXTYPE_VULKAN_DEVICE)",
+                    selected.display_name()
+                );
             } else {
                 println!("GPU selection: auto (first available)");
                 println!();
@@ -708,7 +716,10 @@ pub fn enable() -> anyhow::Result<()> {
 
         // Regenerate systemd service if it exists
         if super::systemd::regenerate_service_file()? {
-            println!("Updated systemd service to use Parakeet {} backend.", backend_name);
+            println!(
+                "Updated systemd service to use Parakeet {} backend.",
+                backend_name
+            );
         }
 
         println!("Switched to Parakeet ({}) backend.", backend_name);
@@ -766,7 +777,10 @@ pub fn disable() -> anyhow::Result<()> {
         let best_backend = detect_best_parakeet_cpu_backend();
         if let Some(backend_name) = best_backend {
             switch_backend_tiered_parakeet(backend_name)?;
-            println!("Switched to Parakeet ({}) backend.", backend_name.trim_start_matches("voxtype-parakeet-"));
+            println!(
+                "Switched to Parakeet ({}) backend.",
+                backend_name.trim_start_matches("voxtype-parakeet-")
+            );
         } else {
             anyhow::bail!(
                 "No Parakeet CPU backend found.\n\

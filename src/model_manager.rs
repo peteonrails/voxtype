@@ -6,7 +6,7 @@
 //! - Fresh subprocess per model (when gpu_isolation = true)
 //! - Remote backend model selection
 
-use crate::config::{WhisperMode, WhisperConfig};
+use crate::config::{WhisperConfig, WhisperMode};
 use crate::error::TranscribeError;
 use crate::transcribe::{self, Transcriber};
 use std::collections::HashMap;
@@ -115,10 +115,7 @@ impl ModelManager {
     }
 
     /// Create a CLI transcriber with model override
-    fn create_cli_transcriber(
-        &self,
-        model: &str,
-    ) -> Result<Arc<dyn Transcriber>, TranscribeError> {
+    fn create_cli_transcriber(&self, model: &str) -> Result<Arc<dyn Transcriber>, TranscribeError> {
         let mut config = self.config.clone();
         config.model = model.to_string();
         tracing::info!("Using whisper-cli subprocess backend");

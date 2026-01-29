@@ -22,8 +22,8 @@ pub mod ydotool;
 use crate::config::{OutputConfig, OutputDriver};
 use crate::error::OutputError;
 use std::borrow::Cow;
-use std::process::Stdio;
 use std::fs;
+use std::process::Stdio;
 use tokio::process::Command;
 
 /// Normalize Unicode curly quotes to ASCII equivalents.
@@ -44,7 +44,7 @@ fn normalize_quotes(text: &str) -> Cow<'_, str> {
             | '\u{201C}'  // LEFT DOUBLE QUOTATION MARK
             | '\u{201D}'  // RIGHT DOUBLE QUOTATION MARK
             | '\u{201F}'  // DOUBLE HIGH-REVERSED-9 QUOTATION MARK
-            | '\u{2033}'  // DOUBLE PRIME
+            | '\u{2033}' // DOUBLE PRIME
         )
     });
 
@@ -98,7 +98,11 @@ pub fn engine_icon(engine: crate::config::TranscriptionEngine) -> &'static str {
 }
 
 /// Send a transcription notification with optional engine icon
-pub async fn send_transcription_notification(text: &str, show_engine_icon: bool, engine: crate::config::TranscriptionEngine) {
+pub async fn send_transcription_notification(
+    text: &str,
+    show_engine_icon: bool,
+    engine: crate::config::TranscriptionEngine,
+) {
     // Truncate preview for notification (use chars() to handle multi-byte UTF-8)
     let preview = if text.chars().count() > 80 {
         format!("{}...", text.chars().take(80).collect::<String>())

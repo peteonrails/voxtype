@@ -149,7 +149,11 @@ fn detect_best_parakeet_backend() -> Option<ParakeetBackend> {
 /// Detect if NVIDIA GPU is present
 fn detect_nvidia_gpu() -> bool {
     // Check for nvidia-smi
-    if let Ok(output) = Command::new("nvidia-smi").arg("--query-gpu=name").arg("--format=csv,noheader").output() {
+    if let Ok(output) = Command::new("nvidia-smi")
+        .arg("--query-gpu=name")
+        .arg("--format=csv,noheader")
+        .output()
+    {
         return output.status.success() && !output.stdout.is_empty();
     }
 
@@ -176,7 +180,10 @@ fn detect_amd_gpu() -> bool {
                 if name.starts_with("renderD") {
                     // Check if it's an AMD device via sysfs
                     let card_num = name.trim_start_matches("renderD");
-                    let vendor_path = format!("/sys/class/drm/card{}/device/vendor", card_num.parse::<i32>().unwrap_or(0) - 128);
+                    let vendor_path = format!(
+                        "/sys/class/drm/card{}/device/vendor",
+                        card_num.parse::<i32>().unwrap_or(0) - 128
+                    );
                     if let Ok(vendor) = fs::read_to_string(&vendor_path) {
                         // AMD vendor ID is 0x1002
                         if vendor.trim() == "0x1002" {
@@ -240,13 +247,18 @@ pub fn show_status() {
             println!("  Backend: {}", backend.display_name());
             println!(
                 "  Binary: {}",
-                Path::new(VOXTYPE_LIB_DIR).join(backend.binary_name()).display()
+                Path::new(VOXTYPE_LIB_DIR)
+                    .join(backend.binary_name())
+                    .display()
             );
         }
     } else {
         println!("Active engine: Whisper");
         if let Some(backend) = detect_current_whisper_backend() {
-            println!("  Binary: {}", Path::new(VOXTYPE_LIB_DIR).join(backend).display());
+            println!(
+                "  Binary: {}",
+                Path::new(VOXTYPE_LIB_DIR).join(backend).display()
+            );
         }
     }
 
@@ -363,18 +375,31 @@ pub fn disable() -> anyhow::Result<()> {
         whisper_backend
     } else {
         // Try to find any available Whisper backend
-        for fallback in ["voxtype-avx512", "voxtype-avx2", "voxtype-vulkan", "voxtype-cpu"] {
+        for fallback in [
+            "voxtype-avx512",
+            "voxtype-avx2",
+            "voxtype-vulkan",
+            "voxtype-cpu",
+        ] {
             if Path::new(VOXTYPE_LIB_DIR).join(fallback).exists() {
-                eprintln!("Note: {} not found, using {} instead", whisper_backend, fallback);
+                eprintln!(
+                    "Note: {} not found, using {} instead",
+                    whisper_backend, fallback
+                );
                 break;
             }
         }
         // Find first available
-        ["voxtype-avx512", "voxtype-avx2", "voxtype-vulkan", "voxtype-cpu"]
-            .iter()
-            .find(|b| Path::new(VOXTYPE_LIB_DIR).join(b).exists())
-            .copied()
-            .ok_or_else(|| anyhow::anyhow!("No Whisper backend found to switch to"))?
+        [
+            "voxtype-avx512",
+            "voxtype-avx2",
+            "voxtype-vulkan",
+            "voxtype-cpu",
+        ]
+        .iter()
+        .find(|b| Path::new(VOXTYPE_LIB_DIR).join(b).exists())
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("No Whisper backend found to switch to"))?
     };
 
     switch_binary(final_backend)?;
@@ -384,7 +409,10 @@ pub fn disable() -> anyhow::Result<()> {
         println!("Updated systemd service to use Whisper backend.");
     }
 
-    println!("Switched to Whisper ({}) backend.", final_backend.trim_start_matches("voxtype-"));
+    println!(
+        "Switched to Whisper ({}) backend.",
+        final_backend.trim_start_matches("voxtype-")
+    );
     println!();
     println!("Restart voxtype to use Whisper:");
     println!("  systemctl --user restart voxtype");
@@ -399,7 +427,10 @@ mod tests {
     #[test]
     fn test_parakeet_backend_binary_names() {
         assert_eq!(ParakeetBackend::Avx2.binary_name(), "voxtype-parakeet-avx2");
-        assert_eq!(ParakeetBackend::Avx512.binary_name(), "voxtype-parakeet-avx512");
+        assert_eq!(
+            ParakeetBackend::Avx512.binary_name(),
+            "voxtype-parakeet-avx512"
+        );
         assert_eq!(ParakeetBackend::Cuda.binary_name(), "voxtype-parakeet-cuda");
         assert_eq!(ParakeetBackend::Rocm.binary_name(), "voxtype-parakeet-rocm");
     }
@@ -415,7 +446,10 @@ mod tests {
     #[test]
     fn test_parakeet_whisper_equivalents() {
         assert_eq!(ParakeetBackend::Avx2.whisper_equivalent(), "voxtype-avx2");
-        assert_eq!(ParakeetBackend::Avx512.whisper_equivalent(), "voxtype-avx512");
+        assert_eq!(
+            ParakeetBackend::Avx512.whisper_equivalent(),
+            "voxtype-avx512"
+        );
         assert_eq!(ParakeetBackend::Cuda.whisper_equivalent(), "voxtype-vulkan");
         assert_eq!(ParakeetBackend::Rocm.whisper_equivalent(), "voxtype-vulkan");
     }
