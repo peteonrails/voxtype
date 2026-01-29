@@ -1,63 +1,65 @@
-# Homebrew Cask formula for Voxtype
-#
-# To use this cask:
-#   1. Create a tap: brew tap peteonrails/voxtype
-#   2. Install: brew install --cask voxtype
-#
-# Or install directly:
-#   brew install --cask peteonrails/voxtype/voxtype
-
-cask "voxtype" do
-  version "0.5.0"
-  sha256 "PLACEHOLDER_SHA256"
-
-  url "https://github.com/peteonrails/voxtype/releases/download/v#{version}/voxtype-#{version}-macos-universal.dmg",
-      verified: "github.com/peteonrails/voxtype/"
-  name "Voxtype"
-  desc "Push-to-talk voice-to-text using Whisper"
+class Voxtype < Formula
+  desc "Push-to-talk voice-to-text for macOS and Linux"
   homepage "https://voxtype.io"
+  url "https://github.com/peteonrails/voxtype/archive/refs/tags/v0.6.0-rc.1.tar.gz"
+  sha256 "PLACEHOLDER_SHA256"
+  license "MIT"
+  head "https://github.com/peteonrails/voxtype.git", branch: "feature/macos-release"
 
-  livecheck do
-    url :url
-    strategy :github_latest
+  depends_on "cmake" => :build
+  depends_on "rust" => :build
+  depends_on "pkg-config" => :build
+
+  # macOS dependencies
+  on_macos do
+    depends_on "portaudio"
   end
 
-  # Universal binary supports both Intel and Apple Silicon
-  depends_on macos: ">= :big_sur"
-
-  binary "voxtype"
-
-  postflight do
-    # Remind user about Accessibility permissions
-    ohai "Voxtype requires Accessibility permissions to detect hotkeys."
-    ohai "Grant access in: System Preferences > Privacy & Security > Accessibility"
-    ohai ""
-    ohai "Quick start:"
-    ohai "  voxtype setup         # Check dependencies, download model"
-    ohai "  voxtype setup launchd # Install as LaunchAgent (auto-start)"
-    ohai "  voxtype daemon        # Start manually"
+  # Linux dependencies
+  on_linux do
+    depends_on "alsa-lib"
+    depends_on "libxkbcommon"
   end
 
-  uninstall launchctl: "io.voxtype.daemon"
+  def install
+    # Build release binary
+    system "cargo", "install", *std_cargo_args
+  end
 
-  zap trash: [
-    "~/Library/LaunchAgents/io.voxtype.daemon.plist",
-    "~/Library/Logs/voxtype",
-    "~/.config/voxtype",
-    "~/.local/share/voxtype",
-  ]
+  def post_install
+    # Create config directory
+    (var/"voxtype").mkpath
+  end
 
-  caveats <<~EOS
-    Voxtype requires Accessibility permissions to detect global hotkeys.
+  def caveats
+    <<~EOS
+      To start using voxtype:
 
-    After installation:
-    1. Open System Preferences > Privacy & Security > Accessibility
-    2. Add and enable voxtype (or the Terminal app if running from terminal)
+      1. Run the setup wizard:
+         voxtype setup macos
 
-    To install as a LaunchAgent (auto-start on login):
-      voxtype setup launchd
+      2. Or start the daemon directly:
+         voxtype daemon
 
-    To start manually:
-      voxtype daemon
-  EOS
+      To have voxtype start at login:
+         voxtype setup launchd
+
+      Default hotkey: Right Option (⌥)
+
+      For more information:
+         voxtype --help
+         https://voxtype.io/docs
+    EOS
+  end
+
+  service do
+    run [opt_bin/"voxtype", "daemon"]
+    keep_alive true
+    log_path var/"log/voxtype.log"
+    error_log_path var/"log/voxtype.log"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/voxtype --version")
+  end
 end

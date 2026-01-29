@@ -3,9 +3,9 @@ members = ["xtask"]
 
 [package]
 name = "voxtype"
-version = "0.6.0-rc1"
+version = "0.6.0-rc.1"
 edition = "2021"
-authors = ["Peter Jackson", "Jean-Paul van Tillo", "Máté Rémiás", "Rob Zolkos", "Dan Heuckeroth", "Igor Warzocha", "Julian Kaiser", "Kevin Miller", "konnsim", "reisset", "Zubair", "Loki Coyote"]
+authors = ["Peter Jackson", "Jean-Paul van Tillo", "Máté Rémiás", "Rob Zolkos", "Dan Heuckeroth", "Igor Warzocha", "Julian Kaiser", "Kevin Miller", "konnsim", "reisset", "Zubair", "Loki Coyote", "Christopher Albert", "André Silva", "goodroot", "Chmouel Boudjnah", "Alexander Bosu-Kellett", "ayoahha", "Thinh Vu"]
 description = "Push-to-talk voice-to-text for Wayland"
 license = "MIT"
 readme = "README.md"
