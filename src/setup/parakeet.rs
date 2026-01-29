@@ -18,6 +18,8 @@ pub enum ParakeetBackend {
     Avx512,
     Cuda,
     Rocm,
+    /// Custom binary (source-compiled without specific suffix)
+    Custom,
 }
 
 impl ParakeetBackend {
@@ -27,6 +29,7 @@ impl ParakeetBackend {
             ParakeetBackend::Avx512 => "voxtype-parakeet-avx512",
             ParakeetBackend::Cuda => "voxtype-parakeet-cuda",
             ParakeetBackend::Rocm => "voxtype-parakeet-rocm",
+            ParakeetBackend::Custom => "voxtype-parakeet",
         }
     }
 
@@ -36,6 +39,7 @@ impl ParakeetBackend {
             ParakeetBackend::Avx512 => "Parakeet (AVX-512)",
             ParakeetBackend::Cuda => "Parakeet (CUDA)",
             ParakeetBackend::Rocm => "Parakeet (ROCm)",
+            ParakeetBackend::Custom => "Parakeet (Custom)",
         }
     }
 
@@ -45,6 +49,7 @@ impl ParakeetBackend {
             ParakeetBackend::Avx512 => "voxtype-avx512",
             ParakeetBackend::Cuda => "voxtype-vulkan", // CUDA users likely have GPU, fall back to vulkan
             ParakeetBackend::Rocm => "voxtype-vulkan", // ROCm users have AMD GPU, fall back to vulkan
+            ParakeetBackend::Custom => "voxtype-native", // Source builds: natively compiled, no CPU tier
         }
     }
 }
@@ -70,6 +75,7 @@ pub fn detect_current_parakeet_backend() -> Option<ParakeetBackend> {
             "voxtype-parakeet-avx512" => Some(ParakeetBackend::Avx512),
             "voxtype-parakeet-cuda" => Some(ParakeetBackend::Cuda),
             "voxtype-parakeet-rocm" => Some(ParakeetBackend::Rocm),
+            "voxtype-parakeet" => Some(ParakeetBackend::Custom),
             _ => None,
         };
     }
@@ -84,7 +90,7 @@ fn detect_current_whisper_backend() -> Option<&'static str> {
             "voxtype-avx2" => Some("voxtype-avx2"),
             "voxtype-avx512" => Some("voxtype-avx512"),
             "voxtype-vulkan" => Some("voxtype-vulkan"),
-            "voxtype-cpu" => Some("voxtype-cpu"),
+            "voxtype-native" => Some("voxtype-native"),
             _ => None,
         };
     }
@@ -100,6 +106,7 @@ pub fn detect_available_backends() -> Vec<ParakeetBackend> {
         ParakeetBackend::Avx512,
         ParakeetBackend::Cuda,
         ParakeetBackend::Rocm,
+        ParakeetBackend::Custom,
     ] {
         let path = Path::new(VOXTYPE_LIB_DIR).join(backend.binary_name());
         if path.exists() {
@@ -140,6 +147,11 @@ fn detect_best_parakeet_backend() -> Option<ParakeetBackend> {
     // Fall back to AVX2
     if available.contains(&ParakeetBackend::Avx2) {
         return Some(ParakeetBackend::Avx2);
+    }
+
+    // Fall back to Native (source-compiled generic binary)
+    if available.contains(&ParakeetBackend::Custom) {
+        return Some(ParakeetBackend::Custom);
     }
 
     // Last resort: whatever is available
@@ -264,6 +276,7 @@ pub fn show_status() {
             ParakeetBackend::Avx512,
             ParakeetBackend::Cuda,
             ParakeetBackend::Rocm,
+            ParakeetBackend::Custom,
         ] {
             let installed = available.contains(&backend);
             let active = current == Some(backend);
@@ -363,14 +376,14 @@ pub fn disable() -> anyhow::Result<()> {
         whisper_backend
     } else {
         // Try to find any available Whisper backend
-        for fallback in ["voxtype-avx512", "voxtype-avx2", "voxtype-vulkan", "voxtype-cpu"] {
+        for fallback in ["voxtype-avx512", "voxtype-avx2", "voxtype-vulkan", "voxtype-native"] {
             if Path::new(VOXTYPE_LIB_DIR).join(fallback).exists() {
                 eprintln!("Note: {} not found, using {} instead", whisper_backend, fallback);
                 break;
             }
         }
         // Find first available
-        ["voxtype-avx512", "voxtype-avx2", "voxtype-vulkan", "voxtype-cpu"]
+        ["voxtype-avx512", "voxtype-avx2", "voxtype-vulkan", "voxtype-native"]
             .iter()
             .find(|b| Path::new(VOXTYPE_LIB_DIR).join(b).exists())
             .copied()
@@ -402,6 +415,7 @@ mod tests {
         assert_eq!(ParakeetBackend::Avx512.binary_name(), "voxtype-parakeet-avx512");
         assert_eq!(ParakeetBackend::Cuda.binary_name(), "voxtype-parakeet-cuda");
         assert_eq!(ParakeetBackend::Rocm.binary_name(), "voxtype-parakeet-rocm");
+        assert_eq!(ParakeetBackend::Custom.binary_name(), "voxtype-parakeet");
     }
 
     #[test]
@@ -410,6 +424,7 @@ mod tests {
         assert_eq!(ParakeetBackend::Avx512.display_name(), "Parakeet (AVX-512)");
         assert_eq!(ParakeetBackend::Cuda.display_name(), "Parakeet (CUDA)");
         assert_eq!(ParakeetBackend::Rocm.display_name(), "Parakeet (ROCm)");
+        assert_eq!(ParakeetBackend::Custom.display_name(), "Parakeet (Custom)");
     }
 
     #[test]
@@ -418,6 +433,7 @@ mod tests {
         assert_eq!(ParakeetBackend::Avx512.whisper_equivalent(), "voxtype-avx512");
         assert_eq!(ParakeetBackend::Cuda.whisper_equivalent(), "voxtype-vulkan");
         assert_eq!(ParakeetBackend::Rocm.whisper_equivalent(), "voxtype-vulkan");
+        assert_eq!(ParakeetBackend::Custom.whisper_equivalent(), "voxtype-native");
     }
 
     #[test]
@@ -433,7 +449,7 @@ mod tests {
         let backends = detect_available_backends();
         // On most dev machines, no parakeet binaries are installed
         // Just verify it returns a valid vector
-        assert!(backends.len() <= 4);
+        assert!(backends.len() <= 5);
     }
 
     #[test]
