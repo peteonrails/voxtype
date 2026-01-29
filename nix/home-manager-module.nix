@@ -7,7 +7,7 @@
 #   # Whisper example (default engine):
 #   programs.voxtype = {
 #     enable = true;
-#     package = voxtype.packages.${system}.vulkan;
+#     package = voxtype.packages.${pkgs.stdenv.hostPlatform.system}.vulkan;
 #     model.name = "base.en";
 #     service.enable = true;
 #     settings = {
@@ -16,12 +16,24 @@
 #     };
 #   };
 #
-#   # Parakeet example:
+#   # Parakeet example (declarative model download):
 #   programs.voxtype = {
 #     enable = true;
 #     engine = "parakeet";
-#     package = voxtype.packages.${system}.parakeet-cuda;
-#     model.path = "/path/to/parakeet-tdt-1.1b";
+#     package = voxtype.packages.${pkgs.stdenv.hostPlatform.system}.parakeet-cuda;
+#     model.name = "parakeet-tdt-0.6b-v3";  # Automatically fetched
+#     service.enable = true;
+#     settings = {
+#       hotkey.enabled = false;
+#     };
+#   };
+#
+#   # Parakeet example (custom model path):
+#   programs.voxtype = {
+#     enable = true;
+#     engine = "parakeet";
+#     package = voxtype.packages.${pkgs.stdenv.hostPlatform.system}.parakeet-cuda;
+#     model.path = "/path/to/custom-parakeet-model";
 #     service.enable = true;
 #     settings = {
 #       hotkey.enabled = false;
@@ -33,21 +45,43 @@
 let
   cfg = config.programs.voxtype;
   tomlFormat = pkgs.formats.toml { };
-  modelDefs = import ./models.nix;
+  whisperModelDefs = import ./whisper-models.nix;
+  parakeetModelDefs = import ./parakeet-models.nix;
 
-  # Fetch model from HuggingFace if using declarative model management
-  fetchedModel = lib.optionalAttrs (cfg.model.name != null) (
-    let modelDef = modelDefs.${cfg.model.name}; in
+  # Fetch Whisper model from HuggingFace (single .bin file)
+  fetchedWhisperModel = lib.optionalAttrs 
+    (cfg.engine == "whisper" && cfg.model.name != null) (
+    let modelDef = whisperModelDefs.${cfg.model.name}; in
     pkgs.fetchurl {
       url = modelDef.url;
       hash = modelDef.hash;
     }
   );
 
+  # Fetch Parakeet model from HuggingFace (directory with multiple ONNX files)
+  # Parakeet models consist of multiple files (encoder, decoder, vocab, config)
+  # that must be in a directory structure, so we use linkFarm to create that structure.
+  # Whisper uses a single .bin file, so fetchurl is sufficient.
+  fetchedParakeetModel = lib.optionalAttrs
+    (cfg.engine == "parakeet" && cfg.model.name != null) (
+    let 
+      modelDef = parakeetModelDefs.${cfg.model.name};
+      fileList = lib.mapAttrsToList (filename: fileSpec: {
+        name = filename;
+        path = pkgs.fetchurl {
+          url = fileSpec.url;
+          hash = fileSpec.hash;
+        };
+      }) modelDef.files;
+    in
+    pkgs.linkFarm cfg.model.name fileList
+  );
+
   # Resolve the model path (fetched or user-provided)
   resolvedModelPath =
     if cfg.model.path != null then cfg.model.path
-    else if cfg.model.name != null then fetchedModel
+    else if cfg.engine == "whisper" && cfg.model.name != null then fetchedWhisperModel
+    else if cfg.engine == "parakeet" && cfg.model.name != null then fetchedParakeetModel
     else null;
 
   # Build the config TOML from settings, injecting engine and model path
@@ -74,8 +108,8 @@ in {
         - whisper: Local transcription via whisper.cpp (default)
         - parakeet: NVIDIA Parakeet models via ONNX Runtime
 
-        When using parakeet, set model.name to null and use model.path
-        to point to your Parakeet model directory.
+        Both engines support declarative model management via model.name
+        or manual management via model.path.
       '';
     };
 
@@ -96,19 +130,26 @@ in {
 
         All packages include runtime dependencies (wtype, ydotool, etc.).
       '';
-      example = lib.literalExpression "voxtype.packages.\${system}.vulkan";
+      example = lib.literalExpression "voxtype.packages.\${pkgs.stdenv.hostPlatform.system}.vulkan";
     };
 
     model = {
       name = lib.mkOption {
-        type = lib.types.nullOr (lib.types.enum (builtins.attrNames modelDefs));
+        type = lib.types.nullOr (lib.types.enum (
+          (builtins.attrNames whisperModelDefs) ++ (builtins.attrNames parakeetModelDefs)
+        ));
         default = null;
         description = ''
-          Whisper model to download from HuggingFace. Only used when engine = "whisper".
-          Set to null when using Parakeet or managing models manually.
+          Model to download from HuggingFace. Automatically fetched when set.
 
-          Available: tiny, tiny.en, base, base.en, small, small.en,
-          medium, medium.en, large-v3, large-v3-turbo
+          Whisper models (engine = "whisper"):
+            tiny, tiny.en, base, base.en, small, small.en,
+            medium, medium.en, large-v3, large-v3-turbo
+
+          Parakeet models (engine = "parakeet"):
+            parakeet-tdt-0.6b-v2, parakeet-tdt-0.6b-v3, parakeet-tdt-0.6b-v3-int8
+
+          Set to null and use model.path for custom/manually managed models.
         '';
       };
 
@@ -116,11 +157,13 @@ in {
         type = lib.types.nullOr lib.types.path;
         default = null;
         description = ''
-          Path to a model file or directory.
+          Path to a model file or directory. Use this for custom models
+          not available in model.name presets.
+
           - For Whisper: path to a .bin model file
           - For Parakeet: path to the model directory containing ONNX files
 
-          Overrides model.name when set.
+          Overrides model.name when set. Cannot be used together with model.name.
         '';
         example = "/home/user/.local/share/voxtype/models/parakeet-tdt-1.1b";
       };
@@ -172,11 +215,26 @@ in {
     assertions = [
       {
         assertion = !(cfg.model.name != null && cfg.model.path != null);
-        message = "programs.voxtype: cannot set both model.name and model.path";
+        message = ''
+          programs.voxtype: cannot set both model.name and model.path.
+          Choose one: use model.name for preset models, or model.path for custom models.
+        '';
       }
       {
-        assertion = !(cfg.engine == "parakeet" && cfg.model.name != null);
-        message = "programs.voxtype: model.name is only for Whisper models. Use model.path for Parakeet.";
+        assertion = !(cfg.engine == "whisper" && cfg.model.name != null && !(builtins.hasAttr cfg.model.name whisperModelDefs));
+        message = ''
+          programs.voxtype: '${cfg.model.name}' is not a valid Whisper model.
+          Available Whisper models: ${lib.concatStringsSep ", " (builtins.attrNames whisperModelDefs)}
+          Alternatively, use model.path to specify a custom model file.
+        '';
+      }
+      {
+        assertion = !(cfg.engine == "parakeet" && cfg.model.name != null && !(builtins.hasAttr cfg.model.name parakeetModelDefs));
+        message = ''
+          programs.voxtype: '${cfg.model.name}' is not a valid Parakeet model.
+          Available Parakeet models: ${lib.concatStringsSep ", " (builtins.attrNames parakeetModelDefs)}
+          Alternatively, use model.path to specify a custom model directory.
+        '';
       }
     ];
 
