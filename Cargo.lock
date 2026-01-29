@@ -702,7 +702,7 @@ dependencies = [
 
 [[package]]
 name = "deranged"
-version = "0.5.5"
+
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ececcb659e7ba858fb4f10388c250a7252eb0a27373f1a72b8748afdd248e587"
 dependencies = [
@@ -3701,7 +3701,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "voxtype"
-version = "0.5.5"
+version = "0.6.0-rc1"
 dependencies = [
  "anyhow",
  "async-trait",
