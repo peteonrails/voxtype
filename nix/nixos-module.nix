@@ -40,9 +40,16 @@ in {
       type = lib.types.package;
       description = ''
         The VoxType package to install. Use the flake's wrapped packages:
+        
+        Whisper-based (whisper.cpp):
         - packages.default: CPU-only
         - packages.vulkan: Vulkan GPU acceleration
         - packages.rocm: ROCm/HIP acceleration (AMD)
+        
+        Parakeet-based (NVIDIA ONNX models):
+        - packages.parakeet: CPU-only
+        - packages.parakeet-cuda: CUDA acceleration (NVIDIA)
+        - packages.parakeet-rocm: ROCm acceleration (AMD)
 
         These packages include all runtime dependencies (wtype, ydotool, etc.)
         in their PATH.
