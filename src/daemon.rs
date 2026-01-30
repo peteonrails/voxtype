@@ -309,6 +309,18 @@ fn cleanup_model_override() {
 /// Result type for transcription task
 type TranscriptionResult = std::result::Result<String, crate::error::TranscribeError>;
 
+/// Commands sent to the persistent streaming transcriber task
+enum StreamingCommand {
+    /// Feed audio samples to the transcriber
+    Audio(Vec<f32>),
+    /// Flush remaining audio (silence padding) and send final text
+    Flush,
+    /// Reset transcriber state for a new utterance (no text output)
+    Reset,
+    /// Shut down the task entirely
+    Shutdown,
+}
+
 /// Main daemon that orchestrates all components
 pub struct Daemon {
     config: Config,
@@ -334,7 +346,7 @@ pub struct Daemon {
         tokio::task::JoinHandle<std::result::Result<String, crate::error::TranscribeError>>,
     )>,
     // Streaming transcription: channels for chunk→transcriber→text communication
-    streaming_chunk_tx: Option<mpsc::Sender<Vec<f32>>>,
+    streaming_chunk_tx: Option<mpsc::Sender<StreamingCommand>>,
     streaming_text_rx: Option<mpsc::Receiver<String>>,
     // Handle for the streaming transcriber blocking task
     streaming_task: Option<tokio::task::JoinHandle<()>>,
@@ -537,89 +549,95 @@ impl Daemon {
         }
     }
 
-    /// Start streaming transcription: spawns a blocking task that owns the StreamingTranscriber
-    /// and communicates via channels. Returns (chunk_tx, text_rx).
-    fn start_streaming_transcriber(
+    /// Initialize the persistent streaming transcriber at startup.
+    /// Loads the model once and spawns a long-lived blocking task.
+    /// Call `begin_streaming_session()` to start each recording, not this.
+    fn init_streaming_transcriber(
         &mut self,
     ) -> std::result::Result<(), crate::error::TranscribeError> {
         let config = self.config.clone();
         let mut streaming = crate::transcribe::create_streaming_transcriber(&config)?;
 
         let chunk_size = streaming.chunk_size();
-        let (chunk_tx, mut chunk_rx) = mpsc::channel::<Vec<f32>>(32);
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<StreamingCommand>(32);
         let (text_tx, text_rx) = mpsc::channel::<String>(32);
 
         let task = tokio::task::spawn_blocking(move || {
-            // Block waiting for chunks, process them, send text deltas
-            while let Some(chunk) = chunk_rx.blocking_recv() {
-                if chunk.is_empty() {
-                    // Empty chunk is a signal to flush
-                    match streaming.flush() {
-                        Ok(delta) if !delta.is_empty() => {
-                            let _ = text_tx.blocking_send(delta);
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::error!("Streaming flush failed: {}", e);
-                        }
-                    }
-                    break;
-                }
-
-                // Process the chunk
-                match streaming.transcribe_chunk(&chunk) {
-                    Ok(delta) if !delta.is_empty() => {
-                        if text_tx.blocking_send(delta).is_err() {
-                            tracing::debug!("Streaming text receiver dropped, stopping");
-                            break;
+            while let Some(cmd) = cmd_rx.blocking_recv() {
+                match cmd {
+                    StreamingCommand::Audio(chunk) => {
+                        match streaming.transcribe_chunk(&chunk) {
+                            Ok(delta) if !delta.is_empty() => {
+                                if text_tx.blocking_send(delta).is_err() {
+                                    tracing::debug!("Streaming text receiver dropped");
+                                    break;
+                                }
+                            }
+                            Ok(_) => {} // No new text yet
+                            Err(e) => {
+                                tracing::error!("Streaming chunk transcription failed: {}", e);
+                            }
                         }
                     }
-                    Ok(_) => {} // No new text yet
-                    Err(e) => {
-                        tracing::error!("Streaming chunk transcription failed: {}", e);
+                    StreamingCommand::Flush => {
+                        match streaming.flush() {
+                            Ok(delta) if !delta.is_empty() => {
+                                let _ = text_tx.blocking_send(delta);
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::error!("Streaming flush failed: {}", e);
+                            }
+                        }
+                        tracing::debug!(
+                            "Streaming flush complete, transcript: {:?}",
+                            streaming.get_transcript()
+                        );
+                    }
+                    StreamingCommand::Reset => {
+                        streaming.reset();
+                        tracing::debug!("Streaming transcriber reset for new utterance");
+                    }
+                    StreamingCommand::Shutdown => {
+                        tracing::debug!("Streaming transcriber shutting down");
+                        break;
                     }
                 }
             }
-
-            tracing::debug!(
-                "Streaming transcriber task finished, final transcript: {:?}",
-                streaming.get_transcript()
-            );
         });
 
-        self.streaming_chunk_tx = Some(chunk_tx);
+        self.streaming_chunk_tx = Some(cmd_tx);
         self.streaming_text_rx = Some(text_rx);
         self.streaming_task = Some(task);
 
         tracing::info!(
-            "Started streaming transcriber (chunk_size={} samples, {:.0}ms)",
+            "Streaming transcriber ready (chunk_size={} samples, {:.0}ms)",
             chunk_size,
             chunk_size as f64 / 16.0
         );
         Ok(())
     }
 
-    /// Stop streaming transcription: flush and cleanup
-    async fn stop_streaming(&mut self) {
-        // Send empty chunk to signal flush
-        if let Some(tx) = self.streaming_chunk_tx.take() {
-            let _ = tx.send(Vec::new()).await;
+    /// Begin a new streaming session (reset state for new recording).
+    /// The model is already loaded; this just resets the transcriber state.
+    async fn begin_streaming_session(&self) {
+        if let Some(ref tx) = self.streaming_chunk_tx {
+            let _ = tx.send(StreamingCommand::Reset).await;
         }
-
-        // Wait for the task to finish
-        if let Some(task) = self.streaming_task.take() {
-            let _ = task.await;
-        }
-
-        self.streaming_text_rx = None;
     }
 
-    /// Cancel streaming transcription without flushing
-    fn cancel_streaming(&mut self) {
-        self.streaming_chunk_tx = None;
-        self.streaming_text_rx = None;
-        if let Some(task) = self.streaming_task.take() {
-            task.abort();
+    /// Stop streaming transcription: flush remaining audio and reset
+    async fn stop_streaming(&mut self) {
+        if let Some(ref tx) = self.streaming_chunk_tx {
+            let _ = tx.send(StreamingCommand::Flush).await;
+        }
+        // Note: we don't take/drop the channels — the task persists for next recording
+    }
+
+    /// Cancel streaming transcription without flushing (reset for next recording)
+    async fn cancel_streaming(&mut self) {
+        if let Some(ref tx) = self.streaming_chunk_tx {
+            let _ = tx.send(StreamingCommand::Reset).await;
         }
     }
 
@@ -1182,10 +1200,15 @@ impl Daemon {
                     }
                 }
                 crate::config::TranscriptionEngine::Parakeet => {
-                    // Parakeet uses its own model loading
-                    transcriber_preloaded = Some(Arc::from(crate::transcribe::create_transcriber(
-                        &self.config,
-                    )?));
+                    if self.should_use_streaming() {
+                        // Pre-load streaming transcriber (Nemotron) — no batch transcriber needed
+                        self.init_streaming_transcriber()?;
+                    } else {
+                        // Parakeet batch mode uses its own model loading
+                        transcriber_preloaded = Some(Arc::from(
+                            crate::transcribe::create_transcriber(&self.config)?,
+                        ));
+                    }
                 }
             }
             tracing::info!("Model loaded, ready for voice input");
@@ -1313,29 +1336,17 @@ impl Daemon {
                                                 tracing::debug!("Audio capture started successfully");
 
                                                 // Check if streaming mode should be used
-                                                if self.should_use_streaming() {
+                                                if self.should_use_streaming() && self.streaming_chunk_tx.is_some() {
                                                     tracing::info!("Using streaming transcription (Nemotron)");
-                                                    match self.start_streaming_transcriber() {
-                                                        Ok(()) => {
-                                                            audio_rx = Some(rx);
-                                                            audio_capture = Some(capture);
-                                                            state = State::StreamingRecording {
-                                                                started_at: std::time::Instant::now(),
-                                                                model_override: model_override.clone(),
-                                                                audio_buffer: Vec::new(),
-                                                                text_output_so_far: String::new(),
-                                                            };
-                                                        }
-                                                        Err(e) => {
-                                                            tracing::error!("Failed to start streaming transcriber: {}", e);
-                                                            // Fall back to normal recording
-                                                            audio_capture = Some(capture);
-                                                            state = State::Recording {
-                                                                started_at: std::time::Instant::now(),
-                                                                model_override: model_override.clone(),
-                                                            };
-                                                        }
-                                                    }
+                                                    self.begin_streaming_session().await;
+                                                    audio_rx = Some(rx);
+                                                    audio_capture = Some(capture);
+                                                    state = State::StreamingRecording {
+                                                        started_at: std::time::Instant::now(),
+                                                        model_override: model_override.clone(),
+                                                        audio_buffer: Vec::new(),
+                                                        text_output_so_far: String::new(),
+                                                    };
                                                 } else if self.config.whisper.eager_processing {
                                                     tracing::info!("Using eager input processing");
                                                     audio_capture = Some(capture);
@@ -1425,7 +1436,7 @@ impl Daemon {
                                     if !audio_buffer.is_empty() {
                                         let remaining = audio_buffer.clone();
                                         if let Some(ref tx) = self.streaming_chunk_tx {
-                                            let _ = tx.send(remaining).await;
+                                            let _ = tx.send(StreamingCommand::Audio(remaining)).await;
                                         }
                                     }
                                 }
@@ -1573,28 +1584,17 @@ impl Daemon {
                                         match capture.start().await {
                                             Ok(rx) => {
                                                 // Check if streaming mode should be used
-                                                if self.should_use_streaming() {
+                                                if self.should_use_streaming() && self.streaming_chunk_tx.is_some() {
                                                     tracing::info!("Using streaming transcription (Nemotron, toggle mode)");
-                                                    match self.start_streaming_transcriber() {
-                                                        Ok(()) => {
-                                                            audio_rx = Some(rx);
-                                                            audio_capture = Some(capture);
-                                                            state = State::StreamingRecording {
-                                                                started_at: std::time::Instant::now(),
-                                                                model_override: model_override.clone(),
-                                                                audio_buffer: Vec::new(),
-                                                                text_output_so_far: String::new(),
-                                                            };
-                                                        }
-                                                        Err(e) => {
-                                                            tracing::error!("Failed to start streaming transcriber: {}", e);
-                                                            audio_capture = Some(capture);
-                                                            state = State::Recording {
-                                                                started_at: std::time::Instant::now(),
-                                                                model_override: model_override.clone(),
-                                                            };
-                                                        }
-                                                    }
+                                                    self.begin_streaming_session().await;
+                                                    audio_rx = Some(rx);
+                                                    audio_capture = Some(capture);
+                                                    state = State::StreamingRecording {
+                                                        started_at: std::time::Instant::now(),
+                                                        model_override: model_override.clone(),
+                                                        audio_buffer: Vec::new(),
+                                                        text_output_so_far: String::new(),
+                                                    };
                                                 } else if self.config.whisper.eager_processing {
                                                     tracing::info!("Using eager input processing");
                                                     audio_capture = Some(capture);
@@ -1655,7 +1655,7 @@ impl Daemon {
                                     if !audio_buffer.is_empty() {
                                         let remaining = audio_buffer.clone();
                                         if let Some(ref tx) = self.streaming_chunk_tx {
-                                            let _ = tx.send(remaining).await;
+                                            let _ = tx.send(StreamingCommand::Audio(remaining)).await;
                                         }
                                     }
                                 }
@@ -1777,7 +1777,7 @@ impl Daemon {
                                 }
 
                                 // Cancel streaming transcription if active
-                                self.cancel_streaming();
+                                self.cancel_streaming().await;
 
                                 // Cancel any pending model load task
                                 if let Some(task) = self.model_load_task.take() {
@@ -1855,7 +1855,7 @@ impl Daemon {
                         while audio_buffer.len() >= chunk_size {
                             let chunk: Vec<f32> = audio_buffer.drain(..chunk_size).collect();
                             if let Some(ref tx) = self.streaming_chunk_tx {
-                                if tx.send(chunk).await.is_err() {
+                                if tx.send(StreamingCommand::Audio(chunk)).await.is_err() {
                                     tracing::warn!("Streaming transcriber channel closed");
                                     break;
                                 }
@@ -1901,7 +1901,7 @@ impl Daemon {
                         }
 
                         // Cancel streaming transcription if active
-                        self.cancel_streaming();
+                        self.cancel_streaming().await;
 
                         // Cancel any pending model load task
                         if let Some(task) = self.model_load_task.take() {
@@ -1949,7 +1949,7 @@ impl Daemon {
                             }
 
                             // Cancel streaming transcription if active
-                            self.cancel_streaming();
+                            self.cancel_streaming().await;
 
                             // Cancel any pending eager chunk tasks
                             for (_, task) in self.eager_chunk_tasks.drain(..) {
@@ -2029,28 +2029,17 @@ impl Daemon {
                             Ok(mut capture) => {
                                 match capture.start().await {
                                     Ok(rx) => {
-                                        if self.should_use_streaming() {
+                                        if self.should_use_streaming() && self.streaming_chunk_tx.is_some() {
                                             tracing::info!("Using streaming transcription (Nemotron, external trigger)");
-                                            match self.start_streaming_transcriber() {
-                                                Ok(()) => {
-                                                    audio_rx = Some(rx);
-                                                    audio_capture = Some(capture);
-                                                    state = State::StreamingRecording {
-                                                        started_at: std::time::Instant::now(),
-                                                        model_override,
-                                                        audio_buffer: Vec::new(),
-                                                        text_output_so_far: String::new(),
-                                                    };
-                                                }
-                                                Err(e) => {
-                                                    tracing::error!("Failed to start streaming: {}", e);
-                                                    audio_capture = Some(capture);
-                                                    state = State::Recording {
-                                                        started_at: std::time::Instant::now(),
-                                                        model_override,
-                                                    };
-                                                }
-                                            }
+                                            self.begin_streaming_session().await;
+                                            audio_rx = Some(rx);
+                                            audio_capture = Some(capture);
+                                            state = State::StreamingRecording {
+                                                started_at: std::time::Instant::now(),
+                                                model_override,
+                                                audio_buffer: Vec::new(),
+                                                text_output_so_far: String::new(),
+                                            };
                                         } else if self.config.whisper.eager_processing {
                                             tracing::info!("Using eager input processing");
                                             audio_capture = Some(capture);
@@ -2114,7 +2103,7 @@ impl Daemon {
                             if !audio_buffer.is_empty() {
                                 let remaining = audio_buffer.clone();
                                 if let Some(ref tx) = self.streaming_chunk_tx {
-                                    let _ = tx.send(remaining).await;
+                                    let _ = tx.send(StreamingCommand::Audio(remaining)).await;
                                 }
                             }
                         }
@@ -2301,8 +2290,14 @@ impl Daemon {
             task.abort();
         }
 
-        // Cancel any streaming transcription
-        self.cancel_streaming();
+        // Shut down the streaming transcription task
+        if let Some(tx) = self.streaming_chunk_tx.take() {
+            let _ = tx.send(StreamingCommand::Shutdown).await;
+        }
+        if let Some(task) = self.streaming_task.take() {
+            let _ = task.await;
+        }
+        self.streaming_text_rx = None;
 
         // Remove state file on shutdown
         if let Some(ref path) = self.state_file_path {
