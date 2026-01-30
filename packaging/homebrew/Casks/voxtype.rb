@@ -17,6 +17,9 @@ cask "voxtype" do
   app "Voxtype.app"
 
   postflight do
+    # Remove quarantine attribute (app is unsigned)
+    system_command "/usr/bin/xattr", args: ["-cr", "/Applications/Voxtype.app"]
+
     # Create config directory
     system_command "/bin/mkdir", args: ["-p", "#{ENV["HOME"]}/Library/Application Support/voxtype"]
 
@@ -89,24 +92,18 @@ cask "voxtype" do
   ]
 
   caveats <<~EOS
-    If macOS says the app is "damaged", run:
-       xattr -cr /Applications/Voxtype.app
-
-    The daemon starts automatically at login.
+    Voxtype is installed and the daemon will start automatically.
 
     To complete setup:
 
     1. Download a speech model:
        voxtype setup --download --model parakeet-tdt-0.6b-v3-int8
 
-    2. Grant permissions in System Settings > Privacy & Security:
-       - Microphone: Add Voxtype
-       - Input Monitoring: Add Voxtype
-       - Accessibility: Add Voxtype
+    2. Grant permissions when prompted, or manually in System Settings:
+       Privacy & Security > Microphone, Input Monitoring, Accessibility
 
-    Default hotkey: Right Option (hold to record)
+    Default hotkey: Right Option (hold to record, release to transcribe)
 
-    Optional: Run the menu bar helper for status icon:
-       voxtype menubar
+    For menu bar status icon: voxtype menubar
   EOS
 end
