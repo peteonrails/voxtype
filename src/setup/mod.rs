@@ -732,34 +732,21 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
     // Check Parakeet models (experimental)
     println!("\nParakeet Models (EXPERIMENTAL):");
 
-    // Find available Parakeet models
+    // Find available Parakeet models by checking known model names
     let mut parakeet_models: Vec<(String, u64)> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&models_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.contains("parakeet") {
-                    // Check if it has the required ONNX files
-                    let encoder_path = path.join("encoder-model.onnx");
-                    let has_encoder = encoder_path.exists();
-                    let has_decoder = path.join("decoder_joint-model.onnx").exists()
-                        || path.join("model.onnx").exists();
-                    if has_encoder || has_decoder {
-                        // Get total size of model files
-                        let size = std::fs::read_dir(&path)
-                            .map(|entries| {
-                                entries
-                                    .flatten()
-                                    .filter_map(|e| e.metadata().ok())
-                                    .map(|m| m.len())
-                                    .sum()
-                            })
-                            .unwrap_or(0);
-                        parakeet_models.push((name, size));
-                    }
-                }
-            }
+    for known_model in model::valid_parakeet_model_names() {
+        let path = models_dir.join(known_model);
+        if path.is_dir() && model::validate_parakeet_model(&path).is_ok() {
+            let size = std::fs::read_dir(&path)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .filter_map(|e| e.metadata().ok())
+                        .map(|m| m.len())
+                        .sum()
+                })
+                .unwrap_or(0);
+            parakeet_models.push((known_model.to_string(), size));
         }
     }
 
