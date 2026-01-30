@@ -1,0 +1,46 @@
+# Voxtype test config: Nemotron streaming transcription
+#
+# Setup:
+#   1. Build with parakeet support:
+#      cargo build --features parakeet
+#
+#   2. Download the Nemotron model:
+#      voxtype setup model
+#      (select "nemotron-speech-streaming-en-0.6b")
+#
+#   3. Run the daemon:
+#      voxtype -c contrib/nemotron-streaming-test-config.toml daemon
+
+engine = "parakeet"
+
+[hotkey]
+key = "Super_R"
+enabled = true
+mode = "push-to-talk"
+
+[audio]
+device = "default"
+max_duration_secs = 30
+
+[audio.feedback]
+enabled = true
+
+[parakeet]
+# Downloaded via: voxtype setup model
+model = "nemotron-speech-streaming-en-0.6b"
+
+# Auto-detected from model files, but you can force it:
+# model_type = "nemotron"
+
+# Streaming is auto-enabled for Nemotron models.
+# Set to false to use batch transcription instead:
+# streaming = false
+
+[output]
+mode = "type"
+state_file = "auto"
+
+[output.notification]
+on_recording_start = true
+on_recording_stop = true
+on_transcription = true

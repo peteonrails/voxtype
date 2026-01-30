@@ -94,6 +94,8 @@ struct ParakeetModelInfo {
     description: &'static str,
     files: &'static [(&'static str, u64)], // (filename, expected_size_bytes)
     huggingface_repo: &'static str,
+    /// Subdirectory within the HuggingFace repo (None = files are in repo root)
+    huggingface_path: Option<&'static str>,
 }
 
 const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
@@ -109,6 +111,7 @@ const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
             ("config.json", 97),
         ],
         huggingface_repo: "istupakov/parakeet-tdt-0.6b-v3-onnx",
+        huggingface_path: None,
     },
     ParakeetModelInfo {
         name: "parakeet-tdt-0.6b-v3-int8",
@@ -121,6 +124,20 @@ const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
             ("config.json", 97),
         ],
         huggingface_repo: "istupakov/parakeet-tdt-0.6b-v3-onnx",
+        huggingface_path: None,
+    },
+    ParakeetModelInfo {
+        name: "nemotron-speech-streaming-en-0.6b",
+        size_mb: 2570,
+        description: "Nemotron streaming, live text during recording",
+        files: &[
+            ("encoder.onnx", 44_252_467),
+            ("encoder.onnx.data", 2_621_440_000),
+            ("decoder_joint.onnx", 37_539_691),
+            ("tokenizer.model", 257_151),
+        ],
+        huggingface_repo: "altunenes/parakeet-rs",
+        huggingface_path: Some("nemotron-speech-streaming-en-0.6b"),
     },
 ];
 
@@ -664,10 +681,16 @@ fn download_parakeet_model_by_info(model: &ParakeetModelInfo) -> anyhow::Result<
             continue;
         }
 
-        let url = format!(
-            "https://huggingface.co/{}/resolve/main/{}",
-            model.huggingface_repo, filename
-        );
+        let url = match model.huggingface_path {
+            Some(path) => format!(
+                "https://huggingface.co/{}/resolve/main/{}/{}",
+                model.huggingface_repo, path, filename
+            ),
+            None => format!(
+                "https://huggingface.co/{}/resolve/main/{}",
+                model.huggingface_repo, filename
+            ),
+        };
 
         println!("Downloading {}...", filename);
 
@@ -1050,10 +1073,13 @@ language = "en"
                 "Model {} should have file definitions",
                 model.name
             );
-            // All TDT models should have vocab.txt
+            // All models should have a tokenizer: vocab.txt (TDT/CTC) or tokenizer.model (Nemotron)
+            let has_tokenizer = model.files.iter().any(|(f, _)| {
+                *f == "vocab.txt" || *f == "tokenizer.model" || *f == "tokenizer.json"
+            });
             assert!(
-                model.files.iter().any(|(f, _)| *f == "vocab.txt"),
-                "Model {} should have vocab.txt",
+                has_tokenizer,
+                "Model {} should have a tokenizer file (vocab.txt, tokenizer.model, or tokenizer.json)",
                 model.name
             );
         }
@@ -1064,6 +1090,7 @@ language = "en"
         // Valid Parakeet models
         assert!(is_parakeet_model("parakeet-tdt-0.6b-v3"));
         assert!(is_parakeet_model("parakeet-tdt-0.6b-v3-int8"));
+        assert!(is_parakeet_model("nemotron-speech-streaming-en-0.6b"));
 
         // Invalid models
         assert!(!is_parakeet_model("base.en"));

@@ -382,8 +382,10 @@ fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
 
     Err(TranscribeError::ModelNotFound(format!(
         "Parakeet model '{}' not found. Looked in:\n  - {}\n  - {}\n  - {}\n\n\
+        Run: voxtype setup model\n\n\
         Download TDT (recommended): https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx\n\
-        Download CTC: https://huggingface.co/nvidia/parakeet-ctc-0.6b",
+        Download CTC: https://huggingface.co/nvidia/parakeet-ctc-0.6b\n\
+        Download Nemotron (streaming): https://huggingface.co/altunenes/parakeet-rs/tree/main/nemotron-speech-streaming-en-0.6b",
         model,
         model_path.display(),
         cwd_path.display(),
