@@ -22,8 +22,12 @@ class Voxtype < Formula
   end
 
   def install
-    # Build release binary
-    system "cargo", "install", *std_cargo_args
+    # Build release binary with parakeet support on macOS
+    if OS.mac?
+      system "cargo", "install", *std_cargo_args, "--features", "parakeet"
+    else
+      system "cargo", "install", *std_cargo_args
+    end
   end
 
   def post_install
