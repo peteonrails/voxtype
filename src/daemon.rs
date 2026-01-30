@@ -596,6 +596,8 @@ impl Daemon {
                             "Streaming flush complete, transcript: {:?}",
                             streaming.get_transcript()
                         );
+                        // Send sentinel so stop_streaming() knows flush is done
+                        let _ = text_tx.blocking_send("\0".to_string());
                     }
                     StreamingCommand::Reset => {
                         streaming.reset();
@@ -631,36 +633,40 @@ impl Daemon {
     }
 
     /// Stop streaming transcription: flush remaining audio, collect final text, then reset.
-    /// Returns any text produced during flush.
+    /// Waits for all in-flight chunks to be processed plus the flush silence chunks.
+    /// Returns any text produced after the main loop stopped polling text_rx.
     async fn stop_streaming(&mut self) -> String {
         let mut final_text = String::new();
 
-        // Send flush command
+        // Send flush command — this queues behind any in-flight audio chunks,
+        // so the blocking task will process all pending audio before flushing.
         if let Some(ref tx) = self.streaming_chunk_tx {
             let _ = tx.send(StreamingCommand::Flush).await;
         }
 
-        // Wait for flush text with timeout (flush produces ~3 silence chunks worth of inference)
+        // Collect all text until we receive the flush-done sentinel ("\0").
+        // This includes text from in-flight audio chunks AND the flush itself.
         if let Some(ref mut rx) = self.streaming_text_rx {
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
             loop {
                 match tokio::time::timeout_at(deadline, rx.recv()).await {
+                    Ok(Some(delta)) if delta == "\0" => {
+                        // Sentinel: flush is done, all text collected
+                        tracing::debug!("Received flush-done sentinel");
+                        break;
+                    }
                     Ok(Some(delta)) if !delta.is_empty() => {
                         final_text.push_str(&delta);
                     }
                     Ok(Some(_)) => {} // empty delta, keep waiting
-                    _ => break, // timeout or channel closed
-                }
-                // After receiving one non-empty delta from flush, give a brief window for more
-                // then break (flush is a single operation, not a stream)
-                if !final_text.is_empty() {
-                    // Drain any immediately available text
-                    while let Ok(delta) = rx.try_recv() {
-                        if !delta.is_empty() {
-                            final_text.push_str(&delta);
-                        }
+                    Ok(None) => {
+                        tracing::debug!("Streaming text channel closed during flush");
+                        break;
                     }
-                    break;
+                    Err(_) => {
+                        tracing::warn!("Timed out waiting for streaming flush to complete");
+                        break;
+                    }
                 }
             }
         }
