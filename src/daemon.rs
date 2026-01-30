@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::signal::unix::{signal, SignalKind};
+use tokio::sync::mpsc;
 
 /// Send a desktop notification with optional engine icon
 async fn send_notification(title: &str, body: &str, show_engine_icon: bool, engine: crate::config::TranscriptionEngine) {
@@ -325,6 +326,11 @@ pub struct Daemon {
     transcription_task: Option<tokio::task::JoinHandle<TranscriptionResult>>,
     // Background tasks for eager chunk transcriptions (chunk_index, task)
     eager_chunk_tasks: Vec<(usize, tokio::task::JoinHandle<std::result::Result<String, crate::error::TranscribeError>>)>,
+    // Streaming transcription: channels for chunk→transcriber→text communication
+    streaming_chunk_tx: Option<mpsc::Sender<Vec<f32>>>,
+    streaming_text_rx: Option<mpsc::Receiver<String>>,
+    // Handle for the streaming transcriber blocking task
+    streaming_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Daemon {
@@ -386,6 +392,9 @@ impl Daemon {
             model_load_task: None,
             transcription_task: None,
             eager_chunk_tasks: Vec::new(),
+            streaming_chunk_tx: None,
+            streaming_text_rx: None,
+            streaming_task: None,
         }
     }
 
@@ -484,6 +493,113 @@ impl Daemon {
             if let Err(e) = output::run_hook(cmd, "post_output").await {
                 tracing::warn!("{}", e);
             }
+        }
+    }
+
+    /// Check if streaming transcription should be used for the current config
+    fn should_use_streaming(&self) -> bool {
+        if self.config.engine != crate::config::TranscriptionEngine::Parakeet {
+            return false;
+        }
+        if let Some(ref parakeet) = self.config.parakeet {
+            // Detect model type to check if Nemotron
+            let model_type = parakeet.model_type.unwrap_or_else(|| {
+                // Quick check: if streaming is explicitly enabled, assume Nemotron
+                if parakeet.streaming == Some(true) {
+                    crate::config::ParakeetModelType::Nemotron
+                } else {
+                    crate::config::ParakeetModelType::Tdt
+                }
+            });
+            parakeet.streaming_enabled(model_type)
+        } else {
+            false
+        }
+    }
+
+    /// Start streaming transcription: spawns a blocking task that owns the StreamingTranscriber
+    /// and communicates via channels. Returns (chunk_tx, text_rx).
+    fn start_streaming_transcriber(
+        &mut self,
+    ) -> std::result::Result<(), crate::error::TranscribeError> {
+        let config = self.config.clone();
+        let mut streaming = crate::transcribe::create_streaming_transcriber(&config)?;
+
+        let chunk_size = streaming.chunk_size();
+        let (chunk_tx, mut chunk_rx) = mpsc::channel::<Vec<f32>>(32);
+        let (text_tx, text_rx) = mpsc::channel::<String>(32);
+
+        let task = tokio::task::spawn_blocking(move || {
+            // Block waiting for chunks, process them, send text deltas
+            while let Some(chunk) = chunk_rx.blocking_recv() {
+                if chunk.is_empty() {
+                    // Empty chunk is a signal to flush
+                    match streaming.flush() {
+                        Ok(delta) if !delta.is_empty() => {
+                            let _ = text_tx.blocking_send(delta);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::error!("Streaming flush failed: {}", e);
+                        }
+                    }
+                    break;
+                }
+
+                // Process the chunk
+                match streaming.transcribe_chunk(&chunk) {
+                    Ok(delta) if !delta.is_empty() => {
+                        if text_tx.blocking_send(delta).is_err() {
+                            tracing::debug!("Streaming text receiver dropped, stopping");
+                            break;
+                        }
+                    }
+                    Ok(_) => {} // No new text yet
+                    Err(e) => {
+                        tracing::error!("Streaming chunk transcription failed: {}", e);
+                    }
+                }
+            }
+
+            tracing::debug!(
+                "Streaming transcriber task finished, final transcript: {:?}",
+                streaming.get_transcript()
+            );
+        });
+
+        self.streaming_chunk_tx = Some(chunk_tx);
+        self.streaming_text_rx = Some(text_rx);
+        self.streaming_task = Some(task);
+
+        tracing::info!(
+            "Started streaming transcriber (chunk_size={} samples, {:.0}ms)",
+            chunk_size,
+            chunk_size as f64 / 16.0
+        );
+        Ok(())
+    }
+
+    /// Stop streaming transcription: flush and cleanup
+    async fn stop_streaming(&mut self) {
+        // Send empty chunk to signal flush
+        if let Some(tx) = self.streaming_chunk_tx.take() {
+            let _ = tx.send(Vec::new()).await;
+        }
+
+        // Wait for the task to finish
+        if let Some(task) = self.streaming_task.take() {
+            let _ = task.await;
+        }
+
+        self.streaming_text_rx = None;
+    }
+
+    /// Cancel streaming transcription without flushing
+    fn cancel_streaming(&mut self) {
+        self.streaming_chunk_tx = None;
+        self.streaming_text_rx = None;
+        if let Some(task) = self.streaming_task.take() {
+            task.abort();
         }
     }
 
@@ -1064,6 +1180,9 @@ impl Daemon {
         // Audio capture (created fresh for each recording)
         let mut audio_capture: Option<Box<dyn AudioCapture>> = None;
 
+        // Audio receiver for streaming mode (receives chunks from audio capture)
+        let mut audio_rx: Option<mpsc::Receiver<Vec<f32>>> = None;
+
         // Recording timeout
         let max_duration = Duration::from_secs(self.config.audio.max_duration_secs as u64);
 
@@ -1153,37 +1272,65 @@ impl Daemon {
                                 match audio::create_capture(&self.config.audio) {
                                     Ok(mut capture) => {
                                         tracing::debug!("Audio capture created, starting...");
-                                        if let Err(e) = capture.start().await {
-                                            tracing::error!("Failed to start audio: {}", e);
-                                            continue;
-                                        }
-                                        tracing::debug!("Audio capture started successfully");
-                                        audio_capture = Some(capture);
+                                        match capture.start().await {
+                                            Ok(rx) => {
+                                                tracing::debug!("Audio capture started successfully");
 
-                                        // Use EagerRecording state if eager_processing is enabled
-                                        if self.config.whisper.eager_processing {
-                                            tracing::info!("Using eager input processing");
-                                            state = State::EagerRecording {
-                                                started_at: std::time::Instant::now(),
-                                                model_override: model_override.clone(),
-                                                accumulated_audio: Vec::new(),
-                                                chunks_sent: 0,
-                                                chunk_results: Vec::new(),
-                                                tasks_in_flight: 0,
-                                            };
-                                        } else {
-                                            state = State::Recording {
-                                                started_at: std::time::Instant::now(),
-                                                model_override: model_override.clone(),
-                                            };
-                                        }
-                                        self.update_state("recording");
-                                        self.play_feedback(SoundEvent::RecordingStart);
+                                                // Check if streaming mode should be used
+                                                if self.should_use_streaming() {
+                                                    tracing::info!("Using streaming transcription (Nemotron)");
+                                                    match self.start_streaming_transcriber() {
+                                                        Ok(()) => {
+                                                            audio_rx = Some(rx);
+                                                            audio_capture = Some(capture);
+                                                            state = State::StreamingRecording {
+                                                                started_at: std::time::Instant::now(),
+                                                                model_override: model_override.clone(),
+                                                                audio_buffer: Vec::new(),
+                                                                text_output_so_far: String::new(),
+                                                            };
+                                                        }
+                                                        Err(e) => {
+                                                            tracing::error!("Failed to start streaming transcriber: {}", e);
+                                                            // Fall back to normal recording
+                                                            audio_capture = Some(capture);
+                                                            state = State::Recording {
+                                                                started_at: std::time::Instant::now(),
+                                                                model_override: model_override.clone(),
+                                                            };
+                                                        }
+                                                    }
+                                                } else if self.config.whisper.eager_processing {
+                                                    tracing::info!("Using eager input processing");
+                                                    audio_capture = Some(capture);
+                                                    state = State::EagerRecording {
+                                                        started_at: std::time::Instant::now(),
+                                                        model_override: model_override.clone(),
+                                                        accumulated_audio: Vec::new(),
+                                                        chunks_sent: 0,
+                                                        chunk_results: Vec::new(),
+                                                        tasks_in_flight: 0,
+                                                    };
+                                                } else {
+                                                    audio_capture = Some(capture);
+                                                    state = State::Recording {
+                                                        started_at: std::time::Instant::now(),
+                                                        model_override: model_override.clone(),
+                                                    };
+                                                }
+                                                self.update_state("recording");
+                                                self.play_feedback(SoundEvent::RecordingStart);
 
-                                        // Run pre-recording hook (e.g., enter compositor submap for cancel)
-                                        if let Some(cmd) = &self.config.output.pre_recording_command {
-                                            if let Err(e) = output::run_hook(cmd, "pre_recording").await {
-                                                tracing::warn!("{}", e);
+                                                // Run pre-recording hook (e.g., enter compositor submap for cancel)
+                                                if let Some(cmd) = &self.config.output.pre_recording_command {
+                                                    if let Err(e) = output::run_hook(cmd, "pre_recording").await {
+                                                        tracing::warn!("{}", e);
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("Failed to start audio: {}", e);
+                                                continue;
                                             }
                                         }
                                     }
@@ -1215,6 +1362,70 @@ impl Daemon {
                                     &mut audio_capture,
                                     transcriber,
                                 ).await;
+                            } else if state.is_streaming_recording() {
+                                // Handle streaming recording stop
+                                let duration = state.recording_duration().unwrap_or_default();
+                                let text_so_far = match &state {
+                                    State::StreamingRecording { text_output_so_far, .. } => text_output_so_far.clone(),
+                                    _ => String::new(),
+                                };
+                                tracing::info!(
+                                    "Streaming recording stopped ({:.1}s), already typed {} chars",
+                                    duration.as_secs_f32(),
+                                    text_so_far.len()
+                                );
+
+                                self.play_feedback(SoundEvent::RecordingStop);
+
+                                // Stop audio capture
+                                audio_rx = None;
+                                if let Some(mut capture) = audio_capture.take() {
+                                    let _ = capture.stop().await;
+                                }
+
+                                // Flush the streaming transcriber and get any remaining text
+                                // Drain any buffered audio first
+                                if let State::StreamingRecording { audio_buffer, .. } = &state {
+                                    if !audio_buffer.is_empty() {
+                                        let remaining = audio_buffer.clone();
+                                        if let Some(ref tx) = self.streaming_chunk_tx {
+                                            let _ = tx.send(remaining).await;
+                                        }
+                                    }
+                                }
+
+                                // Stop streaming (sends flush signal)
+                                self.stop_streaming().await;
+
+                                // Collect any remaining text deltas that arrived
+                                if let Some(ref mut text_rx) = self.streaming_text_rx {
+                                    while let Ok(delta) = text_rx.try_recv() {
+                                        if !delta.is_empty() {
+                                            let output_chain = output::create_output_chain(&self.config.output);
+                                            let output_options = output::OutputOptions {
+                                                pre_output_command: None,
+                                                post_output_command: None,
+                                            };
+                                            if let Err(e) = output::output_with_fallback(&output_chain, &delta, output_options).await {
+                                                tracing::error!("Failed to output streaming text: {}", e);
+                                            }
+                                        }
+                                    }
+                                }
+                                self.streaming_text_rx = None;
+
+                                if self.config.output.notification.on_recording_stop {
+                                    send_notification("Streaming Complete", "Done", self.config.output.notification.show_engine_icon, self.config.engine).await;
+                                }
+
+                                // Run post_output_command to reset compositor submap
+                                if let Some(cmd) = &self.config.output.post_output_command {
+                                    if let Err(e) = output::run_hook(cmd, "post_output").await {
+                                        tracing::warn!("{}", e);
+                                    }
+                                }
+
+                                self.reset_to_idle(&mut state).await;
                             } else if state.is_eager_recording() {
                                 // Handle eager recording stop - extract model_override first
                                 let model_override = match &state {
@@ -1323,37 +1534,63 @@ impl Daemon {
 
                                 match audio::create_capture(&self.config.audio) {
                                     Ok(mut capture) => {
-                                        if let Err(e) = capture.start().await {
-                                            tracing::error!("Failed to start audio: {}", e);
-                                            self.play_feedback(SoundEvent::Error);
-                                            continue;
-                                        }
-                                        audio_capture = Some(capture);
+                                        match capture.start().await {
+                                            Ok(rx) => {
+                                                // Check if streaming mode should be used
+                                                if self.should_use_streaming() {
+                                                    tracing::info!("Using streaming transcription (Nemotron, toggle mode)");
+                                                    match self.start_streaming_transcriber() {
+                                                        Ok(()) => {
+                                                            audio_rx = Some(rx);
+                                                            audio_capture = Some(capture);
+                                                            state = State::StreamingRecording {
+                                                                started_at: std::time::Instant::now(),
+                                                                model_override: model_override.clone(),
+                                                                audio_buffer: Vec::new(),
+                                                                text_output_so_far: String::new(),
+                                                            };
+                                                        }
+                                                        Err(e) => {
+                                                            tracing::error!("Failed to start streaming transcriber: {}", e);
+                                                            audio_capture = Some(capture);
+                                                            state = State::Recording {
+                                                                started_at: std::time::Instant::now(),
+                                                                model_override: model_override.clone(),
+                                                            };
+                                                        }
+                                                    }
+                                                } else if self.config.whisper.eager_processing {
+                                                    tracing::info!("Using eager input processing");
+                                                    audio_capture = Some(capture);
+                                                    state = State::EagerRecording {
+                                                        started_at: std::time::Instant::now(),
+                                                        model_override: model_override.clone(),
+                                                        accumulated_audio: Vec::new(),
+                                                        chunks_sent: 0,
+                                                        chunk_results: Vec::new(),
+                                                        tasks_in_flight: 0,
+                                                    };
+                                                } else {
+                                                    audio_capture = Some(capture);
+                                                    state = State::Recording {
+                                                        started_at: std::time::Instant::now(),
+                                                        model_override: model_override.clone(),
+                                                    };
+                                                }
+                                                self.update_state("recording");
+                                                self.play_feedback(SoundEvent::RecordingStart);
 
-                                        // Use EagerRecording state if eager_processing is enabled
-                                        if self.config.whisper.eager_processing {
-                                            tracing::info!("Using eager input processing");
-                                            state = State::EagerRecording {
-                                                started_at: std::time::Instant::now(),
-                                                model_override: model_override.clone(),
-                                                accumulated_audio: Vec::new(),
-                                                chunks_sent: 0,
-                                                chunk_results: Vec::new(),
-                                                tasks_in_flight: 0,
-                                            };
-                                        } else {
-                                            state = State::Recording {
-                                                started_at: std::time::Instant::now(),
-                                                model_override: model_override.clone(),
-                                            };
-                                        }
-                                        self.update_state("recording");
-                                        self.play_feedback(SoundEvent::RecordingStart);
-
-                                        // Run pre-recording hook (e.g., enter compositor submap for cancel)
-                                        if let Some(cmd) = &self.config.output.pre_recording_command {
-                                            if let Err(e) = output::run_hook(cmd, "pre_recording").await {
-                                                tracing::warn!("{}", e);
+                                                // Run pre-recording hook (e.g., enter compositor submap for cancel)
+                                                if let Some(cmd) = &self.config.output.pre_recording_command {
+                                                    if let Err(e) = output::run_hook(cmd, "pre_recording").await {
+                                                        tracing::warn!("{}", e);
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("Failed to start audio: {}", e);
+                                                self.play_feedback(SoundEvent::Error);
+                                                continue;
                                             }
                                         }
                                     }
@@ -1362,6 +1599,61 @@ impl Daemon {
                                         self.play_feedback(SoundEvent::Error);
                                     }
                                 }
+                            } else if state.is_streaming_recording() {
+                                // Handle streaming recording stop (toggle mode)
+                                let duration = state.recording_duration().unwrap_or_default();
+                                tracing::info!(
+                                    "Streaming recording stopped (toggle, {:.1}s)",
+                                    duration.as_secs_f32()
+                                );
+
+                                self.play_feedback(SoundEvent::RecordingStop);
+
+                                audio_rx = None;
+                                if let Some(mut capture) = audio_capture.take() {
+                                    let _ = capture.stop().await;
+                                }
+
+                                // Flush remaining audio buffer
+                                if let State::StreamingRecording { audio_buffer, .. } = &state {
+                                    if !audio_buffer.is_empty() {
+                                        let remaining = audio_buffer.clone();
+                                        if let Some(ref tx) = self.streaming_chunk_tx {
+                                            let _ = tx.send(remaining).await;
+                                        }
+                                    }
+                                }
+
+                                self.stop_streaming().await;
+
+                                // Drain remaining text
+                                if let Some(ref mut text_rx) = self.streaming_text_rx {
+                                    while let Ok(delta) = text_rx.try_recv() {
+                                        if !delta.is_empty() {
+                                            let output_chain = output::create_output_chain(&self.config.output);
+                                            let output_options = output::OutputOptions {
+                                                pre_output_command: None,
+                                                post_output_command: None,
+                                            };
+                                            if let Err(e) = output::output_with_fallback(&output_chain, &delta, output_options).await {
+                                                tracing::error!("Failed to output streaming text: {}", e);
+                                            }
+                                        }
+                                    }
+                                }
+                                self.streaming_text_rx = None;
+
+                                if self.config.output.notification.on_recording_stop {
+                                    send_notification("Streaming Complete", "Done", self.config.output.notification.show_engine_icon, self.config.engine).await;
+                                }
+
+                                if let Some(cmd) = &self.config.output.post_output_command {
+                                    if let Err(e) = output::run_hook(cmd, "post_output").await {
+                                        tracing::warn!("{}", e);
+                                    }
+                                }
+
+                                self.reset_to_idle(&mut state).await;
                             } else if let State::Recording { model_override: current_model_override, .. } = &state {
                                 let transcriber = match self.get_transcriber_for_recording(
                                     current_model_override.as_deref(),
@@ -1443,9 +1735,13 @@ impl Daemon {
                                 tracing::info!("Recording cancelled via hotkey");
 
                                 // Stop recording and discard audio
+                                audio_rx = None;
                                 if let Some(mut capture) = audio_capture.take() {
                                     let _ = capture.stop().await;
                                 }
+
+                                // Cancel streaming transcription if active
+                                self.cancel_streaming();
 
                                 // Cancel any pending model load task
                                 if let Some(task) = self.model_load_task.take() {
@@ -1506,6 +1802,56 @@ impl Daemon {
                     }
                 }
 
+                // Streaming: receive audio chunks from capture and feed to transcriber
+                Some(audio_chunk) = async {
+                    match &mut audio_rx {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                }, if state.is_streaming_recording() => {
+                    if let State::StreamingRecording { audio_buffer, .. } = &mut state {
+                        audio_buffer.extend(audio_chunk);
+
+                        // Get chunk_size (8960 for Nemotron at 560ms/16kHz)
+                        let chunk_size = 8960;
+
+                        // Send full chunks to the streaming transcriber
+                        while audio_buffer.len() >= chunk_size {
+                            let chunk: Vec<f32> = audio_buffer.drain(..chunk_size).collect();
+                            if let Some(ref tx) = self.streaming_chunk_tx {
+                                if tx.send(chunk).await.is_err() {
+                                    tracing::warn!("Streaming transcriber channel closed");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Streaming: receive text deltas from transcriber and output them live
+                Some(text_delta) = async {
+                    match &mut self.streaming_text_rx {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                }, if state.is_streaming_recording() => {
+                    if !text_delta.is_empty() {
+                        tracing::debug!("Streaming text delta: {:?}", text_delta);
+
+                        let output_chain = output::create_output_chain(&self.config.output);
+                        let output_options = output::OutputOptions {
+                            pre_output_command: None,
+                            post_output_command: None,
+                        };
+
+                        if let Err(e) = output::output_with_fallback(&output_chain, &text_delta, output_options).await {
+                            tracing::error!("Failed to output streaming text: {}", e);
+                        } else if let State::StreamingRecording { text_output_so_far, .. } = &mut state {
+                            text_output_so_far.push_str(&text_delta);
+                        }
+                    }
+                }
+
                 // Check for recording timeout and cancel requests
                 _ = tokio::time::sleep(Duration::from_millis(100)), if state.is_recording() => {
                     // Check for cancel request first
@@ -1513,9 +1859,13 @@ impl Daemon {
                         tracing::info!("Recording cancelled");
 
                         // Stop recording and discard audio
+                        audio_rx = None;
                         if let Some(mut capture) = audio_capture.take() {
                             let _ = capture.stop().await;
                         }
+
+                        // Cancel streaming transcription if active
+                        self.cancel_streaming();
 
                         // Cancel any pending model load task
                         if let Some(task) = self.model_load_task.take() {
@@ -1557,9 +1907,13 @@ impl Daemon {
                             );
 
                             // Stop recording
+                            audio_rx = None;
                             if let Some(mut capture) = audio_capture.take() {
                                 let _ = capture.stop().await;
                             }
+
+                            // Cancel streaming transcription if active
+                            self.cancel_streaming();
 
                             // Cancel any pending eager chunk tasks
                             for (_, task) in self.eager_chunk_tasks.drain(..) {
@@ -1637,36 +1991,60 @@ impl Daemon {
 
                         match audio::create_capture(&self.config.audio) {
                             Ok(mut capture) => {
-                                if let Err(e) = capture.start().await {
-                                    tracing::error!("Failed to start audio: {}", e);
-                                } else {
-                                    audio_capture = Some(capture);
-
-                                    // Use EagerRecording state if eager_processing is enabled
-                                    if self.config.whisper.eager_processing {
-                                        tracing::info!("Using eager input processing");
-                                        state = State::EagerRecording {
-                                            started_at: std::time::Instant::now(),
-                                            model_override,
-                                            accumulated_audio: Vec::new(),
-                                            chunks_sent: 0,
-                                            chunk_results: Vec::new(),
-                                            tasks_in_flight: 0,
-                                        };
-                                    } else {
-                                        state = State::Recording {
-                                            started_at: std::time::Instant::now(),
-                                            model_override,
-                                        };
-                                    }
-                                    self.update_state("recording");
-                                    self.play_feedback(SoundEvent::RecordingStart);
-
-                                    // Run pre-recording hook (e.g., enter compositor submap for cancel)
-                                    if let Some(cmd) = &self.config.output.pre_recording_command {
-                                        if let Err(e) = output::run_hook(cmd, "pre_recording").await {
-                                            tracing::warn!("{}", e);
+                                match capture.start().await {
+                                    Ok(rx) => {
+                                        if self.should_use_streaming() {
+                                            tracing::info!("Using streaming transcription (Nemotron, external trigger)");
+                                            match self.start_streaming_transcriber() {
+                                                Ok(()) => {
+                                                    audio_rx = Some(rx);
+                                                    audio_capture = Some(capture);
+                                                    state = State::StreamingRecording {
+                                                        started_at: std::time::Instant::now(),
+                                                        model_override,
+                                                        audio_buffer: Vec::new(),
+                                                        text_output_so_far: String::new(),
+                                                    };
+                                                }
+                                                Err(e) => {
+                                                    tracing::error!("Failed to start streaming: {}", e);
+                                                    audio_capture = Some(capture);
+                                                    state = State::Recording {
+                                                        started_at: std::time::Instant::now(),
+                                                        model_override,
+                                                    };
+                                                }
+                                            }
+                                        } else if self.config.whisper.eager_processing {
+                                            tracing::info!("Using eager input processing");
+                                            audio_capture = Some(capture);
+                                            state = State::EagerRecording {
+                                                started_at: std::time::Instant::now(),
+                                                model_override,
+                                                accumulated_audio: Vec::new(),
+                                                chunks_sent: 0,
+                                                chunk_results: Vec::new(),
+                                                tasks_in_flight: 0,
+                                            };
+                                        } else {
+                                            audio_capture = Some(capture);
+                                            state = State::Recording {
+                                                started_at: std::time::Instant::now(),
+                                                model_override,
+                                            };
                                         }
+                                        self.update_state("recording");
+                                        self.play_feedback(SoundEvent::RecordingStart);
+
+                                        // Run pre-recording hook (e.g., enter compositor submap for cancel)
+                                        if let Some(cmd) = &self.config.output.pre_recording_command {
+                                            if let Err(e) = output::run_hook(cmd, "pre_recording").await {
+                                                tracing::warn!("{}", e);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Failed to start audio: {}", e);
                                     }
                                 }
                             }
@@ -1681,7 +2059,60 @@ impl Daemon {
                 // Handle SIGUSR2 - stop recording (for compositor keybindings)
                 _ = sigusr2.recv() => {
                     tracing::debug!("Received SIGUSR2 (stop recording)");
-                    if let State::Recording { model_override, .. } = &state {
+                    if state.is_streaming_recording() {
+                        // Handle streaming recording stop via external trigger
+                        let duration = state.recording_duration().unwrap_or_default();
+                        tracing::info!(
+                            "Streaming recording stopped (external, {:.1}s)",
+                            duration.as_secs_f32()
+                        );
+
+                        self.play_feedback(SoundEvent::RecordingStop);
+
+                        audio_rx = None;
+                        if let Some(mut capture) = audio_capture.take() {
+                            let _ = capture.stop().await;
+                        }
+
+                        if let State::StreamingRecording { audio_buffer, .. } = &state {
+                            if !audio_buffer.is_empty() {
+                                let remaining = audio_buffer.clone();
+                                if let Some(ref tx) = self.streaming_chunk_tx {
+                                    let _ = tx.send(remaining).await;
+                                }
+                            }
+                        }
+
+                        self.stop_streaming().await;
+
+                        if let Some(ref mut text_rx) = self.streaming_text_rx {
+                            while let Ok(delta) = text_rx.try_recv() {
+                                if !delta.is_empty() {
+                                    let output_chain = output::create_output_chain(&self.config.output);
+                                    let output_options = output::OutputOptions {
+                                        pre_output_command: None,
+                                        post_output_command: None,
+                                    };
+                                    if let Err(e) = output::output_with_fallback(&output_chain, &delta, output_options).await {
+                                        tracing::error!("Failed to output streaming text: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                        self.streaming_text_rx = None;
+
+                        if self.config.output.notification.on_recording_stop {
+                            send_notification("Streaming Complete", "Done", self.config.output.notification.show_engine_icon, self.config.engine).await;
+                        }
+
+                        if let Some(cmd) = &self.config.output.post_output_command {
+                            if let Err(e) = output::run_hook(cmd, "post_output").await {
+                                tracing::warn!("{}", e);
+                            }
+                        }
+
+                        self.reset_to_idle(&mut state).await;
+                    } else if let State::Recording { model_override, .. } = &state {
                         let transcriber = match self.get_transcriber_for_recording(
                             model_override.as_deref(),
                             &transcriber_preloaded,
@@ -1833,6 +2264,9 @@ impl Daemon {
         for (_, task) in self.eager_chunk_tasks.drain(..) {
             task.abort();
         }
+
+        // Cancel any streaming transcription
+        self.cancel_streaming();
 
         // Remove state file on shutdown
         if let Some(ref path) = self.state_file_path {

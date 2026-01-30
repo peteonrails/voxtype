@@ -47,6 +47,19 @@ pub enum State {
         tasks_in_flight: usize,
     },
 
+    /// Hotkey held, recording audio with streaming transcription (Nemotron)
+    /// Text is typed live during recording as audio chunks are processed
+    StreamingRecording {
+        /// When recording started
+        started_at: Instant,
+        /// Optional model override for this recording
+        model_override: Option<String>,
+        /// Audio samples buffered but not yet a full chunk
+        audio_buffer: Vec<f32>,
+        /// Text already typed to the output
+        text_output_so_far: String,
+    },
+
     /// Hotkey released, transcribing audio
     Transcribing {
         /// Recorded audio samples
@@ -71,9 +84,17 @@ impl State {
         matches!(self, State::Idle)
     }
 
-    /// Check if in recording state (normal or eager)
+    /// Check if in recording state (normal, eager, or streaming)
     pub fn is_recording(&self) -> bool {
-        matches!(self, State::Recording { .. } | State::EagerRecording { .. })
+        matches!(
+            self,
+            State::Recording { .. } | State::EagerRecording { .. } | State::StreamingRecording { .. }
+        )
+    }
+
+    /// Check if in streaming recording state specifically
+    pub fn is_streaming_recording(&self) -> bool {
+        matches!(self, State::StreamingRecording { .. })
     }
 
     /// Check if in eager recording state specifically
@@ -81,12 +102,12 @@ impl State {
         matches!(self, State::EagerRecording { .. })
     }
 
-    /// Get recording duration if currently recording (normal or eager)
+    /// Get recording duration if currently recording (normal, eager, or streaming)
     pub fn recording_duration(&self) -> Option<std::time::Duration> {
         match self {
-            State::Recording { started_at, .. } | State::EagerRecording { started_at, .. } => {
-                Some(started_at.elapsed())
-            }
+            State::Recording { started_at, .. }
+            | State::EagerRecording { started_at, .. }
+            | State::StreamingRecording { started_at, .. } => Some(started_at.elapsed()),
             _ => None,
         }
     }
@@ -133,6 +154,18 @@ impl std::fmt::Display for State {
                     started_at.elapsed().as_secs_f32(),
                     chunks_sent,
                     tasks_in_flight
+                )
+            }
+            State::StreamingRecording {
+                started_at,
+                text_output_so_far,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Streaming ({:.1}s, {} chars typed)",
+                    started_at.elapsed().as_secs_f32(),
+                    text_output_so_far.len()
                 )
             }
             State::Transcribing { audio } => {
@@ -219,6 +252,34 @@ mod tests {
         assert!(!state.is_eager_recording());
         assert_eq!(state.eager_chunks_sent(), None);
         assert_eq!(state.eager_tasks_in_flight(), None);
+    }
+
+    #[test]
+    fn test_streaming_recording_state() {
+        let state = State::StreamingRecording {
+            started_at: Instant::now(),
+            model_override: None,
+            audio_buffer: vec![],
+            text_output_so_far: "hello ".to_string(),
+        };
+        assert!(state.is_recording());
+        assert!(state.is_streaming_recording());
+        assert!(!state.is_idle());
+        assert!(!state.is_eager_recording());
+        assert!(state.recording_duration().is_some());
+    }
+
+    #[test]
+    fn test_streaming_recording_display() {
+        let state = State::StreamingRecording {
+            started_at: Instant::now(),
+            model_override: None,
+            audio_buffer: vec![],
+            text_output_so_far: "hello world".to_string(),
+        };
+        let display = format!("{}", state);
+        assert!(display.contains("Streaming"));
+        assert!(display.contains("11 chars typed"));
     }
 
     #[test]

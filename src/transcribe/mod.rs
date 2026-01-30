@@ -39,6 +39,28 @@ pub trait Transcriber: Send + Sync {
     }
 }
 
+/// Trait for streaming speech-to-text (real-time transcription during recording)
+///
+/// Unlike `Transcriber`, this maintains internal state and produces incremental
+/// text output as audio chunks are fed in. Used by Nemotron streaming models.
+pub trait StreamingTranscriber: Send {
+    /// Feed a chunk of audio and get incremental text back
+    /// Returns the new text produced by this chunk (delta, not cumulative)
+    fn transcribe_chunk(&mut self, chunk: &[f32]) -> Result<String, TranscribeError>;
+
+    /// Flush remaining audio by feeding silence chunks to drain the decoder
+    fn flush(&mut self) -> Result<String, TranscribeError>;
+
+    /// Reset state for a new utterance
+    fn reset(&mut self);
+
+    /// Get the full accumulated transcript so far
+    fn get_transcript(&self) -> String;
+
+    /// Chunk size in samples expected by this model
+    fn chunk_size(&self) -> usize;
+}
+
 /// Factory function to create transcriber based on configured engine
 pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, TranscribeError> {
     match config.engine {
@@ -58,6 +80,29 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
                 .to_string(),
         )),
     }
+}
+
+/// Factory function to create a streaming transcriber (currently only Nemotron)
+#[cfg(feature = "parakeet")]
+pub fn create_streaming_transcriber(
+    config: &Config,
+) -> Result<Box<dyn StreamingTranscriber>, TranscribeError> {
+    let parakeet_config = config.parakeet.as_ref().ok_or_else(|| {
+        TranscribeError::InitFailed(
+            "Streaming transcription requires [parakeet] config section".to_string(),
+        )
+    })?;
+    parakeet::create_nemotron_streaming(parakeet_config)
+}
+
+/// Factory function to create a streaming transcriber (stub when parakeet feature is disabled)
+#[cfg(not(feature = "parakeet"))]
+pub fn create_streaming_transcriber(
+    _config: &Config,
+) -> Result<Box<dyn StreamingTranscriber>, TranscribeError> {
+    Err(TranscribeError::InitFailed(
+        "Streaming transcription requires voxtype compiled with --features parakeet".to_string(),
+    ))
 }
 
 /// Factory function to create Whisper transcriber (local or remote)

@@ -870,6 +870,8 @@ pub enum ParakeetModelType {
     /// TDT (Token-Duration-Transducer) - recommended, proper punctuation and word boundaries
     #[default]
     Tdt,
+    /// Nemotron (streaming transducer) - supports real-time streaming transcription
+    Nemotron,
 }
 
 /// Parakeet speech-to-text configuration (ONNX-based, alternative to Whisper)
@@ -879,9 +881,10 @@ pub struct ParakeetConfig {
     /// Path to model directory containing ONNX model files
     /// For TDT: encoder-model.onnx, decoder_joint-model.onnx, vocab.txt
     /// For CTC: model.onnx, tokenizer.json
+    /// For Nemotron: encoder.onnx, encoder.onnx.data, decoder_joint.onnx, tokenizer.model
     pub model: String,
 
-    /// Model architecture type: "tdt" (default, recommended) or "ctc"
+    /// Model architecture type: "tdt" (default, recommended), "ctc", or "nemotron"
     /// Auto-detected from model directory structure if not specified
     #[serde(default)]
     pub model_type: Option<ParakeetModelType>,
@@ -889,6 +892,11 @@ pub struct ParakeetConfig {
     /// Load model on-demand when recording starts (true) or keep loaded (false)
     #[serde(default = "default_on_demand_loading")]
     pub on_demand_loading: bool,
+
+    /// Enable streaming transcription (text typed live during recording)
+    /// Default: auto (enabled when model_type is Nemotron, disabled otherwise)
+    #[serde(default)]
+    pub streaming: Option<bool>,
 }
 
 impl Default for ParakeetConfig {
@@ -897,7 +905,15 @@ impl Default for ParakeetConfig {
             model: "parakeet-tdt-0.6b-v3".to_string(),
             model_type: None, // Auto-detect
             on_demand_loading: false,
+            streaming: None, // Auto: enabled for Nemotron, disabled otherwise
         }
+    }
+}
+
+impl ParakeetConfig {
+    /// Check if streaming is enabled (auto-detects based on model type)
+    pub fn streaming_enabled(&self, detected_model_type: ParakeetModelType) -> bool {
+        self.streaming.unwrap_or(matches!(detected_model_type, ParakeetModelType::Nemotron))
     }
 }
 
