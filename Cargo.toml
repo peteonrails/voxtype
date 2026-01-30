@@ -67,7 +67,7 @@ rodio = { version = "0.19", default-features = false, features = ["wav"] }
 whisper-rs = "0.15.1"
 
 # Parakeet speech-to-text (optional, ONNX-based)
-parakeet-rs = { version = "0.2.9", optional = true }
+parakeet-rs = { version = "0.3.1", optional = true }
 
 
 # CPU count for thread detection
@@ -89,7 +89,7 @@ gpu-hipblas = ["whisper-rs/hipblas"]
 parakeet = ["dep:parakeet-rs"]
 parakeet-cuda = ["parakeet", "parakeet-rs/cuda"]
 parakeet-tensorrt = ["parakeet", "parakeet-rs/tensorrt"]
-parakeet-rocm = ["parakeet", "parakeet-rs/rocm"]
+parakeet-rocm = ["parakeet", "parakeet-rs/migraphx"]
 # Dynamic loading for system ONNX Runtime (used by Nix builds)
 parakeet-load-dynamic = ["parakeet", "parakeet-rs/load-dynamic"]
 

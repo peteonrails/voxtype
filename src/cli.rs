@@ -68,11 +68,23 @@ pub struct Cli {
     #[arg(long, value_name = "PROMPT")]
     pub initial_prompt: Option<String>,
 
+    /// Enable eager input processing (transcribe chunks while recording continues)
+    #[arg(long)]
+    pub eager_processing: bool,
+
+    /// Chunk duration in seconds for eager processing (default: 5.0)
+    #[arg(long, value_name = "SECS")]
+    pub eager_chunk_secs: Option<f32>,
+
+    /// Overlap between chunks in seconds for eager processing (default: 0.5)
+    #[arg(long, value_name = "SECS")]
+    pub eager_overlap_secs: Option<f32>,
+
     /// Override transcription engine: "whisper" (default) or "parakeet" (EXPERIMENTAL)
     #[arg(long, value_name = "ENGINE")]
     pub engine: Option<String>,
 
-    /// Override hotkey (e.g., SCROLLLOCK, PAUSE, F13)
+    /// Override hotkey (e.g., SCROLLLOCK, PAUSE, F13, MEDIA, WEV_234, EVTEST_226)
     #[arg(long, value_name = "KEY")]
     pub hotkey: Option<String>,
 

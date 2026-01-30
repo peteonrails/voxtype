@@ -61,6 +61,8 @@ The main key to hold for recording. Must be a valid Linux evdev key name.
 - `PAUSE` - Pause/Break key
 - `RIGHTALT` - Right Alt key
 - `F13` through `F24` - Extended function keys
+- `MEDIA` - Media key (often a dedicated button on multimedia keyboards)
+- `RECORD` - Record key
 - `INSERT` - Insert key
 - `HOME` - Home key
 - `END` - End key
@@ -74,10 +76,25 @@ The main key to hold for recording. Must be a valid Linux evdev key name.
 key = "PAUSE"
 ```
 
+**Numeric keycodes:**
+
+You can also specify keys by their numeric keycode if the key name isn't in the built-in list. Use a prefix to indicate the source tool, since different tools report different numbers for the same key:
+
+- `WEV_234` or `X11_234` or `XEV_234` - XKB keycode as shown by `wev` or `xev` (offset by 8 from the kernel value)
+- `EVTEST_226` - kernel keycode as shown by `evtest`
+- Hex values are also accepted: `WEV_0xEA`, `EVTEST_0xE2`
+
+Bare numeric values (e.g. `226`) are not accepted because `wev`/`xev` and `evtest` report different numbers for the same key.
+
 **Finding key names:**
 ```bash
+# Using evtest (shows kernel keycodes):
 sudo evtest
 # Select keyboard, press desired key, note KEY_XXXX name
+
+# Using wev on Wayland (shows XKB keycodes):
+wev
+# Press the key, note the keycode number — use with WEV_ prefix
 ```
 
 ### modifiers
@@ -593,6 +610,100 @@ voxtype --whisper-context-optimization daemon
 
 **Note:** This setting only applies when using the local whisper backend (`backend = "local"`). It has no effect with remote transcription.
 
+### eager_processing
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Enable eager input processing. When enabled, audio is split into chunks and transcribed in parallel with continued recording, reducing perceived latency on slower machines.
+
+**Values:**
+- `false` (default) - Traditional mode: record all audio, then transcribe
+- `true` - Eager mode: transcribe chunks while recording continues
+
+**How it works:**
+
+1. While recording, audio is split into fixed-size chunks (default 5 seconds)
+2. Each chunk is sent for transcription as soon as it's ready
+3. Recording continues while earlier chunks are being transcribed
+4. When recording stops, all chunk results are combined
+
+**When to use eager processing:**
+- You have a slower CPU where transcription takes several seconds
+- You regularly dictate longer passages (10+ seconds)
+- You want to minimize the delay between speaking and text output
+
+**When to keep default (`false`):**
+- You have a fast CPU or GPU acceleration
+- Your recordings are typically short (under 5 seconds)
+- You want maximum transcription accuracy (single-pass is more consistent)
+
+**Example:**
+```toml
+[whisper]
+model = "base.en"
+eager_processing = true
+eager_chunk_secs = 5.0    # 5 second chunks
+eager_overlap_secs = 0.5  # 0.5 second overlap
+```
+
+**CLI override:**
+```bash
+voxtype --eager-processing daemon
+```
+
+**Note:** Eager processing is experimental. There may be occasional word duplications or omissions at chunk boundaries.
+
+### eager_chunk_secs
+
+**Type:** Float
+**Default:** `5.0`
+**Required:** No
+
+Duration of each audio chunk in seconds when eager processing is enabled.
+
+**Example:**
+```toml
+[whisper]
+eager_processing = true
+eager_chunk_secs = 3.0  # Shorter chunks for faster feedback
+```
+
+**CLI override:**
+```bash
+voxtype --eager-processing --eager-chunk-secs 3.0 daemon
+```
+
+**Trade-offs:**
+- Shorter chunks: Faster feedback, but more boundary artifacts
+- Longer chunks: Better accuracy, but less parallelism benefit
+
+### eager_overlap_secs
+
+**Type:** Float
+**Default:** `0.5`
+**Required:** No
+
+Overlap duration in seconds between adjacent chunks when eager processing is enabled. Overlap helps catch words that span chunk boundaries.
+
+**Example:**
+```toml
+[whisper]
+eager_processing = true
+eager_chunk_secs = 5.0
+eager_overlap_secs = 1.0  # More overlap for better boundary handling
+```
+
+**CLI override:**
+```bash
+voxtype --eager-processing --eager-overlap-secs 1.0 daemon
+```
+
+**Trade-offs:**
+- More overlap: Better word boundary handling, slightly more processing
+- Less overlap: Faster processing, but may miss words at boundaries
+
 ### initial_prompt
 
 **Type:** String
@@ -893,12 +1004,49 @@ The model architecture type. Usually auto-detected based on files present in the
 **Values:**
 - `tdt` - Token-Duration-Transducer (recommended, proper punctuation)
 - `ctc` - Connectionist Temporal Classification (faster, character-level)
+- `nemotron` - Nemotron streaming transducer (supports real-time streaming output)
 
 **Example:**
 ```toml
 [parakeet]
 model = "parakeet-tdt-0.6b-v3"
 model_type = "tdt"
+```
+
+**Auto-detection:**
+
+The model type is detected from the files in the model directory:
+
+| Model Type | Required Files |
+|-----------|---------------|
+| TDT | `encoder-model.onnx`, `decoder_joint-model.onnx`, `vocab.txt` |
+| CTC | `model.onnx` (or `model_int8.onnx`), `tokenizer.json` |
+| Nemotron | `encoder.onnx`, `decoder_joint.onnx`, `tokenizer.model` |
+
+### streaming
+
+**Type:** Boolean
+**Default:** Auto (enabled for Nemotron, disabled for TDT/CTC)
+**Required:** No
+
+When enabled, text is typed live during recording as the model produces output. Each audio chunk (560ms) is processed incrementally, and the resulting text is typed immediately at the cursor position.
+
+Streaming is automatically enabled when using a Nemotron model and can be explicitly overridden.
+
+**Example:**
+```toml
+[parakeet]
+model = "/path/to/nemotron-model"
+model_type = "nemotron"
+streaming = true  # This is the default for Nemotron
+```
+
+**To disable streaming for a Nemotron model (batch mode instead):**
+```toml
+[parakeet]
+model = "/path/to/nemotron-model"
+model_type = "nemotron"
+streaming = false  # Wait until recording stops, then transcribe all at once
 ```
 
 ### on_demand_loading
@@ -916,14 +1064,25 @@ model = "parakeet-tdt-0.6b-v3"
 on_demand_loading = true  # Free memory when not transcribing
 ```
 
-### Complete Example
+### Complete Examples
 
+**TDT model (recommended for batch transcription):**
 ```toml
 engine = "parakeet"
 
 [parakeet]
 model = "parakeet-tdt-0.6b-v3"
 on_demand_loading = false  # Keep model loaded for fast response
+```
+
+**Nemotron model (streaming transcription):**
+```toml
+engine = "parakeet"
+
+[parakeet]
+model = "/path/to/nemotron-0.6b"
+model_type = "nemotron"
+# streaming = true is the default for Nemotron
 ```
 
 ---
@@ -1016,20 +1175,21 @@ fallback_to_clipboard = true  # Use clipboard if typing drivers fail
 ### driver_order
 
 **Type:** Array of strings
-**Default:** `["wtype", "dotool", "ydotool", "clipboard", "xclip"]`
+**Default:** `["wtype", "eitype", "dotool", "ydotool", "clipboard", "xclip"]`
 **Required:** No
 
 Custom order of output drivers to try when `mode = "type"`. Each driver is tried in sequence until one succeeds. This allows you to prefer specific drivers or exclude others entirely.
 
 **Available drivers:**
-- `wtype` - Wayland virtual keyboard (best CJK/Unicode support, wlroots compositors only)
+- `wtype` - Wayland virtual keyboard protocol (best CJK/Unicode support, wlroots compositors only)
+- `eitype` - Wayland via libei/EI protocol (works on GNOME, KDE, and compositors with libei support)
 - `dotool` - uinput-based typing (supports keyboard layouts, works on X11/Wayland/TTY)
 - `ydotool` - uinput-based typing (requires daemon, X11/Wayland/TTY)
 - `clipboard` - Wayland clipboard via wl-copy
 - `xclip` - X11 clipboard via xclip
 
 **Default behavior (no driver_order set):**
-The default chain is: wtype → dotool → ydotool → clipboard → xclip
+The default chain is: wtype → eitype → dotool → ydotool → clipboard → xclip
 
 **Examples:**
 
@@ -1046,8 +1206,8 @@ driver_order = ["dotool", "ydotool", "xclip"]
 # Force single driver (no fallback)
 driver_order = ["ydotool"]
 
-# KDE/GNOME Wayland (wtype doesn't work)
-driver_order = ["dotool", "ydotool", "clipboard"]
+# GNOME/KDE Wayland (prefer eitype, wtype doesn't work)
+driver_order = ["eitype", "dotool", "clipboard"]
 ```
 
 **CLI override:**

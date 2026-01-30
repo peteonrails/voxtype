@@ -120,6 +120,18 @@ translate = false
 # Default: 300 (5 minutes). Only applies when gpu_isolation = false.
 # cold_model_timeout_secs = 300
 
+# --- Eager processing settings ---
+#
+# Enable eager input processing (transcribe chunks while recording continues)
+# Reduces perceived latency on slower machines by processing audio in parallel.
+# eager_processing = false
+#
+# Duration of each audio chunk in seconds (default: 5.0)
+# eager_chunk_secs = 5.0
+#
+# Overlap between chunks in seconds (helps catch words at boundaries, default: 0.5)
+# eager_overlap_secs = 0.5
+
 # --- Remote backend settings (used when backend = "remote") ---
 #
 # Remote server endpoint URL (required for remote backend)
@@ -388,6 +400,14 @@ fn default_max_loaded_models() -> usize {
 
 fn default_cold_model_timeout() -> u64 {
     300 // 5 minutes
+}
+
+fn default_eager_chunk_secs() -> f32 {
+    5.0
+}
+
+fn default_eager_overlap_secs() -> f32 {
+    0.5
 }
 
 fn default_whisper_model() -> String {
@@ -710,6 +730,22 @@ pub struct WhisperConfig {
     #[serde(default = "default_context_window_optimization")]
     pub context_window_optimization: bool,
 
+    // --- Eager processing settings ---
+    /// Enable eager input processing (transcribe chunks while recording continues)
+    /// When enabled, audio is split into chunks and transcribed in parallel with
+    /// continued recording. This reduces perceived latency on slower machines.
+    #[serde(default)]
+    pub eager_processing: bool,
+
+    /// Duration of each audio chunk in seconds for eager processing
+    #[serde(default = "default_eager_chunk_secs")]
+    pub eager_chunk_secs: f32,
+
+    /// Overlap between adjacent chunks in seconds for eager processing
+    /// Overlap helps catch words at chunk boundaries
+    #[serde(default = "default_eager_overlap_secs")]
+    pub eager_overlap_secs: f32,
+
     /// Initial prompt to provide context for transcription
     /// Use this to hint at terminology, proper nouns, or formatting conventions.
     /// Example: "Technical discussion about Rust, TypeScript, and Kubernetes."
@@ -717,7 +753,6 @@ pub struct WhisperConfig {
     pub initial_prompt: Option<String>,
 
     // --- Multi-model settings ---
-
     /// Secondary model to use when hotkey.model_modifier is held
     /// Example: "large-v3-turbo" for difficult audio
     #[serde(default)]
@@ -774,9 +809,7 @@ impl WhisperConfig {
         }
         // Fall back to deprecated `backend` with warning
         if let Some(backend) = self.backend {
-            tracing::warn!(
-                "DEPRECATED: [whisper] backend is deprecated, use 'mode' instead"
-            );
+            tracing::warn!("DEPRECATED: [whisper] backend is deprecated, use 'mode' instead");
             tracing::warn!(
                 "  Change 'backend = \"{}\"' to 'mode = \"{}\"' in config.toml",
                 match backend {
@@ -808,6 +841,9 @@ impl Default for WhisperConfig {
             on_demand_loading: default_on_demand_loading(),
             gpu_isolation: false,
             context_window_optimization: default_context_window_optimization(),
+            eager_processing: false,
+            eager_chunk_secs: default_eager_chunk_secs(),
+            eager_overlap_secs: default_eager_overlap_secs(),
             initial_prompt: None,
             secondary_model: None,
             available_models: vec![],
@@ -831,6 +867,8 @@ pub enum ParakeetModelType {
     /// TDT (Token-Duration-Transducer) - recommended, proper punctuation and word boundaries
     #[default]
     Tdt,
+    /// Nemotron (streaming transducer) - supports real-time streaming transcription
+    Nemotron,
 }
 
 /// Parakeet speech-to-text configuration (ONNX-based, alternative to Whisper)
@@ -840,9 +878,10 @@ pub struct ParakeetConfig {
     /// Path to model directory containing ONNX model files
     /// For TDT: encoder-model.onnx, decoder_joint-model.onnx, vocab.txt
     /// For CTC: model.onnx, tokenizer.json
+    /// For Nemotron: encoder.onnx, encoder.onnx.data, decoder_joint.onnx, tokenizer.model
     pub model: String,
 
-    /// Model architecture type: "tdt" (default, recommended) or "ctc"
+    /// Model architecture type: "tdt" (default, recommended), "ctc", or "nemotron"
     /// Auto-detected from model directory structure if not specified
     #[serde(default)]
     pub model_type: Option<ParakeetModelType>,
@@ -850,6 +889,11 @@ pub struct ParakeetConfig {
     /// Load model on-demand when recording starts (true) or keep loaded (false)
     #[serde(default = "default_on_demand_loading")]
     pub on_demand_loading: bool,
+
+    /// Enable streaming transcription (text typed live during recording)
+    /// Default: auto (enabled when model_type is Nemotron, disabled otherwise)
+    #[serde(default)]
+    pub streaming: Option<bool>,
 }
 
 impl Default for ParakeetConfig {
@@ -858,7 +902,16 @@ impl Default for ParakeetConfig {
             model: "parakeet-tdt-0.6b-v3".to_string(),
             model_type: None, // Auto-detect
             on_demand_loading: false,
+            streaming: None, // Auto: enabled for Nemotron, disabled otherwise
         }
+    }
+}
+
+impl ParakeetConfig {
+    /// Check if streaming is enabled (auto-detects based on model type)
+    pub fn streaming_enabled(&self, detected_model_type: ParakeetModelType) -> bool {
+        self.streaming
+            .unwrap_or(matches!(detected_model_type, ParakeetModelType::Nemotron))
     }
 }
 
@@ -1100,8 +1153,10 @@ pub enum OutputMode {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputDriver {
-    /// wtype - Wayland-native, best Unicode/CJK support
+    /// wtype - Wayland-native via virtual-keyboard protocol, best Unicode/CJK support
     Wtype,
+    /// eitype - Wayland via libei/EI protocol, works on GNOME/KDE
+    Eitype,
     /// dotool - Works on X11/Wayland/TTY, supports keyboard layouts
     Dotool,
     /// ydotool - Works on X11/Wayland/TTY, requires daemon
@@ -1116,6 +1171,7 @@ impl std::fmt::Display for OutputDriver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OutputDriver::Wtype => write!(f, "wtype"),
+            OutputDriver::Eitype => write!(f, "eitype"),
             OutputDriver::Dotool => write!(f, "dotool"),
             OutputDriver::Ydotool => write!(f, "ydotool"),
             OutputDriver::Clipboard => write!(f, "clipboard"),
@@ -1130,12 +1186,13 @@ impl std::str::FromStr for OutputDriver {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "wtype" => Ok(OutputDriver::Wtype),
+            "eitype" => Ok(OutputDriver::Eitype),
             "dotool" => Ok(OutputDriver::Dotool),
             "ydotool" => Ok(OutputDriver::Ydotool),
             "clipboard" => Ok(OutputDriver::Clipboard),
             "xclip" => Ok(OutputDriver::Xclip),
             _ => Err(format!(
-                "Unknown driver '{}'. Valid options: wtype, dotool, ydotool, clipboard, xclip",
+                "Unknown driver '{}'. Valid options: wtype, eitype, dotool, ydotool, clipboard, xclip",
                 s
             )),
         }
@@ -1184,6 +1241,9 @@ impl Default for Config {
                 on_demand_loading: default_on_demand_loading(),
                 gpu_isolation: false,
                 context_window_optimization: default_context_window_optimization(),
+                eager_processing: false,
+                eager_chunk_secs: default_eager_chunk_secs(),
+                eager_overlap_secs: default_eager_overlap_secs(),
                 initial_prompt: None,
                 secondary_model: None,
                 available_models: vec![],
@@ -1975,7 +2035,10 @@ mod tests {
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.engine, TranscriptionEngine::Parakeet);
         assert!(config.parakeet.is_some());
-        assert_eq!(config.parakeet.as_ref().unwrap().model, "parakeet-tdt-0.6b-v3");
+        assert_eq!(
+            config.parakeet.as_ref().unwrap().model,
+            "parakeet-tdt-0.6b-v3"
+        );
     }
 
     #[test]
@@ -2003,15 +2066,39 @@ mod tests {
 
     #[test]
     fn test_output_driver_from_str() {
-        assert_eq!("wtype".parse::<OutputDriver>().unwrap(), OutputDriver::Wtype);
-        assert_eq!("dotool".parse::<OutputDriver>().unwrap(), OutputDriver::Dotool);
-        assert_eq!("ydotool".parse::<OutputDriver>().unwrap(), OutputDriver::Ydotool);
-        assert_eq!("clipboard".parse::<OutputDriver>().unwrap(), OutputDriver::Clipboard);
-        assert_eq!("xclip".parse::<OutputDriver>().unwrap(), OutputDriver::Xclip);
+        assert_eq!(
+            "wtype".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Wtype
+        );
+        assert_eq!(
+            "dotool".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Dotool
+        );
+        assert_eq!(
+            "ydotool".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Ydotool
+        );
+        assert_eq!(
+            "clipboard".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Clipboard
+        );
+        assert_eq!(
+            "xclip".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Xclip
+        );
         // Case insensitive
-        assert_eq!("WTYPE".parse::<OutputDriver>().unwrap(), OutputDriver::Wtype);
-        assert_eq!("Ydotool".parse::<OutputDriver>().unwrap(), OutputDriver::Ydotool);
-        assert_eq!("XCLIP".parse::<OutputDriver>().unwrap(), OutputDriver::Xclip);
+        assert_eq!(
+            "WTYPE".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Wtype
+        );
+        assert_eq!(
+            "Ydotool".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Ydotool
+        );
+        assert_eq!(
+            "XCLIP".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Xclip
+        );
         // Invalid
         assert!("invalid".parse::<OutputDriver>().is_err());
     }
@@ -2405,11 +2492,17 @@ mod tests {
         assert_eq!(config.profiles.len(), 2);
 
         let slack = config.get_profile("slack").unwrap();
-        assert_eq!(slack.post_process_command, Some("cleanup-for-slack.sh".to_string()));
+        assert_eq!(
+            slack.post_process_command,
+            Some("cleanup-for-slack.sh".to_string())
+        );
         assert!(slack.output_mode.is_none());
 
         let code = config.get_profile("code").unwrap();
-        assert_eq!(code.post_process_command, Some("cleanup-for-code.sh".to_string()));
+        assert_eq!(
+            code.post_process_command,
+            Some("cleanup-for-code.sh".to_string())
+        );
         assert_eq!(code.output_mode, Some(OutputMode::Clipboard));
     }
 
@@ -2438,7 +2531,10 @@ mod tests {
 
         let config: Config = toml::from_str(toml_str).unwrap();
         let slow = config.get_profile("slow").unwrap();
-        assert_eq!(slow.post_process_command, Some("slow-llm-command".to_string()));
+        assert_eq!(
+            slow.post_process_command,
+            Some("slow-llm-command".to_string())
+        );
         assert_eq!(slow.post_process_timeout_ms, Some(60000));
     }
 

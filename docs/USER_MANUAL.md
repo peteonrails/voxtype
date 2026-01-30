@@ -17,6 +17,7 @@ Voxtype is a push-to-talk voice-to-text tool for Linux. Optimized for Wayland, w
 - [Whisper Models](#whisper-models)
 - [Remote Whisper Servers](#remote-whisper-servers)
 - [CLI Backend (whisper-cli)](#cli-backend-whisper-cli)
+- [Eager Processing](#eager-processing)
 - [Output Modes](#output-modes)
 - [Post-Processing with LLMs](#post-processing-with-llms)
 - [Profiles](#profiles)
@@ -334,6 +335,8 @@ Any key supported by the Linux evdev system can be used as a hotkey:
 | Right Alt | `RIGHTALT` |
 | Right Ctrl | `RIGHTCTRL` |
 | F13-F24 | `F13`, `F14`, ... `F24` |
+| Media | `MEDIA` |
+| Record | `RECORD` |
 | Insert | `INSERT` |
 | Home | `HOME` |
 | End | `END` |
@@ -354,6 +357,19 @@ sudo evtest
 # Press the key you want to use
 # Look for "KEY_XXXXX" - use the part after KEY_
 ```
+
+### Numeric Keycodes
+
+If your key isn't in the built-in list, you can specify it by numeric keycode. Use a prefix to indicate which tool you got the number from, since `wev`/`xev` and `evtest` report different numbers for the same key (XKB keycodes are offset by 8 from kernel keycodes):
+
+```toml
+[hotkey]
+key = "WEV_234"      # XKB keycode from wev/xev (KEY_MEDIA)
+key = "EVTEST_226"   # Kernel keycode from evtest (KEY_MEDIA)
+key = "WEV_0xEA"     # Hex also works
+```
+
+Prefixes: `WEV_`, `X11_`, `XEV_` (XKB keycode), `EVTEST_` (kernel keycode).
 
 ### Using Modifier Keys
 
@@ -575,6 +591,36 @@ Parakeet is NVIDIA's FastConformer-based ASR model. It offers:
 - English-only use case
 
 See [PARAKEET.md](PARAKEET.md) for detailed setup instructions.
+
+### Nemotron Streaming (Experimental)
+
+Nemotron is a streaming variant of the Parakeet architecture. Unlike TDT and CTC models that transcribe after you stop recording, Nemotron types text live as you speak.
+
+**How it works:**
+- Audio is split into 560ms chunks during recording
+- Each chunk is fed to the Nemotron model immediately
+- Recognized text is typed at the cursor in real-time
+- When you release the hotkey, any remaining audio is flushed
+
+**Setup:**
+1. Download a Nemotron ONNX model (contains `encoder.onnx`, `decoder_joint.onnx`, `tokenizer.model`)
+2. Configure voxtype to use it:
+
+```toml
+engine = "parakeet"
+
+[parakeet]
+model = "/path/to/nemotron-model"
+# model_type = "nemotron" is auto-detected from model files
+```
+
+3. Start the daemon. Text will appear live as you speak.
+
+**Notes:**
+- Streaming mode is automatically enabled when a Nemotron model is detected
+- Set `streaming = false` in `[parakeet]` to disable streaming and use batch mode instead
+- Post-processing commands are not applied during streaming (text is output raw)
+- Requires a Parakeet-enabled binary (`voxtype-*-parakeet-*`)
 
 ---
 
@@ -938,6 +984,107 @@ This adds minimal overhead compared to the FFI approach since file I/O is fast o
 
 ---
 
+## Eager Processing
+
+Eager processing transcribes audio in chunks while you're still recording. Instead of waiting until you release the hotkey to start transcription, voxtype begins processing audio in the background as you speak. When you stop recording, the final chunk is transcribed and all results are combined.
+
+### When to Use Eager Processing
+
+Eager processing is most valuable when:
+
+1. **You have slow transcription hardware**: On machines where transcription takes longer than the recording itself, eager processing parallelizes the work to reduce overall wait time.
+
+2. **You make long recordings**: For recordings over 15-30 seconds, starting transcription early means less waiting when you're done speaking.
+
+3. **You use large models**: Larger Whisper models (medium, large-v3) are slower. Eager processing helps hide some of that latency.
+
+**Not recommended when:**
+- You use fast models (tiny, base) on modern hardware with GPU acceleration
+- Your recordings are typically short (under 5 seconds)
+- You're on a laptop and want to minimize battery usage
+
+### How It Works
+
+With eager processing enabled:
+
+1. Audio accumulates as you record
+2. Every `eager_chunk_secs` (default: 5 seconds), a chunk is extracted and sent for transcription
+3. Chunks overlap by `eager_overlap_secs` (default: 0.5 seconds) to avoid missing words at boundaries
+4. When you stop recording, all chunk results are combined and deduplicated
+5. The final text is output
+
+The overlap region helps catch words that might be split across chunk boundaries. The deduplication logic matches overlapping text to produce a clean result.
+
+### Configuration
+
+Enable eager processing in `~/.config/voxtype/config.toml`:
+
+```toml
+[whisper]
+model = "medium.en"
+
+# Enable eager input processing
+eager_processing = true
+
+# Chunk duration (default: 5.0 seconds)
+eager_chunk_secs = 5.0
+
+# Overlap between chunks (default: 0.5 seconds)
+eager_overlap_secs = 0.5
+```
+
+Or via CLI flags:
+
+```bash
+voxtype --eager-processing --eager-chunk-secs 5.0 daemon
+```
+
+### Tuning Chunk Size
+
+The chunk duration affects the trade-off between parallelization and overhead:
+
+| Chunk Size | Pros | Cons |
+|------------|------|------|
+| 3 seconds | More parallelization, faster for slow models | More boundary handling, slightly higher CPU |
+| 5 seconds | Good balance for most cases | - |
+| 10 seconds | Fewer chunks to combine | Less parallelization benefit |
+
+For testing, try `eager_chunk_secs = 3.0` to see more chunk messages in the logs.
+
+### Trade-offs
+
+**Benefits:**
+- Reduced perceived latency on slow hardware
+- Better experience for long recordings
+- Parallelizes transcription work across recording time
+
+**Limitations:**
+- Boundary handling may occasionally produce artifacts (repeated or dropped words at chunk edges)
+- Slightly higher CPU usage during recording
+- Adds complexity to the transcription pipeline
+
+For most users with modern hardware and GPU acceleration, the default (disabled) provides the cleanest results. Enable eager processing when latency is a problem that outweighs the small risk of boundary artifacts.
+
+### Verifying It Works
+
+Run voxtype with verbose logging:
+
+```bash
+voxtype -vv
+```
+
+Then record for 10+ seconds. You should see log messages like:
+
+```
+[DEBUG] Spawning eager transcription for chunk 0
+[DEBUG] Spawning eager transcription for chunk 1
+[DEBUG] Chunk 0 completed: "This is the first part of my recording"
+[DEBUG] Chunk 1 completed: "the first part of my recording and here is more"
+[DEBUG] Combined eager chunks with deduplication
+```
+
+---
+
 ## Output Modes
 
 ### Type Mode (Default)
@@ -973,16 +1120,23 @@ systemctl --user enable --now ydotool
 
 **Compositor Compatibility:**
 
-wtype does not work on all Wayland compositors. KDE Plasma and GNOME do not support the virtual keyboard protocol that wtype requires.
+wtype does not work on all Wayland compositors. KDE Plasma and GNOME do not support the virtual keyboard protocol that wtype requires. However, eitype uses the libei/EI protocol which is supported by GNOME and KDE.
 
-| Desktop | wtype | dotool | ydotool | clipboard | Notes |
-|---------|-------|--------|---------|-----------|-------|
-| Hyprland, Sway, River | ✓ | ✓ | ✓ | wl-copy | wtype recommended (best CJK support) |
-| KDE Plasma (Wayland) | ✗ | ✓ | ✓ | wl-copy | dotool recommended (keyboard layout support) |
-| GNOME (Wayland) | ✗ | ✓ | ✓ | wl-copy | dotool recommended (keyboard layout support) |
-| X11 (any) | ✗ | ✓ | ✓ | xclip | dotool or ydotool; xclip for clipboard |
+| Desktop | wtype | eitype | dotool | ydotool | clipboard | Notes |
+|---------|-------|--------|--------|---------|-----------|-------|
+| Hyprland, Sway, River | ✓ | * | ✓ | ✓ | wl-copy | wtype recommended (best CJK support) |
+| KDE Plasma (Wayland) | ✗ | ✓ | ✓ | ✓ | wl-copy | eitype recommended (native EI protocol) |
+| GNOME (Wayland) | ✗ | ✓ | ✓ | ✓ | wl-copy | eitype recommended (native EI protocol) |
+| X11 (any) | ✗ | ✗ | ✓ | ✓ | xclip | dotool or ydotool; xclip for clipboard |
 
-**KDE Plasma and GNOME users:** Install dotool (recommended) or set up ydotool for type mode to work.
+\* eitype works on wlroots compositors with libei support.
+
+**KDE Plasma and GNOME users:** Install eitype (recommended) or dotool for type mode to work.
+
+For eitype (recommended for GNOME/KDE):
+```bash
+cargo install eitype
+```
 
 For dotool (recommended for non-US keyboards):
 ```bash
@@ -1054,7 +1208,7 @@ mode = "paste"
 
 ### Fallback Behavior
 
-Voxtype uses a fallback chain: wtype → dotool → ydotool → clipboard (wl-copy) → xclip
+Voxtype uses a fallback chain: wtype → eitype → dotool → ydotool → clipboard (wl-copy) → xclip
 
 ```toml
 [output]
@@ -1062,7 +1216,7 @@ mode = "type"
 fallback_to_clipboard = true  # Falls back to clipboard if typing fails
 ```
 
-On Wayland, wtype is tried first (best CJK support), then dotool (supports keyboard layouts), then ydotool, then wl-copy (Wayland clipboard). On X11, xclip is available as an additional clipboard fallback.
+On Wayland, wtype is tried first (best CJK support), then eitype (libei protocol, works on GNOME/KDE), then dotool (supports keyboard layouts), then ydotool, then wl-copy (Wayland clipboard). On X11, xclip is available as an additional clipboard fallback.
 
 ### Custom Driver Order
 
@@ -1075,7 +1229,7 @@ mode = "type"
 driver_order = ["ydotool", "wtype", "clipboard"]
 ```
 
-**Available drivers:** `wtype`, `dotool`, `ydotool`, `clipboard` (wl-copy), `xclip` (X11)
+**Available drivers:** `wtype`, `eitype`, `dotool`, `ydotool`, `clipboard` (wl-copy), `xclip` (X11)
 
 **Examples:**
 
@@ -1086,8 +1240,8 @@ driver_order = ["ydotool", "xclip"]
 # Force ydotool only (no fallback)
 driver_order = ["ydotool"]
 
-# KDE/GNOME Wayland (wtype doesn't work)
-driver_order = ["dotool", "ydotool", "clipboard"]
+# GNOME/KDE Wayland (prefer eitype, wtype doesn't work)
+driver_order = ["eitype", "dotool", "clipboard"]
 ```
 
 **CLI override:**

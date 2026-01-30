@@ -3,16 +3,18 @@
 //! Provides text output via keyboard simulation or clipboard.
 //!
 //! Fallback chain for `mode = "type"`:
-//! 1. wtype - Wayland-native, best Unicode/CJK support, no daemon needed
-//! 2. dotool - Works on X11/Wayland/TTY, supports keyboard layouts, no daemon needed
-//! 3. ydotool - Works on X11/Wayland/TTY, requires daemon
-//! 4. clipboard (wl-copy) - Wayland clipboard fallback
-//! 5. xclip - X11 clipboard fallback
+//! 1. wtype - Wayland-native via virtual-keyboard protocol, best Unicode/CJK support, no daemon needed
+//! 2. eitype - Wayland via libei/EI protocol, works on GNOME/KDE (no virtual-keyboard support)
+//! 3. dotool - Works on X11/Wayland/TTY, supports keyboard layouts, no daemon needed
+//! 4. ydotool - Works on X11/Wayland/TTY, requires daemon
+//! 5. clipboard (wl-copy) - Wayland clipboard fallback
+//! 6. xclip - X11 clipboard fallback
 //!
 //! Paste mode (clipboard + Ctrl+V) helps with system with non US keyboard layouts.
 
 pub mod clipboard;
 pub mod dotool;
+pub mod eitype;
 pub mod paste;
 pub mod post_process;
 pub mod wtype;
@@ -142,6 +144,7 @@ pub trait TextOutput: Send + Sync {
 /// Default driver order for type mode
 const DEFAULT_DRIVER_ORDER: &[OutputDriver] = &[
     OutputDriver::Wtype,
+    OutputDriver::Eitype,
     OutputDriver::Dotool,
     OutputDriver::Ydotool,
     OutputDriver::Clipboard,
@@ -160,6 +163,12 @@ fn create_driver_output(
 
     match driver {
         OutputDriver::Wtype => Box::new(wtype::WtypeOutput::new(
+            config.auto_submit,
+            config.type_delay_ms,
+            pre_type_delay_ms,
+            config.shift_enter_newlines,
+        )),
+        OutputDriver::Eitype => Box::new(eitype::EitypeOutput::new(
             config.auto_submit,
             config.type_delay_ms,
             pre_type_delay_ms,
