@@ -108,6 +108,9 @@ pub enum OutputError {
     #[error("wtype not found in PATH. Install via your package manager.")]
     WtypeNotFound,
 
+    #[error("eitype not found in PATH. Install via: cargo install eitype")]
+    EitypeNotFound,
+
     #[error("wl-copy not found in PATH. Install wl-clipboard via your package manager.")]
     WlCopyNotFound,
 
