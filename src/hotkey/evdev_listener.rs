@@ -651,7 +651,7 @@ fn parse_key_name(name: &str) -> Result<Key, HotkeyError> {
         // If not found, return error with suggestions
         _ => {
             return Err(HotkeyError::UnknownKey(format!(
-                "{}. Try: SCROLLLOCK, PAUSE, MEDIA, F13-F24, a numeric keycode (e.g. 226), or run 'evtest' to find key names",
+                "{}. Try: SCROLLLOCK, PAUSE, MEDIA, F13-F24, or a prefixed keycode (e.g. EVTEST_226, WEV_234). Run 'evtest' to find key names",
                 name
             )));
         }

@@ -575,6 +575,7 @@ We want to hear from you! Voxtype is a young project and your feedback helps mak
 - [IgorWarzocha](https://github.com/IgorWarzocha) - Hyprland submap solution for modifier key fix
 - [Zubair](https://github.com/mzubair481) - dotool output driver with keyboard layout support
 - [ayoahha](https://github.com/ayoahha) - CLI backend for whisper-cli subprocess transcription
+- [Loki Coyote](https://github.com/lokkju) - eitype output driver for KDE/GNOME support, media keys and numeric keycode hotkey support
 
 ## License
 
