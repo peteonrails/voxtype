@@ -350,6 +350,8 @@ pub struct Daemon {
     streaming_text_rx: Option<mpsc::Receiver<String>>,
     // Handle for the streaming transcriber blocking task
     streaming_task: Option<tokio::task::JoinHandle<()>>,
+    // Chunk size in samples for streaming transcription
+    streaming_chunk_size: usize,
 }
 
 impl Daemon {
@@ -414,6 +416,7 @@ impl Daemon {
             streaming_chunk_tx: None,
             streaming_text_rx: None,
             streaming_task: None,
+            streaming_chunk_size: 8960, // Default, updated when streaming transcriber is initialized
         }
     }
 
@@ -609,6 +612,7 @@ impl Daemon {
         self.streaming_chunk_tx = Some(cmd_tx);
         self.streaming_text_rx = Some(text_rx);
         self.streaming_task = Some(task);
+        self.streaming_chunk_size = chunk_size;
 
         tracing::info!(
             "Streaming transcriber ready (chunk_size={} samples, {:.0}ms)",
@@ -626,12 +630,47 @@ impl Daemon {
         }
     }
 
-    /// Stop streaming transcription: flush remaining audio and reset
-    async fn stop_streaming(&mut self) {
+    /// Stop streaming transcription: flush remaining audio, collect final text, then reset.
+    /// Returns any text produced during flush.
+    async fn stop_streaming(&mut self) -> String {
+        let mut final_text = String::new();
+
+        // Send flush command
         if let Some(ref tx) = self.streaming_chunk_tx {
             let _ = tx.send(StreamingCommand::Flush).await;
         }
-        // Note: we don't take/drop the channels — the task persists for next recording
+
+        // Wait for flush text with timeout (flush produces ~3 silence chunks worth of inference)
+        if let Some(ref mut rx) = self.streaming_text_rx {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                match tokio::time::timeout_at(deadline, rx.recv()).await {
+                    Ok(Some(delta)) if !delta.is_empty() => {
+                        final_text.push_str(&delta);
+                    }
+                    Ok(Some(_)) => {} // empty delta, keep waiting
+                    _ => break, // timeout or channel closed
+                }
+                // After receiving one non-empty delta from flush, give a brief window for more
+                // then break (flush is a single operation, not a stream)
+                if !final_text.is_empty() {
+                    // Drain any immediately available text
+                    while let Ok(delta) = rx.try_recv() {
+                        if !delta.is_empty() {
+                            final_text.push_str(&delta);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        // Reset for next recording
+        if let Some(ref tx) = self.streaming_chunk_tx {
+            let _ = tx.send(StreamingCommand::Reset).await;
+        }
+
+        final_text
     }
 
     /// Cancel streaming transcription without flushing (reset for next recording)
@@ -1441,25 +1480,19 @@ impl Daemon {
                                     }
                                 }
 
-                                // Stop streaming (sends flush signal)
-                                self.stop_streaming().await;
-
-                                // Collect any remaining text deltas that arrived
-                                if let Some(ref mut text_rx) = self.streaming_text_rx {
-                                    while let Ok(delta) = text_rx.try_recv() {
-                                        if !delta.is_empty() {
-                                            let output_chain = output::create_output_chain(&self.config.output);
-                                            let output_options = output::OutputOptions {
-                                                pre_output_command: None,
-                                                post_output_command: None,
-                                            };
-                                            if let Err(e) = output::output_with_fallback(&output_chain, &delta, output_options).await {
-                                                tracing::error!("Failed to output streaming text: {}", e);
-                                            }
-                                        }
+                                // Flush streaming transcriber and output any remaining text
+                                let flush_text = self.stop_streaming().await;
+                                if !flush_text.is_empty() {
+                                    tracing::debug!("Flush produced text: {:?}", flush_text);
+                                    let output_chain = output::create_output_chain(&self.config.output);
+                                    let output_options = output::OutputOptions {
+                                        pre_output_command: None,
+                                        post_output_command: None,
+                                    };
+                                    if let Err(e) = output::output_with_fallback(&output_chain, &flush_text, output_options).await {
+                                        tracing::error!("Failed to output streaming flush text: {}", e);
                                     }
                                 }
-                                self.streaming_text_rx = None;
 
                                 if self.config.output.notification.on_recording_stop {
                                     send_notification("Streaming Complete", "Done", self.config.output.notification.show_engine_icon, self.config.engine).await;
@@ -1660,24 +1693,18 @@ impl Daemon {
                                     }
                                 }
 
-                                self.stop_streaming().await;
-
-                                // Drain remaining text
-                                if let Some(ref mut text_rx) = self.streaming_text_rx {
-                                    while let Ok(delta) = text_rx.try_recv() {
-                                        if !delta.is_empty() {
-                                            let output_chain = output::create_output_chain(&self.config.output);
-                                            let output_options = output::OutputOptions {
-                                                pre_output_command: None,
-                                                post_output_command: None,
-                                            };
-                                            if let Err(e) = output::output_with_fallback(&output_chain, &delta, output_options).await {
-                                                tracing::error!("Failed to output streaming text: {}", e);
-                                            }
-                                        }
+                                let flush_text = self.stop_streaming().await;
+                                if !flush_text.is_empty() {
+                                    tracing::debug!("Flush produced text: {:?}", flush_text);
+                                    let output_chain = output::create_output_chain(&self.config.output);
+                                    let output_options = output::OutputOptions {
+                                        pre_output_command: None,
+                                        post_output_command: None,
+                                    };
+                                    if let Err(e) = output::output_with_fallback(&output_chain, &flush_text, output_options).await {
+                                        tracing::error!("Failed to output streaming flush text: {}", e);
                                     }
                                 }
-                                self.streaming_text_rx = None;
 
                                 if self.config.output.notification.on_recording_stop {
                                     send_notification("Streaming Complete", "Done", self.config.output.notification.show_engine_icon, self.config.engine).await;
@@ -1848,8 +1875,7 @@ impl Daemon {
                     if let State::StreamingRecording { audio_buffer, .. } = &mut state {
                         audio_buffer.extend(audio_chunk);
 
-                        // Get chunk_size (8960 for Nemotron at 560ms/16kHz)
-                        let chunk_size = 8960;
+                        let chunk_size = self.streaming_chunk_size;
 
                         // Send full chunks to the streaming transcriber
                         while audio_buffer.len() >= chunk_size {
@@ -2108,24 +2134,18 @@ impl Daemon {
                             }
                         }
 
-                        self.stop_streaming().await;
-
-                        if let Some(ref mut text_rx) = self.streaming_text_rx {
-                            while let Ok(delta) = text_rx.try_recv() {
-                                if !delta.is_empty() {
-                                    let output_chain = output::create_output_chain(&self.config.output);
-                                    let output_options = output::OutputOptions {
-                                        pre_output_command: None,
-                                        post_output_command: None,
-                                    };
-                                    if let Err(e) = output::output_with_fallback(&output_chain, &delta, output_options).await {
-                                        tracing::error!("Failed to output streaming text: {}", e);
-                                    }
-                                }
+                        let flush_text = self.stop_streaming().await;
+                        if !flush_text.is_empty() {
+                            tracing::debug!("Flush produced text: {:?}", flush_text);
+                            let output_chain = output::create_output_chain(&self.config.output);
+                            let output_options = output::OutputOptions {
+                                pre_output_command: None,
+                                post_output_command: None,
+                            };
+                            if let Err(e) = output::output_with_fallback(&output_chain, &flush_text, output_options).await {
+                                tracing::error!("Failed to output streaming flush text: {}", e);
                             }
                         }
-                        self.streaming_text_rx = None;
-
                         if self.config.output.notification.on_recording_stop {
                             send_notification("Streaming Complete", "Done", self.config.output.notification.show_engine_icon, self.config.engine).await;
                         }
