@@ -628,26 +628,34 @@ pub fn validate_parakeet_model(path: &Path) -> anyhow::Result<()> {
         anyhow::bail!("Model directory does not exist: {:?}", path);
     }
 
-    // Check for TDT structure: encoder + decoder + vocab
-    let has_encoder = path.join("encoder-model.onnx").exists()
+    // Check for TDT/CTC structure: encoder-model + decoder_joint-model + vocab.txt
+    let has_tdt_encoder = path.join("encoder-model.onnx").exists()
         || path.join("encoder-model.onnx.data").exists()
         || path.join("encoder-model.int8.onnx").exists();
-    let has_decoder = path.join("decoder_joint-model.onnx").exists()
+    let has_tdt_decoder = path.join("decoder_joint-model.onnx").exists()
         || path.join("decoder_joint-model.int8.onnx").exists();
     let has_vocab = path.join("vocab.txt").exists();
 
-    if has_encoder && has_decoder && has_vocab {
+    // Check for Nemotron structure: encoder + decoder_joint + tokenizer.model
+    let has_nemotron_encoder =
+        path.join("encoder.onnx").exists() || path.join("encoder.onnx.data").exists();
+    let has_nemotron_decoder = path.join("decoder_joint.onnx").exists();
+    let has_tokenizer = path.join("tokenizer.model").exists();
+
+    if (has_tdt_encoder && has_tdt_decoder && has_vocab)
+        || (has_nemotron_encoder && has_nemotron_decoder && has_tokenizer)
+    {
         Ok(())
     } else {
         let mut missing = Vec::new();
-        if !has_encoder {
+        if !has_tdt_encoder && !has_nemotron_encoder {
             missing.push("encoder model");
         }
-        if !has_decoder {
+        if !has_tdt_decoder && !has_nemotron_decoder {
             missing.push("decoder model");
         }
-        if !has_vocab {
-            missing.push("vocab.txt");
+        if !has_vocab && !has_tokenizer {
+            missing.push("tokenizer (vocab.txt or tokenizer.model)");
         }
         anyhow::bail!("Incomplete Parakeet model, missing: {}", missing.join(", "))
     }
