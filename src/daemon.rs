@@ -509,12 +509,25 @@ impl Daemon {
             return false;
         }
         if let Some(ref parakeet) = self.config.parakeet {
-            // Detect model type to check if Nemotron
+            // Detect model type from config or filesystem
             let model_type = parakeet.model_type.unwrap_or_else(|| {
-                // Quick check: if streaming is explicitly enabled, assume Nemotron
-                if parakeet.streaming == Some(true) {
-                    crate::config::ParakeetModelType::Nemotron
-                } else {
+                // Auto-detect from model files on disk
+                #[cfg(feature = "parakeet")]
+                {
+                    match crate::transcribe::parakeet::resolve_model_path(&parakeet.model) {
+                        Ok(path) => crate::transcribe::parakeet::detect_model_type(&path),
+                        Err(_) => {
+                            // Can't resolve path; fall back to checking explicit streaming flag
+                            if parakeet.streaming == Some(true) {
+                                crate::config::ParakeetModelType::Nemotron
+                            } else {
+                                crate::config::ParakeetModelType::Tdt
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(feature = "parakeet"))]
+                {
                     crate::config::ParakeetModelType::Tdt
                 }
             });

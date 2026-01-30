@@ -309,7 +309,7 @@ fn build_execution_config() -> Option<ExecutionConfig> {
 /// Nemotron models have: encoder.onnx, encoder.onnx.data, decoder_joint.onnx, tokenizer.model
 /// TDT models have: encoder-model.onnx, decoder_joint-model.onnx, vocab.txt
 /// CTC models have: model.onnx (or model_int8.onnx), tokenizer.json
-fn detect_model_type(path: &PathBuf) -> ParakeetModelType {
+pub fn detect_model_type(path: &PathBuf) -> ParakeetModelType {
     // Check for Nemotron model structure (must come before TDT since both have encoder/decoder)
     // Nemotron uses non-hyphenated names: encoder.onnx (not encoder-model.onnx)
     let has_nemotron_encoder =
@@ -353,7 +353,7 @@ fn detect_model_type(path: &PathBuf) -> ParakeetModelType {
 }
 
 /// Resolve model name to directory path
-fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
+pub fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
     // If it's already an absolute path, use it directly
     let path = PathBuf::from(model);
     if path.is_absolute() && path.exists() {
