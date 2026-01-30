@@ -139,6 +139,30 @@ const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
         huggingface_repo: "altunenes/parakeet-rs",
         huggingface_path: Some("nemotron-speech-streaming-en-0.6b"),
     },
+    ParakeetModelInfo {
+        name: "nemotron-speech-streaming-en-0.6b-int8",
+        size_mb: 670,
+        description: "Nemotron streaming, quantized int8 (faster CPU)",
+        files: &[
+            ("encoder.onnx", 0),
+            ("decoder_joint.onnx", 0),
+            ("tokenizer.model", 257_151),
+        ],
+        huggingface_repo: "lokkju/nemotron-speech-streaming-en-0.6b-int8",
+        huggingface_path: None,
+    },
+    ParakeetModelInfo {
+        name: "nemotron-speech-streaming-en-0.6b-int4",
+        size_mb: 400,
+        description: "Nemotron streaming, quantized int4 (smallest/fastest CPU)",
+        files: &[
+            ("encoder.onnx", 0),
+            ("decoder_joint.onnx", 0),
+            ("tokenizer.model", 257_151),
+        ],
+        huggingface_repo: "lokkju/nemotron-speech-streaming-en-0.6b-int4",
+        huggingface_path: None,
+    },
 ];
 
 // =============================================================================
@@ -1056,6 +1080,9 @@ language = "en"
         let model_names: Vec<&str> = PARAKEET_MODELS.iter().map(|m| m.name).collect();
         assert!(model_names.contains(&"parakeet-tdt-0.6b-v3"));
         assert!(model_names.contains(&"parakeet-tdt-0.6b-v3-int8"));
+        assert!(model_names.contains(&"nemotron-speech-streaming-en-0.6b"));
+        assert!(model_names.contains(&"nemotron-speech-streaming-en-0.6b-int8"));
+        assert!(model_names.contains(&"nemotron-speech-streaming-en-0.6b-int4"));
     }
 
     #[test]
@@ -1099,6 +1126,8 @@ language = "en"
         assert!(is_parakeet_model("parakeet-tdt-0.6b-v3"));
         assert!(is_parakeet_model("parakeet-tdt-0.6b-v3-int8"));
         assert!(is_parakeet_model("nemotron-speech-streaming-en-0.6b"));
+        assert!(is_parakeet_model("nemotron-speech-streaming-en-0.6b-int8"));
+        assert!(is_parakeet_model("nemotron-speech-streaming-en-0.6b-int4"));
 
         // Invalid models
         assert!(!is_parakeet_model("base.en"));
