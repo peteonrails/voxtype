@@ -610,6 +610,100 @@ voxtype --whisper-context-optimization daemon
 
 **Note:** This setting only applies when using the local whisper backend (`backend = "local"`). It has no effect with remote transcription.
 
+### eager_processing
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Enable eager input processing. When enabled, audio is split into chunks and transcribed in parallel with continued recording, reducing perceived latency on slower machines.
+
+**Values:**
+- `false` (default) - Traditional mode: record all audio, then transcribe
+- `true` - Eager mode: transcribe chunks while recording continues
+
+**How it works:**
+
+1. While recording, audio is split into fixed-size chunks (default 5 seconds)
+2. Each chunk is sent for transcription as soon as it's ready
+3. Recording continues while earlier chunks are being transcribed
+4. When recording stops, all chunk results are combined
+
+**When to use eager processing:**
+- You have a slower CPU where transcription takes several seconds
+- You regularly dictate longer passages (10+ seconds)
+- You want to minimize the delay between speaking and text output
+
+**When to keep default (`false`):**
+- You have a fast CPU or GPU acceleration
+- Your recordings are typically short (under 5 seconds)
+- You want maximum transcription accuracy (single-pass is more consistent)
+
+**Example:**
+```toml
+[whisper]
+model = "base.en"
+eager_processing = true
+eager_chunk_secs = 5.0    # 5 second chunks
+eager_overlap_secs = 0.5  # 0.5 second overlap
+```
+
+**CLI override:**
+```bash
+voxtype --eager-processing daemon
+```
+
+**Note:** Eager processing is experimental. There may be occasional word duplications or omissions at chunk boundaries.
+
+### eager_chunk_secs
+
+**Type:** Float
+**Default:** `5.0`
+**Required:** No
+
+Duration of each audio chunk in seconds when eager processing is enabled.
+
+**Example:**
+```toml
+[whisper]
+eager_processing = true
+eager_chunk_secs = 3.0  # Shorter chunks for faster feedback
+```
+
+**CLI override:**
+```bash
+voxtype --eager-processing --eager-chunk-secs 3.0 daemon
+```
+
+**Trade-offs:**
+- Shorter chunks: Faster feedback, but more boundary artifacts
+- Longer chunks: Better accuracy, but less parallelism benefit
+
+### eager_overlap_secs
+
+**Type:** Float
+**Default:** `0.5`
+**Required:** No
+
+Overlap duration in seconds between adjacent chunks when eager processing is enabled. Overlap helps catch words that span chunk boundaries.
+
+**Example:**
+```toml
+[whisper]
+eager_processing = true
+eager_chunk_secs = 5.0
+eager_overlap_secs = 1.0  # More overlap for better boundary handling
+```
+
+**CLI override:**
+```bash
+voxtype --eager-processing --eager-overlap-secs 1.0 daemon
+```
+
+**Trade-offs:**
+- More overlap: Better word boundary handling, slightly more processing
+- Less overlap: Faster processing, but may miss words at boundaries
+
 ### initial_prompt
 
 **Type:** String

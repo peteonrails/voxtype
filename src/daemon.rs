@@ -6,12 +6,13 @@
 use crate::audio::feedback::{AudioFeedback, SoundEvent};
 use crate::audio::{self, AudioCapture};
 use crate::config::{ActivationMode, Config, FileMode, OutputMode};
+use crate::eager::{self, EagerConfig};
 use crate::error::Result;
 use crate::hotkey::{self, HotkeyEvent};
 use crate::model_manager::ModelManager;
 use crate::output;
 use crate::output::post_process::PostProcessor;
-use crate::state::State;
+use crate::state::{ChunkResult, State};
 use crate::text::TextProcessor;
 use crate::transcribe::Transcriber;
 use pidlock::Pidlock;
@@ -322,6 +323,8 @@ pub struct Daemon {
     model_load_task: Option<tokio::task::JoinHandle<std::result::Result<Arc<dyn Transcriber>, crate::error::TranscribeError>>>,
     // Background task for transcription (allows cancel during transcription)
     transcription_task: Option<tokio::task::JoinHandle<TranscriptionResult>>,
+    // Background tasks for eager chunk transcriptions (chunk_index, task)
+    eager_chunk_tasks: Vec<(usize, tokio::task::JoinHandle<std::result::Result<String, crate::error::TranscribeError>>)>,
 }
 
 impl Daemon {
@@ -382,6 +385,7 @@ impl Daemon {
             model_manager: None,
             model_load_task: None,
             transcription_task: None,
+            eager_chunk_tasks: Vec::new(),
         }
     }
 
@@ -480,6 +484,197 @@ impl Daemon {
             if let Err(e) = output::run_hook(cmd, "post_output").await {
                 tracing::warn!("{}", e);
             }
+        }
+    }
+
+    /// Spawn a transcription task for a single chunk (eager processing)
+    fn spawn_chunk_transcription(
+        &mut self,
+        chunk_index: usize,
+        chunk_audio: Vec<f32>,
+        transcriber: Arc<dyn Transcriber>,
+    ) {
+        tracing::debug!(
+            "Spawning eager transcription for chunk {} ({:.1}s)",
+            chunk_index,
+            chunk_audio.len() as f32 / 16000.0
+        );
+
+        let task = tokio::task::spawn_blocking(move || transcriber.transcribe(&chunk_audio));
+
+        self.eager_chunk_tasks.push((chunk_index, task));
+    }
+
+    /// Check for any ready chunks in accumulated audio and spawn transcription tasks
+    /// Returns the number of new chunks spawned
+    fn process_eager_chunks(
+        &mut self,
+        accumulated_audio: &[f32],
+        chunks_sent: &mut usize,
+        tasks_in_flight: &mut usize,
+        transcriber: &Arc<dyn Transcriber>,
+    ) -> usize {
+        let eager_config = EagerConfig::from_whisper_config(&self.config.whisper);
+        let complete_chunks = eager::count_complete_chunks(accumulated_audio.len(), &eager_config);
+
+        let mut spawned = 0;
+        while *chunks_sent < complete_chunks {
+            if let Some(chunk_audio) = eager::extract_chunk(accumulated_audio, *chunks_sent, &eager_config) {
+                self.spawn_chunk_transcription(*chunks_sent, chunk_audio, transcriber.clone());
+                *chunks_sent += 1;
+                *tasks_in_flight += 1;
+                spawned += 1;
+            } else {
+                break;
+            }
+        }
+
+        spawned
+    }
+
+    /// Poll for completed chunk transcription tasks and collect results
+    /// Returns any completed results
+    async fn poll_chunk_tasks(&mut self) -> Vec<ChunkResult> {
+        let mut completed = Vec::new();
+        let mut remaining_tasks = Vec::new();
+
+        for (chunk_index, task) in self.eager_chunk_tasks.drain(..) {
+            if task.is_finished() {
+                // Task is finished, await will complete immediately
+                match task.await {
+                    Ok(Ok(text)) => {
+                        tracing::debug!("Chunk {} completed: {:?}", chunk_index, text);
+                        completed.push(ChunkResult { text, chunk_index });
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!("Chunk {} transcription failed: {}", chunk_index, e);
+                        // Add empty result to maintain ordering
+                        completed.push(ChunkResult {
+                            text: String::new(),
+                            chunk_index,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!("Chunk {} task panicked: {}", chunk_index, e);
+                        completed.push(ChunkResult {
+                            text: String::new(),
+                            chunk_index,
+                        });
+                    }
+                }
+            } else {
+                remaining_tasks.push((chunk_index, task));
+            }
+        }
+
+        self.eager_chunk_tasks = remaining_tasks;
+        completed
+    }
+
+    /// Wait for all remaining chunk tasks to complete
+    async fn wait_for_chunk_tasks(&mut self) -> Vec<ChunkResult> {
+        let mut results = Vec::new();
+
+        for (chunk_index, task) in self.eager_chunk_tasks.drain(..) {
+            match task.await {
+                Ok(Ok(text)) => {
+                    tracing::debug!("Chunk {} completed (waited): {:?}", chunk_index, text);
+                    results.push(ChunkResult { text, chunk_index });
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("Chunk {} transcription failed: {}", chunk_index, e);
+                    results.push(ChunkResult {
+                        text: String::new(),
+                        chunk_index,
+                    });
+                }
+                Err(e) => {
+                    if e.is_cancelled() {
+                        tracing::debug!("Chunk {} task was cancelled", chunk_index);
+                    } else {
+                        tracing::warn!("Chunk {} task panicked: {}", chunk_index, e);
+                    }
+                    results.push(ChunkResult {
+                        text: String::new(),
+                        chunk_index,
+                    });
+                }
+            }
+        }
+
+        results
+    }
+
+    /// Finish eager recording: wait for all chunks, transcribe tail, combine results
+    async fn finish_eager_recording(
+        &mut self,
+        state: &mut State,
+        transcriber: Arc<dyn Transcriber>,
+    ) -> Option<String> {
+        // Extract state data
+        let (accumulated_audio, mut chunk_results) = match state {
+            State::EagerRecording {
+                accumulated_audio,
+                chunk_results,
+                ..
+            } => (accumulated_audio.clone(), chunk_results.clone()),
+            _ => return None,
+        };
+
+        let audio_duration = accumulated_audio.len() as f32 / 16000.0;
+        tracing::info!(
+            "Finishing eager recording: {:.1}s of audio, {} chunks already transcribed",
+            audio_duration,
+            chunk_results.len()
+        );
+
+        // Wait for any in-flight chunk tasks
+        let mut waited_results = self.wait_for_chunk_tasks().await;
+        chunk_results.append(&mut waited_results);
+
+        // Transcribe the tail (audio after last complete chunk)
+        let eager_config = EagerConfig::from_whisper_config(&self.config.whisper);
+        let chunks_sent = chunk_results.iter().map(|r| r.chunk_index).max().map(|i| i + 1).unwrap_or(0);
+        let tail_start = chunks_sent * eager_config.stride_samples();
+
+        if tail_start < accumulated_audio.len() {
+            let tail_audio = accumulated_audio[tail_start..].to_vec();
+            let tail_duration = tail_audio.len() as f32 / 16000.0;
+
+            if tail_duration >= 0.3 {
+                tracing::debug!(
+                    "Transcribing tail audio: {:.1}s (from sample {})",
+                    tail_duration,
+                    tail_start
+                );
+
+                let tail_transcriber = transcriber.clone();
+                match tokio::task::spawn_blocking(move || tail_transcriber.transcribe(&tail_audio)).await {
+                    Ok(Ok(text)) => {
+                        tracing::debug!("Tail transcription: {:?}", text);
+                        chunk_results.push(ChunkResult {
+                            text,
+                            chunk_index: chunks_sent,
+                        });
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!("Tail transcription failed: {}", e);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Tail transcription task panicked: {}", e);
+                    }
+                }
+            }
+        }
+
+        // Combine all chunk results
+        let combined = eager::combine_chunk_results(chunk_results);
+        tracing::info!("Combined eager transcription: {:?}", combined);
+
+        if combined.is_empty() {
+            None
+        } else {
+            Some(combined)
         }
     }
 
@@ -964,10 +1159,24 @@ impl Daemon {
                                         }
                                         tracing::debug!("Audio capture started successfully");
                                         audio_capture = Some(capture);
-                                        state = State::Recording {
-                                            started_at: std::time::Instant::now(),
-                                            model_override: model_override.clone(),
-                                        };
+
+                                        // Use EagerRecording state if eager_processing is enabled
+                                        if self.config.whisper.eager_processing {
+                                            tracing::info!("Using eager input processing");
+                                            state = State::EagerRecording {
+                                                started_at: std::time::Instant::now(),
+                                                model_override: model_override.clone(),
+                                                accumulated_audio: Vec::new(),
+                                                chunks_sent: 0,
+                                                chunk_results: Vec::new(),
+                                                tasks_in_flight: 0,
+                                            };
+                                        } else {
+                                            state = State::Recording {
+                                                started_at: std::time::Instant::now(),
+                                                model_override: model_override.clone(),
+                                            };
+                                        }
                                         self.update_state("recording");
                                         self.play_feedback(SoundEvent::RecordingStart);
 
@@ -1006,6 +1215,54 @@ impl Daemon {
                                     &mut audio_capture,
                                     transcriber,
                                 ).await;
+                            } else if state.is_eager_recording() {
+                                // Handle eager recording stop - extract model_override first
+                                let model_override = match &state {
+                                    State::EagerRecording { model_override, .. } => model_override.clone(),
+                                    _ => None,
+                                };
+
+                                let duration = state.recording_duration().unwrap_or_default();
+                                tracing::info!("Eager recording stopped ({:.1}s)", duration.as_secs_f32());
+
+                                self.play_feedback(SoundEvent::RecordingStop);
+
+                                if self.config.output.notification.on_recording_stop {
+                                    send_notification("Recording Stopped", "Transcribing...", self.config.output.notification.show_engine_icon, self.config.engine).await;
+                                }
+
+                                // Stop audio capture and get remaining samples
+                                if let Some(mut capture) = audio_capture.take() {
+                                    if let Ok(final_samples) = capture.stop().await {
+                                        // Add final samples to accumulated audio
+                                        if let State::EagerRecording { accumulated_audio, .. } = &mut state {
+                                            accumulated_audio.extend(final_samples);
+                                        }
+                                    }
+                                }
+
+                                let transcriber = match self.get_transcriber_for_recording(
+                                    model_override.as_deref(),
+                                    &transcriber_preloaded,
+                                ).await {
+                                    Ok(t) => t,
+                                    Err(()) => {
+                                        state = State::Idle;
+                                        self.update_state("idle");
+                                        continue;
+                                    }
+                                };
+
+                                self.update_state("transcribing");
+
+                                if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
+                                    // Move to outputting state and handle via transcription result flow
+                                    state = State::Transcribing { audio: Vec::new() };
+                                    self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
+                                } else {
+                                    tracing::debug!("Eager recording produced empty result");
+                                    self.reset_to_idle(&mut state).await;
+                                }
                             }
                         }
 
@@ -1072,10 +1329,24 @@ impl Daemon {
                                             continue;
                                         }
                                         audio_capture = Some(capture);
-                                        state = State::Recording {
-                                            started_at: std::time::Instant::now(),
-                                            model_override: model_override.clone(),
-                                        };
+
+                                        // Use EagerRecording state if eager_processing is enabled
+                                        if self.config.whisper.eager_processing {
+                                            tracing::info!("Using eager input processing");
+                                            state = State::EagerRecording {
+                                                started_at: std::time::Instant::now(),
+                                                model_override: model_override.clone(),
+                                                accumulated_audio: Vec::new(),
+                                                chunks_sent: 0,
+                                                chunk_results: Vec::new(),
+                                                tasks_in_flight: 0,
+                                            };
+                                        } else {
+                                            state = State::Recording {
+                                                started_at: std::time::Instant::now(),
+                                                model_override: model_override.clone(),
+                                            };
+                                        }
                                         self.update_state("recording");
                                         self.play_feedback(SoundEvent::RecordingStart);
 
@@ -1110,6 +1381,52 @@ impl Daemon {
                                     &mut audio_capture,
                                     transcriber,
                                 ).await;
+                            } else if state.is_eager_recording() {
+                                // Handle eager recording stop in toggle mode - extract model_override first
+                                let model_override = match &state {
+                                    State::EagerRecording { model_override, .. } => model_override.clone(),
+                                    _ => None,
+                                };
+
+                                let duration = state.recording_duration().unwrap_or_default();
+                                tracing::info!("Eager recording stopped ({:.1}s)", duration.as_secs_f32());
+
+                                self.play_feedback(SoundEvent::RecordingStop);
+
+                                if self.config.output.notification.on_recording_stop {
+                                    send_notification("Recording Stopped", "Transcribing...", self.config.output.notification.show_engine_icon, self.config.engine).await;
+                                }
+
+                                // Stop audio capture and get remaining samples
+                                if let Some(mut capture) = audio_capture.take() {
+                                    if let Ok(final_samples) = capture.stop().await {
+                                        if let State::EagerRecording { accumulated_audio, .. } = &mut state {
+                                            accumulated_audio.extend(final_samples);
+                                        }
+                                    }
+                                }
+
+                                let transcriber = match self.get_transcriber_for_recording(
+                                    model_override.as_deref(),
+                                    &transcriber_preloaded,
+                                ).await {
+                                    Ok(t) => t,
+                                    Err(()) => {
+                                        state = State::Idle;
+                                        self.update_state("idle");
+                                        continue;
+                                    }
+                                };
+
+                                self.update_state("transcribing");
+
+                                if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
+                                    state = State::Transcribing { audio: Vec::new() };
+                                    self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
+                                } else {
+                                    tracing::debug!("Eager recording produced empty result");
+                                    self.reset_to_idle(&mut state).await;
+                                }
                             }
                         }
 
@@ -1132,6 +1449,11 @@ impl Daemon {
 
                                 // Cancel any pending model load task
                                 if let Some(task) = self.model_load_task.take() {
+                                    task.abort();
+                                }
+
+                                // Cancel any pending eager chunk tasks
+                                for (_, task) in self.eager_chunk_tasks.drain(..) {
                                     task.abort();
                                 }
 
@@ -1200,6 +1522,11 @@ impl Daemon {
                             task.abort();
                         }
 
+                        // Cancel any pending eager chunk tasks
+                        for (_, task) in self.eager_chunk_tasks.drain(..) {
+                            task.abort();
+                        }
+
                         cleanup_output_mode_override();
                         cleanup_model_override();
                         cleanup_profile_override();
@@ -1233,6 +1560,12 @@ impl Daemon {
                             if let Some(mut capture) = audio_capture.take() {
                                 let _ = capture.stop().await;
                             }
+
+                            // Cancel any pending eager chunk tasks
+                            for (_, task) in self.eager_chunk_tasks.drain(..) {
+                                task.abort();
+                            }
+
                             cleanup_output_mode_override();
                             cleanup_model_override();
                             cleanup_profile_override();
@@ -1308,10 +1641,24 @@ impl Daemon {
                                     tracing::error!("Failed to start audio: {}", e);
                                 } else {
                                     audio_capture = Some(capture);
-                                    state = State::Recording {
-                                        started_at: std::time::Instant::now(),
-                                        model_override,
-                                    };
+
+                                    // Use EagerRecording state if eager_processing is enabled
+                                    if self.config.whisper.eager_processing {
+                                        tracing::info!("Using eager input processing");
+                                        state = State::EagerRecording {
+                                            started_at: std::time::Instant::now(),
+                                            model_override,
+                                            accumulated_audio: Vec::new(),
+                                            chunks_sent: 0,
+                                            chunk_results: Vec::new(),
+                                            tasks_in_flight: 0,
+                                        };
+                                    } else {
+                                        state = State::Recording {
+                                            started_at: std::time::Instant::now(),
+                                            model_override,
+                                        };
+                                    }
                                     self.update_state("recording");
                                     self.play_feedback(SoundEvent::RecordingStart);
 
@@ -1352,6 +1699,52 @@ impl Daemon {
                             &mut audio_capture,
                             transcriber,
                         ).await;
+                    } else if state.is_eager_recording() {
+                        // Handle eager recording stop via external trigger - extract model_override first
+                        let model_override = match &state {
+                            State::EagerRecording { model_override, .. } => model_override.clone(),
+                            _ => None,
+                        };
+
+                        let duration = state.recording_duration().unwrap_or_default();
+                        tracing::info!("Eager recording stopped ({:.1}s)", duration.as_secs_f32());
+
+                        self.play_feedback(SoundEvent::RecordingStop);
+
+                        if self.config.output.notification.on_recording_stop {
+                            send_notification("Recording Stopped", "Transcribing...", self.config.output.notification.show_engine_icon, self.config.engine).await;
+                        }
+
+                        // Stop audio capture and get remaining samples
+                        if let Some(mut capture) = audio_capture.take() {
+                            if let Ok(final_samples) = capture.stop().await {
+                                if let State::EagerRecording { accumulated_audio, .. } = &mut state {
+                                    accumulated_audio.extend(final_samples);
+                                }
+                            }
+                        }
+
+                        let transcriber = match self.get_transcriber_for_recording(
+                            model_override.as_deref(),
+                            &transcriber_preloaded,
+                        ).await {
+                            Ok(t) => t,
+                            Err(()) => {
+                                state = State::Idle;
+                                self.update_state("idle");
+                                continue;
+                            }
+                        };
+
+                        self.update_state("transcribing");
+
+                        if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
+                            state = State::Transcribing { audio: Vec::new() };
+                            self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
+                        } else {
+                            tracing::debug!("Eager recording produced empty result");
+                            self.reset_to_idle(&mut state).await;
+                        }
                     }
                 }
 
@@ -1433,6 +1826,11 @@ impl Daemon {
 
         // Abort any pending transcription task
         if let Some(task) = self.transcription_task.take() {
+            task.abort();
+        }
+
+        // Abort any pending eager chunk tasks
+        for (_, task) in self.eager_chunk_tasks.drain(..) {
             task.abort();
         }
 
