@@ -988,16 +988,23 @@ systemctl --user enable --now ydotool
 
 **Compositor Compatibility:**
 
-wtype does not work on all Wayland compositors. KDE Plasma and GNOME do not support the virtual keyboard protocol that wtype requires.
+wtype does not work on all Wayland compositors. KDE Plasma and GNOME do not support the virtual keyboard protocol that wtype requires. However, eitype uses the libei/EI protocol which is supported by GNOME and KDE.
 
-| Desktop | wtype | dotool | ydotool | clipboard | Notes |
-|---------|-------|--------|---------|-----------|-------|
-| Hyprland, Sway, River | ✓ | ✓ | ✓ | wl-copy | wtype recommended (best CJK support) |
-| KDE Plasma (Wayland) | ✗ | ✓ | ✓ | wl-copy | dotool recommended (keyboard layout support) |
-| GNOME (Wayland) | ✗ | ✓ | ✓ | wl-copy | dotool recommended (keyboard layout support) |
-| X11 (any) | ✗ | ✓ | ✓ | xclip | dotool or ydotool; xclip for clipboard |
+| Desktop | wtype | eitype | dotool | ydotool | clipboard | Notes |
+|---------|-------|--------|--------|---------|-----------|-------|
+| Hyprland, Sway, River | ✓ | * | ✓ | ✓ | wl-copy | wtype recommended (best CJK support) |
+| KDE Plasma (Wayland) | ✗ | ✓ | ✓ | ✓ | wl-copy | eitype recommended (native EI protocol) |
+| GNOME (Wayland) | ✗ | ✓ | ✓ | ✓ | wl-copy | eitype recommended (native EI protocol) |
+| X11 (any) | ✗ | ✗ | ✓ | ✓ | xclip | dotool or ydotool; xclip for clipboard |
 
-**KDE Plasma and GNOME users:** Install dotool (recommended) or set up ydotool for type mode to work.
+\* eitype works on wlroots compositors with libei support.
+
+**KDE Plasma and GNOME users:** Install eitype (recommended) or dotool for type mode to work.
+
+For eitype (recommended for GNOME/KDE):
+```bash
+cargo install eitype
+```
 
 For dotool (recommended for non-US keyboards):
 ```bash
@@ -1069,7 +1076,7 @@ mode = "paste"
 
 ### Fallback Behavior
 
-Voxtype uses a fallback chain: wtype → dotool → ydotool → clipboard (wl-copy) → xclip
+Voxtype uses a fallback chain: wtype → eitype → dotool → ydotool → clipboard (wl-copy) → xclip
 
 ```toml
 [output]
@@ -1077,7 +1084,7 @@ mode = "type"
 fallback_to_clipboard = true  # Falls back to clipboard if typing fails
 ```
 
-On Wayland, wtype is tried first (best CJK support), then dotool (supports keyboard layouts), then ydotool, then wl-copy (Wayland clipboard). On X11, xclip is available as an additional clipboard fallback.
+On Wayland, wtype is tried first (best CJK support), then eitype (libei protocol, works on GNOME/KDE), then dotool (supports keyboard layouts), then ydotool, then wl-copy (Wayland clipboard). On X11, xclip is available as an additional clipboard fallback.
 
 ### Custom Driver Order
 
@@ -1090,7 +1097,7 @@ mode = "type"
 driver_order = ["ydotool", "wtype", "clipboard"]
 ```
 
-**Available drivers:** `wtype`, `dotool`, `ydotool`, `clipboard` (wl-copy), `xclip` (X11)
+**Available drivers:** `wtype`, `eitype`, `dotool`, `ydotool`, `clipboard` (wl-copy), `xclip` (X11)
 
 **Examples:**
 
@@ -1101,8 +1108,8 @@ driver_order = ["ydotool", "xclip"]
 # Force ydotool only (no fallback)
 driver_order = ["ydotool"]
 
-# KDE/GNOME Wayland (wtype doesn't work)
-driver_order = ["dotool", "ydotool", "clipboard"]
+# GNOME/KDE Wayland (prefer eitype, wtype doesn't work)
+driver_order = ["eitype", "dotool", "clipboard"]
 ```
 
 **CLI override:**

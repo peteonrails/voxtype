@@ -54,6 +54,7 @@ pub struct OutputToolStatus {
 pub struct OutputChainStatus {
     pub display_server: DisplayServer,
     pub wtype: OutputToolStatus,
+    pub eitype: OutputToolStatus,
     pub ydotool: OutputToolStatus,
     pub ydotool_daemon: bool,
     pub wl_copy: OutputToolStatus,
@@ -178,6 +179,16 @@ pub async fn detect_output_chain() -> OutputChainStatus {
         None
     };
 
+    // Check eitype
+    let eitype_path = get_command_path("eitype").await;
+    let eitype_installed = eitype_path.is_some();
+    let eitype_available = eitype_installed && display_server == DisplayServer::Wayland;
+    let eitype_note = if eitype_installed && display_server != DisplayServer::Wayland {
+        Some("Wayland only".to_string())
+    } else {
+        None
+    };
+
     // Check ydotool
     let ydotool_path = get_command_path("ydotool").await;
     let ydotool_installed = ydotool_path.is_some();
@@ -216,6 +227,8 @@ pub async fn detect_output_chain() -> OutputChainStatus {
     // Determine primary method
     let primary_method = if wtype_available {
         Some("wtype".to_string())
+    } else if eitype_available {
+        Some("eitype".to_string())
     } else if ydotool_available {
         Some("ydotool".to_string())
     } else if wl_copy_available || xclip_available {
@@ -232,6 +245,13 @@ pub async fn detect_output_chain() -> OutputChainStatus {
             available: wtype_available,
             path: wtype_path,
             note: wtype_note,
+        },
+        eitype: OutputToolStatus {
+            name: "eitype",
+            installed: eitype_installed,
+            available: eitype_available,
+            path: eitype_path,
+            note: eitype_note,
         },
         ydotool: OutputToolStatus {
             name: "ydotool",
@@ -283,6 +303,12 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
         status.display_server == DisplayServer::Wayland,
     );
 
+    // eitype
+    print_tool_status(
+        &status.eitype,
+        status.display_server == DisplayServer::Wayland,
+    );
+
     // ydotool
     if status.ydotool.installed {
         let daemon_status = if status.ydotool_daemon {
@@ -323,6 +349,7 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
     if let Some(ref method) = status.primary_method {
         let method_desc = match method.as_str() {
             "wtype" => "wtype (CJK supported)",
+            "eitype" => "eitype (libei, GNOME/KDE native)",
             "ydotool" => "ydotool (CJK not supported)",
             "clipboard" => "clipboard (requires manual paste)",
             _ => method.as_str(),
@@ -330,7 +357,7 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
         println!("  \x1b[32m→\x1b[0m Text will be typed via {}", method_desc);
     } else {
         println!("  \x1b[31m→\x1b[0m No text output method available!");
-        println!("    Install wtype (Wayland) or ydotool (X11) for typing support");
+        println!("    Install wtype (Wayland), eitype (GNOME/KDE), or ydotool (X11) for typing support");
     }
 }
 
@@ -667,6 +694,7 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
         print_failure("No text output method available");
         if output_status.display_server == DisplayServer::Wayland {
             println!("       Install wtype: sudo pacman -S wtype");
+            println!("       Or eitype:     cargo install eitype");
         } else {
             println!("       Install ydotool: sudo pacman -S ydotool");
         }
@@ -675,6 +703,7 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
         print_warning("Only clipboard mode available - typing won't work");
         if output_status.display_server == DisplayServer::Wayland {
             println!("       Install wtype: sudo pacman -S wtype");
+            println!("       Or eitype:     cargo install eitype");
         } else {
             println!("       Install ydotool: sudo pacman -S ydotool");
         }
