@@ -443,15 +443,25 @@ GPU acceleration is enabled via Cargo features:
 | `gpu-hipblas` | ROCm/HIP | AMD GPUs (alternative to Vulkan) |
 | `gpu-metal` | Metal | macOS (not applicable for Linux builds) |
 
+**CRITICAL: Always run `cargo clean` before building with different features.**
+
+When switching between feature sets (e.g., CPU-only to GPU-enabled, or between different GPU backends), stale build artifacts can cause GPU support to silently fail at runtime. The binary will compile, have a different checksum, and appear correct, but GPU acceleration won't work.
+
+This is especially insidious because:
+- The build succeeds without errors
+- The binary size and checksum differ from previous builds
+- `--version` reports correctly
+- But GPU detection fails silently at runtime (e.g., `use gpu = 0` instead of `use gpu = 1`)
+
 ```bash
 # Build with Vulkan GPU support
-cargo build --release --features gpu-vulkan
+cargo clean && cargo build --release --features gpu-vulkan
 
 # Build with CUDA GPU support
-cargo build --release --features gpu-cuda
+cargo clean && cargo build --release --features gpu-cuda
 
 # Build CPU-only (no GPU feature)
-cargo build --release
+cargo clean && cargo build --release
 ```
 
 ### Remote Docker Context
@@ -473,9 +483,13 @@ docker context use default
 
 ### Full Release Build Process
 
-**CRITICAL: Always use `--no-cache` for release builds to prevent stale binaries.**
+**CRITICAL: Always use `--no-cache` for Docker builds and `cargo clean` for local builds.**
 
-Docker caches build layers aggressively. Without `--no-cache`, you may upload binaries with old version numbers even after updating Cargo.toml. This has caused AUR packages to ship v0.4.1 binaries labeled as v0.4.5.
+Stale build artifacts cause two categories of failures:
+
+1. **Docker cache** - Without `--no-cache`, Docker may reuse layers with old version numbers. This caused AUR packages to ship v0.4.1 binaries labeled as v0.4.5.
+
+2. **Cargo incremental compilation** - Without `cargo clean`, switching between feature sets (e.g., CPU-only to `--features gpu-vulkan`) can produce binaries where GPU support silently fails at runtime. The binary compiles, has a different checksum, and reports the correct version, but GPU acceleration doesn't work. This is undetectable without actually testing GPU functionality.
 
 ```bash
 # Set version
@@ -532,6 +546,28 @@ releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-parakeet-avx512 --version
 ```
 
 If versions don't match, the Docker cache is stale. Rebuild with `--no-cache`.
+
+### Functional Verification (GPU Builds)
+
+**Version checks and checksums are NOT sufficient to verify GPU builds.** A binary can report the correct version, have the expected file size, and still have non-functional GPU support due to stale build artifacts.
+
+For GPU-enabled binaries (Vulkan, CUDA, ROCm), verify GPU is actually detected:
+
+```bash
+# Test Vulkan build - should show "use gpu = 1" and "ggml_vulkan: Found N devices"
+./voxtype-${VERSION}-linux-x86_64-vulkan daemon &
+sleep 3
+journalctl --user -u voxtype --since "10 seconds ago" | grep -E "(use gpu|ggml_vulkan|Found.*devices)"
+# Expected: "use gpu = 1", "ggml_vulkan: Found 1 Vulkan devices"
+# Bad: "use gpu = 0" or "no GPU found"
+
+# For Parakeet ROCm - should show ROCm execution provider
+./voxtype-${VERSION}-linux-x86_64-parakeet-rocm daemon &
+sleep 3
+journalctl --user -u voxtype --since "10 seconds ago" | grep -iE "(rocm|execution provider)"
+```
+
+If GPU detection fails but the binary otherwise works, the build used stale artifacts. Run `cargo clean` and rebuild.
 
 ### Validating Binaries (AVX-512 Detection)
 
