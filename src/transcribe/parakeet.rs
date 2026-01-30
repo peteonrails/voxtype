@@ -10,7 +10,11 @@
 use super::{StreamingTranscriber, Transcriber};
 use crate::config::{ParakeetConfig, ParakeetModelType};
 use crate::error::TranscribeError;
-#[cfg(any(feature = "parakeet-cuda", feature = "parakeet-rocm", feature = "parakeet-tensorrt"))]
+#[cfg(any(
+    feature = "parakeet-cuda",
+    feature = "parakeet-rocm",
+    feature = "parakeet-tensorrt"
+))]
 use parakeet_rs::ExecutionProvider;
 use parakeet_rs::{
     ExecutionConfig, Nemotron, Parakeet, ParakeetTDT, Transcriber as ParakeetTranscriberTrait,
@@ -58,22 +62,22 @@ impl ParakeetTranscriber {
 
         let model = match model_type {
             ParakeetModelType::Ctc => {
-                let parakeet = Parakeet::from_pretrained(&model_path, exec_config)
-                    .map_err(|e| {
+                let parakeet =
+                    Parakeet::from_pretrained(&model_path, exec_config).map_err(|e| {
                         TranscribeError::InitFailed(format!("Parakeet CTC init failed: {}", e))
                     })?;
                 ParakeetModel::Ctc(Mutex::new(parakeet))
             }
             ParakeetModelType::Tdt => {
-                let parakeet = ParakeetTDT::from_pretrained(&model_path, exec_config)
-                    .map_err(|e| {
+                let parakeet =
+                    ParakeetTDT::from_pretrained(&model_path, exec_config).map_err(|e| {
                         TranscribeError::InitFailed(format!("Parakeet TDT init failed: {}", e))
                     })?;
                 ParakeetModel::Tdt(Mutex::new(parakeet))
             }
             ParakeetModelType::Nemotron => {
-                let nemotron = Nemotron::from_pretrained(&model_path, exec_config)
-                    .map_err(|e| {
+                let nemotron =
+                    Nemotron::from_pretrained(&model_path, exec_config).map_err(|e| {
                         TranscribeError::InitFailed(format!("Nemotron init failed: {}", e))
                     })?;
                 ParakeetModel::Nemotron(Mutex::new(nemotron))
@@ -93,7 +97,9 @@ impl ParakeetTranscriber {
 impl Transcriber for ParakeetTranscriber {
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         if samples.is_empty() {
-            return Err(TranscribeError::AudioFormat("Empty audio buffer".to_string()));
+            return Err(TranscribeError::AudioFormat(
+                "Empty audio buffer".to_string(),
+            ));
         }
 
         let duration_secs = samples.len() as f32 / 16000.0;
@@ -109,7 +115,10 @@ impl Transcriber for ParakeetTranscriber {
         let text = match &self.model {
             ParakeetModel::Ctc(parakeet) => {
                 let mut parakeet = parakeet.lock().map_err(|e| {
-                    TranscribeError::InferenceFailed(format!("Failed to lock Parakeet mutex: {}", e))
+                    TranscribeError::InferenceFailed(format!(
+                        "Failed to lock Parakeet mutex: {}",
+                        e
+                    ))
                 })?;
 
                 let result = parakeet
@@ -120,14 +129,20 @@ impl Transcriber for ParakeetTranscriber {
                         None,  // default timestamp mode
                     )
                     .map_err(|e| {
-                        TranscribeError::InferenceFailed(format!("Parakeet CTC inference failed: {}", e))
+                        TranscribeError::InferenceFailed(format!(
+                            "Parakeet CTC inference failed: {}",
+                            e
+                        ))
                     })?;
 
                 result.text.trim().to_string()
             }
             ParakeetModel::Tdt(parakeet) => {
                 let mut parakeet = parakeet.lock().map_err(|e| {
-                    TranscribeError::InferenceFailed(format!("Failed to lock Parakeet mutex: {}", e))
+                    TranscribeError::InferenceFailed(format!(
+                        "Failed to lock Parakeet mutex: {}",
+                        e
+                    ))
                 })?;
 
                 let result = parakeet
@@ -138,22 +153,26 @@ impl Transcriber for ParakeetTranscriber {
                         None,  // default timestamp mode
                     )
                     .map_err(|e| {
-                        TranscribeError::InferenceFailed(format!("Parakeet TDT inference failed: {}", e))
+                        TranscribeError::InferenceFailed(format!(
+                            "Parakeet TDT inference failed: {}",
+                            e
+                        ))
                     })?;
 
                 result.text.trim().to_string()
             }
             ParakeetModel::Nemotron(nemotron) => {
                 let mut nemotron = nemotron.lock().map_err(|e| {
-                    TranscribeError::InferenceFailed(format!("Failed to lock Nemotron mutex: {}", e))
+                    TranscribeError::InferenceFailed(format!(
+                        "Failed to lock Nemotron mutex: {}",
+                        e
+                    ))
                 })?;
 
                 nemotron.reset();
-                let text = nemotron
-                    .transcribe_audio(samples)
-                    .map_err(|e| {
-                        TranscribeError::InferenceFailed(format!("Nemotron inference failed: {}", e))
-                    })?;
+                let text = nemotron.transcribe_audio(samples).map_err(|e| {
+                    TranscribeError::InferenceFailed(format!("Nemotron inference failed: {}", e))
+                })?;
 
                 text.trim().to_string()
             }
@@ -190,9 +209,8 @@ impl NemotronStreamingTranscriber {
 
         let exec_config = build_execution_config();
 
-        let model = Nemotron::from_pretrained(&model_path, exec_config).map_err(|e| {
-            TranscribeError::InitFailed(format!("Nemotron init failed: {}", e))
-        })?;
+        let model = Nemotron::from_pretrained(&model_path, exec_config)
+            .map_err(|e| TranscribeError::InitFailed(format!("Nemotron init failed: {}", e)))?;
 
         tracing::info!(
             "Nemotron streaming model loaded in {:.2}s",
@@ -276,7 +294,11 @@ fn build_execution_config() -> Option<ExecutionConfig> {
         return Some(ExecutionConfig::new().with_execution_provider(ExecutionProvider::ROCm));
     }
 
-    #[cfg(not(any(feature = "parakeet-cuda", feature = "parakeet-tensorrt", feature = "parakeet-rocm")))]
+    #[cfg(not(any(
+        feature = "parakeet-cuda",
+        feature = "parakeet-tensorrt",
+        feature = "parakeet-rocm"
+    )))]
     {
         None
     }
@@ -290,8 +312,8 @@ fn build_execution_config() -> Option<ExecutionConfig> {
 fn detect_model_type(path: &PathBuf) -> ParakeetModelType {
     // Check for Nemotron model structure (must come before TDT since both have encoder/decoder)
     // Nemotron uses non-hyphenated names: encoder.onnx (not encoder-model.onnx)
-    let has_nemotron_encoder = path.join("encoder.onnx").exists()
-        || path.join("encoder.onnx.data").exists();
+    let has_nemotron_encoder =
+        path.join("encoder.onnx").exists() || path.join("encoder.onnx.data").exists();
     let has_nemotron_decoder = path.join("decoder_joint.onnx").exists();
     let has_sentencepiece = path.join("tokenizer.model").exists();
 
@@ -303,8 +325,8 @@ fn detect_model_type(path: &PathBuf) -> ParakeetModelType {
     }
 
     // Check for TDT model structure (hyphenated names: encoder-model.onnx)
-    let has_encoder = path.join("encoder-model.onnx").exists()
-        || path.join("encoder-model.onnx.data").exists();
+    let has_encoder =
+        path.join("encoder-model.onnx").exists() || path.join("encoder-model.onnx.data").exists();
     let has_decoder = path.join("decoder_joint-model.onnx").exists();
 
     if has_encoder && has_decoder {
@@ -313,8 +335,7 @@ fn detect_model_type(path: &PathBuf) -> ParakeetModelType {
     }
 
     // Check for CTC model structure
-    let has_ctc_model = path.join("model.onnx").exists()
-        || path.join("model_int8.onnx").exists();
+    let has_ctc_model = path.join("model.onnx").exists() || path.join("model_int8.onnx").exists();
     let has_tokenizer = path.join("tokenizer.json").exists();
 
     if has_ctc_model && has_tokenizer {
