@@ -196,8 +196,6 @@ impl Transcriber for ParakeetTranscriber {
 /// Nemotron streaming transcriber for real-time output during recording
 pub struct NemotronStreamingTranscriber {
     model: Nemotron,
-    /// Text already returned to the caller (for computing deltas)
-    last_transcript_len: usize,
 }
 
 impl NemotronStreamingTranscriber {
@@ -217,28 +215,17 @@ impl NemotronStreamingTranscriber {
             start.elapsed().as_secs_f32()
         );
 
-        Ok(Self {
-            model,
-            last_transcript_len: 0,
-        })
+        Ok(Self { model })
     }
 }
 
 impl StreamingTranscriber for NemotronStreamingTranscriber {
     fn transcribe_chunk(&mut self, chunk: &[f32]) -> Result<String, TranscribeError> {
-        let full_text = self.model.transcribe_chunk(chunk).map_err(|e| {
+        // parakeet-rs transcribe_chunk() already returns only the new tokens (delta),
+        // not the full cumulative transcript. Return it directly.
+        self.model.transcribe_chunk(chunk).map_err(|e| {
             TranscribeError::InferenceFailed(format!("Nemotron chunk inference failed: {}", e))
-        })?;
-
-        // Return only the new text (delta)
-        let delta = if full_text.len() > self.last_transcript_len {
-            full_text[self.last_transcript_len..].to_string()
-        } else {
-            String::new()
-        };
-        self.last_transcript_len = full_text.len();
-
-        Ok(delta)
+        })
     }
 
     fn flush(&mut self) -> Result<String, TranscribeError> {
@@ -254,7 +241,6 @@ impl StreamingTranscriber for NemotronStreamingTranscriber {
 
     fn reset(&mut self) {
         self.model.reset();
-        self.last_transcript_len = 0;
     }
 
     fn get_transcript(&self) -> String {
