@@ -1004,12 +1004,49 @@ The model architecture type. Usually auto-detected based on files present in the
 **Values:**
 - `tdt` - Token-Duration-Transducer (recommended, proper punctuation)
 - `ctc` - Connectionist Temporal Classification (faster, character-level)
+- `nemotron` - Nemotron streaming transducer (supports real-time streaming output)
 
 **Example:**
 ```toml
 [parakeet]
 model = "parakeet-tdt-0.6b-v3"
 model_type = "tdt"
+```
+
+**Auto-detection:**
+
+The model type is detected from the files in the model directory:
+
+| Model Type | Required Files |
+|-----------|---------------|
+| TDT | `encoder-model.onnx`, `decoder_joint-model.onnx`, `vocab.txt` |
+| CTC | `model.onnx` (or `model_int8.onnx`), `tokenizer.json` |
+| Nemotron | `encoder.onnx`, `decoder_joint.onnx`, `tokenizer.model` |
+
+### streaming
+
+**Type:** Boolean
+**Default:** Auto (enabled for Nemotron, disabled for TDT/CTC)
+**Required:** No
+
+When enabled, text is typed live during recording as the model produces output. Each audio chunk (560ms) is processed incrementally, and the resulting text is typed immediately at the cursor position.
+
+Streaming is automatically enabled when using a Nemotron model and can be explicitly overridden.
+
+**Example:**
+```toml
+[parakeet]
+model = "/path/to/nemotron-model"
+model_type = "nemotron"
+streaming = true  # This is the default for Nemotron
+```
+
+**To disable streaming for a Nemotron model (batch mode instead):**
+```toml
+[parakeet]
+model = "/path/to/nemotron-model"
+model_type = "nemotron"
+streaming = false  # Wait until recording stops, then transcribe all at once
 ```
 
 ### on_demand_loading
@@ -1027,14 +1064,25 @@ model = "parakeet-tdt-0.6b-v3"
 on_demand_loading = true  # Free memory when not transcribing
 ```
 
-### Complete Example
+### Complete Examples
 
+**TDT model (recommended for batch transcription):**
 ```toml
 engine = "parakeet"
 
 [parakeet]
 model = "parakeet-tdt-0.6b-v3"
 on_demand_loading = false  # Keep model loaded for fast response
+```
+
+**Nemotron model (streaming transcription):**
+```toml
+engine = "parakeet"
+
+[parakeet]
+model = "/path/to/nemotron-0.6b"
+model_type = "nemotron"
+# streaming = true is the default for Nemotron
 ```
 
 ---

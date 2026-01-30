@@ -592,6 +592,36 @@ Parakeet is NVIDIA's FastConformer-based ASR model. It offers:
 
 See [PARAKEET.md](PARAKEET.md) for detailed setup instructions.
 
+### Nemotron Streaming (Experimental)
+
+Nemotron is a streaming variant of the Parakeet architecture. Unlike TDT and CTC models that transcribe after you stop recording, Nemotron types text live as you speak.
+
+**How it works:**
+- Audio is split into 560ms chunks during recording
+- Each chunk is fed to the Nemotron model immediately
+- Recognized text is typed at the cursor in real-time
+- When you release the hotkey, any remaining audio is flushed
+
+**Setup:**
+1. Download a Nemotron ONNX model (contains `encoder.onnx`, `decoder_joint.onnx`, `tokenizer.model`)
+2. Configure voxtype to use it:
+
+```toml
+engine = "parakeet"
+
+[parakeet]
+model = "/path/to/nemotron-model"
+# model_type = "nemotron" is auto-detected from model files
+```
+
+3. Start the daemon. Text will appear live as you speak.
+
+**Notes:**
+- Streaming mode is automatically enabled when a Nemotron model is detected
+- Set `streaming = false` in `[parakeet]` to disable streaming and use batch mode instead
+- Post-processing commands are not applied during streaming (text is output raw)
+- Requires a Parakeet-enabled binary (`voxtype-*-parakeet-*`)
+
 ---
 
 ## Multi-Model Support
