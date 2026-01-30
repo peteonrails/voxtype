@@ -124,6 +124,15 @@ async fn main() -> anyhow::Result<()> {
     if let Some(prompt) = cli.initial_prompt {
         config.whisper.initial_prompt = Some(prompt);
     }
+    if cli.eager_processing {
+        config.whisper.eager_processing = true;
+    }
+    if let Some(secs) = cli.eager_chunk_secs {
+        config.whisper.eager_chunk_secs = secs;
+    }
+    if let Some(secs) = cli.eager_overlap_secs {
+        config.whisper.eager_overlap_secs = secs;
+    }
     if let Some(ref driver_str) = cli.driver {
         match parse_driver_order(driver_str) {
             Ok(drivers) => {

@@ -17,6 +17,7 @@ Voxtype is a push-to-talk voice-to-text tool for Linux. Optimized for Wayland, w
 - [Whisper Models](#whisper-models)
 - [Remote Whisper Servers](#remote-whisper-servers)
 - [CLI Backend (whisper-cli)](#cli-backend-whisper-cli)
+- [Eager Processing](#eager-processing)
 - [Output Modes](#output-modes)
 - [Post-Processing with LLMs](#post-processing-with-llms)
 - [Profiles](#profiles)
@@ -950,6 +951,107 @@ This adds minimal overhead compared to the FFI approach since file I/O is fast o
 - Slightly higher latency than FFI (file I/O overhead)
 - Requires separate whisper-cli installation
 - No GPU isolation mode (whisper-cli manages its own GPU memory)
+
+---
+
+## Eager Processing
+
+Eager processing transcribes audio in chunks while you're still recording. Instead of waiting until you release the hotkey to start transcription, voxtype begins processing audio in the background as you speak. When you stop recording, the final chunk is transcribed and all results are combined.
+
+### When to Use Eager Processing
+
+Eager processing is most valuable when:
+
+1. **You have slow transcription hardware**: On machines where transcription takes longer than the recording itself, eager processing parallelizes the work to reduce overall wait time.
+
+2. **You make long recordings**: For recordings over 15-30 seconds, starting transcription early means less waiting when you're done speaking.
+
+3. **You use large models**: Larger Whisper models (medium, large-v3) are slower. Eager processing helps hide some of that latency.
+
+**Not recommended when:**
+- You use fast models (tiny, base) on modern hardware with GPU acceleration
+- Your recordings are typically short (under 5 seconds)
+- You're on a laptop and want to minimize battery usage
+
+### How It Works
+
+With eager processing enabled:
+
+1. Audio accumulates as you record
+2. Every `eager_chunk_secs` (default: 5 seconds), a chunk is extracted and sent for transcription
+3. Chunks overlap by `eager_overlap_secs` (default: 0.5 seconds) to avoid missing words at boundaries
+4. When you stop recording, all chunk results are combined and deduplicated
+5. The final text is output
+
+The overlap region helps catch words that might be split across chunk boundaries. The deduplication logic matches overlapping text to produce a clean result.
+
+### Configuration
+
+Enable eager processing in `~/.config/voxtype/config.toml`:
+
+```toml
+[whisper]
+model = "medium.en"
+
+# Enable eager input processing
+eager_processing = true
+
+# Chunk duration (default: 5.0 seconds)
+eager_chunk_secs = 5.0
+
+# Overlap between chunks (default: 0.5 seconds)
+eager_overlap_secs = 0.5
+```
+
+Or via CLI flags:
+
+```bash
+voxtype --eager-processing --eager-chunk-secs 5.0 daemon
+```
+
+### Tuning Chunk Size
+
+The chunk duration affects the trade-off between parallelization and overhead:
+
+| Chunk Size | Pros | Cons |
+|------------|------|------|
+| 3 seconds | More parallelization, faster for slow models | More boundary handling, slightly higher CPU |
+| 5 seconds | Good balance for most cases | - |
+| 10 seconds | Fewer chunks to combine | Less parallelization benefit |
+
+For testing, try `eager_chunk_secs = 3.0` to see more chunk messages in the logs.
+
+### Trade-offs
+
+**Benefits:**
+- Reduced perceived latency on slow hardware
+- Better experience for long recordings
+- Parallelizes transcription work across recording time
+
+**Limitations:**
+- Boundary handling may occasionally produce artifacts (repeated or dropped words at chunk edges)
+- Slightly higher CPU usage during recording
+- Adds complexity to the transcription pipeline
+
+For most users with modern hardware and GPU acceleration, the default (disabled) provides the cleanest results. Enable eager processing when latency is a problem that outweighs the small risk of boundary artifacts.
+
+### Verifying It Works
+
+Run voxtype with verbose logging:
+
+```bash
+voxtype -vv
+```
+
+Then record for 10+ seconds. You should see log messages like:
+
+```
+[DEBUG] Spawning eager transcription for chunk 0
+[DEBUG] Spawning eager transcription for chunk 1
+[DEBUG] Chunk 0 completed: "This is the first part of my recording"
+[DEBUG] Chunk 1 completed: "the first part of my recording and here is more"
+[DEBUG] Combined eager chunks with deduplication
+```
 
 ---
 
