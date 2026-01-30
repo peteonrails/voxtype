@@ -26,6 +26,7 @@ const VOXTYPE_LIB_DIR: &str = "/usr/lib/voxtype";
 const VOXTYPE_BIN: &str = "/usr/bin/voxtype";
 const VOXTYPE_BIN_LOCAL: &str = "/usr/local/bin/voxtype";
 const VOXTYPE_CPU_BACKUP: &str = "/usr/lib/voxtype/voxtype-cpu";
+const VOXTYPE_NATIVE: &str = "/usr/lib/voxtype/voxtype-native";
 
 /// Get the active voxtype binary path (prefers /usr/bin, falls back to /usr/local/bin)
 fn get_active_binary_path() -> &'static str {
@@ -75,7 +76,8 @@ fn detect_active_parakeet_backend() -> Option<String> {
 /// Available backend variants
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Backend {
-    Cpu,    // Simple mode: native CPU binary
+    Cpu,    // Legacy: voxtype-cpu (deprecated, kept for compatibility)
+    Native, // Simple mode: source-built native CPU binary (voxtype-native)
     Avx2,   // Tiered mode: AVX2 binary
     Avx512, // Tiered mode: AVX-512 binary
     Vulkan, // GPU acceleration
@@ -85,6 +87,7 @@ impl Backend {
     fn binary_name(&self) -> &'static str {
         match self {
             Backend::Cpu => "voxtype-cpu",
+            Backend::Native => "voxtype-native",
             Backend::Avx2 => "voxtype-avx2",
             Backend::Avx512 => "voxtype-avx512",
             Backend::Vulkan => "voxtype-vulkan",
@@ -93,7 +96,8 @@ impl Backend {
 
     fn display_name(&self) -> &'static str {
         match self {
-            Backend::Cpu => "CPU (native)",
+            Backend::Cpu => "CPU (legacy)",
+            Backend::Native => "CPU (native)",
             Backend::Avx2 => "CPU (AVX2)",
             Backend::Avx512 => "CPU (AVX-512)",
             Backend::Vulkan => "GPU (Vulkan)",
@@ -166,6 +170,7 @@ pub fn detect_current_backend() -> Option<Backend> {
         let target_name = link_target.file_name()?.to_str()?;
         return match target_name {
             "voxtype-cpu" => Some(Backend::Cpu),
+            "voxtype-native" => Some(Backend::Native),
             "voxtype-avx2" => Some(Backend::Avx2),
             "voxtype-avx512" => Some(Backend::Avx512),
             "voxtype-vulkan" => Some(Backend::Vulkan),
@@ -175,7 +180,7 @@ pub fn detect_current_backend() -> Option<Backend> {
 
     // Not a symlink - check if it's a regular file (simple mode with CPU active)
     if Path::new(active_bin).is_file() {
-        return Some(Backend::Cpu);
+        return Some(Backend::Native);
     }
 
     None
@@ -195,14 +200,18 @@ pub fn detect_available_backends() -> Vec<Backend> {
             }
         }
     } else {
-        // Simple mode: CPU binary at the active location or backed up
-        if Path::new(active_bin).is_file()
+        // Simple mode: check for native binary in lib dir or at active location
+        if Path::new(VOXTYPE_NATIVE).exists() {
+            available.push(Backend::Native);
+        } else if Path::new(active_bin).is_file()
             && !fs::symlink_metadata(active_bin)
                 .map(|m| m.file_type().is_symlink())
                 .unwrap_or(false)
         {
-            available.push(Backend::Cpu);
+            // Binary directly at active location (not a symlink)
+            available.push(Backend::Native);
         } else if Path::new(VOXTYPE_CPU_BACKUP).exists() {
+            // Legacy backup location
             available.push(Backend::Cpu);
         }
 
@@ -363,9 +372,10 @@ fn switch_backend_tiered(backend: Backend) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Enable GPU in simple mode (backup CPU binary, symlink to vulkan)
+/// Enable GPU in simple mode (switch symlink from native to vulkan)
 fn enable_simple_mode() -> anyhow::Result<()> {
     let vulkan_path = Path::new(VOXTYPE_LIB_DIR).join("voxtype-vulkan");
+    let native_path = Path::new(VOXTYPE_NATIVE);
     let active_bin = get_active_binary_path();
 
     if !vulkan_path.exists() {
@@ -376,20 +386,39 @@ fn enable_simple_mode() -> anyhow::Result<()> {
         );
     }
 
-    // Check if already using vulkan
-    if fs::read_link(active_bin).is_ok() {
-        anyhow::bail!("GPU backend is already enabled.");
+    // Check if already using vulkan (symlink points to vulkan)
+    if let Ok(target) = fs::read_link(active_bin) {
+        if target.file_name().map(|n| n.to_str()) == Some(Some("voxtype-vulkan")) {
+            anyhow::bail!("GPU backend is already enabled.");
+        }
     }
 
     // Ensure lib dir exists
     fs::create_dir_all(VOXTYPE_LIB_DIR)
         .map_err(|e| anyhow::anyhow!("Failed to create {}: {}", VOXTYPE_LIB_DIR, e))?;
 
-    // Backup the CPU binary
-    if Path::new(active_bin).exists() {
+    // Handle different scenarios:
+    // 1. New layout: symlink to voxtype-native -> just update symlink
+    // 2. Old layout: actual binary at active_bin -> backup and symlink
+    // 3. No native binary in lib dir -> backup current binary
+    let is_symlink = fs::symlink_metadata(active_bin)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+
+    if !is_symlink && Path::new(active_bin).exists() && !native_path.exists() {
+        // Old layout: backup the CPU binary (only if native doesn't exist in lib dir)
         fs::rename(active_bin, VOXTYPE_CPU_BACKUP).map_err(|e| {
             anyhow::anyhow!(
                 "Failed to backup CPU binary (need sudo?): {}\n\
+                 Try: sudo voxtype setup gpu --enable",
+                e
+            )
+        })?;
+    } else if is_symlink || Path::new(active_bin).exists() {
+        // New layout or existing symlink: just remove current symlink/file
+        fs::remove_file(active_bin).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to remove existing binary/symlink (need sudo?): {}\n\
                  Try: sudo voxtype setup gpu --enable",
                 e
             )
@@ -398,8 +427,12 @@ fn enable_simple_mode() -> anyhow::Result<()> {
 
     // Create symlink to vulkan
     symlink(&vulkan_path, active_bin).map_err(|e| {
-        // Try to restore backup on failure
-        let _ = fs::rename(VOXTYPE_CPU_BACKUP, active_bin);
+        // Try to restore on failure
+        if native_path.exists() {
+            let _ = symlink(native_path, active_bin);
+        } else {
+            let _ = fs::rename(VOXTYPE_CPU_BACKUP, active_bin);
+        }
         anyhow::anyhow!(
             "Failed to create symlink (need sudo?): {}\n\
              Try: sudo voxtype setup gpu --enable",
@@ -413,15 +446,21 @@ fn enable_simple_mode() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Disable GPU in simple mode (restore CPU binary)
+/// Disable GPU in simple mode (restore native CPU binary)
 fn disable_simple_mode() -> anyhow::Result<()> {
     let active_bin = get_active_binary_path();
+    let native_path = Path::new(VOXTYPE_NATIVE);
 
-    // Check if CPU backup exists
-    if !Path::new(VOXTYPE_CPU_BACKUP).exists() {
+    // Check if native binary exists in lib dir (new layout) or backup exists (old layout)
+    let use_native_layout = native_path.exists();
+    let use_backup_layout = Path::new(VOXTYPE_CPU_BACKUP).exists();
+
+    if !use_native_layout && !use_backup_layout {
         anyhow::bail!(
-            "CPU binary backup not found at {}\n\
+            "CPU binary not found.\n\
+             Neither {} nor {} exists.\n\
              Cannot restore CPU backend.",
+            VOXTYPE_NATIVE,
             VOXTYPE_CPU_BACKUP
         );
     }
@@ -437,14 +476,25 @@ fn disable_simple_mode() -> anyhow::Result<()> {
         })?;
     }
 
-    // Restore CPU binary
-    fs::rename(VOXTYPE_CPU_BACKUP, active_bin).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to restore CPU binary (need sudo?): {}\n\
-             Try: sudo voxtype setup gpu --disable",
-            e
-        )
-    })?;
+    if use_native_layout {
+        // New layout: create symlink to voxtype-native
+        symlink(native_path, active_bin).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to create symlink (need sudo?): {}\n\
+                 Try: sudo voxtype setup gpu --disable",
+                e
+            )
+        })?;
+    } else {
+        // Old layout: restore from backup
+        fs::rename(VOXTYPE_CPU_BACKUP, active_bin).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to restore CPU binary (need sudo?): {}\n\
+                 Try: sudo voxtype setup gpu --disable",
+                e
+            )
+        })?;
+    }
 
     // Restore SELinux context if available
     let _ = Command::new("restorecon").arg(active_bin).status();
@@ -560,7 +610,7 @@ pub fn show_status() {
             println!("  {} - {}", backend.display_name(), status);
         }
     } else {
-        for backend in [Backend::Cpu, Backend::Vulkan] {
+        for backend in [Backend::Native, Backend::Vulkan] {
             let installed = available.contains(&backend);
             let active = current == Some(backend);
 

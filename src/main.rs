@@ -526,7 +526,8 @@ impl ExtendedStatusInfo {
     fn from_config(config: &config::Config) -> Self {
         let backend = setup::gpu::detect_current_backend()
             .map(|b| match b {
-                setup::gpu::Backend::Cpu => "CPU (native)",
+                setup::gpu::Backend::Cpu => "CPU (legacy)",
+                setup::gpu::Backend::Native => "CPU (native)",
                 setup::gpu::Backend::Avx2 => "CPU (AVX2)",
                 setup::gpu::Backend::Avx512 => "CPU (AVX-512)",
                 setup::gpu::Backend::Vulkan => "GPU (Vulkan)",
