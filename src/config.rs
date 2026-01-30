@@ -1100,8 +1100,10 @@ pub enum OutputMode {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputDriver {
-    /// wtype - Wayland-native, best Unicode/CJK support
+    /// wtype - Wayland-native via virtual-keyboard protocol, best Unicode/CJK support
     Wtype,
+    /// eitype - Wayland via libei/EI protocol, works on GNOME/KDE
+    Eitype,
     /// dotool - Works on X11/Wayland/TTY, supports keyboard layouts
     Dotool,
     /// ydotool - Works on X11/Wayland/TTY, requires daemon
@@ -1116,6 +1118,7 @@ impl std::fmt::Display for OutputDriver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OutputDriver::Wtype => write!(f, "wtype"),
+            OutputDriver::Eitype => write!(f, "eitype"),
             OutputDriver::Dotool => write!(f, "dotool"),
             OutputDriver::Ydotool => write!(f, "ydotool"),
             OutputDriver::Clipboard => write!(f, "clipboard"),
@@ -1130,12 +1133,13 @@ impl std::str::FromStr for OutputDriver {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "wtype" => Ok(OutputDriver::Wtype),
+            "eitype" => Ok(OutputDriver::Eitype),
             "dotool" => Ok(OutputDriver::Dotool),
             "ydotool" => Ok(OutputDriver::Ydotool),
             "clipboard" => Ok(OutputDriver::Clipboard),
             "xclip" => Ok(OutputDriver::Xclip),
             _ => Err(format!(
-                "Unknown driver '{}'. Valid options: wtype, dotool, ydotool, clipboard, xclip",
+                "Unknown driver '{}'. Valid options: wtype, eitype, dotool, ydotool, clipboard, xclip",
                 s
             )),
         }

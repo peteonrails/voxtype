@@ -1033,20 +1033,21 @@ fallback_to_clipboard = true  # Use clipboard if typing drivers fail
 ### driver_order
 
 **Type:** Array of strings
-**Default:** `["wtype", "dotool", "ydotool", "clipboard", "xclip"]`
+**Default:** `["wtype", "eitype", "dotool", "ydotool", "clipboard", "xclip"]`
 **Required:** No
 
 Custom order of output drivers to try when `mode = "type"`. Each driver is tried in sequence until one succeeds. This allows you to prefer specific drivers or exclude others entirely.
 
 **Available drivers:**
-- `wtype` - Wayland virtual keyboard (best CJK/Unicode support, wlroots compositors only)
+- `wtype` - Wayland virtual keyboard protocol (best CJK/Unicode support, wlroots compositors only)
+- `eitype` - Wayland via libei/EI protocol (works on GNOME, KDE, and compositors with libei support)
 - `dotool` - uinput-based typing (supports keyboard layouts, works on X11/Wayland/TTY)
 - `ydotool` - uinput-based typing (requires daemon, X11/Wayland/TTY)
 - `clipboard` - Wayland clipboard via wl-copy
 - `xclip` - X11 clipboard via xclip
 
 **Default behavior (no driver_order set):**
-The default chain is: wtype → dotool → ydotool → clipboard → xclip
+The default chain is: wtype → eitype → dotool → ydotool → clipboard → xclip
 
 **Examples:**
 
@@ -1063,8 +1064,8 @@ driver_order = ["dotool", "ydotool", "xclip"]
 # Force single driver (no fallback)
 driver_order = ["ydotool"]
 
-# KDE/GNOME Wayland (wtype doesn't work)
-driver_order = ["dotool", "ydotool", "clipboard"]
+# GNOME/KDE Wayland (prefer eitype, wtype doesn't work)
+driver_order = ["eitype", "dotool", "clipboard"]
 ```
 
 **CLI override:**
