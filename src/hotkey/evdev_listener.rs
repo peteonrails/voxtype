@@ -544,8 +544,24 @@ fn evdev_listener_loop(
 
 /// Parse a key name string to evdev Key
 fn parse_key_name(name: &str) -> Result<Key, HotkeyError> {
+    let trimmed = name.trim();
+
+    // Try parsing as a prefixed numeric keycode (e.g. "wev_234", "evtest_226")
+    if let Some(key) = parse_prefixed_keycode(trimmed)? {
+        return Ok(key);
+    }
+
+    // Bare numeric values are ambiguous — require a prefix
+    if trimmed.parse::<u16>().is_ok() || trimmed.starts_with("0x") || trimmed.starts_with("0X") {
+        return Err(HotkeyError::UnknownKey(format!(
+            "{}. Bare numeric keycodes are ambiguous (wev/xev and evtest use different numbering).\n  \
+             Use a prefix: WEV_234, X11_234, XEV_234 (XKB keycode, offset by 8) or EVTEST_226 (kernel keycode)",
+            name
+        )));
+    }
+
     // Normalize: uppercase and replace - or space with _
-    let normalized: String = name
+    let normalized: String = trimmed
         .chars()
         .map(|c| match c {
             '-' | ' ' => '_',
@@ -627,17 +643,81 @@ fn parse_key_name(name: &str) -> Result<Key, HotkeyError> {
         "KEY_PLAYPAUSE" => Key::KEY_PLAYPAUSE,
         "KEY_NEXTSONG" => Key::KEY_NEXTSONG,
         "KEY_PREVIOUSSONG" => Key::KEY_PREVIOUSSONG,
+        "KEY_RECORD" => Key::KEY_RECORD,
+        "KEY_REWIND" => Key::KEY_REWIND,
+        "KEY_FASTFORWARD" => Key::KEY_FASTFORWARD,
+        "KEY_MEDIA" => Key::KEY_MEDIA,
 
         // If not found, return error with suggestions
         _ => {
             return Err(HotkeyError::UnknownKey(format!(
-                "{}. Try: SCROLLLOCK, PAUSE, F13-F24, or run 'evtest' to find key names",
+                "{}. Try: SCROLLLOCK, PAUSE, MEDIA, F13-F24, a numeric keycode (e.g. 226), or run 'evtest' to find key names",
                 name
             )));
         }
     };
 
     Ok(key)
+}
+
+/// XKB keycodes are offset by 8 from Linux kernel keycodes
+const XKB_OFFSET: u16 = 8;
+
+/// Try to parse a prefixed numeric keycode string.
+///
+/// Supported prefixes:
+/// - `wev_`, `x11_`, `xev_` — XKB keycode (subtract 8 to get kernel keycode)
+/// - `evtest_` — raw kernel keycode (used directly)
+///
+/// Returns `Ok(None)` if the string doesn't match any prefix pattern.
+/// Returns `Ok(Some(key))` on successful parse.
+/// Returns `Err` if the prefix is recognized but the number is invalid.
+fn parse_prefixed_keycode(s: &str) -> Result<Option<Key>, HotkeyError> {
+    let normalized = s.to_ascii_uppercase();
+
+    let (number_str, is_xkb) =
+        if let Some(n) = normalized.strip_prefix("WEV_") {
+            (n, true)
+        } else if let Some(n) = normalized.strip_prefix("X11_") {
+            (n, true)
+        } else if let Some(n) = normalized.strip_prefix("XEV_") {
+            (n, true)
+        } else if let Some(n) = normalized.strip_prefix("EVTEST_") {
+            (n, false)
+        } else {
+            return Ok(None);
+        };
+
+    let code: u16 = if let Some(hex) = number_str.strip_prefix("0X") {
+        u16::from_str_radix(hex, 16)
+    } else {
+        number_str.parse()
+    }
+    .map_err(|_| {
+        HotkeyError::UnknownKey(format!(
+            "{}. The value after the prefix must be a decimal or 0x-prefixed hex number",
+            s
+        ))
+    })?;
+
+    let kernel_code = if is_xkb {
+        code.checked_sub(XKB_OFFSET).ok_or_else(|| {
+            HotkeyError::UnknownKey(format!(
+                "{}. XKB keycode must be >= {} (the XKB offset)",
+                s, XKB_OFFSET
+            ))
+        })?
+    } else {
+        code
+    };
+
+    tracing::debug!(
+        "Parsed numeric keycode '{}' as kernel keycode {}",
+        s,
+        kernel_code
+    );
+
+    Ok(Some(Key::new(kernel_code)))
 }
 
 #[cfg(test)]
@@ -655,6 +735,50 @@ mod tests {
         assert_eq!(parse_key_name("F13").unwrap(), Key::KEY_F13);
         assert_eq!(parse_key_name("LEFTALT").unwrap(), Key::KEY_LEFTALT);
         assert_eq!(parse_key_name("LALT").unwrap(), Key::KEY_LEFTALT);
+    }
+
+    #[test]
+    fn test_parse_media_keys() {
+        assert_eq!(parse_key_name("MEDIA").unwrap(), Key::KEY_MEDIA);
+        assert_eq!(parse_key_name("KEY_MEDIA").unwrap(), Key::KEY_MEDIA);
+        assert_eq!(parse_key_name("RECORD").unwrap(), Key::KEY_RECORD);
+        assert_eq!(parse_key_name("FASTFORWARD").unwrap(), Key::KEY_FASTFORWARD);
+        assert_eq!(parse_key_name("REWIND").unwrap(), Key::KEY_REWIND);
+    }
+
+    #[test]
+    fn test_parse_wev_keycode() {
+        // wev shows XKB keycode 234 for KEY_MEDIA (kernel 226 + 8)
+        assert_eq!(parse_key_name("wev_234").unwrap(), Key::KEY_MEDIA);
+        assert_eq!(parse_key_name("WEV_234").unwrap(), Key::KEY_MEDIA);
+        assert_eq!(parse_key_name("x11_234").unwrap(), Key::KEY_MEDIA);
+        assert_eq!(parse_key_name("xev_234").unwrap(), Key::KEY_MEDIA);
+    }
+
+    #[test]
+    fn test_parse_evtest_keycode() {
+        // evtest shows raw kernel keycode 226 for KEY_MEDIA
+        assert_eq!(parse_key_name("evtest_226").unwrap(), Key::KEY_MEDIA);
+        assert_eq!(parse_key_name("EVTEST_226").unwrap(), Key::KEY_MEDIA);
+        assert_eq!(parse_key_name("evtest_70").unwrap(), Key::KEY_SCROLLLOCK);
+        // hex format
+        assert_eq!(parse_key_name("evtest_0xe2").unwrap(), Key::KEY_MEDIA);
+        assert_eq!(parse_key_name("EVTEST_0xE2").unwrap(), Key::KEY_MEDIA);
+    }
+
+    #[test]
+    fn test_parse_wev_keycode_hex() {
+        // XKB keycode 0xEA = 234 decimal, minus 8 = 226 = KEY_MEDIA
+        assert_eq!(parse_key_name("wev_0xEA").unwrap(), Key::KEY_MEDIA);
+        assert_eq!(parse_key_name("WEV_0xea").unwrap(), Key::KEY_MEDIA);
+    }
+
+    #[test]
+    fn test_bare_numeric_keycode_rejected() {
+        // Bare numbers should be rejected as ambiguous
+        assert!(parse_key_name("226").is_err());
+        assert!(parse_key_name("234").is_err());
+        assert!(parse_key_name("0x226").is_err());
     }
 
     #[test]

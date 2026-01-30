@@ -61,6 +61,8 @@ The main key to hold for recording. Must be a valid Linux evdev key name.
 - `PAUSE` - Pause/Break key
 - `RIGHTALT` - Right Alt key
 - `F13` through `F24` - Extended function keys
+- `MEDIA` - Media key (often a dedicated button on multimedia keyboards)
+- `RECORD` - Record key
 - `INSERT` - Insert key
 - `HOME` - Home key
 - `END` - End key
@@ -74,10 +76,25 @@ The main key to hold for recording. Must be a valid Linux evdev key name.
 key = "PAUSE"
 ```
 
+**Numeric keycodes:**
+
+You can also specify keys by their numeric keycode if the key name isn't in the built-in list. Use a prefix to indicate the source tool, since different tools report different numbers for the same key:
+
+- `WEV_234` or `X11_234` or `XEV_234` - XKB keycode as shown by `wev` or `xev` (offset by 8 from the kernel value)
+- `EVTEST_226` - kernel keycode as shown by `evtest`
+- Hex values are also accepted: `WEV_0xEA`, `EVTEST_0xE2`
+
+Bare numeric values (e.g. `226`) are not accepted because `wev`/`xev` and `evtest` report different numbers for the same key.
+
 **Finding key names:**
 ```bash
+# Using evtest (shows kernel keycodes):
 sudo evtest
 # Select keyboard, press desired key, note KEY_XXXX name
+
+# Using wev on Wayland (shows XKB keycodes):
+wev
+# Press the key, note the keycode number — use with WEV_ prefix
 ```
 
 ### modifiers

@@ -334,6 +334,8 @@ Any key supported by the Linux evdev system can be used as a hotkey:
 | Right Alt | `RIGHTALT` |
 | Right Ctrl | `RIGHTCTRL` |
 | F13-F24 | `F13`, `F14`, ... `F24` |
+| Media | `MEDIA` |
+| Record | `RECORD` |
 | Insert | `INSERT` |
 | Home | `HOME` |
 | End | `END` |
@@ -354,6 +356,19 @@ sudo evtest
 # Press the key you want to use
 # Look for "KEY_XXXXX" - use the part after KEY_
 ```
+
+### Numeric Keycodes
+
+If your key isn't in the built-in list, you can specify it by numeric keycode. Use a prefix to indicate which tool you got the number from, since `wev`/`xev` and `evtest` report different numbers for the same key (XKB keycodes are offset by 8 from kernel keycodes):
+
+```toml
+[hotkey]
+key = "WEV_234"      # XKB keycode from wev/xev (KEY_MEDIA)
+key = "EVTEST_226"   # Kernel keycode from evtest (KEY_MEDIA)
+key = "WEV_0xEA"     # Hex also works
+```
+
+Prefixes: `WEV_`, `X11_`, `XEV_` (XKB keycode), `EVTEST_` (kernel keycode).
 
 ### Using Modifier Keys
 

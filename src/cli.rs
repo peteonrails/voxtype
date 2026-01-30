@@ -72,7 +72,7 @@ pub struct Cli {
     #[arg(long, value_name = "ENGINE")]
     pub engine: Option<String>,
 
-    /// Override hotkey (e.g., SCROLLLOCK, PAUSE, F13)
+    /// Override hotkey (e.g., SCROLLLOCK, PAUSE, F13, MEDIA, WEV_234, EVTEST_226)
     #[arg(long, value_name = "KEY")]
     pub hotkey: Option<String>,
 
