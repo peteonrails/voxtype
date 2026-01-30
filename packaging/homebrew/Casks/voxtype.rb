@@ -1,6 +1,6 @@
 cask "voxtype" do
   version "0.6.0-rc1"
-  sha256 "32aaaacc37688996f68588e45da2a53bbc05783591d78a07be58be28d0c044c0"
+  sha256 "ad5c4f2531ed50ed028ec7e85062abeb2e64c27e8d1becb84b4946b631ba7aeb"
 
   url "https://github.com/peteonrails/voxtype/releases/download/v#{version}/Voxtype-#{version}-macos-arm64.dmg"
   name "Voxtype"
