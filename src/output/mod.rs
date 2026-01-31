@@ -281,6 +281,72 @@ pub fn create_output_chain_with_override(
     chain
 }
 
+/// Probe the output chain once and return the index of the first available driver.
+///
+/// This allows caching the result across multiple output calls within a streaming
+/// session, avoiding repeated `is_available()` subprocess spawns per delta.
+pub async fn probe_output_chain(chain: &[Box<dyn TextOutput>]) -> Option<usize> {
+    for (i, output) in chain.iter().enumerate() {
+        if output.is_available().await {
+            tracing::debug!("Probed output chain: {} (index {}) is available", output.name(), i);
+            return Some(i);
+        }
+        tracing::debug!("{} not available during probe, trying next", output.name());
+    }
+    None
+}
+
+/// Output text using a cached driver index, skipping `is_available()` probes.
+///
+/// If the cached driver fails, falls back to a full probe of the remaining chain.
+/// Returns the (possibly updated) driver index on success.
+pub async fn output_with_cached_index(
+    chain: &[Box<dyn TextOutput>],
+    text: &str,
+    cached_index: usize,
+) -> Result<usize, OutputError> {
+    let normalized_text = normalize_quotes(text);
+
+    // Try the cached driver directly
+    if cached_index < chain.len() {
+        match chain[cached_index].output(&normalized_text).await {
+            Ok(()) => {
+                tracing::debug!("Text output via cached {} (index {})", chain[cached_index].name(), cached_index);
+                return Ok(cached_index);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Cached output {} (index {}) failed: {}, falling back to probe",
+                    chain[cached_index].name(),
+                    cached_index,
+                    e
+                );
+            }
+        }
+    }
+
+    // Cached driver failed or index out of bounds; full probe fallback
+    for (i, output) in chain.iter().enumerate() {
+        if i == cached_index {
+            continue; // Already tried this one
+        }
+        if !output.is_available().await {
+            continue;
+        }
+        match output.output(&normalized_text).await {
+            Ok(()) => {
+                tracing::debug!("Text output via fallback {} (index {})", output.name(), i);
+                return Ok(i);
+            }
+            Err(e) => {
+                tracing::warn!("{} failed: {}, trying next", output.name(), e);
+            }
+        }
+    }
+
+    Err(OutputError::AllMethodsFailed)
+}
+
 /// Run a shell command (for pre/post hooks)
 pub async fn run_hook(command: &str, hook_name: &str) -> Result<(), String> {
     tracing::debug!("Running {} hook: {}", hook_name, command);
@@ -361,6 +427,118 @@ pub async fn output_with_fallback(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// Mock output driver for testing caching behavior
+    struct MockTextOutput {
+        name: &'static str,
+        available: bool,
+        output_count: Arc<AtomicUsize>,
+        available_count: Arc<AtomicUsize>,
+    }
+
+    impl MockTextOutput {
+        fn new(name: &'static str, available: bool) -> Self {
+            Self {
+                name,
+                available,
+                output_count: Arc::new(AtomicUsize::new(0)),
+                available_count: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn output_calls(&self) -> usize {
+            self.output_count.load(Ordering::Relaxed)
+        }
+
+        fn available_calls(&self) -> usize {
+            self.available_count.load(Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TextOutput for MockTextOutput {
+        async fn output(&self, _text: &str) -> Result<(), OutputError> {
+            self.output_count.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn is_available(&self) -> bool {
+            self.available_count.fetch_add(1, Ordering::Relaxed);
+            self.available
+        }
+
+        fn name(&self) -> &'static str {
+            self.name
+        }
+    }
+
+    #[tokio::test]
+    async fn test_probe_output_chain_finds_first_available() {
+        let chain: Vec<Box<dyn TextOutput>> = vec![
+            Box::new(MockTextOutput::new("unavailable", false)),
+            Box::new(MockTextOutput::new("available", true)),
+            Box::new(MockTextOutput::new("also_available", true)),
+        ];
+        let idx = probe_output_chain(&chain).await;
+        assert_eq!(idx, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_probe_output_chain_none_available() {
+        let chain: Vec<Box<dyn TextOutput>> = vec![
+            Box::new(MockTextOutput::new("a", false)),
+            Box::new(MockTextOutput::new("b", false)),
+        ];
+        let idx = probe_output_chain(&chain).await;
+        assert_eq!(idx, None);
+    }
+
+    #[tokio::test]
+    async fn test_cached_index_skips_is_available() {
+        let mock = MockTextOutput::new("cached", true);
+        let available_counter = mock.available_count.clone();
+        let output_counter = mock.output_count.clone();
+
+        let chain: Vec<Box<dyn TextOutput>> = vec![Box::new(mock)];
+
+        // Output 15 deltas using cached index
+        for _ in 0..15 {
+            let result = output_with_cached_index(&chain, "hello", 0).await;
+            assert!(result.is_ok());
+        }
+
+        // is_available should never have been called
+        assert_eq!(available_counter.load(Ordering::Relaxed), 0);
+        // output should have been called 15 times
+        assert_eq!(output_counter.load(Ordering::Relaxed), 15);
+    }
+
+    #[tokio::test]
+    async fn test_streaming_output_latency_baseline() {
+        let chain: Vec<Box<dyn TextOutput>> = vec![
+            Box::new(MockTextOutput::new("mock_driver", true)),
+        ];
+
+        let idx = probe_output_chain(&chain).await.unwrap();
+        let start = std::time::Instant::now();
+
+        // Simulate 15 streaming deltas
+        for i in 0..15 {
+            let text = format!("delta {}", i);
+            let result = output_with_cached_index(&chain, &text, idx).await;
+            assert!(result.is_ok());
+        }
+
+        let elapsed = start.elapsed();
+        // 15 mock deltas should complete well under 50ms
+        assert!(
+            elapsed.as_millis() < 50,
+            "15 cached deltas took {}ms, expected <50ms",
+            elapsed.as_millis()
+        );
+    }
 
     #[test]
     fn test_normalize_quotes_no_change() {
