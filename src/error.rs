@@ -93,6 +93,19 @@ pub enum TranscribeError {
     RemoteError(String),
 }
 
+/// Errors related to Voice Activity Detection
+#[derive(Error, Debug)]
+pub enum VadError {
+    #[error("VAD model not found: {0}\n  Run 'voxtype setup vad' to download.")]
+    ModelNotFound(String),
+
+    #[error("VAD initialization failed: {0}")]
+    InitFailed(String),
+
+    #[error("VAD detection failed: {0}")]
+    DetectionFailed(String),
+}
+
 /// Errors related to text output
 #[derive(Error, Debug)]
 pub enum OutputError {

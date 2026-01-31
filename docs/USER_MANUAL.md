@@ -20,6 +20,7 @@ Voxtype is a push-to-talk voice-to-text tool for Linux. Optimized for Wayland, w
 - [Output Modes](#output-modes)
 - [Post-Processing with LLMs](#post-processing-with-llms)
 - [Profiles](#profiles)
+- [Voice Activity Detection](#voice-activity-detection)
 - [Tips & Best Practices](#tips--best-practices)
 - [Keyboard Shortcuts](#keyboard-shortcuts)
 - [Integration Examples](#integration-examples)
@@ -1442,6 +1443,56 @@ output_mode = "clipboard"
 [profiles.notes]
 post_process_command = "ollama run llama3.2:1b 'Convert to bullet points. Be concise:'"
 ```
+
+---
+
+## Voice Activity Detection
+
+Voice Activity Detection (VAD) filters silence-only recordings before transcription. This prevents Whisper from hallucinating text when processing silent audio (a known issue where Whisper may output phrases like "Thank you for watching" when given silence).
+
+### Enabling VAD
+
+**Via config file:**
+```toml
+[vad]
+enabled = true
+```
+
+**Via command line (single session):**
+```bash
+voxtype --vad daemon
+```
+
+### Configuration Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `enabled` | `false` | Enable VAD filtering |
+| `backend` | `auto` | Detection algorithm: `auto`, `energy`, `whisper` |
+| `threshold` | `0.5` | Sensitivity (0.0 = very sensitive, 1.0 = aggressive) |
+| `min_speech_duration_ms` | `100` | Minimum speech required (ms) |
+
+### VAD Backends
+
+- **auto** (default): Selects the best backend for your transcription engine
+  - Whisper engine → Whisper VAD (requires model download)
+  - Parakeet engine → Energy VAD (no model needed)
+- **energy**: Fast RMS-based detection. Works with any engine, no model download required.
+- **whisper**: Silero VAD via whisper-rs. More accurate but requires downloading the model:
+  ```bash
+  voxtype setup vad
+  ```
+
+### When to Use VAD
+
+VAD is helpful if you:
+- Often accidentally trigger recording without speaking
+- Experience Whisper hallucinations on silent recordings
+- Want faster feedback when recordings contain no speech
+
+### How It Works
+
+Recordings where speech falls below the detection threshold are rejected before transcription, and a "cancelled" feedback sound is played instead of transcribing silence.
 
 ---
 
