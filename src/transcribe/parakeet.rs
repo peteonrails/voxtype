@@ -166,7 +166,7 @@ fn build_execution_config() -> Option<ExecutionConfig> {
     #[cfg(feature = "parakeet-rocm")]
     {
         tracing::info!("Configuring ROCm execution provider for AMD GPU acceleration");
-        return Some(ExecutionConfig::new().with_execution_provider(ExecutionProvider::ROCm));
+        return Some(ExecutionConfig::new().with_execution_provider(ExecutionProvider::MIGraphX));
     }
 
     #[cfg(not(any(feature = "parakeet-cuda", feature = "parakeet-tensorrt", feature = "parakeet-rocm")))]

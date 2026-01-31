@@ -60,21 +60,43 @@
         # Wrap a parakeet package with runtime dependencies and ORT_DYLIB_PATH
         # Parakeet uses ONNX Runtime, which needs to know where to find the library
         libExt = if pkgs.stdenv.isDarwin then "dylib" else "so";
-        wrapParakeet = { onnxruntime ? pkgs.onnxruntime, pkg }: pkgs.symlinkJoin {
+        wrapParakeet = { onnxruntime ? pkgs.onnxruntime, pkg, extraWrapperArgs ? "" }: pkgs.symlinkJoin {
           name = "${pkg.pname or "voxtype"}-wrapped-${pkg.version}";
           paths = [ pkg ];
           buildInputs = [ pkgs.makeWrapper ];
           postBuild = ''
             wrapProgram $out/bin/voxtype \
               --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps} \
-              --set ORT_DYLIB_PATH "${onnxruntime}/lib/libonnxruntime.${libExt}"
+              --set ORT_DYLIB_PATH "${onnxruntime}/lib/libonnxruntime.${libExt}" \
+              ${extraWrapperArgs}
           '';
           inherit (pkg) meta;
         };
 
+        # Extra wrapper args for MIGraphX (ROCm) to set cache directory
+        migraphxWrapperArgs = ''
+          --run '
+            : "''${ORT_MIGRAPHX_MODEL_CACHE_PATH:=''${XDG_CACHE_HOME:-$HOME/.cache}/voxtype/migraphx}"
+            export ORT_MIGRAPHX_MODEL_CACHE_PATH
+            mkdir -p "$ORT_MIGRAPHX_MODEL_CACHE_PATH"
+          '
+        '';
+
         # ONNX Runtime variants for different GPU backends
         onnxruntimeCuda = pkgsUnfree.onnxruntime.override { cudaSupport = true; };
-        onnxruntimeRocm = pkgs.onnxruntime.override { rocmSupport = true; };
+        onnxruntimeRocm = let
+          # MIGraphX with MLIR enabled (required for onnxruntime MIGraphX provider)
+          migraphxWithMlir = pkgs.rocmPackages.migraphx.overrideAttrs (old: {
+            cmakeFlags = map (flag:
+              if flag == "-DMIGRAPHX_ENABLE_MLIR=OFF" then "-DMIGRAPHX_ENABLE_MLIR=ON" else flag
+            ) old.cmakeFlags;
+          });
+        in
+          (pkgs.onnxruntime.override { rocmSupport = true; }).overrideAttrs (old: {
+            buildInputs = map (input:
+              if input.pname == "migraphx" then migraphxWithMlir else input
+            ) old.buildInputs;
+          });
 
         # Base derivation for voxtype (unwrapped)
         mkVoxtypeUnwrapped = { pname ? "voxtype", features ? [], extraNativeBuildInputs ? [], extraBuildInputs ? [] }:
@@ -83,7 +105,13 @@
             version = "0.5.0";
 
             src = ./.;
-            cargoLock.lockFile = ./Cargo.lock;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              outputHashes = {
+                "parakeet-rs-0.3.0" = "sha256-rq/COzeNGAcS6sfwcB280lxTmy4UhuARUWg5ZbXCFrY=";
+                "ort-2.0.0-rc.11" = "sha256-c8ye9/Pj8iPRFU92gn2d9WIiLodHhV2ow2Z/MfhqgN0=";
+              };
+            };
 
             nativeBuildInputs = commonNativeBuildInputs ++ extraNativeBuildInputs;
             buildInputs = commonBuildInputs ++ extraBuildInputs;
@@ -235,7 +263,7 @@
           # Uses NVIDIA's Parakeet models instead of Whisper
           parakeet = wrapParakeet { pkg = parakeetUnwrapped; };
           parakeet-cuda = wrapParakeet { onnxruntime = onnxruntimeCuda; pkg = parakeetCudaUnwrapped; };
-          parakeet-rocm = wrapParakeet { onnxruntime = onnxruntimeRocm; pkg = parakeetRocmUnwrapped; };
+          parakeet-rocm = wrapParakeet { onnxruntime = onnxruntimeRocm; pkg = parakeetRocmUnwrapped; extraWrapperArgs = migraphxWrapperArgs; };
 
           # Unwrapped packages (for custom wrapping scenarios)
           voxtype-unwrapped = mkVoxtypeUnwrapped {};
