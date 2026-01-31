@@ -11,6 +11,7 @@ use crate::error::Result;
 use crate::hotkey::{self, HotkeyEvent};
 use crate::model_manager::ModelManager;
 use crate::output;
+use crate::output::TextOutput;
 use crate::output::post_process::PostProcessor;
 use crate::state::{ChunkResult, State};
 use crate::text::TextProcessor;
@@ -352,6 +353,10 @@ pub struct Daemon {
     streaming_task: Option<tokio::task::JoinHandle<()>>,
     // Chunk size in samples for streaming transcription
     streaming_chunk_size: usize,
+    // Cached output chain and driver index for streaming sessions.
+    // Avoids recreating the chain and re-probing is_available() per delta.
+    streaming_output_chain: Option<Vec<Box<dyn TextOutput>>>,
+    streaming_output_index: Option<usize>,
 }
 
 impl Daemon {
@@ -417,6 +422,8 @@ impl Daemon {
             streaming_text_rx: None,
             streaming_task: None,
             streaming_chunk_size: 8960, // Default, updated when streaming transcriber is initialized
+            streaming_output_chain: None,
+            streaming_output_index: None,
         }
     }
 
@@ -626,10 +633,26 @@ impl Daemon {
 
     /// Begin a new streaming session (reset state for new recording).
     /// The model is already loaded; this just resets the transcriber state.
-    async fn begin_streaming_session(&self) {
+    async fn begin_streaming_session(&mut self) {
         if let Some(ref tx) = self.streaming_chunk_tx {
             let _ = tx.send(StreamingCommand::Reset).await;
         }
+
+        // Pre-create and probe the output chain once for the entire streaming session
+        let chain = output::create_output_chain(&self.config.output);
+        let index = output::probe_output_chain(&chain).await;
+        if let Some(idx) = index {
+            tracing::debug!("Cached streaming output driver: {} (index {})", chain[idx].name(), idx);
+        } else {
+            tracing::warn!("No output driver available at streaming session start");
+        }
+        self.streaming_output_chain = Some(chain);
+        self.streaming_output_index = index;
+    }
+
+    /// Clear the cached output chain. Returns the chain if caller needs it for a final output.
+    fn take_streaming_output_cache(&mut self) -> (Option<Vec<Box<dyn TextOutput>>>, Option<usize>) {
+        (self.streaming_output_chain.take(), self.streaming_output_index.take())
     }
 
     /// Stop streaming transcription: flush remaining audio, collect final text, then reset.
@@ -684,6 +707,9 @@ impl Daemon {
         if let Some(ref tx) = self.streaming_chunk_tx {
             let _ = tx.send(StreamingCommand::Reset).await;
         }
+        // Clear cached output chain since the streaming session is ending
+        self.streaming_output_chain = None;
+        self.streaming_output_index = None;
     }
 
     /// Spawn a transcription task for a single chunk (eager processing)
@@ -1490,14 +1516,25 @@ impl Daemon {
                                 let flush_text = self.stop_streaming().await;
                                 if !flush_text.is_empty() {
                                     tracing::debug!("Flush produced text: {:?}", flush_text);
-                                    let output_chain = output::create_output_chain(&self.config.output);
-                                    let output_options = output::OutputOptions {
-                                        pre_output_command: None,
-                                        post_output_command: None,
-                                    };
-                                    if let Err(e) = output::output_with_fallback(&output_chain, &flush_text, output_options).await {
-                                        tracing::error!("Failed to output streaming flush text: {}", e);
+                                    // Take the cached chain for the final output, then clear cache
+                                    let (chain, cached_idx) = self.take_streaming_output_cache();
+                                    let chain = chain.unwrap_or_else(|| output::create_output_chain(&self.config.output));
+                                    if let Some(idx) = cached_idx {
+                                        if let Err(e) = output::output_with_cached_index(&chain, &flush_text, idx).await {
+                                            tracing::error!("Failed to output streaming flush text: {}", e);
+                                        }
+                                    } else {
+                                        let output_options = output::OutputOptions {
+                                            pre_output_command: None,
+                                            post_output_command: None,
+                                        };
+                                        if let Err(e) = output::output_with_fallback(&chain, &flush_text, output_options).await {
+                                            tracing::error!("Failed to output streaming flush text: {}", e);
+                                        }
                                     }
+                                } else {
+                                    // No flush text, just clear the cache
+                                    self.take_streaming_output_cache();
                                 }
 
                                 if self.config.output.notification.on_recording_stop {
@@ -1702,14 +1739,23 @@ impl Daemon {
                                 let flush_text = self.stop_streaming().await;
                                 if !flush_text.is_empty() {
                                     tracing::debug!("Flush produced text: {:?}", flush_text);
-                                    let output_chain = output::create_output_chain(&self.config.output);
-                                    let output_options = output::OutputOptions {
-                                        pre_output_command: None,
-                                        post_output_command: None,
-                                    };
-                                    if let Err(e) = output::output_with_fallback(&output_chain, &flush_text, output_options).await {
-                                        tracing::error!("Failed to output streaming flush text: {}", e);
+                                    let (chain, cached_idx) = self.take_streaming_output_cache();
+                                    let chain = chain.unwrap_or_else(|| output::create_output_chain(&self.config.output));
+                                    if let Some(idx) = cached_idx {
+                                        if let Err(e) = output::output_with_cached_index(&chain, &flush_text, idx).await {
+                                            tracing::error!("Failed to output streaming flush text: {}", e);
+                                        }
+                                    } else {
+                                        let output_options = output::OutputOptions {
+                                            pre_output_command: None,
+                                            post_output_command: None,
+                                        };
+                                        if let Err(e) = output::output_with_fallback(&chain, &flush_text, output_options).await {
+                                            tracing::error!("Failed to output streaming flush text: {}", e);
+                                        }
                                     }
+                                } else {
+                                    self.take_streaming_output_cache();
                                 }
 
                                 if self.config.output.notification.on_recording_stop {
@@ -1906,16 +1952,43 @@ impl Daemon {
                     if !text_delta.is_empty() {
                         tracing::debug!("Streaming text delta: {:?}", text_delta);
 
-                        let output_chain = output::create_output_chain(&self.config.output);
-                        let output_options = output::OutputOptions {
-                            pre_output_command: None,
-                            post_output_command: None,
+                        // Use cached output chain and driver index to avoid per-delta overhead
+                        let output_ok = if let (Some(ref chain), Some(cached_idx)) =
+                            (&self.streaming_output_chain, self.streaming_output_index)
+                        {
+                            match output::output_with_cached_index(chain, &text_delta, cached_idx).await {
+                                Ok(new_idx) => {
+                                    // Update cached index if driver changed due to fallback
+                                    if new_idx != cached_idx {
+                                        self.streaming_output_index = Some(new_idx);
+                                    }
+                                    true
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to output streaming text: {}", e);
+                                    false
+                                }
+                            }
+                        } else {
+                            // No cached chain (shouldn't happen, but fall back gracefully)
+                            let output_chain = output::create_output_chain(&self.config.output);
+                            let output_options = output::OutputOptions {
+                                pre_output_command: None,
+                                post_output_command: None,
+                            };
+                            match output::output_with_fallback(&output_chain, &text_delta, output_options).await {
+                                Ok(()) => true,
+                                Err(e) => {
+                                    tracing::error!("Failed to output streaming text: {}", e);
+                                    false
+                                }
+                            }
                         };
 
-                        if let Err(e) = output::output_with_fallback(&output_chain, &text_delta, output_options).await {
-                            tracing::error!("Failed to output streaming text: {}", e);
-                        } else if let State::StreamingRecording { text_output_so_far, .. } = &mut state {
-                            text_output_so_far.push_str(&text_delta);
+                        if output_ok {
+                            if let State::StreamingRecording { text_output_so_far, .. } = &mut state {
+                                text_output_so_far.push_str(&text_delta);
+                            }
                         }
                     }
                 }
@@ -2143,14 +2216,23 @@ impl Daemon {
                         let flush_text = self.stop_streaming().await;
                         if !flush_text.is_empty() {
                             tracing::debug!("Flush produced text: {:?}", flush_text);
-                            let output_chain = output::create_output_chain(&self.config.output);
-                            let output_options = output::OutputOptions {
-                                pre_output_command: None,
-                                post_output_command: None,
-                            };
-                            if let Err(e) = output::output_with_fallback(&output_chain, &flush_text, output_options).await {
-                                tracing::error!("Failed to output streaming flush text: {}", e);
+                            let (chain, cached_idx) = self.take_streaming_output_cache();
+                            let chain = chain.unwrap_or_else(|| output::create_output_chain(&self.config.output));
+                            if let Some(idx) = cached_idx {
+                                if let Err(e) = output::output_with_cached_index(&chain, &flush_text, idx).await {
+                                    tracing::error!("Failed to output streaming flush text: {}", e);
+                                }
+                            } else {
+                                let output_options = output::OutputOptions {
+                                    pre_output_command: None,
+                                    post_output_command: None,
+                                };
+                                if let Err(e) = output::output_with_fallback(&chain, &flush_text, output_options).await {
+                                    tracing::error!("Failed to output streaming flush text: {}", e);
+                                }
                             }
+                        } else {
+                            self.take_streaming_output_cache();
                         }
                         if self.config.output.notification.on_recording_stop {
                             send_notification("Streaming Complete", "Done", self.config.output.notification.show_engine_icon, self.config.engine).await;
