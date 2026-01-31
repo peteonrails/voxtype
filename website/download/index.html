@@ -18,7 +18,7 @@
     <link rel="icon" type="image/svg+xml" href="../images/favicon.svg">
     <style>
         .download-hero {
-            padding: 6rem 2rem 4rem;
+            padding: 5rem 2rem 1.5rem;
             text-align: center;
             background: linear-gradient(135deg, var(--bg-dark) 0%, #1a1a2e 100%);
         }
@@ -36,37 +36,64 @@
         }
 
         .version-badge {
-            display: inline-block;
+            position: absolute;
+            bottom: 1rem;
+            left: 1rem;
             background: var(--accent);
             color: var(--bg-dark);
-            padding: 0.5rem 1rem;
+            padding: 0.35rem 0.75rem;
             border-radius: 2rem;
             font-weight: 600;
-            font-size: 0.9rem;
+            font-size: 0.75rem;
+        }
+
+        .version-badge.coming-soon-badge {
+            background: #6b7280;
+            color: #fff;
         }
 
         .download-section {
-            padding: 4rem 2rem;
+            padding: 2rem 2rem 4rem;
         }
 
         .download-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 2rem;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 2.5rem;
             max-width: 900px;
             margin: 0 auto;
         }
 
         .platform-card {
-            background: var(--bg-card);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 2rem;
+            background: #1a1f2e;
+            border: 3px solid #3d4663;
+            border-radius: 16px;
+            padding: 2.5rem 2rem;
             text-align: center;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .platform-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: linear-gradient(90deg, #22d3ee 0%, #a855f7 100%);
+        }
+
+        .platform-card:hover {
+            border-color: #22d3ee;
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+            transform: translateY(-2px);
+            transition: all 0.2s ease;
         }
 
         .platform-card h2 {
-            font-size: 1.5rem;
+            font-size: 1.75rem;
             margin-bottom: 0.5rem;
             display: flex;
             align-items: center;
@@ -75,9 +102,10 @@
         }
 
         .platform-card .platform-icon {
-            width: 32px;
-            height: 32px;
+            width: 40px;
+            height: 40px;
         }
+
 
         .platform-card .description {
             color: var(--text-muted);
@@ -133,8 +161,89 @@
         }
 
         .download-btn svg {
-            width: 20px;
-            height: 20px;
+            width: 24px;
+            height: 24px;
+        }
+
+        .download-btn .pkg-icon {
+            width: 32px;
+            height: 32px;
+        }
+
+        /* Package manager section */
+        .pkg-manager-section {
+            padding: 3rem 2rem;
+            background: var(--bg-card);
+            border-top: 1px solid var(--border);
+        }
+
+        .pkg-manager-section h2 {
+            text-align: center;
+            margin-bottom: 0.5rem;
+        }
+
+        .pkg-manager-section .section-subtitle {
+            text-align: center;
+            color: var(--text-muted);
+            margin-bottom: 2rem;
+        }
+
+        .pkg-manager-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1.5rem;
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+
+        .pkg-manager-card {
+            background: #1a1f2e;
+            border: 2px solid #3d4663;
+            border-radius: 12px;
+            padding: 1.75rem;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+        }
+
+        .pkg-manager-card:hover {
+            border-color: #22d3ee;
+            transition: border-color 0.2s ease;
+        }
+
+        .pkg-manager-card h3 {
+            font-size: 1.25rem;
+            margin-bottom: 0.75rem;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .pkg-manager-card .distro-icon {
+            width: 36px;
+            height: 36px;
+            flex-shrink: 0;
+        }
+
+        .pkg-manager-card p {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            margin-bottom: 1rem;
+        }
+
+        .pkg-manager-card .code-block {
+            background: #0d1117;
+            border-radius: 6px;
+            padding: 1rem;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            font-size: 0.85rem;
+            overflow-x: auto;
+        }
+
+        .pkg-manager-card .code-block code {
+            color: #e6edf3;
+        }
+
+        .pkg-manager-card .code-block .comment {
+            color: #8b949e;
         }
 
         .coming-soon {
@@ -254,9 +363,8 @@
         <h1>Download <span class="highlight">Voxtype</span></h1>
         <p class="subtitle">
             Push-to-talk voice-to-text for Linux and macOS.
-            Fully offline, open source, and free.
+            Fully offline and open source.
         </p>
-        <span class="version-badge">Latest: v0.5.5</span>
     </section>
 
     <!-- Download Options -->
@@ -265,52 +373,139 @@
             <!-- Linux -->
             <div class="platform-card">
                 <h2>
-                    <svg class="platform-icon" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M12.504 0c-.155 0-.315.008-.48.021-4.226.333-3.105 4.807-3.17 6.298-.076 1.092-.3 1.953-1.05 3.02-.885 1.051-2.127 2.75-2.716 4.521-.278.832-.41 1.684-.287 2.489a.424.424 0 00-.11.135c-.26.268-.45.6-.663.839-.199.199-.485.267-.797.4-.313.136-.658.269-.864.68-.09.189-.136.394-.132.602 0 .199.027.4.055.536.058.399.116.728.04.97-.249.68-.28 1.145-.106 1.484.174.334.535.47.94.601.81.2 1.91.135 2.774.6.926.466 1.866.67 2.616.47.526-.116.97-.464 1.208-.946.587-.003 1.23-.269 2.26-.334.699-.058 1.574.267 2.577.2.025.134.063.198.114.333l.003.003c.391.778 1.113 1.132 1.884 1.071.771-.06 1.592-.536 2.257-1.306.631-.765 1.683-1.084 2.378-1.503.348-.199.629-.469.649-.853.023-.4-.2-.811-.714-1.376v-.097l-.003-.003c-.17-.2-.25-.535-.338-.926-.085-.401-.182-.786-.492-1.046h-.003c-.059-.054-.123-.067-.188-.135a.357.357 0 00-.19-.064c.431-1.278.264-2.55-.173-3.694-.533-1.41-1.465-2.638-2.175-3.483-.796-1.005-1.576-1.957-1.56-3.368.026-2.152.236-6.133-3.544-6.139zm.529 3.405h.013c.213 0 .396.062.584.198.19.135.33.332.438.533.105.259.158.459.166.724 0-.02 0-.04-.002-.059v.015a.386.386 0 01-.005.051c-.004.024-.008.047-.015.074l-.005.019-.001.005-.003.012-.007.022-.01.03-.002.007c-.007.017-.015.034-.024.05a.204.204 0 01-.043.054l-.025.022-.012.01-.012.008-.006.003-.002.002-.021.012-.017.008-.004.003-.023.009-.008.003-.016.005-.007.002-.014.004-.011.002-.009.002-.017.003-.007.001h-.018l-.012-.001h-.005l-.016-.003-.013-.003-.008-.003-.018-.006-.012-.005-.01-.005-.017-.01-.01-.005-.013-.01-.012-.01-.009-.009-.022-.024c-.008-.01-.016-.02-.023-.032a.152.152 0 01-.024-.053l-.008-.025-.003-.011-.004-.015-.006-.026-.003-.015-.001-.008-.002-.014v-.025l.001-.018.001-.012.001-.013v-.012l.002-.016v-.003l.002-.01.003-.015c.002-.01.004-.018.007-.027l.003-.013.004-.012.003-.01.003-.008c.003-.01.007-.019.011-.028l.006-.012.004-.01.007-.01.01-.015.007-.01.01-.012.01-.01.011-.01.011-.01.01-.007.012-.008.011-.006.012-.006.013-.005.012-.004.013-.003h.013l.011-.001zm-1.834.466c.086 0 .167.015.243.044l.044.02c.078.04.151.092.217.156a.71.71 0 01.15.208c.041.083.067.17.078.258a.486.486 0 01-.02.196c-.02.067-.049.13-.085.188a.571.571 0 01-.294.222.506.506 0 01-.34-.003.544.544 0 01-.177-.098.623.623 0 01-.141-.166.603.603 0 01-.079-.2.52.52 0 01.003-.214.532.532 0 01.088-.197.596.596 0 01.157-.153.559.559 0 01.156-.073zm3.957 1.164c.026-.002.05 0 .075.003a.28.28 0 01.122.05c.04.03.073.066.098.109a.395.395 0 01.05.149v.015a.326.326 0 01-.009.098.39.39 0 01-.045.106.326.326 0 01-.076.086.304.304 0 01-.156.063.252.252 0 01-.118-.014.314.314 0 01-.106-.063.326.326 0 01-.075-.102.358.358 0 01-.037-.12.313.313 0 01.009-.117.338.338 0 01.055-.105.316.316 0 01.092-.078.263.263 0 01.121-.035z"/>
+                    <!-- Tux penguin icon -->
+                    <svg class="platform-icon" viewBox="0 0 24 24">
+                        <!-- Body -->
+                        <ellipse cx="12" cy="14" rx="7" ry="8" fill="#1a1a1a"/>
+                        <!-- Belly -->
+                        <ellipse cx="12" cy="15" rx="4.5" ry="6" fill="#fff"/>
+                        <!-- Left foot -->
+                        <ellipse cx="8" cy="21.5" rx="2.5" ry="1" fill="#f5a623"/>
+                        <!-- Right foot -->
+                        <ellipse cx="16" cy="21.5" rx="2.5" ry="1" fill="#f5a623"/>
+                        <!-- Head -->
+                        <circle cx="12" cy="6" r="4.5" fill="#1a1a1a"/>
+                        <!-- Left eye white -->
+                        <ellipse cx="10.5" cy="5.5" rx="1.2" ry="1.5" fill="#fff"/>
+                        <!-- Right eye white -->
+                        <ellipse cx="13.5" cy="5.5" rx="1.2" ry="1.5" fill="#fff"/>
+                        <!-- Left pupil -->
+                        <circle cx="10.5" cy="5.5" r="0.6" fill="#1a1a1a"/>
+                        <!-- Right pupil -->
+                        <circle cx="13.5" cy="5.5" r="0.6" fill="#1a1a1a"/>
+                        <!-- Beak -->
+                        <path d="M12 7 L10.5 8.5 L13.5 8.5 Z" fill="#f5a623"/>
                     </svg>
                     Linux
                 </h2>
-                <p class="description">For Ubuntu, Debian, Fedora, Arch, and other distributions</p>
+                <p class="description">For Omarchy, Arch, NixOS, Ubuntu, Debian, Fedora, and more</p>
                 <div class="download-buttons">
-                    <a href="https://github.com/peteonrails/voxtype/releases/download/v0.5.5/voxtype_0.5.5-1_amd64.deb" class="download-btn">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                            <polyline points="7 10 12 15 17 10"/>
-                            <line x1="12" y1="15" x2="12" y2="3"/>
+                    <a href="https://github.com/peteonrails/voxtype/releases/download/v0.6.0/voxtype_0.6.0-1_amd64.deb" class="download-btn">
+                        <!-- Debian logo from Simple Icons (CC0) -->
+                        <svg class="pkg-icon" viewBox="0 0 24 24" fill="#A80030">
+                            <path d="M13.88 12.685c-.32 0-.4.2-.4.375 0 .405.475.58.795.58.32-.175.445-.405.445-.615 0-.23-.205-.34-.84-.34zm.59-.205c.54 0 .665.25.665.55 0 .545-.475.935-1.14.935-.445 0-.785-.145-.96-.475.065-.07.195-.165.355-.165.16 0 .275.11.275.26 0 .195-.19.315-.475.315-.095 0-.175-.01-.24-.025.115.14.37.19.58.19.505 0 .81-.27.81-.58 0-.19-.1-.365-.46-.365-.23 0-.405.08-.53.08-.115 0-.185-.06-.185-.155 0-.285.49-.35.49-.665 0-.145-.11-.22-.325-.22-.365 0-.65.24-.65.525 0 .145.08.275.195.345-.065.05-.145.08-.245.08-.19 0-.305-.16-.305-.365 0-.455.475-.81 1.015-.81.445 0 .81.21.81.545 0 .305-.26.525-.68.525zm-1.93-1.76c-.035-.15-.115-.275-.115-.405 0-.335.605-.57 1.42-.57 1.105 0 1.695.42 1.695 1.01 0 .335-.205.615-.555.835.37.175.585.415.585.735 0 .76-.88 1.265-2.12 1.265-1.045 0-1.695-.34-1.695-.895 0-.25.13-.465.355-.635-.21-.145-.35-.335-.35-.57 0-.175.085-.32.195-.445-.065-.065-.115-.16-.115-.26 0-.045.01-.09.025-.135a1.201 1.201 0 01-.33-.715c0-.57.465-1.05 1.085-1.05.27 0 .51.095.685.24.125-.465.365-.685.545-.685.165 0 .265.15.265.335 0 .065-.02.145-.04.22-.095-.055-.19-.08-.305-.08-.195 0-.355.13-.415.37.13.155.215.36.215.595 0 .585-.465 1.05-1.035 1.05-.115 0-.22-.015-.32-.05zm.03-1.465c-.35 0-.635.3-.635.675 0 .37.285.67.635.67s.635-.3.635-.67c0-.375-.285-.675-.635-.675zM12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm4.14 16.06c-.39.155-.85.285-1.385.355-.55.08-1.18.08-1.805-.065-.74-.175-1.38-.505-1.9-.915-.265.405-.685.58-1.095.58-.575 0-.995-.31-.995-.76 0-.315.175-.545.475-.69-.175-.205-.28-.475-.28-.76 0-.31.11-.575.29-.78-.155-.165-.255-.395-.255-.645 0-.24.085-.46.225-.635-.145-.185-.24-.425-.24-.69 0-.585.445-1.055.975-1.15-.04-.115-.065-.24-.065-.365 0-.495.35-.9.815-.985.015-.33.135-.615.325-.835-1.03.665-1.68 1.65-1.68 2.75 0 2.07 2.01 3.73 4.47 3.73.63 0 1.215-.1 1.74-.275.025.19.04.385.04.575 0 .35-.055.685-.155.995z"/>
                         </svg>
                         Download .deb
                     </a>
-                    <a href="https://github.com/peteonrails/voxtype/releases/download/v0.5.5/voxtype-0.5.5-1.x86_64.rpm" class="download-btn secondary">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                            <polyline points="7 10 12 15 17 10"/>
-                            <line x1="12" y1="15" x2="12" y2="3"/>
+                    <a href="https://github.com/peteonrails/voxtype/releases/download/v0.6.0/voxtype-0.6.0-1.x86_64.rpm" class="download-btn secondary">
+                        <!-- Fedora logo from Simple Icons (CC0) -->
+                        <svg class="pkg-icon" viewBox="0 0 24 24" fill="#51A2DA">
+                            <path d="M12.001 0C5.376 0 .001 5.376.001 12c0 6.625 5.375 12 12 12s12-5.375 12-12c0-6.624-5.375-12-12-12zm0 1.5c5.808 0 10.5 4.692 10.5 10.5s-4.692 10.5-10.5 10.5S1.501 17.808 1.501 12 6.193 1.5 12.001 1.5zm0 3a7.5 7.5 0 00-7.5 7.5v.75c0 .415.335.75.75.75h4.5c.415 0 .75-.335.75-.75V12a1.5 1.5 0 113 0v6.75c0 .415.335.75.75.75h4.5c.415 0 .75-.335.75-.75V12a7.5 7.5 0 00-7.5-7.5z"/>
                         </svg>
                         Download .rpm
                     </a>
                 </div>
+                <span class="version-badge">v0.6.0</span>
             </div>
 
             <!-- macOS -->
             <div class="platform-card">
                 <h2>
-                    <svg class="platform-icon" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/>
+                    <!-- Apple logo with gradient -->
+                    <svg class="platform-icon" viewBox="0 0 24 24">
+                        <defs>
+                            <linearGradient id="appleGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+                                <stop offset="0%" style="stop-color:#b4b4b4"/>
+                                <stop offset="100%" style="stop-color:#8a8a8a"/>
+                            </linearGradient>
+                        </defs>
+                        <path fill="url(#appleGradient)" d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/>
                     </svg>
                     macOS
                 </h2>
                 <p class="description">For macOS 12 Monterey and later (Apple Silicon & Intel)</p>
                 <div class="download-buttons">
-                    <a href="#" class="download-btn disabled">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                            <polyline points="7 10 12 15 17 10"/>
-                            <line x1="12" y1="15" x2="12" y2="3"/>
+                    <a href="https://github.com/peteonrails/voxtype/releases/download/v0.6.0-rc1/Voxtype-0.6.0-rc1-macos-arm64.dmg" class="download-btn">
+                        <!-- macOS-style disk image icon -->
+                        <svg class="pkg-icon" viewBox="0 0 24 24">
+                            <defs>
+                                <linearGradient id="dmgGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+                                    <stop offset="0%" style="stop-color:#fff"/>
+                                    <stop offset="100%" style="stop-color:#e0e0e0"/>
+                                </linearGradient>
+                            </defs>
+                            <rect x="2" y="4" width="20" height="16" rx="2" fill="url(#dmgGrad)" stroke="#aaa" stroke-width="1"/>
+                            <rect x="5" y="10" width="14" height="3" rx="1.5" fill="#888"/>
+                            <circle cx="17" cy="7" r="1.5" fill="#4ade80"/>
                         </svg>
                         Download .dmg
                     </a>
                 </div>
-                <p class="coming-soon">Coming soon - join the waitlist for early access</p>
+                <span class="version-badge coming-soon-badge">v0.6.0-rc1</span>
+            </div>
+        </div>
+    </section>
+
+    <!-- Package Manager Installation -->
+    <section class="pkg-manager-section">
+        <h2>Use Your Package Manager</h2>
+        <p class="section-subtitle">Install directly from your distribution's package manager</p>
+        <div class="pkg-manager-grid">
+            <!-- Omarchy -->
+            <div class="pkg-manager-card">
+                <h3>
+                    <svg class="distro-icon" viewBox="0 0 24 24">
+                        <circle cx="12" cy="12" r="10" fill="#e84545"/>
+                        <circle cx="12" cy="12" r="6" fill="none" stroke="#fff" stroke-width="2.5"/>
+                    </svg>
+                    Omarchy
+                </h3>
+                <p>Our primary development target. One-click install, zero configuration.</p>
+                <div class="code-block">
+                    <code>Install → AI → Dictation</code>
+                </div>
+            </div>
+
+            <!-- Arch Linux -->
+            <div class="pkg-manager-card">
+                <h3>
+                    <svg class="distro-icon" viewBox="0 0 24 24">
+                        <circle cx="12" cy="12" r="10" fill="#1793d1"/>
+                        <path d="M12 4L6 18h3l3-7 3 7h3L12 4z" fill="#fff"/>
+                    </svg>
+                    Arch Linux
+                </h3>
+                <p>Install from the AUR using paru or yay</p>
+                <div class="code-block">
+                    <code><span class="comment"># Using paru</span><br/>paru -S voxtype<br/><br/><span class="comment"># Using yay</span><br/>yay -S voxtype</code>
+                </div>
+            </div>
+
+            <!-- NixOS -->
+            <div class="pkg-manager-card">
+                <h3>
+                    <svg class="distro-icon" viewBox="0 0 24 24">
+                        <circle cx="12" cy="12" r="10" fill="#5277c3"/>
+                        <path d="M12 6l-4 3 4 3 4-3-4-3z" fill="#7ebae4"/>
+                        <path d="M8 9v6l4 3v-6l-4-3z" fill="#5277c3" stroke="#7ebae4" stroke-width="0.5"/>
+                        <path d="M16 9v6l-4 3v-6l4-3z" fill="#7ebae4"/>
+                    </svg>
+                    NixOS
+                </h3>
+                <p>Add to your configuration or use nix-shell</p>
+                <div class="code-block">
+                    <code><span class="comment"># In configuration.nix</span><br/>environment.systemPackages = [ pkgs.voxtype ];<br/><br/><span class="comment"># Or try it</span><br/>nix-shell -p voxtype</code>
+                </div>
             </div>
         </div>
     </section>
@@ -322,9 +517,11 @@
             <div class="requirement-card">
                 <h3>Linux</h3>
                 <ul>
+                    <li>Omarchy</li>
+                    <li>Arch Linux (via AUR)</li>
+                    <li>NixOS</li>
                     <li>Ubuntu 24.04+ or Debian Trixie+</li>
                     <li>Fedora 39+</li>
-                    <li>Arch Linux (AUR)</li>
                     <li>glibc 2.38 or later</li>
                     <li>PipeWire or PulseAudio</li>
                     <li>Wayland or X11</li>
@@ -347,9 +544,8 @@
         <h2>Other Options</h2>
         <p>Looking for other versions or installation methods?</p>
         <div class="alt-links">
-            <a href="https://aur.archlinux.org/packages/voxtype">Arch Linux (AUR)</a>
-            <a href="https://aur.archlinux.org/packages/voxtype-bin">Arch Linux Binary (AUR)</a>
             <a href="https://github.com/peteonrails/voxtype/releases">All Releases on GitHub</a>
+            <a href="https://aur.archlinux.org/packages/voxtype-bin">Pre-built Binaries (AUR)</a>
             <a href="https://github.com/peteonrails/voxtype#building-from-source">Build from Source</a>
         </div>
     </section>
@@ -385,7 +581,7 @@
             </div>
         </div>
         <div class="footer-bottom">
-            <p>MIT License. Made with care for the Linux and macOS desktop.</p>
+            <p>MIT License. Made by <a href="https://fasteragile.com">Faster Agile</a> and <a href="https://peterjackson.dev">Peter Jackson</a>.</p>
         </div>
     </footer>
 

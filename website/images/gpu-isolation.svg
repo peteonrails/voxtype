@@ -21,7 +21,7 @@
   <text x="600" y="60" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="36" font-weight="bold" fill="#cdd6f4">GPU Memory: Hybrid Graphics Laptops</text>
 
   <!-- Subtitle -->
-  <text x="600" y="95" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="20" fill="#a6adc8">voxtype 0.4.13 with gpu_isolation</text>
+  <text x="600" y="95" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="20" fill="#a6adc8">voxtype 0.6.0 with gpu_isolation</text>
 
   <!-- Left Panel: Without gpu_isolation -->
   <g transform="translate(60, 130)">

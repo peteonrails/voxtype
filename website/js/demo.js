@@ -137,7 +137,7 @@ class VoxtypeDemo {
 
             // Phase 4: Transcribing
             this.setKeyStatus('Transcribing...', 'transcribing');
-            this.showNotification('transcribing', 'Push to Talk Inactive', 'Transcribing...');
+            this.showNotification('transcribing', 'Recording Stopped', 'Transcribing...');
             await this.delay(1500);
             this.hideNotification();
 

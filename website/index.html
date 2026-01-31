@@ -82,7 +82,7 @@
                 </div>
                 <div class="terminal-body">
                     <pre><code><span class="prompt">$</span> voxtype
-<span class="info">[INFO]</span> Voxtype v0.1.0 starting...
+<span class="info">[INFO]</span> Voxtype v0.6.0 starting...
 <span class="info">[INFO]</span> Using model: base.en
 <span class="info">[INFO]</span> Hotkey: SCROLLLOCK
 <span class="info">[INFO]</span> Ready! Hold SCROLLLOCK to record.
@@ -319,7 +319,7 @@
                         <polyline points="16 18 22 12 16 6"/>
                         <polyline points="8 6 2 12 8 18"/>
                     </svg>
-                    Coding in Neovim
+                    Coding with opencode
                 </button>
             </div>
 
@@ -405,7 +405,7 @@
                                 <span class="control minimize"></span>
                                 <span class="control maximize"></span>
                             </div>
-                            <span class="window-title-bar">nvim main.rs</span>
+                            <span class="window-title-bar">opencode — main.rs</span>
                         </div>
                         <div class="window-content vim">
                             <div class="vim-lines">
@@ -417,7 +417,7 @@
                                 <div class="vim-line"><span class="line-nr">6</span>}</div>
                             </div>
                             <div class="vim-statusline">
-                                <span class="vim-mode" id="vim-mode">-- INSERT --</span>
+                                <span class="vim-mode" id="vim-mode">opencode</span>
                                 <span class="vim-file">main.rs</span>
                                 <span class="vim-pos">5:1</span>
                             </div>
@@ -459,6 +459,24 @@
                 <h3>Dictate an AI Prompt</h3>
                 <p>Watch as Voxtype captures speech and types a prompt directly into an AI coding assistant. Perfect for hands-free interaction with agentic tools.</p>
             </div>
+
+        </div>
+    </section>
+
+    <!-- Video Demo Section -->
+    <section id="video-demo" class="video-demo-section">
+        <div class="container">
+            <h2>Voxtype on Omarchy</h2>
+            <p class="section-subtitle">See Voxtype in action on the Omarchy desktop</p>
+            <div class="video-wrapper">
+                <div class="video-aspect-ratio">
+                    <video controls playsinline>
+                        <source src="https://github.com/user-attachments/assets/f3d5156f-05e5-4f0f-9f71-b2022477d110" type="video/mp4">
+                        Your browser does not support the video tag.
+                    </video>
+                </div>
+            </div>
+            <p class="video-credit">Video courtesy of <a href="https://omarchy.org">Omarchy</a>, <a href="https://basecamp.com">Basecamp</a>, and <a href="https://dhh.dk">DHH</a>.</p>
         </div>
     </section>
 
@@ -468,6 +486,7 @@
             <h2>Choose Your Model</h2>
             <p class="section-subtitle">Balance speed and accuracy for your needs. With GPU acceleration, even large-v3 achieves sub-second inference!</p>
 
+            <h3 class="model-category">Whisper Models (English-only)</h3>
             <div class="model-table-wrapper">
                 <table class="model-table">
                     <thead>
@@ -540,6 +559,83 @@
                             </td>
                             <td>Professional transcription</td>
                         </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h3 class="model-category">Whisper Models (Multilingual)</h3>
+            <div class="model-table-wrapper">
+                <table class="model-table">
+                    <thead>
+                        <tr>
+                            <th>Model</th>
+                            <th>Size</th>
+                            <th>Speed</th>
+                            <th>Accuracy</th>
+                            <th>Best For</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>tiny</code></td>
+                            <td>75 MB</td>
+                            <td>
+                                <div class="speed-bar">
+                                    <div class="speed-fill" style="width: 95%"></div>
+                                </div>
+                            </td>
+                            <td>
+                                <div class="accuracy-bar">
+                                    <div class="accuracy-fill" style="width: 55%"></div>
+                                </div>
+                            </td>
+                            <td>Quick notes, any language</td>
+                        </tr>
+                        <tr>
+                            <td><code>base</code></td>
+                            <td>142 MB</td>
+                            <td>
+                                <div class="speed-bar">
+                                    <div class="speed-fill" style="width: 80%"></div>
+                                </div>
+                            </td>
+                            <td>
+                                <div class="accuracy-bar">
+                                    <div class="accuracy-fill" style="width: 70%"></div>
+                                </div>
+                            </td>
+                            <td>General multilingual use</td>
+                        </tr>
+                        <tr>
+                            <td><code>small</code></td>
+                            <td>466 MB</td>
+                            <td>
+                                <div class="speed-bar">
+                                    <div class="speed-fill" style="width: 55%"></div>
+                                </div>
+                            </td>
+                            <td>
+                                <div class="accuracy-bar">
+                                    <div class="accuracy-fill" style="width: 82%"></div>
+                                </div>
+                            </td>
+                            <td>Better multilingual accuracy</td>
+                        </tr>
+                        <tr>
+                            <td><code>medium</code></td>
+                            <td>1.5 GB</td>
+                            <td>
+                                <div class="speed-bar">
+                                    <div class="speed-fill" style="width: 30%"></div>
+                                </div>
+                            </td>
+                            <td>
+                                <div class="accuracy-bar">
+                                    <div class="accuracy-fill" style="width: 90%"></div>
+                                </div>
+                            </td>
+                            <td>Professional multilingual</td>
+                        </tr>
                         <tr>
                             <td><code>large-v3</code></td>
                             <td>3.1 GB</td>
@@ -553,7 +649,7 @@
                                     <div class="accuracy-fill" style="width: 100%"></div>
                                 </div>
                             </td>
-                            <td>Maximum accuracy, multilingual</td>
+                            <td>Maximum accuracy</td>
                         </tr>
                         <tr class="recommended">
                             <td><code>large-v3-turbo</code> <span class="rec-badge">GPU Recommended</span></td>
@@ -568,13 +664,60 @@
                                     <div class="accuracy-fill" style="width: 95%"></div>
                                 </div>
                             </td>
-                            <td>Fast + accurate, multilingual</td>
+                            <td>Fast + accurate</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h3 class="model-category">Parakeet Models (English, experimental)</h3>
+            <div class="model-table-wrapper">
+                <table class="model-table">
+                    <thead>
+                        <tr>
+                            <th>Model</th>
+                            <th>Size</th>
+                            <th>Speed</th>
+                            <th>Accuracy</th>
+                            <th>Best For</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr class="recommended">
+                            <td><code>parakeet-tdt-0.6b-v3</code> <span class="rec-badge">Recommended</span></td>
+                            <td>2.6 GB</td>
+                            <td>
+                                <div class="speed-bar">
+                                    <div class="speed-fill" style="width: 90%"></div>
+                                </div>
+                            </td>
+                            <td>
+                                <div class="accuracy-bar">
+                                    <div class="accuracy-fill" style="width: 95%"></div>
+                                </div>
+                            </td>
+                            <td>Fast, accurate, includes punctuation</td>
+                        </tr>
+                        <tr>
+                            <td><code>parakeet-tdt-0.6b-v3-int8</code></td>
+                            <td>670 MB</td>
+                            <td>
+                                <div class="speed-bar">
+                                    <div class="speed-fill" style="width: 95%"></div>
+                                </div>
+                            </td>
+                            <td>
+                                <div class="accuracy-bar">
+                                    <div class="accuracy-fill" style="width: 90%"></div>
+                                </div>
+                            </td>
+                            <td>Smaller, faster, quantized</td>
                         </tr>
                     </tbody>
                 </table>
             </div>
             <p class="model-note">
-                <strong>.en models</strong> are English-only but faster and more accurate for English content.
+                <strong>.en models</strong> are English-only but faster and more accurate for English. <strong>Parakeet</strong> requires the parakeet binary variant.
             </p>
         </div>
     </section>
@@ -625,8 +768,8 @@ sudo pacman -S wtype wl-clipboard</code></pre>
                             <button class="copy-btn">Copy</button>
                         </div>
                         <pre><code><span class="comment"># Download and install (Ubuntu 24.04+, Debian Trixie+)</span>
-wget https://github.com/peteonrails/voxtype/releases/download/v0.5.2/voxtype_0.5.2-1_amd64.deb
-sudo dpkg -i voxtype_0.5.2-1_amd64.deb
+wget https://github.com/peteonrails/voxtype/releases/download/v0.6.0/voxtype_0.6.0-1_amd64.deb
+sudo dpkg -i voxtype_0.6.0-1_amd64.deb
 sudo apt-get install -f
 
 <span class="comment"># Install optional dependencies</span>
@@ -642,8 +785,8 @@ sudo apt install wtype wl-clipboard</code></pre>
                             <button class="copy-btn">Copy</button>
                         </div>
                         <pre><code><span class="comment"># Download and install (Fedora 39+)</span>
-wget https://github.com/peteonrails/voxtype/releases/download/v0.5.2/voxtype-0.5.2-1.x86_64.rpm
-sudo dnf install ./voxtype-0.5.2-1.x86_64.rpm
+wget https://github.com/peteonrails/voxtype/releases/download/v0.6.0/voxtype-0.6.0-1.x86_64.rpm
+sudo dnf install ./voxtype-0.6.0-1.x86_64.rpm
 
 <span class="comment"># Install optional dependencies</span>
 sudo dnf install wtype wl-clipboard</code></pre>
@@ -794,9 +937,18 @@ systemctl --user status voxtype</code></pre>
                 <div class="feedback-card">
                     <div class="feedback-icon">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <circle cx="12" cy="12" r="10"/>
-                            <line x1="12" y1="8" x2="12" y2="12"/>
-                            <line x1="12" y1="16" x2="12.01" y2="16"/>
+                            <!-- Bug icon -->
+                            <path d="M8 2l1.88 1.88"/>
+                            <path d="M14.12 3.88L16 2"/>
+                            <path d="M9 7.13v-1a3.003 3.003 0 116 0v1"/>
+                            <path d="M12 20c-3.3 0-6-2.7-6-6v-3a6 6 0 0112 0v3c0 3.3-2.7 6-6 6z"/>
+                            <path d="M12 20v-9"/>
+                            <path d="M6.53 9C4.6 8.8 3 7.1 3 5"/>
+                            <path d="M6 13H2"/>
+                            <path d="M3 21c0-2.1 1.7-3.9 3.8-4"/>
+                            <path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/>
+                            <path d="M22 13h-4"/>
+                            <path d="M17.2 17c2.1.1 3.8 1.9 3.8 4"/>
                         </svg>
                     </div>
                     <h3>Something Not Working?</h3>
@@ -815,8 +967,8 @@ systemctl --user status voxtype</code></pre>
                     </div>
                     <h3>Like Voxtype?</h3>
                     <p>
-                        I don't accept donations, but if you find Voxtype useful, a star on GitHub
-                        helps others discover the project. Arch users can also vote on the AUR package.
+                        A star on GitHub helps others discover the project. A vote on the AUR package
+                        increases the likelihood of inclusion in the Arch extras repository.
                     </p>
                     <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
                         <a href="https://github.com/peteonrails/voxtype" class="btn btn-secondary">Star on GitHub</a>
@@ -833,7 +985,7 @@ systemctl --user status voxtype</code></pre>
             <h2>Ready to try Voxtype?</h2>
             <p>Start dictating on your Linux desktop today.</p>
             <div class="cta-buttons">
-                <a href="#install" class="btn btn-primary btn-large">Get Started</a>
+                <a href="download/" class="btn btn-primary btn-large">Download</a>
                 <a href="https://github.com/peteonrails/voxtype" class="btn btn-secondary btn-large">View Source</a>
             </div>
         </div>
@@ -881,8 +1033,8 @@ systemctl --user status voxtype</code></pre>
             </div>
 
             <div class="footer-bottom">
-                <p>&copy; 2024-2025 Voxtype. Open source under the MIT License.</p>
-                <p>Made with care by <a href="https://peterjackson.dev">Pete Jackson</a> with contributions from <a href="https://github.com/jvantillo">jvantillo</a>, <a href="https://github.com/materemias">materemias</a>, <a href="https://github.com/danheuck">danheuck</a>, <a href="https://github.com/digunix">digunix</a>, <a href="https://github.com/reisset">reisset</a>, <a href="https://github.com/goodroot">Goodroot</a>, <a href="https://github.com/robzolkos">robzolkos</a>, <a href="https://github.com/konnsim">konnsim</a>, <a href="https://github.com/IgorWarzocha">IgorWarzocha</a>, and <a href="https://github.com/mzubair481">Zubair</a></p>
+                <p>&copy; 2024, 2025, 2026 Voxtype. Open source under the MIT License.</p>
+                <p>Made by <a href="https://fasteragile.com">Faster Agile</a> and <a href="https://peterjackson.dev">Peter Jackson</a> with contributions from <a href="https://github.com/jvantillo">jvantillo</a>, <a href="https://github.com/materemias">materemias</a>, <a href="https://github.com/danheuck">danheuck</a>, <a href="https://github.com/digunix">digunix</a>, <a href="https://github.com/reisset">reisset</a>, <a href="https://github.com/goodroot">Goodroot</a>, <a href="https://github.com/robzolkos">robzolkos</a>, <a href="https://github.com/konnsim">konnsim</a>, <a href="https://github.com/IgorWarzocha">IgorWarzocha</a>, and <a href="https://github.com/mzubair481">Zubair</a></p>
             </div>
         </div>
     </footer>
