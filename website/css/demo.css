@@ -614,7 +614,26 @@
     50% { height: 18px; }
 }
 
-/* Video Demo Section */
+/* Video Demo Inline (within demo section) */
+.video-demo-inline {
+    margin-bottom: 3rem;
+    text-align: center;
+}
+
+.video-demo-inline h3 {
+    color: #e2e8f0;
+    margin-bottom: 1.5rem;
+    font-size: 1.3rem;
+}
+
+.interactive-demos-header {
+    text-align: center;
+    color: #e2e8f0;
+    margin-bottom: 1.5rem;
+    font-size: 1.3rem;
+}
+
+/* Video Demo Section (standalone) */
 .video-demo-section {
     padding: 4rem 0;
     background: linear-gradient(180deg, #0d1117 0%, #161b22 100%);
