@@ -29,6 +29,22 @@ struct SettingsView: View {
                 .padding()
         }
         .navigationTitle("Voxtype Settings")
+        .onAppear {
+            // On first launch, go to Permissions so user can grant access
+            if isFirstLaunch() {
+                selectedSection = .permissions
+            }
+        }
+    }
+
+    private func isFirstLaunch() -> Bool {
+        let key = "HasLaunchedBefore"
+        let hasLaunched = UserDefaults.standard.bool(forKey: key)
+        if !hasLaunched {
+            UserDefaults.standard.set(true, forKey: key)
+            return true
+        }
+        return false
     }
 }
 

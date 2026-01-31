@@ -1,6 +1,6 @@
 cask "voxtype" do
   version "0.6.0-rc1"
-  sha256 "b98f426c74f35cc769191ad9c427078f64695017a0273bf323b259488962bb30"
+  sha256 "791963b523e84c3569cae2e64fae02bb782e9ce1bf0f244b8f45a8149ad80dd8"
 
   url "file:///Users/pete/workspace/voxtype/releases/0.6.0-rc1/Voxtype-0.6.0-rc1-macos-arm64.dmg"
   name "Voxtype"
@@ -86,11 +86,12 @@ cask "voxtype" do
       args: ["setup", "--download", "--model", "parakeet-tdt-0.6b-v3-int8"],
       print_stdout: true
 
-    # Now load the LaunchAgent (after setup is complete)
+    # Load the LaunchAgent to start the daemon
+    # It will work once user grants permissions
     system_command "/bin/launchctl", args: ["load", plist_path]
 
-    # Launch the menubar app
-    system_command "/usr/bin/open", args: ["/Applications/Voxtype.app/Contents/MacOS/VoxtypeMenubar.app"]
+    # Launch Settings app to Permissions pane so user can grant access
+    system_command "/usr/bin/open", args: ["/Applications/Voxtype.app/Contents/MacOS/VoxtypeSetup.app"]
   end
 
   uninstall_postflight do
@@ -112,20 +113,15 @@ cask "voxtype" do
   ]
 
   caveats <<~EOS
-    Voxtype is installed and running!
+    Voxtype is installed and the daemon is running!
 
-    The Parakeet speech model was downloaded automatically.
-    Look for the microphone icon in your menu bar.
+    The Settings app opened to help you grant permissions:
+    1. Click "Grant Access" for Input Monitoring (hotkey detection)
+    2. Click "Grant Access" for Microphone (recording)
+
+    Once permissions are granted, hold Right Option to record.
 
     If prompted "Voxtype was blocked", go to:
       System Settings > Privacy & Security > click "Open Anyway"
-
-    To use hotkeys, grant Input Monitoring permission:
-      System Settings > Privacy & Security > Input Monitoring
-
-    Default hotkey: Right Option (hold to record, release to transcribe)
-
-    Settings: Click menu bar icon > Settings
-    CLI help:  voxtype --help
   EOS
 end
