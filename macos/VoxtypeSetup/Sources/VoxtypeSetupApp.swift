@@ -2,61 +2,74 @@ import SwiftUI
 
 @main
 struct VoxtypeSetupApp: App {
-    @StateObject private var setupState = SetupState()
-
     var body: some Scene {
         WindowGroup {
-            if setupState.setupComplete {
-                PreferencesView()
-                    .environmentObject(setupState)
-            } else {
-                SetupWizardView()
-                    .environmentObject(setupState)
-            }
+            SettingsView()
         }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 700, height: 500)
     }
 }
 
-/// Tracks overall setup state
-class SetupState: ObservableObject {
-    @Published var setupComplete: Bool = false
-    @Published var currentStep: SetupStep = .welcome
+/// Main settings view with sidebar navigation
+struct SettingsView: View {
+    @State private var selectedSection: SettingsSection = .general
 
-    private let wizardCompletedKey = "wizardCompleted"
-
-    init() {
-        // Only show preferences if wizard was explicitly completed
-        setupComplete = UserDefaults.standard.bool(forKey: wizardCompletedKey)
-    }
-
-    /// Mark wizard as completed (called when user finishes the wizard)
-    func markWizardComplete() {
-        UserDefaults.standard.set(true, forKey: wizardCompletedKey)
-        setupComplete = true
-    }
-
-    /// Reset to show wizard again
-    func resetWizard() {
-        UserDefaults.standard.set(false, forKey: wizardCompletedKey)
-        setupComplete = false
-        currentStep = .welcome
+    var body: some View {
+        NavigationSplitView {
+            List(SettingsSection.allCases, selection: $selectedSection) { section in
+                Label(section.title, systemImage: section.icon)
+                    .tag(section)
+            }
+            .listStyle(.sidebar)
+            .navigationSplitViewColumnWidth(min: 180, ideal: 200)
+        } detail: {
+            selectedSection.view
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding()
+        }
+        .navigationTitle("Voxtype Settings")
     }
 }
 
-enum SetupStep: Int, CaseIterable {
-    case welcome
+/// Settings sections
+enum SettingsSection: String, CaseIterable, Identifiable {
+    case general
+    case models
+    case output
     case permissions
-    case model
-    case launchAgent
-    case complete
+    case advanced
+
+    var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .welcome: return "Welcome"
+        case .general: return "General"
+        case .models: return "Models"
+        case .output: return "Output"
         case .permissions: return "Permissions"
-        case .model: return "Speech Model"
-        case .launchAgent: return "Auto-Start"
-        case .complete: return "Complete"
+        case .advanced: return "Advanced"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .general: return "gearshape"
+        case .models: return "cpu"
+        case .output: return "text.cursor"
+        case .permissions: return "lock.shield"
+        case .advanced: return "wrench.and.screwdriver"
+        }
+    }
+
+    @ViewBuilder
+    var view: some View {
+        switch self {
+        case .general: GeneralSettingsView()
+        case .models: ModelsSettingsView()
+        case .output: OutputSettingsView()
+        case .permissions: PermissionsSettingsView()
+        case .advanced: AdvancedSettingsView()
         }
     }
 }
