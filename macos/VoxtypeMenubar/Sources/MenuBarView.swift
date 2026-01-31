@@ -5,21 +5,16 @@ struct MenuBarView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header
-            Text("Voxtype")
-                .font(.headline)
-                .padding(.horizontal, 12)
-                .padding(.top, 8)
-                .padding(.bottom, 4)
-
-            // Status section
-            HStack {
+            // Status header - single line with icon, name, and status
+            Label {
+                Text("Voxtype · \(statusMonitor.statusText)")
+            } icon: {
                 Image(systemName: statusMonitor.iconName)
                     .foregroundColor(statusColor)
-                Text(statusMonitor.statusText)
             }
+            .font(.headline)
             .padding(.horizontal, 12)
-            .padding(.bottom, 8)
+            .padding(.vertical, 8)
 
             Divider()
 

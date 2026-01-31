@@ -30,13 +30,19 @@ use tokio::signal::unix::{signal, SignalKind};
 
 /// Send a desktop notification with optional engine icon
 async fn send_notification(title: &str, body: &str, show_engine_icon: bool, engine: crate::config::TranscriptionEngine) {
+    // On Linux, add emoji to title. On macOS, use content image instead.
+    #[cfg(target_os = "linux")]
     let title = if show_engine_icon {
         format!("{} {}", crate::output::engine_icon(engine), title)
     } else {
         title.to_string()
     };
+    #[cfg(not(target_os = "linux"))]
+    let title = title.to_string();
 
-    notification::send(&title, body).await;
+    // Pass engine for macOS content image when show_engine_icon is enabled
+    let engine_for_icon = if show_engine_icon { Some(engine) } else { None };
+    notification::send_with_engine(&title, body, engine_for_icon).await;
 }
 
 /// Write state to file for external integrations (e.g., Waybar)

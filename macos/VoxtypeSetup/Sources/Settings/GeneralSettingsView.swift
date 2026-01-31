@@ -126,27 +126,7 @@ struct GeneralSettingsView: View {
     }
 
     private func restartDaemon() {
-        // Kill existing daemon
-        let killTask = Process()
-        killTask.launchPath = "/usr/bin/pkill"
-        killTask.arguments = ["-x", "voxtype"]
-        killTask.standardOutput = FileHandle.nullDevice
-        killTask.standardError = FileHandle.nullDevice
-        try? killTask.run()
-        killTask.waitUntilExit()
-
-        // Clean up state
-        let rmTask = Process()
-        rmTask.launchPath = "/bin/rm"
-        rmTask.arguments = ["-rf", "/tmp/voxtype"]
-        rmTask.standardOutput = FileHandle.nullDevice
-        rmTask.standardError = FileHandle.nullDevice
-        try? rmTask.run()
-        rmTask.waitUntilExit()
-
-        // Start daemon fresh
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-            _ = VoxtypeCLI.run(["daemon"], wait: false)
+        VoxtypeCLI.restartDaemon {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                 self.checkDaemonStatus()
             }

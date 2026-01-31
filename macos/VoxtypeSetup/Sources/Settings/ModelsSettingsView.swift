@@ -1,184 +1,69 @@
 import SwiftUI
 
 struct ModelsSettingsView: View {
-    @State private var installedModels: [ModelInfo] = []
+    @State private var installedModels: Set<String> = []
     @State private var selectedModel: String = ""
-    @State private var isDownloading: Bool = false
-    @State private var downloadProgress: String = ""
+    @State private var downloadingModel: String? = nil
+    @State private var needsRestart: Bool = false
+
+    private let allModels: [ModelCategory] = [
+        ModelCategory(name: "Parakeet", description: "Fast, English-only, recommended", models: [
+            ModelDefinition(id: "parakeet-tdt-0.6b-v3-int8", name: "Parakeet INT8", size: "~640 MB", description: "Quantized, fastest"),
+            ModelDefinition(id: "parakeet-tdt-0.6b-v3", name: "Parakeet Full", size: "~1.2 GB", description: "Full precision"),
+        ]),
+        ModelCategory(name: "Whisper English", description: "OpenAI Whisper, optimized for English", models: [
+            ModelDefinition(id: "base.en", name: "Base English", size: "~142 MB", description: "Fast, good accuracy"),
+            ModelDefinition(id: "small.en", name: "Small English", size: "~466 MB", description: "Better accuracy"),
+            ModelDefinition(id: "medium.en", name: "Medium English", size: "~1.5 GB", description: "High accuracy"),
+        ]),
+        ModelCategory(name: "Whisper Multilingual", description: "Supports 99 languages", models: [
+            ModelDefinition(id: "base", name: "Base", size: "~142 MB", description: "Fast, 99 languages"),
+            ModelDefinition(id: "small", name: "Small", size: "~466 MB", description: "Better accuracy"),
+            ModelDefinition(id: "medium", name: "Medium", size: "~1.5 GB", description: "High accuracy"),
+            ModelDefinition(id: "large-v3", name: "Large V3", size: "~3.1 GB", description: "Best quality"),
+            ModelDefinition(id: "large-v3-turbo", name: "Large V3 Turbo", size: "~1.6 GB", description: "Fast, near-large quality"),
+        ]),
+    ]
 
     var body: some View {
         Form {
-            Section {
-                if installedModels.isEmpty {
-                    Text("No models installed")
-                        .foregroundColor(.secondary)
-                } else {
-                    ForEach(installedModels, id: \.name) { model in
-                        HStack {
-                            VStack(alignment: .leading) {
-                                Text(model.name)
-                                    .fontWeight(model.name == selectedModel ? .semibold : .regular)
-                                Text(model.size)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-
-                            Spacer()
-
-                            if model.name == selectedModel {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundColor(.green)
-                            } else {
-                                Button("Select") {
-                                    selectModel(model.name)
-                                }
-                            }
+            if needsRestart {
+                Section {
+                    HStack {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange)
+                        Text("Model changed. Restart daemon to apply.")
+                        Spacer()
+                        Button("Restart Now") {
+                            restartDaemon()
+                            needsRestart = false
                         }
-                        .padding(.vertical, 4)
+                        .buttonStyle(.borderedProminent)
                     }
                 }
-            } header: {
-                Text("Installed Models")
             }
 
-            Section {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Parakeet (Recommended)")
-                        .font(.headline)
-
-                    HStack {
-                        Button("Download parakeet-tdt-0.6b-v3-int8") {
-                            downloadModel("parakeet-tdt-0.6b-v3-int8")
-                        }
-                        .disabled(isDownloading)
-
-                        Text("~640 MB - Quantized, fast")
-                            .foregroundColor(.secondary)
+            ForEach(allModels, id: \.name) { category in
+                Section {
+                    ForEach(category.models, id: \.id) { model in
+                        ModelRowView(
+                            model: model,
+                            isInstalled: installedModels.contains(model.id),
+                            isSelected: selectedModel == model.id,
+                            isDownloading: downloadingModel == model.id,
+                            onSelect: { selectModel(model.id) },
+                            onDownload: { downloadModel(model.id) }
+                        )
                     }
-
-                    HStack {
-                        Button("Download parakeet-tdt-0.6b-v3") {
-                            downloadModel("parakeet-tdt-0.6b-v3")
-                        }
-                        .disabled(isDownloading)
-
-                        Text("~1.2 GB - Full precision")
+                } header: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(category.name)
+                        Text(category.description)
+                            .font(.caption)
                             .foregroundColor(.secondary)
+                            .fontWeight(.regular)
                     }
                 }
-
-                Divider()
-
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Whisper English-Only")
-                        .font(.headline)
-
-                    Text("Optimized for English, faster and more accurate")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    HStack {
-                        Button("Download base.en") {
-                            downloadModel("base.en")
-                        }
-                        .disabled(isDownloading)
-
-                        Text("~142 MB")
-                            .foregroundColor(.secondary)
-                    }
-
-                    HStack {
-                        Button("Download small.en") {
-                            downloadModel("small.en")
-                        }
-                        .disabled(isDownloading)
-
-                        Text("~466 MB")
-                            .foregroundColor(.secondary)
-                    }
-
-                    HStack {
-                        Button("Download medium.en") {
-                            downloadModel("medium.en")
-                        }
-                        .disabled(isDownloading)
-
-                        Text("~1.5 GB")
-                            .foregroundColor(.secondary)
-                    }
-                }
-
-                Divider()
-
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Whisper Multilingual")
-                        .font(.headline)
-
-                    Text("Supports 99 languages, can translate to English")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    HStack {
-                        Button("Download base") {
-                            downloadModel("base")
-                        }
-                        .disabled(isDownloading)
-
-                        Text("~142 MB")
-                            .foregroundColor(.secondary)
-                    }
-
-                    HStack {
-                        Button("Download small") {
-                            downloadModel("small")
-                        }
-                        .disabled(isDownloading)
-
-                        Text("~466 MB")
-                            .foregroundColor(.secondary)
-                    }
-
-                    HStack {
-                        Button("Download medium") {
-                            downloadModel("medium")
-                        }
-                        .disabled(isDownloading)
-
-                        Text("~1.5 GB")
-                            .foregroundColor(.secondary)
-                    }
-
-                    HStack {
-                        Button("Download large-v3") {
-                            downloadModel("large-v3")
-                        }
-                        .disabled(isDownloading)
-
-                        Text("~3.1 GB - Best quality")
-                            .foregroundColor(.secondary)
-                    }
-
-                    HStack {
-                        Button("Download large-v3-turbo") {
-                            downloadModel("large-v3-turbo")
-                        }
-                        .disabled(isDownloading)
-
-                        Text("~1.6 GB - Fast, near large quality")
-                            .foregroundColor(.secondary)
-                    }
-                }
-
-                if isDownloading {
-                    HStack {
-                        ProgressView()
-                            .scaleEffect(0.8)
-                        Text(downloadProgress)
-                            .foregroundColor(.secondary)
-                    }
-                }
-            } header: {
-                Text("Download Models")
             }
         }
         .formStyle(.grouped)
@@ -194,7 +79,7 @@ struct ModelsSettingsView: View {
             return
         }
 
-        var models: [ModelInfo] = []
+        var installed: Set<String> = []
 
         for item in contents {
             let path = modelsDir + "/" + item
@@ -203,22 +88,16 @@ struct ModelsSettingsView: View {
             FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
 
             if isDir.boolValue && item.contains("parakeet") {
-                // Parakeet model directory
-                let size = getDirectorySize(path)
-                models.append(ModelInfo(name: item, size: formatSize(size), isParakeet: true))
+                installed.insert(item)
             } else if item.hasPrefix("ggml-") && item.hasSuffix(".bin") {
-                // Whisper model file
-                if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-                   let size = attrs[.size] as? Int64 {
-                    let modelName = item
-                        .replacingOccurrences(of: "ggml-", with: "")
-                        .replacingOccurrences(of: ".bin", with: "")
-                    models.append(ModelInfo(name: modelName, size: formatSize(size), isParakeet: false))
-                }
+                let modelName = item
+                    .replacingOccurrences(of: "ggml-", with: "")
+                    .replacingOccurrences(of: ".bin", with: "")
+                installed.insert(modelName)
             }
         }
 
-        installedModels = models
+        installedModels = installed
 
         // Get currently selected model from config
         if let engine = ConfigManager.shared.getString("engine"), engine == "parakeet" {
@@ -244,18 +123,17 @@ struct ModelsSettingsView: View {
         }
 
         selectedModel = name
+        needsRestart = true
     }
 
     private func downloadModel(_ name: String) {
-        isDownloading = true
-        downloadProgress = "Downloading \(name)..."
+        downloadingModel = name
 
         DispatchQueue.global().async {
             let result = VoxtypeCLI.run(["setup", "--download", "--model", name])
 
             DispatchQueue.main.async {
-                isDownloading = false
-                downloadProgress = ""
+                downloadingModel = nil
                 loadInstalledModels()
 
                 if result.success {
@@ -265,31 +143,102 @@ struct ModelsSettingsView: View {
         }
     }
 
-    private func getDirectorySize(_ path: String) -> Int64 {
-        var size: Int64 = 0
-        if let enumerator = FileManager.default.enumerator(atPath: path) {
-            while let file = enumerator.nextObject() as? String {
-                let filePath = path + "/" + file
-                if let attrs = try? FileManager.default.attributesOfItem(atPath: filePath),
-                   let fileSize = attrs[.size] as? Int64 {
-                    size += fileSize
-                }
-            }
-        }
-        return size
-    }
-
-    private func formatSize(_ bytes: Int64) -> String {
-        let mb = Double(bytes) / 1_000_000
-        if mb >= 1000 {
-            return String(format: "%.1f GB", mb / 1000)
-        }
-        return String(format: "%.0f MB", mb)
+    private func restartDaemon() {
+        VoxtypeCLI.restartDaemon()
     }
 }
 
-struct ModelInfo {
+struct ModelRowView: View {
+    let model: ModelDefinition
+    let isInstalled: Bool
+    let isSelected: Bool
+    let isDownloading: Bool
+    let onSelect: () -> Void
+    let onDownload: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            // Status icon
+            statusIcon
+                .frame(width: 20)
+
+            // Model info
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text(model.name)
+                        .fontWeight(isSelected ? .semibold : .regular)
+                    if isSelected {
+                        Text("Active")
+                            .font(.caption)
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.green)
+                            .cornerRadius(4)
+                    }
+                }
+
+                if isDownloading {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .scaleEffect(0.7)
+                        Text("Downloading...")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                } else {
+                    Text("\(model.size) - \(model.description)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Spacer()
+
+            // Action button
+            if isDownloading {
+                // No button while downloading
+            } else if isInstalled {
+                if !isSelected {
+                    Button("Select") {
+                        onSelect()
+                    }
+                    .buttonStyle(.bordered)
+                }
+            } else {
+                Button("Download") {
+                    onDownload()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    @ViewBuilder
+    private var statusIcon: some View {
+        if isSelected {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundColor(.green)
+        } else if isInstalled {
+            Image(systemName: "checkmark.circle")
+                .foregroundColor(.secondary)
+        } else {
+            Image(systemName: "arrow.down.circle")
+                .foregroundColor(.blue)
+        }
+    }
+}
+
+struct ModelCategory {
+    let name: String
+    let description: String
+    let models: [ModelDefinition]
+}
+
+struct ModelDefinition {
+    let id: String
     let name: String
     let size: String
-    let isParakeet: Bool
+    let description: String
 }

@@ -39,7 +39,6 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     case audio
     case models
     case whisper
-    case remoteWhisper
     case output
     case textProcessing
     case notifications
@@ -55,7 +54,6 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .audio: return "Audio"
         case .models: return "Models"
         case .whisper: return "Whisper"
-        case .remoteWhisper: return "Remote Whisper"
         case .output: return "Output"
         case .textProcessing: return "Text Processing"
         case .notifications: return "Notifications"
@@ -71,7 +69,6 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .audio: return "mic"
         case .models: return "cpu"
         case .whisper: return "waveform"
-        case .remoteWhisper: return "network"
         case .output: return "text.cursor"
         case .textProcessing: return "text.quote"
         case .notifications: return "bell"
@@ -88,7 +85,6 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .audio: AudioSettingsView()
         case .models: ModelsSettingsView()
         case .whisper: WhisperSettingsView()
-        case .remoteWhisper: RemoteWhisperSettingsView()
         case .output: OutputSettingsView()
         case .textProcessing: TextProcessingSettingsView()
         case .notifications: NotificationSettingsView()

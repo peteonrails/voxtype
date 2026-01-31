@@ -74,4 +74,39 @@ enum VoxtypeCLI {
         let status = result.output.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return status == "idle" || status == "recording" || status == "transcribing"
     }
+
+    /// Restart the daemon (stop, clean up, start fresh)
+    static func restartDaemon(completion: (() -> Void)? = nil) {
+        DispatchQueue.global().async {
+            // Kill daemon with SIGKILL to ensure it stops
+            let killTask = Process()
+            killTask.launchPath = "/usr/bin/pkill"
+            killTask.arguments = ["-9", "voxtype"]
+            killTask.standardOutput = FileHandle.nullDevice
+            killTask.standardError = FileHandle.nullDevice
+            try? killTask.run()
+            killTask.waitUntilExit()
+
+            // Wait for process to fully terminate
+            Thread.sleep(forTimeInterval: 0.5)
+
+            // Clean up lock and state files
+            let rmTask = Process()
+            rmTask.launchPath = "/bin/rm"
+            rmTask.arguments = ["-rf", "/tmp/voxtype"]
+            rmTask.standardOutput = FileHandle.nullDevice
+            rmTask.standardError = FileHandle.nullDevice
+            try? rmTask.run()
+            rmTask.waitUntilExit()
+
+            // Wait a moment for filesystem to sync
+            Thread.sleep(forTimeInterval: 0.5)
+
+            // Start daemon
+            DispatchQueue.main.async {
+                _ = run(["daemon"], wait: false)
+                completion?()
+            }
+        }
+    }
 }

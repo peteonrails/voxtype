@@ -178,28 +178,8 @@ struct HotkeySettingsView: View {
     }
 
     private func restartDaemon() {
-        // First, stop any running daemon
-        let killTask = Process()
-        killTask.launchPath = "/usr/bin/pkill"
-        killTask.arguments = ["-x", "voxtype"]
-        try? killTask.run()
-        killTask.waitUntilExit()
-
-        // Wait a moment for the daemon to stop
-        Thread.sleep(forTimeInterval: 0.5)
-
-        // Try launchctl first (if service is installed)
-        let launchTask = Process()
-        launchTask.launchPath = "/bin/launchctl"
-        launchTask.arguments = ["start", "io.voxtype.daemon"]
-        try? launchTask.run()
-        launchTask.waitUntilExit()
-
-        // If launchctl didn't work, start daemon directly
-        if launchTask.terminationStatus != 0 {
-            VoxtypeCLI.run(["daemon"], wait: false)
+        VoxtypeCLI.restartDaemon {
+            self.needsRestart = false
         }
-
-        needsRestart = false
     }
 }
