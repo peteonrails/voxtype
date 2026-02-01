@@ -414,23 +414,26 @@ Building on modern CPUs (Zen 4, etc.) can leak AVX-512/GFNI instructions into bi
 
 ### Build Strategy
 
-**Whisper Binaries:**
+A full release requires **7 Linux binaries**: 3 Whisper variants and 4 Parakeet variants.
+
+**Whisper Binaries (3):**
 
 | Binary | Build Location | Why |
 |--------|---------------|-----|
-| AVX2 | Docker on remote pre-AVX-512 server | Clean toolchain, no AVX-512 contamination |
-| Vulkan | Docker on remote pre-AVX-512 server | GPU build on CPU without AVX-512 |
-| AVX512 | Local machine | Requires AVX-512 capable host |
+| avx2 | Docker on remote pre-AVX-512 server | Clean toolchain, no AVX-512 contamination |
+| avx512 | Local machine | Requires AVX-512 capable host |
+| vulkan | Docker on remote pre-AVX-512 server | GPU build without AVX-512 contamination |
 
-**Parakeet Binaries (Experimental):**
+**Parakeet Binaries (4):**
 
 | Binary | Build Location | Why |
 |--------|---------------|-----|
 | parakeet-avx2 | Docker on remote pre-AVX-512 server | Wide CPU compatibility |
 | parakeet-avx512 | Local machine | Best CPU performance |
-| parakeet-cuda | Docker on remote server with NVIDIA GPU | GPU acceleration |
+| parakeet-cuda | Docker on remote server with NVIDIA GPU | NVIDIA GPU acceleration |
+| parakeet-rocm | Local machine with AMD GPU | AMD GPU acceleration |
 
-Note: Parakeet binaries include bundled ONNX Runtime which contains AVX-512 instructions, but ONNX Runtime uses runtime CPU detection and falls back gracefully on older CPUs.
+Note: Parakeet binaries include bundled ONNX Runtime which may contain AVX-512 instructions, but ONNX Runtime uses runtime CPU detection and falls back gracefully on older CPUs.
 
 ### GPU Feature Flags
 
@@ -495,22 +498,23 @@ Stale build artifacts cause two categories of failures:
 # Set version
 export VERSION=0.5.0
 
-# 1. Build Whisper binaries (AVX2 + Vulkan) on remote server
+# 1. Build Whisper + Parakeet CPU binaries on remote server (no AVX-512)
 docker context use <your-remote-context>
-docker compose -f docker-compose.build.yml build --no-cache avx2 vulkan
-docker compose -f docker-compose.build.yml up avx2 vulkan
+docker compose -f docker-compose.build.yml build --no-cache avx2 vulkan parakeet-avx2
+docker compose -f docker-compose.build.yml up avx2 vulkan parakeet-avx2
 
-# 2. Build Parakeet binaries on remote server
-docker compose -f docker-compose.build.yml build --no-cache parakeet-avx2
-docker compose -f docker-compose.build.yml up parakeet-avx2
+# 2. Build Parakeet CUDA on remote server (requires NVIDIA GPU)
+docker compose -f docker-compose.build.yml build --no-cache parakeet-cuda
+docker compose -f docker-compose.build.yml up parakeet-cuda
 
-# 3. Copy binaries from remote Docker volumes to local
+# 3. Copy binaries from remote Docker containers to local
 mkdir -p releases/${VERSION}
-docker run --rm -v $(pwd)/releases/${VERSION}:/test ubuntu:24.04 ls /test  # verify
-# Use tar pipe to copy from remote Docker volume:
-docker run --rm -v $(pwd)/releases/${VERSION}:/src ubuntu:24.04 tar -cf - -C /src . | tar -xf - -C releases/${VERSION}/
+docker cp macos-release-avx2-1:/output/. releases/${VERSION}/
+docker cp macos-release-vulkan-1:/output/. releases/${VERSION}/
+docker cp macos-release-parakeet-avx2-1:/output/. releases/${VERSION}/
+docker cp macos-release-parakeet-cuda-1:/output/. releases/${VERSION}/
 
-# 4. Build AVX-512 binaries locally (requires AVX-512 capable CPU)
+# 4. Build local binaries (requires AVX-512 CPU and AMD GPU)
 docker context use default
 
 # Whisper AVX-512
@@ -520,6 +524,10 @@ cp target/release/voxtype releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-av
 # Parakeet AVX-512
 cargo clean && RUSTFLAGS="-C target-cpu=native" cargo build --release --features parakeet
 cp target/release/voxtype releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-parakeet-avx512
+
+# Parakeet ROCm (requires AMD GPU)
+cargo clean && RUSTFLAGS="-C target-cpu=native" cargo build --release --features parakeet-rocm
+cp target/release/voxtype releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-parakeet-rocm
 
 # 5. VERIFY VERSIONS before uploading (critical!)
 for bin in releases/${VERSION}/voxtype-*; do
@@ -532,17 +540,19 @@ done
 
 ### Version Verification Checklist
 
-**Before uploading any release, verify ALL binaries report the correct version:**
+**Before uploading any release, verify ALL 7 binaries report the correct version:**
 
 ```bash
-# Whisper binaries
+# Whisper binaries (3)
 releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx2 --version
 releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx512 --version
 releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-vulkan --version
 
-# Parakeet binaries (experimental)
+# Parakeet binaries (4)
 releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-parakeet-avx2 --version
 releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-parakeet-avx512 --version
+releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-parakeet-cuda --version
+releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-parakeet-rocm --version
 ```
 
 If versions don't match, the Docker cache is stale. Rebuild with `--no-cache`.
