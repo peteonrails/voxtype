@@ -15,9 +15,9 @@ Optimized for Wayland, works on X11 too.
 COMMANDS:
   voxtype                  Start the daemon (with evdev hotkey detection)
   voxtype daemon           Same as above
-  voxtype record-toggle    Toggle recording (for compositor keybindings)
-  voxtype record-start     Start recording
-  voxtype record-stop      Stop recording and transcribe
+  voxtype record toggle    Toggle recording (for compositor keybindings)
+  voxtype record start     Start recording
+  voxtype record stop      Stop recording and transcribe
   voxtype status           Show daemon status (integrates with Waybar)
   voxtype setup            Check dependencies and download models
   voxtype config           Show current configuration
