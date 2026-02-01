@@ -76,11 +76,12 @@
         onnxruntimeCuda = pkgsUnfree.onnxruntime.override { cudaSupport = true; };
         onnxruntimeRocm = pkgs.onnxruntime.override { rocmSupport = true; };
 
+
         # Base derivation for voxtype (unwrapped)
         mkVoxtypeUnwrapped = { pname ? "voxtype", features ? [], extraNativeBuildInputs ? [], extraBuildInputs ? [] }:
           pkgs.rustPlatform.buildRustPackage {
             inherit pname;
-            version = "0.5.0";
+            version = "0.4.9";
 
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
@@ -223,6 +224,7 @@
           ];
         };
 
+
       in {
         packages = {
           # Wrapped packages (ready to use, runtime deps in PATH)
@@ -237,13 +239,11 @@
           parakeet-cuda = wrapParakeet { onnxruntime = onnxruntimeCuda; pkg = parakeetCudaUnwrapped; };
           parakeet-rocm = wrapParakeet { onnxruntime = onnxruntimeRocm; pkg = parakeetRocmUnwrapped; };
 
+
           # Unwrapped packages (for custom wrapping scenarios)
           voxtype-unwrapped = mkVoxtypeUnwrapped {};
           voxtype-vulkan-unwrapped = vulkanUnwrapped;
           voxtype-rocm-unwrapped = rocmUnwrapped;
-          voxtype-parakeet-unwrapped = parakeetUnwrapped;
-          voxtype-parakeet-cuda-unwrapped = parakeetCudaUnwrapped;
-          voxtype-parakeet-rocm-unwrapped = parakeetRocmUnwrapped;
         };
 
         # Development shell with all dependencies

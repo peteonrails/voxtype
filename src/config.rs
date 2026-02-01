@@ -417,7 +417,11 @@ pub struct StatusConfig {
 }
 
 fn default_icon_theme() -> String {
-    "emoji".to_string()
+    if cfg!(target_os = "macos") {
+        "nerd-font".to_string()
+    } else {
+        "emoji".to_string()
+    }
 }
 
 impl Default for StatusConfig {
@@ -863,15 +867,29 @@ impl Default for ParakeetConfig {
 }
 
 /// Transcription engine selection (which ASR technology to use)
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TranscriptionEngine {
-    /// Use Whisper (whisper.cpp via whisper-rs) - default
-    #[default]
+    /// Use Whisper (whisper.cpp via whisper-rs)
     Whisper,
     /// Use Parakeet (NVIDIA's FastConformer via ONNX Runtime)
     /// Requires: cargo build --features parakeet
     Parakeet,
+}
+
+impl Default for TranscriptionEngine {
+    fn default() -> Self {
+        // macOS: Default to Parakeet with CoreML for best performance on Apple Silicon
+        // Linux: Default to Whisper for broader compatibility
+        #[cfg(target_os = "macos")]
+        {
+            TranscriptionEngine::Parakeet
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            TranscriptionEngine::Whisper
+        }
+    }
 }
 
 /// Text processing configuration
