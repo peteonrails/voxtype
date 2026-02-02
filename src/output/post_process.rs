@@ -198,8 +198,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_output_fallback() {
-        // echo -n outputs nothing, which should trigger fallback
-        let config = make_config("echo -n ''", 5000);
+        // printf '' outputs nothing, which should trigger fallback
+        // (echo -n is not portable across platforms)
+        let config = make_config("printf ''", 5000);
         let processor = PostProcessor::new(&config);
         let result = processor.process("original text").await;
         assert_eq!(result, "original text"); // Falls back to original
@@ -232,7 +233,8 @@ mod tests {
     #[tokio::test]
     async fn test_whitespace_trimming() {
         // Output has trailing newline which should be trimmed
-        let config = make_config("echo 'hello'", 5000);
+        // Use printf with \n to be portable across platforms
+        let config = make_config("printf 'hello\\n'", 5000);
         let processor = PostProcessor::new(&config);
         let result = processor.process("ignored").await;
         assert_eq!(result, "hello");

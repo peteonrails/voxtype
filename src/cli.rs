@@ -103,6 +103,10 @@ pub enum Commands {
     /// Run as daemon (default if no command specified)
     Daemon,
 
+    /// Run menu bar helper (macOS)
+    #[cfg(target_os = "macos")]
+    Menubar,
+
     /// Transcribe an audio file (WAV, 16kHz, mono)
     Transcribe {
         /// Path to audio file
@@ -181,6 +185,9 @@ pub enum Commands {
         #[command(subcommand)]
         action: RecordAction,
     },
+
+    /// Check for updates
+    CheckUpdate,
 }
 
 /// Output mode override for record commands
@@ -345,7 +352,11 @@ pub enum SetupAction {
     /// Check system configuration and dependencies
     Check,
 
-    /// Install voxtype as a systemd user service
+    /// Interactive macOS setup wizard
+    #[cfg(target_os = "macos")]
+    Macos,
+
+    /// Install voxtype as a systemd user service (Linux)
     Systemd {
         /// Uninstall the service instead of installing
         #[arg(long)]
@@ -354,6 +365,38 @@ pub enum SetupAction {
         /// Show service status
         #[arg(long)]
         status: bool,
+    },
+
+    /// Install voxtype as a LaunchAgent (macOS)
+    #[cfg(target_os = "macos")]
+    Launchd {
+        /// Uninstall the service instead of installing
+        #[arg(long)]
+        uninstall: bool,
+
+        /// Show service status
+        #[arg(long)]
+        status: bool,
+    },
+
+    /// Set up Hammerspoon hotkey integration (macOS)
+    #[cfg(target_os = "macos")]
+    Hammerspoon {
+        /// Install Hammerspoon config (copy to ~/.hammerspoon/)
+        #[arg(long)]
+        install: bool,
+
+        /// Show the Hammerspoon configuration snippet
+        #[arg(long)]
+        show: bool,
+
+        /// Hotkey to configure (default: rightalt)
+        #[arg(long, default_value = "rightalt")]
+        hotkey: String,
+
+        /// Use toggle mode instead of push-to-talk
+        #[arg(long)]
+        toggle: bool,
     },
 
     /// Show Waybar configuration snippets
