@@ -17,6 +17,26 @@ fn parse_driver_order(s: &str) -> Result<Vec<config::OutputDriver>, String> {
         .collect()
 }
 
+/// Check if running as root and warn for commands that don't need elevated privileges.
+/// Returns true if running as root.
+fn warn_if_root(command_name: &str) -> bool {
+    // SAFETY: getuid() is always safe to call
+    let is_root = unsafe { libc::getuid() } == 0;
+    if is_root {
+        eprintln!(
+            "Warning: Running 'voxtype setup {}' as root is not recommended.",
+            command_name
+        );
+        eprintln!("  - Models will download to /root/.local/share/voxtype/ instead of your user directory");
+        eprintln!("  - Config changes will apply to /root/.config/voxtype/ instead of your user config");
+        eprintln!("  - Cannot restart your user's voxtype daemon from root");
+        eprintln!();
+        eprintln!("Run without sudo: voxtype setup {}", command_name);
+        eprintln!();
+    }
+    is_root
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Install SIGILL handler early to catch illegal instruction crashes
@@ -182,9 +202,11 @@ async fn main() -> anyhow::Result<()> {
         } => {
             match action {
                 Some(SetupAction::Check) => {
+                    warn_if_root("check");
                     setup::run_checks(&config).await?;
                 }
                 Some(SetupAction::Systemd { uninstall, status }) => {
+                    warn_if_root("systemd");
                     if status {
                         setup::systemd::status().await?;
                     } else if uninstall {
@@ -199,6 +221,7 @@ async fn main() -> anyhow::Result<()> {
                     install,
                     uninstall,
                 }) => {
+                    warn_if_root("waybar");
                     if install {
                         setup::waybar::install()?;
                     } else if uninstall {
@@ -216,6 +239,7 @@ async fn main() -> anyhow::Result<()> {
                     uninstall,
                     qml,
                 }) => {
+                    warn_if_root("dms");
                     if install {
                         setup::dms::install()?;
                     } else if uninstall {
@@ -227,6 +251,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 Some(SetupAction::Model { list, set, restart }) => {
+                    warn_if_root("model");
                     if list {
                         setup::model::list_installed();
                     } else if let Some(model_name) = set {
@@ -252,6 +277,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 Some(SetupAction::Parakeet { enable, disable, status }) => {
+                    warn_if_root("parakeet");
                     if status {
                         setup::parakeet::show_status();
                     } else if enable {
@@ -264,10 +290,12 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 Some(SetupAction::Compositor { compositor_type }) => {
+                    warn_if_root("compositor");
                     setup::compositor::run(&compositor_type).await?;
                 }
                 None => {
                     // Default: run setup (non-blocking)
+                    warn_if_root("");
                     setup::run_setup(&config, download, model.as_deref(), quiet, no_post_install)
                         .await?;
                 }
