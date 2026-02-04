@@ -208,6 +208,16 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 #[cfg(target_os = "macos")]
+                Some(SetupAction::AppBundle { uninstall, status }) => {
+                    if status {
+                        setup::app_bundle::status().await?;
+                    } else if uninstall {
+                        setup::app_bundle::uninstall().await?;
+                    } else {
+                        setup::app_bundle::install().await?;
+                    }
+                }
+                #[cfg(target_os = "macos")]
                 Some(SetupAction::Hammerspoon { install, show, hotkey, toggle }) => {
                     setup::hammerspoon::run(install, show, &hotkey, toggle).await?;
                 }

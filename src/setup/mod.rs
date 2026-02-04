@@ -13,6 +13,8 @@ pub mod compositor;
 pub mod dms;
 pub mod gpu;
 #[cfg(target_os = "macos")]
+pub mod app_bundle;
+#[cfg(target_os = "macos")]
 pub mod hammerspoon;
 pub mod launchd;
 #[cfg(target_os = "macos")]
