@@ -186,6 +186,7 @@ fn parse_key_name(name: &str) -> Option<Key> {
         "PAUSE" => Some(Key::Pause),
         "SCROLLLOCK" => Some(Key::ScrollLock),
         "PRINTSCREEN" => Some(Key::PrintScreen),
+        "FN" | "FUNCTION" | "GLOBE" => Some(Key::Function),
 
         // Letters (for completeness, though unusual for hotkeys)
         "A" => Some(Key::KeyA),
