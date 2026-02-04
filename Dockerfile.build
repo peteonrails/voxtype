@@ -80,5 +80,6 @@ RUN echo "=== Verifying AVX2 binary ===" \
 # Output stage - copy binary to /output volume
 CMD mkdir -p /output \
     && cp /tmp/voxtype-avx2 /output/voxtype-${VERSION}-linux-x86_64-avx2 \
+    && chmod 755 /output/voxtype-${VERSION}-linux-x86_64-avx2 \
     && echo "Binary copied to /output:" \
     && ls -la /output/voxtype-*
