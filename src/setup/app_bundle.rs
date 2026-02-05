@@ -13,7 +13,7 @@ use std::process::Command;
 use super::{get_voxtype_path, print_failure, print_info, print_success, print_warning};
 
 const APP_NAME: &str = "Voxtype.app";
-const BUNDLE_ID: &str = "io.voxtype.daemon";
+pub const BUNDLE_ID: &str = "io.voxtype.daemon";
 
 /// Get the path to the app bundle
 pub fn app_bundle_path() -> PathBuf {
