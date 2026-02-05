@@ -13,6 +13,8 @@ pub mod compositor;
 pub mod dms;
 pub mod gpu;
 #[cfg(target_os = "macos")]
+pub mod app_bundle;
+#[cfg(target_os = "macos")]
 pub mod hammerspoon;
 pub mod launchd;
 #[cfg(target_os = "macos")]
@@ -675,17 +677,33 @@ pub async fn run_setup(
     if !quiet && !no_post_install {
         println!();
         println!("Next steps:");
-        println!("  1. Set up a compositor keybinding to trigger recording:");
-        println!(
-            "     Example for Hyprland: bind = , XF86AudioRecord, exec, voxtype record-toggle\n"
-        );
-        println!("  2. Start the daemon: voxtype daemon\n");
-        println!("Optional:");
-        println!("  voxtype setup check      - Verify system configuration");
-        println!("  voxtype setup model      - Download/switch whisper models");
-        println!("  voxtype setup systemd    - Install as systemd service");
-        println!("  voxtype setup waybar     - Get Waybar integration config");
-        println!("  voxtype setup compositor - Fix modifier key issues (Hyprland/Sway/River)");
+
+        #[cfg(target_os = "macos")]
+        {
+            println!("  1. Install as app bundle (recommended):");
+            println!("     voxtype setup app-bundle\n");
+            println!("  2. Or run the interactive setup wizard:");
+            println!("     voxtype setup macos\n");
+            println!("Optional:");
+            println!("  voxtype setup check             - Verify system configuration");
+            println!("  voxtype setup model             - Download/switch whisper models");
+            println!("  voxtype setup app-bundle --status - Check installation status");
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            println!("  1. Set up a compositor keybinding to trigger recording:");
+            println!(
+                "     Example for Hyprland: bind = , XF86AudioRecord, exec, voxtype record-toggle\n"
+            );
+            println!("  2. Start the daemon: voxtype daemon\n");
+            println!("Optional:");
+            println!("  voxtype setup check      - Verify system configuration");
+            println!("  voxtype setup model      - Download/switch whisper models");
+            println!("  voxtype setup systemd    - Install as systemd service");
+            println!("  voxtype setup waybar     - Get Waybar integration config");
+            println!("  voxtype setup compositor - Fix modifier key issues (Hyprland/Sway/River)");
+        }
     }
 
     Ok(())

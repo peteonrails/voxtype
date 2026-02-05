@@ -1,121 +1,39 @@
 //! macOS interactive setup wizard
 //!
 //! Provides a guided setup experience for macOS users, covering:
-//! - App bundle creation and code signing
+//! - App bundle creation and code signing (via app_bundle module)
 //! - Microphone permission (required for audio capture)
 //! - Accessibility permission (required for text injection)
 //! - Notification permission (optional)
 //! - Hotkey configuration (native rdev or Hammerspoon)
-//! - LaunchAgent auto-start
+//! - Login Items auto-start (via app_bundle module)
 //! - Model download
 
 use super::{print_failure, print_info, print_success, print_warning};
 use std::io::{self, Write};
-use std::path::PathBuf;
 
-const APP_BUNDLE_PATH: &str = "/Applications/Voxtype.app";
-const BUNDLE_IDENTIFIER: &str = "io.voxtype";
-
-/// Check if the app bundle exists and is properly signed
+/// Check if the app bundle exists and is properly set up
 fn check_app_bundle() -> bool {
-    let app_path = PathBuf::from(APP_BUNDLE_PATH);
+    let app_path = super::app_bundle::app_bundle_path();
     let binary_path = app_path.join("Contents/MacOS/voxtype");
     let info_plist = app_path.join("Contents/Info.plist");
 
     app_path.exists() && binary_path.exists() && info_plist.exists()
 }
 
-/// Create the app bundle with proper Info.plist for permissions
-async fn create_app_bundle() -> anyhow::Result<()> {
-    let app_path = PathBuf::from(APP_BUNDLE_PATH);
-    let contents_path = app_path.join("Contents");
-    let macos_path = contents_path.join("MacOS");
-    let resources_path = contents_path.join("Resources");
-
-    // Create directory structure
-    std::fs::create_dir_all(&macos_path)?;
-    std::fs::create_dir_all(&resources_path)?;
-
-    // Get current binary path
-    let current_exe = std::env::current_exe()?;
-    let binary_dest = macos_path.join("voxtype");
-
-    // Copy binary to app bundle
-    std::fs::copy(&current_exe, &binary_dest)?;
-
-    // Get version from Cargo
-    let version = env!("CARGO_PKG_VERSION");
-
-    // Create Info.plist with all required permission descriptions
-    let info_plist = format!(r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleExecutable</key>
-    <string>voxtype</string>
-    <key>CFBundleIdentifier</key>
-    <string>{}</string>
-    <key>CFBundleName</key>
-    <string>Voxtype</string>
-    <key>CFBundleDisplayName</key>
-    <string>Voxtype</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>{}</string>
-    <key>CFBundleVersion</key>
-    <string>{}</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>11.0</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>Voxtype needs microphone access to capture your voice for speech-to-text transcription.</string>
-    <key>NSAppleEventsUsageDescription</key>
-    <string>Voxtype needs to send keystrokes to type transcribed text into applications.</string>
-</dict>
-</plist>
-"#, BUNDLE_IDENTIFIER, version, version);
-
-    std::fs::write(contents_path.join("Info.plist"), info_plist)?;
-
-    // Copy icon if available
-    if let Some(data_dir) = directories::BaseDirs::new().map(|d| d.data_dir().join("voxtype")) {
-        let icon_src = data_dir.join("icon.png");
-        if icon_src.exists() {
-            let _ = std::fs::copy(&icon_src, resources_path.join("icon.png"));
-        }
-    }
-
-    // Sign the app bundle
-    let sign_result = tokio::process::Command::new("codesign")
-        .args(["--force", "--deep", "--sign", "-", APP_BUNDLE_PATH])
-        .output()
-        .await;
-
-    match sign_result {
-        Ok(output) if output.status.success() => Ok(()),
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Code signing failed: {}", stderr)
-        }
-        Err(e) => anyhow::bail!("Failed to run codesign: {}", e),
-    }
-}
-
 /// Reset TCC permissions for Voxtype (forces re-prompt)
 async fn reset_permissions() -> bool {
+    let bundle_id = super::app_bundle::BUNDLE_ID;
+
     let mic_reset = tokio::process::Command::new("tccutil")
-        .args(["reset", "Microphone", BUNDLE_IDENTIFIER])
+        .args(["reset", "Microphone", bundle_id])
         .output()
         .await
         .map(|o| o.status.success())
         .unwrap_or(false);
 
     let acc_reset = tokio::process::Command::new("tccutil")
-        .args(["reset", "Accessibility", BUNDLE_IDENTIFIER])
+        .args(["reset", "Accessibility", bundle_id])
         .output()
         .await
         .map(|o| o.status.success())
@@ -124,24 +42,8 @@ async fn reset_permissions() -> bool {
     mic_reset || acc_reset
 }
 
-/// Check if microphone permission is granted
-/// This is tricky - we can't directly check, but we can try to access an audio device
-async fn check_microphone_permission() -> bool {
-    // Use a simple AppleScript to check if we can access audio input
-    // This isn't perfect but gives a reasonable indication
-    let output = tokio::process::Command::new("osascript")
-        .args(["-e", "do shell script \"echo test\""])
-        .output()
-        .await;
-
-    // For now, we'll assume permission is needed and guide the user
-    // The real check happens when the daemon tries to capture audio
-    output.map(|o| o.status.success()).unwrap_or(false)
-}
-
 /// Check if Accessibility permission is granted using AXIsProcessTrusted equivalent
 async fn check_accessibility_permission() -> bool {
-    // Try to use osascript to control System Events - this requires Accessibility
     let output = tokio::process::Command::new("osascript")
         .args(["-e", "tell application \"System Events\" to return name of first process"])
         .output()
@@ -163,36 +65,6 @@ async fn open_privacy_settings(pane: &str) -> bool {
         .await
         .map(|o| o.status.success())
         .unwrap_or(false)
-}
-
-/// Check if Voxtype is in the Accessibility list (even if disabled)
-async fn is_in_accessibility_list() -> bool {
-    // Check the TCC database - this is a heuristic
-    let output = tokio::process::Command::new("sqlite3")
-        .args([
-            "/Library/Application Support/com.apple.TCC/TCC.db",
-            &format!("SELECT client FROM access WHERE client='{}' AND service='kTCCServiceAccessibility'", BUNDLE_IDENTIFIER),
-        ])
-        .output()
-        .await;
-
-    // If we can't query (permission denied), check user database
-    if output.is_err() || !output.as_ref().unwrap().status.success() {
-        if let Some(home) = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf()) {
-            let user_db = home.join("Library/Application Support/com.apple.TCC/TCC.db");
-            let output = tokio::process::Command::new("sqlite3")
-                .args([
-                    user_db.to_str().unwrap_or(""),
-                    &format!("SELECT client FROM access WHERE client='{}' AND service='kTCCServiceAccessibility'", BUNDLE_IDENTIFIER),
-                ])
-                .output()
-                .await;
-
-            return output.map(|o| !o.stdout.is_empty()).unwrap_or(false);
-        }
-    }
-
-    output.map(|o| !o.stdout.is_empty()).unwrap_or(false)
 }
 
 /// Check if Hammerspoon is installed
@@ -315,7 +187,9 @@ fn install_default_icon_file() -> anyhow::Result<()> {
 
 /// Get the app bundle binary path
 pub fn get_app_bundle_path() -> String {
-    format!("{}/Contents/MacOS/voxtype", APP_BUNDLE_PATH)
+    super::app_bundle::app_binary_path()
+        .to_string_lossy()
+        .to_string()
 }
 
 /// Run the macOS setup wizard
@@ -333,7 +207,7 @@ pub async fn run() -> anyhow::Result<()> {
         let recreate = prompt_yn("Recreate app bundle? (recommended after updates)", true);
         if recreate {
             println!("  Creating app bundle...");
-            match create_app_bundle().await {
+            match super::app_bundle::create_app_bundle() {
                 Ok(_) => print_success("App bundle created and signed"),
                 Err(e) => {
                     print_failure(&format!("Failed to create app bundle: {}", e));
@@ -352,7 +226,7 @@ pub async fn run() -> anyhow::Result<()> {
         let create = prompt_yn("Create app bundle?", true);
         if create {
             println!("  Creating app bundle...");
-            match create_app_bundle().await {
+            match super::app_bundle::create_app_bundle() {
                 Ok(_) => print_success("App bundle created and signed"),
                 Err(e) => {
                     print_failure(&format!("Failed to create app bundle: {}", e));
@@ -374,21 +248,20 @@ pub async fn run() -> anyhow::Result<()> {
 
     let setup_mic = prompt_yn("Set up microphone permission now?", true);
     if setup_mic {
-        // Reset permissions to ensure a fresh prompt
         let _ = reset_permissions().await;
 
-        // Open System Settings to Microphone
         print_info("Opening System Settings > Privacy & Security > Microphone...");
         open_privacy_settings("Microphone").await;
 
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-        // Launch the app to trigger the permission prompt
-        print_info("Launching Voxtype to trigger permission prompt...");
-        let app_binary = get_app_bundle_path();
-        let _ = tokio::process::Command::new(&app_binary)
-            .arg("daemon")
-            .spawn();
+        // Launch the app bundle to trigger the permission prompt
+        print_info("Launching Voxtype.app to trigger permission prompt...");
+        let app_path = super::app_bundle::app_bundle_path();
+        let _ = tokio::process::Command::new("open")
+            .arg(app_path.as_os_str())
+            .output()
+            .await;
 
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
@@ -403,7 +276,7 @@ pub async fn run() -> anyhow::Result<()> {
 
         // Kill the test daemon
         let _ = tokio::process::Command::new("pkill")
-            .args(["-f", "voxtype"])
+            .args(["-9", "-f", "Voxtype.app"])
             .output()
             .await;
 
@@ -461,7 +334,6 @@ pub async fn run() -> anyhow::Result<()> {
 
             wait_for_enter("Press Enter when Accessibility permission is granted...");
 
-            // Verify permission
             let has_acc_now = check_accessibility_permission().await;
             if has_acc_now {
                 print_success("Accessibility permission granted");
@@ -524,7 +396,7 @@ pub async fn run() -> anyhow::Result<()> {
         false
     };
 
-    let hotkey = prompt("\nHotkey to use", "rightalt");
+    let hotkey = prompt("\nHotkey to use", "fn");
     let toggle_mode = prompt_yn("Use toggle mode? (press to start/stop instead of hold)", false);
 
     if use_hammerspoon {
@@ -539,22 +411,21 @@ pub async fn run() -> anyhow::Result<()> {
         print_info(&format!("Mode: {}", if toggle_mode { "toggle" } else { "push-to-talk" }));
     }
 
-    // Step 7: Auto-start
+    // Step 7: Auto-start (Login Items)
     section("Step 7: Auto-start Configuration");
 
-    println!("Voxtype can start automatically when you log in.\n");
+    println!("Voxtype can start automatically when you log in via Login Items.\n");
 
-    let setup_autostart = prompt_yn("Set up auto-start (LaunchAgent)?", true);
+    let setup_autostart = prompt_yn("Add to Login Items?", true);
 
     if setup_autostart {
-        println!();
-        println!("Installing LaunchAgent...");
-
-        // First, update launchd to use the app bundle path
-        if let Err(e) = install_launchd_with_app_bundle().await {
-            print_warning(&format!("Could not install LaunchAgent: {}", e));
-        } else {
-            print_success("LaunchAgent installed");
+        match super::app_bundle::add_to_login_items() {
+            Ok(true) => print_success("Added to Login Items"),
+            Ok(false) => {
+                print_warning("Could not add to Login Items automatically");
+                print_info("Add manually: System Settings > General > Login Items");
+            }
+            Err(e) => print_warning(&format!("Could not add to Login Items: {}", e)),
         }
     }
 
@@ -753,25 +624,17 @@ pub async fn run() -> anyhow::Result<()> {
     println!("  Hotkey:         {} ({})", hotkey, if toggle_mode { "toggle" } else { "push-to-talk" });
     println!("  Engine:         {}", engine_name);
     println!("  Model:          {}", model);
-    println!("  Auto-start:     {}", if setup_autostart { "enabled" } else { "disabled" });
+    println!("  Auto-start:     {}", if setup_autostart { "Login Items" } else { "disabled" });
 
     println!("\n\x1b[1mStarting Voxtype...\x1b[0m\n");
 
-    // Start the daemon
-    if setup_autostart {
-        let _ = tokio::process::Command::new("launchctl")
-            .args(["load", &format!("{}/Library/LaunchAgents/io.voxtype.daemon.plist",
-                   dirs::home_dir().map(|h| h.to_string_lossy().to_string()).unwrap_or_default())])
-            .output()
-            .await;
-        print_success("Daemon started via LaunchAgent");
-    } else {
-        let app_binary = get_app_bundle_path();
-        let _ = tokio::process::Command::new(&app_binary)
-            .arg("daemon")
-            .spawn();
-        print_success("Daemon started");
-    }
+    // Start via open (preserves app bundle identity for permissions)
+    let app_path = super::app_bundle::app_bundle_path();
+    let _ = tokio::process::Command::new("open")
+        .arg(app_path.as_os_str())
+        .output()
+        .await;
+    print_success("Voxtype.app started");
 
     println!();
     println!("Press {} to start recording!", hotkey);
@@ -779,74 +642,8 @@ pub async fn run() -> anyhow::Result<()> {
     println!("Useful commands:");
     println!("  voxtype status            - Check daemon status");
     println!("  voxtype status --follow   - Watch status in real-time");
+    println!("  voxtype setup app-bundle --status  - Check app bundle status");
     println!("  voxtype record toggle     - Toggle recording from CLI");
-
-    Ok(())
-}
-
-/// Install LaunchAgent configured to use the app bundle
-async fn install_launchd_with_app_bundle() -> anyhow::Result<()> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-    let launch_agents_dir = home.join("Library/LaunchAgents");
-    let logs_dir = home.join("Library/Logs/voxtype");
-
-    std::fs::create_dir_all(&launch_agents_dir)?;
-    std::fs::create_dir_all(&logs_dir)?;
-
-    let app_binary = get_app_bundle_path();
-
-    let plist_content = format!(r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>io.voxtype.daemon</string>
-
-    <key>ProgramArguments</key>
-    <array>
-        <string>{}</string>
-        <string>daemon</string>
-    </array>
-
-    <key>RunAtLoad</key>
-    <true/>
-
-    <key>KeepAlive</key>
-    <true/>
-
-    <key>StandardOutPath</key>
-    <string>{}/stdout.log</string>
-
-    <key>StandardErrorPath</key>
-    <string>{}/stderr.log</string>
-
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
-    </dict>
-
-    <key>ProcessType</key>
-    <string>Interactive</string>
-
-    <key>Nice</key>
-    <integer>-10</integer>
-</dict>
-</plist>
-"#, app_binary, logs_dir.display(), logs_dir.display());
-
-    let plist_path = launch_agents_dir.join("io.voxtype.daemon.plist");
-
-    // Unload existing if present
-    let _ = tokio::process::Command::new("launchctl")
-        .args(["unload", plist_path.to_str().unwrap_or("")])
-        .output()
-        .await;
-
-    std::fs::write(&plist_path, plist_content)?;
-
-    print_success(&format!("Created: {}", plist_path.display()));
-    print_success(&format!("Logs: {}", logs_dir.display()));
 
     Ok(())
 }

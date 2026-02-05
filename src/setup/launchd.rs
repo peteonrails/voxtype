@@ -86,6 +86,18 @@ pub async fn install() -> anyhow::Result<()> {
         anyhow::bail!("Not on macOS");
     }
 
+    // Warn about limitations on macOS
+    #[cfg(target_os = "macos")]
+    {
+        print_warning("LaunchAgent services do not receive Microphone permissions on macOS.");
+        print_warning("Transcription will fail (Whisper outputs silence as 'Thank you').");
+        println!();
+        print_info("Recommended: use 'voxtype setup app-bundle' instead.");
+        print_info("The app bundle approach uses Login Items and properly receives");
+        print_info("Accessibility, Input Monitoring, and Microphone permissions.");
+        println!();
+    }
+
     // Ensure LaunchAgents directory exists
     let launch_dir = launch_agents_dir().ok_or_else(|| anyhow::anyhow!("Could not determine LaunchAgents directory"))?;
     fs::create_dir_all(&launch_dir)?;
