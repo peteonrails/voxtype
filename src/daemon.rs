@@ -322,6 +322,8 @@ pub struct Daemon {
     model_load_task: Option<tokio::task::JoinHandle<std::result::Result<Arc<dyn Transcriber>, crate::error::TranscribeError>>>,
     // Background task for transcription (allows cancel during transcription)
     transcription_task: Option<tokio::task::JoinHandle<TranscriptionResult>>,
+    // Voice Activity Detection (filters silence-only recordings)
+    vad: Option<Box<dyn crate::vad::VoiceActivityDetector>>,
 }
 
 impl Daemon {
@@ -371,6 +373,24 @@ impl Daemon {
             PostProcessor::new(cfg)
         });
 
+        // Initialize Voice Activity Detection if enabled
+        let vad = match crate::vad::create_vad(&config) {
+            Ok(Some(vad)) => {
+                tracing::info!(
+                    "Voice Activity Detection enabled (backend: {:?}, threshold: {:.2}, min_speech: {}ms)",
+                    config.vad.backend,
+                    config.vad.threshold,
+                    config.vad.min_speech_duration_ms
+                );
+                Some(vad)
+            }
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!("Failed to initialize VAD, continuing without: {}", e);
+                None
+            }
+        };
+
         Self {
             config,
             config_path,
@@ -382,6 +402,7 @@ impl Daemon {
             model_manager: None,
             model_load_task: None,
             transcription_task: None,
+            vad,
         }
     }
 
@@ -513,6 +534,33 @@ impl Daemon {
                         tracing::debug!("Recording too short ({:.2}s), ignoring", audio_duration);
                         self.reset_to_idle(state).await;
                         return false;
+                    }
+
+                    // Voice Activity Detection: skip if no speech detected
+                    if let Some(ref vad) = self.vad {
+                        match vad.detect(&samples) {
+                            Ok(result) if !result.has_speech => {
+                                tracing::debug!(
+                                    "No speech detected (speech={:.1}%, rms={:.4}), skipping transcription",
+                                    result.speech_ratio * 100.0,
+                                    result.rms_energy
+                                );
+                                self.play_feedback(SoundEvent::Cancelled);
+                                self.reset_to_idle(state).await;
+                                return false;
+                            }
+                            Ok(result) => {
+                                tracing::debug!(
+                                    "Speech detected: {:.2}s ({:.1}%)",
+                                    result.speech_duration_secs,
+                                    result.speech_ratio * 100.0
+                                );
+                            }
+                            Err(e) => {
+                                // VAD failed, proceed with transcription anyway
+                                tracing::warn!("VAD failed, proceeding anyway: {}", e);
+                            }
+                        }
                     }
 
                     tracing::info!("Transcribing {:.1}s of audio...", audio_duration);

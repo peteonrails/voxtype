@@ -22,6 +22,8 @@
 # Audio files (test recordings)
 *.wav
 *.mp3
+# Exception: VAD test fixtures are intentionally committed
+!tests/fixtures/vad/*.wav
 
 # Claude Code
 .claude/settings.local.json

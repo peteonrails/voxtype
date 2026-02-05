@@ -70,6 +70,7 @@ whisper-rs = "0.15.1"
 parakeet-rs = { version = "0.2.9", optional = true }
 
 
+
 # CPU count for thread detection
 num_cpus = "1.16"
 
@@ -98,6 +99,8 @@ clap = { version = "4", features = ["derive"] }
 clap_mangen = "0.2"
 
 [dev-dependencies]
+hound = "3.5"
+dirs = "5.0"
 
 [profile.release]
 lto = true
