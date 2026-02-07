@@ -40,10 +40,6 @@ jobs:
       - name: Build VitePress
         run: bun run docs:build
 
-      - name: Copy VitePress build to website
-        run: |
-          cp -r dist/docs website/
-
       - name: Setup Pages
         uses: actions/configure-pages@v4
 
