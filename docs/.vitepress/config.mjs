@@ -4,9 +4,9 @@ export default defineConfig({
   title: "Voxtype",
   description:
     "Voice-to-text with push-to-talk for Wayland compositors.",
-  base: "/docs/",
+  base: "/voxtype/docs/",
   srcDir: ".",
-  outDir: "../dist/docs",
+  outDir: "../website/docs",
 
   head: [["link", { rel: "icon", href: "/docs/logo.svg" }]],
 
