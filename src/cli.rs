@@ -53,6 +53,11 @@ pub struct Cli {
     #[arg(long)]
     pub paste: bool,
 
+    /// Restore clipboard content after paste mode completes
+    /// Saves clipboard before transcription and restores it after paste
+    #[arg(long)]
+    pub restore_clipboard: bool,
+
     /// Override model for transcription.
     /// Whisper: tiny, base, small, medium, large-v3, large-v3-turbo (and .en variants).
     /// Parakeet: parakeet-tdt-0.6b-v3, parakeet-tdt-0.6b-v3-int8

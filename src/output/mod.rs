@@ -284,6 +284,8 @@ pub fn create_output_chain_with_override(
                 config.paste_keys.clone(),
                 config.type_delay_ms,
                 pre_type_delay_ms,
+                config.restore_clipboard,
+                config.restore_clipboard_delay_ms,
             )));
         }
         crate::config::OutputMode::File => {

@@ -1200,6 +1200,47 @@ paste_keys = "shift+insert"  # For Hyprland/Omarchy
 - Letters: `a-z`
 - Special: `insert`, `enter`
 
+### restore_clipboard
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+**Applies to:** Paste mode only
+
+When `true`, voxtype saves your clipboard content before transcription and restores it after the paste operation completes. This prevents your original clipboard content from being overwritten by the transcription.
+
+**How it works:**
+1. Before transcription: Save current clipboard content (including MIME type for binary data)
+2. Copy transcribed text to clipboard
+3. Simulate paste keystroke
+4. After brief delay: Restore original clipboard content
+
+**Example:**
+```toml
+[output]
+mode = "paste"
+restore_clipboard = true  # Preserve original clipboard content
+```
+
+**Note:** This only works in `mode = "paste"`. In `mode = "clipboard"`, the user manually pastes the content, so restoration would interfere with the intended workflow.
+
+### restore_clipboard_delay_ms
+
+**Type:** Integer
+**Default:** `50`
+**Required:** No
+**Applies to:** Paste mode only (when `restore_clipboard = true`)
+
+Delay in milliseconds after the paste keystroke before restoring the original clipboard content. Increase this if the restoration happens too quickly and interferes with the paste operation.
+
+**Example:**
+```toml
+[output]
+mode = "paste"
+restore_clipboard = true
+restore_clipboard_delay_ms = 100  # Longer delay for slower systems
+```
+
 ### fallback_to_clipboard
 
 **Type:** Boolean

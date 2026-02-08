@@ -127,6 +127,9 @@ pub enum OutputError {
     #[error("wl-copy not found in PATH. Install wl-clipboard via your package manager.")]
     WlCopyNotFound,
 
+    #[error("wl-paste not found in PATH. Install wl-clipboard via your package manager.")]
+    WlPasteNotFound,
+
     #[error("xclip not found in PATH. Install xclip via your package manager.")]
     XclipNotFound,
 
