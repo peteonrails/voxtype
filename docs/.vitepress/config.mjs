@@ -36,6 +36,7 @@ export default defineConfig({
     
 
     nav: [
+      { text:"Homepage", link:"https://radiorambo.github.io/voxtype" },
       { text: "Installation", link: "/" },  
       { text: "Troubleshooting", link: "/TROUBLESHOOTING" },
       { text: "FAQ", link: "/FAQ" },
