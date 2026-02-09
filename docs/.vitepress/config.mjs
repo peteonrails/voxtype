@@ -8,7 +8,7 @@ export default defineConfig({
   srcDir: ".",
   outDir: "../website/docs",
 
-  head: [["link", { rel: "icon", href: "/docs/logo.svg" }]],
+  head: [["link", { rel: "icon", href: "/voxtype/docs/logo.svg" }]],
 
   cleanUrls: true,
   lastUpdated: true,
