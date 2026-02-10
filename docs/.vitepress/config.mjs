@@ -4,11 +4,11 @@ export default defineConfig({
   title: "Voxtype",
   description:
     "Voice-to-text with push-to-talk for Wayland compositors.",
-  base: "/voxtype/docs/",
+  base: "/docs/",
   srcDir: ".",
   outDir: "../website/docs",
 
-  head: [["link", { rel: "icon", href: "/voxtype/docs/logo.svg" }]],
+  head: [["link", { rel: "icon", href: "/docs/logo.svg" }]],
 
   cleanUrls: true,
   lastUpdated: true,
@@ -36,7 +36,7 @@ export default defineConfig({
     
 
     nav: [
-      { text:"Homepage", link:"https://radiorambo.github.io/voxtype" },
+      { text:"Homepage", link:"https://voxtype.io" },
       { text: "Installation", link: "/" },  
       { text: "Troubleshooting", link: "/TROUBLESHOOTING" },
       { text: "FAQ", link: "/FAQ" },
