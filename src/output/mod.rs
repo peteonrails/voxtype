@@ -196,8 +196,14 @@ fn create_driver_output(
             config.auto_submit,
             config.append_text.clone(),
         )),
-        OutputDriver::Clipboard => Box::new(clipboard::ClipboardOutput::new(show_notification)),
-        OutputDriver::Xclip => Box::new(xclip::XclipOutput::new(show_notification)),
+        OutputDriver::Clipboard => Box::new(clipboard::ClipboardOutput::new(
+            show_notification,
+            config.append_text.clone(),
+        )),
+        OutputDriver::Xclip => Box::new(xclip::XclipOutput::new(
+            show_notification,
+            config.append_text.clone(),
+        )),
     }
 }
 
@@ -256,13 +262,17 @@ pub fn create_output_chain_with_override(
                 && config.driver_order.is_some()
                 && !driver_order.contains(&OutputDriver::Clipboard)
             {
-                chain.push(Box::new(clipboard::ClipboardOutput::new(false)));
+                chain.push(Box::new(clipboard::ClipboardOutput::new(
+                    false,
+                    config.append_text.clone(),
+                )));
             }
         }
         crate::config::OutputMode::Clipboard => {
             // Only clipboard
             chain.push(Box::new(clipboard::ClipboardOutput::new(
                 config.notification.on_transcription,
+                config.append_text.clone(),
             )));
         }
         crate::config::OutputMode::Paste => {
@@ -283,6 +293,7 @@ pub fn create_output_chain_with_override(
             );
             chain.push(Box::new(clipboard::ClipboardOutput::new(
                 config.notification.on_transcription,
+                config.append_text.clone(),
             )));
         }
     }

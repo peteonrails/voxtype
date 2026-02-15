@@ -15,12 +15,17 @@ use tokio::process::Command;
 pub struct ClipboardOutput {
     /// Whether to show a desktop notification
     notify: bool,
+    /// Text to append after transcription
+    append_text: Option<String>,
 }
 
 impl ClipboardOutput {
     /// Create a new clipboard output
-    pub fn new(notify: bool) -> Self {
-        Self { notify }
+    pub fn new(notify: bool, append_text: Option<String>) -> Self {
+        Self {
+            notify,
+            append_text,
+        }
     }
 
     /// Send a desktop notification
@@ -53,6 +58,13 @@ impl TextOutput for ClipboardOutput {
         if text.is_empty() {
             return Ok(());
         }
+
+        // Prepare text with optional append
+        let text = if let Some(ref append) = self.append_text {
+            std::borrow::Cow::Owned(format!("{}{}", text, append))
+        } else {
+            std::borrow::Cow::Borrowed(text)
+        };
 
         // Spawn wl-copy with stdin pipe
         let mut child = Command::new("wl-copy")
@@ -93,7 +105,7 @@ impl TextOutput for ClipboardOutput {
 
         // Send notification if enabled
         if self.notify {
-            self.send_notification(text).await;
+            self.send_notification(&text).await;
         }
 
         tracing::info!("Text copied to clipboard ({} chars)", text.len());
@@ -122,10 +134,10 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = ClipboardOutput::new(true);
+        let output = ClipboardOutput::new(true, None);
         assert!(output.notify);
 
-        let output = ClipboardOutput::new(false);
+        let output = ClipboardOutput::new(false, None);
         assert!(!output.notify);
     }
 }
