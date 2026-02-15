@@ -5,9 +5,11 @@ Solutions to common issues when using Voxtype.
 ## Table of Contents
 
 - [Modifier Key Interference (Hyprland/Sway/River)](#modifier-key-interference-hyprlandswayriver)
+- [Hotkey Detection on KDE Plasma](#hotkey-detection-on-kde-plasma)
 - [Permission Issues](#permission-issues)
 - [Audio Problems](#audio-problems)
 - [Transcription Issues](#transcription-issues)
+- [Voice Activity Detection (VAD)](#voice-activity-detection-vad)
 - [Output Problems](#output-problems)
   - [wtype not working on KDE Plasma or GNOME Wayland](#wtype-not-working-on-kde-plasma-or-gnome-wayland)
   - [Text output not working on X11](#text-output-not-working-on-x11)
@@ -409,6 +411,77 @@ If you experience phrase repetition (e.g., "word word word"), make sure this set
    ```
 2. Try a different model (large-v3-turbo and large-v3 are most affected)
 3. If using context optimization and experiencing issues, disable it
+
+---
+
+## Voice Activity Detection (VAD)
+
+### VAD filters too aggressively (rejects recordings with speech)
+
+**Symptom:** VAD rejects recordings that contain speech, showing "No speech detected" in notifications or logs.
+
+**Cause:** The detection threshold is too high for your microphone or environment.
+
+**Solution:** Lower the threshold. The default is 0.5. Values closer to 0.0 are more sensitive:
+
+```toml
+[vad]
+enabled = true
+threshold = 0.2  # More sensitive, less likely to reject speech
+```
+
+You can also reduce `min_speech_duration_ms` if very short utterances are being rejected:
+
+```toml
+[vad]
+enabled = true
+threshold = 0.3
+min_speech_duration_ms = 50  # Accept shorter speech segments (default: 100)
+```
+
+### VAD model not found (Whisper VAD backend)
+
+**Symptom:** Error about missing VAD model when using `backend = "whisper"` or `backend = "auto"` with the Whisper engine.
+
+**Solution:** Download the Silero VAD model:
+
+```bash
+voxtype setup vad
+```
+
+Alternatively, switch to the energy backend which requires no model download:
+
+```toml
+[vad]
+enabled = true
+backend = "energy"
+```
+
+### VAD doesn't filter silence
+
+**Symptom:** VAD is enabled but silent recordings still get transcribed, producing hallucinations.
+
+**Possible causes:**
+1. Background noise above the threshold. Lower your microphone gain or raise the threshold:
+   ```toml
+   [vad]
+   enabled = true
+   threshold = 0.7  # Require louder speech
+   ```
+2. The energy backend may be less accurate than the Whisper backend for borderline cases. Try switching:
+   ```toml
+   [vad]
+   enabled = true
+   backend = "whisper"  # More accurate, requires: voxtype setup vad
+   ```
+
+**Debugging:** Run with verbose logging to see VAD decisions:
+
+```bash
+voxtype -vv
+```
+
+Look for log messages about speech detection to understand what VAD is doing with your recordings.
 
 ---
 

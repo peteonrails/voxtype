@@ -284,7 +284,7 @@ sample_rate = 16000
 **Default:** `60`
 **Required:** No
 
-Maximum recording duration in seconds. Recording automatically stops after this limit as a safety measure.
+Maximum recording duration in seconds. Recording automatically stops after this limit as a safety measure. When the limit is reached, the captured audio is transcribed and output normally rather than being discarded.
 
 **Example:**
 ```toml

@@ -1257,6 +1257,17 @@ auto_submit = true           # Final Enter to submit
 
 This lets you dictate multi-line messages that are automatically submitted when complete.
 
+**Append text after each transcription:**
+
+```toml
+[output]
+append_text = " "  # Add a space after each transcription
+```
+
+When dictating a paragraph one sentence at a time, each transcription ends without a trailing space. This causes sentences to run together. Setting `append_text = " "` adds a space after each transcription so sentences are properly separated.
+
+This works with all output modes (type, paste, clipboard). The appended text is inserted before `auto_submit` sends Enter, if enabled.
+
 ---
 
 ## Output Hooks (Compositor Integration)
