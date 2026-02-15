@@ -589,6 +589,7 @@ if [[ "$BUILD_DEB" == "true" ]]; then
         --depends "libasound2 | libasound2t64" \
         --depends libc6 \
         --depends curl \
+        --deb-recommends pipewire-alsa \
         --deb-recommends wtype \
         --deb-recommends wl-clipboard \
         --deb-suggests ydotool \
@@ -622,6 +623,7 @@ if [[ "$BUILD_RPM" == "true" ]]; then
         --depends "alsa-lib" \
         --depends "glibc" \
         --depends "curl" \
+        --depends "pipewire-alsa" \
         --rpm-summary "$DESCRIPTION" \
         --package "$RPM_FILE" \
         usr etc

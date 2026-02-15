@@ -15,11 +15,11 @@ BuildRequires:  systemd-rpm-macros
 BuildRequires:  cmake
 
 Requires:       curl
+Requires:       pipewire-alsa
 Recommends:     wtype
 Recommends:     wl-clipboard
 Suggests:       ydotool
 Suggests:       libnotify
-Suggests:       pipewire
 
 %description
 Voxtype is a push-to-talk voice-to-text daemon for Linux.
