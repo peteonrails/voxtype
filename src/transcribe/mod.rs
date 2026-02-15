@@ -50,7 +50,9 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
                     "Parakeet engine selected but [parakeet] config section is missing".to_string(),
                 )
             })?;
-            Ok(Box::new(parakeet::ParakeetTranscriber::new(parakeet_config)?))
+            Ok(Box::new(parakeet::ParakeetTranscriber::new(
+                parakeet_config,
+            )?))
         }
         #[cfg(not(feature = "parakeet"))]
         TranscriptionEngine::Parakeet => Err(TranscribeError::InitFailed(
@@ -76,7 +78,10 @@ pub fn create_transcriber_with_config_path(
     // Apply GPU selection from VOXTYPE_VULKAN_DEVICE environment variable
     // This sets VK_LOADER_DRIVERS_SELECT to filter Vulkan drivers
     if let Some(vendor) = gpu::apply_gpu_selection() {
-        tracing::info!("GPU selection: {} (via VOXTYPE_VULKAN_DEVICE)", vendor.display_name());
+        tracing::info!(
+            "GPU selection: {} (via VOXTYPE_VULKAN_DEVICE)",
+            vendor.display_name()
+        );
     }
 
     match config.effective_mode() {

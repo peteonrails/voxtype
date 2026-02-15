@@ -49,8 +49,10 @@ impl EitypeOutput {
 
         // eitype doesn't have a pre-type delay flag, so sleep if needed
         if self.pre_type_delay_ms > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(self.pre_type_delay_ms as u64))
-                .await;
+            tokio::time::sleep(std::time::Duration::from_millis(
+                self.pre_type_delay_ms as u64,
+            ))
+            .await;
         }
 
         let mut cmd = Command::new("eitype");
@@ -62,10 +64,7 @@ impl EitypeOutput {
             debug_args.push(format!("-d {}", self.type_delay_ms));
         }
 
-        debug_args.push(format!(
-            "\"{}\"",
-            text.chars().take(20).collect::<String>()
-        ));
+        debug_args.push(format!("\"{}\"", text.chars().take(20).collect::<String>()));
         tracing::debug!("Running: {}", debug_args.join(" "));
 
         let output = cmd

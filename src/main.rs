@@ -120,7 +120,10 @@ async fn main() -> anyhow::Result<()> {
             "whisper" => config.engine = config::TranscriptionEngine::Whisper,
             "parakeet" => config.engine = config::TranscriptionEngine::Parakeet,
             _ => {
-                eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet", engine);
+                eprintln!(
+                    "Error: Invalid engine '{}'. Valid options: whisper, parakeet",
+                    engine
+                );
                 std::process::exit(1);
             }
         }
@@ -285,7 +288,11 @@ async fn main() -> anyhow::Result<()> {
                         setup::gpu::show_status();
                     }
                 }
-                Some(SetupAction::Parakeet { enable, disable, status }) => {
+                Some(SetupAction::Parakeet {
+                    enable,
+                    disable,
+                    status,
+                }) => {
                     warn_if_root("parakeet");
                     if status {
                         setup::parakeet::show_status();
@@ -414,7 +421,14 @@ fn send_record_command(config: &config::Config, action: RecordAction) -> anyhow:
             } else {
                 eprintln!("Error: Profile '{}' not found.", profile_name);
                 eprintln!();
-                eprintln!("Available profiles: {}", available.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
+                eprintln!(
+                    "Available profiles: {}",
+                    available
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
             }
             std::process::exit(1);
         }
@@ -819,7 +833,10 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
         if let Some(ref model_type) = parakeet_config.model_type {
             println!("  model_type = {:?}", model_type);
         }
-        println!("  on_demand_loading = {}", parakeet_config.on_demand_loading);
+        println!(
+            "  on_demand_loading = {}",
+            parakeet_config.on_demand_loading
+        );
     } else {
         println!("  (not configured)");
     }

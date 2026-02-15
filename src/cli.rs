@@ -809,7 +809,10 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "record", "start", "--file=out.txt"]);
         match cli.command {
             Some(Commands::Record { action }) => {
-                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::File));
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::File)
+                );
                 assert_eq!(action.file_path(), Some("out.txt"));
             }
             _ => panic!("Expected Record command"),
@@ -833,7 +836,10 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "record", "start", "--file"]);
         match cli.command {
             Some(Commands::Record { action }) => {
-                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::File));
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::File)
+                );
                 assert_eq!(action.file_path(), Some("")); // Empty string means use config path
             }
             _ => panic!("Expected Record command"),
@@ -842,11 +848,21 @@ mod tests {
 
     #[test]
     fn test_record_start_model_and_output_override() {
-        let cli = Cli::parse_from(["voxtype", "record", "start", "--model", "large-v3-turbo", "--clipboard"]);
+        let cli = Cli::parse_from([
+            "voxtype",
+            "record",
+            "start",
+            "--model",
+            "large-v3-turbo",
+            "--clipboard",
+        ]);
         match cli.command {
             Some(Commands::Record { action }) => {
                 assert_eq!(action.model_override(), Some("large-v3-turbo"));
-                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::Clipboard));
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::Clipboard)
+                );
             }
             _ => panic!("Expected Record command"),
         }
@@ -857,7 +873,10 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "record", "start", "--file=/tmp/output.txt"]);
         match cli.command {
             Some(Commands::Record { action }) => {
-                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::File));
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::File)
+                );
                 assert_eq!(action.file_path(), Some("/tmp/output.txt"));
             }
             _ => panic!("Expected Record command"),
@@ -880,7 +899,10 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "record", "toggle", "--file=out.txt"]);
         match cli.command {
             Some(Commands::Record { action }) => {
-                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::File));
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::File)
+                );
                 assert_eq!(action.file_path(), Some("out.txt"));
             }
             _ => panic!("Expected Record command"),
@@ -892,7 +914,10 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "record", "toggle", "--file"]);
         match cli.command {
             Some(Commands::Record { action }) => {
-                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::File));
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::File)
+                );
                 assert_eq!(action.file_path(), Some("")); // Empty string means use config path
             }
             _ => panic!("Expected Record command"),
@@ -916,17 +941,9 @@ mod tests {
 
     #[test]
     fn test_record_start_file_mutually_exclusive_with_paste() {
-        let result = Cli::try_parse_from([
-            "voxtype",
-            "record",
-            "start",
-            "--file=out.txt",
-            "--paste",
-        ]);
-        assert!(
-            result.is_err(),
-            "Should not allow both --file and --paste"
-        );
+        let result =
+            Cli::try_parse_from(["voxtype", "record", "start", "--file=out.txt", "--paste"]);
+        assert!(result.is_err(), "Should not allow both --file and --paste");
     }
 
     #[test]
@@ -946,17 +963,9 @@ mod tests {
 
     #[test]
     fn test_record_start_file_mutually_exclusive_with_type() {
-        let result = Cli::try_parse_from([
-            "voxtype",
-            "record",
-            "start",
-            "--file=out.txt",
-            "--type",
-        ]);
-        assert!(
-            result.is_err(),
-            "Should not allow both --file and --type"
-        );
+        let result =
+            Cli::try_parse_from(["voxtype", "record", "start", "--file=out.txt", "--type"]);
+        assert!(result.is_err(), "Should not allow both --file and --type");
     }
 
     #[test]
@@ -1076,11 +1085,21 @@ mod tests {
     #[test]
     fn test_record_start_profile_with_output_mode() {
         // Profile can be used together with output mode overrides
-        let cli = Cli::parse_from(["voxtype", "record", "start", "--profile", "slack", "--clipboard"]);
+        let cli = Cli::parse_from([
+            "voxtype",
+            "record",
+            "start",
+            "--profile",
+            "slack",
+            "--clipboard",
+        ]);
         match cli.command {
             Some(Commands::Record { action }) => {
                 assert_eq!(action.profile(), Some("slack"));
-                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::Clipboard));
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::Clipboard)
+                );
             }
             _ => panic!("Expected Record command"),
         }
@@ -1095,7 +1114,12 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "setup", "dms", "--install"]);
         match cli.command {
             Some(Commands::Setup {
-                action: Some(SetupAction::Dms { install, uninstall, qml }),
+                action:
+                    Some(SetupAction::Dms {
+                        install,
+                        uninstall,
+                        qml,
+                    }),
                 ..
             }) => {
                 assert!(install, "should have install=true");
@@ -1111,7 +1135,12 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "setup", "dms", "--uninstall"]);
         match cli.command {
             Some(Commands::Setup {
-                action: Some(SetupAction::Dms { install, uninstall, qml }),
+                action:
+                    Some(SetupAction::Dms {
+                        install,
+                        uninstall,
+                        qml,
+                    }),
                 ..
             }) => {
                 assert!(!install, "should have install=false");
@@ -1127,7 +1156,12 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "setup", "dms", "--qml"]);
         match cli.command {
             Some(Commands::Setup {
-                action: Some(SetupAction::Dms { install, uninstall, qml }),
+                action:
+                    Some(SetupAction::Dms {
+                        install,
+                        uninstall,
+                        qml,
+                    }),
                 ..
             }) => {
                 assert!(!install, "should have install=false");
@@ -1143,7 +1177,12 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "setup", "dms"]);
         match cli.command {
             Some(Commands::Setup {
-                action: Some(SetupAction::Dms { install, uninstall, qml }),
+                action:
+                    Some(SetupAction::Dms {
+                        install,
+                        uninstall,
+                        qml,
+                    }),
                 ..
             }) => {
                 assert!(!install, "should have install=false");

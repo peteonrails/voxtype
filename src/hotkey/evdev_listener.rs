@@ -675,18 +675,17 @@ const XKB_OFFSET: u16 = 8;
 fn parse_prefixed_keycode(s: &str) -> Result<Option<Key>, HotkeyError> {
     let normalized = s.to_ascii_uppercase();
 
-    let (number_str, is_xkb) =
-        if let Some(n) = normalized.strip_prefix("WEV_") {
-            (n, true)
-        } else if let Some(n) = normalized.strip_prefix("X11_") {
-            (n, true)
-        } else if let Some(n) = normalized.strip_prefix("XEV_") {
-            (n, true)
-        } else if let Some(n) = normalized.strip_prefix("EVTEST_") {
-            (n, false)
-        } else {
-            return Ok(None);
-        };
+    let (number_str, is_xkb) = if let Some(n) = normalized.strip_prefix("WEV_") {
+        (n, true)
+    } else if let Some(n) = normalized.strip_prefix("X11_") {
+        (n, true)
+    } else if let Some(n) = normalized.strip_prefix("XEV_") {
+        (n, true)
+    } else if let Some(n) = normalized.strip_prefix("EVTEST_") {
+        (n, false)
+    } else {
+        return Ok(None);
+    };
 
     let code: u16 = if let Some(hex) = number_str.strip_prefix("0X") {
         u16::from_str_radix(hex, 16)

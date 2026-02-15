@@ -156,7 +156,12 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let parakeet_available = cfg!(feature = "parakeet");
     let whisper_count = MODELS.len();
     let parakeet_count = PARAKEET_MODELS.len();
-    let total_count = whisper_count + if parakeet_available { parakeet_count } else { 0 };
+    let total_count = whisper_count
+        + if parakeet_available {
+            parakeet_count
+        } else {
+            0
+        };
 
     // --- Whisper Section ---
     println!("--- Whisper (OpenAI, 99+ languages) ---\n");
@@ -704,7 +709,10 @@ fn download_parakeet_model_by_info(model: &ParakeetModelInfo) -> anyhow::Result<
 
     // Validate all files are present
     validate_parakeet_model(&model_path)?;
-    print_success(&format!("Model '{}' downloaded to {:?}", model.name, model_path));
+    print_success(&format!(
+        "Model '{}' downloaded to {:?}",
+        model.name, model_path
+    ));
 
     Ok(())
 }
@@ -811,10 +819,7 @@ fn update_parakeet_in_config(config: &str, model_name: &str) -> String {
 
     // Add [parakeet] section if not present
     if !has_parakeet_section {
-        result.push_str(&format!(
-            "\n[parakeet]\nmodel = \"{}\"\n",
-            model_name
-        ));
+        result.push_str(&format!("\n[parakeet]\nmodel = \"{}\"\n", model_name));
     }
 
     // Remove trailing newline if original didn't have one
@@ -853,10 +858,7 @@ pub fn list_installed_parakeet() {
                 })
                 .unwrap_or(0.0);
 
-            println!(
-                "  {} ({:.0} MB) - {}",
-                model.name, size, model.description
-            );
+            println!("  {} ({:.0} MB) - {}", model.name, size, model.description);
             found = true;
         }
     }
@@ -1181,16 +1183,23 @@ translate = false
         use crate::config::TranscriptionEngine;
 
         // Simulate: engine=Whisper, current model="base.en"
-        let is_whisper_engine = matches!(TranscriptionEngine::Whisper, TranscriptionEngine::Whisper);
+        let is_whisper_engine =
+            matches!(TranscriptionEngine::Whisper, TranscriptionEngine::Whisper);
         let current_whisper_model = "base.en";
 
         // "base.en" should have star
         let is_current = is_whisper_engine && "base.en" == current_whisper_model;
-        assert!(is_current, "base.en should show star when it's the current Whisper model");
+        assert!(
+            is_current,
+            "base.en should show star when it's the current Whisper model"
+        );
 
         // "small.en" should NOT have star
         let is_current = is_whisper_engine && "small.en" == current_whisper_model;
-        assert!(!is_current, "small.en should not show star when base.en is current");
+        assert!(
+            !is_current,
+            "small.en should not show star when base.en is current"
+        );
     }
 
     #[test]
@@ -1198,16 +1207,25 @@ translate = false
         use crate::config::TranscriptionEngine;
 
         // Simulate: engine=Parakeet, current model="parakeet-tdt-0.6b-v3"
-        let is_parakeet_engine = matches!(TranscriptionEngine::Parakeet, TranscriptionEngine::Parakeet);
+        let is_parakeet_engine =
+            matches!(TranscriptionEngine::Parakeet, TranscriptionEngine::Parakeet);
         let current_parakeet_model: Option<&str> = Some("parakeet-tdt-0.6b-v3");
 
         // "parakeet-tdt-0.6b-v3" should have star
-        let is_current = is_parakeet_engine && current_parakeet_model == Some("parakeet-tdt-0.6b-v3");
-        assert!(is_current, "parakeet-tdt-0.6b-v3 should show star when it's the current Parakeet model");
+        let is_current =
+            is_parakeet_engine && current_parakeet_model == Some("parakeet-tdt-0.6b-v3");
+        assert!(
+            is_current,
+            "parakeet-tdt-0.6b-v3 should show star when it's the current Parakeet model"
+        );
 
         // "parakeet-tdt-0.6b-v3-int8" should NOT have star
-        let is_current = is_parakeet_engine && current_parakeet_model == Some("parakeet-tdt-0.6b-v3-int8");
-        assert!(!is_current, "parakeet-tdt-0.6b-v3-int8 should not show star when other model is current");
+        let is_current =
+            is_parakeet_engine && current_parakeet_model == Some("parakeet-tdt-0.6b-v3-int8");
+        assert!(
+            !is_current,
+            "parakeet-tdt-0.6b-v3-int8 should not show star when other model is current"
+        );
     }
 
     #[test]
@@ -1215,18 +1233,27 @@ translate = false
         use crate::config::TranscriptionEngine;
 
         // When engine is Parakeet, Whisper models should NOT show star
-        let is_whisper_engine = matches!(TranscriptionEngine::Parakeet, TranscriptionEngine::Whisper);
+        let is_whisper_engine =
+            matches!(TranscriptionEngine::Parakeet, TranscriptionEngine::Whisper);
         let current_whisper_model = "base.en";
 
         let is_current = is_whisper_engine && "base.en" == current_whisper_model;
-        assert!(!is_current, "Whisper models should not show star when engine is Parakeet");
+        assert!(
+            !is_current,
+            "Whisper models should not show star when engine is Parakeet"
+        );
 
         // When engine is Whisper, Parakeet models should NOT show star
-        let is_parakeet_engine = matches!(TranscriptionEngine::Whisper, TranscriptionEngine::Parakeet);
+        let is_parakeet_engine =
+            matches!(TranscriptionEngine::Whisper, TranscriptionEngine::Parakeet);
         let current_parakeet_model: Option<&str> = Some("parakeet-tdt-0.6b-v3");
 
-        let is_current = is_parakeet_engine && current_parakeet_model == Some("parakeet-tdt-0.6b-v3");
-        assert!(!is_current, "Parakeet models should not show star when engine is Whisper");
+        let is_current =
+            is_parakeet_engine && current_parakeet_model == Some("parakeet-tdt-0.6b-v3");
+        assert!(
+            !is_current,
+            "Parakeet models should not show star when engine is Whisper"
+        );
     }
 
     #[test]
@@ -1234,11 +1261,16 @@ translate = false
         use crate::config::TranscriptionEngine;
 
         // When parakeet config is None (not configured)
-        let is_parakeet_engine = matches!(TranscriptionEngine::Parakeet, TranscriptionEngine::Parakeet);
+        let is_parakeet_engine =
+            matches!(TranscriptionEngine::Parakeet, TranscriptionEngine::Parakeet);
         let current_parakeet_model: Option<&str> = None;
 
         // No model should show star when no parakeet config exists
-        let is_current = is_parakeet_engine && current_parakeet_model == Some("parakeet-tdt-0.6b-v3");
-        assert!(!is_current, "No star should show when parakeet config is not set");
+        let is_current =
+            is_parakeet_engine && current_parakeet_model == Some("parakeet-tdt-0.6b-v3");
+        assert!(
+            !is_current,
+            "No star should show when parakeet config is not set"
+        );
     }
 }

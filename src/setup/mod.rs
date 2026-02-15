@@ -357,7 +357,9 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
         println!("  \x1b[32m→\x1b[0m Text will be typed via {}", method_desc);
     } else {
         println!("  \x1b[31m→\x1b[0m No text output method available!");
-        println!("    Install wtype (Wayland), eitype (GNOME/KDE), or ydotool (X11) for typing support");
+        println!(
+            "    Install wtype (Wayland), eitype (GNOME/KDE), or ydotool (X11) for typing support"
+        );
     }
 }
 
@@ -487,7 +489,10 @@ pub async fn run_setup(
         // Check if parakeet feature is enabled
         #[cfg(not(feature = "parakeet"))]
         {
-            print_failure(&format!("Parakeet model '{}' requires the 'parakeet' feature", model_name));
+            print_failure(&format!(
+                "Parakeet model '{}' requires the 'parakeet' feature",
+                model_name
+            ));
             println!("       Rebuild with: cargo build --features parakeet");
             anyhow::bail!("Parakeet feature not enabled");
         }
@@ -495,8 +500,8 @@ pub async fn run_setup(
         #[cfg(feature = "parakeet")]
         {
             let model_path = models_dir.join(model_name);
-            let model_valid = model_path.exists()
-                && model::validate_parakeet_model(&model_path).is_ok();
+            let model_valid =
+                model_path.exists() && model::validate_parakeet_model(&model_path).is_ok();
 
             if model_valid {
                 if !quiet {
@@ -509,10 +514,7 @@ pub async fn run_setup(
                                 .sum::<f64>()
                         })
                         .unwrap_or(0.0);
-                    print_success(&format!(
-                        "Model ready: {} ({:.0} MB)",
-                        model_name, size
-                    ));
+                    print_success(&format!("Model ready: {} ({:.0} MB)", model_name, size));
                 }
                 // Update config to use Parakeet
                 model::set_parakeet_config(model_name)?;
@@ -534,7 +536,10 @@ pub async fn run_setup(
                 }
             } else if !quiet {
                 print_info(&format!("Model '{}' not downloaded yet", model_name));
-                println!("       Run: voxtype setup --download --model {}", model_name);
+                println!(
+                    "       Run: voxtype setup --download --model {}",
+                    model_name
+                );
             }
         }
     } else {
@@ -570,10 +575,7 @@ pub async fn run_setup(
                 let size = std::fs::metadata(&model_path)
                     .map(|m| m.len() as f64 / 1024.0 / 1024.0)
                     .unwrap_or(0.0);
-                print_success(&format!(
-                    "Model ready: {} ({:.0} MB)",
-                    model_name, size
-                ));
+                print_success(&format!("Model ready: {} ({:.0} MB)", model_name, size));
             }
             // If user explicitly requested this model, update config even if already downloaded
             if model_override.is_some() {
@@ -777,9 +779,14 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
     if config.engine == crate::config::TranscriptionEngine::Parakeet {
         if let Some(ref parakeet_config) = config.parakeet {
             let configured_model = &parakeet_config.model;
-            let model_found = parakeet_models.iter().any(|(name, _)| name == configured_model);
+            let model_found = parakeet_models
+                .iter()
+                .any(|(name, _)| name == configured_model);
             if !model_found {
-                print_failure(&format!("Configured Parakeet model '{}' not found", configured_model));
+                print_failure(&format!(
+                    "Configured Parakeet model '{}' not found",
+                    configured_model
+                ));
                 println!("       Download the model or change config to use an available model");
                 all_ok = false;
             }

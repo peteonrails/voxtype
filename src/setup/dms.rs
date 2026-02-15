@@ -325,7 +325,10 @@ pub fn print_config() {
     println!("   with the following content:\n");
 
     // Print the simplified QML with the actual path substituted
-    println!("{}", QML_SIMPLE_TEMPLATE.replace("VOXTYPE_PATH", &voxtype_path));
+    println!(
+        "{}",
+        QML_SIMPLE_TEMPLATE.replace("VOXTYPE_PATH", &voxtype_path)
+    );
 
     println!("\n\n3. Enable the widget in DankMaterialShell settings.\n");
 

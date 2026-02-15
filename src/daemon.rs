@@ -24,7 +24,12 @@ use tokio::process::Command;
 use tokio::signal::unix::{signal, SignalKind};
 
 /// Send a desktop notification with optional engine icon
-async fn send_notification(title: &str, body: &str, show_engine_icon: bool, engine: crate::config::TranscriptionEngine) {
+async fn send_notification(
+    title: &str,
+    body: &str,
+    show_engine_icon: bool,
+    engine: crate::config::TranscriptionEngine,
+) {
     let title = if show_engine_icon {
         format!("{} {}", crate::output::engine_icon(engine), title)
     } else {
@@ -32,12 +37,7 @@ async fn send_notification(title: &str, body: &str, show_engine_icon: bool, engi
     };
 
     let _ = Command::new("notify-send")
-        .args([
-            "--app-name=Voxtype",
-            "--expire-time=2000",
-            &title,
-            body,
-        ])
+        .args(["--app-name=Voxtype", "--expire-time=2000", &title, body])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -320,7 +320,11 @@ pub struct Daemon {
     // Model manager for multi-model support
     model_manager: Option<ModelManager>,
     // Background task for loading model on-demand
-    model_load_task: Option<tokio::task::JoinHandle<std::result::Result<Arc<dyn Transcriber>, crate::error::TranscribeError>>>,
+    model_load_task: Option<
+        tokio::task::JoinHandle<
+            std::result::Result<Arc<dyn Transcriber>, crate::error::TranscribeError>,
+        >,
+    >,
     // Background task for transcription (allows cancel during transcription)
     transcription_task: Option<tokio::task::JoinHandle<TranscriptionResult>>,
     // Background tasks for eager chunk transcriptions (chunk_index, task)
@@ -694,7 +698,13 @@ impl Daemon {
 
         // Send notification if enabled
         if self.config.output.notification.on_recording_stop {
-            send_notification("Recording Stopped", "Transcribing...", self.config.output.notification.show_engine_icon, self.config.engine).await;
+            send_notification(
+                "Recording Stopped",
+                "Transcribing...",
+                self.config.output.notification.show_engine_icon,
+                self.config.engine,
+            )
+            .await;
         }
 
         // Stop recording and get samples
@@ -778,9 +788,7 @@ impl Daemon {
                     // Apply post-processing command (profile overrides default)
                     let final_text = if let Some(profile) = active_profile {
                         if let Some(ref cmd) = profile.post_process_command {
-                            let timeout_ms = profile
-                                .post_process_timeout_ms
-                                .unwrap_or(30000);
+                            let timeout_ms = profile.post_process_timeout_ms.unwrap_or(30000);
                             let profile_config = crate::config::PostProcessConfig {
                                 command: cmd.clone(),
                                 timeout_ms,
@@ -847,18 +855,15 @@ impl Daemon {
                         };
 
                         let file_mode = &self.config.output.file_mode;
-                        match write_transcription_to_file(&output_path, &final_text, file_mode).await
+                        match write_transcription_to_file(&output_path, &final_text, file_mode)
+                            .await
                         {
                             Ok(()) => {
                                 let mode_str = match file_mode {
                                     FileMode::Overwrite => "wrote",
                                     FileMode::Append => "appended",
                                 };
-                                tracing::info!(
-                                    "{} transcription to {:?}",
-                                    mode_str,
-                                    output_path
-                                );
+                                tracing::info!("{} transcription to {:?}", mode_str, output_path);
                             }
                             Err(e) => {
                                 tracing::error!(
@@ -915,7 +920,8 @@ impl Daemon {
                             &final_text,
                             self.config.output.notification.show_engine_icon,
                             self.config.engine,
-                        ).await;
+                        )
+                        .await;
                     }
 
                     *state = State::Idle;
@@ -996,7 +1002,10 @@ impl Daemon {
         let mut hotkey_listener = if self.config.hotkey.enabled {
             tracing::info!("Hotkey: {}", self.config.hotkey.key);
             let secondary_model = self.config.whisper.secondary_model.clone();
-            Some(hotkey::create_listener(&self.config.hotkey, secondary_model)?)
+            Some(hotkey::create_listener(
+                &self.config.hotkey,
+                secondary_model,
+            )?)
         } else {
             tracing::info!(
                 "Built-in hotkey disabled, use 'voxtype record' commands or compositor keybindings"
@@ -1033,7 +1042,9 @@ impl Daemon {
                 }
                 crate::config::TranscriptionEngine::Parakeet => {
                     // Parakeet uses its own model loading
-                    transcriber_preloaded = Some(Arc::from(crate::transcribe::create_transcriber(&self.config)?));
+                    transcriber_preloaded = Some(Arc::from(crate::transcribe::create_transcriber(
+                        &self.config,
+                    )?));
                 }
             }
             tracing::info!("Model loaded, ready for voice input");
@@ -2033,7 +2044,7 @@ mod tests {
             // Should not panic
         });
     }
-  
+
     fn test_pidlock_acquisition_succeeds() {
         with_test_runtime_dir(|dir| {
             let lock_path = dir.join("voxtype.lock");

@@ -123,7 +123,9 @@ pub enum OutputError {
     #[error("Ctrl+V simulation failed: {0}")]
     CtrlVFailed(String),
 
-    #[error("All output methods failed. Ensure wtype, dotool, ydotool, wl-copy, or xclip is available.")]
+    #[error(
+        "All output methods failed. Ensure wtype, dotool, ydotool, wl-copy, or xclip is available."
+    )]
     AllMethodsFailed,
 }
 

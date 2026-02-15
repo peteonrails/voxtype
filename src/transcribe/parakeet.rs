@@ -10,9 +10,15 @@
 use super::Transcriber;
 use crate::config::{ParakeetConfig, ParakeetModelType};
 use crate::error::TranscribeError;
-#[cfg(any(feature = "parakeet-cuda", feature = "parakeet-rocm", feature = "parakeet-tensorrt"))]
+#[cfg(any(
+    feature = "parakeet-cuda",
+    feature = "parakeet-rocm",
+    feature = "parakeet-tensorrt"
+))]
 use parakeet_rs::ExecutionProvider;
-use parakeet_rs::{ExecutionConfig, Parakeet, ParakeetTDT, Transcriber as ParakeetTranscriberTrait};
+use parakeet_rs::{
+    ExecutionConfig, Parakeet, ParakeetTDT, Transcriber as ParakeetTranscriberTrait,
+};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -54,15 +60,15 @@ impl ParakeetTranscriber {
 
         let model = match model_type {
             ParakeetModelType::Ctc => {
-                let parakeet = Parakeet::from_pretrained(&model_path, exec_config)
-                    .map_err(|e| {
+                let parakeet =
+                    Parakeet::from_pretrained(&model_path, exec_config).map_err(|e| {
                         TranscribeError::InitFailed(format!("Parakeet CTC init failed: {}", e))
                     })?;
                 ParakeetModel::Ctc(Mutex::new(parakeet))
             }
             ParakeetModelType::Tdt => {
-                let parakeet = ParakeetTDT::from_pretrained(&model_path, exec_config)
-                    .map_err(|e| {
+                let parakeet =
+                    ParakeetTDT::from_pretrained(&model_path, exec_config).map_err(|e| {
                         TranscribeError::InitFailed(format!("Parakeet TDT init failed: {}", e))
                     })?;
                 ParakeetModel::Tdt(Mutex::new(parakeet))
@@ -82,7 +88,9 @@ impl ParakeetTranscriber {
 impl Transcriber for ParakeetTranscriber {
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         if samples.is_empty() {
-            return Err(TranscribeError::AudioFormat("Empty audio buffer".to_string()));
+            return Err(TranscribeError::AudioFormat(
+                "Empty audio buffer".to_string(),
+            ));
         }
 
         let duration_secs = samples.len() as f32 / 16000.0;
@@ -98,7 +106,10 @@ impl Transcriber for ParakeetTranscriber {
         let text = match &self.model {
             ParakeetModel::Ctc(parakeet) => {
                 let mut parakeet = parakeet.lock().map_err(|e| {
-                    TranscribeError::InferenceFailed(format!("Failed to lock Parakeet mutex: {}", e))
+                    TranscribeError::InferenceFailed(format!(
+                        "Failed to lock Parakeet mutex: {}",
+                        e
+                    ))
                 })?;
 
                 let result = parakeet
@@ -109,14 +120,20 @@ impl Transcriber for ParakeetTranscriber {
                         None,  // default timestamp mode
                     )
                     .map_err(|e| {
-                        TranscribeError::InferenceFailed(format!("Parakeet CTC inference failed: {}", e))
+                        TranscribeError::InferenceFailed(format!(
+                            "Parakeet CTC inference failed: {}",
+                            e
+                        ))
                     })?;
 
                 result.text.trim().to_string()
             }
             ParakeetModel::Tdt(parakeet) => {
                 let mut parakeet = parakeet.lock().map_err(|e| {
-                    TranscribeError::InferenceFailed(format!("Failed to lock Parakeet mutex: {}", e))
+                    TranscribeError::InferenceFailed(format!(
+                        "Failed to lock Parakeet mutex: {}",
+                        e
+                    ))
                 })?;
 
                 let result = parakeet
@@ -127,7 +144,10 @@ impl Transcriber for ParakeetTranscriber {
                         None,  // default timestamp mode
                     )
                     .map_err(|e| {
-                        TranscribeError::InferenceFailed(format!("Parakeet TDT inference failed: {}", e))
+                        TranscribeError::InferenceFailed(format!(
+                            "Parakeet TDT inference failed: {}",
+                            e
+                        ))
                     })?;
 
                 result.text.trim().to_string()
@@ -169,7 +189,11 @@ fn build_execution_config() -> Option<ExecutionConfig> {
         return Some(ExecutionConfig::new().with_execution_provider(ExecutionProvider::ROCm));
     }
 
-    #[cfg(not(any(feature = "parakeet-cuda", feature = "parakeet-tensorrt", feature = "parakeet-rocm")))]
+    #[cfg(not(any(
+        feature = "parakeet-cuda",
+        feature = "parakeet-tensorrt",
+        feature = "parakeet-rocm"
+    )))]
     {
         None
     }
@@ -181,8 +205,8 @@ fn build_execution_config() -> Option<ExecutionConfig> {
 /// CTC models have: model.onnx (or model_int8.onnx), tokenizer.json
 fn detect_model_type(path: &PathBuf) -> ParakeetModelType {
     // Check for TDT model structure
-    let has_encoder = path.join("encoder-model.onnx").exists()
-        || path.join("encoder-model.onnx.data").exists();
+    let has_encoder =
+        path.join("encoder-model.onnx").exists() || path.join("encoder-model.onnx.data").exists();
     let has_decoder = path.join("decoder_joint-model.onnx").exists();
 
     if has_encoder && has_decoder {
@@ -191,8 +215,7 @@ fn detect_model_type(path: &PathBuf) -> ParakeetModelType {
     }
 
     // Check for CTC model structure
-    let has_ctc_model = path.join("model.onnx").exists()
-        || path.join("model_int8.onnx").exists();
+    let has_ctc_model = path.join("model.onnx").exists() || path.join("model_int8.onnx").exists();
     let has_tokenizer = path.join("tokenizer.json").exists();
 
     if has_ctc_model && has_tokenizer {
