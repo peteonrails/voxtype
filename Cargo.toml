@@ -67,7 +67,7 @@ rodio = { version = "0.19", default-features = false, features = ["wav"] }
 whisper-rs = "0.15.1"
 
 # Parakeet speech-to-text (optional, ONNX-based)
-parakeet-rs = { version = "0.2.9", optional = true }
+parakeet-rs = { version = "0.3", optional = true }
 
 
 # CPU count for thread detection
