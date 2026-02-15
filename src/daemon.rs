@@ -1563,14 +1563,9 @@ impl Daemon {
                     if let Some(duration) = state.recording_duration() {
                         if duration > max_duration {
                             tracing::warn!(
-                                "Recording timeout ({:.0}s limit), stopping",
+                                "Recording timeout ({:.0}s limit), transcribing captured audio",
                                 max_duration.as_secs_f32()
                             );
-
-                            // Stop recording
-                            if let Some(mut capture) = audio_capture.take() {
-                                let _ = capture.stop().await;
-                            }
 
                             // Cancel any pending eager chunk tasks
                             for (_, task) in self.eager_chunk_tasks.drain(..) {
@@ -1580,15 +1575,33 @@ impl Daemon {
                             cleanup_output_mode_override();
                             cleanup_model_override();
                             cleanup_profile_override();
-                            state = State::Idle;
-                            self.update_state("idle");
 
-                            // Run post_output_command to reset compositor submap
-                            if let Some(cmd) = &self.config.output.post_output_command {
-                                if let Err(e) = output::run_hook(cmd, "post_output").await {
-                                    tracing::warn!("{}", e);
+                            // Get model override from state before transitioning
+                            let model_override = match &state {
+                                State::Recording { model_override, .. } => model_override.as_deref(),
+                                State::EagerRecording { model_override, .. } => model_override.as_deref(),
+                                _ => None,
+                            };
+
+                            // Get transcriber for this recording
+                            let transcriber = match self.get_transcriber_for_recording(
+                                model_override,
+                                &transcriber_preloaded,
+                            ).await {
+                                Ok(t) => Some(t),
+                                Err(()) => {
+                                    state = State::Idle;
+                                    self.update_state("idle");
+                                    continue;
                                 }
-                            }
+                            };
+
+                            // Transcribe the captured audio
+                            self.start_transcription_task(
+                                &mut state,
+                                &mut audio_capture,
+                                transcriber,
+                            ).await;
                         }
                     }
                 }
