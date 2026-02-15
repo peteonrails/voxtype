@@ -368,6 +368,8 @@ pub enum SetupAction {
     },
 
     /// Install voxtype as a LaunchAgent (macOS)
+    /// Note: launchd services don't receive microphone permissions.
+    /// Use 'app-bundle' instead for full functionality.
     #[cfg(target_os = "macos")]
     Launchd {
         /// Uninstall the service instead of installing
@@ -375,6 +377,21 @@ pub enum SetupAction {
         uninstall: bool,
 
         /// Show service status
+        #[arg(long)]
+        status: bool,
+    },
+
+    /// Install Voxtype.app bundle with Login Items (macOS, recommended)
+    /// Creates /Applications/Voxtype.app and adds to Login Items.
+    /// This method properly receives Accessibility, Input Monitoring,
+    /// and Microphone permissions (unlike launchd).
+    #[cfg(target_os = "macos")]
+    AppBundle {
+        /// Uninstall the app bundle
+        #[arg(long)]
+        uninstall: bool,
+
+        /// Show installation status
         #[arg(long)]
         status: bool,
     },
