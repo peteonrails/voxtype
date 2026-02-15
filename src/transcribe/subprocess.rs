@@ -84,15 +84,17 @@ impl SubprocessTranscriber {
         let exe_path = Self::get_executable_path()?;
 
         let mut cmd = Command::new(&exe_path);
+
+        // Pass config path BEFORE the subcommand — --config is a parent-level
+        // arg in clap, so it must appear before "transcribe-worker"
+        if let Some(ref config_path) = self.config_path {
+            cmd.arg("--config").arg(config_path);
+        }
+
         cmd.arg("transcribe-worker")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-
-        // Pass config path if we have one
-        if let Some(ref config_path) = self.config_path {
-            cmd.arg("--config").arg(config_path);
-        }
 
         // Pass essential config via command-line arguments
         cmd.arg("--model").arg(&self.config.model);
