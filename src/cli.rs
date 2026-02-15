@@ -100,6 +100,11 @@ pub struct Cli {
     #[arg(long, value_name = "MS", hide = true)]
     pub wtype_delay: Option<u32>,
 
+    /// Text to append after each transcription (e.g., " " for a trailing space).
+    /// Appended before auto_submit. Useful for separating sentences when dictating incrementally.
+    #[arg(long, value_name = "TEXT")]
+    pub append_text: Option<String>,
+
     /// Output driver order for type mode (comma-separated)
     /// Overrides config driver_order. Available: wtype, dotool, ydotool, clipboard
     /// Example: --driver=ydotool,wtype,clipboard

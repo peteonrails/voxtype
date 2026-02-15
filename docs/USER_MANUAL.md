@@ -115,6 +115,7 @@ Check dependencies and optionally download models.
 voxtype setup              # Check dependencies only
 voxtype setup --download   # Download default model (base.en)
 voxtype setup model        # Interactive model selection
+voxtype setup vad          # Download the Silero VAD model
 ```
 
 ### `voxtype config`
@@ -254,7 +255,7 @@ device = "default"
 sample_rate = 16000
 
 # Maximum recording duration in seconds (safety limit)
-# Recording automatically stops after this time
+# Recording automatically stops and transcribes after this time
 max_duration_secs = 60
 
 [whisper]

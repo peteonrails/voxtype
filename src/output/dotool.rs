@@ -25,6 +25,8 @@ pub struct DotoolOutput {
     notify: bool,
     /// Whether to send Enter key after output
     auto_submit: bool,
+    /// Text to append after transcription (before auto_submit)
+    append_text: Option<String>,
     /// Keyboard layout (e.g., "de" for German, "fr" for French)
     xkb_layout: Option<String>,
     /// Keyboard layout variant (e.g., "nodeadkeys")
@@ -38,6 +40,7 @@ impl DotoolOutput {
         pre_type_delay_ms: u32,
         notify: bool,
         auto_submit: bool,
+        append_text: Option<String>,
         xkb_layout: Option<String>,
         xkb_variant: Option<String>,
     ) -> Self {
@@ -49,6 +52,7 @@ impl DotoolOutput {
             pre_type_delay_ms,
             notify,
             auto_submit,
+            append_text,
             xkb_layout,
             xkb_variant,
         }
@@ -90,6 +94,11 @@ impl DotoolOutput {
         // Type the text
         // Note: dotool's type command takes text on the same line
         commands.push_str(&format!("type {}\n", text));
+
+        // Append text if configured (e.g., a space to separate sentences)
+        if let Some(ref append) = self.append_text {
+            commands.push_str(&format!("type {}\n", append));
+        }
 
         // Send Enter key if auto_submit is enabled
         if self.auto_submit {
@@ -207,7 +216,7 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = DotoolOutput::new(10, 0, true, false, Some("de".to_string()), None);
+        let output = DotoolOutput::new(10, 0, true, false, None, Some("de".to_string()), None);
         assert_eq!(output.type_delay_ms, 10);
         assert_eq!(output.pre_type_delay_ms, 0);
         assert!(output.notify);
@@ -217,14 +226,14 @@ mod tests {
 
     #[test]
     fn test_build_commands_simple() {
-        let output = DotoolOutput::new(0, 0, false, false, None, None);
+        let output = DotoolOutput::new(0, 0, false, false, None, None, None);
         let cmds = output.build_commands("Hello world");
         assert_eq!(cmds, "type Hello world\n");
     }
 
     #[test]
     fn test_build_commands_with_delay() {
-        let output = DotoolOutput::new(10, 0, false, false, None, None);
+        let output = DotoolOutput::new(10, 0, false, false, None, None, None);
         let cmds = output.build_commands("Test");
         assert!(cmds.contains("typedelay 10"));
         assert!(cmds.contains("typehold 10"));
@@ -233,7 +242,7 @@ mod tests {
 
     #[test]
     fn test_build_commands_with_enter() {
-        let output = DotoolOutput::new(0, 0, false, true, None, None);
+        let output = DotoolOutput::new(0, 0, false, true, None, None, None);
         let cmds = output.build_commands("Test");
         assert!(cmds.contains("type Test"));
         assert!(cmds.contains("key enter"));

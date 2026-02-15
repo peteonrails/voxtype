@@ -28,7 +28,9 @@ fn warn_if_root(command_name: &str) -> bool {
             command_name
         );
         eprintln!("  - Models will download to /root/.local/share/voxtype/ instead of your user directory");
-        eprintln!("  - Config changes will apply to /root/.config/voxtype/ instead of your user config");
+        eprintln!(
+            "  - Config changes will apply to /root/.config/voxtype/ instead of your user config"
+        );
         eprintln!("  - Cannot restart your user's voxtype daemon from root");
         eprintln!();
         eprintln!("Run without sudo: voxtype setup {}", command_name);
@@ -155,6 +157,9 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(secs) = cli.eager_overlap_secs {
         config.whisper.eager_overlap_secs = secs;
+    }
+    if let Some(append_text) = cli.append_text {
+        config.output.append_text = Some(append_text);
     }
     if let Some(ref driver_str) = cli.driver {
         match parse_driver_order(driver_str) {

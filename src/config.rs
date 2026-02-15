@@ -1134,6 +1134,12 @@ pub struct OutputConfig {
     #[serde(default)]
     pub auto_submit: bool,
 
+    /// Text to append after each transcription (e.g., " " for a space)
+    /// Appended after the transcription but before auto_submit
+    /// Useful for separating sentences when dictating paragraphs incrementally
+    #[serde(default)]
+    pub append_text: Option<String>,
+
     /// Convert newlines to Shift+Enter instead of regular Enter
     /// Useful for applications where Enter submits (e.g., Cursor IDE, Slack, Discord)
     #[serde(default)]
@@ -1337,6 +1343,7 @@ impl Default for Config {
                 pre_type_delay_ms: 0,
                 wtype_delay_ms: 0,
                 auto_submit: false,
+                append_text: None,
                 shift_enter_newlines: false,
                 pre_recording_command: None,
                 pre_output_command: None,
@@ -1494,6 +1501,9 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             "paste" => OutputMode::Paste,
             _ => OutputMode::Type,
         };
+    }
+    if let Ok(append_text) = std::env::var("VOXTYPE_APPEND_TEXT") {
+        config.output.append_text = Some(append_text);
     }
 
     Ok(config)

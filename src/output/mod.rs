@@ -168,12 +168,14 @@ fn create_driver_output(
     match driver {
         OutputDriver::Wtype => Box::new(wtype::WtypeOutput::new(
             config.auto_submit,
+            config.append_text.clone(),
             config.type_delay_ms,
             pre_type_delay_ms,
             config.shift_enter_newlines,
         )),
         OutputDriver::Eitype => Box::new(eitype::EitypeOutput::new(
             config.auto_submit,
+            config.append_text.clone(),
             config.type_delay_ms,
             pre_type_delay_ms,
             config.shift_enter_newlines,
@@ -183,6 +185,7 @@ fn create_driver_output(
             pre_type_delay_ms,
             show_notification,
             config.auto_submit,
+            config.append_text.clone(),
             config.dotool_xkb_layout.clone(),
             config.dotool_xkb_variant.clone(),
         )),
@@ -191,9 +194,16 @@ fn create_driver_output(
             pre_type_delay_ms,
             show_notification,
             config.auto_submit,
+            config.append_text.clone(),
         )),
-        OutputDriver::Clipboard => Box::new(clipboard::ClipboardOutput::new(show_notification)),
-        OutputDriver::Xclip => Box::new(xclip::XclipOutput::new(show_notification)),
+        OutputDriver::Clipboard => Box::new(clipboard::ClipboardOutput::new(
+            show_notification,
+            config.append_text.clone(),
+        )),
+        OutputDriver::Xclip => Box::new(xclip::XclipOutput::new(
+            show_notification,
+            config.append_text.clone(),
+        )),
     }
 }
 
@@ -252,19 +262,24 @@ pub fn create_output_chain_with_override(
                 && config.driver_order.is_some()
                 && !driver_order.contains(&OutputDriver::Clipboard)
             {
-                chain.push(Box::new(clipboard::ClipboardOutput::new(false)));
+                chain.push(Box::new(clipboard::ClipboardOutput::new(
+                    false,
+                    config.append_text.clone(),
+                )));
             }
         }
         crate::config::OutputMode::Clipboard => {
             // Only clipboard
             chain.push(Box::new(clipboard::ClipboardOutput::new(
                 config.notification.on_transcription,
+                config.append_text.clone(),
             )));
         }
         crate::config::OutputMode::Paste => {
             // Only paste mode (no fallback as requested)
             chain.push(Box::new(paste::PasteOutput::new(
                 config.auto_submit,
+                config.append_text.clone(),
                 config.paste_keys.clone(),
                 config.type_delay_ms,
                 pre_type_delay_ms,
@@ -278,6 +293,7 @@ pub fn create_output_chain_with_override(
             );
             chain.push(Box::new(clipboard::ClipboardOutput::new(
                 config.notification.on_transcription,
+                config.append_text.clone(),
             )));
         }
     }

@@ -102,7 +102,9 @@ impl State {
     /// Get the number of transcription tasks currently in flight (eager mode only)
     pub fn eager_tasks_in_flight(&self) -> Option<usize> {
         match self {
-            State::EagerRecording { tasks_in_flight, .. } => Some(*tasks_in_flight),
+            State::EagerRecording {
+                tasks_in_flight, ..
+            } => Some(*tasks_in_flight),
             _ => None,
         }
     }

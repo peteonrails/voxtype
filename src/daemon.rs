@@ -328,7 +328,10 @@ pub struct Daemon {
     // Background task for transcription (allows cancel during transcription)
     transcription_task: Option<tokio::task::JoinHandle<TranscriptionResult>>,
     // Background tasks for eager chunk transcriptions (chunk_index, task)
-    eager_chunk_tasks: Vec<(usize, tokio::task::JoinHandle<std::result::Result<String, crate::error::TranscribeError>>)>,
+    eager_chunk_tasks: Vec<(
+        usize,
+        tokio::task::JoinHandle<std::result::Result<String, crate::error::TranscribeError>>,
+    )>,
     // Voice Activity Detection (filters silence-only recordings)
     vad: Option<Box<dyn crate::vad::VoiceActivityDetector>>,
 }
@@ -544,7 +547,9 @@ impl Daemon {
 
         let mut spawned = 0;
         while *chunks_sent < complete_chunks {
-            if let Some(chunk_audio) = eager::extract_chunk(accumulated_audio, *chunks_sent, &eager_config) {
+            if let Some(chunk_audio) =
+                eager::extract_chunk(accumulated_audio, *chunks_sent, &eager_config)
+            {
                 self.spawn_chunk_transcription(*chunks_sent, chunk_audio, transcriber.clone());
                 *chunks_sent += 1;
                 *tasks_in_flight += 1;
@@ -659,7 +664,12 @@ impl Daemon {
 
         // Transcribe the tail (audio after last complete chunk)
         let eager_config = EagerConfig::from_whisper_config(&self.config.whisper);
-        let chunks_sent = chunk_results.iter().map(|r| r.chunk_index).max().map(|i| i + 1).unwrap_or(0);
+        let chunks_sent = chunk_results
+            .iter()
+            .map(|r| r.chunk_index)
+            .max()
+            .map(|i| i + 1)
+            .unwrap_or(0);
         let tail_start = chunks_sent * eager_config.stride_samples();
 
         if tail_start < accumulated_audio.len() {
@@ -674,7 +684,9 @@ impl Daemon {
                 );
 
                 let tail_transcriber = transcriber.clone();
-                match tokio::task::spawn_blocking(move || tail_transcriber.transcribe(&tail_audio)).await {
+                match tokio::task::spawn_blocking(move || tail_transcriber.transcribe(&tail_audio))
+                    .await
+                {
                     Ok(Ok(text)) => {
                         tracing::debug!("Tail transcription: {:?}", text);
                         chunk_results.push(ChunkResult {

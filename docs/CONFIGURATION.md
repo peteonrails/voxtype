@@ -1335,6 +1335,31 @@ auto_submit = true  # Press Enter after transcription
 
 **Note:** This works with all output modes (`type`, `paste`) but has no effect in `clipboard` mode since clipboard-only output doesn't simulate keypresses.
 
+### append_text
+
+**Type:** String
+**Default:** None (disabled)
+**Required:** No
+**Environment Variable:** `VOXTYPE_APPEND_TEXT`
+
+Text to append after each transcription. Appended after the main transcription but before `auto_submit` (if enabled). Useful for separating sentences when dictating paragraphs incrementally.
+
+**Common use case:** When transcribing a paragraph sentence by sentence, there are no spaces between each sentence. Setting `append_text = " "` adds a space after each transcription, creating proper sentence separation.
+
+**Example:**
+```toml
+[output]
+append_text = " "  # Add a space after each transcription
+```
+
+**How it works:**
+- In `type` mode: Types the text after the main transcription
+- In `paste` mode: Includes the text in the clipboard before pasting
+- In `clipboard` mode: Includes the text in the clipboard
+- With `auto_submit = true`: The append_text is typed/pasted first, then Enter is sent
+
+**Note:** You can append any text, not just spaces. For example, `append_text = "\n"` would add a newline after each transcription.
+
 ### shift_enter_newlines
 
 **Type:** Boolean

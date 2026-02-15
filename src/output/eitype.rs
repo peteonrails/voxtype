@@ -17,6 +17,8 @@ use tokio::process::Command;
 pub struct EitypeOutput {
     /// Whether to send Enter key after output
     auto_submit: bool,
+    /// Text to append after transcription (before auto_submit)
+    append_text: Option<String>,
     /// Delay between key events in milliseconds
     type_delay_ms: u32,
     /// Delay before typing starts (ms)
@@ -29,12 +31,14 @@ impl EitypeOutput {
     /// Create a new eitype output
     pub fn new(
         auto_submit: bool,
+        append_text: Option<String>,
         type_delay_ms: u32,
         pre_type_delay_ms: u32,
         shift_enter_newlines: bool,
     ) -> Self {
         Self {
             auto_submit,
+            append_text,
             type_delay_ms,
             pre_type_delay_ms,
             shift_enter_newlines,
@@ -164,6 +168,11 @@ impl TextOutput for EitypeOutput {
             self.type_text(text).await?;
         }
 
+        // Append text if configured (e.g., a space to separate sentences)
+        if let Some(ref append) = self.append_text {
+            self.type_text(append).await?;
+        }
+
         // Send Enter key if auto_submit is configured
         if self.auto_submit {
             self.send_enter().await?;
@@ -195,7 +204,7 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = EitypeOutput::new(false, 0, 0, false);
+        let output = EitypeOutput::new(false, None, 0, 0, false);
         assert!(!output.auto_submit);
         assert_eq!(output.type_delay_ms, 0);
         assert_eq!(output.pre_type_delay_ms, 0);
@@ -204,27 +213,27 @@ mod tests {
 
     #[test]
     fn test_new_with_enter() {
-        let output = EitypeOutput::new(true, 0, 0, false);
+        let output = EitypeOutput::new(true, None, 0, 0, false);
         assert!(output.auto_submit);
     }
 
     #[test]
     fn test_new_with_type_delay() {
-        let output = EitypeOutput::new(false, 50, 0, false);
+        let output = EitypeOutput::new(false, None, 50, 0, false);
         assert_eq!(output.type_delay_ms, 50);
         assert_eq!(output.pre_type_delay_ms, 0);
     }
 
     #[test]
     fn test_new_with_pre_type_delay() {
-        let output = EitypeOutput::new(false, 0, 200, false);
+        let output = EitypeOutput::new(false, None, 0, 200, false);
         assert_eq!(output.type_delay_ms, 0);
         assert_eq!(output.pre_type_delay_ms, 200);
     }
 
     #[test]
     fn test_new_with_shift_enter_newlines() {
-        let output = EitypeOutput::new(false, 0, 0, true);
+        let output = EitypeOutput::new(false, None, 0, 0, true);
         assert!(output.shift_enter_newlines);
     }
 }
