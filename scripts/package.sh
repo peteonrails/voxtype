@@ -371,14 +371,12 @@ if [[ "$VALIDATE" == "true" && -x "${SCRIPT_DIR}/validate-release.sh" ]]; then
 fi
 
 # Create staging directory using mktemp for portability
-# Note: We don't create /usr/bin here - the postinstall script creates the symlink
 STAGING="$(mktemp -d "${TMPDIR:-/tmp}/voxtype-package.XXXXXX")"
 trap 'rm -rf "$STAGING"' EXIT
-mkdir -p "$STAGING"/{usr/lib/voxtype,etc/voxtype,usr/lib/systemd/user,usr/share/doc/voxtype}
+mkdir -p "$STAGING"/{usr/bin,usr/lib/voxtype,etc/voxtype,usr/lib/systemd/user,usr/share/doc/voxtype}
 mkdir -p "$STAGING"/usr/share/{bash-completion/completions,zsh/site-functions,fish/vendor_completions.d}
 
 # Copy binaries to /usr/lib/voxtype/
-# The post-install script will create a symlink at /usr/bin/voxtype
 if [[ "$TARGET_ARCH" == "x86_64" ]]; then
     # x86_64: Tiered CPU binaries + Vulkan GPU binary (Whisper)
     cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2" "$STAGING/usr/lib/voxtype/voxtype-avx2"
@@ -405,10 +403,18 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
         cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-parakeet-rocm" "$STAGING/usr/lib/voxtype/voxtype-parakeet-rocm"
         chmod 755 "$STAGING/usr/lib/voxtype/voxtype-parakeet-rocm"
     fi
+
+    # Install wrapper script as /usr/bin/voxtype
+    cp "${SCRIPT_DIR}/voxtype-wrapper.sh" "$STAGING/usr/bin/voxtype"
+    chmod 755 "$STAGING/usr/bin/voxtype"
 else
     # aarch64: Single binary
     cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-aarch64" "$STAGING/usr/lib/voxtype/voxtype"
     chmod 755 "$STAGING/usr/lib/voxtype/voxtype"
+
+    # Install wrapper script as /usr/bin/voxtype
+    cp "${SCRIPT_DIR}/voxtype-wrapper.sh" "$STAGING/usr/bin/voxtype"
+    chmod 755 "$STAGING/usr/bin/voxtype"
 fi
 cp config/default.toml "$STAGING/etc/voxtype/config.toml"
 cp packaging/systemd/voxtype.service "$STAGING/usr/lib/systemd/user/"
@@ -434,33 +440,29 @@ else
     echo "  Warning: Man pages not found. Run 'cargo build --release' first."
 fi
 
-# Post-install script - detects CPU and creates symlink to appropriate binary
+# Post-install script - provides setup instructions
 # Generate architecture-specific post-install script
 if [[ "$TARGET_ARCH" == "x86_64" ]]; then
     cat > "$STAGING/postinstall.sh" << 'POSTINST'
 #!/bin/sh
-# Detect CPU capabilities and symlink the appropriate voxtype binary
+# Voxtype post-installation script
 #
 # Binary variants (x86_64):
 #   voxtype-avx2:   CPU - Works on most CPUs from 2013+ (Intel Haswell, AMD Zen)
 #   voxtype-avx512: CPU - Optimized for newer CPUs (AMD Zen 4+, some Intel)
 #   voxtype-vulkan: GPU - Vulkan acceleration (NVIDIA, AMD, Intel)
-
-# Remove existing binary/symlink if present (for upgrades)
-rm -f /usr/bin/voxtype
-
-# Detect AVX-512 support (Linux-specific, falls back to AVX2 on other systems)
-if [ -f /proc/cpuinfo ] && grep -q avx512f /proc/cpuinfo 2>/dev/null; then
-    VARIANT="avx512"
-    ln -sf /usr/lib/voxtype/voxtype-avx512 /usr/bin/voxtype
-else
-    VARIANT="avx2"
-    ln -sf /usr/lib/voxtype/voxtype-avx2 /usr/bin/voxtype
-fi
+#
+# The /usr/bin/voxtype wrapper automatically selects the best binary for your CPU.
 
 # Restore SELinux context if available (for Fedora/RHEL)
 if command -v restorecon >/dev/null 2>&1; then
     restorecon /usr/bin/voxtype 2>/dev/null || true
+fi
+
+# Detect CPU variant that will be used
+VARIANT="avx2"
+if [ -f /proc/cpuinfo ] && grep -q avx512f /proc/cpuinfo 2>/dev/null; then
+    VARIANT="avx512"
 fi
 
 # Detect GPU for Vulkan acceleration recommendation
@@ -485,7 +487,7 @@ fi
 echo ""
 echo "=== Voxtype Post-Installation ==="
 echo ""
-echo "CPU backend: $VARIANT (using voxtype-$VARIANT)"
+echo "CPU backend: $VARIANT (auto-detected)"
 
 if [ -n "$GPU_DETECTED" ]; then
     echo ""
@@ -519,13 +521,7 @@ else
     # aarch64: Single binary, no CPU detection needed
     cat > "$STAGING/postinstall.sh" << 'POSTINST'
 #!/bin/sh
-# Create symlink for voxtype binary (aarch64)
-
-# Remove existing binary/symlink if present (for upgrades)
-rm -f /usr/bin/voxtype
-
-# Create symlink to the binary
-ln -sf /usr/lib/voxtype/voxtype /usr/bin/voxtype
+# Voxtype post-installation script (aarch64)
 
 # Restore SELinux context if available (for Fedora/RHEL)
 if command -v restorecon >/dev/null 2>&1; then
@@ -552,11 +548,12 @@ POSTINST
 fi
 chmod +x "$STAGING/postinstall.sh"
 
-# Post-uninstall script - removes the symlink
+# Post-uninstall script - no longer needed (no symlink to remove)
+# Keep it minimal for package manager compatibility
 cat > "$STAGING/postuninstall.sh" << 'POSTRM'
 #!/bin/sh
-# Remove symlink on package removal
-rm -f /usr/bin/voxtype
+# Voxtype post-uninstall script
+# Nothing to do - wrapper script is removed with package
 POSTRM
 chmod +x "$STAGING/postuninstall.sh"
 
