@@ -103,7 +103,12 @@ mode = "toggle"
 
 Config file location: `~/.config/voxtype/config.toml`
 
+See [`config/default.toml`](config/default.toml) for the full annotated default configuration.
+
 ```toml
+# State file for Waybar/polybar integration (enabled by default)
+state_file = "auto"  # Or custom path, or "disabled" to turn off
+
 [hotkey]
 key = "SCROLLLOCK"  # Or: PAUSE, F13-F24, RIGHTALT, etc.
 modifiers = []      # Optional: ["LEFTCTRL", "LEFTALT"]
@@ -144,9 +149,6 @@ on_transcription = true     # Show transcribed text
 # [text]
 # spoken_punctuation = true  # Say "period" → ".", "open paren" → "("
 # replacements = { "vox type" = "voxtype", "oh marky" = "Omarchy" }
-
-# State file for Waybar/polybar integration (enabled by default)
-state_file = "auto"  # Or custom path, or "disabled" to turn off
 ```
 
 ### Audio Feedback

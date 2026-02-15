@@ -283,7 +283,7 @@ pub struct Config {
     /// When set, the daemon writes current state ("idle", "recording", "transcribing")
     /// to this file whenever state changes.
     /// Example: "/run/user/1000/voxtype/state" or use "auto" for default location
-    #[serde(default)]
+    #[serde(default = "default_state_file")]
     pub state_file: Option<String>,
 
     /// Named profiles for context-specific settings
@@ -392,6 +392,10 @@ fn default_cold_model_timeout() -> u64 {
 
 fn default_whisper_model() -> String {
     "base.en".to_string()
+}
+
+fn default_state_file() -> Option<String> {
+    Some("auto".to_string())
 }
 
 impl Default for AudioFeedbackConfig {
