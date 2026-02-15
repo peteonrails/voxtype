@@ -87,5 +87,6 @@ RUN echo "=== Verifying Vulkan binary ===" \
 # Output stage - copy binary to /output volume
 CMD mkdir -p /output \
     && cp /tmp/voxtype-vulkan /output/voxtype-${VERSION}-linux-x86_64-vulkan \
+    && chmod 755 /output/voxtype-${VERSION}-linux-x86_64-vulkan \
     && echo "Binary copied to /output:" \
     && ls -la /output/voxtype-*-vulkan
