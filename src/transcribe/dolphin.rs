@@ -4,15 +4,17 @@
 //! Dolphin is a CTC-based E-Branchformer model optimized for Eastern languages
 //! (40 languages + 22 Chinese dialects). No English support.
 //!
-//! The ONNX model includes internal feature extraction, so it takes raw audio
-//! waveform as input (unlike SenseVoice/Paraformer which need Fbank preprocessing).
+//! The ONNX model expects 80-dim Fbank features as input, preprocessed with
+//! the shared Fbank pipeline (same as SenseVoice/Paraformer) and normalized
+//! with CMVN stats from model metadata.
 //!
-//! Pipeline: Audio (f32, 16kHz) -> ONNX model (internal Fbank) -> CTC decode
+//! Pipeline: Audio (f32, 16kHz) -> Fbank (80-dim) -> CMVN -> ONNX model -> CTC decode
 //!
 //! Languages: zh, ja, ko, th, vi, id, ms, ar, hi, ur, bn, ta, and 28 more
 //! Model files: model.int8.onnx (or model.onnx), tokens.txt
 
 use super::ctc;
+use super::fbank::{self, FbankExtractor};
 use super::Transcriber;
 use crate::config::DolphinConfig;
 use crate::error::TranscribeError;
@@ -28,6 +30,9 @@ const SAMPLE_RATE: usize = 16000;
 pub struct DolphinTranscriber {
     session: std::sync::Mutex<Session>,
     tokens: HashMap<u32, String>,
+    neg_mean: Vec<f32>,
+    inv_stddev: Vec<f32>,
+    fbank_extractor: FbankExtractor,
 }
 
 impl DolphinTranscriber {
@@ -87,6 +92,12 @@ impl DolphinTranscriber {
                 ))
             })?;
 
+        // Read CMVN stats from model metadata
+        // Dolphin uses "mean"/"invstd" naming (mean is positive, needs negation)
+        let (neg_mean, inv_stddev) = read_cmvn_from_metadata(&session)?;
+
+        let fbank_extractor = FbankExtractor::new_default();
+
         tracing::info!(
             "Dolphin model loaded in {:.2}s",
             start.elapsed().as_secs_f32(),
@@ -95,6 +106,9 @@ impl DolphinTranscriber {
         Ok(Self {
             session: std::sync::Mutex::new(session),
             tokens,
+            neg_mean,
+            inv_stddev,
+            fbank_extractor,
         })
     }
 }
@@ -116,20 +130,41 @@ impl Transcriber for DolphinTranscriber {
 
         let start = std::time::Instant::now();
 
-        // Dolphin takes raw waveform - no Fbank preprocessing needed
-        let num_samples = samples.len();
+        // 1. Extract Fbank features (80-dim, same pipeline as SenseVoice)
+        let fbank_start = std::time::Instant::now();
+        let fbank_features = self.fbank_extractor.extract(samples);
+        tracing::debug!(
+            "Fbank extraction: {:.2}s ({} frames x {})",
+            fbank_start.elapsed().as_secs_f32(),
+            fbank_features.nrows(),
+            fbank_features.ncols(),
+        );
 
-        // x: shape [1, num_samples]
+        if fbank_features.nrows() == 0 {
+            return Err(TranscribeError::AudioFormat(
+                "Audio too short for feature extraction".to_string(),
+            ));
+        }
+
+        // 2. CMVN normalization (no LFR stacking - Dolphin takes 80-dim directly)
+        let mut features = fbank_features;
+        fbank::apply_cmvn(&mut features, &self.neg_mean, &self.inv_stddev);
+
+        let num_frames = features.nrows();
+        let feat_dim = features.ncols();
+
+        // x: shape [1, T, 80]
+        let (x_data, _offset) = features.into_raw_vec_and_offset();
         let x_tensor =
-            Tensor::<f32>::from_array(([1usize, num_samples], samples.to_vec())).map_err(|e| {
+            Tensor::<f32>::from_array(([1usize, num_frames, feat_dim], x_data)).map_err(|e| {
                 TranscribeError::InferenceFailed(format!(
                     "Failed to create input tensor: {}",
                     e
                 ))
             })?;
 
-        // x_length: shape [1]
-        let x_length_tensor = Tensor::<i32>::from_array(([1usize], vec![num_samples as i32]))
+        // x_len: shape [1] (i64)
+        let x_len_tensor = Tensor::<i64>::from_array(([1usize], vec![num_frames as i64]))
             .map_err(|e| {
                 TranscribeError::InferenceFailed(format!(
                     "Failed to create length tensor: {}",
@@ -143,12 +178,11 @@ impl Transcriber for DolphinTranscriber {
             TranscribeError::InferenceFailed(format!("Failed to lock session: {}", e))
         })?;
 
-        // Try standard input names; Dolphin ONNX exports may use different names
         let inputs: Vec<(std::borrow::Cow<str>, ort::session::SessionInputValue)> = vec![
             (std::borrow::Cow::Borrowed("x"), x_tensor.into()),
             (
-                std::borrow::Cow::Borrowed("x_length"),
-                x_length_tensor.into(),
+                std::borrow::Cow::Borrowed("x_len"),
+                x_len_tensor.into(),
             ),
         ];
 
@@ -161,13 +195,15 @@ impl Transcriber for DolphinTranscriber {
             inference_start.elapsed().as_secs_f32(),
         );
 
-        // Extract CTC logits and decode
+        // Extract CTC log-probs and decode
         let logits_val = outputs
-            .get("logits")
+            .get("lob_probs")
+            .or_else(|| outputs.get("logits"))
             .or_else(|| outputs.get("output"))
             .ok_or_else(|| {
                 TranscribeError::InferenceFailed(
-                    "Dolphin output not found (expected 'logits' or 'output')".to_string(),
+                    "Dolphin output not found (expected 'lob_probs', 'logits', or 'output')"
+                        .to_string(),
                 )
             })?;
 
@@ -251,6 +287,74 @@ fn filter_language_tokens(text: &str) -> String {
     }
 
     result.trim().to_string()
+}
+
+/// Read CMVN stats from ONNX model metadata
+///
+/// Dolphin uses "mean"/"invstd" keys where mean is positive (needs negation).
+/// Falls back to "neg_mean"/"inv_stddev" if those aren't found.
+fn read_cmvn_from_metadata(session: &Session) -> Result<(Vec<f32>, Vec<f32>), TranscribeError> {
+    let metadata = session.metadata().map_err(|e| {
+        TranscribeError::InitFailed(format!("Failed to read model metadata: {}", e))
+    })?;
+
+    // Try Dolphin naming first: "mean" and "invstd"
+    // Despite the key name "mean", the values are already negated (same as SenseVoice's
+    // "neg_mean"), so we use them directly without negation.
+    let (neg_mean, inv_stddev) = if let Some(mean_str) = metadata.custom("mean") {
+        let invstd_str = metadata.custom("invstd").ok_or_else(|| {
+            TranscribeError::InitFailed("Model metadata has 'mean' but no 'invstd'".to_string())
+        })?;
+
+        let neg_mean: Vec<f32> = mean_str
+            .split(',')
+            .filter_map(|s: &str| s.trim().parse::<f32>().ok())
+            .collect();
+        let inv_stddev: Vec<f32> = invstd_str
+            .split(',')
+            .filter_map(|s: &str| s.trim().parse::<f32>().ok())
+            .collect();
+
+        (neg_mean, inv_stddev)
+    } else if let Some(neg_mean_str) = metadata.custom("neg_mean") {
+        // SenseVoice-style naming (already negated)
+        let inv_stddev_str = metadata.custom("inv_stddev").ok_or_else(|| {
+            TranscribeError::InitFailed(
+                "Model metadata has 'neg_mean' but no 'inv_stddev'".to_string(),
+            )
+        })?;
+
+        let neg_mean: Vec<f32> = neg_mean_str
+            .split(',')
+            .filter_map(|s: &str| s.trim().parse::<f32>().ok())
+            .collect();
+        let inv_stddev: Vec<f32> = inv_stddev_str
+            .split(',')
+            .filter_map(|s: &str| s.trim().parse::<f32>().ok())
+            .collect();
+        (neg_mean, inv_stddev)
+    } else {
+        return Err(TranscribeError::InitFailed(
+            "Dolphin model metadata missing CMVN stats. \
+             Expected 'mean'/'invstd' or 'neg_mean'/'inv_stddev' keys."
+                .to_string(),
+        ));
+    };
+
+    if neg_mean.is_empty() || inv_stddev.is_empty() {
+        return Err(TranscribeError::InitFailed(format!(
+            "CMVN stats malformed (neg_mean: {} values, inv_stddev: {} values)",
+            neg_mean.len(),
+            inv_stddev.len()
+        )));
+    }
+
+    tracing::debug!(
+        "Loaded CMVN stats: {} dimensions",
+        neg_mean.len()
+    );
+
+    Ok((neg_mean, inv_stddev))
 }
 
 /// Resolve model name to directory path

@@ -262,13 +262,13 @@ fn decode_paraformer_output(
     tracing::debug!("Paraformer output shape (f32): {:?}", shape_dims);
 
     if shape_dims.len() == 3 {
-        // [batch, seq_len, vocab_size] - needs argmax (CTC-like)
+        // [batch, seq_len, vocab_size] - needs argmax then BPE-aware decoding
         let seq_len = shape_dims[1] as usize;
         let vocab_size = shape_dims[2] as usize;
-        let config = super::ctc::CtcConfig::default();
-        Ok(super::ctc::ctc_greedy_decode(
-            data, seq_len, vocab_size, tokens, &config,
-        ))
+        // Do CTC argmax + dedup + blank removal to get token IDs,
+        // then pass through tokens_to_text which handles @@ BPE markers
+        let token_ids = ctc_decode_to_ids(data, seq_len, vocab_size);
+        Ok(tokens_to_text(&token_ids, tokens))
     } else if shape_dims.len() == 2 {
         // [batch, seq_len] - pre-argmaxed token IDs as f32
         let seq_len = shape_dims[1] as usize;
@@ -283,6 +283,32 @@ fn decode_paraformer_output(
             shape_dims
         )))
     }
+}
+
+/// CTC greedy decode to token IDs: argmax per frame, collapse duplicates, remove blanks
+fn ctc_decode_to_ids(logits: &[f32], time_steps: usize, vocab_size: usize) -> Vec<u32> {
+    let blank_id: u32 = 0;
+    let mut token_ids: Vec<u32> = Vec::new();
+    let mut prev_id: Option<u32> = None;
+
+    for t in 0..time_steps {
+        let offset = t * vocab_size;
+        let frame = &logits[offset..offset + vocab_size];
+
+        let best_id = frame
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(idx, _)| idx as u32)
+            .unwrap_or(blank_id);
+
+        if best_id != blank_id && Some(best_id) != prev_id {
+            token_ids.push(best_id);
+        }
+        prev_id = Some(best_id);
+    }
+
+    token_ids
 }
 
 /// Convert token IDs to text, handling BPE continuation markers
