@@ -96,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
     if cli.paste {
         config.output.mode = config::OutputMode::Paste;
     }
+    let top_level_model = cli.model.clone();
     if let Some(model) = cli.model {
         if setup::model::is_valid_model(&model) {
             config.whisper.model = model;
@@ -365,7 +366,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Commands::Record { action } => {
-            send_record_command(&config, action)?;
+            send_record_command(&config, action, top_level_model.as_deref())?;
         }
     }
 
@@ -373,7 +374,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Send a record command to the running daemon via Unix signals or file triggers
-fn send_record_command(config: &config::Config, action: RecordAction) -> anyhow::Result<()> {
+fn send_record_command(config: &config::Config, action: RecordAction, top_level_model: Option<&str>) -> anyhow::Result<()> {
     use nix::sys::signal::{kill, Signal};
     use nix::unistd::Pid;
     use voxtype::OutputModeOverride;
@@ -432,8 +433,9 @@ fn send_record_command(config: &config::Config, action: RecordAction) -> anyhow:
             .map_err(|e| anyhow::anyhow!("Failed to write output mode override: {}", e))?;
     }
 
-    // Write model override file if specified
-    if let Some(model) = action.model_override() {
+    // Write model override file if specified (subcommand --model takes priority over top-level --model)
+    let model_override = action.model_override().or(top_level_model);
+    if let Some(model) = model_override {
         let override_file = config::Config::runtime_dir().join("model_override");
         std::fs::write(&override_file, model)
             .map_err(|e| anyhow::anyhow!("Failed to write model override: {}", e))?;
