@@ -49,7 +49,7 @@ ENV ORT_STRATEGY=download
 
 # Disable LTO for faster builds
 # Build with parakeet-cuda feature for NVIDIA GPU support
-RUN cargo build --release --features parakeet-cuda \
+RUN cargo build --release --features parakeet-cuda,moonshine \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
     && cp target/release/voxtype /tmp/voxtype-parakeet-cuda

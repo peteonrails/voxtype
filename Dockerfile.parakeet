@@ -61,7 +61,7 @@ ENV ORT_STRATEGY=download
 
 # Disable LTO for faster builds (can hang on TrueNAS)
 # Build with parakeet feature
-RUN cargo build --release --features parakeet \
+RUN cargo build --release --features parakeet,moonshine \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
     && cp target/release/voxtype /tmp/voxtype-parakeet-avx2
