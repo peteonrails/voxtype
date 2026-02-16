@@ -85,7 +85,11 @@ impl Exporter for JsonExporter {
         ExportFormat::Json
     }
 
-    fn export(&self, meeting: &MeetingData, _options: &ExportOptions) -> Result<String, ExportError> {
+    fn export(
+        &self,
+        meeting: &MeetingData,
+        _options: &ExportOptions,
+    ) -> Result<String, ExportError> {
         let exported = ExportedMeeting {
             metadata: ExportedMetadata {
                 id: meeting.metadata.id.to_string(),
@@ -168,12 +172,12 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
         assert!(parsed["metadata"]["id"].is_string());
-        assert_eq!(
-            parsed["metadata"]["title"].as_str(),
-            Some("Test Meeting")
-        );
+        assert_eq!(parsed["metadata"]["title"].as_str(), Some("Test Meeting"));
         assert!(parsed["transcript"]["segments"].is_array());
-        assert_eq!(parsed["transcript"]["segments"][0]["text"].as_str(), Some("Hello world."));
+        assert_eq!(
+            parsed["transcript"]["segments"][0]["text"].as_str(),
+            Some("Hello world.")
+        );
     }
 
     #[test]
@@ -200,6 +204,9 @@ mod tests {
 
         // Verify key fields
         assert_eq!(parsed["transcript"]["wordCount"].as_u64(), Some(2));
-        assert_eq!(parsed["transcript"]["segments"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            parsed["transcript"]["segments"].as_array().unwrap().len(),
+            1
+        );
     }
 }

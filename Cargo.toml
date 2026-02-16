@@ -95,6 +95,8 @@ gpu-vulkan = ["whisper-rs/vulkan"]
 gpu-cuda = ["whisper-rs/cuda"]
 gpu-metal = ["whisper-rs/metal"]
 gpu-hipblas = ["whisper-rs/hipblas"]
+# ML-based speaker diarization (uses ONNX for embedding extraction)
+ml-diarization = ["dep:ort", "dep:ndarray"]
 # Parakeet backend (ONNX-based, alternative to Whisper)
 parakeet = ["dep:parakeet-rs"]
 parakeet-cuda = ["parakeet", "parakeet-rs/cuda"]

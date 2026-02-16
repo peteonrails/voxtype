@@ -9,7 +9,11 @@ use crate::meeting::data::MeetingData;
 pub struct SrtExporter;
 
 impl Exporter for SrtExporter {
-    fn export(&self, meeting: &MeetingData, options: &ExportOptions) -> Result<String, ExportError> {
+    fn export(
+        &self,
+        meeting: &MeetingData,
+        options: &ExportOptions,
+    ) -> Result<String, ExportError> {
         let mut output = String::new();
         let mut index = 1;
 
@@ -75,10 +79,22 @@ mod tests {
         use crate::meeting::data::{AudioSource, MeetingData, TranscriptSegment};
 
         let mut meeting = MeetingData::new(Some("Test".to_string()));
-        meeting.transcript.add_segment(TranscriptSegment::new(1, 0, 2000, "Hello world".to_string(), 0));
+        meeting.transcript.add_segment(TranscriptSegment::new(
+            1,
+            0,
+            2000,
+            "Hello world".to_string(),
+            0,
+        ));
         meeting.transcript.segments[0].source = AudioSource::Microphone;
 
-        meeting.transcript.add_segment(TranscriptSegment::new(2, 2500, 5000, "How are you".to_string(), 0));
+        meeting.transcript.add_segment(TranscriptSegment::new(
+            2,
+            2500,
+            5000,
+            "How are you".to_string(),
+            0,
+        ));
         meeting.transcript.segments[1].source = AudioSource::Loopback;
 
         let exporter = SrtExporter;

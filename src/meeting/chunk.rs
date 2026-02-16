@@ -230,7 +230,10 @@ impl ChunkProcessor {
     /// Process a completed chunk of audio
     ///
     /// Applies VAD, transcribes speech regions, and returns transcript segments.
-    pub fn process_chunk(&mut self, buffer: ChunkBuffer) -> Result<ProcessedChunk, TranscribeError> {
+    pub fn process_chunk(
+        &mut self,
+        buffer: ChunkBuffer,
+    ) -> Result<ProcessedChunk, TranscribeError> {
         let start_time = Instant::now();
         let chunk_id = buffer.chunk_id;
         let source = buffer.source;
@@ -295,11 +298,7 @@ impl ChunkProcessor {
         }
 
         let processing_time_ms = start_time.elapsed().as_millis() as u64;
-        tracing::debug!(
-            "Chunk {} processed in {}ms",
-            chunk_id,
-            processing_time_ms
-        );
+        tracing::debug!("Chunk {} processed in {}ms", chunk_id, processing_time_ms);
 
         Ok(ProcessedChunk {
             chunk_id,

@@ -195,11 +195,7 @@ impl Transcript {
 
     /// Total duration in milliseconds
     pub fn duration_ms(&self) -> u64 {
-        self.segments
-            .iter()
-            .map(|s| s.end_ms)
-            .max()
-            .unwrap_or(0)
+        self.segments.iter().map(|s| s.end_ms).max().unwrap_or(0)
     }
 
     /// Word count
@@ -220,11 +216,7 @@ impl Transcript {
 
     /// Get unique speakers
     pub fn speakers(&self) -> Vec<String> {
-        let mut speakers: Vec<String> = self
-            .segments
-            .iter()
-            .map(|s| s.speaker_display())
-            .collect();
+        let mut speakers: Vec<String> = self.segments.iter().map(|s| s.speaker_display()).collect();
         speakers.sort();
         speakers.dedup();
         speakers
@@ -323,9 +315,9 @@ impl MeetingMetadata {
 
     /// Get a display title (or fallback to date)
     pub fn display_title(&self) -> String {
-        self.title.clone().unwrap_or_else(|| {
-            self.started_at.format("Meeting %Y-%m-%d %H:%M").to_string()
-        })
+        self.title
+            .clone()
+            .unwrap_or_else(|| self.started_at.format("Meeting %Y-%m-%d %H:%M").to_string())
     }
 
     /// Generate the default storage directory name
@@ -347,7 +339,11 @@ impl MeetingMetadata {
                 .collect();
             format!("{}-{}", date, safe_title.to_lowercase())
         } else {
-            format!("{}-{}", date, self.id.0.to_string().split('-').next().unwrap_or("meeting"))
+            format!(
+                "{}-{}",
+                date,
+                self.id.0.to_string().split('-').next().unwrap_or("meeting")
+            )
         }
     }
 }
@@ -454,7 +450,13 @@ mod tests {
     fn test_transcript_plain_text() {
         let mut transcript = Transcript::new();
         transcript.add_segment(TranscriptSegment::new(1, 0, 1000, "Hello".to_string(), 0));
-        transcript.add_segment(TranscriptSegment::new(2, 1000, 2000, "world".to_string(), 0));
+        transcript.add_segment(TranscriptSegment::new(
+            2,
+            1000,
+            2000,
+            "world".to_string(),
+            0,
+        ));
         assert_eq!(transcript.plain_text(), "Hello world");
     }
 

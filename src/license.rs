@@ -233,7 +233,9 @@ pub fn init_license() -> &'static License {
 ///
 /// Panics if `init_license()` has not been called.
 pub fn license() -> &'static License {
-    LICENSE.get().expect("License not initialized. Call init_license() first.")
+    LICENSE
+        .get()
+        .expect("License not initialized. Call init_license() first.")
 }
 
 /// Check if a Pro feature is available

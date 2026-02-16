@@ -11,7 +11,11 @@ impl Exporter for TextExporter {
         ExportFormat::Text
     }
 
-    fn export(&self, meeting: &MeetingData, options: &ExportOptions) -> Result<String, ExportError> {
+    fn export(
+        &self,
+        meeting: &MeetingData,
+        options: &ExportOptions,
+    ) -> Result<String, ExportError> {
         let mut output = String::new();
 
         // Metadata header
@@ -27,10 +31,7 @@ impl Exporter for TextExporter {
                 let secs = duration % 60;
                 output.push_str(&format!("Duration: {}:{:02}\n", mins, secs));
             }
-            output.push_str(&format!(
-                "Words: {}\n",
-                meeting.transcript.word_count()
-            ));
+            output.push_str(&format!("Words: {}\n", meeting.transcript.word_count()));
             output.push_str("\n");
             output.push_str(&"=".repeat(60));
             output.push_str("\n\n");

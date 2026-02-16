@@ -11,7 +11,11 @@ impl Exporter for MarkdownExporter {
         ExportFormat::Markdown
     }
 
-    fn export(&self, meeting: &MeetingData, options: &ExportOptions) -> Result<String, ExportError> {
+    fn export(
+        &self,
+        meeting: &MeetingData,
+        options: &ExportOptions,
+    ) -> Result<String, ExportError> {
         let mut output = String::new();
 
         // Title
@@ -29,10 +33,7 @@ impl Exporter for MarkdownExporter {
                 let mins = (duration % 3600) / 60;
                 let secs = duration % 60;
                 if hours > 0 {
-                    output.push_str(&format!(
-                        "- **Duration:** {}h {}m {}s\n",
-                        hours, mins, secs
-                    ));
+                    output.push_str(&format!("- **Duration:** {}h {}m {}s\n", hours, mins, secs));
                 } else {
                     output.push_str(&format!("- **Duration:** {}m {}s\n", mins, secs));
                 }
@@ -77,7 +78,10 @@ impl Exporter for MarkdownExporter {
                         .as_ref()
                         .map(|a| format!(" (@{})", a))
                         .unwrap_or_default();
-                    output.push_str(&format!("- {} {}{}\n", checkbox, item.description, assignee));
+                    output.push_str(&format!(
+                        "- {} {}{}\n",
+                        checkbox, item.description, assignee
+                    ));
                 }
                 output.push_str("\n");
             }
@@ -109,10 +113,7 @@ impl Exporter for MarkdownExporter {
             }
 
             if options.include_timestamps {
-                output.push_str(&format!(
-                    "*[{}]* ",
-                    segment.format_timestamp()
-                ));
+                output.push_str(&format!("*[{}]* ", segment.format_timestamp()));
             }
 
             output.push_str(&segment.text);
@@ -126,27 +127,15 @@ impl Exporter for MarkdownExporter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::meeting::data::{TranscriptSegment, AudioSource};
+    use crate::meeting::data::{AudioSource, TranscriptSegment};
 
     fn create_test_meeting() -> MeetingData {
         let mut meeting = MeetingData::new(Some("Weekly Standup".to_string()));
 
-        let mut seg1 = TranscriptSegment::new(
-            0,
-            0,
-            5000,
-            "Good morning everyone.".to_string(),
-            0,
-        );
+        let mut seg1 = TranscriptSegment::new(0, 0, 5000, "Good morning everyone.".to_string(), 0);
         seg1.source = AudioSource::Microphone;
 
-        let mut seg2 = TranscriptSegment::new(
-            1,
-            5000,
-            10000,
-            "Hey, good morning!".to_string(),
-            0,
-        );
+        let mut seg2 = TranscriptSegment::new(1, 5000, 10000, "Hey, good morning!".to_string(), 0);
         seg2.source = AudioSource::Loopback;
 
         meeting.transcript.add_segment(seg1);

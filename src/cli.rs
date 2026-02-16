@@ -364,6 +364,20 @@ pub enum MeetingAction {
         #[arg(long, short)]
         force: bool,
     },
+    /// Label a speaker in a meeting transcript
+    ///
+    /// Assigns a human-readable name to an auto-generated speaker ID.
+    /// Use with ML diarization to replace "SPEAKER_00" with "Alice".
+    Label {
+        /// Meeting ID (or "latest" for most recent)
+        meeting_id: String,
+
+        /// Speaker ID to label (e.g., "SPEAKER_00" or just "0")
+        speaker_id: String,
+
+        /// Human-readable label to assign
+        label: String,
+    },
 }
 
 impl RecordAction {

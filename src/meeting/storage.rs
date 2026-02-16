@@ -106,6 +106,16 @@ impl MeetingStorage {
 
             CREATE INDEX IF NOT EXISTS idx_meetings_started_at ON meetings(started_at DESC);
             CREATE INDEX IF NOT EXISTS idx_meetings_status ON meetings(status);
+
+            -- Speaker labels for ML diarization (Phase 3)
+            CREATE TABLE IF NOT EXISTS speaker_labels (
+                meeting_id TEXT NOT NULL,
+                speaker_num INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                PRIMARY KEY (meeting_id, speaker_num),
+                FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+            );
             "#,
         )?;
         Ok(())
@@ -200,9 +210,7 @@ impl MeetingStorage {
                         duration_secs: row.get::<_, Option<i64>>(4)?.map(|d| d as u64),
                         status: string_to_status(&row.get::<_, String>(5)?),
                         chunk_count: row.get::<_, i32>(6)? as u32,
-                        storage_path: row
-                            .get::<_, Option<String>>(7)?
-                            .map(PathBuf::from),
+                        storage_path: row.get::<_, Option<String>>(7)?.map(PathBuf::from),
                         audio_retained: row.get::<_, i32>(8)? != 0,
                         model: row.get(9)?,
                         summary: None,
@@ -249,9 +257,7 @@ impl MeetingStorage {
                     duration_secs: row.get::<_, Option<i64>>(4)?.map(|d| d as u64),
                     status: string_to_status(&row.get::<_, String>(5)?),
                     chunk_count: row.get::<_, i32>(6)? as u32,
-                    storage_path: row
-                        .get::<_, Option<String>>(7)?
-                        .map(PathBuf::from),
+                    storage_path: row.get::<_, Option<String>>(7)?.map(PathBuf::from),
                     audio_retained: row.get::<_, i32>(8)? != 0,
                     model: row.get(9)?,
                     summary: None,
@@ -364,6 +370,89 @@ impl MeetingStorage {
             MeetingId::parse(id_str)
                 .map_err(|_| StorageError::NotFound(format!("Invalid meeting ID: {}", id_str)))
         }
+    }
+
+    /// Set a speaker label for ML diarization
+    pub fn set_speaker_label(
+        &self,
+        meeting_id: &MeetingId,
+        speaker_num: u32,
+        label: &str,
+    ) -> Result<(), StorageError> {
+        // Verify meeting exists
+        self.get_meeting(meeting_id)?
+            .ok_or_else(|| StorageError::NotFound(meeting_id.to_string()))?;
+
+        // Insert or update speaker label
+        self.conn.execute(
+            r#"
+            INSERT OR REPLACE INTO speaker_labels (meeting_id, speaker_num, label)
+            VALUES (?1, ?2, ?3)
+            "#,
+            params![meeting_id.to_string(), speaker_num as i32, label],
+        )?;
+
+        // Also update the transcript file to apply labels
+        self.apply_speaker_labels_to_transcript(meeting_id)?;
+
+        Ok(())
+    }
+
+    /// Get all speaker labels for a meeting
+    pub fn get_speaker_labels(
+        &self,
+        meeting_id: &MeetingId,
+    ) -> Result<std::collections::HashMap<u32, String>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT speaker_num, label FROM speaker_labels WHERE meeting_id = ?1")?;
+
+        let labels = stmt
+            .query_map(params![meeting_id.to_string()], |row| {
+                Ok((row.get::<_, i32>(0)? as u32, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
+
+        Ok(labels)
+    }
+
+    /// Apply speaker labels to transcript segments
+    fn apply_speaker_labels_to_transcript(
+        &self,
+        meeting_id: &MeetingId,
+    ) -> Result<(), StorageError> {
+        let labels = self.get_speaker_labels(meeting_id)?;
+        if labels.is_empty() {
+            return Ok(());
+        }
+
+        // Load and update transcript
+        let mut transcript = match self.load_transcript(meeting_id) {
+            Ok(t) => t,
+            Err(_) => return Ok(()), // No transcript yet
+        };
+
+        for segment in &mut transcript.segments {
+            if let Some(ref speaker_id) = segment.speaker_id {
+                // Parse speaker ID - supports "SPEAKER_00" or just "0"
+                let speaker_num: Option<u32> = if speaker_id.starts_with("SPEAKER_") {
+                    speaker_id.trim_start_matches("SPEAKER_").parse().ok()
+                } else {
+                    speaker_id.parse().ok()
+                };
+
+                if let Some(num) = speaker_num {
+                    if let Some(label) = labels.get(&num) {
+                        segment.speaker_label = Some(label.clone());
+                    }
+                }
+            }
+        }
+
+        // Save updated transcript
+        self.save_transcript(meeting_id, &transcript)?;
+
+        Ok(())
     }
 }
 

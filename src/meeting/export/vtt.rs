@@ -9,7 +9,11 @@ use crate::meeting::data::MeetingData;
 pub struct VttExporter;
 
 impl Exporter for VttExporter {
-    fn export(&self, meeting: &MeetingData, options: &ExportOptions) -> Result<String, ExportError> {
+    fn export(
+        &self,
+        meeting: &MeetingData,
+        options: &ExportOptions,
+    ) -> Result<String, ExportError> {
         let mut output = String::from("WEBVTT\n");
 
         // Add metadata if requested

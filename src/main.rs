@@ -1304,11 +1304,14 @@ async fn run_meeting_command(config: &config::Config, action: MeetingAction) -> 
                     println!("===============\n");
 
                     for m in meetings {
-                        let duration = m.duration_secs.map(|d| {
-                            let mins = d / 60;
-                            let secs = d % 60;
-                            format!("{}m {}s", mins, secs)
-                        }).unwrap_or_else(|| "in progress".to_string());
+                        let duration = m
+                            .duration_secs
+                            .map(|d| {
+                                let mins = d / 60;
+                                let secs = d % 60;
+                                format!("{}m {}s", mins, secs)
+                            })
+                            .unwrap_or_else(|| "in progress".to_string());
 
                         println!("{}", m.display_title());
                         println!("  ID: {}", m.id);
@@ -1347,7 +1350,12 @@ async fn run_meeting_command(config: &config::Config, action: MeetingAction) -> 
                 line_width: 0,
             };
 
-            match meeting::export_meeting_by_id(&meeting_config, &meeting_id, export_format, &options) {
+            match meeting::export_meeting_by_id(
+                &meeting_config,
+                &meeting_id,
+                export_format,
+                &options,
+            ) {
                 Ok(content) => {
                     if let Some(path) = output {
                         std::fs::write(&path, &content)?;
@@ -1370,7 +1378,10 @@ async fn run_meeting_command(config: &config::Config, action: MeetingAction) -> 
                     println!("{}", "=".repeat(meeting.metadata.display_title().len()));
                     println!();
                     println!("ID:       {}", meeting.metadata.id);
-                    println!("Started:  {}", meeting.metadata.started_at.format("%Y-%m-%d %H:%M UTC"));
+                    println!(
+                        "Started:  {}",
+                        meeting.metadata.started_at.format("%Y-%m-%d %H:%M UTC")
+                    );
                     if let Some(ended) = meeting.metadata.ended_at {
                         println!("Ended:    {}", ended.format("%Y-%m-%d %H:%M UTC"));
                     }
@@ -1393,7 +1404,10 @@ async fn run_meeting_command(config: &config::Config, action: MeetingAction) -> 
                     println!("Words:    {}", meeting.transcript.word_count());
                     println!("Speakers: {}", meeting.transcript.speakers().join(", "));
                     println!();
-                    println!("Use 'voxtype meeting export {}' to export the transcript.", meeting_id);
+                    println!(
+                        "Use 'voxtype meeting export {}' to export the transcript.",
+                        meeting_id
+                    );
                 }
                 Err(e) => {
                     eprintln!("Error loading meeting: {}", e);
@@ -1412,13 +1426,52 @@ async fn run_meeting_command(config: &config::Config, action: MeetingAction) -> 
             let storage = meeting::MeetingStorage::open(meeting_config.storage.clone())
                 .map_err(|e| anyhow::anyhow!("Failed to open storage: {}", e))?;
 
-            let id = storage.resolve_meeting_id(&meeting_id)
+            let id = storage
+                .resolve_meeting_id(&meeting_id)
                 .map_err(|e| anyhow::anyhow!("Meeting not found: {}", e))?;
 
-            storage.delete_meeting(&id)
+            storage
+                .delete_meeting(&id)
                 .map_err(|e| anyhow::anyhow!("Failed to delete meeting: {}", e))?;
 
             println!("Meeting {} deleted.", meeting_id);
+        }
+
+        MeetingAction::Label {
+            meeting_id,
+            speaker_id,
+            label,
+        } => {
+            let storage = meeting::MeetingStorage::open(meeting_config.storage.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to open storage: {}", e))?;
+
+            let id = storage
+                .resolve_meeting_id(&meeting_id)
+                .map_err(|e| anyhow::anyhow!("Meeting not found: {}", e))?;
+
+            // Parse speaker_id - accept "SPEAKER_00", "0", "00", etc.
+            let speaker_num: u32 = if speaker_id.starts_with("SPEAKER_") {
+                speaker_id
+                    .trim_start_matches("SPEAKER_")
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("Invalid speaker ID format: {}", speaker_id))?
+            } else {
+                speaker_id.parse().map_err(|_| {
+                    anyhow::anyhow!(
+                        "Invalid speaker ID: {}. Use SPEAKER_XX or a number.",
+                        speaker_id
+                    )
+                })?
+            };
+
+            storage
+                .set_speaker_label(&id, speaker_num, &label)
+                .map_err(|e| anyhow::anyhow!("Failed to set speaker label: {}", e))?;
+
+            println!(
+                "Labeled SPEAKER_{:02} as '{}' in meeting {}",
+                speaker_num, label, meeting_id
+            );
         }
     }
 

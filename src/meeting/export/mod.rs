@@ -97,7 +97,8 @@ pub struct ExportOptions {
 /// Trait for meeting exporters
 pub trait Exporter: Send + Sync {
     /// Export meeting data to a string
-    fn export(&self, meeting: &MeetingData, options: &ExportOptions) -> Result<String, ExportError>;
+    fn export(&self, meeting: &MeetingData, options: &ExportOptions)
+        -> Result<String, ExportError>;
 
     /// Get the format name
     fn format(&self) -> ExportFormat;

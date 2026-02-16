@@ -110,9 +110,8 @@ impl MeetingDaemon {
         event_tx: mpsc::Sender<MeetingEvent>,
     ) -> Result<Self> {
         // Verify Pro license
-        require_pro_feature(ProFeature::MeetingMode).map_err(|e| {
-            crate::error::VoxtypeError::Config(e.to_string())
-        })?;
+        require_pro_feature(ProFeature::MeetingMode)
+            .map_err(|e| crate::error::VoxtypeError::Config(e.to_string()))?;
 
         let storage = MeetingStorage::open(config.storage.clone()).map_err(|e| {
             crate::error::VoxtypeError::Config(format!("Failed to open meeting storage: {}", e))
@@ -145,16 +144,25 @@ impl MeetingDaemon {
         meeting.metadata.model = Some(self.engine_name.clone());
 
         // Create storage directory
-        let storage_path = self.storage.create_meeting(&meeting.metadata).map_err(|e| {
-            crate::error::VoxtypeError::Config(format!("Failed to create meeting storage: {}", e))
-        })?;
+        let storage_path = self
+            .storage
+            .create_meeting(&meeting.metadata)
+            .map_err(|e| {
+                crate::error::VoxtypeError::Config(format!(
+                    "Failed to create meeting storage: {}",
+                    e
+                ))
+            })?;
         meeting.metadata.storage_path = Some(storage_path);
 
         let meeting_id = meeting.metadata.id;
         self.current_meeting = Some(meeting);
         self.state = MeetingState::start();
 
-        let _ = self.event_tx.send(MeetingEvent::Started { meeting_id }).await;
+        let _ = self
+            .event_tx
+            .send(MeetingEvent::Started { meeting_id })
+            .await;
         tracing::info!("Meeting started: {}", meeting_id);
 
         Ok(meeting_id)
@@ -213,9 +221,11 @@ impl MeetingDaemon {
                 })?;
 
             // Update metadata
-            self.storage.update_meeting(&meeting.metadata).map_err(|e| {
-                crate::error::VoxtypeError::Config(format!("Failed to update meeting: {}", e))
-            })?;
+            self.storage
+                .update_meeting(&meeting.metadata)
+                .map_err(|e| {
+                    crate::error::VoxtypeError::Config(format!("Failed to update meeting: {}", e))
+                })?;
         }
 
         let meeting_id = self
@@ -224,7 +234,10 @@ impl MeetingDaemon {
             .map(|m| m.metadata.id)
             .unwrap_or_default();
 
-        let _ = self.event_tx.send(MeetingEvent::Stopped { meeting_id }).await;
+        let _ = self
+            .event_tx
+            .send(MeetingEvent::Stopped { meeting_id })
+            .await;
         tracing::info!("Meeting stopped: {}", meeting_id);
 
         // Clean up
@@ -245,7 +258,10 @@ impl MeetingDaemon {
     }
 
     /// Process a chunk of audio
-    pub async fn process_chunk(&mut self, samples: Vec<f32>) -> Result<Option<Vec<TranscriptSegment>>> {
+    pub async fn process_chunk(
+        &mut self,
+        samples: Vec<f32>,
+    ) -> Result<Option<Vec<TranscriptSegment>>> {
         if !self.state.is_active() {
             return Ok(None);
         }
@@ -273,9 +289,9 @@ impl MeetingDaemon {
         let mut buffer = processor.new_buffer(chunk_id, AudioSource::Microphone, start_offset_ms);
         buffer.add_samples(&samples);
 
-        let result = processor.process_chunk(buffer).map_err(|e| {
-            crate::error::VoxtypeError::Transcribe(e)
-        })?;
+        let result = processor
+            .process_chunk(buffer)
+            .map_err(|e| crate::error::VoxtypeError::Transcribe(e))?;
 
         // Add segments to transcript
         if let Some(ref mut meeting) = self.current_meeting {

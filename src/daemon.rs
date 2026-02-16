@@ -238,16 +238,14 @@ fn check_meeting_start() -> Option<Option<String>> {
     let start_file = Config::runtime_dir().join("meeting_start");
     if start_file.exists() {
         // Read optional title from file content
-        let title = std::fs::read_to_string(&start_file)
-            .ok()
-            .and_then(|s| {
-                let trimmed = s.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            });
+        let title = std::fs::read_to_string(&start_file).ok().and_then(|s| {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
         // Remove the file to acknowledge the command
         let _ = std::fs::remove_file(&start_file);
         Some(title)
@@ -292,7 +290,12 @@ fn check_meeting_resume() -> bool {
 /// Clean up any stale meeting command files on startup
 fn cleanup_meeting_files() {
     let runtime_dir = Config::runtime_dir();
-    for name in &["meeting_start", "meeting_stop", "meeting_pause", "meeting_resume"] {
+    for name in &[
+        "meeting_start",
+        "meeting_stop",
+        "meeting_pause",
+        "meeting_resume",
+    ] {
         let file = runtime_dir.join(name);
         if file.exists() {
             let _ = std::fs::remove_file(&file);
@@ -759,7 +762,9 @@ impl Daemon {
 
     /// Check if a meeting is in progress
     fn meeting_active(&self) -> bool {
-        self.meeting_daemon.as_ref().map_or(false, |d| d.state().is_active())
+        self.meeting_daemon
+            .as_ref()
+            .map_or(false, |d| d.state().is_active())
     }
 
     /// Get the chunk duration for meeting mode

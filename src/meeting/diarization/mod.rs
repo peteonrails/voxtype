@@ -6,8 +6,11 @@
 //!
 //! - **Simple**: Source-based attribution using mic vs loopback (Phase 2)
 //! - **ML**: ONNX-based speaker embeddings with clustering (Phase 3)
+//! - **Subprocess**: Memory-isolated ML diarization for resource-constrained systems
 
+pub mod ml;
 pub mod simple;
+pub mod subprocess;
 
 use crate::meeting::data::AudioSource;
 use std::collections::HashMap;
@@ -110,12 +113,39 @@ pub fn create_diarizer(config: &DiarizationConfig) -> Box<dyn Diarizer> {
     match config.backend.as_str() {
         "simple" => Box::new(simple::SimpleDiarizer::new()),
         "ml" => {
-            // ML diarizer will be implemented in Phase 3
-            tracing::warn!("ML diarizer not yet implemented, falling back to simple");
-            Box::new(simple::SimpleDiarizer::new())
+            #[cfg(feature = "ml-diarization")]
+            {
+                let mut diarizer = ml::MlDiarizer::new(config);
+                if diarizer.model_exists() {
+                    if let Err(e) = diarizer.load_model() {
+                        tracing::warn!("Failed to load ML diarization model: {}", e);
+                        tracing::info!("Falling back to simple diarization");
+                        return Box::new(simple::SimpleDiarizer::new());
+                    }
+                    tracing::info!("Using ML diarization with ONNX");
+                    return Box::new(diarizer);
+                } else {
+                    tracing::warn!("ML diarization model not found, falling back to simple");
+                    return Box::new(simple::SimpleDiarizer::new());
+                }
+            }
+            #[cfg(not(feature = "ml-diarization"))]
+            {
+                tracing::warn!(
+                    "ML diarization requires the 'ml-diarization' feature, falling back to simple"
+                );
+                Box::new(simple::SimpleDiarizer::new())
+            }
+        }
+        "subprocess" => {
+            // Subprocess diarizer for memory-isolated ML diarization
+            Box::new(subprocess::SubprocessDiarizer::new(config.clone()))
         }
         _ => {
-            tracing::warn!("Unknown diarizer backend '{}', using simple", config.backend);
+            tracing::warn!(
+                "Unknown diarizer backend '{}', using simple",
+                config.backend
+            );
             Box::new(simple::SimpleDiarizer::new())
         }
     }
@@ -131,7 +161,10 @@ mod tests {
         assert_eq!(SpeakerId::Remote.display_name(), "Remote");
         assert_eq!(SpeakerId::Auto(0).display_name(), "SPEAKER_00");
         assert_eq!(SpeakerId::Auto(5).display_name(), "SPEAKER_05");
-        assert_eq!(SpeakerId::Named("Alice".to_string()).display_name(), "Alice");
+        assert_eq!(
+            SpeakerId::Named("Alice".to_string()).display_name(),
+            "Alice"
+        );
     }
 
     #[test]
