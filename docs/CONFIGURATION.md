@@ -26,6 +26,7 @@ Selects which speech-to-text engine to use for transcription.
 **Values:**
 - `whisper` - OpenAI Whisper via whisper.cpp (default, recommended)
 - `parakeet` - NVIDIA Parakeet via ONNX Runtime (experimental, requires special binary)
+- `moonshine` - Moonshine encoder-decoder transformer via ONNX Runtime (experimental, requires special binary)
 
 **Example:**
 ```toml
@@ -40,7 +41,9 @@ voxtype --engine parakeet daemon
 **Notes:**
 - Parakeet requires a Parakeet-enabled binary (`voxtype-*-parakeet-*`)
 - When using Parakeet, you must also configure the `[parakeet]` section
+- When using Moonshine, you must also configure the `[moonshine]` section
 - See [PARAKEET.md](PARAKEET.md) for detailed Parakeet setup instructions
+- See [MOONSHINE.md](MOONSHINE.md) for detailed Moonshine setup instructions
 
 ---
 
@@ -1034,6 +1037,96 @@ engine = "parakeet"
 
 [parakeet]
 model = "parakeet-tdt-0.6b-v3"
+on_demand_loading = false  # Keep model loaded for fast response
+```
+
+---
+
+## [moonshine]
+
+Configuration for the Moonshine speech-to-text engine. This section is only used when `engine = "moonshine"`.
+
+> **Note:** Moonshine support is experimental. See [MOONSHINE.md](MOONSHINE.md) for detailed setup instructions.
+
+### model
+
+**Type:** String
+**Default:** `"base"`
+**Required:** No
+
+The Moonshine model to use. Can be a model name (looked up in `~/.local/share/voxtype/models/moonshine-{name}/`) or an absolute path to a model directory.
+
+**Available models:**
+
+| Model | Parameters | Size | Description |
+|-------|-----------|------|-------------|
+| `tiny` | 27M | 100MB | Fastest, English |
+| `base` | 61M | 237MB | Better accuracy, English |
+| `base-ja` | 61M | 237MB | Multilingual (Japanese) |
+| `base-zh` | 61M | 237MB | Multilingual (Mandarin) |
+| `tiny-ja` | 27M | 100MB | Multilingual (Japanese) |
+| `tiny-zh` | 27M | 100MB | Multilingual (Mandarin) |
+| `tiny-ko` | 27M | 100MB | Multilingual (Korean) |
+| `tiny-ar` | 27M | 100MB | Multilingual (Arabic) |
+
+**Example:**
+```toml
+[moonshine]
+model = "base"
+```
+
+**Using absolute path:**
+```toml
+[moonshine]
+model = "/opt/models/moonshine-base"
+```
+
+### quantized
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Use quantized model files if available. Quantized models are smaller and faster. Falls back to full precision if quantized files are not found.
+
+**Example:**
+```toml
+[moonshine]
+model = "base"
+quantized = true
+```
+
+### on_demand_loading
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Same behavior as `[whisper].on_demand_loading`. When `true`, loads the model only when recording starts and unloads after transcription.
+
+**Example:**
+```toml
+[moonshine]
+model = "base"
+on_demand_loading = true  # Free memory when not transcribing
+```
+
+### Configuration Summary
+
+| Option | CLI Flag | Environment Variable | Default | Description |
+|--------|----------|---------------------|---------|-------------|
+| `model` | `--model` | `VOXTYPE_MODEL` | `"base"` | Moonshine model name or path |
+| `quantized` | - | - | `true` | Use quantized model files when available |
+| `on_demand_loading` | - | - | `false` | Load model only when recording starts |
+
+### Complete Example
+
+```toml
+engine = "moonshine"
+
+[moonshine]
+model = "base"
+quantized = true
 on_demand_loading = false  # Keep model loaded for fast response
 ```
 

@@ -541,12 +541,13 @@ Any valid evdev key name works. Common choices:
 
 ## Transcription Engines
 
-Voxtype supports two speech-to-text engines:
+Voxtype supports three speech-to-text engines:
 
 | Engine | Best For | GPU Required | Languages |
 |--------|----------|--------------|-----------|
 | **Whisper** (default) | Most users, multilingual | Optional (faster with GPU) | 99+ languages |
 | **Parakeet** (experimental) | Fast CPU inference, English | Optional (CUDA available) | English only |
+| **Moonshine** (experimental) | Very fast CPU inference, small models | No | English + multilingual variants |
 
 ### Selecting an Engine
 
@@ -558,6 +559,9 @@ engine = "whisper"
 
 # Or use Parakeet (requires Parakeet-enabled binary)
 engine = "parakeet"
+
+# Or use Moonshine (requires Moonshine-enabled binary)
+engine = "moonshine"
 ```
 
 **Via CLI flag** (overrides config):
@@ -565,6 +569,7 @@ engine = "parakeet"
 ```bash
 voxtype --engine whisper daemon
 voxtype --engine parakeet daemon
+voxtype --engine moonshine daemon
 ```
 
 ### Whisper (Default)
@@ -593,6 +598,21 @@ Parakeet is NVIDIA's FastConformer-based ASR model. It offers:
 - English-only use case
 
 See [PARAKEET.md](PARAKEET.md) for detailed setup instructions.
+
+### Moonshine (Experimental)
+
+Moonshine is an encoder-decoder transformer model running via ONNX Runtime. It offers:
+
+- Very fast CPU inference (0.09s for 4s audio on Ryzen 9 9900X3D)
+- Small model sizes (tiny: 100MB, base: 237MB)
+- English models are MIT-licensed; multilingual models (Japanese, Mandarin, Korean, Arabic) use a community license
+- Outputs lowercase without punctuation
+
+**Requirements:**
+- A Moonshine-enabled binary (`--features moonshine`)
+- A Moonshine model downloaded to `~/.local/share/voxtype/models/`
+
+See [MOONSHINE.md](MOONSHINE.md) for detailed setup instructions.
 
 ---
 
