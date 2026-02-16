@@ -25,21 +25,21 @@ pub enum ParakeetBackend {
 impl ParakeetBackend {
     fn binary_name(&self) -> &'static str {
         match self {
-            ParakeetBackend::Avx2 => "voxtype-parakeet-avx2",
-            ParakeetBackend::Avx512 => "voxtype-parakeet-avx512",
-            ParakeetBackend::Cuda => "voxtype-parakeet-cuda",
-            ParakeetBackend::Rocm => "voxtype-parakeet-rocm",
-            ParakeetBackend::Custom => "voxtype-parakeet",
+            ParakeetBackend::Avx2 => "voxtype-onnx-avx2",
+            ParakeetBackend::Avx512 => "voxtype-onnx-avx512",
+            ParakeetBackend::Cuda => "voxtype-onnx-cuda",
+            ParakeetBackend::Rocm => "voxtype-onnx-rocm",
+            ParakeetBackend::Custom => "voxtype-onnx",
         }
     }
 
     fn display_name(&self) -> &'static str {
         match self {
-            ParakeetBackend::Avx2 => "Parakeet (AVX2)",
-            ParakeetBackend::Avx512 => "Parakeet (AVX-512)",
-            ParakeetBackend::Cuda => "Parakeet (CUDA)",
-            ParakeetBackend::Rocm => "Parakeet (ROCm)",
-            ParakeetBackend::Custom => "Parakeet (Custom)",
+            ParakeetBackend::Avx2 => "ONNX (AVX2)",
+            ParakeetBackend::Avx512 => "ONNX (AVX-512)",
+            ParakeetBackend::Cuda => "ONNX (CUDA)",
+            ParakeetBackend::Rocm => "ONNX (ROCm)",
+            ParakeetBackend::Custom => "ONNX (Custom)",
         }
     }
 
@@ -59,7 +59,7 @@ pub fn is_parakeet_active() -> bool {
     if let Ok(link_target) = fs::read_link(VOXTYPE_BIN) {
         if let Some(target_name) = link_target.file_name() {
             if let Some(name) = target_name.to_str() {
-                return name.contains("parakeet");
+                return name.contains("onnx") || name.contains("parakeet");
             }
         }
     }
@@ -71,6 +71,13 @@ pub fn detect_current_parakeet_backend() -> Option<ParakeetBackend> {
     if let Ok(link_target) = fs::read_link(VOXTYPE_BIN) {
         let target_name = link_target.file_name()?.to_str()?;
         return match target_name {
+            // New ONNX names
+            "voxtype-onnx-avx2" => Some(ParakeetBackend::Avx2),
+            "voxtype-onnx-avx512" => Some(ParakeetBackend::Avx512),
+            "voxtype-onnx-cuda" => Some(ParakeetBackend::Cuda),
+            "voxtype-onnx-rocm" => Some(ParakeetBackend::Rocm),
+            "voxtype-onnx" => Some(ParakeetBackend::Custom),
+            // Legacy parakeet names (backward compat)
             "voxtype-parakeet-avx2" => Some(ParakeetBackend::Avx2),
             "voxtype-parakeet-avx512" => Some(ParakeetBackend::Avx512),
             "voxtype-parakeet-cuda" => Some(ParakeetBackend::Cuda),
@@ -439,23 +446,23 @@ mod tests {
 
     #[test]
     fn test_parakeet_backend_binary_names() {
-        assert_eq!(ParakeetBackend::Avx2.binary_name(), "voxtype-parakeet-avx2");
+        assert_eq!(ParakeetBackend::Avx2.binary_name(), "voxtype-onnx-avx2");
         assert_eq!(
             ParakeetBackend::Avx512.binary_name(),
-            "voxtype-parakeet-avx512"
+            "voxtype-onnx-avx512"
         );
-        assert_eq!(ParakeetBackend::Cuda.binary_name(), "voxtype-parakeet-cuda");
-        assert_eq!(ParakeetBackend::Rocm.binary_name(), "voxtype-parakeet-rocm");
-        assert_eq!(ParakeetBackend::Custom.binary_name(), "voxtype-parakeet");
+        assert_eq!(ParakeetBackend::Cuda.binary_name(), "voxtype-onnx-cuda");
+        assert_eq!(ParakeetBackend::Rocm.binary_name(), "voxtype-onnx-rocm");
+        assert_eq!(ParakeetBackend::Custom.binary_name(), "voxtype-onnx");
     }
 
     #[test]
     fn test_parakeet_backend_display_names() {
-        assert_eq!(ParakeetBackend::Avx2.display_name(), "Parakeet (AVX2)");
-        assert_eq!(ParakeetBackend::Avx512.display_name(), "Parakeet (AVX-512)");
-        assert_eq!(ParakeetBackend::Cuda.display_name(), "Parakeet (CUDA)");
-        assert_eq!(ParakeetBackend::Rocm.display_name(), "Parakeet (ROCm)");
-        assert_eq!(ParakeetBackend::Custom.display_name(), "Parakeet (Custom)");
+        assert_eq!(ParakeetBackend::Avx2.display_name(), "ONNX (AVX2)");
+        assert_eq!(ParakeetBackend::Avx512.display_name(), "ONNX (AVX-512)");
+        assert_eq!(ParakeetBackend::Cuda.display_name(), "ONNX (CUDA)");
+        assert_eq!(ParakeetBackend::Rocm.display_name(), "ONNX (ROCm)");
+        assert_eq!(ParakeetBackend::Custom.display_name(), "ONNX (Custom)");
     }
 
     #[test]

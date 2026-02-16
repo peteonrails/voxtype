@@ -423,15 +423,15 @@ Building on modern CPUs (Zen 4, etc.) can leak AVX-512/GFNI instructions into bi
 | Vulkan | Docker on remote pre-AVX-512 server | GPU build on CPU without AVX-512 |
 | AVX512 | Local machine | Requires AVX-512 capable host |
 
-**Parakeet Binaries (Experimental):**
+**ONNX Binaries (Parakeet + Moonshine):**
 
 | Binary | Build Location | Why |
 |--------|---------------|-----|
-| parakeet-avx2 | Docker on remote pre-AVX-512 server | Wide CPU compatibility |
-| parakeet-avx512 | Local machine | Best CPU performance |
-| parakeet-cuda | Docker on remote server with NVIDIA GPU | GPU acceleration |
+| onnx-avx2 | Docker on remote pre-AVX-512 server | Wide CPU compatibility |
+| onnx-avx512 | Local machine | Best CPU performance |
+| onnx-cuda | Docker on remote server with NVIDIA GPU | GPU acceleration |
 
-Note: Parakeet binaries include bundled ONNX Runtime which contains AVX-512 instructions, but ONNX Runtime uses runtime CPU detection and falls back gracefully on older CPUs.
+Note: ONNX binaries include bundled ONNX Runtime which contains AVX-512 instructions, but ONNX Runtime uses runtime CPU detection and falls back gracefully on older CPUs.
 
 ### GPU Feature Flags
 
@@ -487,9 +487,9 @@ docker context use <your-remote-context>
 docker compose -f docker-compose.build.yml build --no-cache avx2 vulkan
 docker compose -f docker-compose.build.yml up avx2 vulkan
 
-# 2. Build Parakeet binaries on remote server
-docker compose -f docker-compose.build.yml build --no-cache parakeet-avx2
-docker compose -f docker-compose.build.yml up parakeet-avx2
+# 2. Build ONNX binaries on remote server
+docker compose -f docker-compose.build.yml build --no-cache onnx-avx2
+docker compose -f docker-compose.build.yml up onnx-avx2
 
 # 3. Copy binaries from remote Docker volumes to local
 mkdir -p releases/${VERSION}
@@ -504,9 +504,9 @@ docker context use default
 cargo clean && cargo build --release
 cp target/release/voxtype releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx512
 
-# Parakeet AVX-512
-cargo clean && RUSTFLAGS="-C target-cpu=native" cargo build --release --features parakeet
-cp target/release/voxtype releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-parakeet-avx512
+# ONNX AVX-512
+cargo clean && RUSTFLAGS="-C target-cpu=native" cargo build --release --features parakeet,moonshine
+cp target/release/voxtype releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-onnx-avx512
 
 # 5. VERIFY VERSIONS before uploading (critical!)
 for bin in releases/${VERSION}/voxtype-*; do
@@ -527,9 +527,9 @@ releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx2 --version
 releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx512 --version
 releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-vulkan --version
 
-# Parakeet binaries (experimental)
-releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-parakeet-avx2 --version
-releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-parakeet-avx512 --version
+# ONNX binaries
+releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-onnx-avx2 --version
+releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-onnx-avx512 --version
 ```
 
 If versions don't match, the Docker cache is stale. Rebuild with `--no-cache`.
@@ -556,15 +556,15 @@ What to look for:
 - `{1to4}`, `{1to8}`, `{1to16}` = AVX-512 broadcast syntax
 - `vgf2p8`, `gf2p8` = GFNI instructions (not on Zen 3)
 
-### Parakeet Binary Instruction Leakage
+### ONNX Binary Instruction Leakage
 
-**IMPORTANT: Parakeet binaries also need AVX-512 instruction checks**, even when built on pre-AVX-512 hardware.
+**IMPORTANT: ONNX binaries also need AVX-512 instruction checks**, even when built on pre-AVX-512 hardware.
 
 The `ort` crate downloads prebuilt ONNX Runtime binaries that may contain AVX-512 instructions regardless of the build host's CPU. This is different from Whisper builds where the leakage comes from system libraries.
 
 ```bash
-# Check Parakeet binaries for AVX-512 leakage
-objdump -d voxtype-*-parakeet-avx2 | grep -c zmm
+# Check ONNX binaries for AVX-512 leakage
+objdump -d voxtype-*-onnx-avx2 | grep -c zmm
 # If >0, the ONNX Runtime contains AVX-512 instructions
 ```
 
@@ -573,7 +573,7 @@ objdump -d voxtype-*-parakeet-avx2 | grep -c zmm
 2. **Build ONNX Runtime from source** - Use `ORT_STRATEGY=build` to compile ONNX Runtime with specific CPU flags (significantly increases build time)
 3. **Use `load-dynamic` feature** - Link against system ONNX Runtime instead of bundled (requires users to install ONNX Runtime separately)
 
-For now, Parakeet binaries may contain AVX-512 instructions from ONNX Runtime but should still run on pre-AVX-512 CPUs via runtime fallback. Test on target hardware to verify.
+For now, ONNX binaries may contain AVX-512 instructions from ONNX Runtime but should still run on pre-AVX-512 CPUs via runtime fallback. Test on target hardware to verify.
 
 ### Packaging Deb and RPM
 

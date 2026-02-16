@@ -39,7 +39,7 @@ voxtype --engine parakeet daemon
 ```
 
 **Notes:**
-- Parakeet requires a Parakeet-enabled binary (`voxtype-*-parakeet-*`)
+- Parakeet requires an ONNX-enabled binary (`voxtype-*-onnx-*`)
 - When using Parakeet, you must also configure the `[parakeet]` section
 - When using Moonshine, you must also configure the `[moonshine]` section
 - See [PARAKEET.md](PARAKEET.md) for detailed Parakeet setup instructions

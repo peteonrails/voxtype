@@ -593,7 +593,7 @@ Parakeet is NVIDIA's FastConformer-based ASR model. It offers:
 - No GPU required (though CUDA acceleration available)
 
 **Requirements:**
-- A Parakeet-enabled binary (`voxtype-*-parakeet-*`)
+- An ONNX-enabled binary (`voxtype-*-onnx-*`)
 - The Parakeet model downloaded (~600MB)
 - English-only use case
 

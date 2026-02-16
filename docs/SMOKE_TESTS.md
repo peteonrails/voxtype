@@ -708,13 +708,13 @@ ls -la /usr/bin/voxtype  # Should point to voxtype-vulkan
 sudo voxtype setup gpu --disable  # Switch to best CPU (avx512 or avx2)
 ls -la /usr/bin/voxtype  # Should point to voxtype-avx512 or voxtype-avx2
 
-# Parakeet mode (symlink points to voxtype-parakeet-*)
-# --enable switches to CUDA, --disable switches to best Parakeet CPU
-sudo ln -sf /usr/lib/voxtype/voxtype-parakeet-avx512 /usr/bin/voxtype
-sudo voxtype setup gpu --enable   # Switch to Parakeet CUDA
-ls -la /usr/bin/voxtype  # Should point to voxtype-parakeet-cuda
-sudo voxtype setup gpu --disable  # Switch to best Parakeet CPU
-ls -la /usr/bin/voxtype  # Should point to voxtype-parakeet-avx512
+# ONNX mode (symlink points to voxtype-onnx-*)
+# --enable switches to CUDA, --disable switches to best ONNX CPU
+sudo ln -sf /usr/lib/voxtype/voxtype-onnx-avx512 /usr/bin/voxtype
+sudo voxtype setup gpu --enable   # Switch to ONNX CUDA
+ls -la /usr/bin/voxtype  # Should point to voxtype-onnx-cuda
+sudo voxtype setup gpu --disable  # Switch to best ONNX CPU
+ls -la /usr/bin/voxtype  # Should point to voxtype-onnx-avx512
 
 # Restore to Whisper Vulkan for normal use
 sudo ln -sf /usr/lib/voxtype/voxtype-vulkan /usr/bin/voxtype
@@ -824,7 +824,7 @@ voxtype setup parakeet
 
 # Enable Parakeet (switches symlink to best parakeet binary)
 sudo voxtype setup parakeet --enable
-ls -la /usr/bin/voxtype  # Should point to voxtype-parakeet-cuda or voxtype-parakeet-avx*
+ls -la /usr/bin/voxtype  # Should point to voxtype-onnx-cuda or voxtype-onnx-avx*
 
 # Disable Parakeet (switches back to equivalent Whisper binary)
 sudo voxtype setup parakeet --disable

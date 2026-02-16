@@ -1,11 +1,11 @@
-# Build environment for voxtype with Parakeet CUDA support
+# Build environment for voxtype with ONNX CUDA support
 #
-# Builds voxtype with --features parakeet-cuda for NVIDIA GPU acceleration.
+# Builds voxtype with --features parakeet-cuda,moonshine for NVIDIA GPU acceleration.
 # Uses NVIDIA CUDA base image with cuDNN for optimal ONNX Runtime performance.
 #
 # Usage:
-#   docker build -f Dockerfile.parakeet-cuda -t voxtype-parakeet-cuda-builder .
-#   docker run --rm -v $(pwd)/releases:/output voxtype-parakeet-cuda-builder
+#   docker build -f Dockerfile.onnx-cuda -t voxtype-onnx-cuda-builder .
+#   docker run --rm -v $(pwd)/releases:/output voxtype-onnx-cuda-builder
 #
 # The resulting binary requires:
 #   - NVIDIA GPU with CUDA support
@@ -52,18 +52,18 @@ ENV ORT_STRATEGY=download
 RUN cargo build --release --features parakeet-cuda,moonshine \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
-    && cp target/release/voxtype /tmp/voxtype-parakeet-cuda
+    && cp target/release/voxtype /tmp/voxtype-onnx-cuda
 
 # Verify binary
-RUN echo "=== Verifying Parakeet CUDA binary ===" \
-    && /tmp/voxtype-parakeet-cuda --version \
+RUN echo "=== Verifying ONNX CUDA binary ===" \
+    && /tmp/voxtype-onnx-cuda --version \
     && echo "=== Binary size ===" \
-    && ls -lh /tmp/voxtype-parakeet-cuda \
+    && ls -lh /tmp/voxtype-onnx-cuda \
     && echo "=== Checking CUDA libraries linked ===" \
-    && ldd /tmp/voxtype-parakeet-cuda | grep -iE 'cuda|cudnn|onnx' || echo "Note: CUDA libs may be loaded dynamically at runtime"
+    && ldd /tmp/voxtype-onnx-cuda | grep -iE 'cuda|cudnn|onnx' || echo "Note: CUDA libs may be loaded dynamically at runtime"
 
 # Output stage
 CMD mkdir -p /output \
-    && cp /tmp/voxtype-parakeet-cuda /output/voxtype-${VERSION}-linux-x86_64-parakeet-cuda \
+    && cp /tmp/voxtype-onnx-cuda /output/voxtype-${VERSION}-linux-x86_64-onnx-cuda \
     && echo "Binary copied to /output:" \
     && ls -la /output/voxtype-*

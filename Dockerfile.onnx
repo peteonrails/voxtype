@@ -1,16 +1,17 @@
-# Build environment for voxtype with Parakeet (ONNX) support - AVX2 compatible
+# Build environment for voxtype with ONNX Runtime support - AVX2 compatible
 #
-# Builds voxtype with --features parakeet for NVIDIA Parakeet ASR model support.
-# Uses Ubuntu 24.04 for glibc 2.39+ (required by ONNX Runtime prebuilt binaries).
+# Builds voxtype with --features parakeet,moonshine for ONNX-based engines
+# (Parakeet ASR + Moonshine). Uses Ubuntu 24.04 for glibc 2.39+ (required
+# by ONNX Runtime prebuilt binaries).
 #
 # NOTE: Building on i9-9900K (no AVX-512) ensures wide CPU compatibility.
 # Output binary uses AVX2 instructions for good performance on modern CPUs.
 #
 # Usage:
-#   docker build -f Dockerfile.parakeet -t voxtype-parakeet-avx2-builder .
-#   docker run --rm -v $(pwd)/releases:/output voxtype-parakeet-avx2-builder
+#   docker build -f Dockerfile.onnx -t voxtype-onnx-avx2-builder .
+#   docker run --rm -v $(pwd)/releases:/output voxtype-onnx-avx2-builder
 #
-# For CUDA support, use Dockerfile.parakeet-cuda instead.
+# For CUDA support, use Dockerfile.onnx-cuda instead.
 # For AVX-512 support, build on an AVX-512 capable host.
 #
 FROM ubuntu:24.04
@@ -64,13 +65,13 @@ ENV ORT_STRATEGY=download
 RUN cargo build --release --features parakeet,moonshine \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
-    && cp target/release/voxtype /tmp/voxtype-parakeet-avx2
+    && cp target/release/voxtype /tmp/voxtype-onnx-avx2
 
 # Verify binary
-RUN echo "=== Verifying Parakeet AVX2 binary ===" \
-    && /tmp/voxtype-parakeet-avx2 --version \
+RUN echo "=== Verifying ONNX AVX2 binary ===" \
+    && /tmp/voxtype-onnx-avx2 --version \
     && echo "=== Checking for AVX-512 instructions ===" \
-    && zmm_count=$(objdump -d /tmp/voxtype-parakeet-avx2 | grep -c zmm || echo 0) \
+    && zmm_count=$(objdump -d /tmp/voxtype-onnx-avx2 | grep -c zmm || echo 0) \
     && echo "  zmm registers: $zmm_count" \
     && if [ "$zmm_count" -gt 0 ]; then \
          echo "WARNING: Binary contains AVX-512 instructions"; \
@@ -78,10 +79,10 @@ RUN echo "=== Verifying Parakeet AVX2 binary ===" \
          echo "✓ Binary is clean (no AVX-512)"; \
        fi \
     && echo "=== Binary size ===" \
-    && ls -lh /tmp/voxtype-parakeet-avx2
+    && ls -lh /tmp/voxtype-onnx-avx2
 
 # Output stage
 CMD mkdir -p /output \
-    && cp /tmp/voxtype-parakeet-avx2 /output/voxtype-${VERSION}-linux-x86_64-parakeet-avx2 \
+    && cp /tmp/voxtype-onnx-avx2 /output/voxtype-${VERSION}-linux-x86_64-onnx-avx2 \
     && echo "Binary copied to /output:" \
     && ls -la /output/voxtype-*

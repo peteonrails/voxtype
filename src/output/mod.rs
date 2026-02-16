@@ -75,7 +75,7 @@ pub fn is_parakeet_binary_active() -> bool {
     if let Ok(link_target) = fs::read_link(VOXTYPE_BIN) {
         if let Some(target_name) = link_target.file_name() {
             if let Some(name) = target_name.to_str() {
-                return name.contains("parakeet");
+                return name.contains("onnx") || name.contains("parakeet");
             }
         }
     }
