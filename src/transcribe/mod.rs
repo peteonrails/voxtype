@@ -11,7 +11,6 @@
 //! - Optionally Paraformer via ONNX Runtime (when `paraformer` feature is enabled)
 //! - Optionally Dolphin via ONNX Runtime (when `dolphin` feature is enabled)
 //! - Optionally Omnilingual via ONNX Runtime (when `omnilingual` feature is enabled)
-//! - Optionally FireRedASR via ONNX Runtime (when `fireredasr` feature is enabled)
 
 pub mod cli;
 pub mod remote;
@@ -25,7 +24,6 @@ pub mod worker;
     feature = "paraformer",
     feature = "dolphin",
     feature = "omnilingual",
-    feature = "fireredasr",
 ))]
 pub mod fbank;
 
@@ -55,9 +53,6 @@ pub mod dolphin;
 
 #[cfg(feature = "omnilingual")]
 pub mod omnilingual;
-
-#[cfg(feature = "fireredasr")]
-pub mod fireredasr;
 
 use crate::config::{Config, TranscriptionEngine, WhisperConfig, WhisperMode};
 use crate::error::TranscribeError;
@@ -178,21 +173,6 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
         #[cfg(not(feature = "omnilingual"))]
         TranscriptionEngine::Omnilingual => Err(TranscribeError::InitFailed(
             "Omnilingual engine requested but voxtype was not compiled with --features omnilingual"
-                .to_string(),
-        )),
-        #[cfg(feature = "fireredasr")]
-        TranscriptionEngine::FireRedAsr => {
-            let cfg = config.fireredasr.as_ref().ok_or_else(|| {
-                TranscribeError::InitFailed(
-                    "FireRedASR engine selected but [fireredasr] config section is missing"
-                        .to_string(),
-                )
-            })?;
-            Ok(Box::new(fireredasr::FireRedAsrTranscriber::new(cfg)?))
-        }
-        #[cfg(not(feature = "fireredasr"))]
-        TranscriptionEngine::FireRedAsr => Err(TranscribeError::InitFailed(
-            "FireRedASR engine requested but voxtype was not compiled with --features fireredasr"
                 .to_string(),
         )),
     }

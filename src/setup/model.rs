@@ -347,7 +347,7 @@ const PARAFORMER_MODELS: &[ParaformerModelInfo] = &[
     ParaformerModelInfo {
         name: "zh",
         dir_name: "paraformer-zh",
-        size_mb: 220,
+        size_mb: 487,
         description: "Chinese + English offline (recommended)",
         languages: "zh/en",
         files: &[
@@ -388,14 +388,14 @@ const DOLPHIN_MODELS: &[DolphinModelInfo] = &[
     DolphinModelInfo {
         name: "base",
         dir_name: "dolphin-base",
-        size_mb: 290,
+        size_mb: 198,
         description: "Dictation-optimized (recommended)",
         languages: "en/zh",
         files: &[
             ("model.int8.onnx", "model.int8.onnx"),
             ("tokens.txt", "tokens.txt"),
         ],
-        huggingface_repo: "csukuangfj/sherpa-onnx-dolphin-base",
+        huggingface_repo: "csukuangfj/sherpa-onnx-dolphin-base-ctc-multi-lang-int8-2025-04-02",
     },
 ];
 
@@ -415,46 +415,16 @@ struct OmnilingualModelInfo {
 
 const OMNILINGUAL_MODELS: &[OmnilingualModelInfo] = &[
     OmnilingualModelInfo {
-        name: "large",
-        dir_name: "omnilingual-large",
-        size_mb: 1300,
-        description: "50+ languages (recommended)",
-        languages: "50+ langs",
+        name: "300m",
+        dir_name: "omnilingual-300m",
+        size_mb: 3900,
+        description: "1600+ languages, 300M params",
+        languages: "1600+ langs",
         files: &[
-            ("model.int8.onnx", "model.int8.onnx"),
+            ("model.onnx", "model.onnx"),
             ("tokens.txt", "tokens.txt"),
         ],
-        huggingface_repo: "csukuangfj/sherpa-onnx-paraformer-omnilingual-2024-10-31",
-    },
-];
-
-// =============================================================================
-// FireRedASR Model Definitions
-// =============================================================================
-
-struct FireRedAsrModelInfo {
-    name: &'static str,
-    dir_name: &'static str,
-    size_mb: u32,
-    description: &'static str,
-    languages: &'static str,
-    files: &'static [(&'static str, &'static str)],
-    huggingface_repo: &'static str,
-}
-
-const FIREREDASR_MODELS: &[FireRedAsrModelInfo] = &[
-    FireRedAsrModelInfo {
-        name: "large",
-        dir_name: "firered-asr-large",
-        size_mb: 1740,
-        description: "Large encoder-decoder (~1.3GB enc + ~445MB dec)",
-        languages: "zh/en",
-        files: &[
-            ("encoder.int8.onnx", "encoder.int8.onnx"),
-            ("decoder.int8.onnx", "decoder.int8.onnx"),
-            ("tokens.txt", "tokens.txt"),
-        ],
-        huggingface_repo: "csukuangfj/sherpa-onnx-fire-red-asr-large-zh-2025-02-16",
+        huggingface_repo: "csukuangfj/sherpa-onnx-omnilingual-asr-1600-languages-300M-ctc-2025-11-12",
     },
 ];
 
@@ -489,7 +459,6 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let is_paraformer_engine = matches!(config.engine, TranscriptionEngine::Paraformer);
     let is_dolphin_engine = matches!(config.engine, TranscriptionEngine::Dolphin);
     let is_omnilingual_engine = matches!(config.engine, TranscriptionEngine::Omnilingual);
-    let is_fireredasr_engine = matches!(config.engine, TranscriptionEngine::FireRedAsr);
     let current_whisper_model = &config.whisper.model;
     let current_parakeet_model = config.parakeet.as_ref().map(|p| p.model.as_str());
     let current_moonshine_model = config.moonshine.as_ref().map(|m| m.model.as_str());
@@ -497,15 +466,12 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let current_paraformer_model = config.paraformer.as_ref().map(|p| p.model.as_str());
     let current_dolphin_model = config.dolphin.as_ref().map(|d| d.model.as_str());
     let current_omnilingual_model = config.omnilingual.as_ref().map(|o| o.model.as_str());
-    let current_fireredasr_model = config.fireredasr.as_ref().map(|f| f.model.as_str());
-
     let parakeet_available = cfg!(feature = "parakeet");
     let moonshine_available = cfg!(feature = "moonshine");
     let sensevoice_available = cfg!(feature = "sensevoice");
     let paraformer_available = cfg!(feature = "paraformer");
     let dolphin_available = cfg!(feature = "dolphin");
     let omnilingual_available = cfg!(feature = "omnilingual");
-    let fireredasr_available = cfg!(feature = "fireredasr");
     let whisper_count = MODELS.len();
     let parakeet_count = PARAKEET_MODELS.len();
     let moonshine_count = MOONSHINE_MODELS.len();
@@ -513,7 +479,6 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let paraformer_count = PARAFORMER_MODELS.len();
     let dolphin_count = DOLPHIN_MODELS.len();
     let omnilingual_count = OMNILINGUAL_MODELS.len();
-    let fireredasr_count = FIREREDASR_MODELS.len();
 
     let available_count = |available: bool, count: usize| if available { count } else { 0 };
     let total_count = whisper_count
@@ -522,8 +487,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         + available_count(sensevoice_available, sensevoice_count)
         + available_count(paraformer_available, paraformer_count)
         + available_count(dolphin_available, dolphin_count)
-        + available_count(omnilingual_available, omnilingual_count)
-        + available_count(fireredasr_available, fireredasr_count);
+        + available_count(omnilingual_available, omnilingual_count);
 
     // --- Whisper Section ---
     println!("--- Whisper (OpenAI, 99+ languages) ---\n");
@@ -772,40 +736,6 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         println!("  \x1b[90m(not available - rebuild with --features omnilingual)\x1b[0m");
     }
 
-    // --- FireRedASR Section ---
-    let fireredasr_offset = omnilingual_offset
-        + available_count(omnilingual_available, omnilingual_count);
-    println!("\n--- FireRedASR (encoder-decoder, Chinese + English) ---\n");
-
-    if fireredasr_available {
-        for (i, model) in FIREREDASR_MODELS.iter().enumerate() {
-            let model_path = models_dir.join(model.dir_name);
-            let installed = model_path.exists() && validate_fireredasr_model(&model_path).is_ok();
-
-            let is_current = is_fireredasr_engine && current_fireredasr_model == Some(model.name);
-            let star = if is_current { "*" } else { " " };
-
-            let status = if installed {
-                "\x1b[32m[installed]\x1b[0m"
-            } else {
-                ""
-            };
-
-            println!(
-                " {}[{:>2}] {:<20} ({:>4} MB) {} - {} {}",
-                star,
-                fireredasr_offset + i + 1,
-                model.dir_name,
-                model.size_mb,
-                model.languages,
-                model.description,
-                status
-            );
-        }
-    } else {
-        println!("  \x1b[90m(not available - rebuild with --features fireredasr)\x1b[0m");
-    }
-
     println!("\n  [ 0] Cancel\n");
 
     // Get user selection
@@ -843,9 +773,6 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     } else if omnilingual_available && selection <= omnilingual_offset + omnilingual_count {
         let idx = selection - omnilingual_offset;
         handle_onnx_engine_selection("omnilingual", OMNILINGUAL_MODELS.iter().map(|m| (m.name, m.dir_name, m.size_mb, m.files, m.huggingface_repo)).collect(), idx, validate_onnx_ctc_model).await
-    } else if fireredasr_available && selection <= fireredasr_offset + fireredasr_count {
-        let idx = selection - fireredasr_offset;
-        handle_onnx_engine_selection("fireredasr", FIREREDASR_MODELS.iter().map(|m| (m.name, m.dir_name, m.size_mb, m.files, m.huggingface_repo)).collect(), idx, validate_fireredasr_model).await
     } else {
         println!("\nInvalid selection.");
         Ok(())
@@ -2125,7 +2052,7 @@ pub fn list_installed_sensevoice() {
 }
 
 // =============================================================================
-// Generic ONNX Engine Functions (Paraformer, Dolphin, Omnilingual, FireRedASR)
+// Generic ONNX Engine Functions (Paraformer, Dolphin, Omnilingual)
 // =============================================================================
 
 /// Validate a CTC-based ONNX model directory (model.int8.onnx or model.onnx + tokens.txt)
@@ -2143,35 +2070,6 @@ fn validate_onnx_ctc_model(path: &Path) -> anyhow::Result<()> {
         let mut missing = Vec::new();
         if !has_model {
             missing.push("model.int8.onnx or model.onnx");
-        }
-        if !has_tokens {
-            missing.push("tokens.txt");
-        }
-        anyhow::bail!("Incomplete model, missing: {}", missing.join(", "))
-    }
-}
-
-/// Validate a FireRedASR model directory (encoder + decoder + tokens.txt)
-fn validate_fireredasr_model(path: &Path) -> anyhow::Result<()> {
-    if !path.exists() {
-        anyhow::bail!("Model directory does not exist: {:?}", path);
-    }
-
-    let has_encoder =
-        path.join("encoder.int8.onnx").exists() || path.join("encoder.onnx").exists();
-    let has_decoder =
-        path.join("decoder.int8.onnx").exists() || path.join("decoder.onnx").exists();
-    let has_tokens = path.join("tokens.txt").exists();
-
-    if has_encoder && has_decoder && has_tokens {
-        Ok(())
-    } else {
-        let mut missing = Vec::new();
-        if !has_encoder {
-            missing.push("encoder.int8.onnx or encoder.onnx");
-        }
-        if !has_decoder {
-            missing.push("decoder.int8.onnx or decoder.onnx");
         }
         if !has_tokens {
             missing.push("tokens.txt");

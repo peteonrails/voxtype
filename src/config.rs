@@ -311,10 +311,6 @@ pub struct Config {
     #[serde(default)]
     pub omnilingual: Option<OmnilingualConfig>,
 
-    /// FireRedASR configuration (optional, only used when engine = "fireredasr")
-    #[serde(default)]
-    pub fireredasr: Option<FireRedAsrConfig>,
-
     /// Text processing configuration (replacements, spoken punctuation)
     #[serde(default)]
     pub text: TextConfig,
@@ -1098,42 +1094,6 @@ impl Default for OmnilingualConfig {
     }
 }
 
-/// FireRedASR speech-to-text configuration (ONNX-based encoder-decoder)
-/// Requires: cargo build --features fireredasr
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct FireRedAsrConfig {
-    /// Model name or path to ONNX model directory
-    /// Expects: encoder.int8.onnx, decoder.int8.onnx, tokens.txt
-    pub model: String,
-
-    /// Number of CPU threads for ONNX Runtime inference
-    #[serde(default)]
-    pub threads: Option<usize>,
-
-    /// Maximum number of tokens to generate per transcription
-    #[serde(default = "default_fireredasr_max_tokens")]
-    pub max_tokens: usize,
-
-    /// Load model on-demand when recording starts (true) or keep loaded (false)
-    #[serde(default = "default_on_demand_loading")]
-    pub on_demand_loading: bool,
-}
-
-fn default_fireredasr_max_tokens() -> usize {
-    448
-}
-
-impl Default for FireRedAsrConfig {
-    fn default() -> Self {
-        Self {
-            model: "firered-asr-large".to_string(),
-            threads: None,
-            max_tokens: 448,
-            on_demand_loading: false,
-        }
-    }
-}
-
 /// Transcription engine selection (which ASR technology to use)
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -1159,10 +1119,6 @@ pub enum TranscriptionEngine {
     /// Use Omnilingual (FunASR 50+ language CTC encoder via ONNX Runtime)
     /// Requires: cargo build --features omnilingual
     Omnilingual,
-    /// Use FireRedASR (encoder-decoder ASR via ONNX Runtime)
-    /// Requires: cargo build --features fireredasr
-    #[serde(alias = "firered")]
-    FireRedAsr,
 }
 
 /// VAD backend selection
@@ -1785,7 +1741,6 @@ impl Default for Config {
             paraformer: None,
             dolphin: None,
             omnilingual: None,
-            fireredasr: None,
             text: TextConfig::default(),
             vad: VadConfig::default(),
             status: StatusConfig::default(),
@@ -1894,11 +1849,6 @@ impl Config {
                 .as_ref()
                 .map(|o| o.on_demand_loading)
                 .unwrap_or(false),
-            TranscriptionEngine::FireRedAsr => self
-                .fireredasr
-                .as_ref()
-                .map(|f| f.on_demand_loading)
-                .unwrap_or(false),
         }
     }
 
@@ -1936,11 +1886,6 @@ impl Config {
                 .as_ref()
                 .map(|o| o.model.as_str())
                 .unwrap_or("omnilingual (not configured)"),
-            TranscriptionEngine::FireRedAsr => self
-                .fireredasr
-                .as_ref()
-                .map(|f| f.model.as_str())
-                .unwrap_or("fireredasr (not configured)"),
         }
     }
 

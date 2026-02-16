@@ -2,16 +2,16 @@
 //!
 //! Uses Alibaba's SenseVoice model via ONNX Runtime for local transcription.
 //! SenseVoice is an encoder-only CTC model (no autoregressive decoder loop),
-//! making inference a single forward pass. The complexity is in preprocessing:
-//! audio must be converted to 80-dim Fbank features, stacked via LFR to 560-dim,
-//! then CMVN-normalized before feeding to the ONNX model.
+//! making inference a single forward pass. Preprocessing uses the shared Fbank
+//! pipeline (fbank.rs) and CTC decoding uses the shared decoder (ctc.rs).
 //!
 //! Pipeline: Audio (f32, 16kHz) -> Fbank (80-dim) -> LFR (560-dim) -> CMVN -> ONNX -> CTC decode
 //!
 //! Supports languages: auto, zh, en, ja, ko, yue
 //! Model files: model.int8.onnx (or model.onnx), tokens.txt
 
-use super::fbank::{self, FbankConfig, FbankExtractor};
+use super::fbank::{self, FbankExtractor, LfrConfig};
+use super::ctc::{self, CtcConfig};
 use super::Transcriber;
 use crate::config::SenseVoiceConfig;
 use crate::error::TranscribeError;
@@ -23,19 +23,6 @@ use std::path::PathBuf;
 /// Sample rate expected by SenseVoice
 const SAMPLE_RATE: usize = 16000;
 
-/// LFR window size (stack 7 consecutive frames)
-const LFR_M: usize = 7;
-
-/// LFR stride (advance by 6 frames)
-const LFR_N: usize = 6;
-
-/// Blank token ID for CTC decoding
-const BLANK_ID: u32 = 0;
-
-/// Number of metadata tokens to skip at the start of CTC output
-/// (language, emotion, event, ITN flag)
-const NUM_METADATA_TOKENS: usize = 4;
-
 /// SenseVoice-based transcriber using ONNX Runtime
 pub struct SenseVoiceTranscriber {
     session: std::sync::Mutex<Session>,
@@ -45,6 +32,7 @@ pub struct SenseVoiceTranscriber {
     language_id: i32,
     text_norm_id: i32,
     fbank_extractor: FbankExtractor,
+    ctc_config: CtcConfig,
 }
 
 impl SenseVoiceTranscriber {
@@ -84,7 +72,7 @@ impl SenseVoiceTranscriber {
                 tokens_path.display()
             )));
         }
-        let tokens = fbank::load_tokens(&tokens_path)?;
+        let tokens = ctc::load_tokens(&tokens_path)?;
         tracing::debug!("Loaded {} tokens", tokens.len());
 
         // Create ONNX session
@@ -105,14 +93,14 @@ impl SenseVoiceTranscriber {
             })?;
 
         // Read CMVN stats from model metadata
-        let (neg_mean, inv_stddev) = fbank::read_cmvn_from_metadata(&session)?;
+        let (neg_mean, inv_stddev) = read_cmvn_from_metadata(&session)?;
 
         // Map language config to ID
         let language_id = language_to_id(&config.language);
         let text_norm_id = if config.use_itn { 14 } else { 15 };
 
-        // Pre-compute Fbank extractor
-        let fbank_extractor = FbankExtractor::new(FbankConfig::sensevoice_default());
+        // Create shared Fbank extractor with default settings
+        let fbank_extractor = FbankExtractor::new_default();
 
         tracing::info!(
             "SenseVoice model loaded in {:.2}s (language={}, use_itn={})",
@@ -129,75 +117,8 @@ impl SenseVoiceTranscriber {
             language_id,
             text_norm_id,
             fbank_extractor,
+            ctc_config: CtcConfig::sensevoice(),
         })
-    }
-
-    /// CTC greedy decoding with SenseVoice-specific metadata token skipping
-    fn ctc_decode(&self, logits: &[f32], time_steps: usize, vocab_size: usize) -> String {
-        let mut token_ids: Vec<u32> = Vec::new();
-        let mut prev_id: Option<u32> = None;
-
-        for t in 0..time_steps {
-            let offset = t * vocab_size;
-            let frame_logits = &logits[offset..offset + vocab_size];
-
-            let best_id = frame_logits
-                .iter()
-                .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(idx, _)| idx as u32)
-                .unwrap_or(BLANK_ID);
-
-            if best_id != BLANK_ID && Some(best_id) != prev_id {
-                token_ids.push(best_id);
-            }
-            prev_id = Some(best_id);
-        }
-
-        // Skip metadata tokens (language, emotion, event, ITN flag)
-        let content_tokens = if token_ids.len() > NUM_METADATA_TOKENS {
-            &token_ids[NUM_METADATA_TOKENS..]
-        } else {
-            &[]
-        };
-
-        let mut result = String::new();
-        for &id in content_tokens {
-            if let Some(token_str) = self.tokens.get(&id) {
-                result.push_str(&token_str.replace('\u{2581}', " "));
-            }
-        }
-
-        result.trim().to_string()
-    }
-
-    /// Decode pre-argmaxed output (2D logits where values are token IDs)
-    fn decode_pre_argmax(&self, token_ids_f32: &[f32]) -> String {
-        let mut token_ids: Vec<u32> = Vec::new();
-        let mut prev_id: Option<u32> = None;
-
-        for &val in token_ids_f32 {
-            let id = val as u32;
-            if id != BLANK_ID && Some(id) != prev_id {
-                token_ids.push(id);
-            }
-            prev_id = Some(id);
-        }
-
-        let content_tokens = if token_ids.len() > NUM_METADATA_TOKENS {
-            &token_ids[NUM_METADATA_TOKENS..]
-        } else {
-            &[]
-        };
-
-        let mut result = String::new();
-        for &id in content_tokens {
-            if let Some(token_str) = self.tokens.get(&id) {
-                result.push_str(token_str);
-            }
-        }
-
-        result.trim().to_string()
     }
 }
 
@@ -218,7 +139,7 @@ impl Transcriber for SenseVoiceTranscriber {
 
         let start = std::time::Instant::now();
 
-        // 1. Extract Fbank features using shared extractor
+        // 1. Extract Fbank features (shared pipeline)
         let fbank_start = std::time::Instant::now();
         let fbank_features = self.fbank_extractor.extract(samples);
         tracing::debug!(
@@ -234,11 +155,11 @@ impl Transcriber for SenseVoiceTranscriber {
             ));
         }
 
-        // 2. LFR stacking
-        let lfr = fbank::apply_lfr(&fbank_features, LFR_M, LFR_N);
+        // 2. LFR stacking (shared)
+        let lfr = fbank::apply_lfr(&fbank_features, &LfrConfig::default());
         tracing::debug!("LFR output: {} frames x {}", lfr.nrows(), lfr.ncols());
 
-        // 3. CMVN normalization
+        // 3. CMVN normalization (shared)
         let mut features = lfr;
         fbank::apply_cmvn(&mut features, &self.neg_mean, &self.inv_stddev);
 
@@ -246,6 +167,7 @@ impl Transcriber for SenseVoiceTranscriber {
         let num_frames = features.nrows();
         let feat_dim = features.ncols();
 
+        // x: shape [1, T, 560]
         let (x_data, _offset) = features.into_raw_vec_and_offset();
         let x_tensor = Tensor::<f32>::from_array(([1usize, num_frames, feat_dim], x_data))
             .map_err(|e| {
@@ -255,6 +177,7 @@ impl Transcriber for SenseVoiceTranscriber {
                 ))
             })?;
 
+        // x_length: shape [1]
         let x_length_tensor = Tensor::<i32>::from_array(([1usize], vec![num_frames as i32]))
             .map_err(|e| {
                 TranscribeError::InferenceFailed(format!(
@@ -263,6 +186,7 @@ impl Transcriber for SenseVoiceTranscriber {
                 ))
             })?;
 
+        // language: shape [1]
         let language_tensor = Tensor::<i32>::from_array(([1usize], vec![self.language_id]))
             .map_err(|e| {
                 TranscribeError::InferenceFailed(format!(
@@ -271,6 +195,7 @@ impl Transcriber for SenseVoiceTranscriber {
                 ))
             })?;
 
+        // text_norm: shape [1]
         let text_norm_tensor = Tensor::<i32>::from_array(([1usize], vec![self.text_norm_id]))
             .map_err(|e| {
                 TranscribeError::InferenceFailed(format!(
@@ -310,29 +235,31 @@ impl Transcriber for SenseVoiceTranscriber {
         let shape_dims: &[i64] = shape;
         tracing::debug!("Logits shape: {:?}", shape_dims);
 
-        let (time_steps, vocab_size) = if shape_dims.len() == 3 {
-            (shape_dims[1] as usize, shape_dims[2] as usize)
-        } else if shape_dims.len() == 2 {
+        // logits shape: [batch=1, time_steps] or [batch=1, time_steps, vocab_size]
+        let result = if shape_dims.len() == 3 {
             let time_steps = shape_dims[1] as usize;
-            let result = self.decode_pre_argmax(&logits_data[..time_steps]);
-            tracing::info!(
-                "SenseVoice transcription completed in {:.2}s: {:?}",
-                start.elapsed().as_secs_f32(),
-                if result.chars().count() > 50 {
-                    format!("{}...", result.chars().take(50).collect::<String>())
-                } else {
-                    result.clone()
-                }
-            );
-            return Ok(result);
+            let vocab_size = shape_dims[2] as usize;
+            ctc::ctc_greedy_decode(
+                logits_data,
+                time_steps,
+                vocab_size,
+                &self.tokens,
+                &self.ctc_config,
+            )
+        } else if shape_dims.len() == 2 {
+            // Pre-argmaxed output: each value is already a token ID
+            let time_steps = shape_dims[1] as usize;
+            ctc::decode_pre_argmax(
+                &logits_data[..time_steps],
+                &self.tokens,
+                &self.ctc_config,
+            )
         } else {
             return Err(TranscribeError::InferenceFailed(format!(
                 "Unexpected logits shape: {:?}",
                 shape_dims
             )));
         };
-
-        let result = self.ctc_decode(logits_data, time_steps, vocab_size);
 
         tracing::info!(
             "SenseVoice transcription completed in {:.2}s: {:?}",
@@ -367,19 +294,73 @@ fn language_to_id(language: &str) -> i32 {
     }
 }
 
+/// Read CMVN stats (neg_mean and inv_stddev) from ONNX model metadata
+///
+/// The sherpa-onnx SenseVoice model stores these as comma-separated floats
+/// in metadata keys "neg_mean" and "inv_stddev". This is SenseVoice-specific;
+/// Paraformer reads CMVN from a separate am.mvn file.
+fn read_cmvn_from_metadata(session: &Session) -> Result<(Vec<f32>, Vec<f32>), TranscribeError> {
+    let metadata = session.metadata().map_err(|e| {
+        TranscribeError::InitFailed(format!("Failed to read model metadata: {}", e))
+    })?;
+
+    let neg_mean_str = metadata.custom("neg_mean").ok_or_else(|| {
+        TranscribeError::InitFailed(
+            "Model metadata missing 'neg_mean' key. Is this a sherpa-onnx SenseVoice model?"
+                .to_string(),
+        )
+    })?;
+
+    let inv_stddev_str = metadata.custom("inv_stddev").ok_or_else(|| {
+        TranscribeError::InitFailed(
+            "Model metadata missing 'inv_stddev' key. Is this a sherpa-onnx SenseVoice model?"
+                .to_string(),
+        )
+    })?;
+
+    let neg_mean: Vec<f32> = neg_mean_str
+        .split(',')
+        .filter_map(|s: &str| s.trim().parse::<f32>().ok())
+        .collect();
+
+    let inv_stddev: Vec<f32> = inv_stddev_str
+        .split(',')
+        .filter_map(|s: &str| s.trim().parse::<f32>().ok())
+        .collect();
+
+    if neg_mean.is_empty() || inv_stddev.is_empty() {
+        return Err(TranscribeError::InitFailed(format!(
+            "CMVN stats appear malformed (neg_mean: {} values, inv_stddev: {} values)",
+            neg_mean.len(),
+            inv_stddev.len()
+        )));
+    }
+
+    tracing::debug!(
+        "CMVN stats loaded: neg_mean[{}], inv_stddev[{}]",
+        neg_mean.len(),
+        inv_stddev.len()
+    );
+
+    Ok((neg_mean, inv_stddev))
+}
+
 /// Resolve model name to directory path
 fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
+    // If it's already an absolute path, use it directly
     let path = PathBuf::from(model);
     if path.is_absolute() && path.exists() {
         return Ok(path);
     }
 
+    // Map short names to directory names
     let model_dir_name = if model.starts_with("sensevoice-") {
         model.to_string()
     } else {
         format!("sensevoice-{}", model)
     };
 
+    // Check models directory
     let models_dir = crate::config::Config::models_dir();
     let model_path = models_dir.join(&model_dir_name);
 
@@ -387,16 +368,19 @@ fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
         return Ok(model_path);
     }
 
+    // Also check without prefix (user might pass "sensevoice-small" or just "small")
     let alt_path = models_dir.join(model);
     if alt_path.exists() {
         return Ok(alt_path);
     }
 
+    // Check current directory
     let cwd_path = PathBuf::from(&model_dir_name);
     if cwd_path.exists() {
         return Ok(cwd_path);
     }
 
+    // Check ./models/
     let local_models_path = PathBuf::from("models").join(&model_dir_name);
     if local_models_path.exists() {
         return Ok(local_models_path);
@@ -435,7 +419,7 @@ mod tests {
         assert_eq!(language_to_id("yue"), 7);
         assert_eq!(language_to_id("ja"), 11);
         assert_eq!(language_to_id("ko"), 12);
-        assert_eq!(language_to_id("unknown"), 0);
+        assert_eq!(language_to_id("unknown"), 0); // falls back to auto
     }
 
     #[test]

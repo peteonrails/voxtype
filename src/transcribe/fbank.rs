@@ -1,147 +1,128 @@
-//! Shared log-mel filterbank (Fbank) feature extraction
+//! Shared Fbank (log-mel filterbank) feature extraction
 //!
-//! Converts raw audio samples into log-mel filterbank features used by
-//! ONNX-based ASR models (SenseVoice, Paraformer, Dolphin, Omnilingual).
+//! Used by SenseVoice, Paraformer, and FireRedASR backends. These models share
+//! identical preprocessing: 80-dim Fbank features, LFR stacking (m=7, n=6),
+//! and CMVN normalization with the same constants (16kHz, 25ms/10ms frames,
+//! Hamming window, 0.97 pre-emphasis).
 //!
-//! The pipeline is configurable via `FbankConfig` to support different models:
-//! - Window function (Hamming vs Hann)
-//! - Frame length and shift
-//! - Pre-emphasis coefficient
-//! - LFR (Low Frame Rate) stacking parameters
-//! - CMVN normalization
+//! Pipeline: Audio (f32, 16kHz) -> Fbank (80-dim) -> LFR (560-dim) -> CMVN
 
 use ndarray::Array2;
 use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
 
-/// Window function type for frame windowing
-#[derive(Debug, Clone, Copy)]
-pub enum WindowFn {
-    /// Hamming window: 0.54 - 0.46 * cos(2π n / (N-1))
-    /// Used by SenseVoice, Paraformer
-    Hamming,
-    /// Hann window: 0.5 * (1 - cos(2π n / (N-1)))
-    /// Used by Dolphin
-    Hann,
-}
+/// Default sample rate for Fbank extraction
+const DEFAULT_SAMPLE_RATE: usize = 16000;
+
+/// Default FFT size
+const DEFAULT_FFT_SIZE: usize = 512;
+
+/// Default number of mel filterbank channels
+const DEFAULT_NUM_MELS: usize = 80;
+
+/// Default frame length in samples (25ms at 16kHz)
+const DEFAULT_FRAME_LENGTH: usize = 400;
+
+/// Default frame shift in samples (10ms at 16kHz)
+const DEFAULT_FRAME_SHIFT: usize = 160;
+
+/// Default pre-emphasis coefficient
+const DEFAULT_PREEMPH_COEFF: f32 = 0.97;
+
+/// Default LFR window size (stack 7 consecutive frames)
+const DEFAULT_LFR_M: usize = 7;
+
+/// Default LFR stride (advance by 6 frames)
+const DEFAULT_LFR_N: usize = 6;
 
 /// Configuration for Fbank feature extraction
-#[derive(Debug, Clone)]
 pub struct FbankConfig {
+    pub sample_rate: usize,
+    pub fft_size: usize,
     pub num_mels: usize,
-    pub frame_length_ms: f32,
-    pub frame_shift_ms: f32,
-    pub sample_rate: u32,
-    pub window_fn: WindowFn,
-    pub pre_emphasis: Option<f32>,
+    pub frame_length: usize,
+    pub frame_shift: usize,
+    pub preemph_coeff: f32,
 }
 
-impl FbankConfig {
-    /// Frame length in samples
-    fn frame_length_samples(&self) -> usize {
-        (self.frame_length_ms * self.sample_rate as f32 / 1000.0) as usize
-    }
-
-    /// Frame shift in samples
-    fn frame_shift_samples(&self) -> usize {
-        (self.frame_shift_ms * self.sample_rate as f32 / 1000.0) as usize
-    }
-
-    /// FFT size (next power of 2 >= frame length)
-    fn fft_size(&self) -> usize {
-        let frame_len = self.frame_length_samples();
-        frame_len.next_power_of_two()
-    }
-
-    /// SenseVoice/Paraformer default: Hamming, 25ms frame, 10ms shift, pre-emphasis 0.97
-    pub fn sensevoice_default() -> Self {
+impl Default for FbankConfig {
+    fn default() -> Self {
         Self {
-            num_mels: 80,
-            frame_length_ms: 25.0,
-            frame_shift_ms: 10.0,
-            sample_rate: 16000,
-            window_fn: WindowFn::Hamming,
-            pre_emphasis: Some(0.97),
-        }
-    }
-
-    /// Dolphin default: Hann, 31.25ms frame, 10ms shift, no pre-emphasis
-    pub fn dolphin_default() -> Self {
-        Self {
-            num_mels: 80,
-            frame_length_ms: 31.25,
-            frame_shift_ms: 10.0,
-            sample_rate: 16000,
-            window_fn: WindowFn::Hann,
-            pre_emphasis: None,
-        }
-    }
-
-    /// Omnilingual default: Hamming, 25ms frame, 20ms shift, pre-emphasis 0.97
-    pub fn omnilingual_default() -> Self {
-        Self {
-            num_mels: 80,
-            frame_length_ms: 25.0,
-            frame_shift_ms: 20.0,
-            sample_rate: 16000,
-            window_fn: WindowFn::Hamming,
-            pre_emphasis: Some(0.97),
+            sample_rate: DEFAULT_SAMPLE_RATE,
+            fft_size: DEFAULT_FFT_SIZE,
+            num_mels: DEFAULT_NUM_MELS,
+            frame_length: DEFAULT_FRAME_LENGTH,
+            frame_shift: DEFAULT_FRAME_SHIFT,
+            preemph_coeff: DEFAULT_PREEMPH_COEFF,
         }
     }
 }
 
-/// Pre-computed Fbank extractor for efficient repeated use
+/// Configuration for LFR (Low Frame Rate) stacking
+pub struct LfrConfig {
+    pub m: usize,
+    pub n: usize,
+}
+
+impl Default for LfrConfig {
+    fn default() -> Self {
+        Self {
+            m: DEFAULT_LFR_M,
+            n: DEFAULT_LFR_N,
+        }
+    }
+}
+
+/// Fbank feature extractor with pre-computed mel filterbank matrix
 pub struct FbankExtractor {
     config: FbankConfig,
-    window: Vec<f32>,
     mel_filterbank: Vec<Vec<f32>>,
 }
 
 impl FbankExtractor {
-    /// Create a new Fbank extractor with pre-computed window and filterbank
+    /// Create a new FbankExtractor with the given configuration
     pub fn new(config: FbankConfig) -> Self {
-        let frame_len = config.frame_length_samples();
-        let fft_size = config.fft_size();
-
-        let window = compute_window(config.window_fn, frame_len);
         let mel_filterbank =
-            compute_mel_filterbank(config.num_mels, fft_size, config.sample_rate as f32);
-
+            compute_mel_filterbank(config.num_mels, config.fft_size, config.sample_rate as f32);
         Self {
             config,
-            window,
             mel_filterbank,
         }
     }
 
-    /// Extract log-mel filterbank features from audio samples
+    /// Create a new FbankExtractor with default SenseVoice/Paraformer settings
+    pub fn new_default() -> Self {
+        Self::new(FbankConfig::default())
+    }
+
+    /// Number of mel channels in the output
+    pub fn num_mels(&self) -> usize {
+        self.config.num_mels
+    }
+
+    /// Extract 80-dim log-mel filterbank features from audio samples
     ///
-    /// Input: f32 samples, mono, at config.sample_rate
-    /// Output: Array2<f32> with shape (num_frames, num_mels)
+    /// Input: f32 samples at the configured sample rate (default 16kHz)
+    /// Output: Array2<f32> of shape (num_frames, num_mels)
     pub fn extract(&self, samples: &[f32]) -> Array2<f32> {
-        let frame_len = self.config.frame_length_samples();
-        let frame_shift = self.config.frame_shift_samples();
-        let fft_size = self.config.fft_size();
         let num_mels = self.config.num_mels;
+        let frame_length = self.config.frame_length;
+        let frame_shift = self.config.frame_shift;
+        let fft_size = self.config.fft_size;
 
         // Scale to int16 range (kaldi convention)
         let scaled: Vec<f32> = samples.iter().map(|&s| s * 32768.0).collect();
 
-        // Optional pre-emphasis
-        let signal = if let Some(coeff) = self.config.pre_emphasis {
-            let mut emphasized = Vec::with_capacity(scaled.len());
-            emphasized.push(scaled[0]);
-            for i in 1..scaled.len() {
-                emphasized.push(scaled[i] - coeff * scaled[i - 1]);
-            }
-            emphasized
-        } else {
-            scaled
-        };
+        // Pre-emphasis
+        let mut emphasized = Vec::with_capacity(scaled.len());
+        emphasized.push(scaled[0]);
+        for i in 1..scaled.len() {
+            emphasized.push(scaled[i] - self.config.preemph_coeff * scaled[i - 1]);
+        }
 
         // Compute number of frames
-        let num_frames = if signal.len() >= frame_len {
-            (signal.len() - frame_len) / frame_shift + 1
+        let num_frames = if emphasized.len() >= frame_length {
+            (emphasized.len() - frame_length) / frame_shift + 1
         } else {
             0
         };
@@ -150,11 +131,18 @@ impl FbankExtractor {
             return Array2::zeros((0, num_mels));
         }
 
+        // Pre-compute Hamming window
+        let hamming: Vec<f32> = (0..frame_length)
+            .map(|n| {
+                0.54 - 0.46
+                    * (2.0 * std::f32::consts::PI * n as f32 / (frame_length as f32 - 1.0)).cos()
+            })
+            .collect();
+
         // Set up FFT
         let mut planner = FftPlanner::<f32>::new();
         let fft = planner.plan_fft_forward(fft_size);
 
-        let num_bins = fft_size / 2 + 1;
         let mut fbank = Array2::zeros((num_frames, num_mels));
 
         for frame_idx in 0..num_frames {
@@ -162,20 +150,18 @@ impl FbankExtractor {
 
             // Window the frame
             let mut fft_input: Vec<Complex<f32>> = Vec::with_capacity(fft_size);
-            for i in 0..frame_len {
-                fft_input.push(Complex::new(signal[start + i] * self.window[i], 0.0));
+            for i in 0..frame_length {
+                fft_input.push(Complex::new(emphasized[start + i] * hamming[i], 0.0));
             }
-            // Zero-pad to FFT size
+            // Zero-pad to fft_size
             fft_input.resize(fft_size, Complex::new(0.0, 0.0));
 
             // FFT
             fft.process(&mut fft_input);
 
-            // Power spectrum
-            let power: Vec<f32> = fft_input[..num_bins]
-                .iter()
-                .map(|c| c.norm_sqr())
-                .collect();
+            // Power spectrum (only need first fft_size/2 + 1 bins)
+            let num_bins = fft_size / 2 + 1;
+            let power: Vec<f32> = fft_input[..num_bins].iter().map(|c| c.norm_sqr()).collect();
 
             // Apply mel filterbank and take log
             for mel_idx in 0..num_mels {
@@ -192,27 +178,27 @@ impl FbankExtractor {
     }
 }
 
-/// Apply LFR (Low Frame Rate) stacking: concatenate lfr_m frames with stride lfr_n
+/// Apply LFR (Low Frame Rate) stacking: concatenate m frames with stride n
 ///
-/// This reduces the frame rate by stacking consecutive frames together.
-/// Left-pads with copies of the first frame to maintain alignment.
-pub fn apply_lfr(fbank: &Array2<f32>, lfr_m: usize, lfr_n: usize) -> Array2<f32> {
-    let num_frames = fbank.nrows();
+/// Left-pads with copies of the first frame. Output dimension is num_mels * m.
+/// Default: m=7 consecutive frames, stride n=6, producing 560-dim features from 80-dim Fbank.
+pub fn apply_lfr(fbank: &Array2<f32>, config: &LfrConfig) -> Array2<f32> {
     let num_mels = fbank.ncols();
-
+    let num_frames = fbank.nrows();
     if num_frames == 0 {
-        return Array2::zeros((0, num_mels * lfr_m));
+        return Array2::zeros((0, num_mels * config.m));
     }
 
-    let pad = (lfr_m - 1) / 2;
+    // Left-pad with copies of the first frame
+    let pad = (config.m - 1) / 2;
     let padded_len = pad + num_frames;
-    let output_frames = padded_len.div_ceil(lfr_n);
+    let output_frames = padded_len.div_ceil(config.n);
 
-    let mut output = Array2::zeros((output_frames, num_mels * lfr_m));
+    let mut output = Array2::zeros((output_frames, num_mels * config.m));
 
     for out_idx in 0..output_frames {
-        let center = out_idx * lfr_n;
-        for j in 0..lfr_m {
+        let center = out_idx * config.n;
+        for j in 0..config.m {
             let padded_idx = center + j;
             let frame_idx = if padded_idx < pad {
                 0
@@ -233,60 +219,22 @@ pub fn apply_lfr(fbank: &Array2<f32>, lfr_m: usize, lfr_n: usize) -> Array2<f32>
 /// Apply CMVN (Cepstral Mean and Variance Normalization)
 ///
 /// Formula: normalized = (features + neg_mean) * inv_stddev
+/// Applied element-wise per feature dimension.
 pub fn apply_cmvn(features: &mut Array2<f32>, neg_mean: &[f32], inv_stddev: &[f32]) {
+    let feat_dim = features.ncols();
     for row in features.rows_mut() {
         for (j, val) in row.into_iter().enumerate() {
-            if j < neg_mean.len() {
+            if j < feat_dim && j < neg_mean.len() {
                 *val = (*val + neg_mean[j]) * inv_stddev[j];
             }
         }
     }
 }
 
-/// Apply instance normalization (per-utterance mean/variance normalization)
-///
-/// Used by Omnilingual instead of global CMVN stats.
-pub fn apply_instance_norm(features: &mut Array2<f32>) {
-    let num_frames = features.nrows();
-    if num_frames == 0 {
-        return;
-    }
-    let feat_dim = features.ncols();
-
-    for j in 0..feat_dim {
-        let mut sum = 0.0f32;
-        let mut sum_sq = 0.0f32;
-        for i in 0..num_frames {
-            let v = features[[i, j]];
-            sum += v;
-            sum_sq += v * v;
-        }
-        let mean = sum / num_frames as f32;
-        let var = (sum_sq / num_frames as f32 - mean * mean).max(1e-10);
-        let inv_std = 1.0 / var.sqrt();
-
-        for i in 0..num_frames {
-            features[[i, j]] = (features[[i, j]] - mean) * inv_std;
-        }
-    }
-}
-
-/// Compute window function coefficients
-fn compute_window(window_fn: WindowFn, length: usize) -> Vec<f32> {
-    (0..length)
-        .map(|n| {
-            let phase = 2.0 * std::f32::consts::PI * n as f32 / (length as f32 - 1.0);
-            match window_fn {
-                WindowFn::Hamming => 0.54 - 0.46 * phase.cos(),
-                WindowFn::Hann => 0.5 * (1.0 - phase.cos()),
-            }
-        })
-        .collect()
-}
-
 /// Compute mel filterbank matrix
 ///
-/// Returns num_mels filters, each with fft_size/2+1 coefficients
+/// Returns num_mels triangular filters, each with fft_size/2+1 coefficients.
+/// Uses the standard mel scale: mel = 1127 * ln(1 + f/700)
 pub fn compute_mel_filterbank(
     num_mels: usize,
     fft_size: usize,
@@ -301,15 +249,18 @@ pub fn compute_mel_filterbank(
     let mel_low = hz_to_mel(0.0);
     let mel_high = hz_to_mel(max_freq);
 
+    // Mel center frequencies (num_mels + 2 points for triangular filters)
     let mel_points: Vec<f32> = (0..num_mels + 2)
         .map(|i| mel_low + (mel_high - mel_low) * i as f32 / (num_mels + 1) as f32)
         .collect();
 
+    // Convert back to Hz and then to FFT bin indices
     let bin_points: Vec<f32> = mel_points
         .iter()
         .map(|&m| mel_to_hz(m) * fft_size as f32 / sample_rate)
         .collect();
 
+    // Build triangular filters
     let mut filterbank = Vec::with_capacity(num_mels);
     for i in 0..num_mels {
         let mut filter = vec![0.0f32; num_bins];
@@ -331,99 +282,9 @@ pub fn compute_mel_filterbank(
     filterbank
 }
 
-/// Read CMVN stats (neg_mean and inv_stddev) from ONNX model metadata
-///
-/// Many sherpa-onnx models store CMVN as comma-separated floats in metadata.
-pub fn read_cmvn_from_metadata(
-    session: &ort::session::Session,
-) -> Result<(Vec<f32>, Vec<f32>), crate::error::TranscribeError> {
-    use crate::error::TranscribeError;
-
-    let metadata = session.metadata().map_err(|e| {
-        TranscribeError::InitFailed(format!("Failed to read model metadata: {}", e))
-    })?;
-
-    let neg_mean_str = metadata.custom("neg_mean").ok_or_else(|| {
-        TranscribeError::InitFailed(
-            "Model metadata missing 'neg_mean' key. Is this a sherpa-onnx model?".to_string(),
-        )
-    })?;
-
-    let inv_stddev_str = metadata.custom("inv_stddev").ok_or_else(|| {
-        TranscribeError::InitFailed(
-            "Model metadata missing 'inv_stddev' key. Is this a sherpa-onnx model?".to_string(),
-        )
-    })?;
-
-    let neg_mean: Vec<f32> = neg_mean_str
-        .split(',')
-        .filter_map(|s: &str| s.trim().parse::<f32>().ok())
-        .collect();
-
-    let inv_stddev: Vec<f32> = inv_stddev_str
-        .split(',')
-        .filter_map(|s: &str| s.trim().parse::<f32>().ok())
-        .collect();
-
-    if neg_mean.is_empty() || inv_stddev.is_empty() {
-        return Err(TranscribeError::InitFailed(format!(
-            "CMVN stats appear malformed (neg_mean: {} values, inv_stddev: {} values)",
-            neg_mean.len(),
-            inv_stddev.len()
-        )));
-    }
-
-    tracing::debug!(
-        "CMVN stats loaded: neg_mean[{}], inv_stddev[{}]",
-        neg_mean.len(),
-        inv_stddev.len()
-    );
-
-    Ok((neg_mean, inv_stddev))
-}
-
-/// Load tokens.txt into a HashMap<u32, String>
-///
-/// Format: each line is "token_string token_id" (space-separated).
-/// Common across SenseVoice, Paraformer, Dolphin, Omnilingual.
-pub fn load_tokens(
-    path: &std::path::Path,
-) -> Result<std::collections::HashMap<u32, String>, crate::error::TranscribeError> {
-    use crate::error::TranscribeError;
-
-    let content = std::fs::read_to_string(path).map_err(|e| {
-        TranscribeError::InitFailed(format!("Failed to read tokens.txt: {}", e))
-    })?;
-
-    let mut tokens = std::collections::HashMap::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Some(last_space) = line.rfind(' ') {
-            let token_str = &line[..last_space];
-            let id_str = &line[last_space + 1..];
-            if let Ok(id) = id_str.parse::<u32>() {
-                tokens.insert(id, token_str.to_string());
-            }
-        }
-    }
-
-    if tokens.is_empty() {
-        return Err(TranscribeError::InitFailed(
-            "tokens.txt appears empty or malformed".to_string(),
-        ));
-    }
-
-    Ok(tokens)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use tempfile::TempDir;
 
     #[test]
     fn test_mel_filterbank_shape() {
@@ -447,141 +308,66 @@ mod tests {
     }
 
     #[test]
-    fn test_hamming_window() {
-        let w = compute_window(WindowFn::Hamming, 400);
-        assert_eq!(w.len(), 400);
-        // Hamming window starts and ends at 0.08
-        assert!((w[0] - 0.08).abs() < 0.01);
-        assert!((w[399] - 0.08).abs() < 0.01);
-        // Peak in the middle
-        assert!(w[200] > 0.9);
+    fn test_fbank_extractor_default() {
+        let extractor = FbankExtractor::new_default();
+        assert_eq!(extractor.num_mels(), 80);
     }
 
     #[test]
-    fn test_hann_window() {
-        let w = compute_window(WindowFn::Hann, 500);
-        assert_eq!(w.len(), 500);
-        // Hann window starts and ends at 0
-        assert!(w[0].abs() < 0.001);
-        assert!(w[499].abs() < 0.001);
-        // Peak in the middle
-        assert!((w[250] - 1.0).abs() < 0.01);
+    fn test_fbank_empty_audio() {
+        let extractor = FbankExtractor::new_default();
+        // Audio shorter than one frame (400 samples at 16kHz = 25ms)
+        let short_audio = vec![0.0f32; 100];
+        let result = extractor.extract(&short_audio);
+        assert_eq!(result.nrows(), 0);
     }
 
     #[test]
-    fn test_fbank_extract_basic() {
-        let config = FbankConfig::sensevoice_default();
-        let extractor = FbankExtractor::new(config);
-
-        // 1 second of silence
-        let samples = vec![0.0f32; 16000];
-        let fbank = extractor.extract(&samples);
-
-        // At 25ms frame, 10ms shift: (16000 - 400) / 160 + 1 = 98 frames
-        assert_eq!(fbank.nrows(), 98);
-        assert_eq!(fbank.ncols(), 80);
+    fn test_fbank_one_second() {
+        let extractor = FbankExtractor::new_default();
+        // 1 second of silence at 16kHz
+        let audio = vec![0.0f32; 16000];
+        let result = extractor.extract(&audio);
+        // Expected frames: (16000 - 400) / 160 + 1 = 98
+        assert_eq!(result.nrows(), 98);
+        assert_eq!(result.ncols(), 80);
     }
 
     #[test]
-    fn test_fbank_extract_short_audio() {
-        let config = FbankConfig::sensevoice_default();
-        let extractor = FbankExtractor::new(config);
-
-        // Too short for even 1 frame
-        let samples = vec![0.0f32; 100];
-        let fbank = extractor.extract(&samples);
-        assert_eq!(fbank.nrows(), 0);
+    fn test_lfr_default() {
+        let config = LfrConfig::default();
+        assert_eq!(config.m, 7);
+        assert_eq!(config.n, 6);
     }
 
     #[test]
-    fn test_apply_lfr() {
-        let fbank = Array2::from_shape_fn((20, 80), |(i, j)| (i * 80 + j) as f32);
-        let lfr = apply_lfr(&fbank, 7, 6);
-
-        // Output should have stacked features: 80 * 7 = 560 dims
-        assert_eq!(lfr.ncols(), 560);
-        // With padding 3 + 20 frames, stride 6: ceil(23/6) = 4 output frames
-        assert_eq!(lfr.nrows(), 4);
+    fn test_lfr_stacking() {
+        let fbank = Array2::ones((100, 80));
+        let config = LfrConfig::default();
+        let result = apply_lfr(&fbank, &config);
+        // Output dim should be 80 * 7 = 560
+        assert_eq!(result.ncols(), 560);
+        // Output frames: ceil((3 + 100) / 6) = ceil(103/6) = 18
+        assert_eq!(result.nrows(), 18);
     }
 
     #[test]
-    fn test_apply_lfr_empty() {
+    fn test_lfr_empty() {
         let fbank = Array2::zeros((0, 80));
-        let lfr = apply_lfr(&fbank, 7, 6);
-        assert_eq!(lfr.nrows(), 0);
+        let config = LfrConfig::default();
+        let result = apply_lfr(&fbank, &config);
+        assert_eq!(result.nrows(), 0);
+        assert_eq!(result.ncols(), 560);
     }
 
     #[test]
-    fn test_apply_cmvn() {
-        let mut features = Array2::from_shape_fn((2, 3), |(_i, _j)| 1.0f32);
-        let neg_mean = vec![-1.0, -1.0, -1.0]; // features + neg_mean = 0
-        let inv_stddev = vec![2.0, 2.0, 2.0];
-
+    fn test_cmvn() {
+        let mut features = Array2::from_elem((2, 3), 1.0f32);
+        let neg_mean = vec![-1.0, -1.0, -1.0]; // (1.0 + (-1.0)) = 0.0
+        let inv_stddev = vec![2.0, 2.0, 2.0]; // 0.0 * 2.0 = 0.0
         apply_cmvn(&mut features, &neg_mean, &inv_stddev);
-        // (1.0 + (-1.0)) * 2.0 = 0.0
-        for row in features.rows() {
-            for &val in row {
-                assert!((val - 0.0).abs() < 1e-6);
-            }
+        for val in features.iter() {
+            assert!((val - 0.0).abs() < 1e-6);
         }
-    }
-
-    #[test]
-    fn test_apply_instance_norm() {
-        // Create features where column 0 has values [2, 4, 6] => mean=4, std~=1.63
-        let mut features = Array2::from_shape_fn((3, 2), |(i, _j)| (i as f32 + 1.0) * 2.0);
-        apply_instance_norm(&mut features);
-
-        // After normalization, each column should have mean ~0 and std ~1
-        for j in 0..2 {
-            let mut sum = 0.0f32;
-            for i in 0..3 {
-                sum += features[[i, j]];
-            }
-            assert!((sum / 3.0).abs() < 1e-5, "Mean should be ~0");
-        }
-    }
-
-    #[test]
-    fn test_load_tokens() {
-        let temp_dir = TempDir::new().unwrap();
-        let tokens_path = temp_dir.path().join("tokens.txt");
-        fs::write(
-            &tokens_path,
-            "<blank> 0\n<sos/eos> 1\nhello 2\nworld 3\n",
-        )
-        .unwrap();
-
-        let tokens = load_tokens(&tokens_path).unwrap();
-        assert_eq!(tokens.get(&0), Some(&"<blank>".to_string()));
-        assert_eq!(tokens.get(&2), Some(&"hello".to_string()));
-        assert_eq!(tokens.get(&3), Some(&"world".to_string()));
-    }
-
-    #[test]
-    fn test_load_tokens_empty() {
-        let temp_dir = TempDir::new().unwrap();
-        let tokens_path = temp_dir.path().join("tokens.txt");
-        fs::write(&tokens_path, "").unwrap();
-
-        let result = load_tokens(&tokens_path);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_dolphin_fbank_config() {
-        let config = FbankConfig::dolphin_default();
-        assert_eq!(config.frame_length_samples(), 500); // 31.25ms * 16 = 500
-        assert_eq!(config.frame_shift_samples(), 160); // 10ms * 16 = 160
-        assert_eq!(config.fft_size(), 512); // next power of 2 >= 500
-        assert!(config.pre_emphasis.is_none());
-    }
-
-    #[test]
-    fn test_omnilingual_fbank_config() {
-        let config = FbankConfig::omnilingual_default();
-        assert_eq!(config.frame_length_samples(), 400); // 25ms * 16 = 400
-        assert_eq!(config.frame_shift_samples(), 320); // 20ms * 16 = 320
-        assert_eq!(config.fft_size(), 512);
     }
 }

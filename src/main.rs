@@ -130,10 +130,9 @@ async fn main() -> anyhow::Result<()> {
             "paraformer" => config.engine = config::TranscriptionEngine::Paraformer,
             "dolphin" => config.engine = config::TranscriptionEngine::Dolphin,
             "omnilingual" => config.engine = config::TranscriptionEngine::Omnilingual,
-            "fireredasr" | "firered" => config.engine = config::TranscriptionEngine::FireRedAsr,
             _ => {
                 eprintln!(
-                    "Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, fireredasr",
+                    "Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual",
                     engine
                 );
                 std::process::exit(1);
@@ -211,9 +210,8 @@ async fn main() -> anyhow::Result<()> {
                     "paraformer" => config.engine = config::TranscriptionEngine::Paraformer,
                     "dolphin" => config.engine = config::TranscriptionEngine::Dolphin,
                     "omnilingual" => config.engine = config::TranscriptionEngine::Omnilingual,
-                    "fireredasr" | "firered" => config.engine = config::TranscriptionEngine::FireRedAsr,
                     _ => {
-                        eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, fireredasr", engine_name);
+                        eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual", engine_name);
                         std::process::exit(1);
                     }
                 }

@@ -69,7 +69,7 @@ whisper-rs = "0.15.1"
 # Parakeet speech-to-text (optional, ONNX-based)
 parakeet-rs = { version = "0.3", optional = true }
 
-# ONNX-based ASR engines (Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual, FireRedASR)
+# ONNX-based ASR engines (Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual)
 ort = { version = "2.0.0-rc.11", optional = true }
 ndarray = { version = "0.16", optional = true }
 tokenizers = { version = "0.20", optional = true, default-features = false, features = ["onig"] }
@@ -126,10 +126,6 @@ dolphin-tensorrt = ["dolphin", "ort/tensorrt"]
 omnilingual = ["onnx-common"]
 omnilingual-cuda = ["omnilingual", "ort/cuda"]
 omnilingual-tensorrt = ["omnilingual", "ort/tensorrt"]
-# FireRedASR backend (ONNX-based, encoder-decoder)
-fireredasr = ["onnx-common"]
-fireredasr-cuda = ["fireredasr", "ort/cuda"]
-fireredasr-tensorrt = ["fireredasr", "ort/tensorrt"]
 
 [build-dependencies]
 clap = { version = "4", features = ["derive"] }
