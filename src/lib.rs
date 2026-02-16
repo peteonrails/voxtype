@@ -76,7 +76,6 @@ pub mod daemon;
 pub mod eager;
 pub mod error;
 pub mod hotkey;
-pub mod license;
 pub mod meeting;
 pub mod model_manager;
 pub mod output;

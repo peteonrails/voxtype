@@ -3,8 +3,8 @@
 //! Provides continuous meeting transcription with chunked processing,
 //! speaker attribution, and export capabilities.
 //!
-//! This is a Pro feature that enables transcription of longer meetings
-//! (up to 3 hours) with automatic chunking and speaker separation.
+//! Enables transcription of longer meetings (up to 3 hours) with
+//! automatic chunking and speaker separation.
 //!
 //! # Architecture
 //!
@@ -39,8 +39,7 @@ pub use export::{export_meeting, export_meeting_to_file, ExportFormat, ExportOpt
 pub use state::{ChunkState, MeetingState};
 pub use storage::{MeetingStorage, StorageConfig, StorageError};
 
-use crate::error::Result;
-use crate::license::{require_pro_feature, ProFeature};
+use crate::error::{MeetingError, Result};
 use crate::transcribe::{self, Transcriber};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -63,7 +62,7 @@ pub struct MeetingConfig {
 impl Default for MeetingConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             chunk_duration_secs: 30,
             storage: StorageConfig::default(),
             retain_audio: false,
@@ -98,7 +97,7 @@ pub struct MeetingDaemon {
     state: MeetingState,
     storage: MeetingStorage,
     current_meeting: Option<MeetingData>,
-    transcriber: Option<Arc<Box<dyn Transcriber>>>,
+    transcriber: Option<Arc<dyn Transcriber>>,
     engine_name: String,
     event_tx: mpsc::Sender<MeetingEvent>,
 }
@@ -110,15 +109,11 @@ impl MeetingDaemon {
         app_config: &crate::config::Config,
         event_tx: mpsc::Sender<MeetingEvent>,
     ) -> Result<Self> {
-        // Verify Pro license
-        require_pro_feature(ProFeature::MeetingMode)
-            .map_err(|e| crate::error::VoxtypeError::Config(e.to_string()))?;
+        let storage = MeetingStorage::open(config.storage.clone())
+            .map_err(|e| MeetingError::Storage(e.to_string()))?;
 
-        let storage = MeetingStorage::open(config.storage.clone()).map_err(|e| {
-            crate::error::VoxtypeError::Config(format!("Failed to open meeting storage: {}", e))
-        })?;
-
-        let transcriber = Arc::new(transcribe::create_transcriber(app_config)?);
+        let transcriber: Arc<dyn Transcriber> =
+            Arc::from(transcribe::create_transcriber(app_config)?);
         let engine_name = format!("{:?}", app_config.engine).to_lowercase();
 
         Ok(Self {
@@ -135,9 +130,7 @@ impl MeetingDaemon {
     /// Start a new meeting
     pub async fn start(&mut self, title: Option<String>) -> Result<MeetingId> {
         if !self.state.is_idle() {
-            return Err(crate::error::VoxtypeError::Config(
-                "Meeting already in progress".to_string(),
-            ));
+            return Err(MeetingError::AlreadyInProgress.into());
         }
 
         // Create meeting
@@ -148,12 +141,7 @@ impl MeetingDaemon {
         let storage_path = self
             .storage
             .create_meeting(&meeting.metadata)
-            .map_err(|e| {
-                crate::error::VoxtypeError::Config(format!(
-                    "Failed to create meeting storage: {}",
-                    e
-                ))
-            })?;
+            .map_err(|e| MeetingError::Storage(e.to_string()))?;
         meeting.metadata.storage_path = Some(storage_path);
 
         let meeting_id = meeting.metadata.id;
@@ -172,9 +160,7 @@ impl MeetingDaemon {
     /// Pause the current meeting
     pub async fn pause(&mut self) -> Result<()> {
         if !self.state.is_active() {
-            return Err(crate::error::VoxtypeError::Config(
-                "No active meeting to pause".to_string(),
-            ));
+            return Err(MeetingError::NotActive.into());
         }
 
         self.state = std::mem::take(&mut self.state).pause();
@@ -187,9 +173,7 @@ impl MeetingDaemon {
     /// Resume a paused meeting
     pub async fn resume(&mut self) -> Result<()> {
         if !self.state.is_paused() {
-            return Err(crate::error::VoxtypeError::Config(
-                "No paused meeting to resume".to_string(),
-            ));
+            return Err(MeetingError::NotPaused.into());
         }
 
         self.state = std::mem::take(&mut self.state).resume();
@@ -202,9 +186,7 @@ impl MeetingDaemon {
     /// Stop the current meeting
     pub async fn stop(&mut self) -> Result<MeetingId> {
         if self.state.is_idle() {
-            return Err(crate::error::VoxtypeError::Config(
-                "No meeting in progress".to_string(),
-            ));
+            return Err(MeetingError::NotInProgress.into());
         }
 
         self.state = std::mem::take(&mut self.state).stop();
@@ -217,16 +199,12 @@ impl MeetingDaemon {
             // Save transcript
             self.storage
                 .save_transcript(&meeting.metadata.id, &meeting.transcript)
-                .map_err(|e| {
-                    crate::error::VoxtypeError::Config(format!("Failed to save transcript: {}", e))
-                })?;
+                .map_err(|e| MeetingError::Storage(e.to_string()))?;
 
             // Update metadata
             self.storage
                 .update_meeting(&meeting.metadata)
-                .map_err(|e| {
-                    crate::error::VoxtypeError::Config(format!("Failed to update meeting: {}", e))
-                })?;
+                .map_err(|e| MeetingError::Storage(e.to_string()))?;
         }
 
         let meeting_id = self
@@ -268,9 +246,7 @@ impl MeetingDaemon {
         }
 
         let Some(ref transcriber) = self.transcriber else {
-            return Err(crate::error::VoxtypeError::Config(
-                "Transcriber not initialized".to_string(),
-            ));
+            return Err(MeetingError::TranscriberNotInitialized.into());
         };
 
         let chunk_id = self.state.chunks_processed();
@@ -361,7 +337,7 @@ mod tests {
     #[test]
     fn test_meeting_config_default() {
         let config = MeetingConfig::default();
-        assert!(config.enabled);
+        assert!(!config.enabled);
         assert_eq!(config.chunk_duration_secs, 30);
         assert_eq!(config.max_duration_mins, 180);
     }

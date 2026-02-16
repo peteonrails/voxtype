@@ -225,17 +225,14 @@ impl MeetingStorage {
 
     /// List meetings with optional limit
     pub fn list_meetings(&self, limit: Option<u32>) -> Result<Vec<MeetingMetadata>, StorageError> {
-        let sql = if let Some(limit) = limit {
-            format!(
-                r#"
+        let sql = if limit.is_some() {
+            r#"
                 SELECT id, title, started_at, ended_at, duration_secs, status,
                        chunk_count, storage_path, audio_retained, model, synced_at
                 FROM meetings
                 ORDER BY started_at DESC
-                LIMIT {}
-                "#,
-                limit
-            )
+                LIMIT ?1
+                "#
         } else {
             r#"
                 SELECT id, title, started_at, ended_at, duration_secs, status,
@@ -243,28 +240,33 @@ impl MeetingStorage {
                 FROM meetings
                 ORDER BY started_at DESC
                 "#
-            .to_string()
         };
 
-        let mut stmt = self.conn.prepare(&sql)?;
-        let meetings = stmt
-            .query_map([], |row| {
-                Ok(MeetingMetadata {
-                    id: MeetingId::parse(&row.get::<_, String>(0)?).unwrap_or_default(),
-                    title: row.get(1)?,
-                    started_at: timestamp_to_datetime(row.get(2)?),
-                    ended_at: row.get::<_, Option<i64>>(3)?.map(timestamp_to_datetime),
-                    duration_secs: row.get::<_, Option<i64>>(4)?.map(|d| d as u64),
-                    status: string_to_status(&row.get::<_, String>(5)?),
-                    chunk_count: row.get::<_, i32>(6)? as u32,
-                    storage_path: row.get::<_, Option<String>>(7)?.map(PathBuf::from),
-                    audio_retained: row.get::<_, i32>(8)? != 0,
-                    model: row.get(9)?,
-                    summary: None,
-                    synced_at: row.get::<_, Option<i64>>(10)?.map(timestamp_to_datetime),
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut stmt = self.conn.prepare(sql)?;
+        let row_mapper = |row: &rusqlite::Row| {
+            Ok(MeetingMetadata {
+                id: MeetingId::parse(&row.get::<_, String>(0)?).unwrap_or_default(),
+                title: row.get(1)?,
+                started_at: timestamp_to_datetime(row.get(2)?),
+                ended_at: row.get::<_, Option<i64>>(3)?.map(timestamp_to_datetime),
+                duration_secs: row.get::<_, Option<i64>>(4)?.map(|d| d as u64),
+                status: string_to_status(&row.get::<_, String>(5)?),
+                chunk_count: row.get::<_, i32>(6)? as u32,
+                storage_path: row.get::<_, Option<String>>(7)?.map(PathBuf::from),
+                audio_retained: row.get::<_, i32>(8)? != 0,
+                model: row.get(9)?,
+                summary: None,
+                synced_at: row.get::<_, Option<i64>>(10)?.map(timestamp_to_datetime),
+            })
+        };
+
+        let meetings = if let Some(limit) = limit {
+            stmt.query_map(params![limit], row_mapper)?
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map([], row_mapper)?
+                .collect::<Result<Vec<_>, _>>()?
+        };
 
         Ok(meetings)
     }

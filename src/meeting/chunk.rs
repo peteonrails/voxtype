@@ -211,13 +211,13 @@ pub struct ProcessedChunk {
 pub struct ChunkProcessor {
     config: ChunkConfig,
     vad: VoiceActivityDetector,
-    transcriber: Arc<Box<dyn Transcriber>>,
+    transcriber: Arc<dyn Transcriber>,
     next_segment_id: u32,
 }
 
 impl ChunkProcessor {
     /// Create a new chunk processor
-    pub fn new(config: ChunkConfig, transcriber: Arc<Box<dyn Transcriber>>) -> Self {
+    pub fn new(config: ChunkConfig, transcriber: Arc<dyn Transcriber>) -> Self {
         let vad = VoiceActivityDetector::new(config.vad_threshold, config.sample_rate);
         Self {
             config,

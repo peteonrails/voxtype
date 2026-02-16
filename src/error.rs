@@ -23,6 +23,9 @@ pub enum VoxtypeError {
     #[error("Output error: {0}")]
     Output(#[from] OutputError),
 
+    #[error("Meeting error: {0}")]
+    Meeting(#[from] MeetingError),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -140,6 +143,28 @@ pub enum OutputError {
         "All output methods failed. Ensure wtype, dotool, ydotool, wl-copy, or xclip is available."
     )]
     AllMethodsFailed,
+}
+
+/// Errors related to meeting transcription
+#[derive(Error, Debug)]
+pub enum MeetingError {
+    #[error("Meeting already in progress")]
+    AlreadyInProgress,
+
+    #[error("No meeting in progress")]
+    NotInProgress,
+
+    #[error("No active meeting to pause")]
+    NotActive,
+
+    #[error("No paused meeting to resume")]
+    NotPaused,
+
+    #[error("Transcriber not initialized")]
+    TranscriberNotInitialized,
+
+    #[error("Meeting storage error: {0}")]
+    Storage(String),
 }
 
 /// Result type alias using VoxtypeError

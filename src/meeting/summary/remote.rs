@@ -33,9 +33,7 @@ impl RemoteSummarizer {
 
     /// Call the remote summarization API
     fn call_api(&self, prompt: &str) -> Result<String, SummaryError> {
-        let client = ureq::AgentBuilder::new()
-            .timeout(self.timeout)
-            .build();
+        let client = ureq::AgentBuilder::new().timeout(self.timeout).build();
 
         #[derive(Serialize)]
         struct SummarizeRequest<'a> {

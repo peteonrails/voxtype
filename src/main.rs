@@ -425,7 +425,11 @@ fn check_daemon_running() -> anyhow::Result<()> {
 }
 
 /// Send a record command to the running daemon via Unix signals or file triggers
-fn send_record_command(config: &config::Config, action: RecordAction, top_level_model: Option<&str>) -> anyhow::Result<()> {
+fn send_record_command(
+    config: &config::Config,
+    action: RecordAction,
+    top_level_model: Option<&str>,
+) -> anyhow::Result<()> {
     use nix::sys::signal::{kill, Signal};
     use nix::unistd::Pid;
     use voxtype::OutputModeOverride;

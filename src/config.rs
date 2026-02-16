@@ -324,7 +324,7 @@ pub struct Config {
     #[serde(default)]
     pub status: StatusConfig,
 
-    /// Meeting transcription configuration (Pro feature)
+    /// Meeting transcription configuration
     #[serde(default)]
     pub meeting: MeetingConfig,
 
@@ -1207,11 +1207,11 @@ pub struct TextConfig {
     pub replacements: HashMap<String, String>,
 }
 
-/// Meeting transcription configuration (Pro feature)
+/// Meeting transcription configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MeetingConfig {
     /// Enable meeting mode
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub enabled: bool,
 
     /// Duration of each audio chunk in seconds
@@ -1380,7 +1380,7 @@ impl Default for MeetingSummaryConfig {
 impl Default for MeetingConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             chunk_duration_secs: default_chunk_duration(),
             storage_path: default_storage_path(),
             retain_audio: false,
@@ -3237,7 +3237,7 @@ mod tests {
     #[test]
     fn test_meeting_config_default() {
         let config = MeetingConfig::default();
-        assert!(config.enabled);
+        assert!(!config.enabled);
         assert_eq!(config.chunk_duration_secs, 30);
         assert_eq!(config.storage_path, "auto");
         assert!(!config.retain_audio);
@@ -3273,7 +3273,7 @@ mod tests {
     #[test]
     fn test_meeting_config_in_default_config() {
         let config = Config::default();
-        assert!(config.meeting.enabled);
+        assert!(!config.meeting.enabled);
         assert_eq!(config.meeting.chunk_duration_secs, 30);
         assert_eq!(config.meeting.max_duration_mins, 180);
     }
@@ -3380,7 +3380,7 @@ mod tests {
         "#;
 
         let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(config.meeting.enabled);
+        assert!(!config.meeting.enabled);
         assert_eq!(config.meeting.chunk_duration_secs, 30);
         assert_eq!(config.meeting.storage_path, "auto");
         assert_eq!(config.meeting.diarization.backend, "simple");

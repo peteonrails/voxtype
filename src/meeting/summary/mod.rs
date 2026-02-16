@@ -63,7 +63,10 @@ pub fn summary_to_markdown(summary: &MeetingSummary) -> String {
                 .map(|a| format!(" ({})", a))
                 .unwrap_or_default();
             let checkbox = if item.completed { "[x]" } else { "[ ]" };
-            output.push_str(&format!("- {} {}{}\n", checkbox, item.description, assignee));
+            output.push_str(&format!(
+                "- {} {}{}\n",
+                checkbox, item.description, assignee
+            ));
         }
         output.push('\n');
     }
@@ -188,7 +191,10 @@ Format your response as JSON with this structure:
 }
 
 /// Parse JSON summary from LLM response
-pub fn parse_summary_response(response: &str, model: Option<String>) -> Result<MeetingSummary, SummaryError> {
+pub fn parse_summary_response(
+    response: &str,
+    model: Option<String>,
+) -> Result<MeetingSummary, SummaryError> {
     // Try to extract JSON from the response
     let json_str = extract_json(response).ok_or_else(|| {
         SummaryError::Parse(format!(

@@ -79,9 +79,7 @@ impl OllamaSummarizer {
 
     /// Call Ollama generate API
     fn generate(&self, prompt: &str) -> Result<String, SummaryError> {
-        let client = ureq::AgentBuilder::new()
-            .timeout(self.timeout)
-            .build();
+        let client = ureq::AgentBuilder::new().timeout(self.timeout).build();
 
         let generate_url = format!("{}/api/generate", self.url);
 
@@ -109,9 +107,7 @@ impl OllamaSummarizer {
                 ureq::Error::Transport(ref t) => {
                     let msg = t.to_string();
                     if msg.contains("timed out") || msg.contains("timeout") {
-                        SummaryError::Request(
-                            "Request timed out - try a shorter transcript".into(),
-                        )
+                        SummaryError::Request("Request timed out - try a shorter transcript".into())
                     } else if msg.contains("connection") {
                         SummaryError::OllamaUnavailable(format!("{}: connection failed", self.url))
                     } else {
@@ -128,9 +124,9 @@ impl OllamaSummarizer {
             done: bool,
         }
 
-        let gen_response: GenerateResponse = response
-            .into_json()
-            .map_err(|e| SummaryError::Parse(format!("Failed to parse generate response: {}", e)))?;
+        let gen_response: GenerateResponse = response.into_json().map_err(|e| {
+            SummaryError::Parse(format!("Failed to parse generate response: {}", e))
+        })?;
 
         Ok(gen_response.response)
     }

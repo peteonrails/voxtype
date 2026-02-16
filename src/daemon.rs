@@ -680,7 +680,13 @@ impl Daemon {
 
                         // Notification
                         if self.config.output.notification.on_recording_start {
-                            send_notification("Meeting Started", &format!("ID: {}", meeting_id), false, self.config.engine).await;
+                            send_notification(
+                                "Meeting Started",
+                                &format!("ID: {}", meeting_id),
+                                false,
+                                self.config.engine,
+                            )
+                            .await;
                         }
                     }
                     Err(e) => {
@@ -714,7 +720,13 @@ impl Daemon {
                     self.play_feedback(SoundEvent::RecordingStop);
 
                     if self.config.output.notification.on_recording_stop {
-                        send_notification("Meeting Ended", &format!("ID: {}", meeting_id), false, self.config.engine).await;
+                        send_notification(
+                            "Meeting Ended",
+                            &format!("ID: {}", meeting_id),
+                            false,
+                            self.config.engine,
+                        )
+                        .await;
                     }
                 }
                 Err(e) => {
@@ -738,7 +750,13 @@ impl Daemon {
             tracing::info!("Meeting paused");
 
             if self.config.output.notification.on_recording_stop {
-                send_notification("Meeting Paused", "Recording paused", false, self.config.engine).await;
+                send_notification(
+                    "Meeting Paused",
+                    "Recording paused",
+                    false,
+                    self.config.engine,
+                )
+                .await;
             }
         }
         Ok(())
@@ -753,7 +771,13 @@ impl Daemon {
             tracing::info!("Meeting resumed");
 
             if self.config.output.notification.on_recording_start {
-                send_notification("Meeting Resumed", "Recording resumed", false, self.config.engine).await;
+                send_notification(
+                    "Meeting Resumed",
+                    "Recording resumed",
+                    false,
+                    self.config.engine,
+                )
+                .await;
             }
         }
         Ok(())
