@@ -287,6 +287,48 @@ const MOONSHINE_MODELS: &[MoonshineModelInfo] = &[
 ];
 
 // =============================================================================
+// SenseVoice Model Definitions
+// =============================================================================
+
+/// SenseVoice model information for display and download
+struct SenseVoiceModelInfo {
+    name: &'static str,
+    dir_name: &'static str,
+    size_mb: u32,
+    description: &'static str,
+    languages: &'static str,
+    files: &'static [(&'static str, &'static str)], // (repo_path, local_filename)
+    huggingface_repo: &'static str,
+}
+
+const SENSEVOICE_MODELS: &[SenseVoiceModelInfo] = &[
+    SenseVoiceModelInfo {
+        name: "small",
+        dir_name: "sensevoice-small",
+        size_mb: 239,
+        description: "Quantized int8 (recommended)",
+        languages: "zh/en/ja/ko/yue",
+        files: &[
+            ("model.int8.onnx", "model.int8.onnx"),
+            ("tokens.txt", "tokens.txt"),
+        ],
+        huggingface_repo: "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
+    },
+    SenseVoiceModelInfo {
+        name: "small-fp32",
+        dir_name: "sensevoice-small-fp32",
+        size_mb: 938,
+        description: "Full precision (larger, slightly better accuracy)",
+        languages: "zh/en/ja/ko/yue",
+        files: &[
+            ("model.onnx", "model.onnx"),
+            ("tokens.txt", "tokens.txt"),
+        ],
+        huggingface_repo: "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
+    },
+];
+
+// =============================================================================
 // Whisper Model Functions
 // =============================================================================
 
@@ -313,15 +355,19 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let is_whisper_engine = matches!(config.engine, TranscriptionEngine::Whisper);
     let is_parakeet_engine = matches!(config.engine, TranscriptionEngine::Parakeet);
     let is_moonshine_engine = matches!(config.engine, TranscriptionEngine::Moonshine);
+    let is_sensevoice_engine = matches!(config.engine, TranscriptionEngine::SenseVoice);
     let current_whisper_model = &config.whisper.model;
     let current_parakeet_model = config.parakeet.as_ref().map(|p| p.model.as_str());
     let current_moonshine_model = config.moonshine.as_ref().map(|m| m.model.as_str());
+    let current_sensevoice_model = config.sensevoice.as_ref().map(|s| s.model.as_str());
 
     let parakeet_available = cfg!(feature = "parakeet");
     let moonshine_available = cfg!(feature = "moonshine");
+    let sensevoice_available = cfg!(feature = "sensevoice");
     let whisper_count = MODELS.len();
     let parakeet_count = PARAKEET_MODELS.len();
     let moonshine_count = MOONSHINE_MODELS.len();
+    let sensevoice_count = SENSEVOICE_MODELS.len();
     let total_count = whisper_count
         + if parakeet_available {
             parakeet_count
@@ -330,6 +376,11 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         }
         + if moonshine_available {
             moonshine_count
+        } else {
+            0
+        }
+        + if sensevoice_available {
+            sensevoice_count
         } else {
             0
         };
@@ -441,6 +492,44 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         println!("  \x1b[90m(not available - rebuild with --features moonshine)\x1b[0m");
     }
 
+    // --- SenseVoice Section ---
+    let sensevoice_offset = moonshine_offset
+        + if moonshine_available {
+            moonshine_count
+        } else {
+            0
+        };
+    println!("\n--- SenseVoice (Alibaba FunAudioLLM, CJK + English) ---\n");
+
+    if sensevoice_available {
+        for (i, model) in SENSEVOICE_MODELS.iter().enumerate() {
+            let model_path = models_dir.join(model.dir_name);
+            let installed = model_path.exists() && validate_sensevoice_model(&model_path).is_ok();
+
+            let is_current = is_sensevoice_engine && current_sensevoice_model == Some(model.name);
+            let star = if is_current { "*" } else { " " };
+
+            let status = if installed {
+                "\x1b[32m[installed]\x1b[0m"
+            } else {
+                ""
+            };
+
+            println!(
+                " {}[{:>2}] {:<20} ({:>4} MB) {} - {} {}",
+                star,
+                sensevoice_offset + i + 1,
+                model.dir_name,
+                model.size_mb,
+                model.languages,
+                model.description,
+                status
+            );
+        }
+    } else {
+        println!("  \x1b[90m(not available - rebuild with --features sensevoice)\x1b[0m");
+    }
+
     println!("\n  [ 0] Cancel\n");
 
     // Get user selection
@@ -465,10 +554,14 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         // Parakeet model selected
         let parakeet_index = selection - whisper_count;
         handle_parakeet_selection(parakeet_index).await
-    } else if moonshine_available && selection <= total_count {
+    } else if moonshine_available && selection <= moonshine_offset + moonshine_count {
         // Moonshine model selected
         let moonshine_index = selection - moonshine_offset;
         handle_moonshine_selection(moonshine_index).await
+    } else if sensevoice_available && selection <= total_count {
+        // SenseVoice model selected
+        let sensevoice_index = selection - sensevoice_offset;
+        handle_sensevoice_selection(sensevoice_index).await
     } else {
         println!("\nInvalid selection.");
         Ok(())
@@ -1381,6 +1474,58 @@ fn update_moonshine_in_config(config: &str, model_name: &str) -> String {
     result
 }
 
+/// Handle SenseVoice model selection (download/config)
+async fn handle_sensevoice_selection(selection: usize) -> anyhow::Result<()> {
+    let models_dir = Config::models_dir();
+
+    if selection == 0 || selection > SENSEVOICE_MODELS.len() {
+        println!("\nCancelled.");
+        return Ok(());
+    }
+
+    let model = &SENSEVOICE_MODELS[selection - 1];
+    let model_path = models_dir.join(model.dir_name);
+
+    // Check if already installed
+    if model_path.exists() && validate_sensevoice_model(&model_path).is_ok() {
+        println!("\nModel '{}' is already installed.\n", model.dir_name);
+        println!("  [1] Set as default model (update config)");
+        println!("  [2] Re-download");
+        println!("  [0] Cancel\n");
+
+        print!("Select option [1]: ");
+        io::stdout().flush()?;
+
+        let mut choice = String::new();
+        io::stdin().read_line(&mut choice)?;
+        let choice = choice.trim();
+
+        match choice {
+            "" | "1" => {
+                update_config_sensevoice(model.name)?;
+                restart_daemon_if_running().await;
+                return Ok(());
+            }
+            "2" => {
+                // Continue to download below
+            }
+            _ => {
+                println!("Cancelled.");
+                return Ok(());
+            }
+        }
+    }
+
+    // Download the model
+    download_sensevoice_model_by_info(model)?;
+
+    // Update config and restart daemon
+    update_config_sensevoice(model.name)?;
+    restart_daemon_if_running().await;
+
+    Ok(())
+}
+
 /// List installed Moonshine models
 pub fn list_installed_moonshine() {
     println!("\nInstalled Moonshine Models\n");
@@ -1426,6 +1571,272 @@ pub fn list_installed_moonshine() {
     if !found {
         println!("  No Moonshine models installed.");
         println!("\n  Run 'voxtype setup model' and select Moonshine to download.");
+    }
+}
+
+// =============================================================================
+// SenseVoice Model Functions
+// =============================================================================
+
+/// Check if a model name is a SenseVoice model
+pub fn is_sensevoice_model(name: &str) -> bool {
+    SENSEVOICE_MODELS.iter().any(|m| m.name == name)
+}
+
+/// Get the directory name for a SenseVoice model
+pub fn sensevoice_dir_name(name: &str) -> Option<&'static str> {
+    SENSEVOICE_MODELS
+        .iter()
+        .find(|m| m.name == name)
+        .map(|m| m.dir_name)
+}
+
+/// Get list of valid SenseVoice model names
+pub fn valid_sensevoice_model_names() -> Vec<&'static str> {
+    SENSEVOICE_MODELS.iter().map(|m| m.name).collect()
+}
+
+/// Validate that a SenseVoice model directory has the required files
+pub fn validate_sensevoice_model(path: &Path) -> anyhow::Result<()> {
+    if !path.exists() {
+        anyhow::bail!("Model directory does not exist: {:?}", path);
+    }
+
+    let has_model =
+        path.join("model.int8.onnx").exists() || path.join("model.onnx").exists();
+    let has_tokens = path.join("tokens.txt").exists();
+
+    if has_model && has_tokens {
+        Ok(())
+    } else {
+        let mut missing = Vec::new();
+        if !has_model {
+            missing.push("model.int8.onnx or model.onnx");
+        }
+        if !has_tokens {
+            missing.push("tokens.txt");
+        }
+        anyhow::bail!(
+            "Incomplete SenseVoice model, missing: {}",
+            missing.join(", ")
+        )
+    }
+}
+
+/// Download a SenseVoice model by name (public API for run_setup)
+pub fn download_sensevoice_model(model_name: &str) -> anyhow::Result<()> {
+    let model = SENSEVOICE_MODELS
+        .iter()
+        .find(|m| m.name == model_name)
+        .ok_or_else(|| anyhow::anyhow!("Unknown SenseVoice model: {}", model_name))?;
+
+    download_sensevoice_model_by_info(model)
+}
+
+/// Download a SenseVoice model using its info struct
+fn download_sensevoice_model_by_info(model: &SenseVoiceModelInfo) -> anyhow::Result<()> {
+    let models_dir = Config::models_dir();
+    let model_path = models_dir.join(model.dir_name);
+
+    // Create model directory
+    std::fs::create_dir_all(&model_path)?;
+
+    println!(
+        "\nDownloading {} ({} MB)...\n",
+        model.dir_name, model.size_mb
+    );
+
+    for (repo_path, local_filename) in model.files {
+        let file_path = model_path.join(local_filename);
+
+        if file_path.exists() {
+            println!("  {} already exists, skipping", local_filename);
+            continue;
+        }
+
+        let url = format!(
+            "https://huggingface.co/{}/resolve/main/{}",
+            model.huggingface_repo, repo_path
+        );
+
+        println!("Downloading {}...", local_filename);
+
+        let status = Command::new("curl")
+            .args([
+                "-L",
+                "--progress-bar",
+                "-o",
+                file_path.to_str().unwrap_or("file"),
+                &url,
+            ])
+            .status();
+
+        match status {
+            Ok(exit_status) if exit_status.success() => {
+                // Success, continue
+            }
+            Ok(exit_status) => {
+                print_failure(&format!(
+                    "Download failed: curl exited with code {}",
+                    exit_status.code().unwrap_or(-1)
+                ));
+                let _ = std::fs::remove_file(&file_path);
+                anyhow::bail!("Download failed for {}", local_filename)
+            }
+            Err(e) => {
+                print_failure(&format!("Failed to run curl: {}", e));
+                print_info("Please ensure curl is installed (e.g., 'sudo pacman -S curl')");
+                anyhow::bail!("curl not available: {}", e)
+            }
+        }
+    }
+
+    // Validate all files are present
+    validate_sensevoice_model(&model_path)?;
+    print_success(&format!(
+        "Model '{}' downloaded to {:?}",
+        model.dir_name, model_path
+    ));
+
+    Ok(())
+}
+
+/// Update config to use SenseVoice engine and a specific model (with status messages)
+fn update_config_sensevoice(model_name: &str) -> anyhow::Result<()> {
+    if let Some(config_path) = Config::default_path() {
+        if config_path.exists() {
+            let content = std::fs::read_to_string(&config_path)?;
+            let updated = update_sensevoice_in_config(&content, model_name);
+            std::fs::write(&config_path, updated)?;
+            print_success(&format!(
+                "Config updated: engine = \"sensevoice\", model = \"{}\"",
+                model_name
+            ));
+            Ok(())
+        } else {
+            print_info("No config file found. Run 'voxtype setup' first.");
+            Ok(())
+        }
+    } else {
+        anyhow::bail!("Could not determine config path")
+    }
+}
+
+/// Update the config to use SenseVoice engine with a specific model
+fn update_sensevoice_in_config(config: &str, model_name: &str) -> String {
+    let mut result = String::new();
+    let mut has_engine_line = false;
+    let mut has_sensevoice_section = false;
+    let mut in_sensevoice_section = false;
+    let mut sensevoice_model_updated = false;
+
+    for line in config.lines() {
+        let trimmed = line.trim();
+
+        // Track sections
+        if trimmed.starts_with('[') {
+            if in_sensevoice_section && !sensevoice_model_updated {
+                result.push_str(&format!("model = \"{}\"\n", model_name));
+                sensevoice_model_updated = true;
+            }
+            in_sensevoice_section = trimmed == "[sensevoice]";
+            if in_sensevoice_section {
+                has_sensevoice_section = true;
+            }
+        }
+
+        // Update or add engine line at the top level
+        if trimmed.starts_with("engine") && !trimmed.starts_with('[') {
+            result.push_str("engine = \"sensevoice\"\n");
+            has_engine_line = true;
+        }
+        // Update model line in sensevoice section
+        else if in_sensevoice_section && trimmed.starts_with("model") {
+            result.push_str(&format!("model = \"{}\"\n", model_name));
+            sensevoice_model_updated = true;
+        } else {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+
+    // If we were in sensevoice section at EOF and didn't update model, add it
+    if in_sensevoice_section && !sensevoice_model_updated {
+        result.push_str(&format!("model = \"{}\"\n", model_name));
+    }
+
+    // Add engine line if not present
+    if !has_engine_line {
+        let mut new_result = String::new();
+        let mut engine_added = false;
+        for line in result.lines() {
+            let trimmed = line.trim();
+            if !engine_added
+                && !trimmed.is_empty()
+                && !trimmed.starts_with('#')
+                && !trimmed.starts_with("engine")
+            {
+                new_result.push_str("engine = \"sensevoice\"\n\n");
+                engine_added = true;
+            }
+            new_result.push_str(line);
+            new_result.push('\n');
+        }
+        result = new_result;
+    }
+
+    // Add [sensevoice] section if not present
+    if !has_sensevoice_section {
+        result.push_str(&format!("\n[sensevoice]\nmodel = \"{}\"\n", model_name));
+    }
+
+    // Remove trailing newline if original didn't have one
+    if !config.ends_with('\n') && result.ends_with('\n') {
+        result.pop();
+    }
+
+    result
+}
+
+/// List installed SenseVoice models
+pub fn list_installed_sensevoice() {
+    println!("\nInstalled SenseVoice Models\n");
+    println!("===========================\n");
+
+    let models_dir = Config::models_dir();
+
+    if !models_dir.exists() {
+        println!("No models directory found: {:?}", models_dir);
+        return;
+    }
+
+    let mut found = false;
+
+    for model in SENSEVOICE_MODELS {
+        let model_path = models_dir.join(model.dir_name);
+
+        if model_path.exists() && validate_sensevoice_model(&model_path).is_ok() {
+            let size = std::fs::read_dir(&model_path)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .filter_map(|e| e.metadata().ok())
+                        .map(|m| m.len() as f64 / 1024.0 / 1024.0)
+                        .sum::<f64>()
+                })
+                .unwrap_or(0.0);
+
+            println!(
+                "  {} ({:.0} MB) - {} ({})",
+                model.dir_name, size, model.description, model.languages
+            );
+            found = true;
+        }
+    }
+
+    if !found {
+        println!("  No SenseVoice models installed.");
+        println!("\n  Run 'voxtype setup model' and select SenseVoice to download.");
     }
 }
 

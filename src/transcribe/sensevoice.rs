@@ -296,11 +296,11 @@ impl SenseVoiceTranscriber {
             &[]
         };
 
-        // Map token IDs to strings
+        // Map token IDs to strings, replacing SentencePiece word boundary markers
         let mut result = String::new();
         for &id in content_tokens {
             if let Some(token_str) = self.tokens.get(&id) {
-                result.push_str(token_str);
+                result.push_str(&token_str.replace('\u{2581}', " "));
             }
         }
 
