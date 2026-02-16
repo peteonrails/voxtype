@@ -8,7 +8,9 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::process::Command;
 use tracing_subscriber::EnvFilter;
-use voxtype::{config, cpu, daemon, setup, transcribe, vad, Cli, Commands, RecordAction, SetupAction};
+use voxtype::{
+    config, cpu, daemon, setup, transcribe, vad, Cli, Commands, RecordAction, SetupAction,
+};
 
 /// Parse a comma-separated list of driver names into OutputDriver vec
 fn parse_driver_order(s: &str) -> Result<Vec<config::OutputDriver>, String> {
@@ -96,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
     if cli.paste {
         config.output.mode = config::OutputMode::Paste;
     }
+    let top_level_model = cli.model.clone();
     if let Some(model) = cli.model {
         if setup::model::is_valid_model(&model) {
             config.whisper.model = model;
@@ -121,9 +124,10 @@ async fn main() -> anyhow::Result<()> {
         match engine.to_lowercase().as_str() {
             "whisper" => config.engine = config::TranscriptionEngine::Whisper,
             "parakeet" => config.engine = config::TranscriptionEngine::Parakeet,
+            "moonshine" => config.engine = config::TranscriptionEngine::Moonshine,
             _ => {
                 eprintln!(
-                    "Error: Invalid engine '{}'. Valid options: whisper, parakeet",
+                    "Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine",
                     engine
                 );
                 std::process::exit(1);
@@ -148,15 +152,6 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(prompt) = cli.initial_prompt {
         config.whisper.initial_prompt = Some(prompt);
-    }
-    if cli.eager_processing {
-        config.whisper.eager_processing = true;
-    }
-    if let Some(secs) = cli.eager_chunk_secs {
-        config.whisper.eager_chunk_secs = secs;
-    }
-    if let Some(secs) = cli.eager_overlap_secs {
-        config.whisper.eager_overlap_secs = secs;
     }
     if let Some(append_text) = cli.append_text {
         config.output.append_text = Some(append_text);
@@ -200,7 +195,18 @@ async fn main() -> anyhow::Result<()> {
             daemon.run().await?;
         }
 
-        Commands::Transcribe { file } => {
+        Commands::Transcribe { file, engine } => {
+            if let Some(engine_name) = engine {
+                match engine_name.to_lowercase().as_str() {
+                    "whisper" => config.engine = config::TranscriptionEngine::Whisper,
+                    "parakeet" => config.engine = config::TranscriptionEngine::Parakeet,
+                    "moonshine" => config.engine = config::TranscriptionEngine::Moonshine,
+                    _ => {
+                        eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine", engine_name);
+                        std::process::exit(1);
+                    }
+                }
+            }
             transcribe_file(&config, &file)?;
         }
 
@@ -365,7 +371,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Commands::Record { action } => {
-            send_record_command(&config, action)?;
+            send_record_command(&config, action, top_level_model.as_deref())?;
         }
     }
 
@@ -373,7 +379,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Send a record command to the running daemon via Unix signals or file triggers
-fn send_record_command(config: &config::Config, action: RecordAction) -> anyhow::Result<()> {
+fn send_record_command(config: &config::Config, action: RecordAction, top_level_model: Option<&str>) -> anyhow::Result<()> {
     use nix::sys::signal::{kill, Signal};
     use nix::unistd::Pid;
     use voxtype::OutputModeOverride;
@@ -432,8 +438,9 @@ fn send_record_command(config: &config::Config, action: RecordAction) -> anyhow:
             .map_err(|e| anyhow::anyhow!("Failed to write output mode override: {}", e))?;
     }
 
-    // Write model override file if specified
-    if let Some(model) = action.model_override() {
+    // Write model override file if specified (subcommand --model takes priority over top-level --model)
+    let model_override = action.model_override().or(top_level_model);
+    if let Some(model) = model_override {
         let override_file = config::Config::runtime_dir().join("model_override");
         std::fs::write(&override_file, model)
             .map_err(|e| anyhow::anyhow!("Failed to write model override: {}", e))?;
@@ -919,6 +926,47 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
         println!("  available models: (none found)");
     } else {
         println!("  available models: {}", parakeet_models.join(", "));
+    }
+
+    // Show Moonshine status (experimental)
+    println!("\n[moonshine] (EXPERIMENTAL)");
+    if let Some(ref moonshine_config) = config.moonshine {
+        println!("  model = {:?}", moonshine_config.model);
+        println!("  quantized = {}", moonshine_config.quantized);
+        if let Some(threads) = moonshine_config.threads {
+            println!("  threads = {}", threads);
+        }
+        println!(
+            "  on_demand_loading = {}",
+            moonshine_config.on_demand_loading
+        );
+    } else {
+        println!("  (not configured)");
+    }
+
+    // Check for available Moonshine models
+    let mut moonshine_models: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&models_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.contains("moonshine") {
+                    let has_encoder = path.join("encoder_model.onnx").exists()
+                        || path.join("encoder_model_quantized.onnx").exists();
+                    let has_decoder = path.join("decoder_model_merged.onnx").exists()
+                        || path.join("decoder_model_merged_quantized.onnx").exists();
+                    if has_encoder || has_decoder {
+                        moonshine_models.push(name);
+                    }
+                }
+            }
+        }
+    }
+    if moonshine_models.is_empty() {
+        println!("  available models: (none found)");
+    } else {
+        println!("  available models: {}", moonshine_models.join(", "));
     }
 
     println!("\n[output]");

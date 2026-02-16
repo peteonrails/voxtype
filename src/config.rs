@@ -291,6 +291,10 @@ pub struct Config {
     #[serde(default)]
     pub parakeet: Option<ParakeetConfig>,
 
+    /// Moonshine configuration (optional, only used when engine = "moonshine")
+    #[serde(default)]
+    pub moonshine: Option<MoonshineConfig>,
+
     /// Text processing configuration (replacements, spoken punctuation)
     #[serde(default)]
     pub text: TextConfig,
@@ -915,6 +919,40 @@ impl Default for ParakeetConfig {
     }
 }
 
+/// Moonshine speech-to-text configuration (ONNX-based, encoder-decoder ASR)
+/// Requires: cargo build --features moonshine
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MoonshineConfig {
+    /// Model name or path to directory containing ONNX model files
+    /// Expects: encoder_model.onnx, decoder_model_merged.onnx, tokenizer.json
+    /// Short names: "tiny" (27M params), "base" (61M params)
+    pub model: String,
+
+    /// Use quantized model variants for faster CPU inference (default: true)
+    /// Falls back to full precision if quantized files are not found
+    #[serde(default = "default_true")]
+    pub quantized: bool,
+
+    /// Number of CPU threads for ONNX Runtime inference
+    #[serde(default)]
+    pub threads: Option<usize>,
+
+    /// Load model on-demand when recording starts (true) or keep loaded (false)
+    #[serde(default = "default_on_demand_loading")]
+    pub on_demand_loading: bool,
+}
+
+impl Default for MoonshineConfig {
+    fn default() -> Self {
+        Self {
+            model: "base".to_string(),
+            quantized: true,
+            threads: None,
+            on_demand_loading: false,
+        }
+    }
+}
+
 /// Transcription engine selection (which ASR technology to use)
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -925,6 +963,9 @@ pub enum TranscriptionEngine {
     /// Use Parakeet (NVIDIA's FastConformer via ONNX Runtime)
     /// Requires: cargo build --features parakeet
     Parakeet,
+    /// Use Moonshine (encoder-decoder ASR via ONNX Runtime)
+    /// Requires: cargo build --features moonshine
+    Moonshine,
 }
 
 /// VAD backend selection
@@ -1357,6 +1398,7 @@ impl Default for Config {
             },
             engine: TranscriptionEngine::default(),
             parakeet: None,
+            moonshine: None,
             text: TextConfig::default(),
             vad: VadConfig::default(),
             status: StatusConfig::default(),
@@ -1439,6 +1481,11 @@ impl Config {
                 .as_ref()
                 .map(|p| p.on_demand_loading)
                 .unwrap_or(false),
+            TranscriptionEngine::Moonshine => self
+                .moonshine
+                .as_ref()
+                .map(|m| m.on_demand_loading)
+                .unwrap_or(false),
         }
     }
 
@@ -1451,6 +1498,11 @@ impl Config {
                 .as_ref()
                 .map(|p| p.model.as_str())
                 .unwrap_or("parakeet (not configured)"),
+            TranscriptionEngine::Moonshine => self
+                .moonshine
+                .as_ref()
+                .map(|m| m.model.as_str())
+                .unwrap_or("moonshine (not configured)"),
         }
     }
 

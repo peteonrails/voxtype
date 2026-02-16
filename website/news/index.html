@@ -9,16 +9,16 @@
     <!-- Open Graph / Social Media -->
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://voxtype.io/news/">
-    <meta property="og:title" content="Voxtype 0.5.6: Voice Activity Detection, Eager Transcription, Recording Timeout Fix">
-    <meta property="og:description" content="Voice activity detection filters silence and prevents hallucinations. Eager input processing reduces perceived latency. Recording timeouts now transcribe instead of discarding audio.">
+    <meta property="og:title" content="Voxtype 0.5.6: Moonshine Backend, Voice Activity Detection, Eager Transcription">
+    <meta property="og:description" content="Moonshine transcription backend for fast CPU inference. Voice activity detection filters silence and prevents hallucinations. Eager input processing reduces perceived latency.">
     <meta property="og:image" content="https://voxtype.io/images/gpu-isolation.png">
     <meta property="og:image:width" content="1200">
     <meta property="og:image:height" content="630">
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="Voxtype 0.5.6: Voice Activity Detection, Eager Transcription, Recording Timeout Fix">
-    <meta name="twitter:description" content="Voice activity detection filters silence and prevents hallucinations. Eager input processing reduces perceived latency. Recording timeouts now transcribe instead of discarding audio.">
+    <meta name="twitter:title" content="Voxtype 0.5.6: Moonshine Backend, Voice Activity Detection, Eager Transcription">
+    <meta name="twitter:description" content="Moonshine transcription backend for fast CPU inference. Voice activity detection filters silence and prevents hallucinations. Eager input processing reduces perceived latency.">
     <meta name="twitter:image" content="https://voxtype.io/images/gpu-isolation.png">
 
     <title>News & Updates | Voxtype</title>
@@ -82,9 +82,26 @@
                     <time datetime="2026-02-15">February 15, 2026</time>
                     <span class="article-tag">Release</span>
                 </div>
-                <h2>v0.5.6: Voice Activity Detection, Eager Transcription, Recording Timeout Fix</h2>
+                <h2>v0.5.6: Moonshine Backend, Voice Activity Detection, Eager Transcription</h2>
                 <div class="article-body">
-                    <p>Voxtype 0.5.6 adds voice activity detection to filter silence before transcription, starts transcribing while you're still recording, and fixes several regressions from the 0.5.x series.</p>
+                    <p>Voxtype 0.5.6 adds the Moonshine transcription backend for fast CPU inference, voice activity detection to filter silence before transcription, starts transcribing while you're still recording, and fixes several regressions from the 0.5.x series.</p>
+
+                    <h3>Moonshine Transcription Backend (Experimental)</h3>
+                    <p>A third transcription engine is now available alongside Whisper and Parakeet. Moonshine is an encoder-decoder transformer optimized for fast CPU inference via ONNX Runtime.</p>
+
+                    <p>On a Ryzen 9 9900X3D (CPU-only), Moonshine transcribes 4 seconds of audio in 0.09 seconds. Whisper large-v3-turbo takes 17.7 seconds for the same recording. Models come in two sizes: tiny (27M params, 100MB) and base (61M params, 237MB). English models are MIT-licensed, and multilingual models are available for Japanese, Mandarin, Korean, and Arabic.</p>
+
+                    <p><strong>Why use it:</strong> If transcription speed matters more than accuracy, especially on CPU-only setups. Moonshine outputs lowercase text without punctuation, so pair it with voxtype's spoken punctuation feature or a post-processing command if you need formatted output.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>engine = "moonshine"
+
+[moonshine]
+model = "base"</code></pre>
+                    </div>
+
+                    <p>Download a model with <code>voxtype setup model</code> and select a Moonshine model from the interactive menu. Requires a Moonshine-enabled binary. See the <a href="https://github.com/peteonrails/voxtype/blob/main/docs/MOONSHINE.md">Moonshine documentation</a> for details.</p>
 
                     <h3>Voice Activity Detection (VAD)</h3>
                     <p>Whisper has a well-known problem: feed it silence, and it hallucinates. You'll get phantom words, repeated phrases, or garbage text from a recording that was mostly dead air. VAD solves this by detecting speech in your audio and stripping out silence before it reaches the transcription engine.</p>
@@ -95,13 +112,11 @@
                         <div class="code-header"><span>config.toml</span></div>
                         <pre><code>[vad]
 enabled = true
-backend = "silero"   # or "energy", "webrtc"
+backend = "auto"     # auto, whisper, or energy
 threshold = 0.5      # 0.0 to 1.0, higher = stricter</code></pre>
                     </div>
 
-                    <p>Three backends are available. Silero is a neural network model that gives the best accuracy. Energy is a simple volume threshold that works without any dependencies. WebRTC uses Google's VAD library for a middle ground between the two.</p>
-
-                    <p>Run <code>voxtype setup vad</code> to download the Silero model and configure VAD interactively.</p>
+                    <p>Two backends are available. Whisper VAD uses the Silero neural network model via whisper-rs for the best accuracy. Energy is a simple volume threshold that works without any extra model downloads. The auto backend picks Whisper VAD when using Whisper for transcription, and Energy when using Parakeet or Moonshine.</p>
 
                     <h3>Eager Input Processing</h3>
                     <p>Voxtype can now start transcribing audio while you're still recording. Instead of waiting until you release the hotkey, it processes audio in chunks as you speak. When you stop recording, there's less audio left to transcribe, so the result appears faster.</p>
@@ -134,6 +149,7 @@ append_text = " "   # Trailing space after each transcription</code></pre>
                         <li>Fix GPU isolation subprocess not working (regression since v0.5.0)</li>
                         <li>Fix state file default path not being set correctly</li>
                         <li>RPM packages now include <code>pipewire-alsa</code> dependency and use a wrapper script instead of a symlink for the binary, fixing installation on Fedora</li>
+                        <li>Fix top-level <code>--model</code> flag not being forwarded to daemon via record command</li>
                         <li>Bump parakeet-rs for NixOS compatibility</li>
                         <li>Add KDE Plasma hotkey setup documentation</li>
                     </ul>

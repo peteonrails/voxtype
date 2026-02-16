@@ -91,11 +91,12 @@ pub fn is_parakeet_binary_active() -> bool {
 }
 
 /// Get the engine icon for notifications based on configured engine
-/// Returns 🦜 for Parakeet, 🗣️ for Whisper
+/// Returns 🦜 for Parakeet, 🗣️ for Whisper, 🌙 for Moonshine
 pub fn engine_icon(engine: crate::config::TranscriptionEngine) -> &'static str {
     match engine {
         crate::config::TranscriptionEngine::Parakeet => "🦜",
         crate::config::TranscriptionEngine::Whisper => "🗣️",
+        crate::config::TranscriptionEngine::Moonshine => "\u{1F319}",
     }
 }
 

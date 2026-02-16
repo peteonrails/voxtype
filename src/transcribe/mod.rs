@@ -6,6 +6,7 @@
 //! - CLI subprocess using whisper-cli (fallback for glibc 2.42+ compatibility)
 //! - Subprocess isolation for GPU memory release
 //! - Optionally NVIDIA Parakeet via ONNX Runtime (when `parakeet` feature is enabled)
+//! - Optionally Moonshine via ONNX Runtime (when `moonshine` feature is enabled)
 
 pub mod cli;
 pub mod remote;
@@ -15,6 +16,9 @@ pub mod worker;
 
 #[cfg(feature = "parakeet")]
 pub mod parakeet;
+
+#[cfg(feature = "moonshine")]
+pub mod moonshine;
 
 use crate::config::{Config, TranscriptionEngine, WhisperConfig, WhisperMode};
 use crate::error::TranscribeError;
@@ -57,6 +61,23 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
         #[cfg(not(feature = "parakeet"))]
         TranscriptionEngine::Parakeet => Err(TranscribeError::InitFailed(
             "Parakeet engine requested but voxtype was not compiled with --features parakeet"
+                .to_string(),
+        )),
+        #[cfg(feature = "moonshine")]
+        TranscriptionEngine::Moonshine => {
+            let moonshine_config = config.moonshine.as_ref().ok_or_else(|| {
+                TranscribeError::InitFailed(
+                    "Moonshine engine selected but [moonshine] config section is missing"
+                        .to_string(),
+                )
+            })?;
+            Ok(Box::new(moonshine::MoonshineTranscriber::new(
+                moonshine_config,
+            )?))
+        }
+        #[cfg(not(feature = "moonshine"))]
+        TranscriptionEngine::Moonshine => Err(TranscribeError::InitFailed(
+            "Moonshine engine requested but voxtype was not compiled with --features moonshine"
                 .to_string(),
         )),
     }

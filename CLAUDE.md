@@ -339,6 +339,7 @@ Based on open issues and project direction:
 - **Eager input processing** ([#70](https://github.com/peteonrails/voxtype/issues/70)) - Start transcription while still recording
 
 **Exploratory:**
+- **Consolidated release binaries** - Reduce from 7 binaries to 3 (cpu, cuda, rocm) by combining Whisper + Vulkan + Parakeet into each binary. Vulkan and CUDA/ROCm fall back to CPU when no GPU is present, and ONNX Runtime (Parakeet) does runtime CPU dispatch. The trade-off is losing AVX-512 Whisper performance (~10-30%) and larger binaries (~35-40 MB vs 8 MB). Blocked on whisper.cpp/ggml adding runtime SIMD dispatch if AVX-512 performance must be preserved; otherwise, AVX2-only Whisper is safe on all x86-64 CPUs.
 - **Nemotron Speech backend** ([#47](https://github.com/peteonrails/voxtype/issues/47)) - Alternative ASR engine
 - **Foreign exception handling** ([#30](https://github.com/peteonrails/voxtype/issues/30)) - Investigate whisper.cpp crash recovery
 
