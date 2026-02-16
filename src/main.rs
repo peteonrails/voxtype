@@ -156,6 +156,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(append_text) = cli.append_text {
         config.output.append_text = Some(append_text);
     }
+    if cli.wtype_shift_prefix {
+        config.output.wtype_shift_prefix = true;
+    }
     if let Some(ref driver_str) = cli.driver {
         match parse_driver_order(driver_str) {
             Ok(drivers) => {

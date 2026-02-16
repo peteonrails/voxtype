@@ -1267,7 +1267,16 @@ shift_enter_newlines = true  # Use Shift+Enter instead of Enter for line breaks
 
 Many chat apps (Slack, Discord, Teams) and AI assistants (Cursor) use Enter to send and Shift+Enter for line breaks. Enable this when dictating multi-line messages to prevent premature submission.
 
-**Combining both options:**
+**Shift prefix for CJK character drop:**
+
+```toml
+[output]
+wtype_shift_prefix = true  # Prefix wtype output with Shift press/release
+```
+
+Some apps (notably Discord) drop the first CJK character when wtype types text. This option prefixes each wtype invocation with a Shift key press and release, which prevents the character from being swallowed. Only affects the wtype driver.
+
+**Combining shift_enter_newlines and auto_submit:**
 
 ```toml
 [output]
