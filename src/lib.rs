@@ -76,6 +76,8 @@ pub mod daemon;
 pub mod eager;
 pub mod error;
 pub mod hotkey;
+pub mod license;
+pub mod meeting;
 pub mod model_manager;
 pub mod output;
 pub mod setup;
@@ -84,7 +86,7 @@ pub mod text;
 pub mod transcribe;
 pub mod vad;
 
-pub use cli::{Cli, Commands, CompositorType, OutputModeOverride, RecordAction, SetupAction};
+pub use cli::{Cli, Commands, CompositorType, MeetingAction, OutputModeOverride, RecordAction, SetupAction};
 pub use config::Config;
 pub use daemon::Daemon;
 pub use error::{Result, VoxtypeError};

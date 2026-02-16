@@ -84,6 +84,11 @@ notify = "6"
 # Single instance check
 pidlock = "0.1"
 
+# Meeting mode (Pro feature)
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+
 [features]
 default = []
 gpu-vulkan = ["whisper-rs/vulkan"]

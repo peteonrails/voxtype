@@ -206,6 +206,15 @@ pub enum Commands {
         #[command(subcommand)]
         action: RecordAction,
     },
+
+    /// Meeting transcription mode (Pro feature)
+    ///
+    /// Continuous meeting transcription with chunked processing,
+    /// speaker attribution, and export capabilities.
+    Meeting {
+        #[command(subcommand)]
+        action: MeetingAction,
+    },
 }
 
 /// Output mode override for record commands
@@ -291,6 +300,70 @@ pub enum RecordAction {
     },
     /// Cancel current recording or transcription (discard without output)
     Cancel,
+}
+
+/// Meeting mode actions
+#[derive(Subcommand)]
+pub enum MeetingAction {
+    /// Start a new meeting transcription
+    Start {
+        /// Meeting title (optional)
+        #[arg(long, short)]
+        title: Option<String>,
+    },
+    /// Stop the current meeting
+    Stop,
+    /// Pause the current meeting
+    Pause,
+    /// Resume a paused meeting
+    Resume,
+    /// Show meeting status
+    Status,
+    /// List past meetings
+    List {
+        /// Maximum number of meetings to show
+        #[arg(long, short, default_value = "10")]
+        limit: u32,
+    },
+    /// Export a meeting transcript
+    Export {
+        /// Meeting ID (or "latest" for most recent)
+        meeting_id: String,
+
+        /// Output format: text, markdown, json
+        #[arg(long, short, default_value = "markdown")]
+        format: String,
+
+        /// Output file path (default: stdout)
+        #[arg(long, short)]
+        output: Option<std::path::PathBuf>,
+
+        /// Include timestamps in output
+        #[arg(long)]
+        timestamps: bool,
+
+        /// Include speaker labels in output
+        #[arg(long)]
+        speakers: bool,
+
+        /// Include metadata header in output
+        #[arg(long)]
+        metadata: bool,
+    },
+    /// Show meeting details
+    Show {
+        /// Meeting ID (or "latest" for most recent)
+        meeting_id: String,
+    },
+    /// Delete a meeting
+    Delete {
+        /// Meeting ID
+        meeting_id: String,
+
+        /// Skip confirmation prompt
+        #[arg(long, short)]
+        force: bool,
+    },
 }
 
 impl RecordAction {

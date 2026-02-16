@@ -328,6 +328,10 @@ pub struct Config {
     #[serde(default)]
     pub status: StatusConfig,
 
+    /// Meeting transcription configuration (Pro feature)
+    #[serde(default)]
+    pub meeting: MeetingConfig,
+
     /// Optional path to state file for external integrations (e.g., Waybar)
     /// When set, the daemon writes current state ("idle", "recording", "transcribing")
     /// to this file whenever state changes.
@@ -1247,6 +1251,55 @@ pub struct TextConfig {
     pub replacements: HashMap<String, String>,
 }
 
+/// Meeting transcription configuration (Pro feature)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MeetingConfig {
+    /// Enable meeting mode
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Duration of each audio chunk in seconds
+    #[serde(default = "default_chunk_duration")]
+    pub chunk_duration_secs: u32,
+
+    /// Storage path for meetings ("auto" for default location)
+    /// Default: ~/.local/share/voxtype/meetings/
+    #[serde(default = "default_storage_path")]
+    pub storage_path: String,
+
+    /// Retain raw audio files after transcription
+    #[serde(default)]
+    pub retain_audio: bool,
+
+    /// Maximum meeting duration in minutes (0 = unlimited)
+    #[serde(default = "default_max_duration")]
+    pub max_duration_mins: u32,
+}
+
+fn default_chunk_duration() -> u32 {
+    30
+}
+
+fn default_storage_path() -> String {
+    "auto".to_string()
+}
+
+fn default_max_duration() -> u32 {
+    180
+}
+
+impl Default for MeetingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            chunk_duration_secs: default_chunk_duration(),
+            storage_path: default_storage_path(),
+            retain_audio: false,
+            max_duration_mins: default_max_duration(),
+        }
+    }
+}
+
 /// Notification configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NotificationConfig {
@@ -1600,6 +1653,7 @@ impl Default for Config {
             text: TextConfig::default(),
             vad: VadConfig::default(),
             status: StatusConfig::default(),
+            meeting: MeetingConfig::default(),
             state_file: Some("auto".to_string()),
             profiles: HashMap::new(),
         }

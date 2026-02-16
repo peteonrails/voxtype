@@ -9,7 +9,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use tracing_subscriber::EnvFilter;
 use voxtype::{
-    config, cpu, daemon, setup, transcribe, vad, Cli, Commands, RecordAction, SetupAction,
+    config, cpu, daemon, meeting, setup, transcribe, vad, Cli, Commands, MeetingAction,
+    RecordAction, SetupAction,
 };
 
 /// Parse a comma-separated list of driver names into OutputDriver vec
@@ -382,6 +383,10 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::Record { action } => {
             send_record_command(&config, action, top_level_model.as_deref())?;
+        }
+
+        Commands::Meeting { action } => {
+            run_meeting_command(&config, action).await?;
         }
     }
 
@@ -1098,4 +1103,193 @@ fn reset_sigpipe() {
 #[cfg(not(unix))]
 fn reset_sigpipe() {
     // No-op on non-Unix platforms
+}
+
+/// Run a meeting command
+async fn run_meeting_command(config: &config::Config, action: MeetingAction) -> anyhow::Result<()> {
+    use meeting::{ExportFormat, ExportOptions, MeetingConfig, StorageConfig};
+
+    // Convert config to meeting config
+    let storage_path = if config.meeting.storage_path == "auto" {
+        StorageConfig::default_storage_path()
+    } else {
+        PathBuf::from(&config.meeting.storage_path)
+    };
+
+    let meeting_config = MeetingConfig {
+        enabled: config.meeting.enabled,
+        chunk_duration_secs: config.meeting.chunk_duration_secs,
+        storage: StorageConfig {
+            storage_path,
+            retain_audio: config.meeting.retain_audio,
+            max_meetings: 0,
+        },
+        retain_audio: config.meeting.retain_audio,
+        max_duration_mins: config.meeting.max_duration_mins,
+    };
+
+    match action {
+        MeetingAction::Start { title } => {
+            eprintln!("Error: Meeting start requires a running daemon with meeting mode enabled.");
+            eprintln!();
+            eprintln!("Meeting mode is not yet integrated into the daemon. This feature is coming in v0.5.0.");
+            eprintln!();
+            if let Some(t) = title {
+                eprintln!("Would start meeting: {}", t);
+            }
+            std::process::exit(1);
+        }
+
+        MeetingAction::Stop => {
+            eprintln!("Error: No meeting in progress.");
+            std::process::exit(1);
+        }
+
+        MeetingAction::Pause => {
+            eprintln!("Error: No meeting in progress.");
+            std::process::exit(1);
+        }
+
+        MeetingAction::Resume => {
+            eprintln!("Error: No paused meeting to resume.");
+            std::process::exit(1);
+        }
+
+        MeetingAction::Status => {
+            eprintln!("No meeting currently in progress.");
+            eprintln!();
+            eprintln!("Use 'voxtype meeting list' to see past meetings.");
+        }
+
+        MeetingAction::List { limit } => {
+            match meeting::list_meetings(&meeting_config, Some(limit)) {
+                Ok(meetings) => {
+                    if meetings.is_empty() {
+                        println!("No meetings found.");
+                        return Ok(());
+                    }
+
+                    println!("Recent Meetings");
+                    println!("===============\n");
+
+                    for m in meetings {
+                        let duration = m.duration_secs.map(|d| {
+                            let mins = d / 60;
+                            let secs = d % 60;
+                            format!("{}m {}s", mins, secs)
+                        }).unwrap_or_else(|| "in progress".to_string());
+
+                        println!("{}", m.display_title());
+                        println!("  ID: {}", m.id);
+                        println!("  Date: {}", m.started_at.format("%Y-%m-%d %H:%M"));
+                        println!("  Duration: {}", duration);
+                        println!("  Status: {:?}", m.status);
+                        println!();
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error listing meetings: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        MeetingAction::Export {
+            meeting_id,
+            format,
+            output,
+            timestamps,
+            speakers,
+            metadata,
+        } => {
+            let export_format = ExportFormat::from_str(&format).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unknown export format '{}'. Valid formats: text, markdown, json",
+                    format
+                )
+            })?;
+
+            let options = ExportOptions {
+                include_timestamps: timestamps,
+                include_speakers: speakers,
+                include_metadata: metadata,
+                line_width: 0,
+            };
+
+            match meeting::export_meeting_by_id(&meeting_config, &meeting_id, export_format, &options) {
+                Ok(content) => {
+                    if let Some(path) = output {
+                        std::fs::write(&path, &content)?;
+                        println!("Exported to {:?}", path);
+                    } else {
+                        println!("{}", content);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error exporting meeting: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        MeetingAction::Show { meeting_id } => {
+            match meeting::get_meeting(&meeting_config, &meeting_id) {
+                Ok(meeting) => {
+                    println!("{}", meeting.metadata.display_title());
+                    println!("{}", "=".repeat(meeting.metadata.display_title().len()));
+                    println!();
+                    println!("ID:       {}", meeting.metadata.id);
+                    println!("Started:  {}", meeting.metadata.started_at.format("%Y-%m-%d %H:%M UTC"));
+                    if let Some(ended) = meeting.metadata.ended_at {
+                        println!("Ended:    {}", ended.format("%Y-%m-%d %H:%M UTC"));
+                    }
+                    if let Some(duration) = meeting.metadata.duration_secs {
+                        let hours = duration / 3600;
+                        let mins = (duration % 3600) / 60;
+                        let secs = duration % 60;
+                        if hours > 0 {
+                            println!("Duration: {}h {}m {}s", hours, mins, secs);
+                        } else {
+                            println!("Duration: {}m {}s", mins, secs);
+                        }
+                    }
+                    println!("Status:   {:?}", meeting.metadata.status);
+                    println!("Chunks:   {}", meeting.metadata.chunk_count);
+                    println!();
+                    println!("Transcript:");
+                    println!("-----------");
+                    println!("Segments: {}", meeting.transcript.segments.len());
+                    println!("Words:    {}", meeting.transcript.word_count());
+                    println!("Speakers: {}", meeting.transcript.speakers().join(", "));
+                    println!();
+                    println!("Use 'voxtype meeting export {}' to export the transcript.", meeting_id);
+                }
+                Err(e) => {
+                    eprintln!("Error loading meeting: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        MeetingAction::Delete { meeting_id, force } => {
+            if !force {
+                eprintln!("This will permanently delete the meeting and all associated files.");
+                eprintln!("Use --force to confirm deletion.");
+                std::process::exit(1);
+            }
+
+            let storage = meeting::MeetingStorage::open(meeting_config.storage.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to open storage: {}", e))?;
+
+            let id = storage.resolve_meeting_id(&meeting_id)
+                .map_err(|e| anyhow::anyhow!("Meeting not found: {}", e))?;
+
+            storage.delete_meeting(&id)
+                .map_err(|e| anyhow::anyhow!("Failed to delete meeting: {}", e))?;
+
+            println!("Meeting {} deleted.", meeting_id);
+        }
+    }
+
+    Ok(())
 }
