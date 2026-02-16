@@ -74,6 +74,20 @@ services:
     environment:
       - VERSION=${VERSION:-0.5.0-beta.3}
 
+  # ONNX model export (Japanese + Vietnamese Parakeet models)
+  # Usage: docker compose -f docker-compose.build.yml up onnx-export
+  onnx-export:
+    build:
+      context: .
+      dockerfile: Dockerfile.onnx-export
+    volumes:
+      - ./models/parakeet-onnx:/output
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+
   # All-in-one build (AVX2 + Vulkan)
   all:
     build:
