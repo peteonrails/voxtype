@@ -23,7 +23,7 @@ COMMANDS:
   voxtype config           Show current configuration
 
 EXAMPLES:
-  voxtype setup model      Interactive model selection (Whisper or Parakeet)
+  voxtype setup model      Interactive model selection (Whisper, Parakeet, or Moonshine)
   voxtype setup waybar     Show Waybar integration config
   voxtype setup gpu        Manage GPU acceleration (Vulkan/CUDA/ROCm)
   voxtype setup parakeet   Switch between Whisper and Parakeet engines
@@ -68,19 +68,7 @@ pub struct Cli {
     #[arg(long, value_name = "PROMPT")]
     pub initial_prompt: Option<String>,
 
-    /// Enable eager input processing (transcribe chunks while recording continues)
-    #[arg(long)]
-    pub eager_processing: bool,
-
-    /// Chunk duration in seconds for eager processing (default: 5.0)
-    #[arg(long, value_name = "SECS")]
-    pub eager_chunk_secs: Option<f32>,
-
-    /// Overlap between chunks in seconds for eager processing (default: 0.5)
-    #[arg(long, value_name = "SECS")]
-    pub eager_overlap_secs: Option<f32>,
-
-    /// Override transcription engine: "whisper" (default) or "parakeet" (EXPERIMENTAL)
+    /// Override transcription engine: "whisper" (default), "parakeet", or "moonshine" (EXPERIMENTAL)
     #[arg(long, value_name = "ENGINE")]
     pub engine: Option<String>,
 
@@ -140,6 +128,10 @@ pub enum Commands {
     Transcribe {
         /// Path to audio file
         file: std::path::PathBuf,
+
+        /// Override transcription engine: "whisper", "parakeet", or "moonshine"
+        #[arg(long, value_name = "ENGINE")]
+        engine: Option<String>,
     },
 
     /// Internal: Worker process for GPU-isolated transcription
@@ -1241,5 +1233,43 @@ mod tests {
     fn test_driver_flag_not_set() {
         let cli = Cli::parse_from(["voxtype"]);
         assert!(cli.driver.is_none());
+    }
+
+    // =========================================================================
+    // Transcribe engine flag tests
+    // =========================================================================
+
+    #[test]
+    fn test_transcribe_engine_flag() {
+        let cli = Cli::parse_from(["voxtype", "transcribe", "test.wav", "--engine", "moonshine"]);
+        match cli.command {
+            Some(Commands::Transcribe { file, engine }) => {
+                assert_eq!(file, std::path::PathBuf::from("test.wav"));
+                assert_eq!(engine, Some("moonshine".to_string()));
+            }
+            _ => panic!("Expected Transcribe command"),
+        }
+    }
+
+    #[test]
+    fn test_transcribe_engine_flag_not_set() {
+        let cli = Cli::parse_from(["voxtype", "transcribe", "test.wav"]);
+        match cli.command {
+            Some(Commands::Transcribe { engine, .. }) => {
+                assert!(engine.is_none());
+            }
+            _ => panic!("Expected Transcribe command"),
+        }
+    }
+
+    #[test]
+    fn test_transcribe_engine_whisper() {
+        let cli = Cli::parse_from(["voxtype", "transcribe", "test.wav", "--engine", "whisper"]);
+        match cli.command {
+            Some(Commands::Transcribe { engine, .. }) => {
+                assert_eq!(engine, Some("whisper".to_string()));
+            }
+            _ => panic!("Expected Transcribe command"),
+        }
     }
 }

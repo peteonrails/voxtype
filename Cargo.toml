@@ -69,6 +69,11 @@ whisper-rs = "0.15.1"
 # Parakeet speech-to-text (optional, ONNX-based)
 parakeet-rs = { version = "0.3", optional = true }
 
+# Moonshine speech-to-text (optional, ONNX-based encoder-decoder ASR)
+ort = { version = "2.0.0-rc.11", optional = true }
+ndarray = { version = "0.16", optional = true }
+tokenizers = { version = "0.20", optional = true, default-features = false, features = ["onig"] }
+
 # CPU count for thread detection
 num_cpus = "1.16"
 
@@ -91,6 +96,10 @@ parakeet-tensorrt = ["parakeet", "parakeet-rs/tensorrt"]
 parakeet-rocm = ["parakeet", "parakeet-rs/rocm"]
 # Dynamic loading for system ONNX Runtime (used by Nix builds)
 parakeet-load-dynamic = ["parakeet", "parakeet-rs/load-dynamic"]
+# Moonshine backend (ONNX-based, encoder-decoder ASR)
+moonshine = ["dep:ort", "dep:ndarray", "dep:tokenizers"]
+moonshine-cuda = ["moonshine", "ort/cuda"]
+moonshine-tensorrt = ["moonshine", "ort/tensorrt"]
 
 [build-dependencies]
 clap = { version = "4", features = ["derive"] }
