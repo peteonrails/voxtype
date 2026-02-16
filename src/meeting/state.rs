@@ -37,8 +37,10 @@ impl ChunkState {
 
 /// Meeting transcription state
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub enum MeetingState {
     /// No meeting in progress
+    #[default]
     Idle,
 
     /// Meeting is actively recording
@@ -72,11 +74,6 @@ pub enum MeetingState {
     },
 }
 
-impl Default for MeetingState {
-    fn default() -> Self {
-        MeetingState::Idle
-    }
-}
 
 impl MeetingState {
     /// Create a new idle state

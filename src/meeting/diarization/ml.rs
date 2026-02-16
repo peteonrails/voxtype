@@ -246,7 +246,7 @@ impl Diarizer for MlDiarizer {
         // If model is not loaded or feature is disabled, fall back to simple attribution
         #[cfg(not(feature = "ml-diarization"))]
         {
-            return transcript_segments
+            transcript_segments
                 .iter()
                 .map(|seg| DiarizedSegment {
                     speaker: SpeakerId::Unknown,
@@ -255,7 +255,7 @@ impl Diarizer for MlDiarizer {
                     text: seg.text.clone(),
                     confidence: 0.0,
                 })
-                .collect();
+                .collect()
         }
 
         #[cfg(feature = "ml-diarization")]

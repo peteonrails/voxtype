@@ -695,14 +695,12 @@ pub fn show_status() {
             println!("To switch back to CPU:");
             println!("  sudo voxtype setup gpu --disable");
         }
-    } else {
-        if current != Some(Backend::Vulkan) && available.contains(&Backend::Vulkan) {
-            println!("To enable GPU acceleration:");
-            println!("  sudo voxtype setup gpu --enable");
-        } else if current == Some(Backend::Vulkan) {
-            println!("To switch back to CPU:");
-            println!("  sudo voxtype setup gpu --disable");
-        }
+    } else if current != Some(Backend::Vulkan) && available.contains(&Backend::Vulkan) {
+        println!("To enable GPU acceleration:");
+        println!("  sudo voxtype setup gpu --enable");
+    } else if current == Some(Backend::Vulkan) {
+        println!("To switch back to CPU:");
+        println!("  sudo voxtype setup gpu --disable");
     }
 }
 

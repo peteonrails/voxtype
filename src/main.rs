@@ -1336,7 +1336,7 @@ async fn run_meeting_command(config: &config::Config, action: MeetingAction) -> 
             speakers,
             metadata,
         } => {
-            let export_format = ExportFormat::from_str(&format).ok_or_else(|| {
+            let export_format = ExportFormat::parse(&format).ok_or_else(|| {
                 anyhow::anyhow!(
                     "Unknown export format '{}'. Valid formats: text, markdown, json",
                     format
@@ -1558,7 +1558,7 @@ async fn run_meeting_command(config: &config::Config, action: MeetingAction) -> 
 
                     text
                 }
-                "markdown" | _ => meeting::summary::summary_to_markdown(&summary),
+                _ => meeting::summary::summary_to_markdown(&summary),
             };
 
             // Output

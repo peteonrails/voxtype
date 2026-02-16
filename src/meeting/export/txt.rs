@@ -21,7 +21,7 @@ impl Exporter for TextExporter {
         // Metadata header
         if options.include_metadata {
             output.push_str(&meeting.metadata.display_title());
-            output.push_str("\n");
+            output.push('\n');
             output.push_str(&format!(
                 "Date: {}\n",
                 meeting.metadata.started_at.format("%Y-%m-%d %H:%M")
@@ -32,7 +32,7 @@ impl Exporter for TextExporter {
                 output.push_str(&format!("Duration: {}:{:02}\n", mins, secs));
             }
             output.push_str(&format!("Words: {}\n", meeting.transcript.word_count()));
-            output.push_str("\n");
+            output.push('\n');
             output.push_str(&"=".repeat(60));
             output.push_str("\n\n");
         }
@@ -53,7 +53,7 @@ impl Exporter for TextExporter {
                 let speaker = segment.speaker_display();
                 if speaker != last_speaker {
                     if !last_speaker.is_empty() {
-                        output.push_str("\n");
+                        output.push('\n');
                     }
                     line.push_str(&format!("{}:\n", speaker));
                     last_speaker = speaker;
@@ -69,7 +69,7 @@ impl Exporter for TextExporter {
             } else {
                 output.push_str(&line);
             }
-            output.push_str("\n");
+            output.push('\n');
         }
 
         Ok(output)

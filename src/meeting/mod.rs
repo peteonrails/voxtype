@@ -292,7 +292,7 @@ impl MeetingDaemon {
 
         let result = processor
             .process_chunk(buffer)
-            .map_err(|e| crate::error::VoxtypeError::Transcribe(e))?;
+            .map_err(crate::error::VoxtypeError::Transcribe)?;
 
         // Add segments to transcript
         if let Some(ref mut meeting) = self.current_meeting {

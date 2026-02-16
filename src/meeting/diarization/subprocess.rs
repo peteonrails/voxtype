@@ -213,7 +213,7 @@ pub fn run_worker(_model_path: Option<&str>) -> Result<(), String> {
         reader
             .read_line(&mut line)
             .map_err(|e| format!("Read error: {}", e))?;
-        for s in line.trim().split_whitespace() {
+        for s in line.split_whitespace() {
             if let Ok(f) = s.parse::<f32>() {
                 samples.push(f);
                 remaining = remaining.saturating_sub(1);

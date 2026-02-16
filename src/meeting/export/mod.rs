@@ -27,8 +27,8 @@ pub enum ExportFormat {
 }
 
 impl ExportFormat {
-    /// Parse from string
-    pub fn from_str(s: &str) -> Option<Self> {
+    /// Parse format from string name
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "text" | "txt" => Some(ExportFormat::Text),
             "markdown" | "md" => Some(ExportFormat::Markdown),
@@ -139,15 +139,15 @@ mod tests {
 
     #[test]
     fn test_format_from_str() {
-        assert_eq!(ExportFormat::from_str("text"), Some(ExportFormat::Text));
-        assert_eq!(ExportFormat::from_str("txt"), Some(ExportFormat::Text));
+        assert_eq!(ExportFormat::parse("text"), Some(ExportFormat::Text));
+        assert_eq!(ExportFormat::parse("txt"), Some(ExportFormat::Text));
         assert_eq!(
-            ExportFormat::from_str("markdown"),
+            ExportFormat::parse("markdown"),
             Some(ExportFormat::Markdown)
         );
-        assert_eq!(ExportFormat::from_str("md"), Some(ExportFormat::Markdown));
-        assert_eq!(ExportFormat::from_str("json"), Some(ExportFormat::Json));
-        assert_eq!(ExportFormat::from_str("invalid"), None);
+        assert_eq!(ExportFormat::parse("md"), Some(ExportFormat::Markdown));
+        assert_eq!(ExportFormat::parse("json"), Some(ExportFormat::Json));
+        assert_eq!(ExportFormat::parse("invalid"), None);
     }
 
     #[test]
@@ -170,14 +170,14 @@ mod tests {
 
     #[test]
     fn test_format_from_str_case_insensitive() {
-        assert_eq!(ExportFormat::from_str("TEXT"), Some(ExportFormat::Text));
+        assert_eq!(ExportFormat::parse("TEXT"), Some(ExportFormat::Text));
         assert_eq!(
-            ExportFormat::from_str("Markdown"),
+            ExportFormat::parse("Markdown"),
             Some(ExportFormat::Markdown)
         );
-        assert_eq!(ExportFormat::from_str("JSON"), Some(ExportFormat::Json));
-        assert_eq!(ExportFormat::from_str("SRT"), Some(ExportFormat::Srt));
-        assert_eq!(ExportFormat::from_str("VTT"), Some(ExportFormat::Vtt));
+        assert_eq!(ExportFormat::parse("JSON"), Some(ExportFormat::Json));
+        assert_eq!(ExportFormat::parse("SRT"), Some(ExportFormat::Srt));
+        assert_eq!(ExportFormat::parse("VTT"), Some(ExportFormat::Vtt));
     }
 
     #[test]

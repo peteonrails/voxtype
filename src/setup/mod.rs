@@ -469,7 +469,7 @@ pub async fn run_setup(
         .unwrap_or(false);
 
     // Use model_override if provided, otherwise use config default (for Whisper)
-    let model_name: &str = match model_override {
+    let _model_name: &str = match model_override {
         Some(name) => {
             // Validate the model name (check Whisper, Parakeet, and SenseVoice)
             if !model::is_valid_model(name)

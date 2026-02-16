@@ -46,20 +46,17 @@ impl std::str::FromStr for MeetingId {
 /// Audio source for speaker attribution
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum AudioSource {
     /// User's microphone (local speaker)
     Microphone,
     /// System audio loopback (remote participants)
     Loopback,
     /// Unknown source
+    #[default]
     Unknown,
 }
 
-impl Default for AudioSource {
-    fn default() -> Self {
-        AudioSource::Unknown
-    }
-}
 
 impl std::fmt::Display for AudioSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -226,8 +223,10 @@ impl Transcript {
 /// Meeting status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum MeetingStatus {
     /// Meeting is in progress
+    #[default]
     Active,
     /// Meeting is paused
     Paused,
@@ -237,11 +236,6 @@ pub enum MeetingStatus {
     Cancelled,
 }
 
-impl Default for MeetingStatus {
-    fn default() -> Self {
-        MeetingStatus::Active
-    }
-}
 
 /// Metadata for a meeting
 #[derive(Debug, Clone, Serialize, Deserialize)]

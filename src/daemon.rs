@@ -764,7 +764,7 @@ impl Daemon {
     fn meeting_active(&self) -> bool {
         self.meeting_daemon
             .as_ref()
-            .map_or(false, |d| d.state().is_active())
+            .is_some_and(|d| d.state().is_active())
     }
 
     /// Get the chunk duration for meeting mode
@@ -1065,23 +1065,23 @@ impl Daemon {
                     if let Some(t) = transcriber {
                         self.transcription_task =
                             Some(tokio::task::spawn_blocking(move || t.transcribe(&samples)));
-                        return true;
+                        true
                     } else {
                         tracing::error!("No transcriber available");
                         self.play_feedback(SoundEvent::Error);
                         self.reset_to_idle(state).await;
-                        return false;
+                        false
                     }
                 }
                 Err(e) => {
                     tracing::warn!("Recording error: {}", e);
                     self.reset_to_idle(state).await;
-                    return false;
+                    false
                 }
             }
         } else {
             self.reset_to_idle(state).await;
-            return false;
+            false
         }
     }
 
@@ -1324,8 +1324,7 @@ impl Daemon {
                 return Err(crate::error::VoxtypeError::Config(format!(
                     "Another voxtype instance is already running (lock error: {:?})",
                     e
-                ))
-                .into());
+                )));
             }
         }
 
@@ -2202,7 +2201,7 @@ impl Daemon {
                     // The check interval is 500ms, so we use a counter to approximate 60s
                     static EVICTION_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
                     let count = EVICTION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if count % 120 == 0 {  // 500ms * 120 = 60s
+                    if count.is_multiple_of(120) {  // 500ms * 120 = 60s
                         if let Some(ref mut mm) = self.model_manager {
                             mm.evict_idle_models();
                         }
@@ -2228,34 +2227,31 @@ impl Daemon {
                     }
 
                     // Check for meeting stop command
-                    if check_meeting_stop() {
-                        if self.meeting_daemon.is_some() {
+                    if check_meeting_stop()
+                        && self.meeting_daemon.is_some() {
                             tracing::debug!("Meeting stop requested via file trigger");
                             if let Err(e) = self.stop_meeting().await {
                                 tracing::error!("Failed to stop meeting: {}", e);
                             }
                         }
-                    }
 
                     // Check for meeting pause command
-                    if check_meeting_pause() {
-                        if self.meeting_active() {
+                    if check_meeting_pause()
+                        && self.meeting_active() {
                             tracing::debug!("Meeting pause requested via file trigger");
                             if let Err(e) = self.pause_meeting().await {
                                 tracing::error!("Failed to pause meeting: {}", e);
                             }
                         }
-                    }
 
                     // Check for meeting resume command
-                    if check_meeting_resume() {
-                        if self.meeting_daemon.as_ref().map_or(false, |d| d.state().is_paused()) {
+                    if check_meeting_resume()
+                        && self.meeting_daemon.as_ref().is_some_and(|d| d.state().is_paused()) {
                             tracing::debug!("Meeting resume requested via file trigger");
                             if let Err(e) = self.resume_meeting().await {
                                 tracing::error!("Failed to resume meeting: {}", e);
                             }
                         }
-                    }
                 }
 
                 // Process meeting audio chunks

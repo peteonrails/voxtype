@@ -52,7 +52,7 @@ impl Exporter for MarkdownExporter {
                 output.push_str(&format!("- **Speakers:** {}\n", speakers.join(", ")));
             }
 
-            output.push_str("\n");
+            output.push('\n');
         }
 
         // Summary (if available, Phase 5)
@@ -66,7 +66,7 @@ impl Exporter for MarkdownExporter {
                 for point in &summary.key_points {
                     output.push_str(&format!("- {}\n", point));
                 }
-                output.push_str("\n");
+                output.push('\n');
             }
 
             if !summary.action_items.is_empty() {
@@ -83,7 +83,7 @@ impl Exporter for MarkdownExporter {
                         checkbox, item.description, assignee
                     ));
                 }
-                output.push_str("\n");
+                output.push('\n');
             }
 
             if !summary.decisions.is_empty() {
@@ -91,7 +91,7 @@ impl Exporter for MarkdownExporter {
                 for decision in &summary.decisions {
                     output.push_str(&format!("- {}\n", decision));
                 }
-                output.push_str("\n");
+                output.push('\n');
             }
         }
 
@@ -105,7 +105,7 @@ impl Exporter for MarkdownExporter {
                 let speaker = segment.speaker_display();
                 if speaker != last_speaker {
                     if !last_speaker.is_empty() {
-                        output.push_str("\n");
+                        output.push('\n');
                     }
                     output.push_str(&format!("### {}\n\n", speaker));
                     last_speaker = speaker;
