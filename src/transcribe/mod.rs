@@ -8,12 +8,35 @@
 //! - Optionally NVIDIA Parakeet via ONNX Runtime (when `parakeet` feature is enabled)
 //! - Optionally Moonshine via ONNX Runtime (when `moonshine` feature is enabled)
 //! - Optionally SenseVoice via ONNX Runtime (when `sensevoice` feature is enabled)
+//! - Optionally Paraformer via ONNX Runtime (when `paraformer` feature is enabled)
+//! - Optionally Dolphin via ONNX Runtime (when `dolphin` feature is enabled)
+//! - Optionally Omnilingual via ONNX Runtime (when `omnilingual` feature is enabled)
+//! - Optionally FireRedASR via ONNX Runtime (when `fireredasr` feature is enabled)
 
 pub mod cli;
 pub mod remote;
 pub mod subprocess;
 pub mod whisper;
 pub mod worker;
+
+/// Shared log-mel filterbank feature extraction for ONNX-based ASR engines
+#[cfg(any(
+    feature = "sensevoice",
+    feature = "paraformer",
+    feature = "dolphin",
+    feature = "omnilingual",
+    feature = "fireredasr",
+))]
+pub mod fbank;
+
+/// Shared CTC greedy decoder for CTC-based ASR engines
+#[cfg(any(
+    feature = "sensevoice",
+    feature = "paraformer",
+    feature = "dolphin",
+    feature = "omnilingual",
+))]
+pub mod ctc;
 
 #[cfg(feature = "parakeet")]
 pub mod parakeet;
@@ -23,6 +46,18 @@ pub mod moonshine;
 
 #[cfg(feature = "sensevoice")]
 pub mod sensevoice;
+
+#[cfg(feature = "paraformer")]
+pub mod paraformer;
+
+#[cfg(feature = "dolphin")]
+pub mod dolphin;
+
+#[cfg(feature = "omnilingual")]
+pub mod omnilingual;
+
+#[cfg(feature = "fireredasr")]
+pub mod fireredasr;
 
 use crate::config::{Config, TranscriptionEngine, WhisperConfig, WhisperMode};
 use crate::error::TranscribeError;
