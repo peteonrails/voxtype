@@ -24,6 +24,7 @@
 
 pub mod chunk;
 pub mod data;
+pub mod diarization;
 pub mod export;
 pub mod state;
 pub mod storage;

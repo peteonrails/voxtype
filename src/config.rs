@@ -1274,6 +1274,68 @@ pub struct MeetingConfig {
     /// Maximum meeting duration in minutes (0 = unlimited)
     #[serde(default = "default_max_duration")]
     pub max_duration_mins: u32,
+
+    /// Meeting audio configuration
+    #[serde(default)]
+    pub audio: MeetingAudioConfig,
+
+    /// Diarization configuration
+    #[serde(default)]
+    pub diarization: MeetingDiarizationConfig,
+}
+
+/// Meeting audio configuration for dual capture
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MeetingAudioConfig {
+    /// Microphone device (uses main audio.device if not specified)
+    #[serde(default = "default_mic_device")]
+    pub mic_device: String,
+
+    /// Loopback device for capturing remote participants
+    /// Options: "auto" (detect), "disabled", or specific device name
+    #[serde(default = "default_loopback")]
+    pub loopback_device: String,
+}
+
+fn default_mic_device() -> String {
+    "default".to_string()
+}
+
+fn default_loopback() -> String {
+    "auto".to_string()
+}
+
+impl Default for MeetingAudioConfig {
+    fn default() -> Self {
+        Self {
+            mic_device: default_mic_device(),
+            loopback_device: default_loopback(),
+        }
+    }
+}
+
+/// Meeting diarization configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MeetingDiarizationConfig {
+    /// Enable speaker diarization
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Diarization backend: "simple", "ml", or "remote"
+    #[serde(default = "default_diarization_backend")]
+    pub backend: String,
+
+    /// Maximum number of speakers to detect
+    #[serde(default = "default_max_speakers")]
+    pub max_speakers: u32,
+}
+
+fn default_diarization_backend() -> String {
+    "simple".to_string()
+}
+
+fn default_max_speakers() -> u32 {
+    10
 }
 
 fn default_chunk_duration() -> u32 {
@@ -1288,6 +1350,16 @@ fn default_max_duration() -> u32 {
     180
 }
 
+impl Default for MeetingDiarizationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            backend: default_diarization_backend(),
+            max_speakers: default_max_speakers(),
+        }
+    }
+}
+
 impl Default for MeetingConfig {
     fn default() -> Self {
         Self {
@@ -1296,6 +1368,8 @@ impl Default for MeetingConfig {
             storage_path: default_storage_path(),
             retain_audio: false,
             max_duration_mins: default_max_duration(),
+            audio: MeetingAudioConfig::default(),
+            diarization: MeetingDiarizationConfig::default(),
         }
     }
 }

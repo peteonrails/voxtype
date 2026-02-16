@@ -4,7 +4,10 @@
 //! PipeWire, PulseAudio, and ALSA backends.
 
 pub mod cpal_capture;
+pub mod dual_capture;
 pub mod feedback;
+
+pub use dual_capture::{AudioSourceType, DualCapture, DualSamples, SourcedSample};
 
 use crate::config::AudioConfig;
 use crate::error::AudioError;

@@ -4,7 +4,9 @@
 
 pub mod json;
 pub mod markdown;
+pub mod srt;
 pub mod txt;
+pub mod vtt;
 
 use crate::meeting::data::MeetingData;
 use thiserror::Error;
@@ -111,12 +113,8 @@ pub fn export_meeting(
         ExportFormat::Text => Box::new(txt::TextExporter),
         ExportFormat::Markdown => Box::new(markdown::MarkdownExporter),
         ExportFormat::Json => Box::new(json::JsonExporter),
-        ExportFormat::Srt | ExportFormat::Vtt => {
-            return Err(ExportError::UnsupportedFormat(format!(
-                "{} export is not yet implemented (coming in Phase 2)",
-                format
-            )));
-        }
+        ExportFormat::Srt => Box::new(srt::SrtExporter),
+        ExportFormat::Vtt => Box::new(vtt::VttExporter),
     };
 
     exporter.export(meeting, options)
