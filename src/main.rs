@@ -393,6 +393,39 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Check if the daemon is running, exit with error if not
+fn check_daemon_running() -> anyhow::Result<()> {
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+
+    let pid_file = config::Config::runtime_dir().join("pid");
+
+    if !pid_file.exists() {
+        eprintln!("Error: Voxtype daemon is not running.");
+        eprintln!("Start it with: voxtype daemon");
+        std::process::exit(1);
+    }
+
+    let pid_str = std::fs::read_to_string(&pid_file)
+        .map_err(|e| anyhow::anyhow!("Failed to read PID file: {}", e))?;
+
+    let pid: i32 = pid_str
+        .trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid PID in file: {}", e))?;
+
+    // Check if the process is actually running
+    if kill(Pid::from_raw(pid), None).is_err() {
+        // Process doesn't exist, clean up stale PID file
+        let _ = std::fs::remove_file(&pid_file);
+        eprintln!("Error: Voxtype daemon is not running (stale PID file removed).");
+        eprintln!("Start it with: voxtype daemon");
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
 /// Send a record command to the running daemon via Unix signals or file triggers
 fn send_record_command(config: &config::Config, action: RecordAction, top_level_model: Option<&str>) -> anyhow::Result<()> {
     use nix::sys::signal::{kill, Signal};
@@ -1130,35 +1163,133 @@ async fn run_meeting_command(config: &config::Config, action: MeetingAction) -> 
 
     match action {
         MeetingAction::Start { title } => {
-            eprintln!("Error: Meeting start requires a running daemon with meeting mode enabled.");
-            eprintln!();
-            eprintln!("Meeting mode is not yet integrated into the daemon. This feature is coming in v0.5.0.");
-            eprintln!();
-            if let Some(t) = title {
-                eprintln!("Would start meeting: {}", t);
+            // Check if meeting mode is enabled
+            if !config.meeting.enabled {
+                eprintln!("Error: Meeting mode is disabled in config.");
+                eprintln!();
+                eprintln!("Enable it by adding to config.toml:");
+                eprintln!("  [meeting]");
+                eprintln!("  enabled = true");
+                std::process::exit(1);
             }
-            std::process::exit(1);
+
+            // Check if daemon is running
+            check_daemon_running()?;
+
+            // Check if meeting already in progress
+            let meeting_state_file = config::Config::runtime_dir().join("meeting_state");
+            if meeting_state_file.exists() {
+                let state = std::fs::read_to_string(&meeting_state_file).unwrap_or_default();
+                if state.starts_with("recording") || state.starts_with("paused") {
+                    eprintln!("Error: A meeting is already in progress.");
+                    eprintln!("Use 'voxtype meeting stop' to end it first.");
+                    std::process::exit(1);
+                }
+            }
+
+            // Write start trigger file (with optional title)
+            let start_file = config::Config::runtime_dir().join("meeting_start");
+            let content = title.unwrap_or_default();
+            std::fs::write(&start_file, content)?;
+
+            println!("Meeting start requested. Check status with 'voxtype meeting status'.");
         }
 
         MeetingAction::Stop => {
-            eprintln!("Error: No meeting in progress.");
-            std::process::exit(1);
+            check_daemon_running()?;
+
+            // Check if meeting is in progress
+            let meeting_state_file = config::Config::runtime_dir().join("meeting_state");
+            if !meeting_state_file.exists() {
+                eprintln!("Error: No meeting in progress.");
+                std::process::exit(1);
+            }
+
+            let state = std::fs::read_to_string(&meeting_state_file).unwrap_or_default();
+            if state.starts_with("idle") || state.is_empty() {
+                eprintln!("Error: No meeting in progress.");
+                std::process::exit(1);
+            }
+
+            // Write stop trigger file
+            let stop_file = config::Config::runtime_dir().join("meeting_stop");
+            std::fs::write(&stop_file, "")?;
+
+            println!("Meeting stop requested.");
         }
 
         MeetingAction::Pause => {
-            eprintln!("Error: No meeting in progress.");
-            std::process::exit(1);
+            check_daemon_running()?;
+
+            // Check if meeting is active (not paused)
+            let meeting_state_file = config::Config::runtime_dir().join("meeting_state");
+            if !meeting_state_file.exists() {
+                eprintln!("Error: No meeting in progress.");
+                std::process::exit(1);
+            }
+
+            let state = std::fs::read_to_string(&meeting_state_file).unwrap_or_default();
+            if !state.starts_with("recording") {
+                eprintln!("Error: No active meeting to pause.");
+                std::process::exit(1);
+            }
+
+            // Write pause trigger file
+            let pause_file = config::Config::runtime_dir().join("meeting_pause");
+            std::fs::write(&pause_file, "")?;
+
+            println!("Meeting pause requested.");
         }
 
         MeetingAction::Resume => {
-            eprintln!("Error: No paused meeting to resume.");
-            std::process::exit(1);
+            check_daemon_running()?;
+
+            // Check if meeting is paused
+            let meeting_state_file = config::Config::runtime_dir().join("meeting_state");
+            if !meeting_state_file.exists() {
+                eprintln!("Error: No paused meeting to resume.");
+                std::process::exit(1);
+            }
+
+            let state = std::fs::read_to_string(&meeting_state_file).unwrap_or_default();
+            if !state.starts_with("paused") {
+                eprintln!("Error: No paused meeting to resume.");
+                std::process::exit(1);
+            }
+
+            // Write resume trigger file
+            let resume_file = config::Config::runtime_dir().join("meeting_resume");
+            std::fs::write(&resume_file, "")?;
+
+            println!("Meeting resume requested.");
         }
 
         MeetingAction::Status => {
-            eprintln!("No meeting currently in progress.");
-            eprintln!();
-            eprintln!("Use 'voxtype meeting list' to see past meetings.");
+            // Read meeting state file
+            let meeting_state_file = config::Config::runtime_dir().join("meeting_state");
+            if !meeting_state_file.exists() {
+                println!("No meeting currently in progress.");
+                println!();
+                println!("Use 'voxtype meeting list' to see past meetings.");
+                return Ok(());
+            }
+
+            let state = std::fs::read_to_string(&meeting_state_file).unwrap_or_default();
+            let lines: Vec<&str> = state.lines().collect();
+
+            if lines.is_empty() || lines[0] == "idle" {
+                println!("No meeting currently in progress.");
+                println!();
+                println!("Use 'voxtype meeting list' to see past meetings.");
+            } else {
+                let status = lines[0];
+                let meeting_id = lines.get(1).unwrap_or(&"");
+
+                println!("Meeting Status: {}", status);
+                if !meeting_id.is_empty() {
+                    println!("Meeting ID: {}", meeting_id);
+                }
+            }
         }
 
         MeetingAction::List { limit } => {

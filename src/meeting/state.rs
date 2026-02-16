@@ -118,6 +118,11 @@ impl MeetingState {
         }
     }
 
+    /// Alias for meeting_duration - time elapsed since meeting started
+    pub fn elapsed(&self) -> Option<std::time::Duration> {
+        self.meeting_duration()
+    }
+
     /// Get number of chunks processed
     pub fn chunks_processed(&self) -> u32 {
         match self {
