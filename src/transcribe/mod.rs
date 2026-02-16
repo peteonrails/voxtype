@@ -136,6 +136,65 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
             "SenseVoice engine requested but voxtype was not compiled with --features sensevoice"
                 .to_string(),
         )),
+        #[cfg(feature = "paraformer")]
+        TranscriptionEngine::Paraformer => {
+            let cfg = config.paraformer.as_ref().ok_or_else(|| {
+                TranscribeError::InitFailed(
+                    "Paraformer engine selected but [paraformer] config section is missing"
+                        .to_string(),
+                )
+            })?;
+            Ok(Box::new(paraformer::ParaformerTranscriber::new(cfg)?))
+        }
+        #[cfg(not(feature = "paraformer"))]
+        TranscriptionEngine::Paraformer => Err(TranscribeError::InitFailed(
+            "Paraformer engine requested but voxtype was not compiled with --features paraformer"
+                .to_string(),
+        )),
+        #[cfg(feature = "dolphin")]
+        TranscriptionEngine::Dolphin => {
+            let cfg = config.dolphin.as_ref().ok_or_else(|| {
+                TranscribeError::InitFailed(
+                    "Dolphin engine selected but [dolphin] config section is missing".to_string(),
+                )
+            })?;
+            Ok(Box::new(dolphin::DolphinTranscriber::new(cfg)?))
+        }
+        #[cfg(not(feature = "dolphin"))]
+        TranscriptionEngine::Dolphin => Err(TranscribeError::InitFailed(
+            "Dolphin engine requested but voxtype was not compiled with --features dolphin"
+                .to_string(),
+        )),
+        #[cfg(feature = "omnilingual")]
+        TranscriptionEngine::Omnilingual => {
+            let cfg = config.omnilingual.as_ref().ok_or_else(|| {
+                TranscribeError::InitFailed(
+                    "Omnilingual engine selected but [omnilingual] config section is missing"
+                        .to_string(),
+                )
+            })?;
+            Ok(Box::new(omnilingual::OmnilingualTranscriber::new(cfg)?))
+        }
+        #[cfg(not(feature = "omnilingual"))]
+        TranscriptionEngine::Omnilingual => Err(TranscribeError::InitFailed(
+            "Omnilingual engine requested but voxtype was not compiled with --features omnilingual"
+                .to_string(),
+        )),
+        #[cfg(feature = "fireredasr")]
+        TranscriptionEngine::FireRedAsr => {
+            let cfg = config.fireredasr.as_ref().ok_or_else(|| {
+                TranscribeError::InitFailed(
+                    "FireRedASR engine selected but [fireredasr] config section is missing"
+                        .to_string(),
+                )
+            })?;
+            Ok(Box::new(fireredasr::FireRedAsrTranscriber::new(cfg)?))
+        }
+        #[cfg(not(feature = "fireredasr"))]
+        TranscriptionEngine::FireRedAsr => Err(TranscribeError::InitFailed(
+            "FireRedASR engine requested but voxtype was not compiled with --features fireredasr"
+                .to_string(),
+        )),
     }
 }
 

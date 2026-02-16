@@ -126,9 +126,13 @@ async fn main() -> anyhow::Result<()> {
             "parakeet" => config.engine = config::TranscriptionEngine::Parakeet,
             "moonshine" => config.engine = config::TranscriptionEngine::Moonshine,
             "sensevoice" => config.engine = config::TranscriptionEngine::SenseVoice,
+            "paraformer" => config.engine = config::TranscriptionEngine::Paraformer,
+            "dolphin" => config.engine = config::TranscriptionEngine::Dolphin,
+            "omnilingual" => config.engine = config::TranscriptionEngine::Omnilingual,
+            "fireredasr" | "firered" => config.engine = config::TranscriptionEngine::FireRedAsr,
             _ => {
                 eprintln!(
-                    "Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice",
+                    "Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, fireredasr",
                     engine
                 );
                 std::process::exit(1);
@@ -203,8 +207,12 @@ async fn main() -> anyhow::Result<()> {
                     "parakeet" => config.engine = config::TranscriptionEngine::Parakeet,
                     "moonshine" => config.engine = config::TranscriptionEngine::Moonshine,
                     "sensevoice" => config.engine = config::TranscriptionEngine::SenseVoice,
+                    "paraformer" => config.engine = config::TranscriptionEngine::Paraformer,
+                    "dolphin" => config.engine = config::TranscriptionEngine::Dolphin,
+                    "omnilingual" => config.engine = config::TranscriptionEngine::Omnilingual,
+                    "fireredasr" | "firered" => config.engine = config::TranscriptionEngine::FireRedAsr,
                     _ => {
-                        eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice", engine_name);
+                        eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, fireredasr", engine_name);
                         std::process::exit(1);
                     }
                 }

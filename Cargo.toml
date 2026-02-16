@@ -69,12 +69,10 @@ whisper-rs = "0.15.1"
 # Parakeet speech-to-text (optional, ONNX-based)
 parakeet-rs = { version = "0.3", optional = true }
 
-# Moonshine/SenseVoice speech-to-text (optional, ONNX-based)
+# ONNX-based ASR engines (Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual, FireRedASR)
 ort = { version = "2.0.0-rc.11", optional = true }
 ndarray = { version = "0.16", optional = true }
 tokenizers = { version = "0.20", optional = true, default-features = false, features = ["onig"] }
-
-# SenseVoice speech-to-text (optional, ONNX-based CTC model)
 rustfft = { version = "6", optional = true }
 
 # CPU count for thread detection
@@ -99,14 +97,32 @@ parakeet-tensorrt = ["parakeet", "parakeet-rs/tensorrt"]
 parakeet-rocm = ["parakeet", "parakeet-rs/rocm"]
 # Dynamic loading for system ONNX Runtime (used by Nix builds)
 parakeet-load-dynamic = ["parakeet", "parakeet-rs/load-dynamic"]
+# Shared ONNX dependencies for engines using fbank/CTC preprocessing
+onnx-common = ["dep:ort", "dep:ndarray", "dep:rustfft"]
 # Moonshine backend (ONNX-based, encoder-decoder ASR)
-moonshine = ["dep:ort", "dep:ndarray", "dep:tokenizers"]
+moonshine = ["onnx-common", "dep:tokenizers"]
 moonshine-cuda = ["moonshine", "ort/cuda"]
 moonshine-tensorrt = ["moonshine", "ort/tensorrt"]
 # SenseVoice backend (ONNX-based, CTC encoder-only ASR)
-sensevoice = ["dep:ort", "dep:ndarray", "dep:rustfft"]
+sensevoice = ["onnx-common"]
 sensevoice-cuda = ["sensevoice", "ort/cuda"]
 sensevoice-tensorrt = ["sensevoice", "ort/tensorrt"]
+# Paraformer backend (FunASR ONNX-based CTC encoder)
+paraformer = ["onnx-common"]
+paraformer-cuda = ["paraformer", "ort/cuda"]
+paraformer-tensorrt = ["paraformer", "ort/tensorrt"]
+# Dolphin backend (ONNX-based CTC encoder, dictation-optimized)
+dolphin = ["onnx-common"]
+dolphin-cuda = ["dolphin", "ort/cuda"]
+dolphin-tensorrt = ["dolphin", "ort/tensorrt"]
+# Omnilingual backend (FunASR ONNX-based, 50+ languages)
+omnilingual = ["onnx-common"]
+omnilingual-cuda = ["omnilingual", "ort/cuda"]
+omnilingual-tensorrt = ["omnilingual", "ort/tensorrt"]
+# FireRedASR backend (ONNX-based, encoder-decoder)
+fireredasr = ["onnx-common"]
+fireredasr-cuda = ["fireredasr", "ort/cuda"]
+fireredasr-tensorrt = ["fireredasr", "ort/tensorrt"]
 
 [build-dependencies]
 clap = { version = "4", features = ["derive"] }
