@@ -7,6 +7,7 @@
 //! - Subprocess isolation for GPU memory release
 //! - Optionally NVIDIA Parakeet via ONNX Runtime (when `parakeet` feature is enabled)
 //! - Optionally Moonshine via ONNX Runtime (when `moonshine` feature is enabled)
+//! - Optionally SenseVoice via ONNX Runtime (when `sensevoice` feature is enabled)
 
 pub mod cli;
 pub mod remote;
@@ -19,6 +20,9 @@ pub mod parakeet;
 
 #[cfg(feature = "moonshine")]
 pub mod moonshine;
+
+#[cfg(feature = "sensevoice")]
+pub mod sensevoice;
 
 use crate::config::{Config, TranscriptionEngine, WhisperConfig, WhisperMode};
 use crate::error::TranscribeError;
@@ -78,6 +82,23 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
         #[cfg(not(feature = "moonshine"))]
         TranscriptionEngine::Moonshine => Err(TranscribeError::InitFailed(
             "Moonshine engine requested but voxtype was not compiled with --features moonshine"
+                .to_string(),
+        )),
+        #[cfg(feature = "sensevoice")]
+        TranscriptionEngine::SenseVoice => {
+            let sensevoice_config = config.sensevoice.as_ref().ok_or_else(|| {
+                TranscribeError::InitFailed(
+                    "SenseVoice engine selected but [sensevoice] config section is missing"
+                        .to_string(),
+                )
+            })?;
+            Ok(Box::new(sensevoice::SenseVoiceTranscriber::new(
+                sensevoice_config,
+            )?))
+        }
+        #[cfg(not(feature = "sensevoice"))]
+        TranscriptionEngine::SenseVoice => Err(TranscribeError::InitFailed(
+            "SenseVoice engine requested but voxtype was not compiled with --features sensevoice"
                 .to_string(),
         )),
     }

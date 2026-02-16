@@ -125,9 +125,10 @@ async fn main() -> anyhow::Result<()> {
             "whisper" => config.engine = config::TranscriptionEngine::Whisper,
             "parakeet" => config.engine = config::TranscriptionEngine::Parakeet,
             "moonshine" => config.engine = config::TranscriptionEngine::Moonshine,
+            "sensevoice" => config.engine = config::TranscriptionEngine::SenseVoice,
             _ => {
                 eprintln!(
-                    "Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine",
+                    "Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice",
                     engine
                 );
                 std::process::exit(1);
@@ -201,8 +202,9 @@ async fn main() -> anyhow::Result<()> {
                     "whisper" => config.engine = config::TranscriptionEngine::Whisper,
                     "parakeet" => config.engine = config::TranscriptionEngine::Parakeet,
                     "moonshine" => config.engine = config::TranscriptionEngine::Moonshine,
+                    "sensevoice" => config.engine = config::TranscriptionEngine::SenseVoice,
                     _ => {
-                        eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine", engine_name);
+                        eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice", engine_name);
                         std::process::exit(1);
                     }
                 }
@@ -967,6 +969,47 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
         println!("  available models: (none found)");
     } else {
         println!("  available models: {}", moonshine_models.join(", "));
+    }
+
+    // Show SenseVoice status (experimental)
+    println!("\n[sensevoice] (EXPERIMENTAL)");
+    if let Some(ref sensevoice_config) = config.sensevoice {
+        println!("  model = {:?}", sensevoice_config.model);
+        println!("  language = {:?}", sensevoice_config.language);
+        println!("  use_itn = {}", sensevoice_config.use_itn);
+        if let Some(threads) = sensevoice_config.threads {
+            println!("  threads = {}", threads);
+        }
+        println!(
+            "  on_demand_loading = {}",
+            sensevoice_config.on_demand_loading
+        );
+    } else {
+        println!("  (not configured)");
+    }
+
+    // Check for available SenseVoice models
+    let mut sensevoice_models: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&models_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.contains("sensevoice") {
+                    let has_model = path.join("model.int8.onnx").exists()
+                        || path.join("model.onnx").exists();
+                    let has_tokens = path.join("tokens.txt").exists();
+                    if has_model && has_tokens {
+                        sensevoice_models.push(name);
+                    }
+                }
+            }
+        }
+    }
+    if sensevoice_models.is_empty() {
+        println!("  available models: (none found)");
+    } else {
+        println!("  available models: {}", sensevoice_models.join(", "));
     }
 
     println!("\n[output]");

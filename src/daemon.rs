@@ -470,7 +470,8 @@ impl Daemon {
             // Use preloaded transcriber based on engine type
             match self.config.engine {
                 crate::config::TranscriptionEngine::Parakeet
-                | crate::config::TranscriptionEngine::Moonshine => {
+                | crate::config::TranscriptionEngine::Moonshine
+                | crate::config::TranscriptionEngine::SenseVoice => {
                     if let Some(ref t) = transcriber_preloaded {
                         Ok(t.clone())
                     } else {
@@ -1102,7 +1103,8 @@ impl Daemon {
                     }
                 }
                 crate::config::TranscriptionEngine::Parakeet
-                | crate::config::TranscriptionEngine::Moonshine => {
+                | crate::config::TranscriptionEngine::Moonshine
+                | crate::config::TranscriptionEngine::SenseVoice => {
                     // Parakeet/Moonshine uses its own model loading
                     transcriber_preloaded = Some(Arc::from(crate::transcribe::create_transcriber(
                         &self.config,
@@ -1193,7 +1195,8 @@ impl Daemon {
                                             }));
                                         }
                                         crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine => {
+                                        | crate::config::TranscriptionEngine::Moonshine
+                                        | crate::config::TranscriptionEngine::SenseVoice => {
                                             let config = self.config.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                                 crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -1212,7 +1215,8 @@ impl Daemon {
                                             }
                                         }
                                         crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine => {
+                                        | crate::config::TranscriptionEngine::Moonshine
+                                        | crate::config::TranscriptionEngine::SenseVoice => {
                                             if let Some(ref t) = transcriber_preloaded {
                                                 let transcriber = t.clone();
                                                 tokio::task::spawn_blocking(move || {
@@ -1368,7 +1372,8 @@ impl Daemon {
                                             }));
                                         }
                                         crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine => {
+                                        | crate::config::TranscriptionEngine::Moonshine
+                                        | crate::config::TranscriptionEngine::SenseVoice => {
                                             let config = self.config.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                                 crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -1387,7 +1392,8 @@ impl Daemon {
                                             }
                                         }
                                         crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine => {
+                                        | crate::config::TranscriptionEngine::Moonshine
+                                        | crate::config::TranscriptionEngine::SenseVoice => {
                                             if let Some(ref t) = transcriber_preloaded {
                                                 let transcriber = t.clone();
                                                 tokio::task::spawn_blocking(move || {
@@ -1698,7 +1704,8 @@ impl Daemon {
                                     }));
                                 }
                                 crate::config::TranscriptionEngine::Parakeet
-                                | crate::config::TranscriptionEngine::Moonshine => {
+                                | crate::config::TranscriptionEngine::Moonshine
+                                | crate::config::TranscriptionEngine::SenseVoice => {
                                     let config = self.config.clone();
                                     self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                         crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -1716,7 +1723,8 @@ impl Daemon {
                                     }
                                 }
                                 crate::config::TranscriptionEngine::Parakeet
-                                | crate::config::TranscriptionEngine::Moonshine => {
+                                | crate::config::TranscriptionEngine::Moonshine
+                                | crate::config::TranscriptionEngine::SenseVoice => {
                                     if let Some(ref t) = transcriber_preloaded {
                                         let transcriber = t.clone();
                                         tokio::task::spawn_blocking(move || {
