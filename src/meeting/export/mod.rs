@@ -207,21 +207,21 @@ mod tests {
     }
 
     #[test]
-    fn test_export_meeting_srt_unsupported() {
+    fn test_export_meeting_srt() {
         use crate::meeting::data::MeetingData;
 
         let meeting = MeetingData::new(Some("Test".to_string()));
         let result = export_meeting(&meeting, ExportFormat::Srt, &ExportOptions::default());
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[test]
-    fn test_export_meeting_vtt_unsupported() {
+    fn test_export_meeting_vtt() {
         use crate::meeting::data::MeetingData;
 
         let meeting = MeetingData::new(Some("Test".to_string()));
         let result = export_meeting(&meeting, ExportFormat::Vtt, &ExportOptions::default());
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[test]

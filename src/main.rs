@@ -1473,6 +1473,102 @@ async fn run_meeting_command(config: &config::Config, action: MeetingAction) -> 
                 speaker_num, label, meeting_id
             );
         }
+
+        MeetingAction::Summarize {
+            meeting_id,
+            format,
+            output,
+        } => {
+            // Load meeting
+            let meeting = meeting::get_meeting(&meeting_config, &meeting_id)
+                .map_err(|e| anyhow::anyhow!("Failed to load meeting: {}", e))?;
+
+            // Create summary config from meeting config
+            let summary_config = meeting::summary::SummaryConfig {
+                backend: config.meeting.summary.backend.clone(),
+                ollama_url: config.meeting.summary.ollama_url.clone(),
+                ollama_model: config.meeting.summary.ollama_model.clone(),
+                remote_endpoint: config.meeting.summary.remote_endpoint.clone(),
+                remote_api_key: config.meeting.summary.remote_api_key.clone(),
+                timeout_secs: config.meeting.summary.timeout_secs,
+            };
+
+            // Create summarizer
+            let summarizer = meeting::summary::create_summarizer(&summary_config)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Summarization not configured. Set [meeting.summary] backend in config.toml:\n\n\
+                        [meeting.summary]\n\
+                        backend = \"local\"  # or \"remote\"\n\
+                        ollama_url = \"http://localhost:11434\"\n\
+                        ollama_model = \"llama3.2\""
+                    )
+                })?;
+
+            // Check availability
+            if !summarizer.is_available() {
+                return Err(anyhow::anyhow!(
+                    "Summarizer '{}' is not available. Check that Ollama is running.",
+                    summarizer.name()
+                ));
+            }
+
+            eprintln!("Generating summary using {}...", summarizer.name());
+
+            // Generate summary
+            let summary = summarizer
+                .summarize(&meeting)
+                .map_err(|e| anyhow::anyhow!("Summarization failed: {}", e))?;
+
+            // Format output
+            let content = match format.as_str() {
+                "json" => serde_json::to_string_pretty(&summary)
+                    .map_err(|e| anyhow::anyhow!("Failed to serialize summary: {}", e))?,
+                "text" => {
+                    let mut text = String::new();
+                    text.push_str(&format!("Summary: {}\n\n", summary.summary));
+
+                    if !summary.key_points.is_empty() {
+                        text.push_str("Key Points:\n");
+                        for point in &summary.key_points {
+                            text.push_str(&format!("  - {}\n", point));
+                        }
+                        text.push('\n');
+                    }
+
+                    if !summary.action_items.is_empty() {
+                        text.push_str("Action Items:\n");
+                        for item in &summary.action_items {
+                            let assignee = item
+                                .assignee
+                                .as_ref()
+                                .map(|a| format!(" ({})", a))
+                                .unwrap_or_default();
+                            text.push_str(&format!("  - {}{}\n", item.description, assignee));
+                        }
+                        text.push('\n');
+                    }
+
+                    if !summary.decisions.is_empty() {
+                        text.push_str("Decisions:\n");
+                        for decision in &summary.decisions {
+                            text.push_str(&format!("  - {}\n", decision));
+                        }
+                    }
+
+                    text
+                }
+                "markdown" | _ => meeting::summary::summary_to_markdown(&summary),
+            };
+
+            // Output
+            if let Some(path) = output {
+                std::fs::write(&path, &content)?;
+                eprintln!("Summary saved to {:?}", path);
+            } else {
+                println!("{}", content);
+            }
+        }
     }
 
     Ok(())

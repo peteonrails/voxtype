@@ -681,7 +681,7 @@ impl Daemon {
 
                         // Notification
                         if self.config.output.notification.on_recording_start {
-                            send_notification("Meeting Started", &format!("ID: {}", meeting_id), true, self.config.engine).await;
+                            send_notification("Meeting Started", &format!("ID: {}", meeting_id), false, self.config.engine).await;
                         }
                     }
                     Err(e) => {
@@ -715,7 +715,7 @@ impl Daemon {
                     self.play_feedback(SoundEvent::RecordingStop);
 
                     if self.config.output.notification.on_recording_stop {
-                        send_notification("Meeting Ended", &format!("ID: {}", meeting_id), true, self.config.engine).await;
+                        send_notification("Meeting Ended", &format!("ID: {}", meeting_id), false, self.config.engine).await;
                     }
                 }
                 Err(e) => {

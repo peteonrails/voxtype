@@ -28,6 +28,7 @@ pub mod diarization;
 pub mod export;
 pub mod state;
 pub mod storage;
+pub mod summary;
 
 pub use chunk::{ChunkBuffer, ChunkConfig, ChunkProcessor, ProcessedChunk, VoiceActivityDetector};
 pub use data::{

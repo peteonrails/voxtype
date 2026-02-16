@@ -1282,6 +1282,10 @@ pub struct MeetingConfig {
     /// Diarization configuration
     #[serde(default)]
     pub diarization: MeetingDiarizationConfig,
+
+    /// Summarization configuration
+    #[serde(default)]
+    pub summary: MeetingSummaryConfig,
 }
 
 /// Meeting audio configuration for dual capture
@@ -1360,6 +1364,63 @@ impl Default for MeetingDiarizationConfig {
     }
 }
 
+/// Meeting summary configuration (Phase 5)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MeetingSummaryConfig {
+    /// Summarization backend: "local", "remote", or "disabled"
+    #[serde(default = "default_summary_backend")]
+    pub backend: String,
+
+    /// Ollama URL for local backend
+    #[serde(default = "default_ollama_url")]
+    pub ollama_url: String,
+
+    /// Ollama model name
+    #[serde(default = "default_ollama_model")]
+    pub ollama_model: String,
+
+    /// Remote API endpoint for remote backend
+    #[serde(default)]
+    pub remote_endpoint: Option<String>,
+
+    /// Remote API key
+    #[serde(default)]
+    pub remote_api_key: Option<String>,
+
+    /// Request timeout in seconds
+    #[serde(default = "default_summary_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn default_summary_backend() -> String {
+    "disabled".to_string()
+}
+
+fn default_ollama_url() -> String {
+    "http://localhost:11434".to_string()
+}
+
+fn default_ollama_model() -> String {
+    "llama3.2".to_string()
+}
+
+fn default_summary_timeout() -> u64 {
+    120
+}
+
+impl Default for MeetingSummaryConfig {
+    fn default() -> Self {
+        Self {
+            backend: default_summary_backend(),
+            ollama_url: default_ollama_url(),
+            ollama_model: default_ollama_model(),
+            remote_endpoint: None,
+            remote_api_key: None,
+            timeout_secs: default_summary_timeout(),
+        }
+    }
+}
+
 impl Default for MeetingConfig {
     fn default() -> Self {
         Self {
@@ -1370,6 +1431,7 @@ impl Default for MeetingConfig {
             max_duration_mins: default_max_duration(),
             audio: MeetingAudioConfig::default(),
             diarization: MeetingDiarizationConfig::default(),
+            summary: MeetingSummaryConfig::default(),
         }
     }
 }

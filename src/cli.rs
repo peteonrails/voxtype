@@ -378,6 +378,22 @@ pub enum MeetingAction {
         /// Human-readable label to assign
         label: String,
     },
+    /// Generate an AI summary of a meeting
+    ///
+    /// Uses Ollama or a remote API to generate a summary with
+    /// key points, action items, and decisions.
+    Summarize {
+        /// Meeting ID (or "latest" for most recent)
+        meeting_id: String,
+
+        /// Output format: text, json, or markdown
+        #[arg(long, short, default_value = "markdown")]
+        format: String,
+
+        /// Output file path (default: stdout)
+        #[arg(long, short)]
+        output: Option<std::path::PathBuf>,
+    },
 }
 
 impl RecordAction {
