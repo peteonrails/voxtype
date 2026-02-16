@@ -1231,3 +1231,93 @@ ls ~/.local/share/voxtype/meetings/*/transcript.json
 cat ~/.local/share/voxtype/meetings/*/metadata.json | head -20
 # Expected: valid JSON with meeting metadata
 ```
+
+### Error Handling
+
+```bash
+# Double-start (meeting already in progress)
+voxtype meeting start --title "First"
+voxtype meeting start --title "Second"
+# Expected: error "Meeting already in progress"
+voxtype meeting stop
+
+# Pause when no meeting active
+voxtype meeting pause
+# Expected: error "No active meeting to pause"
+
+# Resume when no meeting paused
+voxtype meeting resume
+# Expected: error "No paused meeting to resume"
+
+# Stop when no meeting active
+voxtype meeting stop
+# Expected: error "No meeting in progress"
+
+# Show nonexistent meeting
+voxtype meeting show 00000000-0000-0000-0000-000000000000
+# Expected: error "Meeting not found"
+
+# Export with invalid format
+voxtype meeting export latest --format invalid
+# Expected: error about unsupported format
+
+# Export with invalid meeting ID
+voxtype meeting export not-a-uuid --format text
+# Expected: error about invalid meeting ID
+
+# Label nonexistent meeting
+voxtype meeting label 00000000-0000-0000-0000-000000000000 SPEAKER_00 "Alice"
+# Expected: error "Meeting not found"
+```
+
+### Dual Audio Sources
+
+```bash
+# Verify loopback detection
+# 1. Configure loopback in config.toml:
+#    [meeting.audio]
+#    loopback_device = "auto"
+
+# 2. Start a meeting while in a video call (Zoom, Teams, etc.)
+voxtype meeting start --title "Video Call Test"
+
+# 3. Speak into mic and wait for remote participants to speak
+sleep 30
+voxtype meeting stop
+
+# 4. Check speaker attribution
+voxtype meeting show latest
+# Expected: segments attributed to "You" (mic) and "Remote" (loopback)
+
+# 5. Verify export includes speaker labels
+voxtype meeting export latest --format text --speakers
+# Expected: "You:" and "Remote:" labels in output
+
+# Disable loopback (mic-only mode)
+#    [meeting.audio]
+#    loopback_device = "disabled"
+systemctl --user restart voxtype
+voxtype meeting start --title "Mic Only Test"
+sleep 10
+voxtype meeting stop
+voxtype meeting show latest
+# Expected: all segments attributed to "You" or "Unknown"
+```
+
+### Diarization Backend Selection
+
+```bash
+# Simple diarization (default, source-based)
+voxtype config | grep -A5 "diarization"
+# Expected: backend = "simple"
+
+# ML diarization (requires ml-diarization feature)
+# 1. Configure in config.toml:
+#    [meeting.diarization]
+#    backend = "ml"
+#    max_speakers = 4
+# 2. Restart and verify
+systemctl --user restart voxtype
+journalctl --user -u voxtype --since "10 seconds ago" | grep -i diariz
+# Expected: "Using ML diarization" or "falling back to simple" if model missing
+```

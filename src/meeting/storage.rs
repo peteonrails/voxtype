@@ -760,4 +760,159 @@ mod tests {
             PathBuf::from("/tmp/test-meetings/index.db")
         );
     }
+
+    #[test]
+    fn test_list_meetings_empty() {
+        let (storage, _temp) = create_test_storage();
+        let meetings = storage.list_meetings(None).unwrap();
+        assert!(meetings.is_empty());
+    }
+
+    #[test]
+    fn test_list_meetings_limit_zero() {
+        let (storage, _temp) = create_test_storage();
+        for i in 0..3 {
+            let metadata = MeetingMetadata::new(Some(format!("Meeting {}", i)));
+            storage.create_meeting(&metadata).unwrap();
+        }
+        let meetings = storage.list_meetings(Some(0)).unwrap();
+        assert!(meetings.is_empty());
+    }
+
+    #[test]
+    fn test_get_meeting_not_found() {
+        let (storage, _temp) = create_test_storage();
+        let id = MeetingId::new();
+        let result = storage.get_meeting(&id).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_delete_nonexistent_meeting() {
+        let (storage, _temp) = create_test_storage();
+        let id = MeetingId::new();
+        // Should not error - just does nothing
+        let result = storage.delete_meeting(&id);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_save_transcript_meeting_not_found() {
+        let (storage, _temp) = create_test_storage();
+        let id = MeetingId::new();
+        let transcript = Transcript::new();
+        let result = storage.save_transcript(&id, &transcript);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_transcript_meeting_not_found() {
+        let (storage, _temp) = create_test_storage();
+        let id = MeetingId::new();
+        let result = storage.load_transcript(&id);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_meeting_data_not_found() {
+        let (storage, _temp) = create_test_storage();
+        let id = MeetingId::new();
+        let result = storage.load_meeting_data(&id);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_speaker_labels() {
+        let (storage, _temp) = create_test_storage();
+        let mut metadata = MeetingMetadata::new(Some("Label Test".to_string()));
+        let id = metadata.id;
+
+        let path = storage.create_meeting(&metadata).unwrap();
+        metadata.storage_path = Some(path);
+        storage.update_meeting(&metadata).unwrap();
+
+        // Set labels
+        storage.set_speaker_label(&id, 0, "Alice").unwrap();
+        storage.set_speaker_label(&id, 1, "Bob").unwrap();
+
+        // Get labels
+        let labels = storage.get_speaker_labels(&id).unwrap();
+        assert_eq!(labels.len(), 2);
+        assert_eq!(labels.get(&0), Some(&"Alice".to_string()));
+        assert_eq!(labels.get(&1), Some(&"Bob".to_string()));
+    }
+
+    #[test]
+    fn test_speaker_labels_overwrite() {
+        let (storage, _temp) = create_test_storage();
+        let mut metadata = MeetingMetadata::new(Some("Overwrite Test".to_string()));
+        let id = metadata.id;
+
+        let path = storage.create_meeting(&metadata).unwrap();
+        metadata.storage_path = Some(path);
+        storage.update_meeting(&metadata).unwrap();
+
+        storage.set_speaker_label(&id, 0, "Alice").unwrap();
+        storage.set_speaker_label(&id, 0, "Carol").unwrap();
+
+        let labels = storage.get_speaker_labels(&id).unwrap();
+        assert_eq!(labels.get(&0), Some(&"Carol".to_string()));
+    }
+
+    #[test]
+    fn test_speaker_labels_nonexistent_meeting() {
+        let (storage, _temp) = create_test_storage();
+        let id = MeetingId::new();
+        let result = storage.set_speaker_label(&id, 0, "Alice");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_speaker_labels_empty() {
+        let (storage, _temp) = create_test_storage();
+        let metadata = MeetingMetadata::new(Some("No Labels".to_string()));
+        let id = metadata.id;
+        storage.create_meeting(&metadata).unwrap();
+
+        let labels = storage.get_speaker_labels(&id).unwrap();
+        assert!(labels.is_empty());
+    }
+
+    #[test]
+    fn test_create_meeting_creates_directory() {
+        let (storage, temp) = create_test_storage();
+        let metadata = MeetingMetadata::new(Some("Dir Test".to_string()));
+        let path = storage.create_meeting(&metadata).unwrap();
+        assert!(path.exists());
+        assert!(path.is_dir());
+        // Should also write metadata.json
+        assert!(path.join("metadata.json").exists());
+    }
+
+    #[test]
+    fn test_list_meetings_ordered_by_start_time() {
+        let (storage, _temp) = create_test_storage();
+
+        // Create meetings with different started_at timestamps
+        let mut metadata1 = MeetingMetadata::new(Some("First".to_string()));
+        metadata1.started_at = chrono::Utc.timestamp_opt(1000000, 0).single().unwrap();
+        storage.create_meeting(&metadata1).unwrap();
+
+        let mut metadata2 = MeetingMetadata::new(Some("Second".to_string()));
+        metadata2.started_at = chrono::Utc.timestamp_opt(2000000, 0).single().unwrap();
+        storage.create_meeting(&metadata2).unwrap();
+
+        let meetings = storage.list_meetings(None).unwrap();
+        assert_eq!(meetings.len(), 2);
+        // Ordered by started_at DESC, so Second should be first
+        assert_eq!(meetings[0].title, Some("Second".to_string()));
+        assert_eq!(meetings[1].title, Some("First".to_string()));
+    }
+
+    #[test]
+    fn test_timestamp_to_datetime_invalid() {
+        // A very old timestamp should still produce a DateTime
+        let dt = timestamp_to_datetime(0);
+        assert_eq!(dt.timestamp(), 0);
+    }
 }

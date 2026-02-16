@@ -3284,4 +3284,161 @@ mod tests {
         assert_eq!(driver_order.len(), 1);
         assert_eq!(driver_order[0], OutputDriver::Ydotool);
     }
+
+    // =========================================================================
+    // Meeting Config Tests
+    // =========================================================================
+
+    #[test]
+    fn test_meeting_config_default() {
+        let config = MeetingConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.chunk_duration_secs, 30);
+        assert_eq!(config.storage_path, "auto");
+        assert!(!config.retain_audio);
+        assert_eq!(config.max_duration_mins, 180);
+    }
+
+    #[test]
+    fn test_meeting_audio_config_default() {
+        let config = MeetingAudioConfig::default();
+        assert_eq!(config.mic_device, "default");
+        assert_eq!(config.loopback_device, "auto");
+    }
+
+    #[test]
+    fn test_meeting_diarization_config_default() {
+        let config = MeetingDiarizationConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.backend, "simple");
+        assert_eq!(config.max_speakers, 10);
+    }
+
+    #[test]
+    fn test_meeting_summary_config_default() {
+        let config = MeetingSummaryConfig::default();
+        assert_eq!(config.backend, "disabled");
+        assert_eq!(config.ollama_url, "http://localhost:11434");
+        assert_eq!(config.ollama_model, "llama3.2");
+        assert!(config.remote_endpoint.is_none());
+        assert!(config.remote_api_key.is_none());
+        assert_eq!(config.timeout_secs, 120);
+    }
+
+    #[test]
+    fn test_meeting_config_in_default_config() {
+        let config = Config::default();
+        assert!(config.meeting.enabled);
+        assert_eq!(config.meeting.chunk_duration_secs, 30);
+        assert_eq!(config.meeting.max_duration_mins, 180);
+    }
+
+    #[test]
+    fn test_parse_meeting_config_from_toml() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [meeting]
+            enabled = true
+            chunk_duration_secs = 45
+            storage_path = "/tmp/meetings"
+            retain_audio = true
+            max_duration_mins = 60
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.meeting.enabled);
+        assert_eq!(config.meeting.chunk_duration_secs, 45);
+        assert_eq!(config.meeting.storage_path, "/tmp/meetings");
+        assert!(config.meeting.retain_audio);
+        assert_eq!(config.meeting.max_duration_mins, 60);
+    }
+
+    #[test]
+    fn test_parse_meeting_config_with_nested_sections() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [meeting]
+            enabled = true
+
+            [meeting.audio]
+            mic_device = "hw:1"
+            loopback_device = "disabled"
+
+            [meeting.diarization]
+            enabled = false
+            backend = "ml"
+            max_speakers = 5
+
+            [meeting.summary]
+            backend = "local"
+            ollama_model = "mistral"
+            timeout_secs = 60
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.meeting.audio.mic_device, "hw:1");
+        assert_eq!(config.meeting.audio.loopback_device, "disabled");
+        assert!(!config.meeting.diarization.enabled);
+        assert_eq!(config.meeting.diarization.backend, "ml");
+        assert_eq!(config.meeting.diarization.max_speakers, 5);
+        assert_eq!(config.meeting.summary.backend, "local");
+        assert_eq!(config.meeting.summary.ollama_model, "mistral");
+        assert_eq!(config.meeting.summary.timeout_secs, 60);
+    }
+
+    #[test]
+    fn test_meeting_config_backward_compatible_omitted() {
+        // Config without [meeting] section should parse fine with defaults
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.meeting.enabled);
+        assert_eq!(config.meeting.chunk_duration_secs, 30);
+        assert_eq!(config.meeting.storage_path, "auto");
+        assert_eq!(config.meeting.diarization.backend, "simple");
+        assert_eq!(config.meeting.summary.backend, "disabled");
+    }
 }

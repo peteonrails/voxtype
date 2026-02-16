@@ -426,10 +426,7 @@ mod tests {
 
     #[test]
     fn test_chunks_processed_in_paused() {
-        let state = MeetingState::start()
-            .next_chunk()
-            .next_chunk()
-            .next_chunk();
+        let state = MeetingState::start().next_chunk().next_chunk().next_chunk();
         assert_eq!(state.chunks_processed(), 3);
         let paused = state.pause();
         assert_eq!(paused.chunks_processed(), 3);
@@ -461,5 +458,133 @@ mod tests {
     fn test_default_is_idle() {
         let state = MeetingState::default();
         assert!(state.is_idle());
+    }
+
+    #[test]
+    fn test_resume_active_is_noop() {
+        let state = MeetingState::start();
+        assert!(state.is_active());
+        let state = state.resume();
+        assert!(state.is_active());
+    }
+
+    #[test]
+    fn test_pause_finalizing_is_noop() {
+        let state = MeetingState::start().stop();
+        assert!(state.is_finalizing());
+        let state = state.pause();
+        assert!(state.is_finalizing());
+    }
+
+    #[test]
+    fn test_resume_finalizing_is_noop() {
+        let state = MeetingState::start().stop();
+        assert!(state.is_finalizing());
+        let state = state.resume();
+        assert!(state.is_finalizing());
+    }
+
+    #[test]
+    fn test_stop_finalizing_is_noop() {
+        let state = MeetingState::start().stop();
+        assert!(state.is_finalizing());
+        let state = state.stop();
+        assert!(state.is_finalizing());
+    }
+
+    #[test]
+    fn test_finalize_idle_is_noop() {
+        let state = MeetingState::Idle;
+        let state = state.finalize();
+        assert!(state.is_idle());
+    }
+
+    #[test]
+    fn test_finalize_paused_is_noop() {
+        let state = MeetingState::start().pause();
+        assert!(state.is_paused());
+        let state = state.finalize();
+        assert!(state.is_paused());
+    }
+
+    #[test]
+    fn test_next_chunk_idle_is_noop() {
+        let state = MeetingState::Idle;
+        let state = state.next_chunk();
+        assert!(state.is_idle());
+    }
+
+    #[test]
+    fn test_next_chunk_finalizing_is_noop() {
+        let state = MeetingState::start().stop();
+        let chunks_before = state.chunks_processed();
+        let state = state.next_chunk();
+        assert!(state.is_finalizing());
+        assert_eq!(state.chunks_processed(), chunks_before);
+    }
+
+    #[test]
+    fn test_processing_chunk_idle_is_noop() {
+        let state = MeetingState::Idle;
+        let state = state.processing_chunk(0);
+        assert!(state.is_idle());
+    }
+
+    #[test]
+    fn test_processing_chunk_paused_is_noop() {
+        let state = MeetingState::start().pause();
+        let state = state.processing_chunk(0);
+        assert!(state.is_paused());
+    }
+
+    #[test]
+    fn test_full_lifecycle_with_chunks() {
+        let state = MeetingState::start();
+        assert!(state.is_active());
+        assert_eq!(state.chunks_processed(), 0);
+
+        let state = state.next_chunk().next_chunk().next_chunk();
+        assert_eq!(state.chunks_processed(), 3);
+
+        let state = state.pause();
+        assert_eq!(state.chunks_processed(), 3);
+
+        let state = state.resume();
+        assert_eq!(state.chunks_processed(), 3);
+
+        let state = state.next_chunk();
+        assert_eq!(state.chunks_processed(), 4);
+
+        let state = state.stop();
+        assert!(state.is_finalizing());
+        assert_eq!(state.chunks_processed(), 4);
+
+        let state = state.finalize();
+        assert!(state.is_idle());
+        assert_eq!(state.chunks_processed(), 0);
+    }
+
+    #[test]
+    fn test_elapsed_alias() {
+        let state = MeetingState::Idle;
+        assert!(state.elapsed().is_none());
+
+        let state = MeetingState::start();
+        assert!(state.elapsed().is_some());
+    }
+
+    #[test]
+    fn test_display_paused() {
+        let state = MeetingState::start().pause();
+        let display = format!("{}", state);
+        assert!(display.starts_with("Paused"));
+    }
+
+    #[test]
+    fn test_display_finalizing() {
+        let state = MeetingState::start().next_chunk().next_chunk().stop();
+        let display = format!("{}", state);
+        assert!(display.contains("Finalizing"));
+        assert!(display.contains("2 chunks"));
     }
 }

@@ -402,4 +402,118 @@ mod tests {
         let rms = VoiceActivityDetector::calculate_rms(&[]);
         assert_eq!(rms, 0.0);
     }
+
+    #[test]
+    fn test_chunk_buffer_empty() {
+        let buffer = ChunkBuffer::new(0, AudioSource::Microphone, 0);
+        assert!(!buffer.has_audio());
+        assert!((buffer.duration_secs() - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_chunk_buffer_take_samples() {
+        let mut buffer = ChunkBuffer::new(0, AudioSource::Microphone, 0);
+        buffer.add_samples(&[0.1, 0.2, 0.3]);
+        assert!(buffer.has_audio());
+
+        let samples = buffer.take_samples();
+        assert_eq!(samples.len(), 3);
+        assert!(!buffer.has_audio());
+    }
+
+    #[test]
+    fn test_chunk_buffer_multiple_adds() {
+        let mut buffer = ChunkBuffer::new(0, AudioSource::Microphone, 0);
+        buffer.add_samples(&vec![0.0; 8000]); // 0.5 seconds
+        buffer.add_samples(&vec![0.0; 8000]); // 0.5 seconds
+        assert!((buffer.duration_secs() - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_chunk_buffer_elapsed() {
+        let buffer = ChunkBuffer::new(0, AudioSource::Microphone, 0);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        assert!(buffer.elapsed() >= std::time::Duration::from_millis(10));
+    }
+
+    #[test]
+    fn test_vad_empty_samples() {
+        let vad = VoiceActivityDetector::new(0.01, 16000);
+        assert!(!vad.contains_speech(&[]));
+    }
+
+    #[test]
+    fn test_vad_detect_segments_empty() {
+        let vad = VoiceActivityDetector::new(0.01, 16000);
+        let segments = vad.detect_speech_segments(&[]);
+        assert!(segments.is_empty());
+    }
+
+    #[test]
+    fn test_vad_detect_segments_all_silence() {
+        let vad = VoiceActivityDetector::new(0.01, 16000);
+        let silent = create_silent_samples(2.0);
+        let segments = vad.detect_speech_segments(&silent);
+        assert!(segments.is_empty());
+    }
+
+    #[test]
+    fn test_vad_detect_segments_all_speech() {
+        let vad = VoiceActivityDetector::new(0.01, 16000);
+        let speech = create_test_samples(1.0, 440.0, 0.5);
+        let segments = vad.detect_speech_segments(&speech);
+        assert!(!segments.is_empty());
+        // Speech covers the entire buffer
+        let (start, end) = segments[0];
+        assert_eq!(start, 0);
+    }
+
+    #[test]
+    fn test_vad_threshold_boundary() {
+        // Amplitude exactly at threshold should not be detected as speech
+        // since RMS of a sine wave with amplitude A is A / sqrt(2)
+        let threshold = 0.5;
+        let vad = VoiceActivityDetector::new(threshold, 16000);
+
+        // Very quiet audio (RMS below threshold)
+        let quiet = create_test_samples(1.0, 440.0, 0.001);
+        assert!(!vad.contains_speech(&quiet));
+
+        // Loud audio (RMS above threshold)
+        let loud = create_test_samples(1.0, 440.0, 1.0);
+        assert!(vad.contains_speech(&loud));
+    }
+
+    #[test]
+    fn test_vad_zero_sample_rate_no_panic() {
+        // Edge case: zero sample rate should not panic
+        let vad = VoiceActivityDetector::new(0.01, 0);
+        assert!(!vad.contains_speech(&[0.5, 0.5, 0.5]));
+        assert!(vad.detect_speech_segments(&[0.5, 0.5]).is_empty());
+    }
+
+    #[test]
+    fn test_chunk_config_custom() {
+        let config = ChunkConfig {
+            chunk_duration_secs: 60,
+            vad_threshold: 0.05,
+            sample_rate: 48000,
+            min_chunk_duration_secs: 1.0,
+        };
+        assert_eq!(config.chunk_duration_secs, 60);
+        assert_eq!(config.sample_rate, 48000);
+    }
+
+    #[test]
+    fn test_rms_uniform_value() {
+        let samples = vec![0.3; 100];
+        let rms = VoiceActivityDetector::calculate_rms(&samples);
+        assert!((rms - 0.3).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_rms_single_sample() {
+        let rms = VoiceActivityDetector::calculate_rms(&[0.7]);
+        assert!((rms - 0.7).abs() < 0.01);
+    }
 }

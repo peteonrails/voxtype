@@ -501,4 +501,249 @@ mod tests {
         assert_eq!(meeting.metadata.status, MeetingStatus::Completed);
         assert!(meeting.metadata.ended_at.is_some());
     }
+
+    #[test]
+    fn test_meeting_id_parse_invalid() {
+        let result = MeetingId::parse("not-a-uuid");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_meeting_id_parse_empty() {
+        let result = MeetingId::parse("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_meeting_id_from_str() {
+        let id = MeetingId::new();
+        let parsed: MeetingId = id.to_string().parse().unwrap();
+        assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn test_meeting_id_default_is_unique() {
+        let id1 = MeetingId::default();
+        let id2 = MeetingId::default();
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_audio_source_default() {
+        let source = AudioSource::default();
+        assert_eq!(source, AudioSource::Unknown);
+    }
+
+    #[test]
+    fn test_audio_source_display() {
+        assert_eq!(format!("{}", AudioSource::Microphone), "You");
+        assert_eq!(format!("{}", AudioSource::Loopback), "Remote");
+        assert_eq!(format!("{}", AudioSource::Unknown), "Unknown");
+    }
+
+    #[test]
+    fn test_transcript_empty() {
+        let transcript = Transcript::new();
+        assert_eq!(transcript.plain_text(), "");
+        assert_eq!(transcript.word_count(), 0);
+        assert_eq!(transcript.duration_ms(), 0);
+        assert!(transcript.speakers().is_empty());
+        assert!(transcript.segments.is_empty());
+    }
+
+    #[test]
+    fn test_transcript_text_with_speakers() {
+        let mut transcript = Transcript::new();
+        let mut seg1 = TranscriptSegment::new(0, 0, 1000, "Hello".to_string(), 0);
+        seg1.source = AudioSource::Microphone;
+        let mut seg2 = TranscriptSegment::new(1, 1000, 2000, "Hi there".to_string(), 0);
+        seg2.source = AudioSource::Loopback;
+        transcript.add_segment(seg1);
+        transcript.add_segment(seg2);
+
+        let text = transcript.text_with_speakers();
+        assert!(text.contains("**You**: Hello"));
+        assert!(text.contains("**Remote**: Hi there"));
+    }
+
+    #[test]
+    fn test_transcript_text_with_speakers_merges_consecutive() {
+        let mut transcript = Transcript::new();
+        let mut seg1 = TranscriptSegment::new(0, 0, 1000, "Hello".to_string(), 0);
+        seg1.source = AudioSource::Microphone;
+        let mut seg2 = TranscriptSegment::new(1, 1000, 2000, "world".to_string(), 0);
+        seg2.source = AudioSource::Microphone;
+        transcript.add_segment(seg1);
+        transcript.add_segment(seg2);
+
+        let text = transcript.text_with_speakers();
+        // Same speaker should not repeat the label
+        assert_eq!(text.matches("**You**").count(), 1);
+    }
+
+    #[test]
+    fn test_transcript_segments_by_speaker() {
+        let mut transcript = Transcript::new();
+        let mut seg1 = TranscriptSegment::new(0, 0, 1000, "Hello".to_string(), 0);
+        seg1.source = AudioSource::Microphone;
+        let mut seg2 = TranscriptSegment::new(1, 1000, 2000, "Hi".to_string(), 0);
+        seg2.source = AudioSource::Loopback;
+        let mut seg3 = TranscriptSegment::new(2, 2000, 3000, "Bye".to_string(), 0);
+        seg3.source = AudioSource::Microphone;
+        transcript.add_segment(seg1);
+        transcript.add_segment(seg2);
+        transcript.add_segment(seg3);
+
+        let you_segments = transcript.segments_by_speaker("You");
+        assert_eq!(you_segments.len(), 2);
+        let remote_segments = transcript.segments_by_speaker("Remote");
+        assert_eq!(remote_segments.len(), 1);
+    }
+
+    #[test]
+    fn test_transcript_speakers_unique_sorted() {
+        let mut transcript = Transcript::new();
+        let mut seg1 = TranscriptSegment::new(0, 0, 1000, "A".to_string(), 0);
+        seg1.source = AudioSource::Loopback;
+        let mut seg2 = TranscriptSegment::new(1, 1000, 2000, "B".to_string(), 0);
+        seg2.source = AudioSource::Microphone;
+        let mut seg3 = TranscriptSegment::new(2, 2000, 3000, "C".to_string(), 0);
+        seg3.source = AudioSource::Loopback;
+        transcript.add_segment(seg1);
+        transcript.add_segment(seg2);
+        transcript.add_segment(seg3);
+
+        let speakers = transcript.speakers();
+        assert_eq!(speakers.len(), 2);
+        assert!(speakers.contains(&"You".to_string()));
+        assert!(speakers.contains(&"Remote".to_string()));
+    }
+
+    #[test]
+    fn test_segment_speaker_display_with_label() {
+        let mut segment = TranscriptSegment::new(0, 0, 1000, "Test".to_string(), 0);
+        segment.speaker_label = Some("Alice".to_string());
+        assert_eq!(segment.speaker_display(), "Alice");
+    }
+
+    #[test]
+    fn test_segment_speaker_display_with_id_no_label() {
+        let mut segment = TranscriptSegment::new(0, 0, 1000, "Test".to_string(), 0);
+        segment.speaker_id = Some("SPEAKER_00".to_string());
+        assert_eq!(segment.speaker_display(), "SPEAKER_00");
+    }
+
+    #[test]
+    fn test_segment_speaker_display_label_overrides_id() {
+        let mut segment = TranscriptSegment::new(0, 0, 1000, "Test".to_string(), 0);
+        segment.speaker_id = Some("SPEAKER_00".to_string());
+        segment.speaker_label = Some("Bob".to_string());
+        assert_eq!(segment.speaker_display(), "Bob");
+    }
+
+    #[test]
+    fn test_segment_duration_zero() {
+        let segment = TranscriptSegment::new(0, 5000, 5000, "".to_string(), 0);
+        assert_eq!(segment.duration_ms(), 0);
+    }
+
+    #[test]
+    fn test_segment_format_timestamp_zero() {
+        let segment = TranscriptSegment::new(0, 0, 1000, "Test".to_string(), 0);
+        assert_eq!(segment.format_timestamp(), "00:00");
+    }
+
+    #[test]
+    fn test_segment_format_timestamp_minutes_only() {
+        let segment = TranscriptSegment::new(0, 125000, 130000, "Test".to_string(), 0);
+        assert_eq!(segment.format_timestamp(), "02:05");
+    }
+
+    #[test]
+    fn test_meeting_metadata_cancel() {
+        let mut metadata = MeetingMetadata::new(Some("Cancelled".to_string()));
+        assert_eq!(metadata.status, MeetingStatus::Active);
+        metadata.cancel();
+        assert_eq!(metadata.status, MeetingStatus::Cancelled);
+        assert!(metadata.ended_at.is_some());
+    }
+
+    #[test]
+    fn test_meeting_metadata_storage_dir_no_title() {
+        let mut metadata = MeetingMetadata::new(None);
+        metadata.started_at = DateTime::parse_from_rfc3339("2024-06-15T09:00:00Z")
+            .unwrap()
+            .into();
+        let dir_name = metadata.storage_dir_name();
+        assert!(dir_name.starts_with("2024-06-15-"));
+    }
+
+    #[test]
+    fn test_meeting_metadata_complete_sets_duration() {
+        let mut metadata = MeetingMetadata::new(Some("Duration Test".to_string()));
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        metadata.complete();
+        assert!(metadata.duration_secs.is_some());
+    }
+
+    #[test]
+    fn test_meeting_data_add_segment() {
+        let mut meeting = MeetingData::new(Some("Test".to_string()));
+        assert!(meeting.transcript.segments.is_empty());
+
+        meeting.add_segment(TranscriptSegment::new(0, 0, 1000, "Hello".to_string(), 0));
+        assert_eq!(meeting.transcript.segments.len(), 1);
+    }
+
+    #[test]
+    fn test_meeting_data_complete_sets_chunk_count() {
+        let mut meeting = MeetingData::new(Some("Test".to_string()));
+        meeting.transcript.total_chunks = 5;
+        meeting.complete();
+        assert_eq!(meeting.metadata.chunk_count, 5);
+    }
+
+    #[test]
+    fn test_meeting_status_default() {
+        let status = MeetingStatus::default();
+        assert_eq!(status, MeetingStatus::Active);
+    }
+
+    #[test]
+    fn test_meeting_metadata_new_defaults() {
+        let metadata = MeetingMetadata::new(None);
+        assert!(metadata.title.is_none());
+        assert!(metadata.ended_at.is_none());
+        assert!(metadata.duration_secs.is_none());
+        assert_eq!(metadata.status, MeetingStatus::Active);
+        assert_eq!(metadata.chunk_count, 0);
+        assert!(!metadata.audio_retained);
+        assert!(metadata.model.is_none());
+        assert!(metadata.summary.is_none());
+        assert!(metadata.synced_at.is_none());
+    }
+
+    #[test]
+    fn test_segment_serialization_roundtrip() {
+        let mut segment = TranscriptSegment::new(0, 0, 5000, "Hello world".to_string(), 0);
+        segment.source = AudioSource::Microphone;
+        segment.speaker_id = Some("SPEAKER_00".to_string());
+        segment.confidence = Some(0.95);
+
+        let json = serde_json::to_string(&segment).unwrap();
+        let deserialized: TranscriptSegment = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.id, 0);
+        assert_eq!(deserialized.text, "Hello world");
+        assert_eq!(deserialized.source, AudioSource::Microphone);
+        assert_eq!(deserialized.speaker_id, Some("SPEAKER_00".to_string()));
+    }
+
+    #[test]
+    fn test_transcript_duration_ms() {
+        let mut transcript = Transcript::new();
+        transcript.add_segment(TranscriptSegment::new(0, 0, 5000, "A".to_string(), 0));
+        transcript.add_segment(TranscriptSegment::new(1, 5000, 12000, "B".to_string(), 1));
+        assert_eq!(transcript.duration_ms(), 12000);
+    }
 }
