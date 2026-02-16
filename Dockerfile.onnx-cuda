@@ -1,6 +1,6 @@
 # Build environment for voxtype with ONNX CUDA support
 #
-# Builds voxtype with --features parakeet-cuda,moonshine for NVIDIA GPU acceleration.
+# Builds voxtype with all ONNX engines + CUDA for NVIDIA GPU acceleration.
 # Uses NVIDIA CUDA base image with cuDNN for optimal ONNX Runtime performance.
 #
 # Usage:
@@ -48,8 +48,8 @@ COPY . .
 ENV ORT_STRATEGY=download
 
 # Disable LTO for faster builds
-# Build with parakeet-cuda feature for NVIDIA GPU support
-RUN cargo build --release --features parakeet-cuda,moonshine \
+# Build with all ONNX engines + CUDA support for NVIDIA GPUs
+RUN cargo build --release --features parakeet-cuda,moonshine-cuda,sensevoice-cuda,paraformer-cuda,dolphin-cuda,omnilingual-cuda \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
     && cp target/release/voxtype /tmp/voxtype-onnx-cuda

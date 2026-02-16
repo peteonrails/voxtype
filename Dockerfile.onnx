@@ -1,8 +1,8 @@
 # Build environment for voxtype with ONNX Runtime support - AVX2 compatible
 #
-# Builds voxtype with --features parakeet,moonshine for ONNX-based engines
-# (Parakeet ASR + Moonshine). Uses Ubuntu 24.04 for glibc 2.39+ (required
-# by ONNX Runtime prebuilt binaries).
+# Builds voxtype with all ONNX-based engines (Parakeet, Moonshine, SenseVoice,
+# Paraformer, Dolphin, Omnilingual). Uses Ubuntu 24.04 for glibc 2.39+
+# (required by ONNX Runtime prebuilt binaries).
 #
 # NOTE: Building on i9-9900K (no AVX-512) ensures wide CPU compatibility.
 # Output binary uses AVX2 instructions for good performance on modern CPUs.
@@ -61,8 +61,8 @@ ENV GGML_AVX512_VNNI=OFF
 ENV ORT_STRATEGY=download
 
 # Disable LTO for faster builds (can hang on TrueNAS)
-# Build with parakeet feature
-RUN cargo build --release --features parakeet,moonshine \
+# Build with all ONNX engines
+RUN cargo build --release --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
     && cp target/release/voxtype /tmp/voxtype-onnx-avx2

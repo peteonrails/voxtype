@@ -12,6 +12,10 @@ target/
 releases/*
 !releases/parakeet-test/
 
+# Worktrees
+.worktrees/
+worktrees/
+
 # Local test files
 *.wav
 *.mp3
