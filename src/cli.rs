@@ -26,7 +26,7 @@ EXAMPLES:
   voxtype setup model      Interactive model selection (Whisper, Parakeet, or Moonshine)
   voxtype setup waybar     Show Waybar integration config
   voxtype setup gpu        Manage GPU acceleration (Vulkan/CUDA/ROCm)
-  voxtype setup parakeet   Switch between Whisper and Parakeet engines
+  voxtype setup onnx       Switch between Whisper and ONNX engines
   voxtype status --follow --format json   Waybar integration
 
 See 'voxtype <command> --help' for more info on a command.
@@ -548,17 +548,30 @@ pub enum SetupAction {
         status: bool,
     },
 
-    /// Switch between Whisper and Parakeet transcription engines
-    Parakeet {
-        /// Enable Parakeet engine (switch to Parakeet binary)
+    /// Switch between Whisper and ONNX transcription engines
+    Onnx {
+        /// Enable ONNX engine (switch to ONNX binary)
         #[arg(long)]
         enable: bool,
 
-        /// Disable Parakeet engine (switch back to Whisper binary)
+        /// Disable ONNX engine (switch back to Whisper binary)
         #[arg(long)]
         disable: bool,
 
-        /// Show current Parakeet backend status
+        /// Show current ONNX backend status
+        #[arg(long)]
+        status: bool,
+    },
+
+    /// Hidden alias for 'onnx' (backwards compatibility)
+    #[command(hide = true)]
+    Parakeet {
+        #[arg(long)]
+        enable: bool,
+
+        #[arg(long)]
+        disable: bool,
+
         #[arg(long)]
         status: bool,
     },

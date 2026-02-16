@@ -328,12 +328,17 @@ async fn main() -> anyhow::Result<()> {
                         setup::gpu::show_status();
                     }
                 }
-                Some(SetupAction::Parakeet {
+                Some(SetupAction::Onnx {
+                    enable,
+                    disable,
+                    status,
+                })
+                | Some(SetupAction::Parakeet {
                     enable,
                     disable,
                     status,
                 }) => {
-                    warn_if_root("parakeet");
+                    warn_if_root("onnx");
                     if status {
                         setup::parakeet::show_status();
                     } else if enable {

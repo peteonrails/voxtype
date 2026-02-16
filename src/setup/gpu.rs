@@ -781,12 +781,12 @@ pub fn enable() -> anyhow::Result<()> {
         // Regenerate systemd service if it exists
         if super::systemd::regenerate_service_file()? {
             println!(
-                "Updated systemd service to use Parakeet {} backend.",
+                "Updated systemd service to use ONNX {} backend.",
                 backend_name
             );
         }
 
-        println!("Switched to Parakeet ({}) backend.", backend_name);
+        println!("Switched to ONNX ({}) backend.", backend_name);
         println!();
         println!("Restart voxtype to use GPU acceleration:");
         println!("  systemctl --user restart voxtype");

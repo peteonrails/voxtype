@@ -234,7 +234,7 @@ fn switch_binary(binary_name: &str) -> anyhow::Result<()> {
         fs::remove_file(VOXTYPE_BIN).map_err(|e| {
             anyhow::anyhow!(
                 "Failed to remove existing symlink (need sudo?): {}\n\
-                 Try: sudo voxtype setup parakeet --enable",
+                 Try: sudo voxtype setup onnx --enable",
                 e
             )
         })?;
@@ -244,7 +244,7 @@ fn switch_binary(binary_name: &str) -> anyhow::Result<()> {
     symlink(&binary_path, VOXTYPE_BIN).map_err(|e| {
         anyhow::anyhow!(
             "Failed to create symlink (need sudo?): {}\n\
-             Try: sudo voxtype setup parakeet --enable",
+             Try: sudo voxtype setup onnx --enable",
             e
         )
     })?;
@@ -257,7 +257,7 @@ fn switch_binary(binary_name: &str) -> anyhow::Result<()> {
 
 /// Show Parakeet backend status
 pub fn show_status() {
-    println!("=== Voxtype Parakeet Status ===\n");
+    println!("=== Voxtype ONNX Engine Status ===\n");
 
     // Current engine
     if is_parakeet_active() {
@@ -281,14 +281,14 @@ pub fn show_status() {
         }
     }
 
-    // Available Parakeet backends
-    println!("\nAvailable Parakeet backends:");
+    // Available ONNX backends
+    println!("\nAvailable ONNX backends:");
     let available = detect_available_backends();
     let current = detect_current_parakeet_backend();
 
     if available.is_empty() {
-        println!("  No Parakeet binaries installed.");
-        println!("\n  Install a Parakeet-enabled package to use this feature.");
+        println!("  No ONNX binaries installed.");
+        println!("\n  Install an ONNX-enabled voxtype package to use this feature.");
     } else {
         for backend in [
             ParakeetBackend::Avx2,
@@ -329,11 +329,11 @@ pub fn show_status() {
     // Usage hints
     println!();
     if !is_parakeet_active() && !available.is_empty() {
-        println!("To enable Parakeet:");
-        println!("  sudo voxtype setup parakeet --enable");
+        println!("To enable ONNX engines:");
+        println!("  sudo voxtype setup onnx --enable");
     } else if is_parakeet_active() {
         println!("To switch back to Whisper:");
-        println!("  sudo voxtype setup parakeet --disable");
+        println!("  sudo voxtype setup onnx --disable");
     }
 }
 
@@ -343,33 +343,33 @@ pub fn enable() -> anyhow::Result<()> {
 
     if available.is_empty() {
         anyhow::bail!(
-            "No Parakeet binaries installed.\n\
-             Install a Parakeet-enabled voxtype package first."
+            "No ONNX binaries installed.\n\
+             Install an ONNX-enabled voxtype package first."
         );
     }
 
     if is_parakeet_active() {
-        println!("Parakeet is already enabled.");
+        println!("ONNX engine is already enabled.");
         if let Some(backend) = detect_current_parakeet_backend() {
             println!("  Current backend: {}", backend.display_name());
         }
         return Ok(());
     }
 
-    // Find best Parakeet backend
+    // Find best ONNX backend
     let backend = detect_best_parakeet_backend()
-        .ok_or_else(|| anyhow::anyhow!("No suitable Parakeet backend found"))?;
+        .ok_or_else(|| anyhow::anyhow!("No suitable ONNX backend found"))?;
 
     switch_binary(backend.binary_name())?;
 
     // Regenerate systemd service if it exists
     if super::systemd::regenerate_service_file()? {
-        println!("Updated systemd service to use Parakeet backend.");
+        println!("Updated systemd service to use ONNX backend.");
     }
 
     println!("Switched to {} backend.", backend.display_name());
     println!();
-    println!("Restart voxtype to use Parakeet:");
+    println!("Restart voxtype to use ONNX engines:");
     println!("  systemctl --user restart voxtype");
 
     Ok(())
@@ -378,7 +378,7 @@ pub fn enable() -> anyhow::Result<()> {
 /// Disable Parakeet backend (switch back to Whisper)
 pub fn disable() -> anyhow::Result<()> {
     if !is_parakeet_active() {
-        println!("Parakeet is not currently enabled (already using Whisper).");
+        println!("ONNX engine is not currently enabled (already using Whisper).");
         return Ok(());
     }
 
