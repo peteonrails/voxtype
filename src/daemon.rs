@@ -2305,6 +2305,32 @@ impl Daemon {
 
                 // Process meeting audio chunks
                 _ = tokio::time::sleep(Duration::from_millis(50)), if self.meeting_active() => {
+                    // Check for meeting stop/pause/resume while active
+                    // (the 100ms polling branch is starved by this faster 50ms branch)
+                    if check_meeting_stop() && self.meeting_daemon.is_some() {
+                        tracing::debug!("Meeting stop requested via file trigger");
+                        if let Err(e) = self.stop_meeting().await {
+                            tracing::error!("Failed to stop meeting: {}", e);
+                        }
+                        continue;
+                    }
+                    if check_meeting_pause() && self.meeting_active() {
+                        tracing::debug!("Meeting pause requested via file trigger");
+                        if let Err(e) = self.pause_meeting().await {
+                            tracing::error!("Failed to pause meeting: {}", e);
+                        }
+                        continue;
+                    }
+                    if check_meeting_resume()
+                        && self.meeting_daemon.as_ref().is_some_and(|d| d.state().is_paused())
+                    {
+                        tracing::debug!("Meeting resume requested via file trigger");
+                        if let Err(e) = self.resume_meeting().await {
+                            tracing::error!("Failed to resume meeting: {}", e);
+                        }
+                        continue;
+                    }
+
                     // Get samples from the audio capture
                     if let Some(ref mut capture) = self.meeting_audio_capture {
                         // Get current samples without stopping
