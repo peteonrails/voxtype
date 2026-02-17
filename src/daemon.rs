@@ -303,6 +303,36 @@ fn cleanup_meeting_files() {
     }
 }
 
+/// Mark any active/paused meetings as completed on daemon startup.
+/// This handles meetings orphaned by a crash or daemon restart.
+fn cleanup_stale_meetings(config: &Config) {
+    let storage_path = if config.meeting.storage_path == "auto" {
+        Config::data_dir().join("meetings")
+    } else {
+        std::path::PathBuf::from(&config.meeting.storage_path)
+    };
+
+    let storage_config = StorageConfig {
+        storage_path,
+        retain_audio: config.meeting.retain_audio,
+        max_meetings: 0,
+    };
+
+    match meeting::MeetingStorage::open(storage_config) {
+        Ok(storage) => match storage.complete_stale_meetings() {
+            Ok(count) if count > 0 => {
+                tracing::info!("Marked {} orphaned meeting(s) as completed", count);
+                // Reset meeting state file to idle
+                let state_file = Config::runtime_dir().join("meeting_state");
+                let _ = std::fs::write(&state_file, "idle");
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("Failed to clean up stale meetings: {}", e),
+        },
+        Err(e) => tracing::warn!("Failed to open meeting storage for cleanup: {}", e),
+    }
+}
+
 /// Write meeting state file for external integrations
 fn write_meeting_state_file(path: &PathBuf, state: &str, meeting_id: Option<&str>) {
     let content = if let Some(id) = meeting_id {
@@ -1311,6 +1341,9 @@ impl Daemon {
 
         // Clean up any stale meeting command files
         cleanup_meeting_files();
+
+        // Mark any orphaned active meetings as completed
+        cleanup_stale_meetings(&self.config);
 
         // Write PID file for external control via signals
         self.pid_file_path = write_pid_file();
