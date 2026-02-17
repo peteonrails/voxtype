@@ -6,6 +6,11 @@
 //! - CLI subprocess using whisper-cli (fallback for glibc 2.42+ compatibility)
 //! - Subprocess isolation for GPU memory release
 //! - Optionally NVIDIA Parakeet via ONNX Runtime (when `parakeet` feature is enabled)
+//! - Optionally Moonshine via ONNX Runtime (when `moonshine` feature is enabled)
+//! - Optionally SenseVoice via ONNX Runtime (when `sensevoice` feature is enabled)
+//! - Optionally Paraformer via ONNX Runtime (when `paraformer` feature is enabled)
+//! - Optionally Dolphin via ONNX Runtime (when `dolphin` feature is enabled)
+//! - Optionally Omnilingual via ONNX Runtime (when `omnilingual` feature is enabled)
 
 pub mod cli;
 pub mod remote;
@@ -13,8 +18,41 @@ pub mod subprocess;
 pub mod whisper;
 pub mod worker;
 
+/// Shared log-mel filterbank feature extraction for ONNX-based ASR engines
+#[cfg(any(
+    feature = "sensevoice",
+    feature = "paraformer",
+    feature = "dolphin",
+    feature = "omnilingual",
+))]
+pub mod fbank;
+
+/// Shared CTC greedy decoder for CTC-based ASR engines
+#[cfg(any(
+    feature = "sensevoice",
+    feature = "paraformer",
+    feature = "dolphin",
+    feature = "omnilingual",
+))]
+pub mod ctc;
+
 #[cfg(feature = "parakeet")]
 pub mod parakeet;
+
+#[cfg(feature = "moonshine")]
+pub mod moonshine;
+
+#[cfg(feature = "sensevoice")]
+pub mod sensevoice;
+
+#[cfg(feature = "paraformer")]
+pub mod paraformer;
+
+#[cfg(feature = "dolphin")]
+pub mod dolphin;
+
+#[cfg(feature = "omnilingual")]
+pub mod omnilingual;
 
 use crate::config::{Config, TranscriptionEngine, WhisperConfig, WhisperMode};
 use crate::error::TranscribeError;
@@ -50,11 +88,91 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
                     "Parakeet engine selected but [parakeet] config section is missing".to_string(),
                 )
             })?;
-            Ok(Box::new(parakeet::ParakeetTranscriber::new(parakeet_config)?))
+            Ok(Box::new(parakeet::ParakeetTranscriber::new(
+                parakeet_config,
+            )?))
         }
         #[cfg(not(feature = "parakeet"))]
         TranscriptionEngine::Parakeet => Err(TranscribeError::InitFailed(
             "Parakeet engine requested but voxtype was not compiled with --features parakeet"
+                .to_string(),
+        )),
+        #[cfg(feature = "moonshine")]
+        TranscriptionEngine::Moonshine => {
+            let moonshine_config = config.moonshine.as_ref().ok_or_else(|| {
+                TranscribeError::InitFailed(
+                    "Moonshine engine selected but [moonshine] config section is missing"
+                        .to_string(),
+                )
+            })?;
+            Ok(Box::new(moonshine::MoonshineTranscriber::new(
+                moonshine_config,
+            )?))
+        }
+        #[cfg(not(feature = "moonshine"))]
+        TranscriptionEngine::Moonshine => Err(TranscribeError::InitFailed(
+            "Moonshine engine requested but voxtype was not compiled with --features moonshine"
+                .to_string(),
+        )),
+        #[cfg(feature = "sensevoice")]
+        TranscriptionEngine::SenseVoice => {
+            let sensevoice_config = config.sensevoice.as_ref().ok_or_else(|| {
+                TranscribeError::InitFailed(
+                    "SenseVoice engine selected but [sensevoice] config section is missing"
+                        .to_string(),
+                )
+            })?;
+            Ok(Box::new(sensevoice::SenseVoiceTranscriber::new(
+                sensevoice_config,
+            )?))
+        }
+        #[cfg(not(feature = "sensevoice"))]
+        TranscriptionEngine::SenseVoice => Err(TranscribeError::InitFailed(
+            "SenseVoice engine requested but voxtype was not compiled with --features sensevoice"
+                .to_string(),
+        )),
+        #[cfg(feature = "paraformer")]
+        TranscriptionEngine::Paraformer => {
+            let cfg = config.paraformer.as_ref().ok_or_else(|| {
+                TranscribeError::InitFailed(
+                    "Paraformer engine selected but [paraformer] config section is missing"
+                        .to_string(),
+                )
+            })?;
+            Ok(Box::new(paraformer::ParaformerTranscriber::new(cfg)?))
+        }
+        #[cfg(not(feature = "paraformer"))]
+        TranscriptionEngine::Paraformer => Err(TranscribeError::InitFailed(
+            "Paraformer engine requested but voxtype was not compiled with --features paraformer"
+                .to_string(),
+        )),
+        #[cfg(feature = "dolphin")]
+        TranscriptionEngine::Dolphin => {
+            let cfg = config.dolphin.as_ref().ok_or_else(|| {
+                TranscribeError::InitFailed(
+                    "Dolphin engine selected but [dolphin] config section is missing".to_string(),
+                )
+            })?;
+            Ok(Box::new(dolphin::DolphinTranscriber::new(cfg)?))
+        }
+        #[cfg(not(feature = "dolphin"))]
+        TranscriptionEngine::Dolphin => Err(TranscribeError::InitFailed(
+            "Dolphin engine requested but voxtype was not compiled with --features dolphin"
+                .to_string(),
+        )),
+        #[cfg(feature = "omnilingual")]
+        TranscriptionEngine::Omnilingual => {
+            let cfg = config.omnilingual.as_ref().ok_or_else(|| {
+                TranscribeError::InitFailed(
+                    "Omnilingual engine selected but [omnilingual] config section is missing"
+                        .to_string(),
+                )
+            })?;
+            Ok(Box::new(omnilingual::OmnilingualTranscriber::new(cfg)?))
+        }
+        #[cfg(not(feature = "omnilingual"))]
+        TranscriptionEngine::Omnilingual => Err(TranscribeError::InitFailed(
+            "Omnilingual engine requested but voxtype was not compiled with --features omnilingual"
                 .to_string(),
         )),
     }
@@ -76,7 +194,10 @@ pub fn create_transcriber_with_config_path(
     // Apply GPU selection from VOXTYPE_VULKAN_DEVICE environment variable
     // This sets VK_LOADER_DRIVERS_SELECT to filter Vulkan drivers
     if let Some(vendor) = gpu::apply_gpu_selection() {
-        tracing::info!("GPU selection: {} (via VOXTYPE_VULKAN_DEVICE)", vendor.display_name());
+        tracing::info!(
+            "GPU selection: {} (via VOXTYPE_VULKAN_DEVICE)",
+            vendor.display_name()
+        );
     }
 
     match config.effective_mode() {

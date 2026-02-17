@@ -160,6 +160,8 @@ fn key_name_to_evdev(name: &str) -> Result<u16, String> {
 pub struct PasteOutput {
     /// Whether to send Enter key after output
     auto_submit: bool,
+    /// Text to append after transcription (before auto_submit)
+    append_text: Option<String>,
     /// Parsed paste keystroke
     keystroke: ParsedKeystroke,
     /// Delay between key events in milliseconds
@@ -172,6 +174,7 @@ impl PasteOutput {
     /// Create a new paste output
     pub fn new(
         auto_submit: bool,
+        append_text: Option<String>,
         paste_keys: Option<String>,
         type_delay_ms: u32,
         pre_type_delay_ms: u32,
@@ -190,6 +193,7 @@ impl PasteOutput {
 
         Self {
             auto_submit,
+            append_text,
             keystroke,
             type_delay_ms,
             pre_type_delay_ms,
@@ -445,8 +449,15 @@ impl TextOutput for PasteOutput {
             return Ok(());
         }
 
+        // Prepare text with optional append
+        let text_to_paste = if let Some(ref append) = self.append_text {
+            format!("{}{}", text, append)
+        } else {
+            text.to_string()
+        };
+
         // Step 1: Copy to clipboard
-        self.copy_to_clipboard(text).await?;
+        self.copy_to_clipboard(&text_to_paste).await?;
 
         // Pre-paste delay to ensure clipboard is set before pasting
         // Default to 100ms if not configured (minimum needed for reliability)

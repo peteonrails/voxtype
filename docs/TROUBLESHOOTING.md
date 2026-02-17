@@ -5,9 +5,11 @@ Solutions to common issues when using Voxtype.
 ## Table of Contents
 
 - [Modifier Key Interference (Hyprland/Sway/River)](#modifier-key-interference-hyprlandswayriver)
+- [Hotkey Detection on KDE Plasma](#hotkey-detection-on-kde-plasma)
 - [Permission Issues](#permission-issues)
 - [Audio Problems](#audio-problems)
 - [Transcription Issues](#transcription-issues)
+- [Voice Activity Detection (VAD)](#voice-activity-detection-vad)
 - [Output Problems](#output-problems)
   - [wtype not working on KDE Plasma or GNOME Wayland](#wtype-not-working-on-kde-plasma-or-gnome-wayland)
   - [Text output not working on X11](#text-output-not-working-on-x11)
@@ -99,6 +101,89 @@ The automatic fix (`voxtype setup compositor`) only works on compositors that su
    This gives you 300ms to release all keys before typing starts.
 
 3. **Use voxtype's built-in evdev hotkey** instead of compositor keybindings - release timing doesn't matter since voxtype controls the entire recording flow.
+
+---
+
+## Hotkey Detection on KDE Plasma
+
+### Meta+modifier hotkeys not detected (evdev mode)
+
+**Symptoms:** When using evdev hotkey detection (`[hotkey] enabled = true`) on KDE Plasma, hotkeys like Meta+Shift, Meta+Ctrl, or Meta+Alt are not detected. Voxtype shows no events in debug logs when these keys are pressed. Non-modifier keys with Meta work fine (e.g., Meta+RightAlt).
+
+**Example:**
+```toml
+[hotkey]
+enabled = true
+key = "LEFTSHIFT"
+modifiers = ["LEFTMETA"]
+```
+
+Pressing Meta+Shift produces no debug output. Changing to `key = "RIGHTALT"` with the same modifiers works correctly.
+
+**Cause:** KDE Plasma grabs Meta+modifier combinations (Meta+Shift, Meta+Ctrl, Meta+Alt) at the compositor level for desktop switching, window management, and other shortcuts. The compositor handles these key combinations before they reach evdev, preventing voxtype from receiving the events. This is compositor behavior, not a voxtype bug.
+
+The kernel delivers these events correctly (visible via `sudo evtest`), but KDE prevents them from reaching applications using evdev.
+
+**Workarounds:**
+
+**1. Use compositor keybindings instead of evdev (recommended)**
+
+Disable evdev hotkey detection and bind voxtype commands directly in KDE System Settings:
+
+```toml
+[hotkey]
+enabled = false  # Disable evdev, use compositor bindings instead
+```
+
+Then set up KDE shortcuts:
+1. Open System Settings → Shortcuts → Custom Shortcuts
+2. Create a new shortcut for `voxtype record toggle`
+3. Assign it to your desired key combination (e.g., Meta+Shift)
+
+This approach works reliably because the compositor processes the hotkey before any grabbing happens.
+
+**2. Disable conflicting KDE shortcuts**
+
+If you want to use evdev mode, remove KDE shortcuts that use your target hotkey:
+
+1. Open System Settings → Shortcuts
+2. Search for shortcuts using Meta+Shift (or your target combination)
+3. Disable or rebind conflicting shortcuts
+4. Test with `voxtype -vv` to verify events are received
+
+**3. Use non-modifier target keys**
+
+Keys like F13-F24, ScrollLock, or Pause are not grabbed by KDE:
+
+```toml
+[hotkey]
+enabled = true
+key = "SCROLLLOCK"
+modifiers = ["LEFTMETA"]  # Meta+ScrollLock works
+```
+
+Or use a single non-modifier key without any modifiers:
+
+```toml
+[hotkey]
+enabled = true
+key = "SCROLLLOCK"  # No modifiers needed
+```
+
+**4. Use Alt+Shift with correct key ordering**
+
+On KDE, Alt+Shift has strict ordering requirements. This configuration works reliably:
+
+```toml
+[hotkey]
+enabled = true
+key = "LEFTALT"
+modifiers = ["LEFTSHIFT"]  # Press Shift first, then Alt
+```
+
+Press Shift first, then Alt while holding Shift. This avoids KDE keyboard layout switching and works consistently.
+
+**Note:** This is not a voxtype limitation. Any application using evdev on KDE Plasma will experience the same behavior with Meta+modifier hotkeys. The compositor keybinding approach is the most reliable solution on KDE.
 
 ---
 
@@ -326,6 +411,77 @@ If you experience phrase repetition (e.g., "word word word"), make sure this set
    ```
 2. Try a different model (large-v3-turbo and large-v3 are most affected)
 3. If using context optimization and experiencing issues, disable it
+
+---
+
+## Voice Activity Detection (VAD)
+
+### VAD filters too aggressively (rejects recordings with speech)
+
+**Symptom:** VAD rejects recordings that contain speech, showing "No speech detected" in notifications or logs.
+
+**Cause:** The detection threshold is too high for your microphone or environment.
+
+**Solution:** Lower the threshold. The default is 0.5. Values closer to 0.0 are more sensitive:
+
+```toml
+[vad]
+enabled = true
+threshold = 0.2  # More sensitive, less likely to reject speech
+```
+
+You can also reduce `min_speech_duration_ms` if very short utterances are being rejected:
+
+```toml
+[vad]
+enabled = true
+threshold = 0.3
+min_speech_duration_ms = 50  # Accept shorter speech segments (default: 100)
+```
+
+### VAD model not found (Whisper VAD backend)
+
+**Symptom:** Error about missing VAD model when using `backend = "whisper"` or `backend = "auto"` with the Whisper engine.
+
+**Solution:** Download the Silero VAD model:
+
+```bash
+voxtype setup vad
+```
+
+Alternatively, switch to the energy backend which requires no model download:
+
+```toml
+[vad]
+enabled = true
+backend = "energy"
+```
+
+### VAD doesn't filter silence
+
+**Symptom:** VAD is enabled but silent recordings still get transcribed, producing hallucinations.
+
+**Possible causes:**
+1. Background noise above the threshold. Lower your microphone gain or raise the threshold:
+   ```toml
+   [vad]
+   enabled = true
+   threshold = 0.7  # Require louder speech
+   ```
+2. The energy backend may be less accurate than the Whisper backend for borderline cases. Try switching:
+   ```toml
+   [vad]
+   enabled = true
+   backend = "whisper"  # More accurate, requires: voxtype setup vad
+   ```
+
+**Debugging:** Run with verbose logging to see VAD decisions:
+
+```bash
+voxtype -vv
+```
+
+Look for log messages about speech detection to understand what VAD is doing with your recordings.
 
 ---
 

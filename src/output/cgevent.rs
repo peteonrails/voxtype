@@ -203,20 +203,21 @@ impl TextOutput for CGEventOutput {
             return Err(OutputError::InjectionFailed(
                 "Accessibility permission required.\n\
                  Grant access in: System Settings > Privacy & Security > Accessibility\n\
-                 Then restart voxtype.".into()
+                 Then restart voxtype."
+                    .into(),
             ));
         }
 
         // Pre-typing delay
         if self.pre_type_delay_ms > 0 {
-            tracing::debug!("cgevent: waiting {}ms before typing", self.pre_type_delay_ms);
+            tracing::debug!(
+                "cgevent: waiting {}ms before typing",
+                self.pre_type_delay_ms
+            );
             tokio::time::sleep(Duration::from_millis(self.pre_type_delay_ms as u64)).await;
         }
 
-        tracing::debug!(
-            "cgevent: typing {} chars",
-            text.chars().count()
-        );
+        tracing::debug!("cgevent: typing {} chars", text.chars().count());
 
         // CGEventSource is not Send, so do all CGEvent work in spawn_blocking
         let text_owned = text.to_string();

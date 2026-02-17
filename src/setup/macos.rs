@@ -45,7 +45,10 @@ async fn reset_permissions() -> bool {
 /// Check if Accessibility permission is granted using AXIsProcessTrusted equivalent
 async fn check_accessibility_permission() -> bool {
     let output = tokio::process::Command::new("osascript")
-        .args(["-e", "tell application \"System Events\" to return name of first process"])
+        .args([
+            "-e",
+            "tell application \"System Events\" to return name of first process",
+        ])
         .output()
         .await;
 
@@ -57,7 +60,10 @@ async fn check_accessibility_permission() -> bool {
 
 /// Open System Settings to a specific privacy pane
 async fn open_privacy_settings(pane: &str) -> bool {
-    let url = format!("x-apple.systempreferences:com.apple.preference.security?Privacy_{}", pane);
+    let url = format!(
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_{}",
+        pane
+    );
 
     tokio::process::Command::new("open")
         .arg(&url)
@@ -269,7 +275,9 @@ pub async fn run() -> anyhow::Result<()> {
         println!("    \x1b[1mAction required:\x1b[0m");
         println!("    1. If a permission dialog appears, click 'OK' to allow microphone access");
         println!("    2. If no dialog appears, find 'Voxtype' in the list and toggle it ON");
-        println!("    3. If Voxtype isn't in the list, press the hotkey once to trigger the prompt");
+        println!(
+            "    3. If Voxtype isn't in the list, press the hotkey once to trigger the prompt"
+        );
         println!();
 
         wait_for_enter("Press Enter when microphone permission is granted...");
@@ -397,7 +405,10 @@ pub async fn run() -> anyhow::Result<()> {
     };
 
     let hotkey = prompt("\nHotkey to use", "fn");
-    let toggle_mode = prompt_yn("Use toggle mode? (press to start/stop instead of hold)", false);
+    let toggle_mode = prompt_yn(
+        "Use toggle mode? (press to start/stop instead of hold)",
+        false,
+    );
 
     if use_hammerspoon {
         println!();
@@ -408,7 +419,14 @@ pub async fn run() -> anyhow::Result<()> {
         }
     } else {
         print_success(&format!("Configured native hotkey: {}", hotkey));
-        print_info(&format!("Mode: {}", if toggle_mode { "toggle" } else { "push-to-talk" }));
+        print_info(&format!(
+            "Mode: {}",
+            if toggle_mode {
+                "toggle"
+            } else {
+                "push-to-talk"
+            }
+        ));
     }
 
     // Step 7: Auto-start (Login Items)
@@ -500,7 +518,9 @@ pub async fn run() -> anyhow::Result<()> {
             println!("  parakeet-tdt-0.6b-v3-int8 - Quantized, faster (~670 MB)");
             println!();
 
-            let current = config.parakeet.as_ref()
+            let current = config
+                .parakeet
+                .as_ref()
                 .map(|p| p.model.as_str())
                 .unwrap_or("parakeet-tdt-0.6b-v3-int8");
             let model = prompt("Model to use", current);
@@ -561,8 +581,8 @@ pub async fn run() -> anyhow::Result<()> {
     // Download and configure the selected model
     if use_parakeet {
         let model_path = models_dir.join(&model);
-        let model_valid = model_path.exists()
-            && super::model::validate_parakeet_model(&model_path).is_ok();
+        let model_valid =
+            model_path.exists() && super::model::validate_parakeet_model(&model_path).is_ok();
 
         if model_valid {
             print_success(&format!("Model '{}' is already downloaded", model));
@@ -621,10 +641,25 @@ pub async fn run() -> anyhow::Result<()> {
     } else {
         println!("  Hotkey method:  Native (rdev)");
     }
-    println!("  Hotkey:         {} ({})", hotkey, if toggle_mode { "toggle" } else { "push-to-talk" });
+    println!(
+        "  Hotkey:         {} ({})",
+        hotkey,
+        if toggle_mode {
+            "toggle"
+        } else {
+            "push-to-talk"
+        }
+    );
     println!("  Engine:         {}", engine_name);
     println!("  Model:          {}", model);
-    println!("  Auto-start:     {}", if setup_autostart { "Login Items" } else { "disabled" });
+    println!(
+        "  Auto-start:     {}",
+        if setup_autostart {
+            "Login Items"
+        } else {
+            "disabled"
+        }
+    );
 
     println!("\n\x1b[1mStarting Voxtype...\x1b[0m\n");
 

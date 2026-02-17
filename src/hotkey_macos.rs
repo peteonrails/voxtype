@@ -11,15 +11,17 @@ use crate::error::{HotkeyError, Result};
 use rdev::{listen, Event, EventType, Key};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 /// Hotkey events that can be sent from the listener
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HotkeyEvent {
     /// The hotkey was pressed (model_override not supported on macOS, always None)
-    Pressed { model_override: Option<String> },
+    Pressed {
+        model_override: Option<String>,
+    },
     Released,
     Cancel,
 }
@@ -44,14 +46,10 @@ pub struct RdevHotkeyListener {
 impl RdevHotkeyListener {
     /// Create a new rdev hotkey listener
     pub fn new(config: &HotkeyConfig) -> Result<Self> {
-        let target_key = parse_key_name(&config.key).ok_or_else(|| {
-            HotkeyError::UnknownKey(config.key.clone())
-        })?;
+        let target_key = parse_key_name(&config.key)
+            .ok_or_else(|| HotkeyError::UnknownKey(config.key.clone()))?;
 
-        let cancel_key = config
-            .cancel_key
-            .as_ref()
-            .and_then(|k| parse_key_name(k));
+        let cancel_key = config.cancel_key.as_ref().and_then(|k| parse_key_name(k));
 
         Ok(Self {
             target_key,
@@ -93,7 +91,9 @@ impl HotkeyListener for RdevHotkeyListener {
                             let mut last = last_press_clone.lock().unwrap();
                             if last.elapsed() > Duration::from_millis(debounce_ms) {
                                 *last = Instant::now();
-                                let _ = tx_clone.blocking_send(HotkeyEvent::Pressed { model_override: None });
+                                let _ = tx_clone.blocking_send(HotkeyEvent::Pressed {
+                                    model_override: None,
+                                });
                             }
                         } else if Some(key) == cancel_key {
                             let _ = tx_clone.blocking_send(HotkeyEvent::Cancel);

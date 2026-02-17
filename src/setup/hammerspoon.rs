@@ -43,7 +43,8 @@ async fn is_hammerspoon_installed() -> bool {
 
 /// Install the voxtype.lua module to ~/.hammerspoon/
 async fn install_module() -> anyhow::Result<()> {
-    let hs_dir = hammerspoon_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+    let hs_dir =
+        hammerspoon_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
 
     // Create .hammerspoon directory if needed
     if !hs_dir.exists() {
@@ -116,7 +117,8 @@ pub async fn run(install: bool, show: bool, hotkey: &str, toggle: bool) -> anyho
         println!("  rightalt, leftalt, rightcmd, leftcmd, rightctrl, leftctrl");
         println!("  rightshift, leftshift, f1-f20, escape, space, tab, etc.\n");
 
-        println!("Current Hammerspoon directory: {}",
+        println!(
+            "Current Hammerspoon directory: {}",
             hammerspoon_dir()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "not found".to_string())

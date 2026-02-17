@@ -45,12 +45,7 @@ pub async fn send_with_engine(title: &str, body: &str, engine: Option<Transcript
 #[cfg(target_os = "linux")]
 async fn send_linux(title: &str, body: &str) {
     let result = Command::new("notify-send")
-        .args([
-            "--app-name=Voxtype",
-            "--expire-time=2000",
-            title,
-            body,
-        ])
+        .args(["--app-name=Voxtype", "--expire-time=2000", title, body])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -72,18 +67,30 @@ fn send_macos_native(title: &str, body: &str, engine: Option<TranscriptionEngine
     let notifier_paths = [bundled_path, "terminal-notifier"];
 
     // Engine-specific content images
-    let content_image = engine.map(|e| match e {
+    let content_image = engine.and_then(|e| match e {
         TranscriptionEngine::Parakeet => {
-            "/Applications/Voxtype.app/Contents/Resources/parakeet.png"
+            Some("/Applications/Voxtype.app/Contents/Resources/parakeet.png")
         }
         TranscriptionEngine::Whisper => {
-            "/Applications/Voxtype.app/Contents/Resources/whisper.png"
+            Some("/Applications/Voxtype.app/Contents/Resources/whisper.png")
         }
+        TranscriptionEngine::Moonshine
+        | TranscriptionEngine::SenseVoice
+        | TranscriptionEngine::Paraformer
+        | TranscriptionEngine::Dolphin
+        | TranscriptionEngine::Omnilingual => None,
     });
 
     for notifier in notifier_paths {
         let mut cmd = std::process::Command::new(notifier);
-        cmd.args(["-title", title, "-message", body, "-sender", "io.voxtype.menubar"]);
+        cmd.args([
+            "-title",
+            title,
+            "-message",
+            body,
+            "-sender",
+            "io.voxtype.menubar",
+        ]);
 
         if let Some(image_path) = content_image {
             // Only add content image if the file exists
@@ -154,12 +161,7 @@ pub fn send_sync_with_engine(title: &str, body: &str, engine: Option<Transcripti
 #[cfg(target_os = "linux")]
 fn send_linux_sync(title: &str, body: &str) {
     let _ = std::process::Command::new("notify-send")
-        .args([
-            "--app-name=Voxtype",
-            "--expire-time=5000",
-            title,
-            body,
-        ])
+        .args(["--app-name=Voxtype", "--expire-time=5000", title, body])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn();

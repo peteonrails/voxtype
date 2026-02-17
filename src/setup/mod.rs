@@ -9,11 +9,11 @@
 //! - Parakeet backend management
 //! - Compositor integration (modifier key fix)
 
+#[cfg(target_os = "macos")]
+pub mod app_bundle;
 pub mod compositor;
 pub mod dms;
 pub mod gpu;
-#[cfg(target_os = "macos")]
-pub mod app_bundle;
 #[cfg(target_os = "macos")]
 pub mod hammerspoon;
 pub mod launchd;
@@ -22,6 +22,7 @@ pub mod macos;
 pub mod model;
 pub mod parakeet;
 pub mod systemd;
+pub mod vad;
 pub mod waybar;
 
 use crate::config::Config;
@@ -367,10 +368,16 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
     } else {
         // Linux tools
         // wtype
-        print_tool_status(&status.wtype, status.display_server == DisplayServer::Wayland);
+        print_tool_status(
+            &status.wtype,
+            status.display_server == DisplayServer::Wayland,
+        );
 
         // eitype
-        print_tool_status(&status.eitype, status.display_server == DisplayServer::Wayland);
+        print_tool_status(
+            &status.eitype,
+            status.display_server == DisplayServer::Wayland,
+        );
 
         // ydotool
         if status.ydotool.installed {
@@ -397,7 +404,10 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
         }
 
         // wl-copy
-        print_tool_status(&status.wl_copy, status.display_server == DisplayServer::Wayland);
+        print_tool_status(
+            &status.wl_copy,
+            status.display_server == DisplayServer::Wayland,
+        );
 
         // xclip (only show on X11 or if installed)
         if status.display_server == DisplayServer::X11 || status.xclip.installed {
@@ -524,16 +534,22 @@ pub async fn run_setup(
 
     let models_dir = Config::models_dir();
 
-    // Check if model_override is a Parakeet model
+    // Check if model_override is a Parakeet or SenseVoice model
     let is_parakeet = model_override
-        .map(|name| model::is_parakeet_model(name))
+        .map(model::is_parakeet_model)
+        .unwrap_or(false);
+    let is_sensevoice = model_override
+        .map(model::is_sensevoice_model)
         .unwrap_or(false);
 
     // Validate model_override if provided (variable unused after this, each branch re-defines)
     let _model_name: &str = match model_override {
         Some(name) => {
-            // Validate the model name (check both Whisper and Parakeet)
-            if !model::is_valid_model(name) && !model::is_parakeet_model(name) {
+            // Validate the model name (check Whisper, Parakeet, and SenseVoice)
+            if !model::is_valid_model(name)
+                && !model::is_parakeet_model(name)
+                && !model::is_sensevoice_model(name)
+            {
                 let valid = model::valid_model_names().join(", ");
                 anyhow::bail!("Unknown model '{}'. Valid models are: {}", name, valid);
             }
@@ -542,28 +558,31 @@ pub async fn run_setup(
         None => &config.whisper.model,
     };
 
-    if is_parakeet {
-        // Handle Parakeet model
+    if is_sensevoice {
+        // Handle SenseVoice model
         #[allow(unused_variables)]
-        let model_name = model_override.unwrap(); // Safe: is_parakeet implies Some
+        let model_name = model_override.unwrap(); // Safe: is_sensevoice implies Some
 
         if !quiet {
-            println!("\nParakeet model (EXPERIMENTAL)...");
+            println!("\nSenseVoice model...");
         }
 
-        // Check if parakeet feature is enabled
-        #[cfg(not(feature = "parakeet"))]
+        #[cfg(not(feature = "sensevoice"))]
         {
-            print_failure(&format!("Parakeet model '{}' requires the 'parakeet' feature", model_name));
-            println!("       Rebuild with: cargo build --features parakeet");
-            anyhow::bail!("Parakeet feature not enabled");
+            print_failure(&format!(
+                "SenseVoice model '{}' requires the 'sensevoice' feature",
+                model_name
+            ));
+            println!("       Rebuild with: cargo build --features sensevoice");
+            anyhow::bail!("SenseVoice feature not enabled");
         }
 
-        #[cfg(feature = "parakeet")]
+        #[cfg(feature = "sensevoice")]
         {
-            let model_path = models_dir.join(model_name);
-            let model_valid = model_path.exists()
-                && model::validate_parakeet_model(&model_path).is_ok();
+            let dir_name = model::sensevoice_dir_name(model_name).unwrap();
+            let model_path = models_dir.join(dir_name);
+            let model_valid =
+                model_path.exists() && model::validate_sensevoice_model(&model_path).is_ok();
 
             if model_valid {
                 if !quiet {
@@ -576,10 +595,56 @@ pub async fn run_setup(
                                 .sum::<f64>()
                         })
                         .unwrap_or(0.0);
-                    print_success(&format!(
-                        "Model ready: {} ({:.0} MB)",
-                        model_name, size
-                    ));
+                    print_success(&format!("Model ready: {} ({:.0} MB)", model_name, size));
+                }
+            } else if download {
+                model::download_sensevoice_model(model_name)?;
+            } else if !quiet {
+                print_info(&format!("Model '{}' not downloaded yet", model_name));
+                println!(
+                    "       Run: voxtype setup --download --model {}",
+                    model_name
+                );
+            }
+        }
+    } else if is_parakeet {
+        // Handle Parakeet model
+        #[allow(unused_variables)]
+        let model_name = model_override.unwrap(); // Safe: is_parakeet implies Some
+
+        if !quiet {
+            println!("\nParakeet model (EXPERIMENTAL)...");
+        }
+
+        // Check if parakeet feature is enabled
+        #[cfg(not(feature = "parakeet"))]
+        {
+            print_failure(&format!(
+                "Parakeet model '{}' requires the 'parakeet' feature",
+                model_name
+            ));
+            println!("       Rebuild with: cargo build --features parakeet");
+            anyhow::bail!("Parakeet feature not enabled");
+        }
+
+        #[cfg(feature = "parakeet")]
+        {
+            let model_path = models_dir.join(model_name);
+            let model_valid =
+                model_path.exists() && model::validate_parakeet_model(&model_path).is_ok();
+
+            if model_valid {
+                if !quiet {
+                    let size = std::fs::read_dir(&model_path)
+                        .map(|entries| {
+                            entries
+                                .flatten()
+                                .filter_map(|e| e.metadata().ok())
+                                .map(|m| m.len() as f64 / 1024.0 / 1024.0)
+                                .sum::<f64>()
+                        })
+                        .unwrap_or(0.0);
+                    print_success(&format!("Model ready: {} ({:.0} MB)", model_name, size));
                 }
                 // Update config to use Parakeet
                 model::set_parakeet_config(model_name)?;
@@ -601,7 +666,10 @@ pub async fn run_setup(
                 }
             } else if !quiet {
                 print_info(&format!("Model '{}' not downloaded yet", model_name));
-                println!("       Run: voxtype setup --download --model {}", model_name);
+                println!(
+                    "       Run: voxtype setup --download --model {}",
+                    model_name
+                );
             }
         }
     } else {
@@ -637,10 +705,7 @@ pub async fn run_setup(
                 let size = std::fs::metadata(&model_path)
                     .map(|m| m.len() as f64 / 1024.0 / 1024.0)
                     .unwrap_or(0.0);
-                print_success(&format!(
-                    "Model ready: {} ({:.0} MB)",
-                    model_name, size
-                ));
+                print_success(&format!("Model ready: {} ({:.0} MB)", model_name, size));
             }
             // If user explicitly requested this model, update config even if already downloaded
             if model_override.is_some() {
@@ -866,9 +931,14 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
     if config.engine == crate::config::TranscriptionEngine::Parakeet {
         if let Some(ref parakeet_config) = config.parakeet {
             let configured_model = &parakeet_config.model;
-            let model_found = parakeet_models.iter().any(|(name, _)| name == configured_model);
+            let model_found = parakeet_models
+                .iter()
+                .any(|(name, _)| name == configured_model);
             if !model_found {
-                print_failure(&format!("Configured Parakeet model '{}' not found", configured_model));
+                print_failure(&format!(
+                    "Configured Parakeet model '{}' not found",
+                    configured_model
+                ));
                 println!("       Download the model or change config to use an available model");
                 all_ok = false;
             }

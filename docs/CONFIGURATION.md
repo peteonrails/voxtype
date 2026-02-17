@@ -26,6 +26,7 @@ Selects which speech-to-text engine to use for transcription.
 **Values:**
 - `whisper` - OpenAI Whisper via whisper.cpp (default, recommended)
 - `parakeet` - NVIDIA Parakeet via ONNX Runtime (experimental, requires special binary)
+- `moonshine` - Moonshine encoder-decoder transformer via ONNX Runtime (experimental, requires special binary)
 
 **Example:**
 ```toml
@@ -38,9 +39,11 @@ voxtype --engine parakeet daemon
 ```
 
 **Notes:**
-- Parakeet requires a Parakeet-enabled binary (`voxtype-*-parakeet-*`)
+- Parakeet requires an ONNX-enabled binary (`voxtype-*-onnx-*`)
 - When using Parakeet, you must also configure the `[parakeet]` section
+- When using Moonshine, you must also configure the `[moonshine]` section
 - See [PARAKEET.md](PARAKEET.md) for detailed Parakeet setup instructions
+- See [MOONSHINE.md](MOONSHINE.md) for detailed Moonshine setup instructions
 
 ---
 
@@ -284,7 +287,7 @@ sample_rate = 16000
 **Default:** `60`
 **Required:** No
 
-Maximum recording duration in seconds. Recording automatically stops after this limit as a safety measure.
+Maximum recording duration in seconds. Recording automatically stops after this limit as a safety measure. When the limit is reached, the captured audio is transcribed and output normally rather than being discarded.
 
 **Example:**
 ```toml
@@ -609,6 +612,100 @@ voxtype --whisper-context-optimization daemon
 ```
 
 **Note:** This setting only applies when using the local whisper backend (`backend = "local"`). It has no effect with remote transcription.
+
+### eager_processing
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Enable eager input processing. When enabled, audio is split into chunks and transcribed in parallel with continued recording, reducing perceived latency on slower machines.
+
+**Values:**
+- `false` (default) - Traditional mode: record all audio, then transcribe
+- `true` - Eager mode: transcribe chunks while recording continues
+
+**How it works:**
+
+1. While recording, audio is split into fixed-size chunks (default 5 seconds)
+2. Each chunk is sent for transcription as soon as it's ready
+3. Recording continues while earlier chunks are being transcribed
+4. When recording stops, all chunk results are combined
+
+**When to use eager processing:**
+- You have a slower CPU where transcription takes several seconds
+- You regularly dictate longer passages (10+ seconds)
+- You want to minimize the delay between speaking and text output
+
+**When to keep default (`false`):**
+- You have a fast CPU or GPU acceleration
+- Your recordings are typically short (under 5 seconds)
+- You want maximum transcription accuracy (single-pass is more consistent)
+
+**Example:**
+```toml
+[whisper]
+model = "base.en"
+eager_processing = true
+eager_chunk_secs = 5.0    # 5 second chunks
+eager_overlap_secs = 0.5  # 0.5 second overlap
+```
+
+**CLI override:**
+```bash
+voxtype --eager-processing daemon
+```
+
+**Note:** Eager processing is experimental. There may be occasional word duplications or omissions at chunk boundaries.
+
+### eager_chunk_secs
+
+**Type:** Float
+**Default:** `5.0`
+**Required:** No
+
+Duration of each audio chunk in seconds when eager processing is enabled.
+
+**Example:**
+```toml
+[whisper]
+eager_processing = true
+eager_chunk_secs = 3.0  # Shorter chunks for faster feedback
+```
+
+**CLI override:**
+```bash
+voxtype --eager-processing --eager-chunk-secs 3.0 daemon
+```
+
+**Trade-offs:**
+- Shorter chunks: Faster feedback, but more boundary artifacts
+- Longer chunks: Better accuracy, but less parallelism benefit
+
+### eager_overlap_secs
+
+**Type:** Float
+**Default:** `0.5`
+**Required:** No
+
+Overlap duration in seconds between adjacent chunks when eager processing is enabled. Overlap helps catch words that span chunk boundaries.
+
+**Example:**
+```toml
+[whisper]
+eager_processing = true
+eager_chunk_secs = 5.0
+eager_overlap_secs = 1.0  # More overlap for better boundary handling
+```
+
+**CLI override:**
+```bash
+voxtype --eager-processing --eager-overlap-secs 1.0 daemon
+```
+
+**Trade-offs:**
+- More overlap: Better word boundary handling, slightly more processing
+- Less overlap: Faster processing, but may miss words at boundaries
 
 ### initial_prompt
 
@@ -946,6 +1043,96 @@ on_demand_loading = false  # Keep model loaded for fast response
 
 ---
 
+## [moonshine]
+
+Configuration for the Moonshine speech-to-text engine. This section is only used when `engine = "moonshine"`.
+
+> **Note:** Moonshine support is experimental. See [MOONSHINE.md](MOONSHINE.md) for detailed setup instructions.
+
+### model
+
+**Type:** String
+**Default:** `"base"`
+**Required:** No
+
+The Moonshine model to use. Can be a model name (looked up in `~/.local/share/voxtype/models/moonshine-{name}/`) or an absolute path to a model directory.
+
+**Available models:**
+
+| Model | Parameters | Size | Description |
+|-------|-----------|------|-------------|
+| `tiny` | 27M | 100MB | Fastest, English |
+| `base` | 61M | 237MB | Better accuracy, English |
+| `base-ja` | 61M | 237MB | Multilingual (Japanese) |
+| `base-zh` | 61M | 237MB | Multilingual (Mandarin) |
+| `tiny-ja` | 27M | 100MB | Multilingual (Japanese) |
+| `tiny-zh` | 27M | 100MB | Multilingual (Mandarin) |
+| `tiny-ko` | 27M | 100MB | Multilingual (Korean) |
+| `tiny-ar` | 27M | 100MB | Multilingual (Arabic) |
+
+**Example:**
+```toml
+[moonshine]
+model = "base"
+```
+
+**Using absolute path:**
+```toml
+[moonshine]
+model = "/opt/models/moonshine-base"
+```
+
+### quantized
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Use quantized model files if available. Quantized models are smaller and faster. Falls back to full precision if quantized files are not found.
+
+**Example:**
+```toml
+[moonshine]
+model = "base"
+quantized = true
+```
+
+### on_demand_loading
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Same behavior as `[whisper].on_demand_loading`. When `true`, loads the model only when recording starts and unloads after transcription.
+
+**Example:**
+```toml
+[moonshine]
+model = "base"
+on_demand_loading = true  # Free memory when not transcribing
+```
+
+### Configuration Summary
+
+| Option | CLI Flag | Environment Variable | Default | Description |
+|--------|----------|---------------------|---------|-------------|
+| `model` | `--model` | `VOXTYPE_MODEL` | `"base"` | Moonshine model name or path |
+| `quantized` | - | - | `true` | Use quantized model files when available |
+| `on_demand_loading` | - | - | `false` | Load model only when recording starts |
+
+### Complete Example
+
+```toml
+engine = "moonshine"
+
+[moonshine]
+model = "base"
+quantized = true
+on_demand_loading = false  # Keep model loaded for fast response
+```
+
+---
+
 ## [output]
 
 Controls how transcribed text is delivered.
@@ -1241,6 +1428,31 @@ auto_submit = true  # Press Enter after transcription
 ```
 
 **Note:** This works with all output modes (`type`, `paste`) but has no effect in `clipboard` mode since clipboard-only output doesn't simulate keypresses.
+
+### append_text
+
+**Type:** String
+**Default:** None (disabled)
+**Required:** No
+**Environment Variable:** `VOXTYPE_APPEND_TEXT`
+
+Text to append after each transcription. Appended after the main transcription but before `auto_submit` (if enabled). Useful for separating sentences when dictating paragraphs incrementally.
+
+**Common use case:** When transcribing a paragraph sentence by sentence, there are no spaces between each sentence. Setting `append_text = " "` adds a space after each transcription, creating proper sentence separation.
+
+**Example:**
+```toml
+[output]
+append_text = " "  # Add a space after each transcription
+```
+
+**How it works:**
+- In `type` mode: Types the text after the main transcription
+- In `paste` mode: Includes the text in the clipboard before pasting
+- In `clipboard` mode: Includes the text in the clipboard
+- With `auto_submit = true`: The append_text is typed/pasted first, then Enter is sent
+
+**Note:** You can append any text, not just spaces. For example, `append_text = "\n"` would add a newline after each transcription.
 
 ### shift_enter_newlines
 
@@ -1605,6 +1817,96 @@ If Whisper transcribes "vox type" (or "Vox Type"), it will be replaced with "vox
 "oh marchy" = "Omarchy"
 "omar g" = "Omarchy"
 "omar key" = "Omarchy"
+```
+
+---
+
+## [vad]
+
+Voice Activity Detection configuration. When enabled, VAD filters silence-only recordings before transcription, preventing Whisper hallucinations when processing silence.
+
+### enabled
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Enable Voice Activity Detection. When enabled, recordings with no detected speech are rejected before transcription, saving processing time and preventing hallucinations on silent audio.
+
+**Example:**
+```toml
+[vad]
+enabled = true
+```
+
+**CLI override:**
+```bash
+voxtype --vad daemon
+```
+
+### backend
+
+**Type:** String (`auto`, `energy`, `whisper`)
+**Default:** `auto`
+**Required:** No
+
+VAD detection algorithm to use:
+
+- `auto` - Automatically select based on transcription engine:
+  - Whisper engine: uses Whisper VAD (more accurate, requires model)
+  - Parakeet engine: uses Energy VAD (fast, no model needed)
+- `energy` - Simple RMS energy-based detection. Fast and works with any engine, no model download required.
+- `whisper` - Silero VAD via whisper-rs. More accurate speech detection but requires downloading the VAD model with `voxtype setup vad`.
+
+**Example:**
+```toml
+[vad]
+enabled = true
+backend = "energy"  # Use fast energy-based detection
+```
+
+**CLI override:**
+```bash
+voxtype --vad --vad-backend whisper daemon
+```
+
+### threshold
+
+**Type:** Float (0.0 - 1.0)
+**Default:** `0.5`
+**Required:** No
+
+Speech detection sensitivity threshold. Lower values are more sensitive (detect quieter speech), higher values are more aggressive (require louder speech).
+
+- `0.0` - Very sensitive, may detect background noise as speech
+- `0.5` - Balanced, filters silence while allowing normal speech (default)
+- `1.0` - Aggressive, requires loud clear speech
+
+**Example:**
+```toml
+[vad]
+enabled = true
+threshold = 0.3  # More sensitive
+```
+
+**CLI override:**
+```bash
+voxtype --vad --vad-threshold 0.7 daemon
+```
+
+### min_speech_duration_ms
+
+**Type:** Integer
+**Default:** `100`
+**Required:** No
+
+Minimum amount of detected speech (in milliseconds) required for a recording to be transcribed. Recordings with less speech than this threshold are rejected.
+
+**Example:**
+```toml
+[vad]
+enabled = true
+min_speech_duration_ms = 200  # Require at least 200ms of speech
 ```
 
 ---

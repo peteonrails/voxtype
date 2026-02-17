@@ -1,0 +1,344 @@
+/**
+ * Customize default theme styling by overriding CSS variables:
+ * https://github.com/vuejs/vitepress/blob/main/src/client/theme-default/styles/vars.css
+ */
+
+/* ==========================================================================
+   Font Imports
+   ========================================================================== */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+
+/* ==========================================================================
+   Light Theme (Default)
+   ========================================================================== */
+
+html:not(.dark) {
+  /* Background Colors */
+  --vt-color-bg: #ffffff;
+  --vt-color-bg-secondary: #f6f8fa;
+  --vt-color-bg-tertiary: #eaeef2;
+  --vt-color-border: #d0d7de;
+
+  /* Text Colors */
+  --vt-color-text: #1f2328;
+  --vt-color-text-secondary: #656d76;
+  --vt-color-text-muted: #8c959f;
+
+  /* Accent Colors */
+  --vt-color-primary: #0969da;
+  --vt-color-primary-hover: #0550ae;
+  --vt-color-secondary: #1a7f37;
+  --vt-color-secondary-hover: #116329;
+  --vt-color-accent: #cf4a32;
+  --vt-color-success: #1a7f37;
+  --vt-color-warning: #9a6700;
+
+  /* VitePress Background Mappings */
+  --vp-c-bg: var(--vt-color-bg);
+  --vp-c-bg-alt: var(--vt-color-bg-secondary);
+  --vp-c-bg-elv: var(--vt-color-bg);
+  --vp-c-bg-soft: var(--vt-color-bg-secondary);
+  --vp-c-bg-soft-up: var(--vt-color-bg-tertiary);
+
+  /* VitePress Text Mappings */
+  --vp-c-text-1: var(--vt-color-text);
+  --vp-c-text-2: var(--vt-color-text-secondary);
+  --vp-c-text-3: var(--vt-color-text-muted);
+
+  /* VitePress Border */
+  --vp-c-border: var(--vt-color-border);
+  --vp-c-divider: var(--vt-color-border);
+  --vp-c-gutter: var(--vt-color-border);
+
+  /* VitePress Brand (Primary) */
+  --vp-c-brand-1: var(--vt-color-primary);
+  --vp-c-brand-2: var(--vt-color-primary-hover);
+  --vp-c-brand-3: var(--vt-color-primary);
+  --vp-c-brand-soft: rgba(9, 105, 218, 0.14);
+
+  /* VitePress Default (Gray) */
+  --vp-c-default-1: #656d76;
+  --vp-c-default-2: #8c959f;
+  --vp-c-default-3: #d0d7de;
+  --vp-c-default-soft: rgba(101, 109, 118, 0.14);
+
+  /* VitePress Tip (Uses Brand) */
+  --vp-c-tip-1: var(--vt-color-primary);
+  --vp-c-tip-2: var(--vt-color-primary-hover);
+  --vp-c-tip-3: var(--vt-color-primary);
+  --vp-c-tip-soft: rgba(9, 105, 218, 0.14);
+
+  /* VitePress Warning (Yellow) */
+  --vp-c-warning-1: #9a6700;
+  --vp-c-warning-2: #7a5400;
+  --vp-c-warning-3: #9a6700;
+  --vp-c-warning-soft: rgba(154, 103, 0, 0.14);
+
+  /* VitePress Danger (Red) */
+  --vp-c-danger-1: #cf222e;
+  --vp-c-danger-2: #a40e26;
+  --vp-c-danger-3: #cf222e;
+  --vp-c-danger-soft: rgba(207, 34, 46, 0.14);
+
+  /* VitePress Success (Green) */
+  --vp-c-green-1: var(--vt-color-success);
+  --vp-c-green-2: var(--vt-color-secondary-hover);
+  --vp-c-green-3: var(--vt-color-success);
+  --vp-c-green-soft: rgba(26, 127, 55, 0.14);
+
+  /* VitePress Yellow */
+  --vp-c-yellow-1: #9a6700;
+  --vp-c-yellow-2: #7a5400;
+  --vp-c-yellow-3: #9a6700;
+  --vp-c-yellow-soft: rgba(154, 103, 0, 0.14);
+
+  /* VitePress Red */
+  --vp-c-red-1: #cf222e;
+  --vp-c-red-2: #a40e26;
+  --vp-c-red-3: #cf222e;
+  --vp-c-red-soft: rgba(207, 34, 46, 0.14);
+
+  /* Font Families */
+  --vp-font-family-base: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+  --vp-font-family-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, Monaco, 'Courier New', monospace;
+
+  /* Button Component */
+  --vp-button-brand-border: transparent;
+  --vp-button-brand-text: #ffffff;
+  --vp-button-brand-bg: var(--vt-color-primary);
+  --vp-button-brand-hover-border: transparent;
+  --vp-button-brand-hover-text: #ffffff;
+  --vp-button-brand-hover-bg: var(--vt-color-primary-hover);
+  --vp-button-brand-active-border: transparent;
+  --vp-button-brand-active-text: #ffffff;
+  --vp-button-brand-active-bg: #033d8b;
+
+  --vp-button-alt-border: var(--vt-color-border);
+  --vp-button-alt-text: var(--vt-color-text);
+  --vp-button-alt-bg: var(--vt-color-bg-secondary);
+  --vp-button-alt-hover-border: var(--vt-color-border);
+  --vp-button-alt-hover-text: var(--vt-color-text);
+  --vp-button-alt-hover-bg: var(--vt-color-bg-tertiary);
+
+  /* Home Hero */
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: -webkit-linear-gradient(120deg,
+      var(--vt-color-primary) 30%,
+      #4493f8);
+  --vp-home-hero-image-background-image: linear-gradient(-45deg,
+      var(--vt-color-primary) 50%,
+      #4493f8 50%);
+  --vp-home-hero-image-filter: blur(44px);
+
+  /* Custom Blocks */
+  --vp-custom-block-tip-border: transparent;
+  --vp-custom-block-tip-text: var(--vt-color-text);
+  --vp-custom-block-tip-bg: rgba(9, 105, 218, 0.14);
+  --vp-custom-block-tip-code-bg: rgba(9, 105, 218, 0.14);
+
+  --vp-custom-block-warning-border: transparent;
+  --vp-custom-block-warning-text: var(--vt-color-text);
+  --vp-custom-block-warning-bg: rgba(154, 103, 0, 0.14);
+  --vp-custom-block-warning-code-bg: rgba(154, 103, 0, 0.14);
+
+  --vp-custom-block-danger-border: transparent;
+  --vp-custom-block-danger-text: var(--vt-color-text);
+  --vp-custom-block-danger-bg: rgba(207, 34, 46, 0.14);
+  --vp-custom-block-danger-code-bg: rgba(207, 34, 46, 0.14);
+
+  /* Code Blocks */
+  --vp-code-bg: var(--vt-color-bg-secondary);
+  --vp-code-color: var(--vt-color-text);
+}
+
+/* ==========================================================================
+   Dark Theme
+   ========================================================================== */
+
+html.dark {
+  /* Background Colors */
+  --vt-color-bg: #0d1117;
+  --vt-color-bg-secondary: #161b22;
+  --vt-color-bg-tertiary: #21262d;
+  --vt-color-border: #30363d;
+
+  /* Text Colors */
+  --vt-color-text: #e6edf3;
+  --vt-color-text-secondary: #8b949e;
+  --vt-color-text-muted: #6e7681;
+
+  /* Accent Colors */
+  --vt-color-primary: #58a6ff;
+  --vt-color-primary-hover: #79b8ff;
+  --vt-color-secondary: #238636;
+  --vt-color-secondary-hover: #2ea043;
+  --vt-color-accent: #f78166;
+  --vt-color-success: #3fb950;
+  --vt-color-warning: #d29922;
+
+  /* VitePress Background Mappings */
+  --vp-c-bg: var(--vt-color-bg);
+  --vp-c-bg-alt: var(--vt-color-bg-secondary);
+  --vp-c-bg-elv: var(--vt-color-bg);
+  --vp-c-bg-soft: var(--vt-color-bg-secondary);
+  --vp-c-bg-soft-up: var(--vt-color-bg-tertiary);
+
+  /* VitePress Text Mappings */
+  --vp-c-text-1: var(--vt-color-text);
+  --vp-c-text-2: var(--vt-color-text-secondary);
+  --vp-c-text-3: var(--vt-color-text-muted);
+
+  /* VitePress Border */
+  --vp-c-border: var(--vt-color-border);
+  --vp-c-divider: var(--vt-color-border);
+  --vp-c-gutter: var(--vt-color-border);
+
+  /* VitePress Brand (Primary) */
+  --vp-c-brand-1: var(--vt-color-primary);
+  --vp-c-brand-2: var(--vt-color-primary-hover);
+  --vp-c-brand-3: var(--vt-color-primary);
+  --vp-c-brand-soft: rgba(88, 166, 255, 0.14);
+
+  /* VitePress Default (Gray) */
+  --vp-c-default-1: #8b949e;
+  --vp-c-default-2: #6e7681;
+  --vp-c-default-3: #30363d;
+  --vp-c-default-soft: rgba(139, 148, 158, 0.14);
+
+  /* VitePress Tip (Uses Brand) */
+  --vp-c-tip-1: var(--vt-color-primary);
+  --vp-c-tip-2: var(--vt-color-primary-hover);
+  --vp-c-tip-3: var(--vt-color-primary);
+  --vp-c-tip-soft: rgba(88, 166, 255, 0.14);
+
+  /* VitePress Warning (Yellow) */
+  --vp-c-warning-1: var(--vt-color-warning);
+  --vp-c-warning-2: #e3b341;
+  --vp-c-warning-3: var(--vt-color-warning);
+  --vp-c-warning-soft: rgba(210, 153, 34, 0.14);
+
+  /* VitePress Danger (Red) */
+  --vp-c-danger-1: #f85149;
+  --vp-c-danger-2: #ff7b72;
+  --vp-c-danger-3: #f85149;
+  --vp-c-danger-soft: rgba(248, 81, 73, 0.14);
+
+  /* VitePress Success (Green) */
+  --vp-c-green-1: var(--vt-color-success);
+  --vp-c-green-2: #56d364;
+  --vp-c-green-3: var(--vt-color-success);
+  --vp-c-green-soft: rgba(63, 185, 80, 0.14);
+
+  /* VitePress Yellow */
+  --vp-c-yellow-1: var(--vt-color-warning);
+  --vp-c-yellow-2: #e3b341;
+  --vp-c-yellow-3: var(--vt-color-warning);
+  --vp-c-yellow-soft: rgba(210, 153, 34, 0.14);
+
+  /* VitePress Red */
+  --vp-c-red-1: #f85149;
+  --vp-c-red-2: #ff7b72;
+  --vp-c-red-3: #f85149;
+  --vp-c-red-soft: rgba(248, 81, 73, 0.14);
+
+  /* Font Families */
+  --vp-font-family-base: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+  --vp-font-family-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, Monaco, 'Courier New', monospace;
+
+  /* Button Component */
+  --vp-button-brand-border: transparent;
+  --vp-button-brand-text: #0d1117;
+  --vp-button-brand-bg: var(--vt-color-primary);
+  --vp-button-brand-hover-border: transparent;
+  --vp-button-brand-hover-text: #0d1117;
+  --vp-button-brand-hover-bg: var(--vt-color-primary-hover);
+  --vp-button-brand-active-border: transparent;
+  --vp-button-brand-active-text: #0d1117;
+  --vp-button-brand-active-bg: #a5d6ff;
+
+  --vp-button-alt-border: var(--vt-color-border);
+  --vp-button-alt-text: var(--vt-color-text);
+  --vp-button-alt-bg: var(--vt-color-bg-secondary);
+  --vp-button-alt-hover-border: var(--vt-color-border);
+  --vp-button-alt-hover-text: var(--vt-color-text);
+  --vp-button-alt-hover-bg: var(--vt-color-bg-tertiary);
+
+
+  /* Custom Blocks */
+  --vp-custom-block-tip-border: transparent;
+  --vp-custom-block-tip-text: var(--vt-color-text);
+  --vp-custom-block-tip-bg: rgba(88, 166, 255, 0.14);
+  --vp-custom-block-tip-code-bg: rgba(88, 166, 255, 0.14);
+
+  --vp-custom-block-warning-border: transparent;
+  --vp-custom-block-warning-text: var(--vt-color-text);
+  --vp-custom-block-warning-bg: rgba(210, 153, 34, 0.14);
+  --vp-custom-block-warning-code-bg: rgba(210, 153, 34, 0.14);
+
+  --vp-custom-block-danger-border: transparent;
+  --vp-custom-block-danger-text: var(--vt-color-text);
+  --vp-custom-block-danger-bg: rgba(248, 81, 73, 0.14);
+  --vp-custom-block-danger-code-bg: rgba(248, 81, 73, 0.14);
+
+  /* Code Blocks */
+  --vp-code-bg: var(--vt-color-bg-secondary);
+  --vp-code-color: var(--vt-color-text);
+}
+
+
+/* ==========================================================================
+   Additional Custom Styles
+   ========================================================================== */
+
+/* Smooth scrolling */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Selection styling */
+::selection {
+  background-color: var(--vp-c-brand-soft);
+  color: inherit;
+}
+
+/* Focus visible styling */
+:focus-visible {
+  outline: 2px solid var(--vp-c-brand-1);
+  outline-offset: 2px;
+}
+
+/* Link hover transitions */
+a {
+  transition: color var(--vt-transition-fast);
+}
+
+/* Code styling enhancements */
+.vp-doc :not(pre)>code {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.875em;
+  padding: 0.2em 0.4em;
+  border-radius: var(--vt-radius-sm);
+  background-color: var(--vp-code-bg);
+}
+
+/* Custom scrollbar for webkit browsers */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--vp-c-bg-soft);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--vp-c-border);
+  border-radius: var(--vt-radius-md);
+  border: 2px solid var(--vp-c-bg-soft);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--vp-c-text-3);
+}

@@ -15,12 +15,17 @@ use tokio::process::Command;
 pub struct XclipOutput {
     /// Whether to show a desktop notification
     notify: bool,
+    /// Text to append after transcription
+    append_text: Option<String>,
 }
 
 impl XclipOutput {
     /// Create a new xclip output
-    pub fn new(notify: bool) -> Self {
-        Self { notify }
+    pub fn new(notify: bool, append_text: Option<String>) -> Self {
+        Self {
+            notify,
+            append_text,
+        }
     }
 
     /// Send a desktop notification
@@ -53,6 +58,13 @@ impl TextOutput for XclipOutput {
         if text.is_empty() {
             return Ok(());
         }
+
+        // Prepare text with optional append
+        let text = if let Some(ref append) = self.append_text {
+            std::borrow::Cow::Owned(format!("{}{}", text, append))
+        } else {
+            std::borrow::Cow::Borrowed(text)
+        };
 
         // Spawn xclip with stdin pipe, targeting the clipboard selection
         let mut child = Command::new("xclip")
@@ -94,7 +106,7 @@ impl TextOutput for XclipOutput {
 
         // Send notification if enabled
         if self.notify {
-            self.send_notification(text).await;
+            self.send_notification(&text).await;
         }
 
         tracing::info!("Text copied to X11 clipboard ({} chars)", text.len());
@@ -129,10 +141,10 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = XclipOutput::new(true);
+        let output = XclipOutput::new(true, None);
         assert!(output.notify);
 
-        let output = XclipOutput::new(false);
+        let output = XclipOutput::new(false, None);
         assert!(!output.notify);
     }
 }

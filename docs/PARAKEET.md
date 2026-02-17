@@ -17,19 +17,19 @@ Parakeet is NVIDIA's FastConformer-based speech recognition model. The TDT (Toke
 
 ## Requirements
 
-- A Parakeet-enabled voxtype binary (see below)
+- An ONNX-enabled voxtype binary (see below)
 - ~600MB disk space for the model
 - CPU with AVX2 or AVX-512 (AVX-512 recommended for best performance)
 
 ## Getting a Parakeet Binary
 
-Parakeet support requires a specially compiled binary. Download from the releases page:
+Parakeet support requires an ONNX-enabled binary. Download from the releases page:
 
 | Binary | Use Case |
 |--------|----------|
-| `voxtype-*-parakeet-avx2` | Most CPUs (Intel Haswell+, AMD Zen+) |
-| `voxtype-*-parakeet-avx512` | Modern CPUs with AVX-512 (Intel Ice Lake+, AMD Zen 4+) |
-| `voxtype-*-parakeet-cuda` | NVIDIA GPU acceleration with CPU fallback |
+| `voxtype-*-onnx-avx2` | Most CPUs (Intel Haswell+, AMD Zen+) |
+| `voxtype-*-onnx-avx512` | Modern CPUs with AVX-512 (Intel Ice Lake+, AMD Zen 4+) |
+| `voxtype-*-onnx-cuda` | NVIDIA GPU acceleration with CPU fallback |
 
 The AVX2 binary works on most modern x86_64 CPUs. Use AVX-512 if your CPU supports it for better performance.
 
@@ -61,19 +61,19 @@ cd ~/.local/share/voxtype/models/parakeet-tdt-0.6b-v3
 
 ## Switching to a Parakeet Binary
 
-The standard voxtype binary does not include Parakeet support. You must switch to a Parakeet-enabled binary.
+The standard voxtype binary does not include Parakeet support. You must switch to an ONNX-enabled binary.
 
 **Manual switching (until `voxtype setup engine` is implemented):**
 
 ```bash
 # Download the Parakeet binary for your CPU
 # Example: AVX-512 capable CPU
-curl -L https://github.com/peteonrails/voxtype/releases/download/v0.5.0/voxtype-0.5.0-linux-x86_64-parakeet-avx512 \
-  -o /tmp/voxtype-parakeet
+curl -L https://github.com/peteonrails/voxtype/releases/download/v0.5.0/voxtype-0.5.0-linux-x86_64-onnx-avx512 \
+  -o /tmp/voxtype-onnx
 
 # Make executable and install
-chmod +x /tmp/voxtype-parakeet
-sudo mv /tmp/voxtype-parakeet /usr/local/bin/voxtype
+chmod +x /tmp/voxtype-onnx
+sudo mv /tmp/voxtype-onnx /usr/local/bin/voxtype
 
 # Restart the daemon
 systemctl --user restart voxtype
@@ -173,7 +173,7 @@ Or simply remove the `engine` line (Whisper is the default).
 
 ### "Parakeet engine requested but voxtype was not compiled with --features parakeet"
 
-You're using a standard voxtype binary without Parakeet support. Download a `parakeet-*` binary from the releases page.
+You're using a standard voxtype binary without Parakeet support. Download an `onnx-*` binary from the releases page.
 
 ### "Parakeet engine selected but [parakeet] config section is missing"
 

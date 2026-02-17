@@ -179,6 +179,11 @@ fn set_engine(engine: TranscriptionEngine) -> bool {
     let engine_str = match engine {
         TranscriptionEngine::Parakeet => "parakeet",
         TranscriptionEngine::Whisper => "whisper",
+        TranscriptionEngine::Moonshine => "moonshine",
+        TranscriptionEngine::SenseVoice => "sensevoice",
+        TranscriptionEngine::Paraformer => "paraformer",
+        TranscriptionEngine::Dolphin => "dolphin",
+        TranscriptionEngine::Omnilingual => "omnilingual",
     };
 
     // Check if engine line exists
@@ -385,7 +390,8 @@ fn build_menu(config: &Config) -> (Menu, MenuItem) {
     }
 
     model_menu.append(&PredefinedMenuItem::separator()).unwrap();
-    let download_item = MenuItem::with_id(menu_ids::DOWNLOAD_MODEL, "Download Model...", true, None);
+    let download_item =
+        MenuItem::with_id(menu_ids::DOWNLOAD_MODEL, "Download Model...", true, None);
     model_menu.append(&download_item).unwrap();
     menu.append(&model_menu).unwrap();
 
@@ -560,24 +566,36 @@ pub fn run(state_file: PathBuf) -> ! {
                 // Engine selection
                 menu_ids::ENGINE_PARAKEET => {
                     if set_engine(TranscriptionEngine::Parakeet) {
-                        notify("Voxtype", "Switched to Parakeet engine. Restart daemon to apply.");
+                        notify(
+                            "Voxtype",
+                            "Switched to Parakeet engine. Restart daemon to apply.",
+                        );
                     }
                 }
                 menu_ids::ENGINE_WHISPER => {
                     if set_engine(TranscriptionEngine::Whisper) {
-                        notify("Voxtype", "Switched to Whisper engine. Restart daemon to apply.");
+                        notify(
+                            "Voxtype",
+                            "Switched to Whisper engine. Restart daemon to apply.",
+                        );
                     }
                 }
 
                 // Hotkey mode
                 menu_ids::HOTKEY_PTT => {
                     if set_hotkey_mode(ActivationMode::PushToTalk) {
-                        notify("Voxtype", "Switched to push-to-talk mode. Restart daemon to apply.");
+                        notify(
+                            "Voxtype",
+                            "Switched to push-to-talk mode. Restart daemon to apply.",
+                        );
                     }
                 }
                 menu_ids::HOTKEY_TOGGLE => {
                     if set_hotkey_mode(ActivationMode::Toggle) {
-                        notify("Voxtype", "Switched to toggle mode. Restart daemon to apply.");
+                        notify(
+                            "Voxtype",
+                            "Switched to toggle mode. Restart daemon to apply.",
+                        );
                     }
                 }
 

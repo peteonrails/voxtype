@@ -1,6 +1,6 @@
 ---
 name: build-release
-description: Build all voxtype binaries for release. Builds Whisper (AVX2, AVX-512, Vulkan) and Parakeet (AVX2, AVX-512, CUDA) binaries using Docker. Use when preparing a new release.
+description: Build all voxtype binaries for release. Builds Whisper (AVX2, AVX-512, Vulkan) and ONNX (AVX2, AVX-512, CUDA) binaries using Docker. Use when preparing a new release.
 user-invocable: true
 allowed-tools:
   - Bash
@@ -12,7 +12,7 @@ allowed-tools:
 
 Build all 6 voxtype binaries for a release:
 - **Whisper**: AVX2, AVX-512, Vulkan
-- **Parakeet**: AVX2, AVX-512, CUDA
+- **ONNX** (Parakeet + Moonshine): AVX2, AVX-512, CUDA
 
 ## Prerequisites
 
@@ -26,20 +26,17 @@ Build all 6 voxtype binaries for a release:
 # Set version
 export VERSION=X.Y.Z
 
-# Build remote binaries (AVX2, Vulkan, Parakeet-AVX2, Parakeet-CUDA)
+# Build remote binaries (AVX2, Vulkan, ONNX-AVX2, ONNX-CUDA)
 docker context use truenas
-docker compose -f docker-compose.build.yml build --no-cache avx2 vulkan parakeet-avx2 parakeet-cuda
-docker run --rm -v $(pwd)/releases/${VERSION}:/output voxtype-parakeet-avx2
-docker run --rm -v $(pwd)/releases/${VERSION}:/output voxtype-parakeet-vulkan
-docker run --rm -v $(pwd)/releases/${VERSION}:/output voxtype-parakeet-parakeet-avx2
-docker run --rm -v $(pwd)/releases/${VERSION}:/output voxtype-parakeet-parakeet-cuda
+docker compose -f docker-compose.build.yml build --no-cache avx2 vulkan onnx-avx2 onnx-cuda
+docker compose -f docker-compose.build.yml up avx2 vulkan onnx-avx2 onnx-cuda
 
 # Build local AVX-512 binaries
 docker context use default
 cargo clean && cargo build --release
 cp target/release/voxtype releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx512
-cargo clean && RUSTFLAGS="-C target-cpu=native" cargo build --release --features parakeet
-cp target/release/voxtype releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-parakeet-avx512
+cargo clean && RUSTFLAGS="-C target-cpu=native" cargo build --release --features parakeet,moonshine
+cp target/release/voxtype releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-onnx-avx512
 
 # Verify versions
 for bin in releases/${VERSION}/voxtype-*; do echo "$(basename $bin): $($bin --version)"; done
@@ -91,7 +88,7 @@ git commit -S -m "Bump to vX.Y.Z"
 git push
 ```
 
-### 2. Build Remote Binaries (AVX2, Vulkan, Parakeet)
+### 2. Build Remote Binaries (AVX2, Vulkan, ONNX)
 
 These builds use Ubuntu 22.04 to avoid AVX-512 instruction contamination:
 
@@ -101,14 +98,10 @@ docker context use truenas
 mkdir -p releases/${VERSION}
 
 # Build all Docker images (takes ~10-15 min)
-docker compose -f docker-compose.build.yml build --no-cache avx2 vulkan parakeet-avx2 parakeet-cuda
+docker compose -f docker-compose.build.yml build --no-cache avx2 vulkan onnx-avx2 onnx-cuda
 
-# Extract binaries from images
-for service in avx2 vulkan; do
-  docker run --rm -v $(pwd)/releases/${VERSION}:/output voxtype-parakeet-${service}
-done
-docker run --rm -v $(pwd)/releases/${VERSION}:/output voxtype-parakeet-parakeet-avx2
-docker run --rm -v $(pwd)/releases/${VERSION}:/output voxtype-parakeet-parakeet-cuda
+# Extract binaries
+docker compose -f docker-compose.build.yml up avx2 vulkan onnx-avx2 onnx-cuda
 ```
 
 ### 3. Build Local AVX-512 Binaries
@@ -122,9 +115,9 @@ docker context use default
 cargo clean && cargo build --release
 cp target/release/voxtype releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx512
 
-# Parakeet AVX-512
-cargo clean && RUSTFLAGS="-C target-cpu=native" cargo build --release --features parakeet
-cp target/release/voxtype releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-parakeet-avx512
+# ONNX AVX-512
+cargo clean && RUSTFLAGS="-C target-cpu=native" cargo build --release --features parakeet,moonshine
+cp target/release/voxtype releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-onnx-avx512
 ```
 
 ### 4. Verify All Binaries
@@ -185,8 +178,8 @@ After successful build, `releases/${VERSION}/` should contain:
 voxtype-X.Y.Z-linux-x86_64-avx2
 voxtype-X.Y.Z-linux-x86_64-avx512
 voxtype-X.Y.Z-linux-x86_64-vulkan
-voxtype-X.Y.Z-linux-x86_64-parakeet-avx2
-voxtype-X.Y.Z-linux-x86_64-parakeet-avx512
-voxtype-X.Y.Z-linux-x86_64-parakeet-cuda
+voxtype-X.Y.Z-linux-x86_64-onnx-avx2
+voxtype-X.Y.Z-linux-x86_64-onnx-avx512
+voxtype-X.Y.Z-linux-x86_64-onnx-cuda
 SHA256SUMS
 ```

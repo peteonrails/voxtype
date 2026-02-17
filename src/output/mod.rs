@@ -37,8 +37,8 @@ pub mod ydotool;
 use crate::config::{OutputConfig, OutputDriver};
 use crate::error::OutputError;
 use std::borrow::Cow;
-use std::process::Stdio;
 use std::fs;
+use std::process::Stdio;
 use tokio::process::Command;
 
 /// Normalize Unicode curly quotes to ASCII equivalents.
@@ -59,7 +59,7 @@ fn normalize_quotes(text: &str) -> Cow<'_, str> {
             | '\u{201C}'  // LEFT DOUBLE QUOTATION MARK
             | '\u{201D}'  // RIGHT DOUBLE QUOTATION MARK
             | '\u{201F}'  // DOUBLE HIGH-REVERSED-9 QUOTATION MARK
-            | '\u{2033}'  // DOUBLE PRIME
+            | '\u{2033}' // DOUBLE PRIME
         )
     });
 
@@ -88,7 +88,7 @@ pub fn is_parakeet_binary_active() -> bool {
     if let Ok(link_target) = fs::read_link(VOXTYPE_BIN) {
         if let Some(target_name) = link_target.file_name() {
             if let Some(name) = target_name.to_str() {
-                return name.contains("parakeet");
+                return name.contains("onnx") || name.contains("parakeet");
             }
         }
     }
@@ -104,16 +104,24 @@ pub fn is_parakeet_binary_active() -> bool {
 }
 
 /// Get the engine icon for notifications based on configured engine
-/// Returns 🦜 for Parakeet, 🗣️ for Whisper
 pub fn engine_icon(engine: crate::config::TranscriptionEngine) -> &'static str {
     match engine {
-        crate::config::TranscriptionEngine::Parakeet => "🦜",
-        crate::config::TranscriptionEngine::Whisper => "🗣️",
+        crate::config::TranscriptionEngine::Parakeet => "\u{1F99C}", // 🦜
+        crate::config::TranscriptionEngine::Whisper => "\u{1F5E3}\u{FE0F}", // 🗣️
+        crate::config::TranscriptionEngine::Moonshine => "\u{1F319}", // 🌙
+        crate::config::TranscriptionEngine::SenseVoice => "\u{1F442}", // 👂
+        crate::config::TranscriptionEngine::Paraformer => "\u{1F4AC}", // 💬
+        crate::config::TranscriptionEngine::Dolphin => "\u{1F42C}",  // 🐬
+        crate::config::TranscriptionEngine::Omnilingual => "\u{1F30D}", // 🌍
     }
 }
 
 /// Send a transcription notification with optional engine icon
-pub async fn send_transcription_notification(text: &str, show_engine_icon: bool, engine: crate::config::TranscriptionEngine) {
+pub async fn send_transcription_notification(
+    text: &str,
+    show_engine_icon: bool,
+    engine: crate::config::TranscriptionEngine,
+) {
     // Truncate preview for notification (use chars() to handle multi-byte UTF-8)
     let preview = if text.chars().count() > 80 {
         format!("{}...", text.chars().take(80).collect::<String>())
@@ -177,12 +185,14 @@ fn create_driver_output(
     match driver {
         OutputDriver::Wtype => Box::new(wtype::WtypeOutput::new(
             config.auto_submit,
+            config.append_text.clone(),
             config.type_delay_ms,
             pre_type_delay_ms,
             config.shift_enter_newlines,
         )),
         OutputDriver::Eitype => Box::new(eitype::EitypeOutput::new(
             config.auto_submit,
+            config.append_text.clone(),
             config.type_delay_ms,
             pre_type_delay_ms,
             config.shift_enter_newlines,
@@ -192,6 +202,7 @@ fn create_driver_output(
             pre_type_delay_ms,
             show_notification,
             config.auto_submit,
+            config.append_text.clone(),
             config.dotool_xkb_layout.clone(),
             config.dotool_xkb_variant.clone(),
         )),
@@ -200,9 +211,16 @@ fn create_driver_output(
             pre_type_delay_ms,
             show_notification,
             config.auto_submit,
+            config.append_text.clone(),
         )),
-        OutputDriver::Clipboard => Box::new(clipboard::ClipboardOutput::new(show_notification)),
-        OutputDriver::Xclip => Box::new(xclip::XclipOutput::new(show_notification)),
+        OutputDriver::Clipboard => Box::new(clipboard::ClipboardOutput::new(
+            show_notification,
+            config.append_text.clone(),
+        )),
+        OutputDriver::Xclip => Box::new(xclip::XclipOutput::new(
+            show_notification,
+            config.append_text.clone(),
+        )),
     }
 }
 
@@ -271,7 +289,10 @@ pub fn create_output_chain_with_override(
                     // Skip clipboard if it's in the middle and fallback_to_clipboard is false
                     // (clipboard should only be added if explicitly in the order OR fallback is enabled and it's last)
                     let is_last = i == driver_order.len() - 1;
-                    if *driver == OutputDriver::Clipboard && !is_last && !config.fallback_to_clipboard {
+                    if *driver == OutputDriver::Clipboard
+                        && !is_last
+                        && !config.fallback_to_clipboard
+                    {
                         continue;
                     }
 
@@ -288,7 +309,10 @@ pub fn create_output_chain_with_override(
                     && config.driver_order.is_some()
                     && !driver_order.contains(&OutputDriver::Clipboard)
                 {
-                    chain.push(Box::new(clipboard::ClipboardOutput::new(false)));
+                    chain.push(Box::new(clipboard::ClipboardOutput::new(
+                        false,
+                        config.append_text.clone(),
+                    )));
                 }
             }
         }
@@ -302,12 +326,14 @@ pub fn create_output_chain_with_override(
             #[cfg(not(target_os = "macos"))]
             chain.push(Box::new(clipboard::ClipboardOutput::new(
                 config.notification.on_transcription,
+                config.append_text.clone(),
             )));
         }
         crate::config::OutputMode::Paste => {
             // Only paste mode (no fallback as requested)
             chain.push(Box::new(paste::PasteOutput::new(
                 config.auto_submit,
+                config.append_text.clone(),
                 config.paste_keys.clone(),
                 config.type_delay_ms,
                 pre_type_delay_ms,
@@ -321,6 +347,7 @@ pub fn create_output_chain_with_override(
             );
             chain.push(Box::new(clipboard::ClipboardOutput::new(
                 config.notification.on_transcription,
+                config.append_text.clone(),
             )));
         }
     }
