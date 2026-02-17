@@ -120,6 +120,18 @@ translate = false
 # Default: 300 (5 minutes). Only applies when gpu_isolation = false.
 # cold_model_timeout_secs = 300
 
+# --- Eager processing settings ---
+#
+# Enable eager input processing (transcribe chunks while recording continues)
+# Reduces perceived latency on slower machines by processing audio in parallel.
+# eager_processing = false
+#
+# Duration of each audio chunk in seconds (default: 5.0)
+# eager_chunk_secs = 5.0
+#
+# Overlap between chunks in seconds (helps catch words at boundaries, default: 0.5)
+# eager_overlap_secs = 0.5
+
 # --- Remote backend settings (used when backend = "remote") ---
 #
 # Remote server endpoint URL (required for remote backend)
@@ -205,6 +217,14 @@ on_transcription = true
 # Custom word replacements (case-insensitive)
 # replacements = { "vox type" = "voxtype" }
 
+# [vad]
+# Voice Activity Detection - filters silence-only recordings
+# Prevents Whisper hallucinations on silent audio
+#
+# enabled = false      # Enable VAD (off by default)
+# threshold = 0.5      # 0.0 = sensitive, 1.0 = aggressive
+# min_speech_duration_ms = 100  # Minimum speech required
+
 # [status]
 # Status display icons for Waybar/tray integrations
 #
@@ -271,19 +291,48 @@ pub struct Config {
     #[serde(default)]
     pub parakeet: Option<ParakeetConfig>,
 
+    /// Moonshine configuration (optional, only used when engine = "moonshine")
+    #[serde(default)]
+    pub moonshine: Option<MoonshineConfig>,
+
+    /// SenseVoice configuration (optional, only used when engine = "sensevoice")
+    #[serde(default)]
+    pub sensevoice: Option<SenseVoiceConfig>,
+
+    /// Paraformer configuration (optional, only used when engine = "paraformer")
+    #[serde(default)]
+    pub paraformer: Option<ParaformerConfig>,
+
+    /// Dolphin configuration (optional, only used when engine = "dolphin")
+    #[serde(default)]
+    pub dolphin: Option<DolphinConfig>,
+
+    /// Omnilingual configuration (optional, only used when engine = "omnilingual")
+    #[serde(default)]
+    pub omnilingual: Option<OmnilingualConfig>,
+
     /// Text processing configuration (replacements, spoken punctuation)
     #[serde(default)]
     pub text: TextConfig,
+
+    /// Voice Activity Detection configuration
+    /// When enabled, filters silence-only recordings before transcription
+    #[serde(default)]
+    pub vad: VadConfig,
 
     /// Status display configuration (icons for Waybar/tray integrations)
     #[serde(default)]
     pub status: StatusConfig,
 
+    /// Meeting transcription configuration
+    #[serde(default)]
+    pub meeting: MeetingConfig,
+
     /// Optional path to state file for external integrations (e.g., Waybar)
     /// When set, the daemon writes current state ("idle", "recording", "transcribing")
     /// to this file whenever state changes.
     /// Example: "/run/user/1000/voxtype/state" or use "auto" for default location
-    #[serde(default)]
+    #[serde(default = "default_state_file")]
     pub state_file: Option<String>,
 
     /// Named profiles for context-specific settings
@@ -390,8 +439,20 @@ fn default_cold_model_timeout() -> u64 {
     300 // 5 minutes
 }
 
+fn default_eager_chunk_secs() -> f32 {
+    5.0
+}
+
+fn default_eager_overlap_secs() -> f32 {
+    0.5
+}
+
 fn default_whisper_model() -> String {
     "base.en".to_string()
+}
+
+fn default_state_file() -> Option<String> {
+    Some("auto".to_string())
 }
 
 impl Default for AudioFeedbackConfig {
@@ -417,11 +478,7 @@ pub struct StatusConfig {
 }
 
 fn default_icon_theme() -> String {
-    if cfg!(target_os = "macos") {
-        "nerd-font".to_string()
-    } else {
-        "emoji".to_string()
-    }
+    "emoji".to_string()
 }
 
 impl Default for StatusConfig {
@@ -714,6 +771,22 @@ pub struct WhisperConfig {
     #[serde(default = "default_context_window_optimization")]
     pub context_window_optimization: bool,
 
+    // --- Eager processing settings ---
+    /// Enable eager input processing (transcribe chunks while recording continues)
+    /// When enabled, audio is split into chunks and transcribed in parallel with
+    /// continued recording. This reduces perceived latency on slower machines.
+    #[serde(default)]
+    pub eager_processing: bool,
+
+    /// Duration of each audio chunk in seconds for eager processing
+    #[serde(default = "default_eager_chunk_secs")]
+    pub eager_chunk_secs: f32,
+
+    /// Overlap between adjacent chunks in seconds for eager processing
+    /// Overlap helps catch words at chunk boundaries
+    #[serde(default = "default_eager_overlap_secs")]
+    pub eager_overlap_secs: f32,
+
     /// Initial prompt to provide context for transcription
     /// Use this to hint at terminology, proper nouns, or formatting conventions.
     /// Example: "Technical discussion about Rust, TypeScript, and Kubernetes."
@@ -721,7 +794,6 @@ pub struct WhisperConfig {
     pub initial_prompt: Option<String>,
 
     // --- Multi-model settings ---
-
     /// Secondary model to use when hotkey.model_modifier is held
     /// Example: "large-v3-turbo" for difficult audio
     #[serde(default)]
@@ -778,9 +850,7 @@ impl WhisperConfig {
         }
         // Fall back to deprecated `backend` with warning
         if let Some(backend) = self.backend {
-            tracing::warn!(
-                "DEPRECATED: [whisper] backend is deprecated, use 'mode' instead"
-            );
+            tracing::warn!("DEPRECATED: [whisper] backend is deprecated, use 'mode' instead");
             tracing::warn!(
                 "  Change 'backend = \"{}\"' to 'mode = \"{}\"' in config.toml",
                 match backend {
@@ -812,6 +882,9 @@ impl Default for WhisperConfig {
             on_demand_loading: default_on_demand_loading(),
             gpu_isolation: false,
             context_window_optimization: default_context_window_optimization(),
+            eager_processing: false,
+            eager_chunk_secs: default_eager_chunk_secs(),
+            eager_overlap_secs: default_eager_overlap_secs(),
             initial_prompt: None,
             secondary_model: None,
             available_models: vec![],
@@ -866,6 +939,161 @@ impl Default for ParakeetConfig {
     }
 }
 
+/// Moonshine speech-to-text configuration (ONNX-based, encoder-decoder ASR)
+/// Requires: cargo build --features moonshine
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MoonshineConfig {
+    /// Model name or path to directory containing ONNX model files
+    /// Expects: encoder_model.onnx, decoder_model_merged.onnx, tokenizer.json
+    /// Short names: "tiny" (27M params), "base" (61M params)
+    pub model: String,
+
+    /// Use quantized model variants for faster CPU inference (default: true)
+    /// Falls back to full precision if quantized files are not found
+    #[serde(default = "default_true")]
+    pub quantized: bool,
+
+    /// Number of CPU threads for ONNX Runtime inference
+    #[serde(default)]
+    pub threads: Option<usize>,
+
+    /// Load model on-demand when recording starts (true) or keep loaded (false)
+    #[serde(default = "default_on_demand_loading")]
+    pub on_demand_loading: bool,
+}
+
+impl Default for MoonshineConfig {
+    fn default() -> Self {
+        Self {
+            model: "base".to_string(),
+            quantized: true,
+            threads: None,
+            on_demand_loading: false,
+        }
+    }
+}
+
+/// SenseVoice speech-to-text configuration (ONNX-based, CTC encoder-only ASR)
+/// Requires: cargo build --features sensevoice
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SenseVoiceConfig {
+    /// Model name or path to directory containing ONNX model files
+    /// Expects: model.int8.onnx (or model.onnx), tokens.txt
+    /// Short name: "sensevoice-small" (default)
+    pub model: String,
+
+    /// Language for transcription: "auto", "zh", "en", "ja", "ko", "yue" (default: "auto")
+    #[serde(default = "default_sensevoice_language")]
+    pub language: String,
+
+    /// Enable inverse text normalization (adds punctuation) (default: true)
+    #[serde(default = "default_true")]
+    pub use_itn: bool,
+
+    /// Number of CPU threads for ONNX Runtime inference
+    #[serde(default)]
+    pub threads: Option<usize>,
+
+    /// Load model on-demand when recording starts (true) or keep loaded (false)
+    #[serde(default = "default_on_demand_loading")]
+    pub on_demand_loading: bool,
+}
+
+fn default_sensevoice_language() -> String {
+    "auto".to_string()
+}
+
+impl Default for SenseVoiceConfig {
+    fn default() -> Self {
+        Self {
+            model: "sensevoice-small".to_string(),
+            language: "auto".to_string(),
+            use_itn: true,
+            threads: None,
+            on_demand_loading: false,
+        }
+    }
+}
+
+/// Paraformer speech-to-text configuration (FunASR ONNX-based CTC encoder)
+/// Requires: cargo build --features paraformer
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ParaformerConfig {
+    /// Model name or path to ONNX model directory
+    /// Expects: model.onnx (or model.int8.onnx), tokens.txt
+    pub model: String,
+
+    /// Number of CPU threads for ONNX Runtime inference
+    #[serde(default)]
+    pub threads: Option<usize>,
+
+    /// Load model on-demand when recording starts (true) or keep loaded (false)
+    #[serde(default = "default_on_demand_loading")]
+    pub on_demand_loading: bool,
+}
+
+impl Default for ParaformerConfig {
+    fn default() -> Self {
+        Self {
+            model: "paraformer-zh".to_string(),
+            threads: None,
+            on_demand_loading: false,
+        }
+    }
+}
+
+/// Dolphin speech-to-text configuration (ONNX-based CTC encoder, dictation-optimized)
+/// Requires: cargo build --features dolphin
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DolphinConfig {
+    /// Model name or path to ONNX model directory
+    pub model: String,
+
+    /// Number of CPU threads for ONNX Runtime inference
+    #[serde(default)]
+    pub threads: Option<usize>,
+
+    /// Load model on-demand when recording starts (true) or keep loaded (false)
+    #[serde(default = "default_on_demand_loading")]
+    pub on_demand_loading: bool,
+}
+
+impl Default for DolphinConfig {
+    fn default() -> Self {
+        Self {
+            model: "dolphin-base".to_string(),
+            threads: None,
+            on_demand_loading: false,
+        }
+    }
+}
+
+/// Omnilingual speech-to-text configuration (FunASR ONNX-based, 50+ languages)
+/// Requires: cargo build --features omnilingual
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OmnilingualConfig {
+    /// Model name or path to ONNX model directory
+    pub model: String,
+
+    /// Number of CPU threads for ONNX Runtime inference
+    #[serde(default)]
+    pub threads: Option<usize>,
+
+    /// Load model on-demand when recording starts (true) or keep loaded (false)
+    #[serde(default = "default_on_demand_loading")]
+    pub on_demand_loading: bool,
+}
+
+impl Default for OmnilingualConfig {
+    fn default() -> Self {
+        Self {
+            model: "omnilingual-large".to_string(),
+            threads: None,
+            on_demand_loading: false,
+        }
+    }
+}
+
 /// Transcription engine selection (which ASR technology to use)
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -875,20 +1103,99 @@ pub enum TranscriptionEngine {
     /// Use Parakeet (NVIDIA's FastConformer via ONNX Runtime)
     /// Requires: cargo build --features parakeet
     Parakeet,
+    /// Use Moonshine (encoder-decoder ASR via ONNX Runtime)
+    /// Requires: cargo build --features moonshine
+    Moonshine,
+    /// Use SenseVoice (Alibaba FunAudioLLM CTC model via ONNX Runtime)
+    /// Requires: cargo build --features sensevoice
+    SenseVoice,
+    /// Use Paraformer (FunASR CTC encoder via ONNX Runtime)
+    /// Requires: cargo build --features paraformer
+    Paraformer,
+    /// Use Dolphin (dictation-optimized CTC encoder via ONNX Runtime)
+    /// Requires: cargo build --features dolphin
+    Dolphin,
+    /// Use Omnilingual (FunASR 50+ language CTC encoder via ONNX Runtime)
+    /// Requires: cargo build --features omnilingual
+    Omnilingual,
+}
+
+/// VAD backend selection
+///
+/// Determines which voice activity detection algorithm to use.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VadBackend {
+    /// Auto-select based on transcription engine (default)
+    /// - Whisper engine: uses Whisper VAD (requires model download)
+    /// - Parakeet engine: uses Energy VAD (no model needed)
+    #[default]
+    Auto,
+    /// Energy-based VAD using RMS amplitude analysis
+    /// Fast, no model download required, works with any engine
+    Energy,
+    /// Whisper VAD using whisper-rs built-in Silero model (GGML format)
+    /// More accurate but requires downloading ggml-silero-vad.bin
+    Whisper,
+}
+
+/// Voice Activity Detection configuration
+///
+/// VAD filters silence-only recordings before transcription to prevent
+/// Whisper hallucinations when processing silence.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VadConfig {
+    /// Enable Voice Activity Detection (default: false)
+    /// When enabled, recordings with no detected speech are rejected before transcription
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// VAD backend to use (default: auto)
+    /// - auto: Whisper VAD for Whisper engine, Energy VAD for Parakeet
+    /// - energy: Simple RMS-based detection, no model needed
+    /// - whisper: Silero VAD via whisper-rs, requires model download
+    #[serde(default)]
+    pub backend: VadBackend,
+
+    /// Speech detection threshold (0.0-1.0, default: 0.5)
+    /// Higher values require more confident speech detection
+    #[serde(default = "default_vad_threshold")]
+    pub threshold: f32,
+
+    /// Minimum speech duration in milliseconds (default: 100)
+    /// Recordings with less speech than this are rejected
+    #[serde(default = "default_min_speech_duration_ms")]
+    pub min_speech_duration_ms: u32,
+
+    /// Path to VAD model file (optional, for Whisper VAD backend)
+    /// If not set, uses the default model location (~/.local/share/voxtype/models/)
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+fn default_vad_threshold() -> f32 {
+    0.5
+}
+
+fn default_min_speech_duration_ms() -> u32 {
+    100
+}
+
+impl Default for VadConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: VadBackend::default(),
+            threshold: default_vad_threshold(),
+            min_speech_duration_ms: default_min_speech_duration_ms(),
+            model: None,
+        }
+    }
 }
 
 impl Default for TranscriptionEngine {
     fn default() -> Self {
-        // macOS: Default to Parakeet with CoreML for best performance on Apple Silicon
-        // Linux: Default to Whisper for broader compatibility
-        #[cfg(target_os = "macos")]
-        {
-            TranscriptionEngine::Parakeet
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            TranscriptionEngine::Whisper
-        }
+        TranscriptionEngine::Whisper
     }
 }
 
@@ -903,6 +1210,191 @@ pub struct TextConfig {
     /// Example: { "vox type" = "voxtype" }
     #[serde(default)]
     pub replacements: HashMap<String, String>,
+}
+
+/// Meeting transcription configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MeetingConfig {
+    /// Enable meeting mode
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Duration of each audio chunk in seconds
+    #[serde(default = "default_chunk_duration")]
+    pub chunk_duration_secs: u32,
+
+    /// Storage path for meetings ("auto" for default location)
+    /// Default: ~/.local/share/voxtype/meetings/
+    #[serde(default = "default_storage_path")]
+    pub storage_path: String,
+
+    /// Retain raw audio files after transcription
+    #[serde(default)]
+    pub retain_audio: bool,
+
+    /// Maximum meeting duration in minutes (0 = unlimited)
+    #[serde(default = "default_max_duration")]
+    pub max_duration_mins: u32,
+
+    /// Meeting audio configuration
+    #[serde(default)]
+    pub audio: MeetingAudioConfig,
+
+    /// Diarization configuration
+    #[serde(default)]
+    pub diarization: MeetingDiarizationConfig,
+
+    /// Summarization configuration
+    #[serde(default)]
+    pub summary: MeetingSummaryConfig,
+}
+
+/// Meeting audio configuration for dual capture
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MeetingAudioConfig {
+    /// Microphone device (uses main audio.device if not specified)
+    #[serde(default = "default_mic_device")]
+    pub mic_device: String,
+
+    /// Loopback device for capturing remote participants
+    /// Options: "auto" (detect), "disabled", or specific device name
+    #[serde(default = "default_loopback")]
+    pub loopback_device: String,
+}
+
+fn default_mic_device() -> String {
+    "default".to_string()
+}
+
+fn default_loopback() -> String {
+    "auto".to_string()
+}
+
+impl Default for MeetingAudioConfig {
+    fn default() -> Self {
+        Self {
+            mic_device: default_mic_device(),
+            loopback_device: default_loopback(),
+        }
+    }
+}
+
+/// Meeting diarization configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MeetingDiarizationConfig {
+    /// Enable speaker diarization
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Diarization backend: "simple", "ml", or "remote"
+    #[serde(default = "default_diarization_backend")]
+    pub backend: String,
+
+    /// Maximum number of speakers to detect
+    #[serde(default = "default_max_speakers")]
+    pub max_speakers: u32,
+}
+
+fn default_diarization_backend() -> String {
+    "simple".to_string()
+}
+
+fn default_max_speakers() -> u32 {
+    10
+}
+
+fn default_chunk_duration() -> u32 {
+    30
+}
+
+fn default_storage_path() -> String {
+    "auto".to_string()
+}
+
+fn default_max_duration() -> u32 {
+    180
+}
+
+impl Default for MeetingDiarizationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            backend: default_diarization_backend(),
+            max_speakers: default_max_speakers(),
+        }
+    }
+}
+
+/// Meeting summary configuration (Phase 5)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MeetingSummaryConfig {
+    /// Summarization backend: "local", "remote", or "disabled"
+    #[serde(default = "default_summary_backend")]
+    pub backend: String,
+
+    /// Ollama URL for local backend
+    #[serde(default = "default_ollama_url")]
+    pub ollama_url: String,
+
+    /// Ollama model name
+    #[serde(default = "default_ollama_model")]
+    pub ollama_model: String,
+
+    /// Remote API endpoint for remote backend
+    #[serde(default)]
+    pub remote_endpoint: Option<String>,
+
+    /// Remote API key
+    #[serde(default)]
+    pub remote_api_key: Option<String>,
+
+    /// Request timeout in seconds
+    #[serde(default = "default_summary_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn default_summary_backend() -> String {
+    "disabled".to_string()
+}
+
+fn default_ollama_url() -> String {
+    "http://localhost:11434".to_string()
+}
+
+fn default_ollama_model() -> String {
+    "llama3.2".to_string()
+}
+
+fn default_summary_timeout() -> u64 {
+    120
+}
+
+impl Default for MeetingSummaryConfig {
+    fn default() -> Self {
+        Self {
+            backend: default_summary_backend(),
+            ollama_url: default_ollama_url(),
+            ollama_model: default_ollama_model(),
+            remote_endpoint: None,
+            remote_api_key: None,
+            timeout_secs: default_summary_timeout(),
+        }
+    }
+}
+
+impl Default for MeetingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            chunk_duration_secs: default_chunk_duration(),
+            storage_path: default_storage_path(),
+            retain_audio: false,
+            max_duration_mins: default_max_duration(),
+            audio: MeetingAudioConfig::default(),
+            diarization: MeetingDiarizationConfig::default(),
+            summary: MeetingSummaryConfig::default(),
+        }
+    }
 }
 
 /// Notification configuration
@@ -1025,6 +1517,12 @@ pub struct OutputConfig {
     /// to auto-submit after dictation
     #[serde(default)]
     pub auto_submit: bool,
+
+    /// Text to append after each transcription (e.g., " " for a space)
+    /// Appended after the transcription but before auto_submit
+    /// Useful for separating sentences when dictating paragraphs incrementally
+    #[serde(default)]
+    pub append_text: Option<String>,
 
     /// Convert newlines to Shift+Enter instead of regular Enter
     /// Useful for applications where Enter submits (e.g., Cursor IDE, Slack, Discord)
@@ -1206,6 +1704,9 @@ impl Default for Config {
                 on_demand_loading: default_on_demand_loading(),
                 gpu_isolation: false,
                 context_window_optimization: default_context_window_optimization(),
+                eager_processing: false,
+                eager_chunk_secs: default_eager_chunk_secs(),
+                eager_overlap_secs: default_eager_overlap_secs(),
                 initial_prompt: None,
                 secondary_model: None,
                 available_models: vec![],
@@ -1226,6 +1727,7 @@ impl Default for Config {
                 pre_type_delay_ms: 0,
                 wtype_delay_ms: 0,
                 auto_submit: false,
+                append_text: None,
                 shift_enter_newlines: false,
                 pre_recording_command: None,
                 pre_output_command: None,
@@ -1239,8 +1741,15 @@ impl Default for Config {
             },
             engine: TranscriptionEngine::default(),
             parakeet: None,
+            moonshine: None,
+            sensevoice: None,
+            paraformer: None,
+            dolphin: None,
+            omnilingual: None,
             text: TextConfig::default(),
+            vad: VadConfig::default(),
             status: StatusConfig::default(),
+            meeting: MeetingConfig::default(),
             state_file: Some("auto".to_string()),
             profiles: HashMap::new(),
         }
@@ -1320,6 +1829,31 @@ impl Config {
                 .as_ref()
                 .map(|p| p.on_demand_loading)
                 .unwrap_or(false),
+            TranscriptionEngine::Moonshine => self
+                .moonshine
+                .as_ref()
+                .map(|m| m.on_demand_loading)
+                .unwrap_or(false),
+            TranscriptionEngine::SenseVoice => self
+                .sensevoice
+                .as_ref()
+                .map(|s| s.on_demand_loading)
+                .unwrap_or(false),
+            TranscriptionEngine::Paraformer => self
+                .paraformer
+                .as_ref()
+                .map(|p| p.on_demand_loading)
+                .unwrap_or(false),
+            TranscriptionEngine::Dolphin => self
+                .dolphin
+                .as_ref()
+                .map(|d| d.on_demand_loading)
+                .unwrap_or(false),
+            TranscriptionEngine::Omnilingual => self
+                .omnilingual
+                .as_ref()
+                .map(|o| o.on_demand_loading)
+                .unwrap_or(false),
         }
     }
 
@@ -1332,6 +1866,31 @@ impl Config {
                 .as_ref()
                 .map(|p| p.model.as_str())
                 .unwrap_or("parakeet (not configured)"),
+            TranscriptionEngine::Moonshine => self
+                .moonshine
+                .as_ref()
+                .map(|m| m.model.as_str())
+                .unwrap_or("moonshine (not configured)"),
+            TranscriptionEngine::SenseVoice => self
+                .sensevoice
+                .as_ref()
+                .map(|s| s.model.as_str())
+                .unwrap_or("sensevoice (not configured)"),
+            TranscriptionEngine::Paraformer => self
+                .paraformer
+                .as_ref()
+                .map(|p| p.model.as_str())
+                .unwrap_or("paraformer (not configured)"),
+            TranscriptionEngine::Dolphin => self
+                .dolphin
+                .as_ref()
+                .map(|d| d.model.as_str())
+                .unwrap_or("dolphin (not configured)"),
+            TranscriptionEngine::Omnilingual => self
+                .omnilingual
+                .as_ref()
+                .map(|o| o.model.as_str())
+                .unwrap_or("omnilingual (not configured)"),
         }
     }
 
@@ -1382,6 +1941,9 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             "paste" => OutputMode::Paste,
             _ => OutputMode::Type,
         };
+    }
+    if let Ok(append_text) = std::env::var("VOXTYPE_APPEND_TEXT") {
+        config.output.append_text = Some(append_text);
     }
 
     Ok(config)
@@ -1997,7 +2559,10 @@ mod tests {
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.engine, TranscriptionEngine::Parakeet);
         assert!(config.parakeet.is_some());
-        assert_eq!(config.parakeet.as_ref().unwrap().model, "parakeet-tdt-0.6b-v3");
+        assert_eq!(
+            config.parakeet.as_ref().unwrap().model,
+            "parakeet-tdt-0.6b-v3"
+        );
     }
 
     #[test]
@@ -2025,15 +2590,39 @@ mod tests {
 
     #[test]
     fn test_output_driver_from_str() {
-        assert_eq!("wtype".parse::<OutputDriver>().unwrap(), OutputDriver::Wtype);
-        assert_eq!("dotool".parse::<OutputDriver>().unwrap(), OutputDriver::Dotool);
-        assert_eq!("ydotool".parse::<OutputDriver>().unwrap(), OutputDriver::Ydotool);
-        assert_eq!("clipboard".parse::<OutputDriver>().unwrap(), OutputDriver::Clipboard);
-        assert_eq!("xclip".parse::<OutputDriver>().unwrap(), OutputDriver::Xclip);
+        assert_eq!(
+            "wtype".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Wtype
+        );
+        assert_eq!(
+            "dotool".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Dotool
+        );
+        assert_eq!(
+            "ydotool".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Ydotool
+        );
+        assert_eq!(
+            "clipboard".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Clipboard
+        );
+        assert_eq!(
+            "xclip".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Xclip
+        );
         // Case insensitive
-        assert_eq!("WTYPE".parse::<OutputDriver>().unwrap(), OutputDriver::Wtype);
-        assert_eq!("Ydotool".parse::<OutputDriver>().unwrap(), OutputDriver::Ydotool);
-        assert_eq!("XCLIP".parse::<OutputDriver>().unwrap(), OutputDriver::Xclip);
+        assert_eq!(
+            "WTYPE".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Wtype
+        );
+        assert_eq!(
+            "Ydotool".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Ydotool
+        );
+        assert_eq!(
+            "XCLIP".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Xclip
+        );
         // Invalid
         assert!("invalid".parse::<OutputDriver>().is_err());
     }
@@ -2427,11 +3016,17 @@ mod tests {
         assert_eq!(config.profiles.len(), 2);
 
         let slack = config.get_profile("slack").unwrap();
-        assert_eq!(slack.post_process_command, Some("cleanup-for-slack.sh".to_string()));
+        assert_eq!(
+            slack.post_process_command,
+            Some("cleanup-for-slack.sh".to_string())
+        );
         assert!(slack.output_mode.is_none());
 
         let code = config.get_profile("code").unwrap();
-        assert_eq!(code.post_process_command, Some("cleanup-for-code.sh".to_string()));
+        assert_eq!(
+            code.post_process_command,
+            Some("cleanup-for-code.sh".to_string())
+        );
         assert_eq!(code.output_mode, Some(OutputMode::Clipboard));
     }
 
@@ -2460,7 +3055,10 @@ mod tests {
 
         let config: Config = toml::from_str(toml_str).unwrap();
         let slow = config.get_profile("slow").unwrap();
-        assert_eq!(slow.post_process_command, Some("slow-llm-command".to_string()));
+        assert_eq!(
+            slow.post_process_command,
+            Some("slow-llm-command".to_string())
+        );
         assert_eq!(slow.post_process_timeout_ms, Some(60000));
     }
 
@@ -2635,5 +3233,162 @@ mod tests {
         let driver_order = config.output.driver_order.unwrap();
         assert_eq!(driver_order.len(), 1);
         assert_eq!(driver_order[0], OutputDriver::Ydotool);
+    }
+
+    // =========================================================================
+    // Meeting Config Tests
+    // =========================================================================
+
+    #[test]
+    fn test_meeting_config_default() {
+        let config = MeetingConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.chunk_duration_secs, 30);
+        assert_eq!(config.storage_path, "auto");
+        assert!(!config.retain_audio);
+        assert_eq!(config.max_duration_mins, 180);
+    }
+
+    #[test]
+    fn test_meeting_audio_config_default() {
+        let config = MeetingAudioConfig::default();
+        assert_eq!(config.mic_device, "default");
+        assert_eq!(config.loopback_device, "auto");
+    }
+
+    #[test]
+    fn test_meeting_diarization_config_default() {
+        let config = MeetingDiarizationConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.backend, "simple");
+        assert_eq!(config.max_speakers, 10);
+    }
+
+    #[test]
+    fn test_meeting_summary_config_default() {
+        let config = MeetingSummaryConfig::default();
+        assert_eq!(config.backend, "disabled");
+        assert_eq!(config.ollama_url, "http://localhost:11434");
+        assert_eq!(config.ollama_model, "llama3.2");
+        assert!(config.remote_endpoint.is_none());
+        assert!(config.remote_api_key.is_none());
+        assert_eq!(config.timeout_secs, 120);
+    }
+
+    #[test]
+    fn test_meeting_config_in_default_config() {
+        let config = Config::default();
+        assert!(!config.meeting.enabled);
+        assert_eq!(config.meeting.chunk_duration_secs, 30);
+        assert_eq!(config.meeting.max_duration_mins, 180);
+    }
+
+    #[test]
+    fn test_parse_meeting_config_from_toml() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [meeting]
+            enabled = true
+            chunk_duration_secs = 45
+            storage_path = "/tmp/meetings"
+            retain_audio = true
+            max_duration_mins = 60
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.meeting.enabled);
+        assert_eq!(config.meeting.chunk_duration_secs, 45);
+        assert_eq!(config.meeting.storage_path, "/tmp/meetings");
+        assert!(config.meeting.retain_audio);
+        assert_eq!(config.meeting.max_duration_mins, 60);
+    }
+
+    #[test]
+    fn test_parse_meeting_config_with_nested_sections() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [meeting]
+            enabled = true
+
+            [meeting.audio]
+            mic_device = "hw:1"
+            loopback_device = "disabled"
+
+            [meeting.diarization]
+            enabled = false
+            backend = "ml"
+            max_speakers = 5
+
+            [meeting.summary]
+            backend = "local"
+            ollama_model = "mistral"
+            timeout_secs = 60
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.meeting.audio.mic_device, "hw:1");
+        assert_eq!(config.meeting.audio.loopback_device, "disabled");
+        assert!(!config.meeting.diarization.enabled);
+        assert_eq!(config.meeting.diarization.backend, "ml");
+        assert_eq!(config.meeting.diarization.max_speakers, 5);
+        assert_eq!(config.meeting.summary.backend, "local");
+        assert_eq!(config.meeting.summary.ollama_model, "mistral");
+        assert_eq!(config.meeting.summary.timeout_secs, 60);
+    }
+
+    #[test]
+    fn test_meeting_config_backward_compatible_omitted() {
+        // Config without [meeting] section should parse fine with defaults
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(!config.meeting.enabled);
+        assert_eq!(config.meeting.chunk_duration_secs, 30);
+        assert_eq!(config.meeting.storage_path, "auto");
+        assert_eq!(config.meeting.diarization.backend, "simple");
+        assert_eq!(config.meeting.summary.backend, "disabled");
     }
 }

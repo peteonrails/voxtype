@@ -5,6 +5,9 @@ on:
     branches: ["main"]
     paths:
       - 'website/**'
+      - 'docs/**'
+      - 'package.json'
+      - '.github/workflows/deploy-pages.yml'
   workflow_dispatch:
 
 permissions:
@@ -25,6 +28,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build VitePress
+        run: bun run docs:build
 
       - name: Setup Pages
         uses: actions/configure-pages@v4

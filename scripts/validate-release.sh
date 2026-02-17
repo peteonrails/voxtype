@@ -33,10 +33,10 @@ WHISPER_BINARIES=(
     "voxtype-${VERSION}-linux-x86_64-vulkan"
 )
 
-PARAKEET_BINARIES=(
-    "voxtype-${VERSION}-linux-x86_64-parakeet-avx2"
-    "voxtype-${VERSION}-linux-x86_64-parakeet-avx512"
-    "voxtype-${VERSION}-linux-x86_64-parakeet-cuda"
+ONNX_BINARIES=(
+    "voxtype-${VERSION}-linux-x86_64-onnx-avx2"
+    "voxtype-${VERSION}-linux-x86_64-onnx-avx512"
+    "voxtype-${VERSION}-linux-x86_64-onnx-cuda"
 )
 
 # Binaries that must NOT have AVX-512 instructions
@@ -48,14 +48,14 @@ MUST_BE_CLEAN=(
 # Binaries that MUST have AVX-512 instructions
 MUST_HAVE_AVX512=(
     "voxtype-${VERSION}-linux-x86_64-avx512"
-    "voxtype-${VERSION}-linux-x86_64-parakeet-avx512"
+    "voxtype-${VERSION}-linux-x86_64-onnx-avx512"
 )
 
 FAILED=false
 
 # 1. Check all binaries exist
 echo "Checking binary existence..."
-ALL_BINARIES=("${WHISPER_BINARIES[@]}" "${PARAKEET_BINARIES[@]}")
+ALL_BINARIES=("${WHISPER_BINARIES[@]}" "${ONNX_BINARIES[@]}")
 FOUND_BINARIES=()
 
 for binary in "${ALL_BINARIES[@]}"; do

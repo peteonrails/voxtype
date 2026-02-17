@@ -111,7 +111,10 @@ pub fn create_app_bundle() -> anyhow::Result<()> {
     let version = env!("CARGO_PKG_VERSION");
 
     // Write Info.plist
-    fs::write(contents_path.join("Info.plist"), generate_info_plist(version))?;
+    fs::write(
+        contents_path.join("Info.plist"),
+        generate_info_plist(version),
+    )?;
 
     // Copy the current voxtype binary
     let source_binary = get_voxtype_path();
@@ -132,7 +135,13 @@ pub fn create_app_bundle() -> anyhow::Result<()> {
 
     // Code sign the app bundle (ad-hoc)
     let _ = Command::new("codesign")
-        .args(["--force", "--deep", "--sign", "-", app_path.to_str().unwrap()])
+        .args([
+            "--force",
+            "--deep",
+            "--sign",
+            "-",
+            app_path.to_str().unwrap(),
+        ])
         .output();
 
     Ok(())
@@ -150,9 +159,7 @@ end tell"#,
         app_path.display()
     );
 
-    let output = Command::new("osascript")
-        .args(["-e", &script])
-        .output()?;
+    let output = Command::new("osascript").args(["-e", &script]).output()?;
 
     Ok(output.status.success())
 }
@@ -165,9 +172,7 @@ pub fn remove_from_login_items() -> anyhow::Result<bool> {
     end if
 end tell"#;
 
-    let output = Command::new("osascript")
-        .args(["-e", script])
-        .output()?;
+    let output = Command::new("osascript").args(["-e", script]).output()?;
 
     Ok(output.status.success())
 }
@@ -197,9 +202,13 @@ pub fn remove_app_bundle() -> anyhow::Result<()> {
 /// Open System Settings to the relevant privacy pane
 pub fn open_privacy_settings(pane: &str) -> anyhow::Result<()> {
     let url = match pane {
-        "accessibility" => "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+        "accessibility" => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        }
         "input" => "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
-        "microphone" => "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
+        "microphone" => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+        }
         "login" => "x-apple.systempreferences:com.apple.LoginItems-Settings.extension",
         _ => return Err(anyhow::anyhow!("Unknown pane: {}", pane)),
     };
@@ -303,9 +312,7 @@ pub async fn status() -> anyhow::Result<()> {
     }
 
     // Check if running
-    let output = Command::new("pgrep")
-        .args(["-f", "Voxtype.app"])
-        .output();
+    let output = Command::new("pgrep").args(["-f", "Voxtype.app"]).output();
 
     match output {
         Ok(out) if out.status.success() => {

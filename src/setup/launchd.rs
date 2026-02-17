@@ -99,7 +99,8 @@ pub async fn install() -> anyhow::Result<()> {
     }
 
     // Ensure LaunchAgents directory exists
-    let launch_dir = launch_agents_dir().ok_or_else(|| anyhow::anyhow!("Could not determine LaunchAgents directory"))?;
+    let launch_dir = launch_agents_dir()
+        .ok_or_else(|| anyhow::anyhow!("Could not determine LaunchAgents directory"))?;
     fs::create_dir_all(&launch_dir)?;
 
     // Ensure logs directory exists
@@ -226,15 +227,11 @@ pub async fn status() -> anyhow::Result<()> {
         let stderr_log = logs.join("stderr.log");
 
         if stdout_log.exists() {
-            let size = fs::metadata(&stdout_log)
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let size = fs::metadata(&stdout_log).map(|m| m.len()).unwrap_or(0);
             println!("  stdout: {:?} ({} bytes)", stdout_log, size);
         }
         if stderr_log.exists() {
-            let size = fs::metadata(&stderr_log)
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let size = fs::metadata(&stderr_log).map(|m| m.len()).unwrap_or(0);
             println!("  stderr: {:?} ({} bytes)", stderr_log, size);
         }
     }

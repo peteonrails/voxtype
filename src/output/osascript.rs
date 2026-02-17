@@ -99,8 +99,10 @@ impl TextOutput for OsascriptOutput {
 
         // Add Enter key if auto_submit is enabled
         if self.auto_submit {
-            script.push_str(r#"
-tell application "System Events" to key code 36"#); // 36 = Return key
+            script.push_str(
+                r#"
+tell application "System Events" to key code 36"#,
+            ); // 36 = Return key
         }
 
         let output = Command::new("osascript")

@@ -7,15 +7,40 @@
 use clap::Parser;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
-use voxtype::{config, cpu, daemon, setup, transcribe, Cli, Commands, RecordAction, SetupAction};
 #[cfg(target_os = "macos")]
 use voxtype::menubar;
+use voxtype::{
+    config, cpu, daemon, meeting, setup, transcribe, vad, Cli, Commands, MeetingAction,
+    RecordAction, SetupAction,
+};
 
 /// Parse a comma-separated list of driver names into OutputDriver vec
 fn parse_driver_order(s: &str) -> Result<Vec<config::OutputDriver>, String> {
     s.split(',')
         .map(|d| d.trim().parse::<config::OutputDriver>())
         .collect()
+}
+
+/// Check if running as root and warn for commands that don't need elevated privileges.
+/// Returns true if running as root.
+fn warn_if_root(command_name: &str) -> bool {
+    // SAFETY: getuid() is always safe to call
+    let is_root = unsafe { libc::getuid() } == 0;
+    if is_root {
+        eprintln!(
+            "Warning: Running 'voxtype setup {}' as root is not recommended.",
+            command_name
+        );
+        eprintln!("  - Models will download to /root/.local/share/voxtype/ instead of your user directory");
+        eprintln!(
+            "  - Config changes will apply to /root/.config/voxtype/ instead of your user config"
+        );
+        eprintln!("  - Cannot restart your user's voxtype daemon from root");
+        eprintln!();
+        eprintln!("Run without sudo: voxtype setup {}", command_name);
+        eprintln!();
+    }
+    is_root
 }
 
 #[tokio::main]
@@ -75,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
     if cli.paste {
         config.output.mode = config::OutputMode::Paste;
     }
+    let top_level_model = cli.model.clone();
     if let Some(model) = cli.model {
         if setup::model::is_valid_model(&model) {
             config.whisper.model = model;
@@ -96,8 +122,16 @@ async fn main() -> anyhow::Result<()> {
         match engine.to_lowercase().as_str() {
             "whisper" => config.engine = config::TranscriptionEngine::Whisper,
             "parakeet" => config.engine = config::TranscriptionEngine::Parakeet,
+            "moonshine" => config.engine = config::TranscriptionEngine::Moonshine,
+            "sensevoice" => config.engine = config::TranscriptionEngine::SenseVoice,
+            "paraformer" => config.engine = config::TranscriptionEngine::Paraformer,
+            "dolphin" => config.engine = config::TranscriptionEngine::Dolphin,
+            "omnilingual" => config.engine = config::TranscriptionEngine::Omnilingual,
             _ => {
-                eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet", engine);
+                eprintln!(
+                    "Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual",
+                    engine
+                );
                 std::process::exit(1);
             }
         }
@@ -121,6 +155,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(prompt) = cli.initial_prompt {
         config.whisper.initial_prompt = Some(prompt);
     }
+    if let Some(append_text) = cli.append_text {
+        config.output.append_text = Some(append_text);
+    }
     if let Some(ref driver_str) = cli.driver {
         match parse_driver_order(driver_str) {
             Ok(drivers) => {
@@ -132,6 +169,26 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+    if cli.vad {
+        config.vad.enabled = true;
+    }
+    if let Some(threshold) = cli.vad_threshold {
+        config.vad.threshold = threshold.clamp(0.0, 1.0);
+    }
+    if let Some(ref backend) = cli.vad_backend {
+        config.vad.backend = match backend.to_lowercase().as_str() {
+            "auto" => config::VadBackend::Auto,
+            "energy" => config::VadBackend::Energy,
+            "whisper" => config::VadBackend::Whisper,
+            _ => {
+                eprintln!(
+                    "Unknown VAD backend '{}'. Valid options: auto, energy, whisper",
+                    backend
+                );
+                std::process::exit(1);
+            }
+        };
+    }
 
     // Run the appropriate command
     match cli.command.unwrap_or(Commands::Daemon) {
@@ -141,13 +198,29 @@ async fn main() -> anyhow::Result<()> {
         }
         #[cfg(target_os = "macos")]
         Commands::Menubar => {
-            let state_file = config.resolve_state_file()
+            let state_file = config
+                .resolve_state_file()
                 .ok_or_else(|| anyhow::anyhow!("state_file not configured"))?;
             menubar::run(state_file);
             // Note: menubar::run() never returns (runs macOS event loop)
         }
 
-        Commands::Transcribe { file } => {
+        Commands::Transcribe { file, engine } => {
+            if let Some(engine_name) = engine {
+                match engine_name.to_lowercase().as_str() {
+                    "whisper" => config.engine = config::TranscriptionEngine::Whisper,
+                    "parakeet" => config.engine = config::TranscriptionEngine::Parakeet,
+                    "moonshine" => config.engine = config::TranscriptionEngine::Moonshine,
+                    "sensevoice" => config.engine = config::TranscriptionEngine::SenseVoice,
+                    "paraformer" => config.engine = config::TranscriptionEngine::Paraformer,
+                    "dolphin" => config.engine = config::TranscriptionEngine::Dolphin,
+                    "omnilingual" => config.engine = config::TranscriptionEngine::Omnilingual,
+                    _ => {
+                        eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual", engine_name);
+                        std::process::exit(1);
+                    }
+                }
+            }
             transcribe_file(&config, &file)?;
         }
 
@@ -186,9 +259,11 @@ async fn main() -> anyhow::Result<()> {
         } => {
             match action {
                 Some(SetupAction::Check) => {
+                    warn_if_root("check");
                     setup::run_checks(&config).await?;
                 }
                 Some(SetupAction::Systemd { uninstall, status }) => {
+                    warn_if_root("systemd");
                     if status {
                         setup::systemd::status().await?;
                     } else if uninstall {
@@ -218,7 +293,12 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 #[cfg(target_os = "macos")]
-                Some(SetupAction::Hammerspoon { install, show, hotkey, toggle }) => {
+                Some(SetupAction::Hammerspoon {
+                    install,
+                    show,
+                    hotkey,
+                    toggle,
+                }) => {
                     setup::hammerspoon::run(install, show, &hotkey, toggle).await?;
                 }
                 #[cfg(target_os = "macos")]
@@ -231,6 +311,7 @@ async fn main() -> anyhow::Result<()> {
                     install,
                     uninstall,
                 }) => {
+                    warn_if_root("waybar");
                     if install {
                         setup::waybar::install()?;
                     } else if uninstall {
@@ -248,6 +329,7 @@ async fn main() -> anyhow::Result<()> {
                     uninstall,
                     qml,
                 }) => {
+                    warn_if_root("dms");
                     if install {
                         setup::dms::install()?;
                     } else if uninstall {
@@ -259,6 +341,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 Some(SetupAction::Model { list, set, restart }) => {
+                    warn_if_root("model");
                     if list {
                         setup::model::list_installed();
                     } else if let Some(model_name) = set {
@@ -283,7 +366,17 @@ async fn main() -> anyhow::Result<()> {
                         setup::gpu::show_status();
                     }
                 }
-                Some(SetupAction::Parakeet { enable, disable, status }) => {
+                Some(SetupAction::Onnx {
+                    enable,
+                    disable,
+                    status,
+                })
+                | Some(SetupAction::Parakeet {
+                    enable,
+                    disable,
+                    status,
+                }) => {
+                    warn_if_root("onnx");
                     if status {
                         setup::parakeet::show_status();
                     } else if enable {
@@ -296,10 +389,20 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 Some(SetupAction::Compositor { compositor_type }) => {
+                    warn_if_root("compositor");
                     setup::compositor::run(&compositor_type).await?;
+                }
+                Some(SetupAction::Vad { status }) => {
+                    warn_if_root("vad");
+                    if status {
+                        setup::vad::show_status();
+                    } else {
+                        setup::vad::download_model()?;
+                    }
                 }
                 None => {
                     // Default: run setup (non-blocking)
+                    warn_if_root("");
                     setup::run_setup(&config, download, model.as_deref(), quiet, no_post_install)
                         .await?;
                 }
@@ -320,9 +423,12 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Commands::Record { action } => {
-            send_record_command(&config, action)?;
+            send_record_command(&config, action, top_level_model.as_deref())?;
         }
 
+        Commands::Meeting { action } => {
+            run_meeting_command(&config, action).await?;
+        }
 
         Commands::CheckUpdate => {
             check_for_updates().await?;
@@ -361,8 +467,14 @@ async fn check_for_updates() -> anyhow::Result<()> {
                     .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
 
                 if latest_ver > current_ver {
-                    println!("\x1b[33m⚠ Update available: {} → {}\x1b[0m\n", current, latest);
-                    println!("Download: https://github.com/peteonrails/voxtype/releases/tag/{}", tag);
+                    println!(
+                        "\x1b[33m⚠ Update available: {} → {}\x1b[0m\n",
+                        current, latest
+                    );
+                    println!(
+                        "Download: https://github.com/peteonrails/voxtype/releases/tag/{}",
+                        tag
+                    );
                     println!("Website:  https://voxtype.io/download");
 
                     // Show release notes excerpt if available
@@ -377,7 +489,10 @@ async fn check_for_updates() -> anyhow::Result<()> {
                         }
                     }
                 } else {
-                    println!("\x1b[32m✓ You're on the latest version ({}).\x1b[0m", current);
+                    println!(
+                        "\x1b[32m✓ You're on the latest version ({}).\x1b[0m",
+                        current
+                    );
                 }
             } else {
                 println!("Could not parse latest version from GitHub.");
@@ -396,8 +511,42 @@ async fn check_for_updates() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Check if the daemon is running, exit with error if not
+fn check_daemon_running() -> anyhow::Result<()> {
+    let pid_file = config::Config::runtime_dir().join("pid");
+
+    if !pid_file.exists() {
+        eprintln!("Error: Voxtype daemon is not running.");
+        eprintln!("Start it with: voxtype daemon");
+        std::process::exit(1);
+    }
+
+    let pid_str = std::fs::read_to_string(&pid_file)
+        .map_err(|e| anyhow::anyhow!("Failed to read PID file: {}", e))?;
+
+    let pid: i32 = pid_str
+        .trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid PID in file: {}", e))?;
+
+    // Check if the process is actually running (signal 0 = check existence)
+    if unsafe { libc::kill(pid, 0) } != 0 {
+        // Process doesn't exist, clean up stale PID file
+        let _ = std::fs::remove_file(&pid_file);
+        eprintln!("Error: Voxtype daemon is not running (stale PID file removed).");
+        eprintln!("Start it with: voxtype daemon");
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
 /// Send a record command to the running daemon via Unix signals or file triggers
-fn send_record_command(config: &config::Config, action: RecordAction) -> anyhow::Result<()> {
+fn send_record_command(
+    config: &config::Config,
+    action: RecordAction,
+    top_level_model: Option<&str>,
+) -> anyhow::Result<()> {
     use voxtype::OutputModeOverride;
 
     // Read PID from the lock file (daemon writes PID to voxtype.lock)
@@ -454,8 +603,9 @@ fn send_record_command(config: &config::Config, action: RecordAction) -> anyhow:
             .map_err(|e| anyhow::anyhow!("Failed to write output mode override: {}", e))?;
     }
 
-    // Write model override file if specified
-    if let Some(model) = action.model_override() {
+    // Write model override file if specified (subcommand --model takes priority over top-level --model)
+    let model_override = action.model_override().or(top_level_model);
+    if let Some(model) = model_override {
         let override_file = config::Config::runtime_dir().join("model_override");
         std::fs::write(&override_file, model)
             .map_err(|e| anyhow::anyhow!("Failed to write model override: {}", e))?;
@@ -476,7 +626,14 @@ fn send_record_command(config: &config::Config, action: RecordAction) -> anyhow:
             } else {
                 eprintln!("Error: Profile '{}' not found.", profile_name);
                 eprintln!();
-                eprintln!("Available profiles: {}", available.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
+                eprintln!(
+                    "Available profiles: {}",
+                    available
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
             }
             std::process::exit(1);
         }
@@ -584,8 +741,29 @@ fn transcribe_file(config: &config::Config, path: &PathBuf) -> anyhow::Result<()
         final_samples.len() as f32 / 16000.0
     );
 
+    // Run VAD if enabled
+    if let Ok(Some(vad)) = vad::create_vad(config) {
+        match vad.detect(&final_samples) {
+            Ok(result) => {
+                println!(
+                    "VAD: {:.2}s speech ({:.1}% of audio)",
+                    result.speech_duration_secs,
+                    result.speech_ratio * 100.0
+                );
+                if !result.has_speech {
+                    println!("No speech detected, skipping transcription.");
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                eprintln!("VAD warning: {}", e);
+                // Continue with transcription if VAD fails
+            }
+        }
+    }
+
     // Create transcriber and transcribe
-    let transcriber = transcribe::create_transcriber(&config)?;
+    let transcriber = transcribe::create_transcriber(config)?;
     let text = transcriber.transcribe(&final_samples)?;
 
     println!("\n{}", text);
@@ -887,7 +1065,10 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
         if let Some(ref model_type) = parakeet_config.model_type {
             println!("  model_type = {:?}", model_type);
         }
-        println!("  on_demand_loading = {}", parakeet_config.on_demand_loading);
+        println!(
+            "  on_demand_loading = {}",
+            parakeet_config.on_demand_loading
+        );
     } else {
         println!("  (not configured)");
     }
@@ -916,6 +1097,88 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
         println!("  available models: (none found)");
     } else {
         println!("  available models: {}", parakeet_models.join(", "));
+    }
+
+    // Show Moonshine status (experimental)
+    println!("\n[moonshine] (EXPERIMENTAL)");
+    if let Some(ref moonshine_config) = config.moonshine {
+        println!("  model = {:?}", moonshine_config.model);
+        println!("  quantized = {}", moonshine_config.quantized);
+        if let Some(threads) = moonshine_config.threads {
+            println!("  threads = {}", threads);
+        }
+        println!(
+            "  on_demand_loading = {}",
+            moonshine_config.on_demand_loading
+        );
+    } else {
+        println!("  (not configured)");
+    }
+
+    // Check for available Moonshine models
+    let mut moonshine_models: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&models_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.contains("moonshine") {
+                    let has_encoder = path.join("encoder_model.onnx").exists()
+                        || path.join("encoder_model_quantized.onnx").exists();
+                    let has_decoder = path.join("decoder_model_merged.onnx").exists()
+                        || path.join("decoder_model_merged_quantized.onnx").exists();
+                    if has_encoder || has_decoder {
+                        moonshine_models.push(name);
+                    }
+                }
+            }
+        }
+    }
+    if moonshine_models.is_empty() {
+        println!("  available models: (none found)");
+    } else {
+        println!("  available models: {}", moonshine_models.join(", "));
+    }
+
+    // Show SenseVoice status (experimental)
+    println!("\n[sensevoice] (EXPERIMENTAL)");
+    if let Some(ref sensevoice_config) = config.sensevoice {
+        println!("  model = {:?}", sensevoice_config.model);
+        println!("  language = {:?}", sensevoice_config.language);
+        println!("  use_itn = {}", sensevoice_config.use_itn);
+        if let Some(threads) = sensevoice_config.threads {
+            println!("  threads = {}", threads);
+        }
+        println!(
+            "  on_demand_loading = {}",
+            sensevoice_config.on_demand_loading
+        );
+    } else {
+        println!("  (not configured)");
+    }
+
+    // Check for available SenseVoice models
+    let mut sensevoice_models: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&models_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.contains("sensevoice") {
+                    let has_model =
+                        path.join("model.int8.onnx").exists() || path.join("model.onnx").exists();
+                    let has_tokens = path.join("tokens.txt").exists();
+                    if has_model && has_tokens {
+                        sensevoice_models.push(name);
+                    }
+                }
+            }
+        }
+    }
+    if sensevoice_models.is_empty() {
+        println!("  available models: (none found)");
+    } else {
+        println!("  available models: {}", sensevoice_models.join(", "));
     }
 
     println!("\n[output]");
@@ -996,4 +1259,440 @@ fn reset_sigpipe() {
 #[cfg(not(unix))]
 fn reset_sigpipe() {
     // No-op on non-Unix platforms
+}
+
+/// Run a meeting command
+async fn run_meeting_command(config: &config::Config, action: MeetingAction) -> anyhow::Result<()> {
+    use meeting::{ExportFormat, ExportOptions, MeetingConfig, StorageConfig};
+
+    // Convert config to meeting config
+    let storage_path = if config.meeting.storage_path == "auto" {
+        StorageConfig::default_storage_path()
+    } else {
+        PathBuf::from(&config.meeting.storage_path)
+    };
+
+    let meeting_config = MeetingConfig {
+        enabled: config.meeting.enabled,
+        chunk_duration_secs: config.meeting.chunk_duration_secs,
+        storage: StorageConfig {
+            storage_path,
+            retain_audio: config.meeting.retain_audio,
+            max_meetings: 0,
+        },
+        retain_audio: config.meeting.retain_audio,
+        max_duration_mins: config.meeting.max_duration_mins,
+    };
+
+    match action {
+        MeetingAction::Start { title } => {
+            // Check if meeting mode is enabled
+            if !config.meeting.enabled {
+                eprintln!("Error: Meeting mode is disabled in config.");
+                eprintln!();
+                eprintln!("Enable it by adding to config.toml:");
+                eprintln!("  [meeting]");
+                eprintln!("  enabled = true");
+                std::process::exit(1);
+            }
+
+            // Check if daemon is running
+            check_daemon_running()?;
+
+            // Check if meeting already in progress
+            let meeting_state_file = config::Config::runtime_dir().join("meeting_state");
+            if meeting_state_file.exists() {
+                let state = std::fs::read_to_string(&meeting_state_file).unwrap_or_default();
+                if state.starts_with("recording") || state.starts_with("paused") {
+                    eprintln!("Error: A meeting is already in progress.");
+                    eprintln!("Use 'voxtype meeting stop' to end it first.");
+                    std::process::exit(1);
+                }
+            }
+
+            // Write start trigger file (with optional title)
+            let start_file = config::Config::runtime_dir().join("meeting_start");
+            let content = title.unwrap_or_default();
+            std::fs::write(&start_file, content)?;
+
+            println!("Meeting start requested. Check status with 'voxtype meeting status'.");
+        }
+
+        MeetingAction::Stop => {
+            check_daemon_running()?;
+
+            // Check if meeting is in progress
+            let meeting_state_file = config::Config::runtime_dir().join("meeting_state");
+            if !meeting_state_file.exists() {
+                eprintln!("Error: No meeting in progress.");
+                std::process::exit(1);
+            }
+
+            let state = std::fs::read_to_string(&meeting_state_file).unwrap_or_default();
+            if state.starts_with("idle") || state.is_empty() {
+                eprintln!("Error: No meeting in progress.");
+                std::process::exit(1);
+            }
+
+            // Write stop trigger file
+            let stop_file = config::Config::runtime_dir().join("meeting_stop");
+            std::fs::write(&stop_file, "")?;
+
+            println!("Meeting stop requested.");
+        }
+
+        MeetingAction::Pause => {
+            check_daemon_running()?;
+
+            // Check if meeting is active (not paused)
+            let meeting_state_file = config::Config::runtime_dir().join("meeting_state");
+            if !meeting_state_file.exists() {
+                eprintln!("Error: No meeting in progress.");
+                std::process::exit(1);
+            }
+
+            let state = std::fs::read_to_string(&meeting_state_file).unwrap_or_default();
+            if !state.starts_with("recording") {
+                eprintln!("Error: No active meeting to pause.");
+                std::process::exit(1);
+            }
+
+            // Write pause trigger file
+            let pause_file = config::Config::runtime_dir().join("meeting_pause");
+            std::fs::write(&pause_file, "")?;
+
+            println!("Meeting pause requested.");
+        }
+
+        MeetingAction::Resume => {
+            check_daemon_running()?;
+
+            // Check if meeting is paused
+            let meeting_state_file = config::Config::runtime_dir().join("meeting_state");
+            if !meeting_state_file.exists() {
+                eprintln!("Error: No paused meeting to resume.");
+                std::process::exit(1);
+            }
+
+            let state = std::fs::read_to_string(&meeting_state_file).unwrap_or_default();
+            if !state.starts_with("paused") {
+                eprintln!("Error: No paused meeting to resume.");
+                std::process::exit(1);
+            }
+
+            // Write resume trigger file
+            let resume_file = config::Config::runtime_dir().join("meeting_resume");
+            std::fs::write(&resume_file, "")?;
+
+            println!("Meeting resume requested.");
+        }
+
+        MeetingAction::Status => {
+            // Read meeting state file
+            let meeting_state_file = config::Config::runtime_dir().join("meeting_state");
+            if !meeting_state_file.exists() {
+                println!("No meeting currently in progress.");
+                println!();
+                println!("Use 'voxtype meeting list' to see past meetings.");
+                return Ok(());
+            }
+
+            let state = std::fs::read_to_string(&meeting_state_file).unwrap_or_default();
+            let lines: Vec<&str> = state.lines().collect();
+
+            if lines.is_empty() || lines[0] == "idle" {
+                println!("No meeting currently in progress.");
+                println!();
+                println!("Use 'voxtype meeting list' to see past meetings.");
+            } else {
+                let status = lines[0];
+                let meeting_id = lines.get(1).unwrap_or(&"");
+
+                println!("Meeting Status: {}", status);
+                if !meeting_id.is_empty() {
+                    println!("Meeting ID: {}", meeting_id);
+                }
+            }
+        }
+
+        MeetingAction::List { limit } => {
+            match meeting::list_meetings(&meeting_config, Some(limit)) {
+                Ok(meetings) => {
+                    if meetings.is_empty() {
+                        println!("No meetings found.");
+                        return Ok(());
+                    }
+
+                    println!("Recent Meetings");
+                    println!("===============\n");
+
+                    for m in meetings {
+                        let duration = m
+                            .duration_secs
+                            .map(|d| {
+                                let mins = d / 60;
+                                let secs = d % 60;
+                                format!("{}m {}s", mins, secs)
+                            })
+                            .unwrap_or_else(|| "in progress".to_string());
+
+                        println!("{}", m.display_title());
+                        println!("  ID: {}", m.id);
+                        println!("  Date: {}", m.started_at.format("%Y-%m-%d %H:%M"));
+                        println!("  Duration: {}", duration);
+                        println!("  Status: {:?}", m.status);
+                        println!();
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error listing meetings: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        MeetingAction::Export {
+            meeting_id,
+            format,
+            output,
+            timestamps,
+            speakers,
+            metadata,
+        } => {
+            let export_format = ExportFormat::parse(&format).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unknown export format '{}'. Valid formats: text, markdown, json",
+                    format
+                )
+            })?;
+
+            let options = ExportOptions {
+                include_timestamps: timestamps,
+                include_speakers: speakers,
+                include_metadata: metadata,
+                line_width: 0,
+            };
+
+            match meeting::export_meeting_by_id(
+                &meeting_config,
+                &meeting_id,
+                export_format,
+                &options,
+            ) {
+                Ok(content) => {
+                    if let Some(path) = output {
+                        std::fs::write(&path, &content)?;
+                        println!("Exported to {:?}", path);
+                    } else {
+                        println!("{}", content);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error exporting meeting: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        MeetingAction::Show { meeting_id } => {
+            match meeting::get_meeting(&meeting_config, &meeting_id) {
+                Ok(meeting) => {
+                    println!("{}", meeting.metadata.display_title());
+                    println!("{}", "=".repeat(meeting.metadata.display_title().len()));
+                    println!();
+                    println!("ID:       {}", meeting.metadata.id);
+                    println!(
+                        "Started:  {}",
+                        meeting.metadata.started_at.format("%Y-%m-%d %H:%M UTC")
+                    );
+                    if let Some(ended) = meeting.metadata.ended_at {
+                        println!("Ended:    {}", ended.format("%Y-%m-%d %H:%M UTC"));
+                    }
+                    if let Some(duration) = meeting.metadata.duration_secs {
+                        let hours = duration / 3600;
+                        let mins = (duration % 3600) / 60;
+                        let secs = duration % 60;
+                        if hours > 0 {
+                            println!("Duration: {}h {}m {}s", hours, mins, secs);
+                        } else {
+                            println!("Duration: {}m {}s", mins, secs);
+                        }
+                    }
+                    println!("Status:   {:?}", meeting.metadata.status);
+                    println!("Chunks:   {}", meeting.metadata.chunk_count);
+                    println!();
+                    println!("Transcript:");
+                    println!("-----------");
+                    println!("Segments: {}", meeting.transcript.segments.len());
+                    println!("Words:    {}", meeting.transcript.word_count());
+                    println!("Speakers: {}", meeting.transcript.speakers().join(", "));
+                    println!();
+                    println!(
+                        "Use 'voxtype meeting export {}' to export the transcript.",
+                        meeting_id
+                    );
+                }
+                Err(e) => {
+                    eprintln!("Error loading meeting: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        MeetingAction::Delete { meeting_id, force } => {
+            if !force {
+                eprintln!("This will permanently delete the meeting and all associated files.");
+                eprintln!("Use --force to confirm deletion.");
+                std::process::exit(1);
+            }
+
+            let storage = meeting::MeetingStorage::open(meeting_config.storage.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to open storage: {}", e))?;
+
+            let id = storage
+                .resolve_meeting_id(&meeting_id)
+                .map_err(|e| anyhow::anyhow!("Meeting not found: {}", e))?;
+
+            storage
+                .delete_meeting(&id)
+                .map_err(|e| anyhow::anyhow!("Failed to delete meeting: {}", e))?;
+
+            println!("Meeting {} deleted.", meeting_id);
+        }
+
+        MeetingAction::Label {
+            meeting_id,
+            speaker_id,
+            label,
+        } => {
+            let storage = meeting::MeetingStorage::open(meeting_config.storage.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to open storage: {}", e))?;
+
+            let id = storage
+                .resolve_meeting_id(&meeting_id)
+                .map_err(|e| anyhow::anyhow!("Meeting not found: {}", e))?;
+
+            // Parse speaker_id - accept "SPEAKER_00", "0", "00", etc.
+            let speaker_num: u32 = if speaker_id.starts_with("SPEAKER_") {
+                speaker_id
+                    .trim_start_matches("SPEAKER_")
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("Invalid speaker ID format: {}", speaker_id))?
+            } else {
+                speaker_id.parse().map_err(|_| {
+                    anyhow::anyhow!(
+                        "Invalid speaker ID: {}. Use SPEAKER_XX or a number.",
+                        speaker_id
+                    )
+                })?
+            };
+
+            storage
+                .set_speaker_label(&id, speaker_num, &label)
+                .map_err(|e| anyhow::anyhow!("Failed to set speaker label: {}", e))?;
+
+            println!(
+                "Labeled SPEAKER_{:02} as '{}' in meeting {}",
+                speaker_num, label, meeting_id
+            );
+        }
+
+        MeetingAction::Summarize {
+            meeting_id,
+            format,
+            output,
+        } => {
+            // Load meeting
+            let meeting = meeting::get_meeting(&meeting_config, &meeting_id)
+                .map_err(|e| anyhow::anyhow!("Failed to load meeting: {}", e))?;
+
+            // Create summary config from meeting config
+            let summary_config = meeting::summary::SummaryConfig {
+                backend: config.meeting.summary.backend.clone(),
+                ollama_url: config.meeting.summary.ollama_url.clone(),
+                ollama_model: config.meeting.summary.ollama_model.clone(),
+                remote_endpoint: config.meeting.summary.remote_endpoint.clone(),
+                remote_api_key: config.meeting.summary.remote_api_key.clone(),
+                timeout_secs: config.meeting.summary.timeout_secs,
+            };
+
+            // Create summarizer
+            let summarizer = meeting::summary::create_summarizer(&summary_config)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Summarization not configured. Set [meeting.summary] backend in config.toml:\n\n\
+                        [meeting.summary]\n\
+                        backend = \"local\"  # or \"remote\"\n\
+                        ollama_url = \"http://localhost:11434\"\n\
+                        ollama_model = \"llama3.2\""
+                    )
+                })?;
+
+            // Check availability
+            if !summarizer.is_available() {
+                return Err(anyhow::anyhow!(
+                    "Summarizer '{}' is not available. Check that Ollama is running.",
+                    summarizer.name()
+                ));
+            }
+
+            eprintln!("Generating summary using {}...", summarizer.name());
+
+            // Generate summary
+            let summary = summarizer
+                .summarize(&meeting)
+                .map_err(|e| anyhow::anyhow!("Summarization failed: {}", e))?;
+
+            // Format output
+            let content = match format.as_str() {
+                "json" => serde_json::to_string_pretty(&summary)
+                    .map_err(|e| anyhow::anyhow!("Failed to serialize summary: {}", e))?,
+                "text" => {
+                    let mut text = String::new();
+                    text.push_str(&format!("Summary: {}\n\n", summary.summary));
+
+                    if !summary.key_points.is_empty() {
+                        text.push_str("Key Points:\n");
+                        for point in &summary.key_points {
+                            text.push_str(&format!("  - {}\n", point));
+                        }
+                        text.push('\n');
+                    }
+
+                    if !summary.action_items.is_empty() {
+                        text.push_str("Action Items:\n");
+                        for item in &summary.action_items {
+                            let assignee = item
+                                .assignee
+                                .as_ref()
+                                .map(|a| format!(" ({})", a))
+                                .unwrap_or_default();
+                            text.push_str(&format!("  - {}{}\n", item.description, assignee));
+                        }
+                        text.push('\n');
+                    }
+
+                    if !summary.decisions.is_empty() {
+                        text.push_str("Decisions:\n");
+                        for decision in &summary.decisions {
+                            text.push_str(&format!("  - {}\n", decision));
+                        }
+                    }
+
+                    text
+                }
+                _ => meeting::summary::summary_to_markdown(&summary),
+            };
+
+            // Output
+            if let Some(path) = output {
+                std::fs::write(&path, &content)?;
+                eprintln!("Summary saved to {:?}", path);
+            } else {
+                println!("{}", content);
+            }
+        }
+    }
+
+    Ok(())
 }

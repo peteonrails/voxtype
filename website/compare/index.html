@@ -72,7 +72,7 @@
                     <tbody>
                         <tr class="highlight-row">
                             <td><strong>Voxtype</strong></td>
-                            <td>Whisper</td>
+                            <td>Multi</td>
                             <td><span class="check">Yes</span></td>
                             <td><span class="check">Vulkan/CUDA</span></td>
                             <td><span class="check">Native</span></td>
@@ -84,9 +84,9 @@
                             <td>Vocalinux</td>
                             <td>Whisper</td>
                             <td><span class="check">Yes</span></td>
-                            <td><span class="no">No</span></td>
-                            <td><span class="check">Yes</span></td>
-                            <td><span class="no">No (ydotool)</span></td>
+                            <td><span class="check">Vulkan/CUDA</span></td>
+                            <td><span class="check">Native</span></td>
+                            <td><span class="check">Yes (wtype/ydotool)</span></td>
                             <td><span class="check">Yes</span></td>
                             <td>Medium</td>
                         </tr>
@@ -322,8 +322,8 @@
     <!-- Engine Comparison -->
     <section class="engine-section">
         <div class="container">
-            <h2>Whisper vs VOSK</h2>
-            <p class="section-subtitle">The two main offline speech recognition engines</p>
+            <h2>Offline Speech Recognition Engines</h2>
+            <p class="section-subtitle">The main offline speech recognition engines used by Linux dictation tools</p>
             <div class="engine-grid">
                 <div class="engine-card">
                     <h3>Whisper (OpenAI)</h3>
@@ -337,6 +337,32 @@
                         <li><span class="con">-</span> Larger models (300MB-6GB)</li>
                     </ul>
                     <p class="engine-tools"><strong>Used by:</strong> Voxtype, Blurt, WhisperWriter, Speech Note</p>
+                </div>
+                <div class="engine-card">
+                    <h3>Parakeet (NVIDIA)</h3>
+                    <p class="engine-tagline">Fast CPU inference with punctuation</p>
+                    <ul class="engine-list">
+                        <li><span class="pro">+</span> 30x realtime on CPU (AVX-512)</li>
+                        <li><span class="pro">+</span> Proper punctuation & capitalization</li>
+                        <li><span class="pro">+</span> CUDA/TensorRT acceleration</li>
+                        <li><span class="pro">+</span> ONNX Runtime (portable)</li>
+                        <li><span class="con">-</span> English only</li>
+                        <li><span class="con">-</span> Larger models (670MB+)</li>
+                    </ul>
+                    <p class="engine-tools"><strong>Used by:</strong> Voxtype</p>
+                </div>
+                <div class="engine-card">
+                    <h3>Moonshine (Useful Sensors)</h3>
+                    <p class="engine-tagline">Ultra-fast, tiny models</p>
+                    <ul class="engine-list">
+                        <li><span class="pro">+</span> 200x faster than Whisper on CPU</li>
+                        <li><span class="pro">+</span> Small models (100-237MB)</li>
+                        <li><span class="pro">+</span> Variable-length input (no 30s padding)</li>
+                        <li><span class="pro">+</span> MIT-licensed (English models)</li>
+                        <li><span class="con">-</span> No punctuation or capitalization</li>
+                        <li><span class="con">-</span> Lower accuracy than Whisper/Parakeet</li>
+                    </ul>
+                    <p class="engine-tools"><strong>Used by:</strong> Voxtype</p>
                 </div>
                 <div class="engine-card">
                     <h3>VOSK (Alpha Cephei)</h3>
@@ -363,12 +389,12 @@
             <div class="compare-links">
                 <a href="nerd-dictation.html" class="compare-link-card">
                     <h3>Voxtype vs Nerd-dictation</h3>
-                    <p>Whisper accuracy vs VOSK hackability. Daemon vs manual activation.</p>
+                    <p>Multi-engine accuracy vs VOSK hackability. Daemon vs manual activation.</p>
                     <span class="link-arrow">&rarr;</span>
                 </a>
                 <a href="blurt.html" class="compare-link-card">
                     <h3>Voxtype vs Blurt</h3>
-                    <p>Both use Whisper. Desktop-agnostic vs GNOME-native.</p>
+                    <p>Multi-engine vs Whisper-only. Desktop-agnostic vs GNOME-native.</p>
                     <span class="link-arrow">&rarr;</span>
                 </a>
                 <a href="speech-note.html" class="compare-link-card">
@@ -393,7 +419,7 @@
                 </a>
                 <a href="hyprwhspr.html" class="compare-link-card">
                     <h3>Voxtype vs hyprwhspr</h3>
-                    <p>Both Whisper-based. Universal vs Arch/Hyprland-focused.</p>
+                    <p>Multi-engine vs Whisper-only. Universal vs Arch/Hyprland-focused.</p>
                     <span class="link-arrow">&rarr;</span>
                 </a>
                 <a href="waystt.html" class="compare-link-card">
@@ -403,7 +429,7 @@
                 </a>
                 <a href="voxinput.html" class="compare-link-card">
                     <h3>Voxtype vs VoxInput</h3>
-                    <p>Embedded Whisper vs LocalAI API. Simple vs flexible.</p>
+                    <p>Multi-engine (local) vs LocalAI API. Simple vs flexible.</p>
                     <span class="link-arrow">&rarr;</span>
                 </a>
                 <a href="voxd.html" class="compare-link-card">

@@ -15,18 +15,18 @@ Optimized for Wayland, works on X11 too.
 COMMANDS:
   voxtype                  Start the daemon (with evdev hotkey detection)
   voxtype daemon           Same as above
-  voxtype record-toggle    Toggle recording (for compositor keybindings)
-  voxtype record-start     Start recording
-  voxtype record-stop      Stop recording and transcribe
+  voxtype record toggle    Toggle recording (for compositor keybindings)
+  voxtype record start     Start recording
+  voxtype record stop      Stop recording and transcribe
   voxtype status           Show daemon status (integrates with Waybar)
   voxtype setup            Check dependencies and download models
   voxtype config           Show current configuration
 
 EXAMPLES:
-  voxtype setup model      Interactive model selection (Whisper or Parakeet)
+  voxtype setup model      Interactive model selection (Whisper, Parakeet, or Moonshine)
   voxtype setup waybar     Show Waybar integration config
   voxtype setup gpu        Manage GPU acceleration (Vulkan/CUDA/ROCm)
-  voxtype setup parakeet   Switch between Whisper and Parakeet engines
+  voxtype setup onnx       Switch between Whisper and ONNX engines
   voxtype status --follow --format json   Waybar integration
 
 See 'voxtype <command> --help' for more info on a command.
@@ -68,7 +68,7 @@ pub struct Cli {
     #[arg(long, value_name = "PROMPT")]
     pub initial_prompt: Option<String>,
 
-    /// Override transcription engine: "whisper" (default) or "parakeet" (EXPERIMENTAL)
+    /// Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual
     #[arg(long, value_name = "ENGINE")]
     pub engine: Option<String>,
 
@@ -88,11 +88,32 @@ pub struct Cli {
     #[arg(long, value_name = "MS", hide = true)]
     pub wtype_delay: Option<u32>,
 
+    /// Text to append after each transcription (e.g., " " for a trailing space).
+    /// Appended before auto_submit. Useful for separating sentences when dictating incrementally.
+    #[arg(long, value_name = "TEXT")]
+    pub append_text: Option<String>,
+
     /// Output driver order for type mode (comma-separated)
     /// Overrides config driver_order. Available: wtype, dotool, ydotool, clipboard
     /// Example: --driver=ydotool,wtype,clipboard
     #[arg(long, value_name = "DRIVERS")]
     pub driver: Option<String>,
+
+    /// Enable Voice Activity Detection (filter silence before transcription)
+    #[arg(long)]
+    pub vad: bool,
+
+    /// VAD speech detection threshold (0.0-1.0, default: 0.5)
+    /// Lower = more sensitive, Higher = less sensitive
+    #[arg(long, value_name = "THRESHOLD")]
+    pub vad_threshold: Option<f32>,
+
+    /// VAD backend: auto, energy, whisper (default: auto)
+    /// - auto: Whisper VAD for Whisper engine, Energy for Parakeet
+    /// - energy: Fast RMS-based detection, no model download needed
+    /// - whisper: Silero VAD via whisper-rs, more accurate, needs model
+    #[arg(long, value_name = "BACKEND")]
+    pub vad_backend: Option<String>,
 
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -111,6 +132,10 @@ pub enum Commands {
     Transcribe {
         /// Path to audio file
         file: std::path::PathBuf,
+
+        /// Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual
+        #[arg(long, value_name = "ENGINE")]
+        engine: Option<String>,
     },
 
     /// Internal: Worker process for GPU-isolated transcription
@@ -184,6 +209,15 @@ pub enum Commands {
     Record {
         #[command(subcommand)]
         action: RecordAction,
+    },
+
+    /// Meeting transcription mode (Pro feature)
+    ///
+    /// Continuous meeting transcription with chunked processing,
+    /// speaker attribution, and export capabilities.
+    Meeting {
+        #[command(subcommand)]
+        action: MeetingAction,
     },
 
     /// Check for updates
@@ -273,6 +307,100 @@ pub enum RecordAction {
     },
     /// Cancel current recording or transcription (discard without output)
     Cancel,
+}
+
+/// Meeting mode actions
+#[derive(Subcommand)]
+pub enum MeetingAction {
+    /// Start a new meeting transcription
+    Start {
+        /// Meeting title (optional)
+        #[arg(long, short)]
+        title: Option<String>,
+    },
+    /// Stop the current meeting
+    Stop,
+    /// Pause the current meeting
+    Pause,
+    /// Resume a paused meeting
+    Resume,
+    /// Show meeting status
+    Status,
+    /// List past meetings
+    List {
+        /// Maximum number of meetings to show
+        #[arg(long, short, default_value = "10")]
+        limit: u32,
+    },
+    /// Export a meeting transcript
+    Export {
+        /// Meeting ID (or "latest" for most recent)
+        meeting_id: String,
+
+        /// Output format: text, markdown, json
+        #[arg(long, short, default_value = "markdown")]
+        format: String,
+
+        /// Output file path (default: stdout)
+        #[arg(long, short)]
+        output: Option<std::path::PathBuf>,
+
+        /// Include timestamps in output
+        #[arg(long)]
+        timestamps: bool,
+
+        /// Include speaker labels in output
+        #[arg(long)]
+        speakers: bool,
+
+        /// Include metadata header in output
+        #[arg(long)]
+        metadata: bool,
+    },
+    /// Show meeting details
+    Show {
+        /// Meeting ID (or "latest" for most recent)
+        meeting_id: String,
+    },
+    /// Delete a meeting
+    Delete {
+        /// Meeting ID
+        meeting_id: String,
+
+        /// Skip confirmation prompt
+        #[arg(long, short)]
+        force: bool,
+    },
+    /// Label a speaker in a meeting transcript
+    ///
+    /// Assigns a human-readable name to an auto-generated speaker ID.
+    /// Use with ML diarization to replace "SPEAKER_00" with "Alice".
+    Label {
+        /// Meeting ID (or "latest" for most recent)
+        meeting_id: String,
+
+        /// Speaker ID to label (e.g., "SPEAKER_00" or just "0")
+        speaker_id: String,
+
+        /// Human-readable label to assign
+        label: String,
+    },
+    /// Generate an AI summary of a meeting
+    ///
+    /// Uses Ollama or a remote API to generate a summary with
+    /// key points, action items, and decisions.
+    Summarize {
+        /// Meeting ID (or "latest" for most recent)
+        meeting_id: String,
+
+        /// Output format: text, json, or markdown
+        #[arg(long, short, default_value = "markdown")]
+        format: String,
+
+        /// Output file path (default: stdout)
+        #[arg(long, short)]
+        output: Option<std::path::PathBuf>,
+    },
 }
 
 impl RecordAction {
@@ -480,17 +608,30 @@ pub enum SetupAction {
         status: bool,
     },
 
-    /// Switch between Whisper and Parakeet transcription engines
-    Parakeet {
-        /// Enable Parakeet engine (switch to Parakeet binary)
+    /// Switch between Whisper and ONNX transcription engines
+    Onnx {
+        /// Enable ONNX engine (switch to ONNX binary)
         #[arg(long)]
         enable: bool,
 
-        /// Disable Parakeet engine (switch back to Whisper binary)
+        /// Disable ONNX engine (switch back to Whisper binary)
         #[arg(long)]
         disable: bool,
 
-        /// Show current Parakeet backend status
+        /// Show current ONNX backend status
+        #[arg(long)]
+        status: bool,
+    },
+
+    /// Hidden alias for 'onnx' (backwards compatibility)
+    #[command(hide = true)]
+    Parakeet {
+        #[arg(long)]
+        enable: bool,
+
+        #[arg(long)]
+        disable: bool,
+
         #[arg(long)]
         status: bool,
     },
@@ -499,6 +640,13 @@ pub enum SetupAction {
     Compositor {
         #[command(subcommand)]
         compositor_type: CompositorType,
+    },
+
+    /// Download the Silero VAD model for speech detection
+    Vad {
+        /// Show VAD model status
+        #[arg(long)]
+        status: bool,
     },
 }
 
@@ -857,7 +1005,10 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "record", "start", "--file=out.txt"]);
         match cli.command {
             Some(Commands::Record { action }) => {
-                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::File));
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::File)
+                );
                 assert_eq!(action.file_path(), Some("out.txt"));
             }
             _ => panic!("Expected Record command"),
@@ -881,7 +1032,10 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "record", "start", "--file"]);
         match cli.command {
             Some(Commands::Record { action }) => {
-                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::File));
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::File)
+                );
                 assert_eq!(action.file_path(), Some("")); // Empty string means use config path
             }
             _ => panic!("Expected Record command"),
@@ -890,11 +1044,21 @@ mod tests {
 
     #[test]
     fn test_record_start_model_and_output_override() {
-        let cli = Cli::parse_from(["voxtype", "record", "start", "--model", "large-v3-turbo", "--clipboard"]);
+        let cli = Cli::parse_from([
+            "voxtype",
+            "record",
+            "start",
+            "--model",
+            "large-v3-turbo",
+            "--clipboard",
+        ]);
         match cli.command {
             Some(Commands::Record { action }) => {
                 assert_eq!(action.model_override(), Some("large-v3-turbo"));
-                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::Clipboard));
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::Clipboard)
+                );
             }
             _ => panic!("Expected Record command"),
         }
@@ -905,7 +1069,10 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "record", "start", "--file=/tmp/output.txt"]);
         match cli.command {
             Some(Commands::Record { action }) => {
-                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::File));
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::File)
+                );
                 assert_eq!(action.file_path(), Some("/tmp/output.txt"));
             }
             _ => panic!("Expected Record command"),
@@ -928,7 +1095,10 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "record", "toggle", "--file=out.txt"]);
         match cli.command {
             Some(Commands::Record { action }) => {
-                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::File));
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::File)
+                );
                 assert_eq!(action.file_path(), Some("out.txt"));
             }
             _ => panic!("Expected Record command"),
@@ -940,7 +1110,10 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "record", "toggle", "--file"]);
         match cli.command {
             Some(Commands::Record { action }) => {
-                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::File));
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::File)
+                );
                 assert_eq!(action.file_path(), Some("")); // Empty string means use config path
             }
             _ => panic!("Expected Record command"),
@@ -964,17 +1137,9 @@ mod tests {
 
     #[test]
     fn test_record_start_file_mutually_exclusive_with_paste() {
-        let result = Cli::try_parse_from([
-            "voxtype",
-            "record",
-            "start",
-            "--file=out.txt",
-            "--paste",
-        ]);
-        assert!(
-            result.is_err(),
-            "Should not allow both --file and --paste"
-        );
+        let result =
+            Cli::try_parse_from(["voxtype", "record", "start", "--file=out.txt", "--paste"]);
+        assert!(result.is_err(), "Should not allow both --file and --paste");
     }
 
     #[test]
@@ -994,17 +1159,9 @@ mod tests {
 
     #[test]
     fn test_record_start_file_mutually_exclusive_with_type() {
-        let result = Cli::try_parse_from([
-            "voxtype",
-            "record",
-            "start",
-            "--file=out.txt",
-            "--type",
-        ]);
-        assert!(
-            result.is_err(),
-            "Should not allow both --file and --type"
-        );
+        let result =
+            Cli::try_parse_from(["voxtype", "record", "start", "--file=out.txt", "--type"]);
+        assert!(result.is_err(), "Should not allow both --file and --type");
     }
 
     #[test]
@@ -1124,11 +1281,21 @@ mod tests {
     #[test]
     fn test_record_start_profile_with_output_mode() {
         // Profile can be used together with output mode overrides
-        let cli = Cli::parse_from(["voxtype", "record", "start", "--profile", "slack", "--clipboard"]);
+        let cli = Cli::parse_from([
+            "voxtype",
+            "record",
+            "start",
+            "--profile",
+            "slack",
+            "--clipboard",
+        ]);
         match cli.command {
             Some(Commands::Record { action }) => {
                 assert_eq!(action.profile(), Some("slack"));
-                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::Clipboard));
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::Clipboard)
+                );
             }
             _ => panic!("Expected Record command"),
         }
@@ -1143,7 +1310,12 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "setup", "dms", "--install"]);
         match cli.command {
             Some(Commands::Setup {
-                action: Some(SetupAction::Dms { install, uninstall, qml }),
+                action:
+                    Some(SetupAction::Dms {
+                        install,
+                        uninstall,
+                        qml,
+                    }),
                 ..
             }) => {
                 assert!(install, "should have install=true");
@@ -1159,7 +1331,12 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "setup", "dms", "--uninstall"]);
         match cli.command {
             Some(Commands::Setup {
-                action: Some(SetupAction::Dms { install, uninstall, qml }),
+                action:
+                    Some(SetupAction::Dms {
+                        install,
+                        uninstall,
+                        qml,
+                    }),
                 ..
             }) => {
                 assert!(!install, "should have install=false");
@@ -1175,7 +1352,12 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "setup", "dms", "--qml"]);
         match cli.command {
             Some(Commands::Setup {
-                action: Some(SetupAction::Dms { install, uninstall, qml }),
+                action:
+                    Some(SetupAction::Dms {
+                        install,
+                        uninstall,
+                        qml,
+                    }),
                 ..
             }) => {
                 assert!(!install, "should have install=false");
@@ -1191,7 +1373,12 @@ mod tests {
         let cli = Cli::parse_from(["voxtype", "setup", "dms"]);
         match cli.command {
             Some(Commands::Setup {
-                action: Some(SetupAction::Dms { install, uninstall, qml }),
+                action:
+                    Some(SetupAction::Dms {
+                        install,
+                        uninstall,
+                        qml,
+                    }),
                 ..
             }) => {
                 assert!(!install, "should have install=false");
@@ -1222,5 +1409,43 @@ mod tests {
     fn test_driver_flag_not_set() {
         let cli = Cli::parse_from(["voxtype"]);
         assert!(cli.driver.is_none());
+    }
+
+    // =========================================================================
+    // Transcribe engine flag tests
+    // =========================================================================
+
+    #[test]
+    fn test_transcribe_engine_flag() {
+        let cli = Cli::parse_from(["voxtype", "transcribe", "test.wav", "--engine", "moonshine"]);
+        match cli.command {
+            Some(Commands::Transcribe { file, engine }) => {
+                assert_eq!(file, std::path::PathBuf::from("test.wav"));
+                assert_eq!(engine, Some("moonshine".to_string()));
+            }
+            _ => panic!("Expected Transcribe command"),
+        }
+    }
+
+    #[test]
+    fn test_transcribe_engine_flag_not_set() {
+        let cli = Cli::parse_from(["voxtype", "transcribe", "test.wav"]);
+        match cli.command {
+            Some(Commands::Transcribe { engine, .. }) => {
+                assert!(engine.is_none());
+            }
+            _ => panic!("Expected Transcribe command"),
+        }
+    }
+
+    #[test]
+    fn test_transcribe_engine_whisper() {
+        let cli = Cli::parse_from(["voxtype", "transcribe", "test.wav", "--engine", "whisper"]);
+        match cli.command {
+            Some(Commands::Transcribe { engine, .. }) => {
+                assert_eq!(engine, Some("whisper".to_string()));
+            }
+            _ => panic!("Expected Transcribe command"),
+        }
     }
 }

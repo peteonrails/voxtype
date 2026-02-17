@@ -23,6 +23,9 @@ pub enum VoxtypeError {
     #[error("Output error: {0}")]
     Output(#[from] OutputError),
 
+    #[error("Meeting error: {0}")]
+    Meeting(#[from] MeetingError),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -96,6 +99,19 @@ pub enum TranscribeError {
     LicenseRequired(String),
 }
 
+/// Errors related to Voice Activity Detection
+#[derive(Error, Debug)]
+pub enum VadError {
+    #[error("VAD model not found: {0}\n  Run 'voxtype setup vad' to download.")]
+    ModelNotFound(String),
+
+    #[error("VAD initialization failed: {0}")]
+    InitFailed(String),
+
+    #[error("VAD detection failed: {0}")]
+    DetectionFailed(String),
+}
+
 /// Errors related to text output
 #[derive(Error, Debug)]
 pub enum OutputError {
@@ -126,8 +142,32 @@ pub enum OutputError {
     #[error("Ctrl+V simulation failed: {0}")]
     CtrlVFailed(String),
 
-    #[error("All output methods failed. Ensure wtype, dotool, ydotool, wl-copy, or xclip is available.")]
+    #[error(
+        "All output methods failed. Ensure wtype, dotool, ydotool, wl-copy, or xclip is available."
+    )]
     AllMethodsFailed,
+}
+
+/// Errors related to meeting transcription
+#[derive(Error, Debug)]
+pub enum MeetingError {
+    #[error("Meeting already in progress")]
+    AlreadyInProgress,
+
+    #[error("No meeting in progress")]
+    NotInProgress,
+
+    #[error("No active meeting to pause")]
+    NotActive,
+
+    #[error("No paused meeting to resume")]
+    NotPaused,
+
+    #[error("Transcriber not initialized")]
+    TranscriberNotInitialized,
+
+    #[error("Meeting storage error: {0}")]
+    Storage(String),
 }
 
 /// Result type alias using VoxtypeError

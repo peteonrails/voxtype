@@ -339,6 +339,7 @@ Based on open issues and project direction:
 - **Eager input processing** ([#70](https://github.com/peteonrails/voxtype/issues/70)) - Start transcription while still recording
 
 **Exploratory:**
+- **Consolidated release binaries** - Reduce from 7 binaries to 3 (cpu, cuda, rocm) by combining Whisper + Vulkan + Parakeet into each binary. Vulkan and CUDA/ROCm fall back to CPU when no GPU is present, and ONNX Runtime (Parakeet) does runtime CPU dispatch. The trade-off is losing AVX-512 Whisper performance (~10-30%) and larger binaries (~35-40 MB vs 8 MB). Blocked on whisper.cpp/ggml adding runtime SIMD dispatch if AVX-512 performance must be preserved; otherwise, AVX2-only Whisper is safe on all x86-64 CPUs.
 - **Nemotron Speech backend** ([#47](https://github.com/peteonrails/voxtype/issues/47)) - Alternative ASR engine
 - **Foreign exception handling** ([#30](https://github.com/peteonrails/voxtype/issues/30)) - Investigate whisper.cpp crash recovery
 
@@ -424,16 +425,15 @@ A full release requires **7 Linux binaries**: 3 Whisper variants and 4 Parakeet 
 | avx512 | Local machine | Requires AVX-512 capable host |
 | vulkan | Docker on remote pre-AVX-512 server | GPU build without AVX-512 contamination |
 
-**Parakeet Binaries (4):**
+**ONNX Binaries (Parakeet + Moonshine):**
 
 | Binary | Build Location | Why |
 |--------|---------------|-----|
-| parakeet-avx2 | Docker on remote pre-AVX-512 server | Wide CPU compatibility |
-| parakeet-avx512 | Local machine | Best CPU performance |
-| parakeet-cuda | Docker on remote server with NVIDIA GPU | NVIDIA GPU acceleration |
-| parakeet-rocm | Local machine with AMD GPU | AMD GPU acceleration |
+| onnx-avx2 | Docker on remote pre-AVX-512 server | Wide CPU compatibility |
+| onnx-avx512 | Local machine | Best CPU performance |
+| onnx-cuda | Docker on remote server with NVIDIA GPU | GPU acceleration |
 
-Note: Parakeet binaries include bundled ONNX Runtime which may contain AVX-512 instructions, but ONNX Runtime uses runtime CPU detection and falls back gracefully on older CPUs.
+Note: ONNX binaries include bundled ONNX Runtime which contains AVX-512 instructions, but ONNX Runtime uses runtime CPU detection and falls back gracefully on older CPUs.
 
 ### GPU Feature Flags
 
@@ -521,9 +521,9 @@ docker context use default
 cargo clean && cargo build --release
 cp target/release/voxtype releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx512
 
-# Parakeet AVX-512
-cargo clean && RUSTFLAGS="-C target-cpu=native" cargo build --release --features parakeet
-cp target/release/voxtype releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-parakeet-avx512
+# ONNX AVX-512
+cargo clean && RUSTFLAGS="-C target-cpu=native" cargo build --release --features parakeet,moonshine
+cp target/release/voxtype releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-onnx-avx512
 
 # Parakeet ROCm (requires AMD GPU)
 cargo clean && RUSTFLAGS="-C target-cpu=native" cargo build --release --features parakeet-rocm
@@ -601,15 +601,15 @@ What to look for:
 - `{1to4}`, `{1to8}`, `{1to16}` = AVX-512 broadcast syntax
 - `vgf2p8`, `gf2p8` = GFNI instructions (not on Zen 3)
 
-### Parakeet Binary Instruction Leakage
+### ONNX Binary Instruction Leakage
 
-**IMPORTANT: Parakeet binaries also need AVX-512 instruction checks**, even when built on pre-AVX-512 hardware.
+**IMPORTANT: ONNX binaries also need AVX-512 instruction checks**, even when built on pre-AVX-512 hardware.
 
 The `ort` crate downloads prebuilt ONNX Runtime binaries that may contain AVX-512 instructions regardless of the build host's CPU. This is different from Whisper builds where the leakage comes from system libraries.
 
 ```bash
-# Check Parakeet binaries for AVX-512 leakage
-objdump -d voxtype-*-parakeet-avx2 | grep -c zmm
+# Check ONNX binaries for AVX-512 leakage
+objdump -d voxtype-*-onnx-avx2 | grep -c zmm
 # If >0, the ONNX Runtime contains AVX-512 instructions
 ```
 
@@ -618,7 +618,7 @@ objdump -d voxtype-*-parakeet-avx2 | grep -c zmm
 2. **Build ONNX Runtime from source** - Use `ORT_STRATEGY=build` to compile ONNX Runtime with specific CPU flags (significantly increases build time)
 3. **Use `load-dynamic` feature** - Link against system ONNX Runtime instead of bundled (requires users to install ONNX Runtime separately)
 
-For now, Parakeet binaries may contain AVX-512 instructions from ONNX Runtime but should still run on pre-AVX-512 CPUs via runtime fallback. Test on target hardware to verify.
+For now, ONNX binaries may contain AVX-512 instructions from ONNX Runtime but should still run on pre-AVX-512 CPUs via runtime fallback. Test on target hardware to verify.
 
 ### Packaging Deb and RPM
 
