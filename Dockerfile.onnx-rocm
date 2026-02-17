@@ -1,0 +1,66 @@
+# Build environment for voxtype ONNX ROCm binary
+# MUST be run on a machine with an AMD GPU
+#
+# Uses Ubuntu 24.04 for glibc 2.39+ (required by ONNX Runtime prebuilt binaries).
+# Building inside Docker caps the glibc requirement at 2.39, preventing the
+# binary from picking up symbols from newer host glibc (e.g. 2.43 on Arch).
+#
+# Usage:
+#   docker build -f Dockerfile.onnx-rocm -t voxtype-onnx-rocm-builder .
+#   docker run --rm -v $(pwd)/releases:/output voxtype-onnx-rocm-builder
+#
+FROM ubuntu:24.04
+
+ARG VERSION=0.6.1
+ARG DEBIAN_FRONTEND=noninteractive
+
+ENV VERSION=${VERSION}
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    clang \
+    cmake \
+    pkg-config \
+    libasound2-dev \
+    libssl-dev \
+    protobuf-compiler \
+    libprotobuf-dev \
+    git \
+    binutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /build
+
+# Copy source code
+COPY . .
+
+# Build with native optimizations
+ENV RUSTFLAGS="-C target-cpu=native"
+
+# ONNX Runtime will be downloaded during build by the ort crate
+ENV ORT_STRATEGY=download
+
+# Disable LTO for faster builds
+# Build with all ONNX engines + ROCm for Parakeet (only engine with ROCm support)
+RUN cargo build --release --features parakeet-rocm,moonshine,sensevoice,paraformer,dolphin,omnilingual \
+    --config 'profile.release.lto=false' \
+    --config 'profile.release.codegen-units=8' \
+    && cp target/release/voxtype /tmp/voxtype-onnx-rocm
+
+# Verify binary
+RUN echo "=== Verifying ONNX ROCm binary ===" \
+    && /tmp/voxtype-onnx-rocm --version \
+    && echo "=== Binary size ===" \
+    && ls -lh /tmp/voxtype-onnx-rocm
+
+# Output stage
+CMD mkdir -p /output \
+    && cp /tmp/voxtype-onnx-rocm /output/voxtype-${VERSION}-linux-x86_64-onnx-rocm \
+    && echo "Binary copied to /output:" \
+    && ls -la /output/voxtype-*

@@ -16,7 +16,7 @@
 #
 FROM ubuntu:22.04
 
-ARG VERSION=0.4.1
+ARG VERSION=0.6.1
 ARG DEBIAN_FRONTEND=noninteractive
 
 # Make VERSION available at runtime (ARG only works during build)
