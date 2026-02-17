@@ -22,6 +22,7 @@ Voxtype is a push-to-talk voice-to-text tool for Linux. Optimized for Wayland, w
 - [Post-Processing with LLMs](#post-processing-with-llms)
 - [Profiles](#profiles)
 - [Voice Activity Detection](#voice-activity-detection)
+- [Meeting Mode](#meeting-mode)
 - [Tips & Best Practices](#tips--best-practices)
 - [Keyboard Shortcuts](#keyboard-shortcuts)
 - [Integration Examples](#integration-examples)
@@ -116,6 +117,7 @@ voxtype setup              # Check dependencies only
 voxtype setup --download   # Download default model (base.en)
 voxtype setup model        # Interactive model selection
 voxtype setup vad          # Download the Silero VAD model
+voxtype setup onnx         # Switch between Whisper and ONNX engines
 ```
 
 ### `voxtype config`
@@ -222,6 +224,22 @@ file_mode = "append"
 For persistent file output without the CLI flag, use `mode = "file"` with `file_path` in your config. See [Configuration Reference](CONFIGURATION.md) for details.
 
 This command is designed for use with compositor keybindings (Hyprland, Sway) instead of the built-in hotkey detection. See [Compositor Keybindings](#compositor-keybindings) for setup instructions.
+
+### `voxtype meeting`
+
+Continuous meeting transcription with chunked processing and speaker diarization. See [Meeting Mode](#meeting-mode) for full details.
+
+```bash
+voxtype meeting start                  # Start a meeting
+voxtype meeting start --title "Title"  # Start with a title
+voxtype meeting stop                   # Stop the meeting
+voxtype meeting pause                  # Pause recording
+voxtype meeting resume                 # Resume recording
+voxtype meeting status                 # Show current meeting status
+voxtype meeting list                   # List past meetings
+voxtype meeting export latest          # Export transcript (markdown)
+voxtype meeting summarize latest       # Generate AI summary
+```
 
 ---
 
@@ -541,13 +559,17 @@ Any valid evdev key name works. Common choices:
 
 ## Transcription Engines
 
-Voxtype supports three speech-to-text engines:
+Voxtype supports seven speech-to-text engines. Whisper uses whisper.cpp and works with any binary variant. The other six engines run via ONNX Runtime and require an ONNX binary variant (`voxtype-*-onnx-*`).
 
 | Engine | Best For | GPU Required | Languages |
 |--------|----------|--------------|-----------|
 | **Whisper** (default) | Most users, multilingual | Optional (faster with GPU) | 99+ languages |
-| **Parakeet** (experimental) | Fast CPU inference, English | Optional (CUDA available) | English only |
-| **Moonshine** (experimental) | Very fast CPU inference, small models | No | English + multilingual variants |
+| **Parakeet** | Fast CPU inference, English | Optional (CUDA available) | English only |
+| **Moonshine** | Very fast CPU inference, small models | No | English + multilingual variants |
+| **SenseVoice** | Multilingual CTC, emotion/event detection | No | Chinese, English, Japanese, Korean, Cantonese |
+| **Paraformer** | Chinese + English dictation | No | Chinese (with English code-switching) |
+| **Dolphin** | Dictation-optimized, fast CTC | No | Chinese + English |
+| **Omnilingual** | Broadest language coverage in ONNX engines | No | 50+ languages |
 
 ### Selecting an Engine
 
@@ -557,11 +579,13 @@ Voxtype supports three speech-to-text engines:
 # Default - use Whisper
 engine = "whisper"
 
-# Or use Parakeet (requires Parakeet-enabled binary)
+# ONNX engines (require onnx binary variant)
 engine = "parakeet"
-
-# Or use Moonshine (requires Moonshine-enabled binary)
 engine = "moonshine"
+engine = "sensevoice"
+engine = "paraformer"
+engine = "dolphin"
+engine = "omnilingual"
 ```
 
 **Via CLI flag** (overrides config):
@@ -570,6 +594,22 @@ engine = "moonshine"
 voxtype --engine whisper daemon
 voxtype --engine parakeet daemon
 voxtype --engine moonshine daemon
+voxtype --engine sensevoice daemon
+voxtype --engine paraformer daemon
+voxtype --engine dolphin daemon
+voxtype --engine omnilingual daemon
+```
+
+Valid `--engine` values: `whisper`, `parakeet`, `moonshine`, `sensevoice`, `paraformer`, `dolphin`, `omnilingual`.
+
+### Switching to an ONNX Engine
+
+All engines except Whisper require an ONNX binary variant. Use the setup command to switch:
+
+```bash
+voxtype setup onnx --enable    # Switch to ONNX binary
+voxtype setup onnx --disable   # Switch back to Whisper binary
+voxtype setup onnx --status    # Show current backend
 ```
 
 ### Whisper (Default)
@@ -583,7 +623,7 @@ Whisper is OpenAI's speech recognition model, running locally via whisper.cpp. I
 
 This is the recommended engine for most users.
 
-### Parakeet (Experimental)
+### Parakeet
 
 Parakeet is NVIDIA's FastConformer-based ASR model. It offers:
 
@@ -597,9 +637,20 @@ Parakeet is NVIDIA's FastConformer-based ASR model. It offers:
 - The Parakeet model downloaded (~600MB)
 - English-only use case
 
+**Configuration:**
+
+```toml
+engine = "parakeet"
+
+[parakeet]
+model = "parakeet-tdt-0.6b-v3"  # or "parakeet-tdt-0.6b-v3-int8"
+# model_type = "tdt"            # "tdt" (recommended) or "ctc", auto-detected if omitted
+# on_demand_loading = false
+```
+
 See [PARAKEET.md](PARAKEET.md) for detailed setup instructions.
 
-### Moonshine (Experimental)
+### Moonshine
 
 Moonshine is an encoder-decoder transformer model running via ONNX Runtime. It offers:
 
@@ -609,10 +660,114 @@ Moonshine is an encoder-decoder transformer model running via ONNX Runtime. It o
 - Outputs lowercase without punctuation
 
 **Requirements:**
-- A Moonshine-enabled binary (`--features moonshine`)
+- An ONNX-enabled binary (`voxtype-*-onnx-*`)
 - A Moonshine model downloaded to `~/.local/share/voxtype/models/`
 
+**Configuration:**
+
+```toml
+engine = "moonshine"
+
+[moonshine]
+model = "base"        # "tiny" (27M params) or "base" (61M params)
+quantized = true      # Use quantized models for faster inference (default: true)
+# threads = 4         # CPU threads (omit for auto-detect)
+# on_demand_loading = false
+```
+
 See [MOONSHINE.md](MOONSHINE.md) for detailed setup instructions.
+
+### SenseVoice
+
+SenseVoice is Alibaba's FunAudioLLM CTC encoder-only model. It offers:
+
+- Multilingual support: Chinese, English, Japanese, Korean, Cantonese
+- Automatic language detection
+- Inverse text normalization (adds punctuation)
+- Emotion and audio event detection
+
+**Requirements:**
+- An ONNX-enabled binary (`voxtype-*-onnx-*`)
+- The SenseVoice model downloaded
+
+**Configuration:**
+
+```toml
+engine = "sensevoice"
+
+[sensevoice]
+model = "sensevoice-small"  # Default model
+language = "auto"           # "auto", "zh", "en", "ja", "ko", "yue"
+use_itn = true              # Inverse text normalization (punctuation)
+# threads = 4
+# on_demand_loading = false
+```
+
+### Paraformer
+
+Paraformer is a FunASR CTC encoder model optimized for Chinese with English code-switching. It offers:
+
+- Fast non-autoregressive inference
+- Good accuracy for Chinese dictation
+
+**Requirements:**
+- An ONNX-enabled binary (`voxtype-*-onnx-*`)
+- The Paraformer model downloaded
+
+**Configuration:**
+
+```toml
+engine = "paraformer"
+
+[paraformer]
+model = "paraformer-zh"  # Default model
+# threads = 4
+# on_demand_loading = false
+```
+
+### Dolphin
+
+Dolphin is a dictation-optimized CTC encoder model. It offers:
+
+- Fast inference tuned for dictation workflows
+- CTC architecture for low-latency output
+
+**Requirements:**
+- An ONNX-enabled binary (`voxtype-*-onnx-*`)
+- The Dolphin model downloaded
+
+**Configuration:**
+
+```toml
+engine = "dolphin"
+
+[dolphin]
+model = "dolphin-base"  # Default model
+# threads = 4
+# on_demand_loading = false
+```
+
+### Omnilingual
+
+Omnilingual is a FunASR CTC encoder model with the broadest language coverage among the ONNX engines. It offers:
+
+- Support for 50+ languages
+- Good accuracy across diverse language families
+
+**Requirements:**
+- An ONNX-enabled binary (`voxtype-*-onnx-*`)
+- The Omnilingual model downloaded
+
+**Configuration:**
+
+```toml
+engine = "omnilingual"
+
+[omnilingual]
+model = "omnilingual-large"  # Default model
+# threads = 4
+# on_demand_loading = false
+```
 
 ---
 
@@ -1627,6 +1782,101 @@ VAD is helpful if you:
 ### How It Works
 
 Recordings where speech falls below the detection threshold are rejected before transcription, and a "cancelled" feedback sound is played instead of transcribing silence.
+
+---
+
+## Meeting Mode
+
+Meeting mode provides continuous transcription for meetings, with chunked processing, speaker diarization, and export capabilities. Unlike push-to-talk (which transcribes short clips), meeting mode runs continuously and processes audio in chunks for the duration of a meeting.
+
+### Commands
+
+```bash
+# Start a new meeting
+voxtype meeting start
+voxtype meeting start --title "Weekly standup"
+
+# Control a running meeting
+voxtype meeting pause
+voxtype meeting resume
+voxtype meeting stop
+
+# View meeting info
+voxtype meeting status          # Current meeting status
+voxtype meeting list            # List past meetings
+voxtype meeting list --limit 5  # Show last 5 meetings
+voxtype meeting show latest     # Show details for most recent meeting
+voxtype meeting show <id>       # Show details for a specific meeting
+
+# Export transcripts
+voxtype meeting export latest                          # Markdown to stdout
+voxtype meeting export latest --format text            # Plain text
+voxtype meeting export latest --format json            # JSON
+voxtype meeting export <id> --output transcript.md     # Write to file
+voxtype meeting export <id> --timestamps --speakers    # Include timestamps and speaker labels
+voxtype meeting export <id> --metadata                 # Include metadata header
+
+# Speaker labeling (replace auto-generated IDs with names)
+voxtype meeting label latest SPEAKER_00 "Alice"
+voxtype meeting label <id> 0 "Bob"
+
+# AI summarization (requires Ollama or remote API)
+voxtype meeting summarize latest
+voxtype meeting summarize <id> --format json --output summary.json
+
+# Delete a meeting
+voxtype meeting delete <id>
+voxtype meeting delete <id> --force   # Skip confirmation
+```
+
+### Configuration
+
+Meeting mode is disabled by default. Enable it in `~/.config/voxtype/config.toml`:
+
+```toml
+[meeting]
+enabled = true
+chunk_duration_secs = 30         # Audio chunk size for processing
+storage_path = "auto"            # Default: ~/.local/share/voxtype/meetings/
+retain_audio = false             # Keep raw audio files after transcription
+max_duration_mins = 180          # Maximum meeting length (0 = unlimited)
+
+[meeting.audio]
+mic_device = "default"           # Microphone (uses audio.device if not set)
+loopback_device = "auto"         # Capture remote participants: "auto", "disabled", or device name
+
+[meeting.diarization]
+enabled = true
+backend = "simple"               # "simple", "ml", or "remote"
+max_speakers = 10
+
+[meeting.summary]
+backend = "disabled"             # "local" (Ollama), "remote", or "disabled"
+ollama_url = "http://localhost:11434"
+ollama_model = "llama3.2"
+timeout_secs = 120
+```
+
+### Speaker Labeling
+
+When diarization is enabled, speakers are assigned auto-generated IDs like `SPEAKER_00`, `SPEAKER_01`, etc. Use the `label` command to assign readable names:
+
+```bash
+voxtype meeting label latest SPEAKER_00 "Alice"
+voxtype meeting label latest 1 "Bob"  # Short form: just the number
+```
+
+Labels persist in the meeting data and appear in exports.
+
+### AI Summarization
+
+Meeting summarization uses Ollama (local) or a remote API to generate a summary with key points, action items, and decisions.
+
+```bash
+# Requires [meeting.summary] backend set to "local" or "remote"
+voxtype meeting summarize latest
+voxtype meeting summarize latest --format markdown --output summary.md
+```
 
 ---
 

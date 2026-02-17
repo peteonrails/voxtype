@@ -12,6 +12,9 @@ Hold a hotkey (default: ScrollLock) while speaking, release to transcribe and ou
 
 - **Works on any Linux desktop** - Uses compositor keybindings (Hyprland, Sway, River) with evdev fallback for X11 and other environments
 - **Fully offline by default** - Uses whisper.cpp for local transcription, with optional remote server support
+- **7 transcription engines** - Whisper, Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, and Omnilingual (see [Supported Engines](#supported-engines) below)
+- **Chinese, Japanese, Korean, and 1600+ languages** - SenseVoice, Dolphin, and Omnilingual add native support for CJK and other non-Latin scripts
+- **Meeting mode** - Continuous meeting transcription with chunked processing, speaker attribution, and export to Markdown, JSON, SRT, or VTT
 - **Fallback chain** - Types via wtype (best CJK support), falls back to dotool (keyboard layout support), ydotool, then clipboard
 - **Push-to-talk or Toggle mode** - Hold to record, or press once to start/stop
 - **Audio feedback** - Optional sound cues when recording starts/stops
@@ -98,6 +101,24 @@ voxtype --toggle
 key = "SCROLLLOCK"
 mode = "toggle"
 ```
+
+### Meeting Mode
+
+For longer recordings like meetings and interviews, meeting mode provides continuous transcription with automatic chunking, speaker attribution, and export.
+
+```bash
+# Start a meeting
+voxtype meeting start --title "Weekly standup"
+
+# Check status
+voxtype meeting status
+
+# Stop and export
+voxtype meeting stop
+voxtype meeting export latest --format markdown --speakers --timestamps
+```
+
+Meetings are stored locally and can be exported to Markdown, plain text, JSON, SRT, or VTT. Use `voxtype meeting list` to see past meetings, and `voxtype meeting summarize latest` to generate an AI summary via Ollama.
 
 ## Configuration
 
@@ -217,6 +238,7 @@ Commands:
   config      Show current configuration
   status      Show daemon status (for Waybar/polybar integration)
   record      Control recording from external sources (compositor keybindings, scripts)
+  meeting     Meeting transcription (start, stop, export, summarize)
 
 Setup subcommands:
   voxtype setup              Run basic dependency checks (default)
@@ -225,6 +247,7 @@ Setup subcommands:
   voxtype setup waybar       Generate Waybar module configuration
   voxtype setup model        Interactive model selection and download
   voxtype setup gpu          Manage GPU acceleration (switch CPU/Vulkan)
+  voxtype setup onnx         Switch between Whisper and ONNX engines
 
 Status options:
   voxtype status --format json       Output as JSON (for Waybar)
@@ -239,16 +262,17 @@ Record subcommands (for compositor keybindings):
   voxtype record toggle                    Toggle recording state
 
 Options:
-  -c, --config <FILE>  Path to config file
-  -v, --verbose        Increase verbosity (-v, -vv)
-  -q, --quiet          Quiet mode (errors only)
-  --clipboard          Force clipboard mode
-  --paste              Force paste mode (clipboard + Ctrl+V)
-  --model <MODEL>      Override whisper model
-  --hotkey <KEY>       Override hotkey
-  --toggle             Use toggle mode (press to start/stop)
-  -h, --help           Print help
-  -V, --version        Print version
+  -c, --config <FILE>    Path to config file
+  -v, --verbose          Increase verbosity (-v, -vv)
+  -q, --quiet            Quiet mode (errors only)
+  --clipboard            Force clipboard mode
+  --paste                Force paste mode (clipboard + Ctrl+V)
+  --model <MODEL>        Override transcription model
+  --engine <ENGINE>      Override transcription engine (whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual)
+  --hotkey <KEY>         Override hotkey
+  --toggle               Use toggle mode (press to start/stop)
+  -h, --help             Print help
+  -V, --version          Print version
 ```
 
 ## Whisper Models
@@ -293,6 +317,32 @@ translate = false
 ```
 
 With GPU acceleration, `large-v3` achieves sub-second inference while supporting all languages.
+
+## Supported Engines
+
+Voxtype ships separate binaries for Whisper and ONNX engines. Use `voxtype setup onnx --enable` to switch to the ONNX binary, or `--disable` to switch back.
+
+| Engine | Languages | Architecture | Best For |
+|--------|-----------|-------------|----------|
+| **Whisper** (default) | 99 languages | Encoder-decoder (whisper.cpp) | General use, multilingual |
+| **Parakeet** | English | FastConformer TDT (ONNX) | Fast English transcription |
+| **Moonshine** | English | Encoder-decoder (ONNX) | Edge devices, low memory |
+| **SenseVoice** | zh, en, ja, ko, yue | CTC encoder (ONNX) | Chinese, Japanese, Korean |
+| **Paraformer** | zh+en, zh+yue+en | Non-autoregressive (ONNX) | Chinese-English bilingual |
+| **Dolphin** | 40 languages + 22 Chinese dialects | CTC E-Branchformer (ONNX) | Eastern languages (no English) |
+| **Omnilingual** | 1600+ languages | wav2vec2 CTC (ONNX) | Low-resource and rare languages |
+
+To set the engine in your config:
+
+```toml
+engine = "sensevoice"  # or: whisper, parakeet, moonshine, paraformer, dolphin, omnilingual
+```
+
+Or override on the command line:
+
+```bash
+voxtype --engine sensevoice
+```
 
 ## GPU Acceleration
 
@@ -524,7 +574,7 @@ flowchart LR
     subgraph Transcription
         Audio --> Engine{Engine?}
         Engine -->|whisper| WhisperBackend{Backend?}
-        Engine -->|parakeet| Parakeet["Parakeet<br/>(ONNX Runtime)"]
+        Engine -->|onnx| ONNX["ONNX Engine<br/>(Parakeet, Moonshine,<br/>SenseVoice, Paraformer,<br/>Dolphin, Omnilingual)"]
         WhisperBackend -->|local| Whisper["Whisper<br/>(whisper-rs)"]
         WhisperBackend -->|cli| CLI["whisper-cli<br/>(subprocess)"]
         WhisperBackend -->|remote| Remote["Remote Server<br/>(HTTP API)"]
@@ -533,7 +583,7 @@ flowchart LR
         Whisper --> PostProcess["Post-Process<br/>(optional)"]
         CLI --> PostProcess
         Remote --> PostProcess
-        Parakeet --> PostProcess
+        ONNX --> PostProcess
         PostProcess --> PreHook["Pre-Output Hook"]
         PreHook --> TextOutput["Output<br/>(wtype/dotool/ydotool)"]
         TextOutput --> PostHook["Post-Output Hook"]
@@ -542,9 +592,9 @@ flowchart LR
     end
 ```
 
-**Multiple transcription backends.** Voxtype supports two transcription engines:
-- **Whisper** (default): OpenAI's Whisper model via whisper.cpp. Supports local in-process, CLI subprocess, and remote HTTP backends.
-- **Parakeet**: NVIDIA's Parakeet model via ONNX Runtime. Faster than Whisper on some hardware.
+**Multiple transcription engines.** Voxtype supports 7 transcription engines across two runtime backends:
+- **Whisper** (default): OpenAI's Whisper model via whisper.cpp. Supports local in-process, CLI subprocess, and remote HTTP backends. 99 languages.
+- **ONNX engines** (via ONNX Runtime): Parakeet (English), Moonshine (English), SenseVoice (zh/en/ja/ko/yue), Paraformer (zh+en bilingual), Dolphin (40 languages + Chinese dialects, no English), Omnilingual (1600+ languages). Switch engines with `voxtype setup onnx`.
 
 **Why compositor keybindings?** Wayland compositors like Hyprland, Sway, and River support key-release events, enabling push-to-talk without special permissions. Voxtype's `record start/stop` commands integrate directly with your compositor's keybinding system.
 

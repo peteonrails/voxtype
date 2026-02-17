@@ -1,322 +1,173 @@
 # Model Selection Guide
 
-This guide helps you choose the right transcription engine and model for your use case. The choice depends on your hardware, language needs, performance requirements, and whether you're on battery power.
+This guide helps you choose the right transcription engine and model for voxtype v0.6.0. The choice depends on your language, hardware, and how you use dictation.
 
-> **Important: Non-European Language Speakers**
->
-> If you speak **Japanese, Chinese, Korean, Arabic, Hindi, Bengali, Vietnamese, Indonesian, Thai, Persian, Hebrew, Swahili**, or any other non-European language, **use Whisper** (not Parakeet). With a GPU, use `large-v3-turbo`. On CPU only, use `small` or `base`. Parakeet only supports 25 European languages. See the [summary](#non-european-languages) for configuration examples.
-
-## Quick Decision Matrix
-
-| Situation | Recommended Configuration |
-|-----------|--------------------------|
-| **English-only, have NVIDIA GPU** | Parakeet TDT 0.6B v3 with CUDA/TensorRT |
-| **English-only, AMD GPU** | Parakeet TDT with ROCm or Whisper with Vulkan |
-| **English-only, CPU only** | Parakeet TDT (CPU) or Whisper small.en |
-| **Multilingual (European languages)** | Parakeet TDT 0.6B v3 |
-| **Non-European languages, with GPU** | **Whisper large-v3-turbo** |
-| **Non-European languages, CPU only** | **Whisper small or base** |
-| **Battery-conscious laptop** | Whisper small.en with on-demand loading |
-| **Fastest transcription possible** | Parakeet TDT with TensorRT (NVIDIA) |
-| **Low VRAM (< 2GB)** | Whisper tiny.en or base.en |
+Voxtype has seven transcription engines. Two are bundled with the standard binary (Whisper and Remote Whisper). The other five require the ONNX binary variant.
 
 ---
 
-## Part 1: Choosing an Engine
+## Quick Comparison
 
-Voxtype supports two transcription engines:
+| Engine | Languages | Architecture | Model Size | Speed (CPU) | Punctuation | Binary |
+|--------|-----------|-------------|------------|-------------|-------------|--------|
+| **Whisper** | 99+ | Encoder-decoder | 75 MB - 3.1 GB | Moderate | No (use post-process) | Standard |
+| **Parakeet** | 25 European | TDT/CTC | 670 MB - 2.6 GB | Fast | Yes (TDT) | ONNX |
+| **Moonshine** | en, ja, zh, ko, ar | Encoder-decoder | 100 - 237 MB | Fast | No | ONNX |
+| **SenseVoice** | zh, en, ja, ko, yue | Encoder-only CTC | 239 - 938 MB | Fast | Yes (ITN) | ONNX |
+| **Paraformer** | zh, en | Encoder-predictor-decoder | 220 - 487 MB | Fast | No | ONNX |
+| **Dolphin** | 40+ langs, 22 Chinese dialects | CTC E-Branchformer | 198 MB | Fast | No | ONNX |
+| **Omnilingual** | 1600+ | CTC wav2vec2 | 3.9 GB | Moderate | No | ONNX |
 
-1. **Whisper** (default) - OpenAI's general-purpose speech recognition via whisper.cpp
-2. **Parakeet** (optional) - NVIDIA's FastConformer-based model via ONNX Runtime
+---
 
-### Language Support: The Critical Difference
+## Which Engine Should I Use?
 
-**This is the most important factor in choosing an engine.**
-
-Parakeet only supports **25 European languages**. If you speak any of these languages not supported by Parakeet, you **must use Whisper**:
-
-- **East Asian:** Japanese, Chinese (Mandarin/Cantonese), Korean, Vietnamese, Thai
-- **South Asian:** Hindi, Bengali, Tamil, Urdu, Punjabi, Marathi
-- **Middle Eastern:** Arabic, Hebrew, Persian (Farsi), Turkish*
-- **African:** Swahili, Yoruba, Amharic, Hausa
-- **Southeast Asian:** Indonesian, Malay, Tagalog, Burmese
-
-*Turkish is supported in Parakeet v3
-
-**If you speak any of these languages, skip to the Whisper section and use `large-v3-turbo`.**
-
-### Whisper: Universal Language Support
-
-**Strengths:**
-- Broad language support (99+ languages including all those listed above)
-- Well-tested, mature codebase
-- Works on any hardware (CPU, NVIDIA, AMD, Intel)
-- Single binary, no external dependencies
-- Flexible model sizes from 39M to 1.5B parameters
-
-**Weaknesses:**
-- Slower than Parakeet for equivalent accuracy
-- Encoder-decoder architecture has higher latency
-- GPU support requires specific build flags
-
-**Best for:** Multilingual transcription, non-European languages, maximum hardware compatibility
-
-### Parakeet: Speed + Accuracy for European Languages
-
-**Strengths:**
-- Dramatically faster inference (up to 3000x real-time factor with TensorRT)
-- State-of-the-art accuracy (~6% WER, #1 on HuggingFace ASR leaderboard)
-- Built-in punctuation and capitalization
-- Accurate word-level timestamps
-- Frame-skipping TDT decoder reduces compute
-- Works on CPU, AMD GPU (ROCm), and NVIDIA GPU (CUDA/TensorRT)
-
-**Weaknesses:**
-- Limited to 25 European languages (no Asian, Middle Eastern, or African languages)
-- Requires ONNX Runtime (larger binary)
-- Single model size (600M parameters)
-
-**Best for:** English and European language transcription, situations where speed matters, systems where you want automatic punctuation
-
-**Important:** Parakeet does NOT require an NVIDIA GPU. It runs on:
-- **CPU** - Works out of the box, still faster than many alternatives
-- **AMD GPU** - Via ROCm execution provider
-- **NVIDIA GPU** - Via CUDA or TensorRT (fastest option)
-
-The NVIDIA-optimized path is the fastest, but Parakeet's efficient architecture makes it competitive even on CPU.
-
-### Decision Flowchart
+Start here and follow the path that matches your situation.
 
 ```
-Do you need Japanese, Chinese, Korean, Arabic, Hindi,
-or other non-European languages?
-    │
-    ├─ YES → Use Whisper large-v3-turbo
-    │
-    └─ NO → Do you only speak English or European languages?
-                │
-                ├─ YES → Use Parakeet TDT (fastest, best accuracy)
-                │
-                └─ SOMETIMES → Consider Whisper for flexibility
+What language(s) do you speak?
+│
+├─ English only
+│   ├─ Want best accuracy + punctuation? → Parakeet TDT (ONNX binary)
+│   ├─ Want smallest/fastest model?      → Moonshine tiny (ONNX binary)
+│   ├─ Want simplest setup?              → Whisper small.en (standard binary)
+│   └─ On a laptop / saving battery?     → Whisper small.en + on_demand_loading
+│
+├─ Chinese (Mandarin or Cantonese)
+│   ├─ Chinese + English mixed?          → Paraformer zh or SenseVoice
+│   ├─ Chinese + Japanese/Korean?        → SenseVoice
+│   ├─ Cantonese specifically?           → SenseVoice (supports yue)
+│   └─ Chinese dialects?                 → Dolphin
+│
+├─ Japanese or Korean
+│   ├─ Want a small, fast model?         → Moonshine (tiny-ja/tiny-ko) or SenseVoice
+│   └─ Want best quality?                → Whisper large-v3-turbo or SenseVoice
+│
+├─ European languages (German, French, Spanish, etc.)
+│   ├─ Want punctuation + fast?          → Parakeet TDT v3
+│   └─ Want broadest coverage?           → Whisper
+│
+├─ Arabic, Hindi, Thai, Vietnamese, other Asian languages
+│   ├─ One of the 40 Dolphin languages?  → Dolphin (small, fast)
+│   └─ Otherwise                         → Whisper large-v3-turbo
+│
+└─ Rare or uncommon language
+    └─ → Omnilingual (1600+ languages) or Whisper
 ```
 
 ---
 
-## Part 2: Whisper Model Selection
+## Standard vs ONNX Binary
 
-### When You Must Use Whisper
+Voxtype ships two binary variants:
 
-**Use Whisper if you need any of these languages:**
+- **Standard binary** -- includes Whisper (whisper.cpp). This is the default.
+- **ONNX binary** -- includes Whisper plus all ONNX-based engines (Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual).
 
-| Region | Languages (examples) |
-|--------|---------------------|
-| East Asia | Japanese, Chinese, Korean, Vietnamese |
-| South Asia | Hindi, Bengali, Tamil, Urdu, Marathi |
-| Middle East | Arabic, Hebrew, Persian |
-| Africa | Swahili, Yoruba, Amharic |
-| Southeast Asia | Indonesian, Tagalog, Thai |
+The ONNX binary is larger because it bundles ONNX Runtime. If you only use Whisper, the standard binary is all you need.
 
-For these languages, the recommended model is **large-v3-turbo**:
-
-```toml
-[whisper]
-model = "large-v3-turbo"
-language = "auto"  # or specify: "ja", "zh", "ko", "ar", "hi", etc.
-```
-
-### Available Models
-
-| Model | File to Download | Parameters | VRAM | Speed | Languages |
-|-------|------------------|-----------|------|-------|-----------|
-| tiny | ggml-tiny.bin | 39M | ~1 GB | ~10x | **99+ (multilingual)** |
-| tiny.en | ggml-tiny.en.bin | 39M | ~1 GB | ~10x | English only |
-| base | ggml-base.bin | 74M | ~1 GB | ~7x | **99+ (multilingual)** |
-| base.en | ggml-base.en.bin | 74M | ~1 GB | ~7x | English only |
-| small | ggml-small.bin | 244M | ~2 GB | ~4x | **99+ (multilingual)** |
-| small.en | ggml-small.en.bin | 244M | ~2 GB | ~4x | English only |
-| medium | ggml-medium.bin | 769M | ~5 GB | ~2x | **99+ (multilingual)** |
-| medium.en | ggml-medium.en.bin | 769M | ~5 GB | ~2x | English only |
-| large-v3 | ggml-large-v3.bin | 1550M | ~10 GB | 1x | **99+ (multilingual)** |
-| large-v3-turbo | ggml-large-v3-turbo.bin | 809M | ~6 GB | ~8x | **99+ (multilingual)** |
-
-**Speed is relative to large-v3 (1x baseline). Higher is faster.*
-
-**Note:** The `.en` models are English-only and faster/more accurate for English. The models without `.en` support 99+ languages including Japanese, Chinese, Korean, Arabic, Hindi, etc. There are no `.en` variants for large-v3 or large-v3-turbo.
-
-### .en Models vs Multilingual Models
-
-Whisper models come in two variants. **This distinction is critical for non-European language support.**
-
-| Model | File | Languages |
-|-------|------|-----------|
-| `small.en` | ggml-small.en.bin | English only |
-| `small` | ggml-small.bin | 99+ languages (including Japanese, Chinese, Arabic, Hindi, etc.) |
-
-**English-only models (`.en` suffix):**
-- Faster (no language detection overhead)
-- More accurate for English
-- **Cannot transcribe non-European languages**
-- Use when you only speak English
-
-**Multilingual models (no `.en` suffix):**
-- Support 99+ languages including all Asian, Middle Eastern, and African languages
-- Slightly slower due to language detection
-- **Required for Japanese, Chinese, Korean, Arabic, Hindi, Vietnamese, etc.**
-- Use when you speak non-European languages or switch between languages
-
-**Important:** If you need Japanese, Chinese, Arabic, Hindi, or other non-European languages, you must use the multilingual model (e.g., `small` not `small.en`). The `.en` models will not work for these languages.
-
-### Model Recommendations by Use Case
-
-#### Best for Non-European Languages
-
-For Japanese, Chinese, Korean, Arabic, Hindi, and dozens of other languages, you must use Whisper.
-
-**With GPU (recommended):**
-```toml
-[whisper]
-model = "large-v3-turbo"
-language = "auto"  # Auto-detect, or set specific language code
-```
-
-The turbo model is:
-- 8x faster than large-v3
-- Within 1-2% accuracy of the full model
-- Requires ~6GB VRAM
-
-**CPU only:**
-```toml
-[whisper]
-model = "small"   # or "base" for lower-end hardware
-language = "auto"
-```
-
-On CPU, large-v3-turbo is very slow. Use `small` for a good balance of speed and accuracy, or `base` if speed is critical.
-
-**Note:** Both multilingual (`small`, `base`) and English-only (`small.en`, `base.en`) models are available in `voxtype setup model`. For non-European languages, make sure to select the version **without** the `.en` suffix.
-
-#### Best for CPU (English): small.en
-
-```toml
-[whisper]
-model = "small.en"
-language = "en"
-```
-
-The small.en model offers the best accuracy-to-speed ratio for CPU-only systems:
-- Transcribes ~4x faster than large-v3
-- Fits comfortably in 2GB VRAM or system RAM
-- Noticeably more accurate than base/tiny
-
-#### Best for GPU (English): large-v3-turbo
-
-```toml
-[whisper]
-model = "large-v3-turbo"
-language = "en"
-```
-
-Even for English, large-v3-turbo is excellent if you have a GPU.
-
-#### Best for Laptops: small.en with on-demand loading
-
-```toml
-[whisper]
-model = "small.en"
-language = "en"
-on_demand_loading = true
-gpu_isolation = true
-```
-
-For laptop users concerned about battery and heat:
-- **on_demand_loading:** Model loads only when you start recording, unloads after transcription
-- **gpu_isolation:** Runs transcription in subprocess that exits completely, releasing GPU memory
-
-#### Best for Low-End Hardware: tiny.en or base.en
-
-```toml
-[whisper]
-model = "base.en"
-language = "en"
-```
-
-For older systems, Raspberry Pi, or integrated graphics:
-- base.en: ~142MB, runs on nearly anything
-- tiny.en: ~75MB, for extreme constraints
-
----
-
-## Part 3: Parakeet Model Selection
-
-### Language Limitations
-
-**Parakeet v3 supports only these 25 languages:**
-
-English, German, French, Spanish, Italian, Dutch, Polish, Portuguese, Romanian, Czech, Hungarian, Slovak, Slovenian, Danish, Norwegian, Swedish, Finnish, Greek, Turkish, Ukrainian, Russian, Catalan, Galician, Basque
-
-**If your language is not in this list, use Whisper large-v3-turbo instead.**
-
-### Available Models
-
-| Model | Architecture | Punctuation | Speed | Accuracy | Recommended |
-|-------|-------------|-------------|-------|----------|-------------|
-| parakeet-tdt-0.6b-v3 | TDT | Yes | Fast | ~6% WER | **Yes** |
-| parakeet-ctc-0.6b | CTC | No | Faster | ~7% WER | Special cases |
-
-### TDT vs CTC
-
-**TDT (Token-Duration-Transducer)** - Recommended:
-- Proper punctuation and capitalization
-- Accurate word-level timestamps
-- Frame-skipping for efficiency
-- Better handling of pauses and phrasing
-
-**CTC (Connectionist Temporal Classification)**:
-- Character-level output (no punctuation)
-- Slightly faster inference
-- Use only if you have a post-processing pipeline that handles punctuation
-
-### Configuration
-
-```toml
-engine = "parakeet"
-
-[parakeet]
-model = "parakeet-tdt-0.6b-v3"
-# model_type auto-detected, or set explicitly:
-# model_type = "tdt"
-```
-
-### GPU Acceleration Options
-
-Parakeet runs on multiple hardware configurations via ONNX Runtime:
-
-| Feature Flag | Backend | Hardware | Performance |
-|--------------|---------|----------|-------------|
-| `parakeet` | CPU | Any | Good |
-| `parakeet-rocm` | ROCm | AMD GPUs | Very good |
-| `parakeet-cuda` | CUDA | NVIDIA GPUs | Excellent |
-| `parakeet-tensorrt` | TensorRT | NVIDIA GPUs | Best |
-
-Build with the appropriate feature:
+To switch to the ONNX binary:
 
 ```bash
-# CPU only (works on any system)
-cargo build --release --features parakeet
-
-# AMD GPU with ROCm
-cargo build --release --features parakeet-rocm
-
-# NVIDIA GPU with CUDA
-cargo build --release --features parakeet-cuda
-
-# NVIDIA GPU with TensorRT (fastest)
-cargo build --release --features parakeet-tensorrt
+sudo voxtype setup onnx --enable
 ```
 
-### Parakeet Without a GPU
+To switch back to the standard binary:
 
-Parakeet's efficient FastConformer architecture means it performs well even on CPU:
+```bash
+sudo voxtype setup onnx --disable
+```
+
+The `setup onnx` command swaps the `/usr/local/bin/voxtype` symlink between the two binaries. Both binaries are installed by the `voxtype-bin` AUR package and the deb/rpm packages.
+
+---
+
+## Engine Details
+
+### 1. Whisper
+
+OpenAI's Whisper via whisper.cpp. The default engine, included in every voxtype binary.
+
+**Languages:** 99+ (the widest coverage of any engine)
+
+**Available models:**
+
+| Model | Size | Speed | Languages |
+|-------|------|-------|-----------|
+| tiny | 75 MB | ~10x | 99+ |
+| tiny.en | 39 MB | ~10x | English only |
+| base | 142 MB | ~7x | 99+ |
+| base.en | 142 MB | ~7x | English only |
+| small | 466 MB | ~4x | 99+ |
+| small.en | 466 MB | ~4x | English only |
+| medium | 1.5 GB | ~2x | 99+ |
+| medium.en | 1.5 GB | ~2x | English only |
+| large-v3 | 3.1 GB | 1x | 99+ |
+| large-v3-turbo | 1.6 GB | ~8x | 99+ |
+
+Speed is relative to large-v3 (1x baseline). Higher is faster.
+
+The `.en` models are English-only but faster and more accurate for English. Models without `.en` support 99+ languages. There are no `.en` variants for large-v3 or large-v3-turbo.
+
+**Config example:**
+
+```toml
+# English-only, good CPU performance
+[whisper]
+model = "small.en"
+language = "en"
+```
+
+```toml
+# Multilingual with GPU
+[whisper]
+model = "large-v3-turbo"
+language = "auto"    # or "ja", "zh", "ko", "ar", etc.
+```
+
+```toml
+# Battery-saving laptop mode
+[whisper]
+model = "small.en"
+language = "en"
+on_demand_loading = true
+gpu_isolation = true
+```
+
+**Pros:**
+- Widest language support (99+ languages)
+- Works with every voxtype binary (no ONNX needed)
+- Many model sizes to fit different hardware
+- GPU support via Vulkan, CUDA, or ROCm
+- Well-tested, mature codebase
+
+**Cons:**
+- Slower than Parakeet for equivalent accuracy
+- No built-in punctuation (use `[output.post_process]` or `[text] spoken_punctuation = true`)
+- Larger models need significant VRAM
+
+**GPU options:** Build with `--features gpu-vulkan` (AMD/Intel), `--features gpu-cuda` (NVIDIA), or `--features gpu-hipblas` (AMD ROCm).
+
+---
+
+### 2. Parakeet
+
+NVIDIA's FastConformer model via the parakeet-rs crate. State-of-the-art accuracy for English and European languages, with built-in punctuation from the TDT decoder.
+
+**Languages:** 25 European languages -- English, German, French, Spanish, Italian, Dutch, Polish, Portuguese, Romanian, Czech, Hungarian, Slovak, Slovenian, Danish, Norwegian, Swedish, Finnish, Greek, Turkish, Ukrainian, Russian, Catalan, Galician, Basque.
+
+**If your language is not in this list, Parakeet will not work for you.**
+
+**Available models:**
+
+| Model | Size | Description |
+|-------|------|-------------|
+| parakeet-tdt-0.6b-v3 | 2.6 GB | TDT with punctuation (recommended) |
+| parakeet-tdt-0.6b-v3-int8 | 670 MB | Quantized, smaller and faster |
+
+**TDT vs CTC:** The TDT model includes punctuation and capitalization. The CTC variant is slightly faster but outputs raw text without punctuation. Use TDT unless you have a specific reason not to.
+
+**Config example:**
 
 ```toml
 engine = "parakeet"
@@ -325,52 +176,306 @@ engine = "parakeet"
 model = "parakeet-tdt-0.6b-v3"
 ```
 
-Build for CPU: `cargo build --release --features parakeet`
+```toml
+# Quantized for lower memory usage
+engine = "parakeet"
 
-On a modern CPU, Parakeet TDT typically outperforms Whisper models of similar accuracy because of the efficient frame-skipping TDT decoder. You still get automatic punctuation and capitalization.
+[parakeet]
+model = "parakeet-tdt-0.6b-v3-int8"
+```
+
+**Pros:**
+- Best accuracy for English (~6% WER, top of HuggingFace ASR leaderboard)
+- Built-in punctuation and capitalization (TDT)
+- Fast even on CPU thanks to efficient FastConformer architecture
+- GPU acceleration via CUDA, ROCm, or TensorRT
+
+**Cons:**
+- Limited to 25 European languages (no CJK, Arabic, Hindi, etc.)
+- Requires ONNX binary
+- Only one model size (0.6B parameters)
+
+**GPU builds:** The ONNX binary variants include GPU support. `onnx-cuda` for NVIDIA, `onnx-rocm` for AMD.
 
 ---
 
-## Part 4: Hardware Considerations
+### 3. Moonshine
 
-### VRAM Requirements Summary
+Encoder-decoder transformer optimized for edge devices. Processes variable-length audio without the 30-second padding that Whisper requires.
 
-| Model | Minimum VRAM | Recommended |
-|-------|-------------|-------------|
-| Whisper tiny/base | 1 GB | 2 GB |
-| Whisper small | 2 GB | 4 GB |
-| Whisper medium | 5 GB | 6 GB |
-| Whisper large-v3-turbo | 6 GB | 8 GB |
-| Whisper large-v3 | 10 GB | 12 GB |
-| Parakeet TDT 0.6B | N/A (CPU) | 4+ GB (GPU) |
+**Languages:** English (MIT license), plus Japanese, Chinese, Korean, Arabic (Moonshine Community License, non-commercial only).
 
-### CPU Performance Expectations
+**Available models:**
 
-Real-world transcription times for 10 seconds of audio on a modern CPU (AMD Ryzen 7 / Intel i7):
+| Model | Size | Language | License |
+|-------|------|----------|---------|
+| base | 237 MB | English | MIT |
+| tiny | 100 MB | English | MIT |
+| base-ja | 237 MB | Japanese | Community (non-commercial) |
+| base-zh | 237 MB | Chinese | Community (non-commercial) |
+| tiny-ja | 100 MB | Japanese | Community (non-commercial) |
+| tiny-zh | 100 MB | Chinese | Community (non-commercial) |
+| tiny-ko | 100 MB | Korean | Community (non-commercial) |
+| tiny-ar | 100 MB | Arabic | Community (non-commercial) |
 
-**Whisper:**
-| Model | Approx Time |
-|-------|-------------|
-| tiny | 1-2s |
-| base | 2-3s |
-| small | 4-6s |
-| medium | 10-15s |
-| large-v3 | 25-40s |
+**Config example:**
 
-**Parakeet:**
-| Model | Approx Time |
-|-------|-------------|
-| TDT 0.6B (CPU) | 2-4s |
-| TDT 0.6B (CUDA) | <1s |
-| TDT 0.6B (TensorRT) | <0.5s |
+```toml
+engine = "moonshine"
 
-### Battery and Thermal Impact
+[moonshine]
+model = "base"         # English, 237 MB
+# quantized = true     # Use quantized variant if available (default: true)
+# threads = 4          # CPU threads for ONNX Runtime
+```
 
-**Desktop:** Use the largest/fastest model your hardware supports.
+```toml
+# Japanese
+engine = "moonshine"
 
-**Laptop (plugged in):** Same as desktop, but consider `gpu_isolation = true`.
+[moonshine]
+model = "base-ja"
+```
 
-**Laptop (battery):**
+**Pros:**
+- Small model sizes (100-237 MB)
+- Fast inference, designed for edge devices
+- No 30-second padding overhead
+- English models are MIT licensed
+
+**Cons:**
+- No built-in punctuation
+- Non-English models are non-commercial only
+- Fewer language options than Whisper or SenseVoice
+- Requires ONNX binary
+
+---
+
+### 4. SenseVoice
+
+Alibaba's FunAudioLLM encoder-only CTC model. Single forward pass (no autoregressive decoder loop), so inference is fast.
+
+**Languages:** Chinese (zh), English (en), Japanese (ja), Korean (ko), Cantonese (yue). Automatic language detection or explicit selection.
+
+**Available models:**
+
+| Model | Size | Description |
+|-------|------|-------------|
+| small | 239 MB | Quantized int8 (recommended) |
+| small-fp32 | 938 MB | Full precision, slightly better accuracy |
+
+**Config example:**
+
+```toml
+engine = "sensevoice"
+
+[sensevoice]
+model = "sensevoice-small"
+language = "auto"      # or "zh", "en", "ja", "ko", "yue"
+use_itn = true         # Inverse text normalization (adds punctuation)
+# threads = 4
+```
+
+**Pros:**
+- Good CJK support (Chinese, Japanese, Korean, Cantonese)
+- Fast single-pass inference (encoder-only, no decoder loop)
+- Inverse text normalization adds punctuation
+- Small quantized model (239 MB)
+- Automatic language detection
+
+**Cons:**
+- Limited to 5 languages
+- CJK output is character-based with no spaces between words (see note below)
+- Requires ONNX binary
+
+---
+
+### 5. Paraformer
+
+Alibaba's non-autoregressive encoder-predictor-decoder model. Generates all output tokens in a single pass.
+
+**Languages:** Chinese + English (bilingual).
+
+**Available models:**
+
+| Model | Size | Languages | Description |
+|-------|------|-----------|-------------|
+| zh | 487 MB | Chinese + English | Bilingual, recommended |
+| en | 220 MB | English | English only |
+
+**Config example:**
+
+```toml
+engine = "paraformer"
+
+[paraformer]
+model = "paraformer-zh"    # Chinese + English
+# threads = 4
+```
+
+**Pros:**
+- Good Chinese + English bilingual support
+- Non-autoregressive: fast, single-pass decoding
+- Moderate model size
+
+**Cons:**
+- Only Chinese and English
+- No built-in punctuation
+- Chinese output is character-based with no spaces (see note below)
+- Requires ONNX binary
+
+---
+
+### 6. Dolphin
+
+DataoceanAI's CTC E-Branchformer model optimized for Eastern languages. Covers 40 languages plus 22 Chinese dialects.
+
+**Languages:** Chinese (Mandarin + 22 dialects), Japanese, Korean, Thai, Vietnamese, Indonesian, Malay, Arabic, Hindi, Urdu, Bengali, Tamil, and more.
+
+**Available models:**
+
+| Model | Size | Languages | Description |
+|-------|------|-----------|-------------|
+| base | 198 MB | 40+ languages | Dictation-optimized, int8 quantized |
+
+**Config example:**
+
+```toml
+engine = "dolphin"
+
+[dolphin]
+model = "dolphin-base"
+# threads = 4
+```
+
+**Pros:**
+- Broad Eastern language coverage (40 languages + 22 Chinese dialects)
+- Small model size (198 MB)
+- Optimized for dictation use cases
+
+**Cons:**
+- CJK output is character-based with no spaces (see note below)
+- No built-in punctuation
+- Single model option
+- Requires ONNX binary
+
+---
+
+### 7. Omnilingual
+
+Meta's Massively Multilingual Speech (MMS) wav2vec2 model. A single model that covers 1600+ languages with a character-level CTC tokenizer.
+
+**Languages:** 1600+ (language-agnostic, no language selection needed).
+
+**Available models:**
+
+| Model | Size | Parameters | Description |
+|-------|------|------------|-------------|
+| 300m | 3.9 GB | 300M | 1600+ languages |
+
+**Config example:**
+
+```toml
+engine = "omnilingual"
+
+[omnilingual]
+model = "omnilingual-large"
+# threads = 4
+```
+
+**Pros:**
+- Widest language coverage of any engine (1600+ languages)
+- Language-agnostic: no language selection needed, just speak
+- Single model covers everything
+
+**Cons:**
+- Large model (3.9 GB)
+- Character-level output (no word boundaries for many languages)
+- No built-in punctuation
+- Accuracy varies by language; less accurate than specialized models for common languages
+- Requires ONNX binary
+
+---
+
+## Notes
+
+### Character-Based CJK Output
+
+SenseVoice, Paraformer, and Dolphin produce character-based output for Chinese, Japanese, and Korean. This means the transcribed text has no spaces between words:
+
+```
+English: "I went to the store"
+Chinese: "我去了商店"          (no spaces, which is correct for Chinese)
+Japanese: "お店に行きました"    (no spaces)
+```
+
+This is standard for CJK text and generally what you want. If your workflow requires word-segmented output, you would need external post-processing.
+
+### Downloading Models
+
+Use the interactive model selector to browse and download models for any engine:
+
+```bash
+voxtype setup model
+```
+
+This shows all available models across all engines, marks installed models, and handles downloads from HuggingFace.
+
+### On-Demand Loading
+
+All engines support `on_demand_loading = true`, which loads the model only when you start recording and unloads it after transcription. This saves memory and battery on laptops at the cost of a short delay before the first transcription.
+
+### Common Config Options
+
+Every ONNX engine supports these options:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `model` | varies | Model name or path to model directory |
+| `threads` | auto | Number of CPU threads for ONNX Runtime |
+| `on_demand_loading` | false | Load model on demand to save memory |
+
+Whisper has additional options (`language`, `gpu_isolation`, `mode`, etc.) documented in the [Configuration Guide](CONFIGURATION.md).
+
+---
+
+## Hardware Recommendations
+
+### VRAM Requirements
+
+| Engine / Model | Minimum VRAM |
+|----------------|-------------|
+| Whisper tiny/base | 1 GB |
+| Whisper small | 2 GB |
+| Whisper medium | 5 GB |
+| Whisper large-v3-turbo | 6 GB |
+| Whisper large-v3 | 10 GB |
+| Parakeet TDT 0.6B | 4 GB (GPU), works on CPU |
+| Parakeet TDT 0.6B int8 | 2 GB (GPU), works on CPU |
+| Moonshine / SenseVoice / Paraformer / Dolphin | CPU-friendly, no GPU needed |
+| Omnilingual 300M | 4+ GB (GPU), works on CPU |
+
+### CPU Performance (10 seconds of audio, modern CPU)
+
+| Engine / Model | Approx Time |
+|----------------|-------------|
+| Whisper tiny | 1-2s |
+| Whisper base | 2-3s |
+| Whisper small | 4-6s |
+| Whisper medium | 10-15s |
+| Parakeet TDT (CPU) | 2-4s |
+| Parakeet TDT (CUDA) | <1s |
+| Moonshine base | 1-2s |
+| SenseVoice small | 1-2s |
+| Paraformer zh | 1-3s |
+| Dolphin base | 1-2s |
+
+### Desktop with GPU
+
+Use the largest model your GPU can hold. For English, Parakeet TDT with CUDA is the fastest option. For multilingual, Whisper large-v3-turbo with Vulkan or CUDA.
+
+### Laptop on Battery
+
 ```toml
 [whisper]
 model = "small.en"
@@ -379,158 +484,61 @@ on_demand_loading = true
 gpu_isolation = true
 ```
 
----
+Or for an ONNX engine:
 
-## Part 5: Language Support Reference
+```toml
+engine = "moonshine"
 
-### Whisper: 99+ Languages
-
-Whisper supports most world languages. This is the only option for:
-
-| Region | Languages |
-|--------|-----------|
-| **East Asia** | Japanese, Chinese (Mandarin, Cantonese), Korean, Vietnamese, Thai |
-| **South Asia** | Hindi, Bengali, Tamil, Urdu, Punjabi, Marathi, Gujarati |
-| **Middle East** | Arabic, Hebrew, Persian (Farsi) |
-| **Africa** | Swahili, Yoruba, Amharic, Hausa, Zulu |
-| **Southeast Asia** | Indonesian, Malay, Tagalog, Burmese, Khmer |
-
-Full list: https://github.com/openai/whisper#available-models-and-languages
-
-### Parakeet v3: 25 European Languages
-
-- English, German, French, Spanish, Italian
-- Dutch, Polish, Portuguese, Romanian
-- Czech, Hungarian, Slovak, Slovenian
-- Danish, Norwegian, Swedish, Finnish
-- Greek, Turkish, Ukrainian, Russian
-- Catalan, Galician, Basque
+[moonshine]
+model = "tiny"
+on_demand_loading = true
+```
 
 ---
 
-## Part 6: Troubleshooting Model Selection
+## Troubleshooting
+
+### "Engine requested but voxtype was not compiled with --features ..."
+
+You are running the standard (Whisper-only) binary and selected an ONNX engine. Switch to the ONNX binary:
+
+```bash
+sudo voxtype setup onnx --enable
+```
 
 ### "My transcription is slow"
 
-1. **Try Parakeet:** Even on CPU, Parakeet is often faster than Whisper for European languages
-2. **Check model size:** Switch to a smaller model
-3. **Enable GPU:** Build with appropriate GPU features
+1. Try a smaller model (base instead of small, tiny instead of base).
+2. Enable GPU acceleration if available.
+3. For English, Parakeet on CPU is often faster than Whisper at similar accuracy.
+4. For CJK, SenseVoice and Dolphin are fast single-pass models.
 
 ### "My transcription has errors"
 
-1. **Try a larger model:** Upgrade from tiny→base→small→medium→large-v3-turbo
-2. **Use .en model for English:** English-only models are more accurate
-3. **Check language setting:** Ensure `language` matches your speech
-4. **Try Parakeet:** It has state-of-the-art accuracy for European languages
+1. Try a larger model.
+2. Use an engine specialized for your language (SenseVoice for CJK, Parakeet for European).
+3. For Whisper, use the `.en` model if you only speak English.
+4. Check that `language` is set correctly.
+5. Try `[output.post_process]` for LLM-based cleanup.
 
-### "My language isn't working with Parakeet"
+### "My language isn't supported by [engine]"
 
-If you're trying to transcribe Japanese, Chinese, Arabic, Hindi, or another non-European language, Parakeet doesn't support it. Switch to Whisper:
+Switch to an engine that supports your language. Whisper (99+ languages) and Omnilingual (1600+ languages) have the broadest coverage.
 
 ```toml
-# Remove or comment out the parakeet config
-# engine = "parakeet"
+# Switch back to Whisper for unsupported languages
+engine = "whisper"
 
 [whisper]
 model = "large-v3-turbo"
-language = "auto"  # or your specific language code
+language = "auto"
 ```
 
-### "My laptop gets hot / battery drains"
+### "I need punctuation"
 
-1. **Enable on-demand loading:** `on_demand_loading = true`
-2. **Enable GPU isolation:** `gpu_isolation = true`
-3. **Use smaller model:** small.en is efficient
-4. **Use CPU inference:** Avoid GPU builds on battery
-
-### "I need punctuation but don't have it"
-
-1. **Use Parakeet TDT:** Includes punctuation automatically (European languages only)
-2. **Use post-processing:** Configure LLM cleanup in `[output.post_process]`
-3. **Enable spoken punctuation:** `[text] spoken_punctuation = true`
-
----
-
-## Summary: Recommended Configurations
-
-### Non-European Languages
-
-**If you speak Japanese, Chinese, Korean, Arabic, Hindi, Bengali, Tamil, Vietnamese, Indonesian, Thai, Persian, Hebrew, Swahili, Tagalog, or any other non-European language, Parakeet will not work for you. Use Whisper instead.**
-
-**With GPU:**
-```toml
-[whisper]
-model = "large-v3-turbo"
-language = "auto"  # or specify: "ja", "zh", "ko", "ar", "hi", etc.
-```
-Build: `cargo build --release --features gpu-cuda` (NVIDIA) or `gpu-vulkan` (AMD)
-
-**CPU only:**
-```toml
-[whisper]
-model = "small"      # or "base" for faster but less accurate
-language = "auto"    # or specify your language code
-```
-Build: `cargo build --release`
-
-### Desktop with NVIDIA GPU (English/European)
-
-```toml
-engine = "parakeet"
-
-[parakeet]
-model = "parakeet-tdt-0.6b-v3"
-```
-Build: `cargo build --release --features parakeet-cuda`
-
-### Desktop with AMD GPU (English/European)
-
-Option A - Parakeet with ROCm:
-```toml
-engine = "parakeet"
-
-[parakeet]
-model = "parakeet-tdt-0.6b-v3"
-```
-Build: `cargo build --release --features parakeet-rocm`
-
-Option B - Whisper with Vulkan:
-```toml
-[whisper]
-model = "large-v3-turbo"
-language = "en"
-```
-Build: `cargo build --release --features gpu-vulkan`
-
-### CPU-Only System (English/European)
-
-Option A - Parakeet (faster, has punctuation):
-```toml
-engine = "parakeet"
-
-[parakeet]
-model = "parakeet-tdt-0.6b-v3"
-```
-Build: `cargo build --release --features parakeet`
-
-Option B - Whisper (more model size options):
-```toml
-[whisper]
-model = "small.en"
-language = "en"
-```
-Build: `cargo build --release`
-
-### Battery-Conscious Laptop
-
-```toml
-[whisper]
-model = "small.en"
-language = "en"
-on_demand_loading = true
-gpu_isolation = true
-```
-Build: `cargo build --release`
+1. Use Parakeet TDT (European languages) or SenseVoice with `use_itn = true` (CJK + English).
+2. Enable spoken punctuation: `[text] spoken_punctuation = true`
+3. Configure LLM post-processing: `[output.post_process]`
 
 ---
 
@@ -539,5 +547,10 @@ Build: `cargo build --release`
 - [Whisper Model Card](https://github.com/openai/whisper)
 - [Whisper Large V3 Turbo](https://huggingface.co/openai/whisper-large-v3-turbo)
 - [Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)
-- [NVIDIA Speech AI Blog](https://developer.nvidia.com/blog/nvidia-speech-ai-models-deliver-industry-leading-accuracy-and-performance/)
+- [Moonshine](https://huggingface.co/onnx-community/moonshine-base-ONNX)
+- [SenseVoice](https://github.com/FunAudioLLM/SenseVoice)
+- [Paraformer](https://github.com/modelscope/FunASR)
+- [Dolphin (DataoceanAI)](https://huggingface.co/csukuangfj/sherpa-onnx-dolphin-base-ctc-multi-lang-int8-2025-04-02)
+- [Meta MMS / Omnilingual](https://huggingface.co/facebook/mms-1b-all)
 - [HuggingFace Open ASR Leaderboard](https://huggingface.co/spaces/hf-audio/open_asr_leaderboard)
+- [Configuration Guide](CONFIGURATION.md)

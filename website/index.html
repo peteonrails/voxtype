@@ -82,7 +82,7 @@
                 </div>
                 <div class="terminal-body">
                     <pre><code><span class="prompt">$</span> voxtype
-<span class="info">[INFO]</span> Voxtype v0.5.6 starting...
+<span class="info">[INFO]</span> Voxtype v0.6.0 starting...
 <span class="info">[INFO]</span> Using model: base.en
 <span class="info">[INFO]</span> Hotkey: SCROLLLOCK
 <span class="info">[INFO]</span> Ready! Hold SCROLLLOCK to record.
@@ -670,12 +670,12 @@
                 </table>
             </div>
 
-            <h3 class="model-category">Parakeet Models (English, experimental)</h3>
+            <h3 class="model-category">ONNX Engines (require ONNX binary variant)</h3>
             <div class="model-table-wrapper">
                 <table class="model-table">
                     <thead>
                         <tr>
-                            <th>Model</th>
+                            <th>Engine / Model</th>
                             <th>Size</th>
                             <th>Speed</th>
                             <th>Accuracy</th>
@@ -683,23 +683,8 @@
                         </tr>
                     </thead>
                     <tbody>
-                        <tr>
-                            <td><code>parakeet-tdt-0.6b-v3</code></td>
-                            <td>2.6 GB</td>
-                            <td>
-                                <div class="speed-bar">
-                                    <div class="speed-fill" style="width: 90%"></div>
-                                </div>
-                            </td>
-                            <td>
-                                <div class="accuracy-bar">
-                                    <div class="accuracy-fill" style="width: 95%"></div>
-                                </div>
-                            </td>
-                            <td>Fast, accurate, includes punctuation</td>
-                        </tr>
                         <tr class="recommended">
-                            <td><code>parakeet-tdt-0.6b-v3-int8</code> <span class="rec-badge">Recommended</span></td>
+                            <td><code>parakeet-tdt-0.6b-v3-int8</code> <span class="rec-badge">English</span></td>
                             <td>670 MB</td>
                             <td>
                                 <div class="speed-bar">
@@ -708,16 +693,91 @@
                             </td>
                             <td>
                                 <div class="accuracy-bar">
-                                    <div class="accuracy-fill" style="width: 90%"></div>
+                                    <div class="accuracy-fill" style="width: 95%"></div>
                                 </div>
                             </td>
-                            <td>Smaller, faster, quantized</td>
+                            <td>Best English accuracy, built-in punctuation</td>
+                        </tr>
+                        <tr>
+                            <td><code>moonshine-base</code></td>
+                            <td>237 MB</td>
+                            <td>
+                                <div class="speed-bar">
+                                    <div class="speed-fill" style="width: 98%"></div>
+                                </div>
+                            </td>
+                            <td>
+                                <div class="accuracy-bar">
+                                    <div class="accuracy-fill" style="width: 78%"></div>
+                                </div>
+                            </td>
+                            <td>Fastest CPU inference, English</td>
+                        </tr>
+                        <tr class="recommended">
+                            <td><code>sensevoice-small</code> <span class="rec-badge">CJK</span></td>
+                            <td>239 MB</td>
+                            <td>
+                                <div class="speed-bar">
+                                    <div class="speed-fill" style="width: 92%"></div>
+                                </div>
+                            </td>
+                            <td>
+                                <div class="accuracy-bar">
+                                    <div class="accuracy-fill" style="width: 88%"></div>
+                                </div>
+                            </td>
+                            <td>Chinese, Japanese, Korean, Cantonese, English</td>
+                        </tr>
+                        <tr>
+                            <td><code>paraformer-zh</code></td>
+                            <td>487 MB</td>
+                            <td>
+                                <div class="speed-bar">
+                                    <div class="speed-fill" style="width: 88%"></div>
+                                </div>
+                            </td>
+                            <td>
+                                <div class="accuracy-bar">
+                                    <div class="accuracy-fill" style="width: 85%"></div>
+                                </div>
+                            </td>
+                            <td>Chinese + English bilingual</td>
+                        </tr>
+                        <tr>
+                            <td><code>dolphin-base</code></td>
+                            <td>198 MB</td>
+                            <td>
+                                <div class="speed-bar">
+                                    <div class="speed-fill" style="width: 90%"></div>
+                                </div>
+                            </td>
+                            <td>
+                                <div class="accuracy-bar">
+                                    <div class="accuracy-fill" style="width: 82%"></div>
+                                </div>
+                            </td>
+                            <td>40 languages + 22 Chinese dialects</td>
+                        </tr>
+                        <tr>
+                            <td><code>omnilingual-large</code></td>
+                            <td>3.9 GB</td>
+                            <td>
+                                <div class="speed-bar">
+                                    <div class="speed-fill" style="width: 40%"></div>
+                                </div>
+                            </td>
+                            <td>
+                                <div class="accuracy-bar">
+                                    <div class="accuracy-fill" style="width: 75%"></div>
+                                </div>
+                            </td>
+                            <td>1600+ languages, rare and low-resource</td>
                         </tr>
                     </tbody>
                 </table>
             </div>
             <p class="model-note">
-                <strong>.en models</strong> are English-only but faster and more accurate for English. <strong>Parakeet</strong> and <strong>Moonshine</strong> require the ONNX binary variant.
+                <strong>.en models</strong> are English-only but faster and more accurate for English. All ONNX engines require the ONNX binary variant. Switch with <code>voxtype setup onnx --enable</code>.
             </p>
         </div>
     </section>
@@ -768,8 +828,8 @@ sudo pacman -S wtype wl-clipboard</code></pre>
                             <button class="copy-btn">Copy</button>
                         </div>
                         <pre><code><span class="comment"># Download and install (Ubuntu 24.04+, Debian Trixie+)</span>
-wget https://github.com/peteonrails/voxtype/releases/download/v0.5.6/voxtype_0.5.6-1_amd64.deb
-sudo dpkg -i voxtype_0.5.6-1_amd64.deb
+wget https://github.com/peteonrails/voxtype/releases/download/v0.6.0/voxtype_0.6.0-1_amd64.deb
+sudo dpkg -i voxtype_0.6.0-1_amd64.deb
 sudo apt-get install -f
 
 <span class="comment"># Install optional dependencies</span>
@@ -785,8 +845,8 @@ sudo apt install wtype wl-clipboard</code></pre>
                             <button class="copy-btn">Copy</button>
                         </div>
                         <pre><code><span class="comment"># Download and install (Fedora 39+)</span>
-wget https://github.com/peteonrails/voxtype/releases/download/v0.5.6/voxtype-0.5.6-1.x86_64.rpm
-sudo dnf install ./voxtype-0.5.6-1.x86_64.rpm
+wget https://github.com/peteonrails/voxtype/releases/download/v0.6.0/voxtype-0.6.0-1.x86_64.rpm
+sudo dnf install ./voxtype-0.6.0-1.x86_64.rpm
 
 <span class="comment"># Install optional dependencies</span>
 sudo dnf install wtype wl-clipboard</code></pre>
