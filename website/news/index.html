@@ -9,16 +9,16 @@
     <!-- Open Graph / Social Media -->
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://voxtype.io/news/">
-    <meta property="og:title" content="Voxtype 0.5.6: Moonshine Backend, Voice Activity Detection, Eager Transcription">
-    <meta property="og:description" content="Moonshine transcription backend for fast CPU inference. Voice activity detection filters silence and prevents hallucinations. Eager input processing reduces perceived latency.">
+    <meta property="og:title" content="Voxtype 0.6.0: Five New Transcription Engines, Meeting Mode">
+    <meta property="og:description" content="Five new ONNX-based transcription engines for Chinese, Japanese, Korean, and 1600+ languages. Meeting mode for continuous transcription with speaker attribution and AI summaries.">
     <meta property="og:image" content="https://voxtype.io/images/gpu-isolation.png">
     <meta property="og:image:width" content="1200">
     <meta property="og:image:height" content="630">
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="Voxtype 0.5.6: Moonshine Backend, Voice Activity Detection, Eager Transcription">
-    <meta name="twitter:description" content="Moonshine transcription backend for fast CPU inference. Voice activity detection filters silence and prevents hallucinations. Eager input processing reduces perceived latency.">
+    <meta name="twitter:title" content="Voxtype 0.6.0: Five New Transcription Engines, Meeting Mode">
+    <meta name="twitter:description" content="Five new ONNX-based transcription engines for Chinese, Japanese, Korean, and 1600+ languages. Meeting mode for continuous transcription with speaker attribution and AI summaries.">
     <meta name="twitter:image" content="https://voxtype.io/images/gpu-isolation.png">
 
     <title>News & Updates | Voxtype</title>
@@ -74,6 +74,170 @@
     <!-- News Articles -->
     <main class="news-content">
         <div class="container">
+
+            <!-- v0.6.x Era Posts -->
+
+            <article class="news-article" id="v060">
+                <div class="article-meta">
+                    <time datetime="2026-02-16">February 16, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v0.6.0: Five New Transcription Engines, Meeting Mode</h2>
+                <div class="article-body">
+                    <p>Voxtype 0.6.0 is a major release. Five new ONNX-based transcription engines bring support for Chinese, Japanese, Korean, Cantonese, and 1600+ additional languages. Meeting mode adds continuous transcription for meetings with speaker attribution, export to multiple formats, and AI-generated summaries. The ONNX binary variants now ship with every ONNX engine included.</p>
+
+                    <h3>Five New Transcription Engines</h3>
+                    <p>Voxtype previously offered two transcription engines: Whisper and Parakeet. This release adds five more, all running locally via ONNX Runtime. Each engine has different strengths and language coverage.</p>
+
+                    <table class="performance-table">
+                        <thead>
+                            <tr>
+                                <th>Engine</th>
+                                <th>Languages</th>
+                                <th>Best For</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>SenseVoice</td>
+                                <td>Chinese, English, Japanese, Korean, Cantonese</td>
+                                <td>CJK transcription with auto-detection</td>
+                            </tr>
+                            <tr>
+                                <td>Paraformer</td>
+                                <td>Chinese + English (bilingual), Chinese + Cantonese + English (trilingual)</td>
+                                <td>Mixed Chinese/English speech</td>
+                            </tr>
+                            <tr>
+                                <td>Dolphin</td>
+                                <td>40 languages + 22 Chinese dialects</td>
+                                <td>Chinese dialects and Eastern languages</td>
+                            </tr>
+                            <tr>
+                                <td>Omnilingual</td>
+                                <td>1600+ languages</td>
+                                <td>Low-resource and rare languages</td>
+                            </tr>
+                            <tr>
+                                <td>Moonshine</td>
+                                <td>English (+ Japanese, Mandarin, Korean, Arabic)</td>
+                                <td>Fast CPU inference</td>
+                            </tr>
+                        </tbody>
+                    </table>
+
+                    <p><strong>Why use them:</strong> If you speak a CJK language and want a model trained specifically for it, SenseVoice and Paraformer will outperform Whisper on that task. If you need a rare language that Whisper doesn't cover well, Omnilingual supports over 1600 languages via Meta's MMS model. Dolphin covers 40 languages plus 22 Chinese dialects, which is useful if your dialect isn't well-served by general-purpose models.</p>
+
+                    <p>All five engines are CTC-based, meaning they run in a single forward pass with no autoregressive decoder loop. In practice, this makes them fast on CPU.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code># SenseVoice for CJK + English
+engine = "sensevoice"
+
+[sensevoice]
+model = "SenseVoiceSmall"
+language = "auto"    # auto, zh, en, ja, ko, yue
+
+# Paraformer for bilingual Chinese/English
+engine = "paraformer"
+
+[paraformer]
+model = "paraformer-zh"
+
+# Omnilingual for 1600+ languages
+engine = "omnilingual"
+
+[omnilingual]
+model = "mms-1b-all"</code></pre>
+                    </div>
+
+                    <p>Download models with <code>voxtype setup model</code> and select from the interactive menu. The new engines share infrastructure with Parakeet and Moonshine: shared Fbank feature extraction, shared CTC decoding, and shared ONNX Runtime session management.</p>
+
+                    <h3>All ONNX Engines in Every ONNX Binary</h3>
+                    <p>Previously, the ONNX release binaries only included Parakeet. Starting with v0.6.0, all four ONNX binary variants (onnx-avx2, onnx-avx512, onnx-cuda, onnx-rocm) include every ONNX engine: Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, and Omnilingual. The three Whisper-only binaries (avx2, avx512, vulkan) remain Whisper-only. Switch engines by changing a single config line.</p>
+
+                    <p>The release binary naming also changed from <code>voxtype-*-parakeet-*</code> to <code>voxtype-*-onnx-*</code> to reflect this broader scope.</p>
+
+                    <h3>Meeting Mode</h3>
+                    <p>Meeting mode is a new way to use Voxtype: continuous transcription for meetings, calls, and lectures. Instead of push-to-talk, it records continuously in chunks and transcribes each chunk as it completes.</p>
+
+                    <div class="code-block">
+                        <pre><code># Start a meeting
+voxtype meeting start --title "Weekly standup"
+
+# Pause and resume
+voxtype meeting pause
+voxtype meeting resume
+
+# Stop when done
+voxtype meeting stop
+
+# Export the transcript
+voxtype meeting export latest --format markdown
+voxtype meeting export latest --format srt</code></pre>
+                    </div>
+
+                    <p><strong>Why use it:</strong> Push-to-talk is great for dictation, but meetings need continuous recording. Meeting mode handles that with automatic chunking (default 30-second chunks), so memory usage stays bounded even for long sessions up to 3 hours.</p>
+
+                    <h3>Speaker Attribution</h3>
+                    <p>Meeting mode can identify who is speaking. Two approaches are available:</p>
+
+                    <ul>
+                        <li><strong>Simple attribution:</strong> Uses dual audio capture (microphone + system loopback) to label segments as "You" or "Remote". Good for 1-on-1 calls where you just need to distinguish yourself from the other person.</li>
+                        <li><strong>ML diarization:</strong> Uses ONNX-based speaker embeddings to cluster speech by speaker and assign labels like SPEAKER_00, SPEAKER_01. Works for multi-person meetings. You can rename speakers after the fact with <code>voxtype meeting label</code>.</li>
+                    </ul>
+
+                    <div class="code-block">
+                        <pre><code># Label auto-generated speaker IDs with real names
+voxtype meeting label latest SPEAKER_00 "Alice"
+voxtype meeting label latest SPEAKER_01 "Bob"</code></pre>
+                    </div>
+
+                    <h3>Meeting Export Formats</h3>
+                    <p>Meeting transcripts can be exported in five formats: plain text, Markdown, JSON, SRT subtitles, and VTT subtitles. The subtitle formats include timestamps, so you can use them with video recordings of the same meeting.</p>
+
+                    <div class="code-block">
+                        <pre><code>voxtype meeting export latest --format text
+voxtype meeting export latest --format markdown
+voxtype meeting export latest --format json
+voxtype meeting export latest --format srt
+voxtype meeting export latest --format vtt</code></pre>
+                    </div>
+
+                    <h3>AI Meeting Summaries</h3>
+                    <p>After a meeting, you can generate a summary with key points, action items, and decisions using a local LLM via Ollama or a remote API endpoint.</p>
+
+                    <div class="code-block">
+                        <pre><code># Generate a summary using Ollama
+voxtype meeting summarize latest
+
+# Output as JSON for programmatic use
+voxtype meeting summarize latest --format json</code></pre>
+                    </div>
+
+                    <p>This requires Ollama running locally or a configured remote summarization endpoint. The summary extracts action items, key decisions, and a concise overview from the full transcript.</p>
+
+                    <h3>Setup ONNX Replaces Setup Parakeet</h3>
+                    <p>The <code>voxtype setup parakeet</code> command has been renamed to <code>voxtype setup onnx</code> to reflect that it now manages all ONNX-based engines, not just Parakeet. The old <code>setup parakeet</code> command still works as a hidden alias, so existing scripts and muscle memory won't break.</p>
+
+                    <div class="code-block">
+                        <pre><code># New name
+voxtype setup onnx
+
+# Old name still works
+voxtype setup parakeet</code></pre>
+                    </div>
+
+                    <h3>Other Changes</h3>
+                    <ul>
+                        <li>Shared Fbank feature extraction and CTC decoder modules reduce code duplication across ONNX engines</li>
+                        <li>Multi-engine transcription smoke tests for automated regression testing</li>
+                        <li>Fix Dolphin and Paraformer transcription backends after initial implementation</li>
+                        <li>Fix clippy warnings across the codebase</li>
+                    </ul>
+                </div>
+            </article>
 
             <!-- v0.5.x Era Posts -->
 
