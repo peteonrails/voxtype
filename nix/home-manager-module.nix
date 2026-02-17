@@ -94,7 +94,7 @@ in {
         - packages.parakeet-cuda: CUDA acceleration (NVIDIA)
         - packages.parakeet-rocm: ROCm acceleration (AMD)
 
-        All packages include runtime dependencies (wtype, ydotool, etc.).
+        All packages include runtime dependencies (wtype, dotool, ydotool, etc.).
       '';
       example = lib.literalExpression "voxtype.packages.\${system}.vulkan";
     };

@@ -37,6 +37,7 @@
         # Runtime dependencies wrapped into PATH
         runtimeDeps = with pkgs; [
           wtype         # Wayland typing
+          dotool        # Universal typing backend via uinput
           wl-clipboard  # Wayland clipboard (wl-copy, wl-paste)
           ydotool       # Alternative typing backend (X11 and Wayland)
           xdotool       # X11 typing fallback

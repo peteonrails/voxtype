@@ -44,7 +44,7 @@ in {
         - packages.vulkan: Vulkan GPU acceleration
         - packages.rocm: ROCm/HIP acceleration (AMD)
 
-        These packages include all runtime dependencies (wtype, ydotool, etc.)
+        These packages include all runtime dependencies (wtype, dotool, ydotool, etc.)
         in their PATH.
       '';
       example = lib.literalExpression "voxtype.packages.\${system}.vulkan";
