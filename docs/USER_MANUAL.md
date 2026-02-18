@@ -340,6 +340,35 @@ voxtype config > ~/.config/voxtype/config.toml
 voxtype -c /path/to/my/config.toml
 ```
 
+### Configuration Priority
+
+Settings are applied in layers, with later layers overriding earlier ones:
+
+1. **Built-in defaults** (lowest priority)
+2. **Config file** (`~/.config/voxtype/config.toml`)
+3. **Environment variables** (`VOXTYPE_*`)
+4. **CLI flags** (highest priority)
+
+Every config file option has a corresponding `VOXTYPE_*` environment variable and CLI flag. See `voxtype --help` for the full list of CLI flags, and [CONFIGURATION.md](CONFIGURATION.md#voxtype_-configuration-overrides) for the full list of environment variables.
+
+```bash
+# Override model and auto-submit via environment
+VOXTYPE_MODEL=large-v3-turbo VOXTYPE_AUTO_SUBMIT=true voxtype
+
+# Override via CLI flags (takes priority over env vars and config file)
+voxtype --model large-v3-turbo --auto-submit
+```
+
+Per-recording overrides are available on `record start` and `record toggle`:
+
+```bash
+# Auto-submit just this recording (even if config has auto_submit = false)
+voxtype record start --auto-submit
+
+# Disable auto-submit just this recording (even if config has auto_submit = true)
+voxtype record toggle --no-auto-submit
+```
+
 ---
 
 ## Hotkeys
