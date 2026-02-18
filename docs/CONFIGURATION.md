@@ -1910,6 +1910,172 @@ min_speech_duration_ms = 200  # Require at least 200ms of speech
 
 ---
 
+## [meeting]
+
+Meeting mode configuration. Meeting mode provides continuous transcription with chunked processing, speaker diarization, and export capabilities.
+
+### enabled
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Enable meeting mode. When enabled, the `voxtype meeting start/stop` commands become available.
+
+### chunk_duration_secs
+
+**Type:** Integer
+**Default:** `30`
+**Required:** No
+
+Duration of audio chunks in seconds. The daemon processes audio in chunks of this size.
+
+### storage_path
+
+**Type:** String
+**Default:** `"auto"` (`~/.local/share/voxtype/meetings/`)
+**Required:** No
+
+Directory for meeting transcript storage.
+
+### retain_audio
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Keep raw audio chunk files after transcription. Useful for debugging or re-transcribing with different settings.
+
+### max_duration_mins
+
+**Type:** Integer
+**Default:** `180`
+**Required:** No
+
+Maximum meeting duration in minutes. Set to `0` for unlimited.
+
+---
+
+## [meeting.audio]
+
+Audio capture settings specific to meeting mode.
+
+### mic_device
+
+**Type:** String
+**Default:** `"default"`
+**Required:** No
+
+Microphone device for meeting recording. Falls back to the main `[audio] device` setting if not specified.
+
+### loopback_device
+
+**Type:** String (`"auto"`, `"disabled"`, or PulseAudio source name)
+**Default:** `"auto"`
+**Required:** No
+
+System audio loopback capture for recording remote meeting participants. Uses `parec` (PulseAudio recording client) to capture audio from a monitor source, which works with both PulseAudio and PipeWire.
+
+- `"auto"` - Detect a monitor source automatically via `pactl`. Prefers a source that is currently RUNNING (active audio output).
+- `"disabled"` - Mic-only capture, no loopback.
+- Explicit source name - Use a specific PulseAudio/PipeWire source (e.g., `"alsa_output.pci-0000_00_1f.3.analog-stereo.monitor"`).
+
+To list available monitor sources:
+
+```bash
+pactl list short sources | grep monitor
+```
+
+### echo_cancel
+
+**Type:** String (`"auto"`, `"disabled"`)
+**Default:** `"auto"`
+**Required:** No
+
+Echo cancellation mode for removing speaker bleed-through from the microphone signal when loopback capture is active.
+
+- `"auto"` - Use GTCRN neural speech enhancement on mic audio before transcription, followed by a phrase-level transcript dedup pass. The GTCRN model (~523 KB) is automatically downloaded on first `voxtype meeting start`.
+- `"disabled"` - No enhancement. Use this if you have system-level echo cancellation configured (e.g., PipeWire's `echo-cancel` module) or if you don't use loopback capture.
+
+**Example:**
+```toml
+[meeting.audio]
+loopback_device = "auto"
+echo_cancel = "auto"  # GTCRN enhancement + transcript dedup
+```
+
+---
+
+## [meeting.diarization]
+
+Speaker diarization settings for meeting mode.
+
+### enabled
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Enable speaker diarization to identify different speakers in meeting transcripts.
+
+### backend
+
+**Type:** String (`"simple"`, `"ml"`, `"remote"`)
+**Default:** `"simple"`
+**Required:** No
+
+Diarization backend to use:
+
+- `"simple"` - Energy-based speaker change detection. No model download required.
+- `"ml"` - Machine learning speaker embeddings (requires ONNX feature).
+- `"remote"` - Remote diarization API.
+
+### max_speakers
+
+**Type:** Integer
+**Default:** `10`
+**Required:** No
+
+Maximum number of speakers to detect.
+
+---
+
+## [meeting.summary]
+
+AI summarization settings for meeting transcripts.
+
+### backend
+
+**Type:** String (`"local"`, `"remote"`, `"disabled"`)
+**Default:** `"disabled"`
+**Required:** No
+
+- `"local"` - Use Ollama for local summarization.
+- `"remote"` - Use a remote API.
+- `"disabled"` - No summarization.
+
+### ollama_url
+
+**Type:** String
+**Default:** `"http://localhost:11434"`
+**Required:** No (only used when `backend = "local"`)
+
+### ollama_model
+
+**Type:** String
+**Default:** `"llama3.2"`
+**Required:** No (only used when `backend = "local"`)
+
+### timeout_secs
+
+**Type:** Integer
+**Default:** `120`
+**Required:** No
+
+Timeout for summarization requests.
+
+---
+
 ## [status]
 
 Controls status display icons for Waybar and other tray integrations.

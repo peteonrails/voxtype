@@ -333,6 +333,7 @@ Based on open issues and project direction:
 
 **Near Term:**
 - **Deterministic integration tests** - Automated smoke tests using pre-recorded audio files that can run in CI without LLM/human interaction
+- **Meeting echo cancellation edge trimming** - Remove residual bleed-through words at segment boundaries when loopback audio is active. GTCRN handles the bulk of echo removal, but 1-2 stray words can appear at the start/end of mic segments where the STFT window crosses a chunk boundary.
 
 **Medium Term:**
 - **Audio caching** ([#28](https://github.com/peteonrails/voxtype/issues/28)) - Save recordings for replay/re-transcription
