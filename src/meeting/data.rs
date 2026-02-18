@@ -160,6 +160,131 @@ impl Transcript {
         self.segments.push(segment);
     }
 
+    /// Remove echoed phrases from mic segments that match loopback transcripts.
+    /// Works at the phrase level: finds runs of consecutive words in a mic segment
+    /// that appear in any loopback segment and strips them out, keeping the user's
+    /// actual speech. Returns the number of words removed.
+    pub fn dedup_bleed_through(&mut self) -> usize {
+        // Build a set of loopback n-grams for fast lookup.
+        // We use 4-grams as the minimum match length to avoid false positives.
+        let min_ngram = 4;
+
+        let loopback_words: Vec<String> = self
+            .segments
+            .iter()
+            .filter(|s| s.source == AudioSource::Loopback)
+            .flat_map(|s| normalize_for_dedup(&s.text))
+            .collect();
+
+        if loopback_words.len() < min_ngram {
+            return 0;
+        }
+
+        // Build set of all n-grams (4 to 8 words) from loopback
+        let mut loopback_ngrams: std::collections::HashSet<Vec<&str>> =
+            std::collections::HashSet::new();
+        for n in min_ngram..=8.min(loopback_words.len()) {
+            for window in loopback_words.windows(n) {
+                loopback_ngrams.insert(window.iter().map(|s| s.as_str()).collect());
+            }
+        }
+
+        let mut total_removed = 0;
+
+        for seg in &mut self.segments {
+            if seg.source != AudioSource::Microphone {
+                continue;
+            }
+
+            let original_text = seg.text.clone();
+            let words: Vec<&str> = original_text.split_whitespace().collect();
+            if words.len() < min_ngram {
+                continue;
+            }
+
+            // Find which words are part of echoed phrases.
+            // A word is "echoed" if it's part of a consecutive run of >= min_ngram
+            // words that appears in the loopback transcript.
+            let mut keep = vec![true; words.len()];
+            let normalized: Vec<String> = words
+                .iter()
+                .map(|w| {
+                    w.to_lowercase()
+                        .chars()
+                        .filter(|c| c.is_alphanumeric())
+                        .collect::<String>()
+                })
+                .collect();
+
+            // Greedy: find longest matching runs first
+            let mut i = 0;
+            while i + min_ngram <= normalized.len() {
+                // Try longest match first (up to 8 words)
+                let max_n = 8.min(normalized.len() - i);
+                let mut matched_len = 0;
+
+                for n in (min_ngram..=max_n).rev() {
+                    let ngram: Vec<&str> =
+                        normalized[i..i + n].iter().map(|s| s.as_str()).collect();
+                    if loopback_ngrams.contains(&ngram) {
+                        matched_len = n;
+                        break;
+                    }
+                }
+
+                if matched_len > 0 {
+                    // Try to extend the match beyond the ngram window
+                    let mut end = i + matched_len;
+                    while end < normalized.len() {
+                        // Check if adding the next word still matches loopback
+                        let check_start = end.saturating_sub(min_ngram - 1);
+                        let check_len = end - check_start + 1;
+                        if check_len >= min_ngram {
+                            let ngram: Vec<&str> = normalized[check_start..=end]
+                                .iter()
+                                .map(|s| s.as_str())
+                                .collect();
+                            if loopback_ngrams.contains(&ngram) {
+                                end += 1;
+                                continue;
+                            }
+                        }
+                        break;
+                    }
+
+                    for j in i..end {
+                        keep[j] = false;
+                    }
+                    total_removed += end - i;
+
+                    tracing::debug!(
+                        "Stripping echoed phrase ({} words): {:?}",
+                        end - i,
+                        words[i..end].join(" ")
+                    );
+
+                    i = end;
+                } else {
+                    i += 1;
+                }
+            }
+
+            // Reconstruct text from kept words
+            if keep.iter().any(|&k| !k) {
+                let new_text: String = words
+                    .iter()
+                    .zip(keep.iter())
+                    .filter(|(_, &k)| k)
+                    .map(|(&w, _)| w)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                seg.text = new_text;
+            }
+        }
+
+        total_removed
+    }
+
     /// Get the full text without speaker labels
     pub fn plain_text(&self) -> String {
         self.segments
@@ -407,6 +532,17 @@ impl MeetingData {
         self.metadata.complete();
         self.metadata.chunk_count = self.transcript.total_chunks;
     }
+}
+
+/// Normalize text for dedup comparison: lowercase, strip punctuation, split into words
+fn normalize_for_dedup(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect::<String>()
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 #[cfg(test)]

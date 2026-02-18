@@ -1039,6 +1039,55 @@ pub fn download_model(model_name: &str) -> anyhow::Result<()> {
     }
 }
 
+/// GTCRN speech enhancement model URL and filename
+const GTCRN_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/gtcrn_simple.onnx";
+const GTCRN_MODEL_FILENAME: &str = "gtcrn_simple.onnx";
+
+/// Ensure the GTCRN speech enhancement model is downloaded.
+/// Returns the path to the model file if available, or None if download fails.
+pub fn ensure_gtcrn_model() -> Option<std::path::PathBuf> {
+    let models_dir = Config::models_dir();
+    let model_path = models_dir.join(GTCRN_MODEL_FILENAME);
+
+    if model_path.exists() {
+        return Some(model_path);
+    }
+
+    // Ensure directory exists
+    if let Err(e) = std::fs::create_dir_all(&models_dir) {
+        eprintln!("Warning: Could not create models directory: {}", e);
+        return None;
+    }
+
+    println!("Downloading GTCRN speech enhancement model (523 KB)...");
+
+    let status = Command::new("curl")
+        .args([
+            "-L",
+            "--progress-bar",
+            "-o",
+            model_path.to_str().unwrap_or("gtcrn_simple.onnx"),
+            GTCRN_MODEL_URL,
+        ])
+        .status();
+
+    match status {
+        Ok(exit_status) if exit_status.success() => {
+            println!("Speech enhancement model downloaded.");
+            Some(model_path)
+        }
+        Ok(_) => {
+            eprintln!("Warning: Failed to download speech enhancement model. Meetings will work without echo cancellation.");
+            let _ = std::fs::remove_file(&model_path);
+            None
+        }
+        Err(_) => {
+            eprintln!("Warning: curl not available. Speech enhancement model not downloaded.");
+            None
+        }
+    }
+}
+
 /// Set a specific model as the default (must already be downloaded)
 pub async fn set_model(model_name: &str, restart: bool) -> anyhow::Result<()> {
     let models_dir = Config::models_dir();

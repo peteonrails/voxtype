@@ -190,6 +190,23 @@ impl MeetingStorage {
         Ok(())
     }
 
+    /// Mark any active/paused meetings as completed.
+    /// Called on daemon startup to clean up meetings orphaned by a previous crash or restart.
+    pub fn complete_stale_meetings(&self) -> Result<u32, StorageError> {
+        let now = Utc::now().timestamp();
+        let count = self.conn.execute(
+            r#"
+            UPDATE meetings SET
+                status = 'completed',
+                ended_at = ?1,
+                duration_secs = (?1 - started_at)
+            WHERE status IN ('active', 'paused')
+            "#,
+            params![now],
+        )?;
+        Ok(count as u32)
+    }
+
     /// Get meeting by ID
     pub fn get_meeting(&self, id: &MeetingId) -> Result<Option<MeetingMetadata>, StorageError> {
         let result = self

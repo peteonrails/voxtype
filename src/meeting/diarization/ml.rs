@@ -10,11 +10,12 @@ use crate::meeting::data::AudioSource;
 use crate::meeting::TranscriptSegment;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 #[cfg(feature = "ml-diarization")]
-use ndarray::{Array1, Array2};
+use ort::session::Session;
 #[cfg(feature = "ml-diarization")]
-use ort::{Session, Value};
+use ort::value::Tensor;
 
 /// Speaker embedding (voice fingerprint)
 #[derive(Debug, Clone)]
@@ -57,7 +58,7 @@ pub struct MlDiarizer {
     model_path: Option<PathBuf>,
     /// ONNX session (lazy loaded)
     #[cfg(feature = "ml-diarization")]
-    session: Option<Arc<Session>>,
+    session: Option<Mutex<Session>>,
     /// Known speaker embeddings
     speaker_embeddings: Vec<SpeakerEmbedding>,
     /// Speaker labels (auto ID -> human label)
@@ -123,9 +124,9 @@ impl MlDiarizer {
         }
 
         match Session::builder() {
-            Ok(builder) => match builder.with_model_from_file(&path) {
+            Ok(builder) => match builder.commit_from_file(&path) {
                 Ok(session) => {
-                    self.session = Some(Arc::new(session));
+                    self.session = Some(Mutex::new(session));
                     tracing::info!("Loaded speaker embedding model: {:?}", path);
                     Ok(())
                 }
@@ -138,35 +139,30 @@ impl MlDiarizer {
     /// Extract embedding from audio samples
     #[cfg(feature = "ml-diarization")]
     pub fn extract_embedding(&self, samples: &[f32]) -> Result<Vec<f32>, String> {
-        let session = self.session.as_ref().ok_or("Model not loaded")?;
+        let mutex = self.session.as_ref().ok_or("Model not loaded")?;
+        let mut session = mutex.lock().map_err(|e| format!("Session lock poisoned: {}", e))?;
 
         // Prepare input tensor: [batch=1, samples]
-        let input_array = Array2::from_shape_vec((1, samples.len()), samples.to_vec())
-            .map_err(|e| format!("Failed to create input array: {}", e))?;
-
-        let input_value = Value::from_array(input_array)
-            .map_err(|e| format!("Failed to create input value: {}", e))?;
+        let input_tensor =
+            Tensor::<f32>::from_array(([1usize, samples.len()], samples.to_vec()))
+                .map_err(|e| format!("Failed to create input tensor: {}", e))?;
 
         // Run inference
         let outputs = session
-            .run(ort::inputs![input_value].map_err(|e| format!("Input error: {}", e))?)
+            .run(ort::inputs![input_tensor])
             .map_err(|e| format!("Inference failed: {}", e))?;
 
-        // Extract embedding from output
+        // Extract embedding from output - try "embedding" key, then "output", then first output
         let output = outputs
             .get("embedding")
-            .or_else(|| outputs.values().next())
+            .or_else(|| outputs.get("output"))
             .ok_or("No output from model")?;
 
-        let embedding: Array1<f32> = output
-            .try_extract_tensor()
-            .map_err(|e| format!("Failed to extract tensor: {}", e))?
-            .view()
-            .to_owned()
-            .into_dimensionality()
-            .map_err(|e| format!("Dimension error: {}", e))?;
+        let (_shape, embedding_data) = output
+            .try_extract_tensor::<f32>()
+            .map_err(|e| format!("Failed to extract tensor: {}", e))?;
 
-        Ok(embedding.to_vec())
+        Ok(embedding_data.to_vec())
     }
 
     /// Find or create speaker ID for an embedding
@@ -239,7 +235,7 @@ impl Default for MlDiarizer {
 impl Diarizer for MlDiarizer {
     fn diarize(
         &self,
-        _samples: &[f32],
+        samples: &[f32],
         _source: AudioSource,
         transcript_segments: &[TranscriptSegment],
     ) -> Vec<DiarizedSegment> {

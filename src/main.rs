@@ -1194,6 +1194,9 @@ async fn run_meeting_command(config: &config::Config, action: MeetingAction) -> 
                 }
             }
 
+            // Ensure GTCRN speech enhancement model is available
+            setup::model::ensure_gtcrn_model();
+
             // Write start trigger file (with optional title)
             let start_file = config::Config::runtime_dir().join("meeting_start");
             let content = title.unwrap_or_default();
