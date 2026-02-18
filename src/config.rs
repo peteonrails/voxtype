@@ -1255,6 +1255,14 @@ pub struct MeetingAudioConfig {
     /// Options: "auto" (detect), "disabled", or specific device name
     #[serde(default = "default_loopback")]
     pub loopback_device: String,
+
+    /// Echo cancellation mode for removing speaker bleed-through from mic
+    /// Options: "auto" (GTCRN neural enhancement + transcript dedup), "disabled"
+    /// The GTCRN model (~523KB) is auto-downloaded on first meeting start.
+    /// For system-level echo cancellation, configure PipeWire's echo-cancel module
+    /// and set this to "disabled".
+    #[serde(default = "default_echo_cancel")]
+    pub echo_cancel: String,
 }
 
 fn default_mic_device() -> String {
@@ -1265,11 +1273,16 @@ fn default_loopback() -> String {
     "auto".to_string()
 }
 
+fn default_echo_cancel() -> String {
+    "auto".to_string()
+}
+
 impl Default for MeetingAudioConfig {
     fn default() -> Self {
         Self {
             mic_device: default_mic_device(),
             loopback_device: default_loopback(),
+            echo_cancel: default_echo_cancel(),
         }
     }
 }

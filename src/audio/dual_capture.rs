@@ -2,11 +2,17 @@
 //!
 //! Captures both microphone input (user's voice) and system audio loopback
 //! (remote participants) simultaneously for speaker attribution.
+//!
+//! Mic capture uses cpal (ALSA). Loopback capture uses `parec` (PulseAudio
+//! recording client) which works with PipeWire's PulseAudio compatibility
+//! layer and can access monitor sources that aren't visible to ALSA.
 
 use super::cpal_capture::CpalCapture;
 use super::AudioCapture;
 use crate::config::AudioConfig;
 use crate::error::AudioError;
+use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 
 /// Audio source identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,14 +34,118 @@ pub struct SourcedSample {
     pub timestamp: u64,
 }
 
+/// Loopback capture via parec subprocess
+struct ParecLoopback {
+    /// Source name (PulseAudio/PipeWire source)
+    source: String,
+    /// Child process
+    child: Option<std::process::Child>,
+    /// Shared buffer for received samples
+    buffer: Arc<Mutex<Vec<f32>>>,
+    /// Reader thread handle
+    reader_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ParecLoopback {
+    fn new(source: String) -> Self {
+        Self {
+            source,
+            child: None,
+            buffer: Arc::new(Mutex::new(Vec::new())),
+            reader_thread: None,
+        }
+    }
+
+    fn start(&mut self) -> Result<(), AudioError> {
+        let mut child = std::process::Command::new("parec")
+            .args([
+                "--device", &self.source,
+                "--format=float32le",
+                "--channels=1",
+                "--rate=16000",
+                "--raw",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| AudioError::Connection(format!("Failed to start parec: {}", e)))?;
+
+        let mut stdout = child.stdout.take()
+            .ok_or_else(|| AudioError::Connection("Failed to capture parec stdout".to_string()))?;
+
+        self.child = Some(child);
+        tracing::info!("Loopback capture started via parec: {}", self.source);
+
+        // Spawn reader thread
+        let buffer = Arc::clone(&self.buffer);
+        self.reader_thread = Some(std::thread::spawn(move || {
+            use std::io::Read;
+            let mut raw_buf = [0u8; 4096]; // 1024 f32 samples
+            loop {
+                match stdout.read(&mut raw_buf) {
+                    Ok(0) => break, // EOF
+                    Ok(n) => {
+                        // Convert raw bytes to f32 samples
+                        let sample_count = n / 4;
+                        let mut samples = Vec::with_capacity(sample_count);
+                        for i in 0..sample_count {
+                            let offset = i * 4;
+                            if offset + 4 <= n {
+                                let sample = f32::from_le_bytes([
+                                    raw_buf[offset],
+                                    raw_buf[offset + 1],
+                                    raw_buf[offset + 2],
+                                    raw_buf[offset + 3],
+                                ]);
+                                samples.push(sample);
+                            }
+                        }
+                        if let Ok(mut buf) = buffer.lock() {
+                            buf.extend(samples);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            tracing::debug!("Loopback reader thread stopped");
+        }));
+
+        Ok(())
+    }
+
+    fn get_samples(&self) -> Vec<f32> {
+        if let Ok(mut buf) = self.buffer.lock() {
+            std::mem::take(&mut *buf)
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn stop(&mut self) {
+        if let Some(ref mut child) = self.child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.child = None;
+        if let Some(thread) = self.reader_thread.take() {
+            let _ = thread.join();
+        }
+        tracing::debug!("Loopback capture stopped");
+    }
+}
+
+impl Drop for ParecLoopback {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 /// Dual audio capture for mic + loopback
 pub struct DualCapture {
-    /// Microphone capture
+    /// Microphone capture (via cpal/ALSA)
     mic_capture: CpalCapture,
-    /// Loopback capture (system audio)
-    loopback_capture: Option<CpalCapture>,
-    /// Whether loopback is enabled
-    loopback_enabled: bool,
+    /// Loopback capture (via parec subprocess)
+    loopback: Option<ParecLoopback>,
     /// Sample counter for timestamps
     sample_counter: u64,
 }
@@ -48,97 +158,84 @@ impl DualCapture {
     ) -> Result<Self, AudioError> {
         let mic_capture = CpalCapture::new(mic_config)?;
 
-        // Try to create loopback capture if device is specified
-        let (loopback_capture, loopback_enabled) = if let Some(device) = loopback_device {
-            if device == "auto" {
-                // Try to find a monitor/loopback device
-                match Self::find_loopback_device() {
-                    Some(device_name) => {
-                        let mut loopback_config = mic_config.clone();
-                        loopback_config.device = device_name;
-                        match CpalCapture::new(&loopback_config) {
-                            Ok(capture) => {
-                                tracing::info!("Loopback capture enabled");
-                                (Some(capture), true)
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to create loopback capture: {}", e);
-                                (None, false)
-                            }
-                        }
+        let loopback = match loopback_device {
+            Some("disabled") | Some("") | None => None,
+            Some("auto") => {
+                match Self::find_monitor_source() {
+                    Some(source) => {
+                        tracing::info!("Auto-detected loopback source: {}", source);
+                        Some(ParecLoopback::new(source))
                     }
                     None => {
-                        tracing::warn!("No loopback device found, using mic only");
-                        (None, false)
-                    }
-                }
-            } else if device == "disabled" || device.is_empty() {
-                (None, false)
-            } else {
-                // Use specified device
-                let mut loopback_config = mic_config.clone();
-                loopback_config.device = device.to_string();
-                match CpalCapture::new(&loopback_config) {
-                    Ok(capture) => {
-                        tracing::info!("Loopback capture enabled: {}", device);
-                        (Some(capture), true)
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to create loopback capture for '{}': {}", device, e);
-                        (None, false)
+                        tracing::warn!("No monitor source found, using mic only");
+                        None
                     }
                 }
             }
-        } else {
-            (None, false)
+            Some(device) => {
+                tracing::info!("Using configured loopback source: {}", device);
+                Some(ParecLoopback::new(device.to_string()))
+            }
         };
 
         Ok(Self {
             mic_capture,
-            loopback_capture,
-            loopback_enabled,
+            loopback,
             sample_counter: 0,
         })
     }
 
-    /// Try to find a loopback/monitor device automatically
-    fn find_loopback_device() -> Option<String> {
-        use cpal::traits::{DeviceTrait, HostTrait};
+    /// Find a PipeWire/PulseAudio monitor source via pactl
+    fn find_monitor_source() -> Option<String> {
+        // pactl list short sources output format:
+        // ID\tNAME\tDRIVER\tFORMAT\tSTATUS
+        let output = std::process::Command::new("pactl")
+            .args(["list", "short", "sources"])
+            .output()
+            .ok()?;
 
-        let host = cpal::default_host();
-        let devices = host.input_devices().ok()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
 
-        for device in devices {
-            if let Ok(name) = device.name() {
-                let name_lower = name.to_lowercase();
-                // Common loopback device name patterns
-                if name_lower.contains("monitor")
-                    || name_lower.contains("loopback")
-                    || name_lower.contains("stereo mix")
-                    || name_lower.contains("what u hear")
-                {
-                    tracing::debug!("Found loopback device: {}", name);
-                    return Some(name);
+        // First pass: prefer RUNNING monitor sources (active audio output)
+        for line in stdout.lines() {
+            let fields: Vec<&str> = line.split('\t').collect();
+            if fields.len() >= 5 {
+                let name = fields[1];
+                let status = fields[4];
+                if name.contains(".monitor") && status == "RUNNING" {
+                    tracing::debug!("Found running monitor source: {}", name);
+                    return Some(name.to_string());
                 }
             }
         }
-
+        // Fall back to any monitor source
+        for line in stdout.lines() {
+            let fields: Vec<&str> = line.split('\t').collect();
+            if fields.len() >= 2 {
+                let name = fields[1];
+                if name.contains(".monitor") {
+                    tracing::debug!("Found monitor source: {}", name);
+                    return Some(name.to_string());
+                }
+            }
+        }
         None
     }
 
     /// Check if loopback capture is active
     pub fn has_loopback(&self) -> bool {
-        self.loopback_enabled && self.loopback_capture.is_some()
+        self.loopback.is_some()
     }
 
     /// Start both captures
     pub async fn start(&mut self) -> Result<(), AudioError> {
-        // Start mic capture
         let _mic_rx = self.mic_capture.start().await?;
 
-        // Start loopback capture if available
-        if let Some(ref mut loopback) = self.loopback_capture {
-            let _loopback_rx = loopback.start().await?;
+        if let Some(ref mut loopback) = self.loopback {
+            if let Err(e) = loopback.start() {
+                tracing::warn!("Loopback capture failed, continuing with mic only: {}", e);
+                self.loopback = None;
+            }
         }
 
         Ok(())
@@ -148,8 +245,10 @@ impl DualCapture {
     pub async fn stop(&mut self) -> Result<DualSamples, AudioError> {
         let mic_samples = self.mic_capture.stop().await?;
 
-        let loopback_samples = if let Some(ref mut loopback) = self.loopback_capture {
-            loopback.stop().await.unwrap_or_default()
+        let loopback_samples = if let Some(ref mut loopback) = self.loopback {
+            let samples = loopback.get_samples();
+            loopback.stop();
+            samples
         } else {
             Vec::new()
         };
@@ -164,8 +263,8 @@ impl DualCapture {
     pub async fn get_samples(&mut self) -> DualSamples {
         let mic = self.mic_capture.get_samples().await;
 
-        let loopback = if let Some(ref mut loopback) = self.loopback_capture {
-            loopback.get_samples().await
+        let loopback = if let Some(ref loopback) = self.loopback {
+            loopback.get_samples()
         } else {
             Vec::new()
         };
@@ -178,7 +277,6 @@ impl DualCapture {
         let dual = self.get_samples().await;
         let mut result = Vec::with_capacity(dual.mic.len() + dual.loopback.len());
 
-        // Add mic samples
         for sample in dual.mic {
             result.push(SourcedSample {
                 sample,
@@ -188,7 +286,6 @@ impl DualCapture {
             self.sample_counter += 1;
         }
 
-        // Add loopback samples (interleaved timing approximation)
         for sample in dual.loopback {
             result.push(SourcedSample {
                 sample,

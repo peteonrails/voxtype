@@ -9,8 +9,8 @@
 # Vendored dependencies (patched forks)
 /vendor/
 
-# Whisper models (large binary files)
-/models/*.bin
+# Model files (downloaded at runtime, not committed)
+/models/
 
 # Editor/IDE
 *.swp

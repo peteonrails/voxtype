@@ -454,12 +454,16 @@ pub struct Daemon {
     meeting_daemon: Option<MeetingDaemon>,
     // Meeting state file path
     meeting_state_file_path: Option<PathBuf>,
-    // Audio capture for meeting mode (continuous recording)
-    meeting_audio_capture: Option<Box<dyn AudioCapture>>,
-    // Chunk buffer for meeting mode
-    meeting_chunk_buffer: Vec<f32>,
+    // Audio capture for meeting mode (dual: mic + loopback)
+    meeting_audio_capture: Option<audio::DualCapture>,
+    // Chunk buffers for meeting mode (separate mic and loopback)
+    meeting_mic_buffer: Vec<f32>,
+    meeting_loopback_buffer: Vec<f32>,
     // Meeting event receiver
     meeting_event_rx: Option<tokio::sync::mpsc::Receiver<MeetingEvent>>,
+    // GTCRN speech enhancer for mic echo cancellation
+    #[cfg(feature = "onnx-common")]
+    speech_enhancer: Option<std::sync::Arc<audio::enhance::GtcrnEnhancer>>,
 }
 
 impl Daemon {
@@ -550,8 +554,11 @@ impl Daemon {
             meeting_daemon: None,
             meeting_state_file_path,
             meeting_audio_capture: None,
-            meeting_chunk_buffer: Vec::new(),
+            meeting_mic_buffer: Vec::new(),
+            meeting_loopback_buffer: Vec::new(),
             meeting_event_rx: None,
+            #[cfg(feature = "onnx-common")]
+            speech_enhancer: None,
         }
     }
 
@@ -685,13 +692,22 @@ impl Daemon {
                         self.update_meeting_state("recording", Some(&id_str));
                         tracing::info!("Meeting started: {}", meeting_id);
 
-                        // Start audio capture for meeting
-                        match audio::create_capture(&self.config.audio) {
+                        // Start dual audio capture for meeting (mic + loopback)
+                        let loopback_device = match self.config.meeting.audio.loopback_device.as_str() {
+                            "disabled" | "" => None,
+                            other => Some(other),
+                        };
+                        match audio::DualCapture::new(&self.config.audio, loopback_device) {
                             Ok(mut capture) => {
                                 if let Err(e) = capture.start().await {
                                     tracing::error!("Failed to start meeting audio: {}", e);
                                     let _ = daemon.stop().await;
                                     return Err(crate::error::VoxtypeError::Audio(e));
+                                }
+                                if capture.has_loopback() {
+                                    tracing::info!("Dual audio capture: mic + loopback");
+                                } else {
+                                    tracing::info!("Single audio capture: mic only");
                                 }
                                 self.meeting_audio_capture = Some(capture);
                             }
@@ -702,8 +718,30 @@ impl Daemon {
                             }
                         }
 
+                        // Load GTCRN speech enhancer for echo cancellation
+                        #[cfg(feature = "onnx-common")]
+                        if self.speech_enhancer.is_none()
+                            && self.config.meeting.audio.echo_cancel != "disabled"
+                        {
+                            let model_path = Config::models_dir().join("gtcrn_simple.onnx");
+                            if model_path.exists() {
+                                match audio::enhance::GtcrnEnhancer::load(&model_path) {
+                                    Ok(enhancer) => {
+                                        self.speech_enhancer = Some(std::sync::Arc::new(enhancer));
+                                        tracing::info!("GTCRN speech enhancer loaded for meeting echo cancellation");
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to load GTCRN enhancer, continuing without: {}", e);
+                                    }
+                                }
+                            } else {
+                                tracing::debug!("GTCRN model not found at {:?}, skipping speech enhancement", model_path);
+                            }
+                        }
+
                         self.meeting_daemon = Some(daemon);
-                        self.meeting_chunk_buffer.clear();
+                        self.meeting_mic_buffer.clear();
+                        self.meeting_loopback_buffer.clear();
 
                         // Play feedback
                         self.play_feedback(SoundEvent::RecordingStart);
@@ -764,7 +802,8 @@ impl Daemon {
                 }
             }
 
-            self.meeting_chunk_buffer.clear();
+            self.meeting_mic_buffer.clear();
+            self.meeting_loopback_buffer.clear();
             self.meeting_event_rx = None;
         }
 
@@ -2331,28 +2370,74 @@ impl Daemon {
                         continue;
                     }
 
-                    // Get samples from the audio capture
+                    // Get samples from dual audio capture
                     if let Some(ref mut capture) = self.meeting_audio_capture {
-                        // Get current samples without stopping
-                        let samples = capture.get_samples().await;
-                        self.meeting_chunk_buffer.extend(samples);
+                        let dual_samples = capture.get_samples().await;
+                        self.meeting_mic_buffer.extend(dual_samples.mic);
+                        self.meeting_loopback_buffer.extend(dual_samples.loopback);
 
-                        // Check if we have enough samples for a chunk
+                        // Check if mic buffer has enough samples for a chunk
                         let chunk_samples = self.meeting_chunk_samples();
-                        if self.meeting_chunk_buffer.len() >= chunk_samples {
-                            // Extract chunk and process
-                            let chunk: Vec<f32> = self.meeting_chunk_buffer.drain(..chunk_samples).collect();
+                        if self.meeting_mic_buffer.len() >= chunk_samples {
+                            let mic_chunk: Vec<f32> = self.meeting_mic_buffer.drain(..chunk_samples).collect();
 
-                            if let Some(ref mut daemon) = self.meeting_daemon {
-                                match daemon.process_chunk(chunk).await {
-                                    Ok(Some(segments)) => {
-                                        tracing::debug!("Processed meeting chunk with {} segments", segments.len());
-                                    }
-                                    Ok(None) => {
-                                        // No segments (possibly VAD filtered)
+                            // Also drain loopback buffer up to the same amount
+                            let loopback_len = self.meeting_loopback_buffer.len().min(chunk_samples);
+                            let loopback_chunk: Vec<f32> = self.meeting_loopback_buffer.drain(..loopback_len).collect();
+
+                            // Enhance mic audio with GTCRN if available (removes echo/noise)
+                            #[cfg(feature = "onnx-common")]
+                            let mic_chunk = if let Some(ref enhancer) = self.speech_enhancer {
+                                match enhancer.enhance(&mic_chunk) {
+                                    Ok(enhanced) => {
+                                        tracing::debug!("GTCRN enhanced mic chunk ({} samples)", enhanced.len());
+                                        enhanced
                                     }
                                     Err(e) => {
-                                        tracing::error!("Error processing meeting chunk: {}", e);
+                                        tracing::warn!("GTCRN enhancement failed, using raw mic: {}", e);
+                                        mic_chunk
+                                    }
+                                }
+                            } else {
+                                mic_chunk
+                            };
+
+                            if let Some(ref mut daemon) = self.meeting_daemon {
+                                // Process mic chunk
+                                let mut had_loopback = false;
+                                match daemon.process_chunk_with_source(mic_chunk, meeting::data::AudioSource::Microphone).await {
+                                    Ok(Some(segments)) => {
+                                        tracing::debug!("Processed mic chunk with {} segments", segments.len());
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => {
+                                        tracing::error!("Error processing mic chunk: {}", e);
+                                    }
+                                }
+
+                                // Process loopback chunk if non-empty
+                                if !loopback_chunk.is_empty() {
+                                    match daemon.process_chunk_with_source(loopback_chunk, meeting::data::AudioSource::Loopback).await {
+                                        Ok(Some(segments)) => {
+                                            tracing::debug!("Processed loopback chunk with {} segments", segments.len());
+                                            if !segments.is_empty() {
+                                                had_loopback = true;
+                                            }
+                                        }
+                                        Ok(None) => {}
+                                        Err(e) => {
+                                            tracing::error!("Error processing loopback chunk: {}", e);
+                                        }
+                                    }
+                                }
+
+                                // Dedup bleed-through: strip echoed phrases from mic segments
+                                if had_loopback {
+                                    if let Some(ref mut meeting) = daemon.current_meeting_mut() {
+                                        let removed = meeting.transcript.dedup_bleed_through();
+                                        if removed > 0 {
+                                            tracing::info!("Removed {} bleed-through word(s) via dedup", removed);
+                                        }
                                     }
                                 }
                             }
