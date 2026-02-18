@@ -1,0 +1,74 @@
+# Build environment for voxtype ONNX AVX-512 binary
+# MUST be run on a machine with AVX-512 support (Zen 4+, some Intel)
+#
+# Uses Ubuntu 24.04 for glibc 2.39+ (required by ONNX Runtime prebuilt binaries).
+# Building inside Docker caps the glibc requirement at 2.39, preventing the
+# binary from picking up symbols from newer host glibc (e.g. 2.43 on Arch).
+#
+# Usage:
+#   docker build -f Dockerfile.onnx-avx512 -t voxtype-onnx-avx512-builder .
+#   docker run --rm -v $(pwd)/releases:/output voxtype-onnx-avx512-builder
+#
+FROM ubuntu:24.04
+
+ARG VERSION=0.6.1
+ARG DEBIAN_FRONTEND=noninteractive
+
+ENV VERSION=${VERSION}
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    clang \
+    cmake \
+    pkg-config \
+    libasound2-dev \
+    libssl-dev \
+    protobuf-compiler \
+    libprotobuf-dev \
+    git \
+    binutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /build
+
+# Copy source code
+COPY . .
+
+# Build with native optimizations (will use AVX-512 if available on host)
+ENV RUSTFLAGS="-C target-cpu=native"
+
+# ONNX Runtime will be downloaded during build by the ort crate
+ENV ORT_STRATEGY=download
+
+# Disable LTO for faster builds
+# Build with all ONNX engines
+RUN cargo build --release --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual \
+    --config 'profile.release.lto=false' \
+    --config 'profile.release.codegen-units=8' \
+    && cp target/release/voxtype /tmp/voxtype-onnx-avx512
+
+# Verify binary
+RUN echo "=== Verifying ONNX AVX-512 binary ===" \
+    && /tmp/voxtype-onnx-avx512 --version \
+    && echo "=== Checking for AVX-512 instructions ===" \
+    && avx512_count=$(objdump -d /tmp/voxtype-onnx-avx512 | grep -cE 'zmm|vpternlog|vpermt2|\{1to' || echo 0) \
+    && echo "  AVX-512 instructions: $avx512_count" \
+    && if [ "$avx512_count" -eq 0 ]; then \
+         echo "WARNING: No AVX-512 instructions found. Is the host AVX-512 capable?"; \
+       else \
+         echo "✓ Binary contains $avx512_count AVX-512 instructions"; \
+       fi \
+    && echo "=== Binary size ===" \
+    && ls -lh /tmp/voxtype-onnx-avx512
+
+# Output stage
+CMD mkdir -p /output \
+    && cp /tmp/voxtype-onnx-avx512 /output/voxtype-${VERSION}-linux-x86_64-onnx-avx512 \
+    && echo "Binary copied to /output:" \
+    && ls -la /output/voxtype-*
