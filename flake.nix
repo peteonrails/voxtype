@@ -80,7 +80,7 @@
         mkVoxtypeUnwrapped = { pname ? "voxtype", features ? [], extraNativeBuildInputs ? [], extraBuildInputs ? [] }:
           pkgs.rustPlatform.buildRustPackage {
             inherit pname;
-            version = "0.5.0";
+            version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
 
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
