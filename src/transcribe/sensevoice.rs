@@ -10,8 +10,8 @@
 //! Supports languages: auto, zh, en, ja, ko, yue
 //! Model files: model.int8.onnx (or model.onnx), tokens.txt
 
-use super::fbank::{self, FbankExtractor, LfrConfig};
 use super::ctc::{self, CtcConfig};
+use super::fbank::{self, FbankExtractor, LfrConfig};
 use super::Transcriber;
 use crate::config::SenseVoiceConfig;
 use crate::error::TranscribeError;
@@ -81,9 +81,7 @@ impl SenseVoiceTranscriber {
                 TranscribeError::InitFailed(format!("ONNX session builder failed: {}", e))
             })?
             .with_intra_threads(threads)
-            .map_err(|e| {
-                TranscribeError::InitFailed(format!("Failed to set threads: {}", e))
-            })?
+            .map_err(|e| TranscribeError::InitFailed(format!("Failed to set threads: {}", e)))?
             .commit_from_file(&model_file)
             .map_err(|e| {
                 TranscribeError::InitFailed(format!(
@@ -171,28 +169,19 @@ impl Transcriber for SenseVoiceTranscriber {
         let (x_data, _offset) = features.into_raw_vec_and_offset();
         let x_tensor = Tensor::<f32>::from_array(([1usize, num_frames, feat_dim], x_data))
             .map_err(|e| {
-                TranscribeError::InferenceFailed(format!(
-                    "Failed to create input tensor: {}",
-                    e
-                ))
+                TranscribeError::InferenceFailed(format!("Failed to create input tensor: {}", e))
             })?;
 
         // x_length: shape [1]
         let x_length_tensor = Tensor::<i32>::from_array(([1usize], vec![num_frames as i32]))
             .map_err(|e| {
-                TranscribeError::InferenceFailed(format!(
-                    "Failed to create length tensor: {}",
-                    e
-                ))
+                TranscribeError::InferenceFailed(format!("Failed to create length tensor: {}", e))
             })?;
 
         // language: shape [1]
         let language_tensor = Tensor::<i32>::from_array(([1usize], vec![self.language_id]))
             .map_err(|e| {
-                TranscribeError::InferenceFailed(format!(
-                    "Failed to create language tensor: {}",
-                    e
-                ))
+                TranscribeError::InferenceFailed(format!("Failed to create language tensor: {}", e))
             })?;
 
         // text_norm: shape [1]
@@ -212,9 +201,18 @@ impl Transcriber for SenseVoiceTranscriber {
 
         let inputs: Vec<(std::borrow::Cow<str>, ort::session::SessionInputValue)> = vec![
             (std::borrow::Cow::Borrowed("x"), x_tensor.into()),
-            (std::borrow::Cow::Borrowed("x_length"), x_length_tensor.into()),
-            (std::borrow::Cow::Borrowed("language"), language_tensor.into()),
-            (std::borrow::Cow::Borrowed("text_norm"), text_norm_tensor.into()),
+            (
+                std::borrow::Cow::Borrowed("x_length"),
+                x_length_tensor.into(),
+            ),
+            (
+                std::borrow::Cow::Borrowed("language"),
+                language_tensor.into(),
+            ),
+            (
+                std::borrow::Cow::Borrowed("text_norm"),
+                text_norm_tensor.into(),
+            ),
         ];
 
         let outputs = session.run(inputs).map_err(|e| {
@@ -249,11 +247,7 @@ impl Transcriber for SenseVoiceTranscriber {
         } else if shape_dims.len() == 2 {
             // Pre-argmaxed output: each value is already a token ID
             let time_steps = shape_dims[1] as usize;
-            ctc::decode_pre_argmax(
-                &logits_data[..time_steps],
-                &self.tokens,
-                &self.ctc_config,
-            )
+            ctc::decode_pre_argmax(&logits_data[..time_steps], &self.tokens, &self.ctc_config)
         } else {
             return Err(TranscribeError::InferenceFailed(format!(
                 "Unexpected logits shape: {:?}",

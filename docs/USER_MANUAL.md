@@ -1231,7 +1231,6 @@ Then record for 10+ seconds. You should see log messages like:
 ```
 
 ---
-
 ## Output Modes
 
 ### Type Mode (Default)
