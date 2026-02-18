@@ -77,6 +77,44 @@
 
             <!-- v0.6.x Era Posts -->
 
+            <article class="news-article" id="v062">
+                <div class="article-meta">
+                    <time datetime="2026-02-17">February 17, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v0.6.2: Echo Cancellation and Meeting Bug Fixes</h2>
+                <div class="article-body">
+                    <p>Voxtype 0.6.2 adds neural echo cancellation for meeting mode, rewrites loopback audio capture, and fixes three meeting bugs. If you use meeting mode with loopback enabled, remote participants' audio no longer bleeds into your mic transcript.</p>
+
+                    <h3>GTCRN Echo Cancellation</h3>
+                    <p>When meeting mode captures both your microphone and system audio (for remote participant transcription), the remote audio bleeds through your speakers into your mic. Previous approaches using signal subtraction and energy gating didn't work because the mic and loopback streams aren't sample-aligned.</p>
+
+                    <p>This release uses GTCRN (Group Temporal Convolutional Recurrent Network), a 48K-parameter speech enhancement model that processes mic audio frame-by-frame through STFT. It removes background noise and speaker bleed-through while preserving your voice. The model is 523 KB and runs at about 0.02x real-time on CPU, so processing 30 seconds of audio takes under 0.6 seconds.</p>
+
+                    <p><strong>Why use it:</strong> If you're in a video call and the other person's voice is showing up in your "You" segments, this fixes it. It's enabled by default when loopback capture is active.</p>
+
+                    <p>The GTCRN model downloads automatically the first time you start a meeting. To disable it (if you already have system-level echo cancellation via PipeWire):</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[meeting.audio]
+echo_cancel = "disabled"</code></pre>
+                    </div>
+
+                    <h3>Dual Audio Capture via parec</h3>
+                    <p>Loopback capture has been rewritten to use <code>parec</code> (PulseAudio recording client) instead of cpal. PipeWire's monitor sources aren't visible through ALSA, which is what cpal uses. The <code>parec</code> approach works with both PipeWire and PulseAudio and can access any monitor source listed by <code>pactl list short sources</code>.</p>
+
+                    <p>Mic and loopback audio now go into separate buffers, so they're transcribed independently. Mic chunks pass through GTCRN before transcription. A phrase-level dedup pass strips any residual echoed words that survive enhancement.</p>
+
+                    <h3>Bug Fixes</h3>
+                    <ul>
+                        <li><strong>Meeting stop/pause/resume not working:</strong> The daemon's event loop starved the meeting control channel when audio processing was active. Meeting commands now take priority.</li>
+                        <li><strong>Orphaned meetings on daemon restart:</strong> If the daemon crashed during a meeting, the meeting state file was never cleaned up, preventing new meetings from starting. The daemon now cleans up stale meeting state on startup.</li>
+                        <li><strong>ml-diarization compilation errors:</strong> Fixed type mismatches after the ort 2.0.0-rc.11 API change.</li>
+                    </ul>
+                </div>
+            </article>
+
             <article class="news-article" id="v060">
                 <div class="article-meta">
                     <time datetime="2026-02-16">February 16, 2026</time>
