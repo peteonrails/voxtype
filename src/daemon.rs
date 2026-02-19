@@ -735,10 +735,11 @@ impl Daemon {
                         tracing::info!("Meeting started: {}", meeting_id);
 
                         // Start dual audio capture for meeting (mic + loopback)
-                        let loopback_device = match self.config.meeting.audio.loopback_device.as_str() {
-                            "disabled" | "" => None,
-                            other => Some(other),
-                        };
+                        let loopback_device =
+                            match self.config.meeting.audio.loopback_device.as_str() {
+                                "disabled" | "" => None,
+                                other => Some(other),
+                            };
                         match audio::DualCapture::new(&self.config.audio, loopback_device) {
                             Ok(mut capture) => {
                                 if let Err(e) = capture.start().await {
@@ -773,11 +774,17 @@ impl Daemon {
                                         tracing::info!("GTCRN speech enhancer loaded for meeting echo cancellation");
                                     }
                                     Err(e) => {
-                                        tracing::warn!("Failed to load GTCRN enhancer, continuing without: {}", e);
+                                        tracing::warn!(
+                                            "Failed to load GTCRN enhancer, continuing without: {}",
+                                            e
+                                        );
                                     }
                                 }
                             } else {
-                                tracing::debug!("GTCRN model not found at {:?}, skipping speech enhancement", model_path);
+                                tracing::debug!(
+                                    "GTCRN model not found at {:?}, skipping speech enhancement",
+                                    model_path
+                                );
                             }
                         }
 
@@ -1243,10 +1250,14 @@ impl Daemon {
                     // Smart auto-submit: detect "submit" trigger word at end
                     // CLI override (--smart-auto-submit / --no-smart-auto-submit) takes priority
                     let smart_auto_submit_cli = read_smart_auto_submit_override();
-                    let (processed_text, smart_submit) =
-                        self.text_processor.detect_submit(&processed_text, smart_auto_submit_cli);
+                    let (processed_text, smart_submit) = self
+                        .text_processor
+                        .detect_submit(&processed_text, smart_auto_submit_cli);
                     if smart_submit {
-                        tracing::debug!("Smart auto-submit triggered");
+                        tracing::debug!(
+                            "Smart auto-submit triggered, stripped text: {:?}",
+                            processed_text
+                        );
                     }
 
                     // Check for profile override from CLI flags
@@ -1299,6 +1310,13 @@ impl Daemon {
                     } else {
                         processed_text
                     };
+
+                    if smart_submit {
+                        tracing::debug!(
+                            "Smart auto-submit: final text after post-processing: {:?}",
+                            final_text
+                        );
+                    }
 
                     // Check for output mode override from CLI flags
                     let output_override = read_output_mode_override();

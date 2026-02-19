@@ -1495,6 +1495,17 @@ mod tests {
     }
 
     #[test]
+    fn test_record_toggle_no_smart_auto_submit() {
+        let cli = Cli::parse_from(["voxtype", "record", "toggle", "--no-smart-auto-submit"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.smart_auto_submit_override(), Some(false));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
     fn test_record_stop_has_no_smart_auto_submit_override() {
         let cli = Cli::parse_from(["voxtype", "record", "stop"]);
         match cli.command {

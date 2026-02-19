@@ -396,6 +396,41 @@ mod tests {
     }
 
     #[test]
+    fn test_pipeline_spoken_punctuation_then_detect_submit() {
+        // Simulates the full daemon pipeline: user says "hello world comma submit"
+        // process() converts "comma" → "," then detect_submit() strips ", submit"
+        let config = TextConfig {
+            spoken_punctuation: true,
+            replacements: HashMap::new(),
+            smart_auto_submit: true,
+        };
+        let processor = TextProcessor::new(&config);
+
+        let processed = processor.process("hello world comma submit");
+        let (text, submit) = processor.detect_submit(&processed, None);
+        assert_eq!(text, "hello world");
+        assert!(submit);
+    }
+
+    #[test]
+    fn test_pipeline_spoken_punctuation_period_then_detect_submit() {
+        // Simulates: user says "hello world period submit"
+        // process() converts "period" → "." then detect_submit() strips " submit"
+        // The period on the prior sentence is preserved.
+        let config = TextConfig {
+            spoken_punctuation: true,
+            replacements: HashMap::new(),
+            smart_auto_submit: true,
+        };
+        let processor = TextProcessor::new(&config);
+
+        let processed = processor.process("hello world period submit");
+        let (text, submit) = processor.detect_submit(&processed, None);
+        assert_eq!(text, "hello world.");
+        assert!(submit);
+    }
+
+    #[test]
     fn test_detect_submit_strips_trailing_comma() {
         let config = make_config_with_submit(false);
         let processor = TextProcessor::new(&config);
