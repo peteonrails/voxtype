@@ -45,38 +45,6 @@
           pciutils      # GPU detection (lspci)
         ];
 
-        # ONNX engine feature sets
-        # All ONNX engines: Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual
-        onnxCpuFeatures = [
-          "parakeet-load-dynamic"
-          "moonshine"
-          "sensevoice"
-          "paraformer"
-          "dolphin"
-          "omnilingual"
-        ];
-
-        onnxCudaFeatures = [
-          "parakeet-load-dynamic"
-          "parakeet-cuda"
-          "moonshine-cuda"
-          "sensevoice-cuda"
-          "paraformer-cuda"
-          "dolphin-cuda"
-          "omnilingual-cuda"
-        ];
-
-        # Only Parakeet has ROCm support; other engines run on CPU
-        onnxRocmFeatures = [
-          "parakeet-load-dynamic"
-          "parakeet-rocm"
-          "moonshine"
-          "sensevoice"
-          "paraformer"
-          "dolphin"
-          "omnilingual"
-        ];
-
         # Wrap a package with runtime dependencies
         wrapVoxtype = pkg: pkgs.symlinkJoin {
           name = "${pkg.pname or "voxtype"}-wrapped-${pkg.version}";
@@ -89,18 +57,17 @@
           inherit (pkg) meta;
         };
 
-        # Wrap an ONNX package with runtime dependencies and ORT_DYLIB_PATH
-        # ONNX engines need ONNX Runtime at runtime for inference
+        # Wrap a parakeet package with runtime dependencies and ORT_DYLIB_PATH
+        # Parakeet uses ONNX Runtime, which needs to know where to find the library
         libExt = if pkgs.stdenv.isDarwin then "dylib" else "so";
-        wrapOnnx = { onnxruntime ? pkgs.onnxruntime, pkg }: pkgs.symlinkJoin {
+        wrapParakeet = { onnxruntime ? pkgs.onnxruntime, pkg }: pkgs.symlinkJoin {
           name = "${pkg.pname or "voxtype"}-wrapped-${pkg.version}";
           paths = [ pkg ];
           buildInputs = [ pkgs.makeWrapper ];
           postBuild = ''
             wrapProgram $out/bin/voxtype \
               --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps} \
-              --set ORT_DYLIB_PATH "${onnxruntime}/lib/libonnxruntime.${libExt}" \
-              --prefix LD_LIBRARY_PATH : "${onnxruntime}/lib"
+              --set ORT_DYLIB_PATH "${onnxruntime}/lib/libonnxruntime.${libExt}"
           '';
           inherit (pkg) meta;
         };
@@ -113,7 +80,7 @@
         mkVoxtypeUnwrapped = { pname ? "voxtype", features ? [], extraNativeBuildInputs ? [], extraBuildInputs ? [] }:
           pkgs.rustPlatform.buildRustPackage {
             inherit pname;
-            version = "0.6.0";
+            version = "0.5.0";
 
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
@@ -161,8 +128,7 @@
               longDescription = ''
                 Voxtype is a push-to-talk voice-to-text daemon for Linux.
                 Hold a hotkey while speaking, release to transcribe and output
-                text at your cursor position. Supports Whisper, Parakeet,
-                SenseVoice, Moonshine, Paraformer, Dolphin, and Omnilingual engines.
+                text at your cursor position. Fully offline using whisper.cpp.
               '';
               homepage = "https://voxtype.io";
               license = licenses.mit;
@@ -197,7 +163,7 @@
           '';
         });
 
-        # Build the ROCm/HIP variant for AMD GPUs (unwrapped, Whisper only)
+        # Build the ROCm/HIP variant for AMD GPUs (unwrapped)
         rocmUnwrapped = let
           pkg = mkVoxtypeUnwrapped {
             pname = "voxtype-rocm";
@@ -222,54 +188,40 @@
           '';
         });
 
-        # Build the ONNX variant (CPU, all engines)
-        # Uses load-dynamic for Parakeet, ort for other engines
-        onnxUnwrapped = let
-          pkg = mkVoxtypeUnwrapped {
-            pname = "voxtype-onnx";
-            features = onnxCpuFeatures;
-            extraBuildInputs = with pkgs; [ onnxruntime ];
-          };
-        in pkg.overrideAttrs (old: {
-          # Tell ort-sys where to find ONNX Runtime (avoids sandbox download)
-          ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
-        });
+        # Build the Parakeet variant (CPU, uses ONNX Runtime)
+        # Uses load-dynamic feature to load system ONNX Runtime at runtime
+        parakeetUnwrapped = mkVoxtypeUnwrapped {
+          pname = "voxtype-parakeet";
+          features = [ "parakeet-load-dynamic" ];
+          extraBuildInputs = with pkgs; [ onnxruntime ];
+        };
 
-        # Build the ONNX + CUDA variant for NVIDIA GPUs
+        # Build the Parakeet + CUDA variant for NVIDIA GPUs
         # Uses pkgsUnfree because CUDA has a non-free license (CUDA EULA)
-        onnxCudaUnwrapped = let
-          pkg = mkVoxtypeUnwrapped {
-            pname = "voxtype-onnx-cuda";
-            features = onnxCudaFeatures;
-            extraNativeBuildInputs = [ pkgsUnfree.cudaPackages.cuda_nvcc ];
-            extraBuildInputs = [
-              onnxruntimeCuda
-              pkgsUnfree.cudaPackages.cudatoolkit
-              pkgsUnfree.cudaPackages.cudnn
-            ];
-          };
-        in pkg.overrideAttrs (old: {
-          ORT_LIB_LOCATION = "${onnxruntimeCuda}/lib";
-        });
+        parakeetCudaUnwrapped = mkVoxtypeUnwrapped {
+          pname = "voxtype-parakeet-cuda";
+          features = [ "parakeet-load-dynamic" "parakeet-cuda" ];
+          extraNativeBuildInputs = [ pkgsUnfree.cudaPackages.cuda_nvcc ];
+          extraBuildInputs = [
+            onnxruntimeCuda
+            pkgsUnfree.cudaPackages.cudatoolkit
+            pkgsUnfree.cudaPackages.cudnn
+          ];
+        };
 
-        # Build the ONNX + ROCm variant for AMD GPUs
-        # Only Parakeet gets ROCm acceleration; other engines run on CPU
-        onnxRocmUnwrapped = let
-          pkg = mkVoxtypeUnwrapped {
-            pname = "voxtype-onnx-rocm";
-            features = onnxRocmFeatures;
-            extraNativeBuildInputs = with pkgs; [
-              rocmPackages.clr
-            ];
-            extraBuildInputs = [
-              onnxruntimeRocm
-              pkgs.rocmPackages.clr
-              pkgs.rocmPackages.rocblas
-            ];
-          };
-        in pkg.overrideAttrs (old: {
-          ORT_LIB_LOCATION = "${onnxruntimeRocm}/lib";
-        });
+        # Build the Parakeet + ROCm variant for AMD GPUs
+        parakeetRocmUnwrapped = mkVoxtypeUnwrapped {
+          pname = "voxtype-parakeet-rocm";
+          features = [ "parakeet-load-dynamic" "parakeet-rocm" ];
+          extraNativeBuildInputs = with pkgs; [
+            rocmPackages.clr
+          ];
+          extraBuildInputs = [
+            onnxruntimeRocm
+            pkgs.rocmPackages.clr
+            pkgs.rocmPackages.rocblas
+          ];
+        };
 
       in {
         packages = {
@@ -279,29 +231,19 @@
           vulkan = wrapVoxtype vulkanUnwrapped;
           rocm = wrapVoxtype rocmUnwrapped;
 
-          # ONNX variants (all ONNX engines: Parakeet, Moonshine, SenseVoice,
-          # Paraformer, Dolphin, Omnilingual)
-          onnx = wrapOnnx { pkg = onnxUnwrapped; };
-          onnx-cuda = wrapOnnx { onnxruntime = onnxruntimeCuda; pkg = onnxCudaUnwrapped; };
-          onnx-rocm = wrapOnnx { onnxruntime = onnxruntimeRocm; pkg = onnxRocmUnwrapped; };
-
-          # Backwards-compatible aliases (parakeet → onnx)
-          parakeet = wrapOnnx { pkg = onnxUnwrapped; };
-          parakeet-cuda = wrapOnnx { onnxruntime = onnxruntimeCuda; pkg = onnxCudaUnwrapped; };
-          parakeet-rocm = wrapOnnx { onnxruntime = onnxruntimeRocm; pkg = onnxRocmUnwrapped; };
+          # Parakeet variants (ONNX-based speech recognition)
+          # Uses NVIDIA's Parakeet models instead of Whisper
+          parakeet = wrapParakeet { pkg = parakeetUnwrapped; };
+          parakeet-cuda = wrapParakeet { onnxruntime = onnxruntimeCuda; pkg = parakeetCudaUnwrapped; };
+          parakeet-rocm = wrapParakeet { onnxruntime = onnxruntimeRocm; pkg = parakeetRocmUnwrapped; };
 
           # Unwrapped packages (for custom wrapping scenarios)
           voxtype-unwrapped = mkVoxtypeUnwrapped {};
           voxtype-vulkan-unwrapped = vulkanUnwrapped;
           voxtype-rocm-unwrapped = rocmUnwrapped;
-          voxtype-onnx-unwrapped = onnxUnwrapped;
-          voxtype-onnx-cuda-unwrapped = onnxCudaUnwrapped;
-          voxtype-onnx-rocm-unwrapped = onnxRocmUnwrapped;
-
-          # Backwards-compatible aliases
-          voxtype-parakeet-unwrapped = onnxUnwrapped;
-          voxtype-parakeet-cuda-unwrapped = onnxCudaUnwrapped;
-          voxtype-parakeet-rocm-unwrapped = onnxRocmUnwrapped;
+          voxtype-parakeet-unwrapped = parakeetUnwrapped;
+          voxtype-parakeet-cuda-unwrapped = parakeetCudaUnwrapped;
+          voxtype-parakeet-rocm-unwrapped = parakeetRocmUnwrapped;
         };
 
         # Development shell with all dependencies
