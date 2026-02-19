@@ -40,16 +40,9 @@ in {
       type = lib.types.package;
       description = ''
         The VoxType package to install. Use the flake's wrapped packages:
-
-        Whisper packages:
-        - packages.default: CPU-only Whisper
+        - packages.default: CPU-only
         - packages.vulkan: Vulkan GPU acceleration
         - packages.rocm: ROCm/HIP acceleration (AMD)
-
-        ONNX packages (Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual):
-        - packages.onnx: CPU-only ONNX engines
-        - packages.onnx-cuda: CUDA acceleration (NVIDIA)
-        - packages.onnx-rocm: ROCm acceleration (AMD, Parakeet only)
 
         These packages include all runtime dependencies (wtype, ydotool, etc.)
         in their PATH.
