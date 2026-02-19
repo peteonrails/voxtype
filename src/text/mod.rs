@@ -16,6 +16,8 @@ pub struct TextProcessor {
     replacements: HashMap<String, String>,
     /// Whether smart auto-submit is enabled
     smart_auto_submit: bool,
+    /// Pre-compiled regex for submit trigger detection
+    submit_re: Regex,
 }
 
 impl TextProcessor {
@@ -28,10 +30,16 @@ impl TextProcessor {
             .map(|(k, v)| (k.to_lowercase(), v.clone()))
             .collect();
 
+        // Use (?:^|\s) instead of \b so that hyphenated forms like "pre-submit"
+        // do not trigger: a hyphen satisfies \b but not (?:^|\s).
+        let submit_re = Regex::new(r"(?i)(?:^|\s)submit[.!?,;]*\s*$")
+            .expect("BUG: submit regex is a compile-time constant and must be valid");
+
         Self {
             spoken_punctuation: config.spoken_punctuation,
             replacements,
             smart_auto_submit: config.smart_auto_submit,
+            submit_re,
         }
     }
 
@@ -65,10 +73,11 @@ impl TextProcessor {
             return (text.to_string(), false);
         }
 
-        // Match "submit" as a whole word at end, optionally followed by punctuation
-        let re = Regex::new(r"(?i)\bsubmit[.!?,;]*\s*$").unwrap();
-        if re.is_match(text) {
-            let stripped = re.replace(text, "").trim_end().to_string();
+        // Match "submit" preceded by start-of-string or whitespace (not hyphens),
+        // optionally followed by punctuation. Leading whitespace in the match is
+        // consumed by replace(); trim_end() cleans any remaining trailing space.
+        if self.submit_re.is_match(text) {
+            let stripped = self.submit_re.replace(text, "").trim_end().to_string();
             (stripped, true)
         } else {
             (text.to_string(), false)
@@ -376,6 +385,18 @@ mod tests {
 
         let (text, submit) = processor.detect_submit("submitted", None);
         assert_eq!(text, "submitted");
+        assert!(!submit);
+    }
+
+    #[test]
+    fn test_detect_submit_hyphenated_prefix_no_match() {
+        let config = make_config_with_submit(false);
+        let processor = TextProcessor::new(&config);
+
+        // "pre-submit" ends with "submit" but hyphen is not a word boundary we
+        // accept: saying "I need to pre-submit" should not fire auto-submit.
+        let (text, submit) = processor.detect_submit("I need to pre-submit", None);
+        assert_eq!(text, "I need to pre-submit");
         assert!(!submit);
     }
 

@@ -77,8 +77,10 @@ sleep 4
 voxtype record stop
 
 # 4. Expected: "hello world" is typed and Enter is pressed
-# Check logs confirm the trigger:
-journalctl --user -u voxtype --since "30 seconds ago" | grep -i "smart auto-submit"
+#
+# To verify via logs, the daemon must be running with debug logging (-v):
+#   journalctl --user -u voxtype --since "30 seconds ago" | grep "Smart auto-submit triggered"
+# At default log level the trigger fires silently - verify by observing Enter being pressed.
 ```
 
 ### CLI override (per-recording)
@@ -100,10 +102,20 @@ voxtype record stop
 ### Environment variable
 
 ```bash
+# Stop the managed daemon first to avoid running two daemons simultaneously
+systemctl --user stop voxtype
+
+# Start a temporary daemon with the env var
 VOXTYPE_SMART_AUTO_SUBMIT=true voxtype daemon &
+DAEMON_PID=$!
 sleep 2
+
 voxtype record start && sleep 4 && voxtype record stop
 # Say "hello world submit" - should type "hello world" and press Enter
+
+# Clean up: stop the temp daemon and restart the managed one
+kill $DAEMON_PID
+systemctl --user start voxtype
 ```
 
 ### Negative cases
