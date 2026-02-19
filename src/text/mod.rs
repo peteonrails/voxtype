@@ -77,7 +77,14 @@ impl TextProcessor {
         // optionally followed by punctuation. Leading whitespace in the match is
         // consumed by replace(); trim_end() cleans any remaining trailing space.
         if self.submit_re.is_match(text) {
-            let stripped = self.submit_re.replace(text, "").trim_end().to_string();
+            // After stripping "submit", also remove trailing connector punctuation
+            // (commas, semicolons) that would otherwise dangle at end of text.
+            // Sentence-ending punctuation (. ! ?) is preserved.
+            let stripped = self
+                .submit_re
+                .replace(text, "")
+                .trim_end_matches(|c: char| c.is_whitespace() || c == ',' || c == ';')
+                .to_string();
             (stripped, true)
         } else {
             (text.to_string(), false)
@@ -386,6 +393,39 @@ mod tests {
         let (text, submit) = processor.detect_submit("submitted", None);
         assert_eq!(text, "submitted");
         assert!(!submit);
+    }
+
+    #[test]
+    fn test_detect_submit_strips_trailing_comma() {
+        let config = make_config_with_submit(false);
+        let processor = TextProcessor::new(&config);
+
+        // "hello world, submit" - spoken punctuation may produce a comma before
+        // "submit"; the dangling comma should be stripped from the result.
+        let (text, submit) = processor.detect_submit("hello world, submit", None);
+        assert_eq!(text, "hello world");
+        assert!(submit);
+    }
+
+    #[test]
+    fn test_detect_submit_strips_trailing_semicolon() {
+        let config = make_config_with_submit(false);
+        let processor = TextProcessor::new(&config);
+
+        let (text, submit) = processor.detect_submit("hello world; submit", None);
+        assert_eq!(text, "hello world");
+        assert!(submit);
+    }
+
+    #[test]
+    fn test_detect_submit_preserves_trailing_period() {
+        let config = make_config_with_submit(false);
+        let processor = TextProcessor::new(&config);
+
+        // A sentence ending in ". submit" should keep the period on the prior sentence.
+        let (text, submit) = processor.detect_submit("hello world. submit", None);
+        assert_eq!(text, "hello world.");
+        assert!(submit);
     }
 
     #[test]
