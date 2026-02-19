@@ -231,6 +231,48 @@ fn cleanup_profile_override() {
     let _ = std::fs::remove_file(&profile_file);
 }
 
+/// Read and consume the smart auto-submit override file
+/// Returns Some(true) to enable, Some(false) to disable, None if not set
+fn read_smart_auto_submit_override() -> Option<bool> {
+    let override_file = Config::runtime_dir().join("smart_auto_submit_override");
+    if !override_file.exists() {
+        return None;
+    }
+
+    let content = match std::fs::read_to_string(&override_file) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("Failed to read smart auto-submit override file: {}", e);
+            return None;
+        }
+    };
+
+    if let Err(e) = std::fs::remove_file(&override_file) {
+        tracing::warn!("Failed to remove smart auto-submit override file: {}", e);
+    }
+
+    match content.trim() {
+        "true" => {
+            tracing::info!("Using smart auto-submit override: enabled");
+            Some(true)
+        }
+        "false" => {
+            tracing::info!("Using smart auto-submit override: disabled");
+            Some(false)
+        }
+        other => {
+            tracing::warn!("Invalid smart auto-submit override value: {:?}", other);
+            None
+        }
+    }
+}
+
+/// Remove the smart auto-submit override file if it exists (for cleanup on cancel/error)
+fn cleanup_smart_auto_submit_override() {
+    let override_file = Config::runtime_dir().join("smart_auto_submit_override");
+    let _ = std::fs::remove_file(&override_file);
+}
+
 // === Meeting Mode IPC ===
 
 /// Check for meeting start command (via file trigger)
@@ -693,10 +735,11 @@ impl Daemon {
                         tracing::info!("Meeting started: {}", meeting_id);
 
                         // Start dual audio capture for meeting (mic + loopback)
-                        let loopback_device = match self.config.meeting.audio.loopback_device.as_str() {
-                            "disabled" | "" => None,
-                            other => Some(other),
-                        };
+                        let loopback_device =
+                            match self.config.meeting.audio.loopback_device.as_str() {
+                                "disabled" | "" => None,
+                                other => Some(other),
+                            };
                         match audio::DualCapture::new(&self.config.audio, loopback_device) {
                             Ok(mut capture) => {
                                 if let Err(e) = capture.start().await {
@@ -731,11 +774,17 @@ impl Daemon {
                                         tracing::info!("GTCRN speech enhancer loaded for meeting echo cancellation");
                                     }
                                     Err(e) => {
-                                        tracing::warn!("Failed to load GTCRN enhancer, continuing without: {}", e);
+                                        tracing::warn!(
+                                            "Failed to load GTCRN enhancer, continuing without: {}",
+                                            e
+                                        );
                                     }
                                 }
                             } else {
-                                tracing::debug!("GTCRN model not found at {:?}, skipping speech enhancement", model_path);
+                                tracing::debug!(
+                                    "GTCRN model not found at {:?}, skipping speech enhancement",
+                                    model_path
+                                );
                             }
                         }
 
@@ -871,6 +920,7 @@ impl Daemon {
         cleanup_output_mode_override();
         cleanup_model_override();
         cleanup_profile_override();
+        cleanup_smart_auto_submit_override();
         *state = State::Idle;
         self.update_state("idle");
 
@@ -1197,6 +1247,19 @@ impl Daemon {
                         tracing::debug!("After text processing: {:?}", processed_text);
                     }
 
+                    // Smart auto-submit: detect "submit" trigger word at end
+                    // CLI override (--smart-auto-submit / --no-smart-auto-submit) takes priority
+                    let smart_auto_submit_cli = read_smart_auto_submit_override();
+                    let (processed_text, smart_submit) = self
+                        .text_processor
+                        .detect_submit(&processed_text, smart_auto_submit_cli);
+                    if smart_submit {
+                        tracing::debug!(
+                            "Smart auto-submit triggered, stripped text: {:?}",
+                            processed_text
+                        );
+                    }
+
                     // Check for profile override from CLI flags
                     let profile_override = read_profile_override();
                     let active_profile = profile_override
@@ -1247,6 +1310,13 @@ impl Daemon {
                     } else {
                         processed_text
                     };
+
+                    if smart_submit {
+                        tracing::debug!(
+                            "Smart auto-submit: final text after post-processing: {:?}",
+                            final_text
+                        );
+                    }
 
                     // Check for output mode override from CLI flags
                     let output_override = read_output_mode_override();
@@ -1324,6 +1394,13 @@ impl Daemon {
                             }
                         }
                     };
+
+                    // If smart auto-submit triggered, enable auto_submit for this cycle
+                    let mut output_config = output_config;
+                    if smart_submit {
+                        output_config.auto_submit = true;
+                    }
+
                     let output_chain = output::create_output_chain(&output_config);
 
                     // Output the text
@@ -1928,6 +2005,7 @@ impl Daemon {
                                 cleanup_output_mode_override();
                                 cleanup_model_override();
                                 cleanup_profile_override();
+                                cleanup_smart_auto_submit_override();
                                 state = State::Idle;
                                 self.update_state("idle");
                                 self.play_feedback(SoundEvent::Cancelled);
@@ -1953,6 +2031,7 @@ impl Daemon {
                                 cleanup_output_mode_override();
                                 cleanup_model_override();
                                 cleanup_profile_override();
+                                cleanup_smart_auto_submit_override();
                                 state = State::Idle;
                                 self.update_state("idle");
                                 self.play_feedback(SoundEvent::Cancelled);
@@ -1998,6 +2077,7 @@ impl Daemon {
                         cleanup_output_mode_override();
                         cleanup_model_override();
                         cleanup_profile_override();
+                        cleanup_smart_auto_submit_override();
                         state = State::Idle;
                         self.update_state("idle");
                         self.play_feedback(SoundEvent::Cancelled);
@@ -2032,6 +2112,7 @@ impl Daemon {
                             cleanup_output_mode_override();
                             cleanup_model_override();
                             cleanup_profile_override();
+                            cleanup_smart_auto_submit_override();
 
                             // Get model override from state before transitioning
                             let model_override = match &state {
@@ -2263,6 +2344,7 @@ impl Daemon {
                         cleanup_output_mode_override();
                         cleanup_model_override();
                         cleanup_profile_override();
+                        cleanup_smart_auto_submit_override();
                         state = State::Idle;
                         self.update_state("idle");
                         self.play_feedback(SoundEvent::Cancelled);

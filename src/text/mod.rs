@@ -14,6 +14,10 @@ pub struct TextProcessor {
     spoken_punctuation: bool,
     /// Custom word replacements (lowercase key → replacement value)
     replacements: HashMap<String, String>,
+    /// Whether smart auto-submit is enabled
+    smart_auto_submit: bool,
+    /// Pre-compiled regex for submit trigger detection
+    submit_re: Regex,
 }
 
 impl TextProcessor {
@@ -26,9 +30,16 @@ impl TextProcessor {
             .map(|(k, v)| (k.to_lowercase(), v.clone()))
             .collect();
 
+        // Use (?:^|\s) instead of \b so that hyphenated forms like "pre-submit"
+        // do not trigger: a hyphen satisfies \b but not (?:^|\s).
+        let submit_re = Regex::new(r"(?i)(?:^|\s)submit[.!?,;]*\s*$")
+            .expect("BUG: submit regex is a compile-time constant and must be valid");
+
         Self {
             spoken_punctuation: config.spoken_punctuation,
             replacements,
+            smart_auto_submit: config.smart_auto_submit,
+            submit_re,
         }
     }
 
@@ -47,6 +58,37 @@ impl TextProcessor {
         }
 
         result
+    }
+
+    /// Check if text ends with the submit trigger word.
+    ///
+    /// Returns `(stripped_text, should_submit)`. Handles trailing punctuation (e.g.,
+    /// "submit." from spoken punctuation) and is case-insensitive.
+    ///
+    /// `cli_override` allows the caller to force enable (`Some(true)`) or disable
+    /// (`Some(false)`) detection, overriding the config value. `None` uses the config.
+    pub fn detect_submit(&self, text: &str, cli_override: Option<bool>) -> (String, bool) {
+        let enabled = cli_override.unwrap_or(self.smart_auto_submit);
+        if !enabled {
+            return (text.to_string(), false);
+        }
+
+        // Match "submit" preceded by start-of-string or whitespace (not hyphens),
+        // optionally followed by punctuation. Leading whitespace in the match is
+        // consumed by replace(); trim_end() cleans any remaining trailing space.
+        if self.submit_re.is_match(text) {
+            // After stripping "submit", also remove trailing connector punctuation
+            // (commas, semicolons) that would otherwise dangle at end of text.
+            // Sentence-ending punctuation (. ! ?) is preserved.
+            let stripped = self
+                .submit_re
+                .replace(text, "")
+                .trim_end_matches(|c: char| c.is_whitespace() || c == ',' || c == ';')
+                .to_string();
+            (stripped, true)
+        } else {
+            (text.to_string(), false)
+        }
     }
 
     /// Apply spoken punctuation conversions
@@ -187,6 +229,15 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
+            smart_auto_submit: false,
+        }
+    }
+
+    fn make_config_with_submit(spoken_punctuation: bool) -> TextConfig {
+        TextConfig {
+            spoken_punctuation,
+            replacements: HashMap::new(),
+            smart_auto_submit: true,
         }
     }
 
@@ -281,5 +332,178 @@ mod tests {
             "line one\nline two"
         );
         assert_eq!(processor.process("col one tab col two"), "col one\tcol two");
+    }
+
+    #[test]
+    fn test_detect_submit_basic() {
+        let config = make_config_with_submit(false);
+        let processor = TextProcessor::new(&config);
+
+        let (text, submit) = processor.detect_submit("hello world submit", None);
+        assert_eq!(text, "hello world");
+        assert!(submit);
+    }
+
+    #[test]
+    fn test_detect_submit_with_period() {
+        let config = make_config_with_submit(false);
+        let processor = TextProcessor::new(&config);
+
+        // spoken punctuation may add a period after "submit"
+        let (text, submit) = processor.detect_submit("hello world submit.", None);
+        assert_eq!(text, "hello world");
+        assert!(submit);
+    }
+
+    #[test]
+    fn test_detect_submit_with_exclamation() {
+        let config = make_config_with_submit(false);
+        let processor = TextProcessor::new(&config);
+
+        let (text, submit) = processor.detect_submit("hello world submit!", None);
+        assert_eq!(text, "hello world");
+        assert!(submit);
+    }
+
+    #[test]
+    fn test_detect_submit_uppercase() {
+        let config = make_config_with_submit(false);
+        let processor = TextProcessor::new(&config);
+
+        let (text, submit) = processor.detect_submit("SUBMIT", None);
+        assert_eq!(text, "");
+        assert!(submit);
+    }
+
+    #[test]
+    fn test_detect_submit_in_middle_no_match() {
+        let config = make_config_with_submit(false);
+        let processor = TextProcessor::new(&config);
+
+        let (text, submit) = processor.detect_submit("Submit this please", None);
+        assert_eq!(text, "Submit this please");
+        assert!(!submit);
+    }
+
+    #[test]
+    fn test_detect_submit_partial_word_no_match() {
+        let config = make_config_with_submit(false);
+        let processor = TextProcessor::new(&config);
+
+        let (text, submit) = processor.detect_submit("submitted", None);
+        assert_eq!(text, "submitted");
+        assert!(!submit);
+    }
+
+    #[test]
+    fn test_pipeline_spoken_punctuation_then_detect_submit() {
+        // Simulates the full daemon pipeline: user says "hello world comma submit"
+        // process() converts "comma" → "," then detect_submit() strips ", submit"
+        let config = TextConfig {
+            spoken_punctuation: true,
+            replacements: HashMap::new(),
+            smart_auto_submit: true,
+        };
+        let processor = TextProcessor::new(&config);
+
+        let processed = processor.process("hello world comma submit");
+        let (text, submit) = processor.detect_submit(&processed, None);
+        assert_eq!(text, "hello world");
+        assert!(submit);
+    }
+
+    #[test]
+    fn test_pipeline_spoken_punctuation_period_then_detect_submit() {
+        // Simulates: user says "hello world period submit"
+        // process() converts "period" → "." then detect_submit() strips " submit"
+        // The period on the prior sentence is preserved.
+        let config = TextConfig {
+            spoken_punctuation: true,
+            replacements: HashMap::new(),
+            smart_auto_submit: true,
+        };
+        let processor = TextProcessor::new(&config);
+
+        let processed = processor.process("hello world period submit");
+        let (text, submit) = processor.detect_submit(&processed, None);
+        assert_eq!(text, "hello world.");
+        assert!(submit);
+    }
+
+    #[test]
+    fn test_detect_submit_strips_trailing_comma() {
+        let config = make_config_with_submit(false);
+        let processor = TextProcessor::new(&config);
+
+        // "hello world, submit" - spoken punctuation may produce a comma before
+        // "submit"; the dangling comma should be stripped from the result.
+        let (text, submit) = processor.detect_submit("hello world, submit", None);
+        assert_eq!(text, "hello world");
+        assert!(submit);
+    }
+
+    #[test]
+    fn test_detect_submit_strips_trailing_semicolon() {
+        let config = make_config_with_submit(false);
+        let processor = TextProcessor::new(&config);
+
+        let (text, submit) = processor.detect_submit("hello world; submit", None);
+        assert_eq!(text, "hello world");
+        assert!(submit);
+    }
+
+    #[test]
+    fn test_detect_submit_preserves_trailing_period() {
+        let config = make_config_with_submit(false);
+        let processor = TextProcessor::new(&config);
+
+        // A sentence ending in ". submit" should keep the period on the prior sentence.
+        let (text, submit) = processor.detect_submit("hello world. submit", None);
+        assert_eq!(text, "hello world.");
+        assert!(submit);
+    }
+
+    #[test]
+    fn test_detect_submit_hyphenated_prefix_no_match() {
+        let config = make_config_with_submit(false);
+        let processor = TextProcessor::new(&config);
+
+        // "pre-submit" ends with "submit" but hyphen is not a word boundary we
+        // accept: saying "I need to pre-submit" should not fire auto-submit.
+        let (text, submit) = processor.detect_submit("I need to pre-submit", None);
+        assert_eq!(text, "I need to pre-submit");
+        assert!(!submit);
+    }
+
+    #[test]
+    fn test_detect_submit_disabled() {
+        let config = make_config(false, &[]);
+        let processor = TextProcessor::new(&config);
+
+        let (text, submit) = processor.detect_submit("hello world submit", None);
+        assert_eq!(text, "hello world submit");
+        assert!(!submit);
+    }
+
+    #[test]
+    fn test_detect_submit_cli_override_enable() {
+        // Config has smart_auto_submit=false, but CLI forces it on
+        let config = make_config(false, &[]);
+        let processor = TextProcessor::new(&config);
+
+        let (text, submit) = processor.detect_submit("hello world submit", Some(true));
+        assert_eq!(text, "hello world");
+        assert!(submit);
+    }
+
+    #[test]
+    fn test_detect_submit_cli_override_disable() {
+        // Config has smart_auto_submit=true, but CLI forces it off
+        let config = make_config_with_submit(false);
+        let processor = TextProcessor::new(&config);
+
+        let (text, submit) = processor.detect_submit("hello world submit", Some(false));
+        assert_eq!(text, "hello world submit");
+        assert!(!submit);
     }
 }

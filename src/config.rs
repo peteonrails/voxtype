@@ -216,6 +216,10 @@ on_transcription = true
 #
 # Custom word replacements (case-insensitive)
 # replacements = { "vox type" = "voxtype" }
+#
+# Smart auto-submit: say "submit" at the end of dictation to press Enter.
+# The word "submit" is stripped from the output text and Enter is pressed.
+# smart_auto_submit = false
 
 # [vad]
 # Voice Activity Detection - filters silence-only recordings
@@ -1205,6 +1209,11 @@ pub struct TextConfig {
     /// Example: { "vox type" = "voxtype" }
     #[serde(default)]
     pub replacements: HashMap<String, String>,
+
+    /// Smart auto-submit: say "submit" at the end of dictation to press Enter.
+    /// The word "submit" is stripped from the output and Enter is pressed.
+    #[serde(default)]
+    pub smart_auto_submit: bool,
 }
 
 /// Meeting transcription configuration
@@ -1952,6 +1961,9 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     }
     if let Ok(append_text) = std::env::var("VOXTYPE_APPEND_TEXT") {
         config.output.append_text = Some(append_text);
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_SMART_AUTO_SUBMIT") {
+        config.text.smart_auto_submit = val != "0" && val.to_lowercase() != "false";
     }
 
     Ok(config)

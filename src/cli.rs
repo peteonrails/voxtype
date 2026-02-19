@@ -255,6 +255,14 @@ pub enum RecordAction {
         /// Profiles are defined in config.toml under [profiles.name]
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
+
+        /// Enable smart auto-submit for this recording (say "submit" to press Enter)
+        #[arg(long, conflicts_with = "no_smart_auto_submit")]
+        smart_auto_submit: bool,
+
+        /// Disable smart auto-submit for this recording
+        #[arg(long, conflicts_with = "smart_auto_submit")]
+        no_smart_auto_submit: bool,
     },
     /// Stop recording and transcribe (send SIGUSR2 to daemon)
     Stop {
@@ -297,6 +305,14 @@ pub enum RecordAction {
         /// Profiles are defined in config.toml under [profiles.name]
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
+
+        /// Enable smart auto-submit for this recording (say "submit" to press Enter)
+        #[arg(long, conflicts_with = "no_smart_auto_submit")]
+        smart_auto_submit: bool,
+
+        /// Disable smart auto-submit for this recording (overrides config)
+        #[arg(long, conflicts_with = "smart_auto_submit")]
+        no_smart_auto_submit: bool,
     },
     /// Cancel current recording or transcription (discard without output)
     Cancel,
@@ -464,6 +480,32 @@ impl RecordAction {
             RecordAction::Start { profile, .. } => profile.as_deref(),
             RecordAction::Toggle { profile, .. } => profile.as_deref(),
             RecordAction::Stop { .. } | RecordAction::Cancel => None,
+        }
+    }
+
+    /// Get the smart auto-submit override from --smart-auto-submit / --no-smart-auto-submit flags
+    /// Returns Some(true) to enable, Some(false) to disable, None if not specified
+    pub fn smart_auto_submit_override(&self) -> Option<bool> {
+        let (enable, disable) = match self {
+            RecordAction::Start {
+                smart_auto_submit,
+                no_smart_auto_submit,
+                ..
+            } => (*smart_auto_submit, *no_smart_auto_submit),
+            RecordAction::Toggle {
+                smart_auto_submit,
+                no_smart_auto_submit,
+                ..
+            } => (*smart_auto_submit, *no_smart_auto_submit),
+            RecordAction::Stop { .. } | RecordAction::Cancel => return None,
+        };
+
+        if enable {
+            Some(true)
+        } else if disable {
+            Some(false)
+        } else {
+            None
         }
     }
 }
@@ -1386,6 +1428,91 @@ mod tests {
                 assert_eq!(engine, Some("whisper".to_string()));
             }
             _ => panic!("Expected Transcribe command"),
+        }
+    }
+
+    // =========================================================================
+    // Smart auto-submit flag tests
+    // =========================================================================
+
+    #[test]
+    fn test_record_start_smart_auto_submit_enable() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--smart-auto-submit"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.smart_auto_submit_override(), Some(true));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_no_smart_auto_submit() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--no-smart-auto-submit"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.smart_auto_submit_override(), Some(false));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_smart_auto_submit_mutual_exclusion() {
+        let result = Cli::try_parse_from([
+            "voxtype",
+            "record",
+            "start",
+            "--smart-auto-submit",
+            "--no-smart-auto-submit",
+        ]);
+        assert!(
+            result.is_err(),
+            "Should not allow both flags simultaneously"
+        );
+    }
+
+    #[test]
+    fn test_record_start_smart_auto_submit_no_flags_returns_none() {
+        let cli = Cli::parse_from(["voxtype", "record", "start"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.smart_auto_submit_override(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_toggle_smart_auto_submit_enable() {
+        let cli = Cli::parse_from(["voxtype", "record", "toggle", "--smart-auto-submit"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.smart_auto_submit_override(), Some(true));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_toggle_no_smart_auto_submit() {
+        let cli = Cli::parse_from(["voxtype", "record", "toggle", "--no-smart-auto-submit"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.smart_auto_submit_override(), Some(false));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_stop_has_no_smart_auto_submit_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "stop"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.smart_auto_submit_override(), None);
+            }
+            _ => panic!("Expected Record command"),
         }
     }
 }

@@ -1413,6 +1413,33 @@ auto_submit = true  # Press Enter after transcription
 
 Useful for chat applications or command lines where you want to submit immediately after dictating.
 
+**Smart auto-submit (say "submit" to press Enter):**
+
+```toml
+[text]
+smart_auto_submit = true
+```
+
+With this enabled, ending your dictation with the word "submit" strips that word from the output and presses Enter. Unlike `auto_submit` (which always presses Enter), this only fires when you choose to say it.
+
+```
+# You say:   "reply to Alice and cc Bob submit"
+# Voxtype types: "reply to Alice and cc Bob"  [then presses Enter]
+```
+
+Per-recording override (useful with compositor keybindings):
+
+```bash
+voxtype record start --smart-auto-submit   # force on for this recording
+voxtype record start --no-smart-auto-submit  # force off for this recording
+```
+
+Or via environment variable for the whole session:
+
+```bash
+VOXTYPE_SMART_AUTO_SUBMIT=true voxtype
+```
+
 **Shift+Enter for newlines:**
 
 ```toml

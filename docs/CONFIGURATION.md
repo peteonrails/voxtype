@@ -1818,6 +1818,42 @@ If Whisper transcribes "vox type" (or "Vox Type"), it will be replaced with "vox
 "omar key" = "Omarchy"
 ```
 
+### smart_auto_submit
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+When `true`, Voxtype watches for the word "submit" at the end of each transcription. If detected, it strips the word from the output and presses Enter - as if `auto_submit` had fired, but triggered by voice rather than being permanently on. Trailing punctuation on "submit" (e.g., "submit." from spoken punctuation) is handled correctly.
+
+**Example:**
+
+```toml
+[text]
+smart_auto_submit = true
+```
+
+Saying "send a reply to Alice submit" types "send a reply to Alice" and presses Enter.
+
+**Per-recording override:**
+
+```bash
+# Enable for just this recording (even if config has it off)
+voxtype record start --smart-auto-submit
+voxtype record toggle --smart-auto-submit
+
+# Disable for just this recording (even if config has it on)
+voxtype record start --no-smart-auto-submit
+```
+
+**Environment variable:**
+
+```bash
+VOXTYPE_SMART_AUTO_SUBMIT=true voxtype
+```
+
+**Note:** `smart_auto_submit` is conditional - it only fires when you say "submit". The existing `auto_submit` option always presses Enter after every transcription. Use `smart_auto_submit` when you want the choice per dictation, and `auto_submit` when you always want Enter pressed.
+
 ---
 
 ## [vad]
