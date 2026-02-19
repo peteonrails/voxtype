@@ -1742,8 +1742,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 [[package]]
 name = "ort"
 version = "2.0.0-rc.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a5df903c0d2c07b56950f1058104ab0c8557159f2741782223704de9be73c3c"
+source = "git+https://github.com/pykeio/ort?rev=5913ae0a6f4468cf8329ba0da71b560de31481dc#5913ae0a6f4468cf8329ba0da71b560de31481dc"
 dependencies = [
  "libloading 0.9.0",
  "ndarray 0.17.1",
@@ -1756,8 +1755,7 @@ dependencies = [
 [[package]]
 name = "ort-sys"
 version = "2.0.0-rc.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06503bb33f294c5f1ba484011e053bfa6ae227074bdb841e9863492dc5960d4b"
+source = "git+https://github.com/pykeio/ort?rev=5913ae0a6f4468cf8329ba0da71b560de31481dc#5913ae0a6f4468cf8329ba0da71b560de31481dc"
 dependencies = [
  "hmac-sha256",
  "lzma-rust2",
@@ -1766,9 +1764,9 @@ dependencies = [
 
 [[package]]
 name = "parakeet-rs"
-version = "0.3.0"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cbd5310b3d9a1d8ab59369a2e6dd20511f46a81de08f5aaca0ba811059c2c93"
+checksum = "ffb8f3a2abb6cf36b9d431a25ead23d4e19294169f0d99bc7f4d4a1478233fdc"
 dependencies = [
  "eyre",
  "hound",
