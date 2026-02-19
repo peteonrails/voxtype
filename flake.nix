@@ -309,6 +309,7 @@
         devShells.default = pkgs.mkShell {
           inputsFrom = [ self.packages.${system}.voxtype-unwrapped ];
 
+          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
           packages = with pkgs; [
             rust-analyzer
             rustfmt
