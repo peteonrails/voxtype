@@ -805,6 +805,27 @@ echo "test" | wl-copy
 wl-paste
 ```
 
+### Clipboard not restored after paste
+
+**Cause:** The restore delay may be too short for your application, or `wl-paste` is not installed.
+
+**Solution:**
+
+1. Make sure `wl-clipboard` is installed (provides both `wl-copy` and `wl-paste`):
+```bash
+# Arch: sudo pacman -S wl-clipboard
+# Debian: sudo apt install wl-clipboard
+# Fedora: sudo dnf install wl-clipboard
+```
+
+2. If the clipboard is restored before the application reads it, increase the delay:
+```toml
+[output]
+restore_clipboard_delay_ms = 500  # Try 300-500ms for slow applications
+```
+
+3. On X11, make sure `xclip` is installed for clipboard restoration support.
+
 ### No desktop notification
 
 **Cause:** notify-send not installed or notifications disabled.

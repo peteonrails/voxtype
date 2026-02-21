@@ -181,6 +181,16 @@ type_delay_ms = 0
 # Useful for applications where Enter submits (e.g., Cursor IDE, Slack, Discord)
 # shift_enter_newlines = false
 
+# Restore clipboard content after paste mode (default: false)
+# Saves clipboard before transcription, restores it after paste keystroke
+# Only applies to mode = "paste". Useful when you want to preserve your
+# existing clipboard content across dictation operations.
+# restore_clipboard = false
+
+# Delay after paste before restoring clipboard (milliseconds)
+# Allows time for the paste operation to complete (default: 200)
+# restore_clipboard_delay_ms = 200
+
 # Pre/post output hooks (optional)
 # Commands to run before and after typing output. Useful for compositor integration.
 # Example: Block modifier keys during typing with Hyprland submap:
@@ -1487,6 +1497,10 @@ fn default_post_process_timeout() -> u64 {
     30000 // 30 seconds - generous for LLM processing
 }
 
+fn default_restore_clipboard_delay() -> u32 {
+    200 // 200ms - delay for paste to complete before restoring clipboard
+}
+
 /// Text output configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OutputConfig {
@@ -1580,6 +1594,16 @@ pub struct OutputConfig {
     /// Applies to both config-based file output and --output-file CLI flag
     #[serde(default)]
     pub file_mode: FileMode,
+
+    /// Restore original clipboard content after paste mode completes
+    /// Saves clipboard before transcription, restores it after paste keystroke
+    #[serde(default)]
+    pub restore_clipboard: bool,
+
+    /// Delay after paste before restoring clipboard content (milliseconds)
+    /// Allows time for the paste operation to complete
+    #[serde(default = "default_restore_clipboard_delay")]
+    pub restore_clipboard_delay_ms: u32,
 }
 
 impl OutputConfig {
@@ -1746,6 +1770,8 @@ impl Default for Config {
                 dotool_xkb_variant: None,
                 file_path: None,
                 file_mode: FileMode::default(),
+                restore_clipboard: false,
+                restore_clipboard_delay_ms: default_restore_clipboard_delay(),
             },
             engine: TranscriptionEngine::default(),
             parakeet: None,
@@ -1952,6 +1978,14 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     }
     if let Ok(append_text) = std::env::var("VOXTYPE_APPEND_TEXT") {
         config.output.append_text = Some(append_text);
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_RESTORE_CLIPBOARD") {
+        config.output.restore_clipboard = val == "1" || val.eq_ignore_ascii_case("true");
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_RESTORE_CLIPBOARD_DELAY_MS") {
+        if let Ok(ms) = val.parse::<u32>() {
+            config.output.restore_clipboard_delay_ms = ms;
+        }
     }
 
     Ok(config)
@@ -3398,5 +3432,64 @@ mod tests {
         assert_eq!(config.meeting.storage_path, "auto");
         assert_eq!(config.meeting.diarization.backend, "simple");
         assert_eq!(config.meeting.summary.backend, "disabled");
+    }
+
+    // =========================================================================
+    // Clipboard Restore Tests
+    // =========================================================================
+
+    #[test]
+    fn test_restore_clipboard_defaults() {
+        let config = Config::default();
+        assert!(!config.output.restore_clipboard);
+        assert_eq!(config.output.restore_clipboard_delay_ms, 200);
+    }
+
+    #[test]
+    fn test_restore_clipboard_deserialization() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 30
+
+            [whisper]
+            model = "base.en"
+
+            [output]
+            mode = "paste"
+            restore_clipboard = true
+            restore_clipboard_delay_ms = 500
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.output.restore_clipboard);
+        assert_eq!(config.output.restore_clipboard_delay_ms, 500);
+    }
+
+    #[test]
+    fn test_restore_clipboard_missing_uses_defaults() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 30
+
+            [whisper]
+            model = "base.en"
+
+            [output]
+            mode = "paste"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(!config.output.restore_clipboard);
+        assert_eq!(config.output.restore_clipboard_delay_ms, 200);
     }
 }

@@ -99,6 +99,12 @@ async fn main() -> anyhow::Result<()> {
     if cli.paste {
         config.output.mode = config::OutputMode::Paste;
     }
+    if cli.restore_clipboard {
+        config.output.restore_clipboard = true;
+    }
+    if let Some(delay) = cli.restore_clipboard_delay_ms {
+        config.output.restore_clipboard_delay_ms = delay;
+    }
     let top_level_model = cli.model.clone();
     if let Some(model) = cli.model {
         if setup::model::is_valid_model(&model) {
@@ -1085,6 +1091,11 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
     }
     println!("  type_delay_ms = {}", config.output.type_delay_ms);
     println!("  pre_type_delay_ms = {}", config.output.pre_type_delay_ms);
+    println!("  restore_clipboard = {}", config.output.restore_clipboard);
+    println!(
+        "  restore_clipboard_delay_ms = {}",
+        config.output.restore_clipboard_delay_ms
+    );
 
     println!("\n[output.notification]");
     println!(
