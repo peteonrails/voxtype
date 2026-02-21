@@ -176,6 +176,7 @@ fn create_driver_output(
             config.type_delay_ms,
             pre_type_delay_ms,
             config.shift_enter_newlines,
+            config.wtype_shift_prefix,
         )),
         OutputDriver::Eitype => Box::new(eitype::EitypeOutput::new(
             config.auto_submit,

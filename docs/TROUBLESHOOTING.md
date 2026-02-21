@@ -779,6 +779,23 @@ Some applications (terminals, games) may block simulated input.
 mode = "clipboard"
 ```
 
+### First CJK character dropped (wtype)
+
+**Symptom:** When using wtype, the first Chinese, Japanese, or Korean character is missing from the output. This happens in some apps like Discord.
+
+**Cause:** Some Wayland applications swallow the first character from wtype's virtual keyboard input, particularly with CJK text.
+
+**Solution:** Enable the Shift prefix workaround:
+
+```toml
+[output]
+wtype_shift_prefix = true
+```
+
+This prefixes each wtype command with a Shift key press and release (`-P Shift_L -p Shift_L`), which prevents the first character from being dropped. It only affects the wtype driver and has no visible effect on the output text.
+
+You can also enable it via CLI flag (`--wtype-shift-prefix`) or environment variable (`VOXTYPE_WTYPE_SHIFT_PREFIX=true`).
+
 ### Characters dropped or garbled
 
 **Cause:** Typing too fast for the application.

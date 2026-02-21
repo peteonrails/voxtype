@@ -1479,6 +1479,35 @@ shift_enter_newlines = true  # Use Shift+Enter for newlines
 
 **Note:** This only affects the wtype output driver. When combined with `auto_submit = true`, the final Enter (to submit) is still sent as a regular Enter after all Shift+Enter line breaks.
 
+### wtype_shift_prefix
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+**Environment Variable:** `VOXTYPE_WTYPE_SHIFT_PREFIX`
+
+Prefix wtype output with a Shift key press and release. This is a workaround for apps (notably Discord) that drop the first CJK character when wtype types text. The Shift press/release has no visible effect on the output but prevents the first character from being swallowed.
+
+Only affects the wtype output driver. Has no effect when using dotool, ydotool, or clipboard modes.
+
+**Example:**
+```toml
+[output]
+wtype_shift_prefix = true
+```
+
+**CLI override:**
+```bash
+voxtype --wtype-shift-prefix daemon
+```
+
+**When to use:**
+- First CJK (Chinese, Japanese, Korean) character is missing from output
+- You're using the wtype driver (default on wlroots compositors)
+- The problem happens in specific apps like Discord
+
+See [Troubleshooting](TROUBLESHOOTING.md#first-cjk-character-dropped-wtype) for more details.
+
 ### pre_output_command
 
 **Type:** String
