@@ -57,7 +57,12 @@ pub fn create_vad(config: &Config) -> Result<Option<Box<dyn VoiceActivityDetecto
             // Auto-select: Whisper VAD for Whisper engine, Energy for Parakeet
             match config.engine {
                 TranscriptionEngine::Whisper => VadBackend::Whisper,
-                TranscriptionEngine::Parakeet | TranscriptionEngine::Moonshine => VadBackend::Energy,
+                TranscriptionEngine::Parakeet
+                | TranscriptionEngine::Moonshine
+                | TranscriptionEngine::SenseVoice
+                | TranscriptionEngine::Paraformer
+                | TranscriptionEngine::Dolphin
+                | TranscriptionEngine::Omnilingual => VadBackend::Energy,
             }
         }
         explicit => explicit,

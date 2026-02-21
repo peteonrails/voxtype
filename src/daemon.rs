@@ -9,6 +9,7 @@ use crate::config::{ActivationMode, Config, FileMode, OutputMode};
 use crate::eager::{self, EagerConfig};
 use crate::error::Result;
 use crate::hotkey::{self, HotkeyEvent};
+use crate::meeting::{self, MeetingDaemon, MeetingEvent, StorageConfig};
 use crate::model_manager::ModelManager;
 use crate::output;
 use crate::output::post_process::PostProcessor;
@@ -230,6 +231,121 @@ fn cleanup_profile_override() {
     let _ = std::fs::remove_file(&profile_file);
 }
 
+// === Meeting Mode IPC ===
+
+/// Check for meeting start command (via file trigger)
+fn check_meeting_start() -> Option<Option<String>> {
+    let start_file = Config::runtime_dir().join("meeting_start");
+    if start_file.exists() {
+        // Read optional title from file content
+        let title = std::fs::read_to_string(&start_file).ok().and_then(|s| {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        // Remove the file to acknowledge the command
+        let _ = std::fs::remove_file(&start_file);
+        Some(title)
+    } else {
+        None
+    }
+}
+
+/// Check for meeting stop command (via file trigger)
+fn check_meeting_stop() -> bool {
+    let stop_file = Config::runtime_dir().join("meeting_stop");
+    if stop_file.exists() {
+        let _ = std::fs::remove_file(&stop_file);
+        true
+    } else {
+        false
+    }
+}
+
+/// Check for meeting pause command (via file trigger)
+fn check_meeting_pause() -> bool {
+    let pause_file = Config::runtime_dir().join("meeting_pause");
+    if pause_file.exists() {
+        let _ = std::fs::remove_file(&pause_file);
+        true
+    } else {
+        false
+    }
+}
+
+/// Check for meeting resume command (via file trigger)
+fn check_meeting_resume() -> bool {
+    let resume_file = Config::runtime_dir().join("meeting_resume");
+    if resume_file.exists() {
+        let _ = std::fs::remove_file(&resume_file);
+        true
+    } else {
+        false
+    }
+}
+
+/// Clean up any stale meeting command files on startup
+fn cleanup_meeting_files() {
+    let runtime_dir = Config::runtime_dir();
+    for name in &[
+        "meeting_start",
+        "meeting_stop",
+        "meeting_pause",
+        "meeting_resume",
+    ] {
+        let file = runtime_dir.join(name);
+        if file.exists() {
+            let _ = std::fs::remove_file(&file);
+        }
+    }
+}
+
+/// Mark any active/paused meetings as completed on daemon startup.
+/// This handles meetings orphaned by a crash or daemon restart.
+fn cleanup_stale_meetings(config: &Config) {
+    let storage_path = if config.meeting.storage_path == "auto" {
+        Config::data_dir().join("meetings")
+    } else {
+        std::path::PathBuf::from(&config.meeting.storage_path)
+    };
+
+    let storage_config = StorageConfig {
+        storage_path,
+        retain_audio: config.meeting.retain_audio,
+        max_meetings: 0,
+    };
+
+    match meeting::MeetingStorage::open(storage_config) {
+        Ok(storage) => match storage.complete_stale_meetings() {
+            Ok(count) if count > 0 => {
+                tracing::info!("Marked {} orphaned meeting(s) as completed", count);
+                // Reset meeting state file to idle
+                let state_file = Config::runtime_dir().join("meeting_state");
+                let _ = std::fs::write(&state_file, "idle");
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("Failed to clean up stale meetings: {}", e),
+        },
+        Err(e) => tracing::warn!("Failed to open meeting storage for cleanup: {}", e),
+    }
+}
+
+/// Write meeting state file for external integrations
+fn write_meeting_state_file(path: &PathBuf, state: &str, meeting_id: Option<&str>) {
+    let content = if let Some(id) = meeting_id {
+        format!("{}\n{}", state, id)
+    } else {
+        state.to_string()
+    };
+
+    if let Err(e) = std::fs::write(path, content) {
+        tracing::warn!("Failed to write meeting state file: {}", e);
+    }
+}
+
 /// Write transcription to a file, respecting file_mode (overwrite or append)
 async fn write_transcription_to_file(
     path: &std::path::Path,
@@ -334,6 +450,20 @@ pub struct Daemon {
     )>,
     // Voice Activity Detection (filters silence-only recordings)
     vad: Option<Box<dyn crate::vad::VoiceActivityDetector>>,
+    // Meeting mode daemon (optional, created when meeting starts)
+    meeting_daemon: Option<MeetingDaemon>,
+    // Meeting state file path
+    meeting_state_file_path: Option<PathBuf>,
+    // Audio capture for meeting mode (dual: mic + loopback)
+    meeting_audio_capture: Option<audio::DualCapture>,
+    // Chunk buffers for meeting mode (separate mic and loopback)
+    meeting_mic_buffer: Vec<f32>,
+    meeting_loopback_buffer: Vec<f32>,
+    // Meeting event receiver
+    meeting_event_rx: Option<tokio::sync::mpsc::Receiver<MeetingEvent>>,
+    // GTCRN speech enhancer for mic echo cancellation
+    #[cfg(feature = "onnx-common")]
+    speech_enhancer: Option<std::sync::Arc<audio::enhance::GtcrnEnhancer>>,
 }
 
 impl Daemon {
@@ -401,6 +531,13 @@ impl Daemon {
             }
         };
 
+        // Meeting state file path (separate from push-to-talk state)
+        let meeting_state_file_path = if state_file_path.is_some() {
+            Some(Config::runtime_dir().join("meeting_state"))
+        } else {
+            None
+        };
+
         Self {
             config,
             config_path,
@@ -414,6 +551,14 @@ impl Daemon {
             transcription_task: None,
             eager_chunk_tasks: Vec::new(),
             vad,
+            meeting_daemon: None,
+            meeting_state_file_path,
+            meeting_audio_capture: None,
+            meeting_mic_buffer: Vec::new(),
+            meeting_loopback_buffer: Vec::new(),
+            meeting_event_rx: None,
+            #[cfg(feature = "onnx-common")]
+            speech_enhancer: None,
         }
     }
 
@@ -470,7 +615,11 @@ impl Daemon {
             // Use preloaded transcriber based on engine type
             match self.config.engine {
                 crate::config::TranscriptionEngine::Parakeet
-                | crate::config::TranscriptionEngine::Moonshine => {
+                | crate::config::TranscriptionEngine::Moonshine
+                | crate::config::TranscriptionEngine::SenseVoice
+                | crate::config::TranscriptionEngine::Paraformer
+                | crate::config::TranscriptionEngine::Dolphin
+                | crate::config::TranscriptionEngine::Omnilingual => {
                     if let Some(ref t) = transcriber_preloaded {
                         Ok(t.clone())
                     } else {
@@ -497,6 +646,223 @@ impl Daemon {
                 }
             }
         }
+    }
+
+    /// Update the meeting state file if configured
+    fn update_meeting_state(&self, state_name: &str, meeting_id: Option<&str>) {
+        if let Some(ref path) = self.meeting_state_file_path {
+            write_meeting_state_file(path, state_name, meeting_id);
+        }
+    }
+
+    /// Start a new meeting
+    async fn start_meeting(&mut self, title: Option<String>) -> Result<()> {
+        if self.meeting_daemon.is_some() {
+            tracing::warn!("Meeting already in progress");
+            return Ok(());
+        }
+
+        // Create meeting config from main config
+        let meeting_config = meeting::MeetingConfig {
+            enabled: self.config.meeting.enabled,
+            chunk_duration_secs: self.config.meeting.chunk_duration_secs,
+            storage: StorageConfig {
+                storage_path: if self.config.meeting.storage_path == "auto" {
+                    Config::data_dir().join("meetings")
+                } else {
+                    PathBuf::from(&self.config.meeting.storage_path)
+                },
+                retain_audio: self.config.meeting.retain_audio,
+                max_meetings: 0,
+            },
+            retain_audio: self.config.meeting.retain_audio,
+            max_duration_mins: self.config.meeting.max_duration_mins,
+        };
+
+        // Create event channel
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        self.meeting_event_rx = Some(rx);
+
+        // Create meeting daemon
+        match MeetingDaemon::new(meeting_config, &self.config, tx) {
+            Ok(mut daemon) => {
+                match daemon.start(title).await {
+                    Ok(meeting_id) => {
+                        let id_str = meeting_id.to_string();
+                        self.update_meeting_state("recording", Some(&id_str));
+                        tracing::info!("Meeting started: {}", meeting_id);
+
+                        // Start dual audio capture for meeting (mic + loopback)
+                        let loopback_device = match self.config.meeting.audio.loopback_device.as_str() {
+                            "disabled" | "" => None,
+                            other => Some(other),
+                        };
+                        match audio::DualCapture::new(&self.config.audio, loopback_device) {
+                            Ok(mut capture) => {
+                                if let Err(e) = capture.start().await {
+                                    tracing::error!("Failed to start meeting audio: {}", e);
+                                    let _ = daemon.stop().await;
+                                    return Err(crate::error::VoxtypeError::Audio(e));
+                                }
+                                if capture.has_loopback() {
+                                    tracing::info!("Dual audio capture: mic + loopback");
+                                } else {
+                                    tracing::info!("Single audio capture: mic only");
+                                }
+                                self.meeting_audio_capture = Some(capture);
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to create meeting audio capture: {}", e);
+                                let _ = daemon.stop().await;
+                                return Err(crate::error::VoxtypeError::Audio(e));
+                            }
+                        }
+
+                        // Load GTCRN speech enhancer for echo cancellation
+                        #[cfg(feature = "onnx-common")]
+                        if self.speech_enhancer.is_none()
+                            && self.config.meeting.audio.echo_cancel != "disabled"
+                        {
+                            let model_path = Config::models_dir().join("gtcrn_simple.onnx");
+                            if model_path.exists() {
+                                match audio::enhance::GtcrnEnhancer::load(&model_path) {
+                                    Ok(enhancer) => {
+                                        self.speech_enhancer = Some(std::sync::Arc::new(enhancer));
+                                        tracing::info!("GTCRN speech enhancer loaded for meeting echo cancellation");
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to load GTCRN enhancer, continuing without: {}", e);
+                                    }
+                                }
+                            } else {
+                                tracing::debug!("GTCRN model not found at {:?}, skipping speech enhancement", model_path);
+                            }
+                        }
+
+                        self.meeting_daemon = Some(daemon);
+                        self.meeting_mic_buffer.clear();
+                        self.meeting_loopback_buffer.clear();
+
+                        // Play feedback
+                        self.play_feedback(SoundEvent::RecordingStart);
+
+                        // Notification
+                        if self.config.output.notification.on_recording_start {
+                            send_notification(
+                                "Meeting Started",
+                                &format!("ID: {}", meeting_id),
+                                false,
+                                self.config.engine,
+                            )
+                            .await;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to start meeting: {}", e);
+                        return Err(e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to create meeting daemon: {}", e);
+                return Err(e);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Stop the current meeting
+    async fn stop_meeting(&mut self) -> Result<()> {
+        if let Some(mut daemon) = self.meeting_daemon.take() {
+            // Stop audio capture
+            if let Some(mut capture) = self.meeting_audio_capture.take() {
+                let _ = capture.stop().await;
+            }
+
+            match daemon.stop().await {
+                Ok(meeting_id) => {
+                    self.update_meeting_state("idle", None);
+                    tracing::info!("Meeting stopped: {}", meeting_id);
+
+                    self.play_feedback(SoundEvent::RecordingStop);
+
+                    if self.config.output.notification.on_recording_stop {
+                        send_notification(
+                            "Meeting Ended",
+                            &format!("ID: {}", meeting_id),
+                            false,
+                            self.config.engine,
+                        )
+                        .await;
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Error stopping meeting: {}", e);
+                }
+            }
+
+            self.meeting_mic_buffer.clear();
+            self.meeting_loopback_buffer.clear();
+            self.meeting_event_rx = None;
+        }
+
+        Ok(())
+    }
+
+    /// Pause the current meeting
+    async fn pause_meeting(&mut self) -> Result<()> {
+        if let Some(ref mut daemon) = self.meeting_daemon {
+            daemon.pause().await?;
+            let meeting_id = daemon.current_meeting_id().map(|id| id.to_string());
+            self.update_meeting_state("paused", meeting_id.as_deref());
+            tracing::info!("Meeting paused");
+
+            if self.config.output.notification.on_recording_stop {
+                send_notification(
+                    "Meeting Paused",
+                    "Recording paused",
+                    false,
+                    self.config.engine,
+                )
+                .await;
+            }
+        }
+        Ok(())
+    }
+
+    /// Resume the current meeting
+    async fn resume_meeting(&mut self) -> Result<()> {
+        if let Some(ref mut daemon) = self.meeting_daemon {
+            daemon.resume().await?;
+            let meeting_id = daemon.current_meeting_id().map(|id| id.to_string());
+            self.update_meeting_state("recording", meeting_id.as_deref());
+            tracing::info!("Meeting resumed");
+
+            if self.config.output.notification.on_recording_start {
+                send_notification(
+                    "Meeting Resumed",
+                    "Recording resumed",
+                    false,
+                    self.config.engine,
+                )
+                .await;
+            }
+        }
+        Ok(())
+    }
+
+    /// Check if a meeting is in progress
+    fn meeting_active(&self) -> bool {
+        self.meeting_daemon
+            .as_ref()
+            .is_some_and(|d| d.state().is_active())
+    }
+
+    /// Get the chunk duration for meeting mode
+    fn meeting_chunk_samples(&self) -> usize {
+        // 16kHz sample rate * chunk duration in seconds
+        16000 * self.config.meeting.chunk_duration_secs as usize
     }
 
     /// Reset state to idle and run post_output_command to reset compositor submap
@@ -791,23 +1157,23 @@ impl Daemon {
                     if let Some(t) = transcriber {
                         self.transcription_task =
                             Some(tokio::task::spawn_blocking(move || t.transcribe(&samples)));
-                        return true;
+                        true
                     } else {
                         tracing::error!("No transcriber available");
                         self.play_feedback(SoundEvent::Error);
                         self.reset_to_idle(state).await;
-                        return false;
+                        false
                     }
                 }
                 Err(e) => {
                     tracing::warn!("Recording error: {}", e);
                     self.reset_to_idle(state).await;
-                    return false;
+                    false
                 }
             }
         } else {
             self.reset_to_idle(state).await;
-            return false;
+            false
         }
     }
 
@@ -1012,6 +1378,12 @@ impl Daemon {
         // Clean up any stale cancel file from previous runs
         cleanup_cancel_file();
 
+        // Clean up any stale meeting command files
+        cleanup_meeting_files();
+
+        // Mark any orphaned active meetings as completed
+        cleanup_stale_meetings(&self.config);
+
         // Write PID file for external control via signals
         self.pid_file_path = write_pid_file();
 
@@ -1047,8 +1419,7 @@ impl Daemon {
                 return Err(crate::error::VoxtypeError::Config(format!(
                     "Another voxtype instance is already running (lock error: {:?})",
                     e
-                ))
-                .into());
+                )));
             }
         }
 
@@ -1102,7 +1473,11 @@ impl Daemon {
                     }
                 }
                 crate::config::TranscriptionEngine::Parakeet
-                | crate::config::TranscriptionEngine::Moonshine => {
+                | crate::config::TranscriptionEngine::Moonshine
+                | crate::config::TranscriptionEngine::SenseVoice
+                | crate::config::TranscriptionEngine::Paraformer
+                | crate::config::TranscriptionEngine::Dolphin
+                | crate::config::TranscriptionEngine::Omnilingual => {
                     // Parakeet/Moonshine uses its own model loading
                     transcriber_preloaded = Some(Arc::from(crate::transcribe::create_transcriber(
                         &self.config,
@@ -1193,7 +1568,11 @@ impl Daemon {
                                             }));
                                         }
                                         crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine => {
+                                        | crate::config::TranscriptionEngine::Moonshine
+                                        | crate::config::TranscriptionEngine::SenseVoice
+                | crate::config::TranscriptionEngine::Paraformer
+                | crate::config::TranscriptionEngine::Dolphin
+                | crate::config::TranscriptionEngine::Omnilingual => {
                                             let config = self.config.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                                 crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -1212,7 +1591,11 @@ impl Daemon {
                                             }
                                         }
                                         crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine => {
+                                        | crate::config::TranscriptionEngine::Moonshine
+                                        | crate::config::TranscriptionEngine::SenseVoice
+                | crate::config::TranscriptionEngine::Paraformer
+                | crate::config::TranscriptionEngine::Dolphin
+                | crate::config::TranscriptionEngine::Omnilingual => {
                                             if let Some(ref t) = transcriber_preloaded {
                                                 let transcriber = t.clone();
                                                 tokio::task::spawn_blocking(move || {
@@ -1368,7 +1751,11 @@ impl Daemon {
                                             }));
                                         }
                                         crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine => {
+                                        | crate::config::TranscriptionEngine::Moonshine
+                                        | crate::config::TranscriptionEngine::SenseVoice
+                | crate::config::TranscriptionEngine::Paraformer
+                | crate::config::TranscriptionEngine::Dolphin
+                | crate::config::TranscriptionEngine::Omnilingual => {
                                             let config = self.config.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                                 crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -1387,7 +1774,11 @@ impl Daemon {
                                             }
                                         }
                                         crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine => {
+                                        | crate::config::TranscriptionEngine::Moonshine
+                                        | crate::config::TranscriptionEngine::SenseVoice
+                | crate::config::TranscriptionEngine::Paraformer
+                | crate::config::TranscriptionEngine::Dolphin
+                | crate::config::TranscriptionEngine::Omnilingual => {
                                             if let Some(ref t) = transcriber_preloaded {
                                                 let transcriber = t.clone();
                                                 tokio::task::spawn_blocking(move || {
@@ -1698,7 +2089,11 @@ impl Daemon {
                                     }));
                                 }
                                 crate::config::TranscriptionEngine::Parakeet
-                                | crate::config::TranscriptionEngine::Moonshine => {
+                                | crate::config::TranscriptionEngine::Moonshine
+                                | crate::config::TranscriptionEngine::SenseVoice
+                | crate::config::TranscriptionEngine::Paraformer
+                | crate::config::TranscriptionEngine::Dolphin
+                | crate::config::TranscriptionEngine::Omnilingual => {
                                     let config = self.config.clone();
                                     self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                         crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -1716,7 +2111,11 @@ impl Daemon {
                                     }
                                 }
                                 crate::config::TranscriptionEngine::Parakeet
-                                | crate::config::TranscriptionEngine::Moonshine => {
+                                | crate::config::TranscriptionEngine::Moonshine
+                                | crate::config::TranscriptionEngine::SenseVoice
+                | crate::config::TranscriptionEngine::Paraformer
+                | crate::config::TranscriptionEngine::Dolphin
+                | crate::config::TranscriptionEngine::Omnilingual => {
                                     if let Some(ref t) = transcriber_preloaded {
                                         let transcriber = t.clone();
                                         tokio::task::spawn_blocking(move || {
@@ -1890,9 +2289,211 @@ impl Daemon {
                     // The check interval is 500ms, so we use a counter to approximate 60s
                     static EVICTION_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
                     let count = EVICTION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if count % 120 == 0 {  // 500ms * 120 = 60s
+                    if count.is_multiple_of(120) {  // 500ms * 120 = 60s
                         if let Some(ref mut mm) = self.model_manager {
                             mm.evict_idle_models();
+                        }
+                    }
+                }
+
+                // === MEETING MODE HANDLERS ===
+
+                // Poll for meeting commands (file-based IPC)
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    // Check for meeting start command
+                    if let Some(title) = check_meeting_start() {
+                        if self.config.meeting.enabled && self.meeting_daemon.is_none() {
+                            tracing::debug!("Meeting start requested via file trigger");
+                            if let Err(e) = self.start_meeting(title).await {
+                                tracing::error!("Failed to start meeting: {}", e);
+                            }
+                        } else if !self.config.meeting.enabled {
+                            tracing::warn!("Meeting mode is disabled in config");
+                        } else {
+                            tracing::warn!("Meeting already in progress");
+                        }
+                    }
+
+                    // Check for meeting stop command
+                    if check_meeting_stop()
+                        && self.meeting_daemon.is_some() {
+                            tracing::debug!("Meeting stop requested via file trigger");
+                            if let Err(e) = self.stop_meeting().await {
+                                tracing::error!("Failed to stop meeting: {}", e);
+                            }
+                        }
+
+                    // Check for meeting pause command
+                    if check_meeting_pause()
+                        && self.meeting_active() {
+                            tracing::debug!("Meeting pause requested via file trigger");
+                            if let Err(e) = self.pause_meeting().await {
+                                tracing::error!("Failed to pause meeting: {}", e);
+                            }
+                        }
+
+                    // Check for meeting resume command
+                    if check_meeting_resume()
+                        && self.meeting_daemon.as_ref().is_some_and(|d| d.state().is_paused()) {
+                            tracing::debug!("Meeting resume requested via file trigger");
+                            if let Err(e) = self.resume_meeting().await {
+                                tracing::error!("Failed to resume meeting: {}", e);
+                            }
+                        }
+                }
+
+                // Process meeting audio chunks
+                _ = tokio::time::sleep(Duration::from_millis(50)), if self.meeting_active() => {
+                    // Check for meeting stop/pause/resume while active
+                    // (the 100ms polling branch is starved by this faster 50ms branch)
+                    if check_meeting_stop() && self.meeting_daemon.is_some() {
+                        tracing::debug!("Meeting stop requested via file trigger");
+                        if let Err(e) = self.stop_meeting().await {
+                            tracing::error!("Failed to stop meeting: {}", e);
+                        }
+                        continue;
+                    }
+                    if check_meeting_pause() && self.meeting_active() {
+                        tracing::debug!("Meeting pause requested via file trigger");
+                        if let Err(e) = self.pause_meeting().await {
+                            tracing::error!("Failed to pause meeting: {}", e);
+                        }
+                        continue;
+                    }
+                    if check_meeting_resume()
+                        && self.meeting_daemon.as_ref().is_some_and(|d| d.state().is_paused())
+                    {
+                        tracing::debug!("Meeting resume requested via file trigger");
+                        if let Err(e) = self.resume_meeting().await {
+                            tracing::error!("Failed to resume meeting: {}", e);
+                        }
+                        continue;
+                    }
+
+                    // Get samples from dual audio capture
+                    if let Some(ref mut capture) = self.meeting_audio_capture {
+                        let dual_samples = capture.get_samples().await;
+                        self.meeting_mic_buffer.extend(dual_samples.mic);
+                        self.meeting_loopback_buffer.extend(dual_samples.loopback);
+
+                        // Check if mic buffer has enough samples for a chunk
+                        let chunk_samples = self.meeting_chunk_samples();
+                        if self.meeting_mic_buffer.len() >= chunk_samples {
+                            let mic_chunk: Vec<f32> = self.meeting_mic_buffer.drain(..chunk_samples).collect();
+
+                            // Also drain loopback buffer up to the same amount
+                            let loopback_len = self.meeting_loopback_buffer.len().min(chunk_samples);
+                            let loopback_chunk: Vec<f32> = self.meeting_loopback_buffer.drain(..loopback_len).collect();
+
+                            // Enhance mic audio with GTCRN if available (removes echo/noise)
+                            #[cfg(feature = "onnx-common")]
+                            let mic_chunk = if let Some(ref enhancer) = self.speech_enhancer {
+                                match enhancer.enhance(&mic_chunk) {
+                                    Ok(enhanced) => {
+                                        tracing::debug!("GTCRN enhanced mic chunk ({} samples)", enhanced.len());
+                                        enhanced
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("GTCRN enhancement failed, using raw mic: {}", e);
+                                        mic_chunk
+                                    }
+                                }
+                            } else {
+                                mic_chunk
+                            };
+
+                            if let Some(ref mut daemon) = self.meeting_daemon {
+                                // Process mic chunk
+                                let mut had_loopback = false;
+                                match daemon.process_chunk_with_source(mic_chunk, meeting::data::AudioSource::Microphone).await {
+                                    Ok(Some(segments)) => {
+                                        tracing::debug!("Processed mic chunk with {} segments", segments.len());
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => {
+                                        tracing::error!("Error processing mic chunk: {}", e);
+                                    }
+                                }
+
+                                // Process loopback chunk if non-empty
+                                if !loopback_chunk.is_empty() {
+                                    match daemon.process_chunk_with_source(loopback_chunk, meeting::data::AudioSource::Loopback).await {
+                                        Ok(Some(segments)) => {
+                                            tracing::debug!("Processed loopback chunk with {} segments", segments.len());
+                                            if !segments.is_empty() {
+                                                had_loopback = true;
+                                            }
+                                        }
+                                        Ok(None) => {}
+                                        Err(e) => {
+                                            tracing::error!("Error processing loopback chunk: {}", e);
+                                        }
+                                    }
+                                }
+
+                                // Dedup bleed-through: strip echoed phrases from mic segments
+                                if had_loopback {
+                                    if let Some(ref mut meeting) = daemon.current_meeting_mut() {
+                                        let removed = meeting.transcript.dedup_bleed_through();
+                                        if removed > 0 {
+                                            tracing::info!("Removed {} bleed-through word(s) via dedup", removed);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Check meeting timeout
+                    if self.config.meeting.max_duration_mins > 0 {
+                        if let Some(ref daemon) = self.meeting_daemon {
+                            if let Some(duration) = daemon.state().elapsed() {
+                                let max_duration = Duration::from_secs(
+                                    self.config.meeting.max_duration_mins as u64 * 60
+                                );
+                                if duration > max_duration {
+                                    tracing::warn!("Meeting timeout ({} min limit), stopping",
+                                        self.config.meeting.max_duration_mins);
+                                    if let Err(e) = self.stop_meeting().await {
+                                        tracing::error!("Failed to stop meeting after timeout: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Handle meeting events
+                event = async {
+                    match self.meeting_event_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                }, if self.meeting_event_rx.is_some() => {
+                    match event {
+                        Some(MeetingEvent::Started { meeting_id }) => {
+                            tracing::info!("Meeting event: started {}", meeting_id);
+                        }
+                        Some(MeetingEvent::ChunkProcessed { chunk_id, segments }) => {
+                            tracing::debug!("Meeting event: chunk {} processed with {} segments",
+                                chunk_id, segments.len());
+                        }
+                        Some(MeetingEvent::Paused) => {
+                            tracing::info!("Meeting event: paused");
+                        }
+                        Some(MeetingEvent::Resumed) => {
+                            tracing::info!("Meeting event: resumed");
+                        }
+                        Some(MeetingEvent::Stopped { meeting_id }) => {
+                            tracing::info!("Meeting event: stopped {}", meeting_id);
+                        }
+                        Some(MeetingEvent::Error(msg)) => {
+                            tracing::error!("Meeting error: {}", msg);
+                        }
+                        None => {
+                            // Channel closed
+                            tracing::debug!("Meeting event channel closed");
+                            self.meeting_event_rx = None;
                         }
                     }
                 }
@@ -1926,8 +2527,19 @@ impl Daemon {
             task.abort();
         }
 
+        // Stop any active meeting
+        if self.meeting_daemon.is_some() {
+            tracing::info!("Stopping active meeting on shutdown");
+            let _ = self.stop_meeting().await;
+        }
+
         // Remove state file on shutdown
         if let Some(ref path) = self.state_file_path {
+            cleanup_state_file(path);
+        }
+
+        // Remove meeting state file on shutdown
+        if let Some(ref path) = self.meeting_state_file_path {
             cleanup_state_file(path);
         }
 

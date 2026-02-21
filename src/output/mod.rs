@@ -75,7 +75,7 @@ pub fn is_parakeet_binary_active() -> bool {
     if let Ok(link_target) = fs::read_link(VOXTYPE_BIN) {
         if let Some(target_name) = link_target.file_name() {
             if let Some(name) = target_name.to_str() {
-                return name.contains("parakeet");
+                return name.contains("onnx") || name.contains("parakeet");
             }
         }
     }
@@ -91,12 +91,15 @@ pub fn is_parakeet_binary_active() -> bool {
 }
 
 /// Get the engine icon for notifications based on configured engine
-/// Returns 🦜 for Parakeet, 🗣️ for Whisper, 🌙 for Moonshine
 pub fn engine_icon(engine: crate::config::TranscriptionEngine) -> &'static str {
     match engine {
-        crate::config::TranscriptionEngine::Parakeet => "🦜",
-        crate::config::TranscriptionEngine::Whisper => "🗣️",
-        crate::config::TranscriptionEngine::Moonshine => "\u{1F319}",
+        crate::config::TranscriptionEngine::Parakeet => "\u{1F99C}",     // 🦜
+        crate::config::TranscriptionEngine::Whisper => "\u{1F5E3}\u{FE0F}", // 🗣️
+        crate::config::TranscriptionEngine::Moonshine => "\u{1F319}",    // 🌙
+        crate::config::TranscriptionEngine::SenseVoice => "\u{1F442}",   // 👂
+        crate::config::TranscriptionEngine::Paraformer => "\u{1F4AC}",   // 💬
+        crate::config::TranscriptionEngine::Dolphin => "\u{1F42C}",      // 🐬
+        crate::config::TranscriptionEngine::Omnilingual => "\u{1F30D}",  // 🌍
     }
 }
 

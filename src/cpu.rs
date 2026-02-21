@@ -36,7 +36,7 @@ pub fn install_sigill_handler() {
     }
 
     unsafe {
-        libc::signal(libc::SIGILL, sigill_handler as libc::sighandler_t);
+        libc::signal(libc::SIGILL, sigill_handler as *const () as libc::sighandler_t);
     }
 }
 

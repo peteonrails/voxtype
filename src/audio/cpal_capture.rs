@@ -16,6 +16,8 @@ use tokio::sync::{mpsc, oneshot};
 /// Commands sent to the audio capture thread
 enum CaptureCommand {
     Stop(oneshot::Sender<Vec<f32>>),
+    /// Get current samples and clear the buffer (for continuous recording)
+    GetSamples(oneshot::Sender<Vec<f32>>),
 }
 
 /// Parameters for building an audio input stream
@@ -238,19 +240,37 @@ impl AudioCapture for CpalCapture {
 
             tracing::debug!("Audio capture thread started");
 
-            // Wait for stop command
-            if let Ok(CaptureCommand::Stop(response_tx)) = cmd_rx.recv() {
-                // Stop the stream (drop it)
-                drop(stream);
+            // Handle commands in a loop
+            loop {
+                match cmd_rx.recv() {
+                    Ok(CaptureCommand::Stop(response_tx)) => {
+                        // Stop the stream (drop it)
+                        drop(stream);
 
-                // Get collected samples
-                let collected = {
-                    let guard = samples_clone.lock().unwrap();
-                    guard.clone()
-                };
+                        // Get collected samples
+                        let collected = {
+                            let guard = samples_clone.lock().unwrap();
+                            guard.clone()
+                        };
 
-                // Send samples back
-                let _ = response_tx.send(collected);
+                        // Send samples back
+                        let _ = response_tx.send(collected);
+                        break;
+                    }
+                    Ok(CaptureCommand::GetSamples(response_tx)) => {
+                        // Get and clear current samples (for continuous recording)
+                        let samples = {
+                            let mut guard = samples_clone.lock().unwrap();
+                            std::mem::take(&mut *guard)
+                        };
+                        let _ = response_tx.send(samples);
+                    }
+                    Err(_) => {
+                        // Channel closed, exit thread
+                        tracing::debug!("Command channel closed");
+                        break;
+                    }
+                }
             }
 
             tracing::debug!("Audio capture thread stopped");
@@ -300,6 +320,28 @@ impl AudioCapture for CpalCapture {
         }
 
         Ok(samples)
+    }
+
+    async fn get_samples(&mut self) -> Vec<f32> {
+        // Get current samples without stopping
+        if let Some(ref cmd_tx) = self.cmd_tx {
+            let (response_tx, response_rx) = oneshot::channel();
+
+            if cmd_tx.send(CaptureCommand::GetSamples(response_tx)).is_ok() {
+                // Wait for response (with short timeout)
+                match tokio::time::timeout(std::time::Duration::from_millis(500), response_rx).await
+                {
+                    Ok(Ok(samples)) => return samples,
+                    Ok(Err(_)) => {
+                        tracing::warn!("get_samples: channel closed");
+                    }
+                    Err(_) => {
+                        tracing::warn!("get_samples: timeout");
+                    }
+                }
+            }
+        }
+        Vec::new()
     }
 }
 

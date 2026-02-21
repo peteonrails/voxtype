@@ -67,9 +67,7 @@ pub fn show_status() {
     println!("VAD Model Status\n");
 
     if model_path.exists() {
-        let size = std::fs::metadata(&model_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let size = std::fs::metadata(&model_path).map(|m| m.len()).unwrap_or(0);
         print_success(&format!(
             "Silero VAD model installed: {:?} ({:.1} MB)",
             model_path,

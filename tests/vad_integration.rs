@@ -58,7 +58,10 @@ fn energy_vad_rejects_pure_silence() {
     let vad = energy_vad();
     let result = vad.detect(&samples).unwrap();
 
-    assert!(!result.has_speech, "Pure silence should not be detected as speech");
+    assert!(
+        !result.has_speech,
+        "Pure silence should not be detected as speech"
+    );
     assert_eq!(result.speech_duration_secs, 0.0);
     assert_eq!(result.speech_ratio, 0.0);
     // RMS may be slightly above 0 due to WAV quantization noise
@@ -71,7 +74,10 @@ fn energy_vad_rejects_short_silence() {
     let vad = energy_vad();
     let result = vad.detect(&samples).unwrap();
 
-    assert!(!result.has_speech, "Short silence should not be detected as speech");
+    assert!(
+        !result.has_speech,
+        "Short silence should not be detected as speech"
+    );
 }
 
 #[test]
@@ -80,7 +86,10 @@ fn energy_vad_rejects_low_noise() {
     let vad = energy_vad();
     let result = vad.detect(&samples).unwrap();
 
-    assert!(!result.has_speech, "Very low noise should not be detected as speech");
+    assert!(
+        !result.has_speech,
+        "Very low noise should not be detected as speech"
+    );
     assert!(result.rms_energy < 0.01, "RMS energy should be very low");
 }
 
@@ -95,8 +104,14 @@ fn energy_vad_accepts_tone() {
     let result = vad.detect(&samples).unwrap();
 
     // Energy VAD detects any audio with sufficient energy, not just speech
-    assert!(result.has_speech, "Loud tone should be detected as 'audio present'");
-    assert!(result.speech_ratio > 0.9, "Tone should fill most of the audio");
+    assert!(
+        result.has_speech,
+        "Loud tone should be detected as 'audio present'"
+    );
+    assert!(
+        result.speech_ratio > 0.9,
+        "Tone should fill most of the audio"
+    );
 }
 
 #[test]
@@ -107,8 +122,14 @@ fn energy_vad_accepts_white_noise() {
 
     // White noise has high energy, so Energy VAD will detect it
     assert!(result.has_speech, "Loud white noise should be detected");
-    assert!(result.speech_ratio > 0.9, "White noise should fill most of the audio");
-    assert!(result.rms_energy > 0.01, "White noise should have measurable energy");
+    assert!(
+        result.speech_ratio > 0.9,
+        "White noise should fill most of the audio"
+    );
+    assert!(
+        result.rms_energy > 0.01,
+        "White noise should have measurable energy"
+    );
 }
 
 #[test]
@@ -131,7 +152,10 @@ fn energy_vad_accepts_speech_hello() {
     let result = vad.detect(&samples).unwrap();
 
     assert!(result.has_speech, "Speech should be detected");
-    assert!(result.speech_ratio > 0.5, "Most of the clip should contain speech");
+    assert!(
+        result.speech_ratio > 0.5,
+        "Most of the clip should contain speech"
+    );
 }
 
 #[test]
@@ -141,7 +165,10 @@ fn energy_vad_accepts_speech_long() {
     let result = vad.detect(&samples).unwrap();
 
     assert!(result.has_speech, "Long speech should be detected");
-    assert!(result.speech_duration_secs > 1.0, "Should detect significant speech duration");
+    assert!(
+        result.speech_duration_secs > 1.0,
+        "Should detect significant speech duration"
+    );
 }
 
 #[test]
@@ -150,10 +177,19 @@ fn energy_vad_accepts_speech_padded() {
     let vad = energy_vad();
     let result = vad.detect(&samples).unwrap();
 
-    assert!(result.has_speech, "Speech with silence padding should still be detected");
+    assert!(
+        result.has_speech,
+        "Speech with silence padding should still be detected"
+    );
     // The speech ratio should be lower due to silence padding
-    assert!(result.speech_ratio < 0.8, "Speech ratio should reflect silence padding");
-    assert!(result.speech_ratio > 0.1, "But should still detect the speech portion");
+    assert!(
+        result.speech_ratio < 0.8,
+        "Speech ratio should reflect silence padding"
+    );
+    assert!(
+        result.speech_ratio > 0.1,
+        "But should still detect the speech portion"
+    );
 }
 
 #[test]
@@ -276,7 +312,10 @@ fn energy_vad_min_speech_duration_filtering() {
     let vad = EnergyVad::new(&config);
     let result = vad.detect(&samples).unwrap();
 
-    assert!(!result.has_speech, "Speech shorter than min_duration should be rejected");
+    assert!(
+        !result.has_speech,
+        "Speech shorter than min_duration should be rejected"
+    );
     // But speech_duration_secs should still report the actual detected duration
     assert!(result.speech_duration_secs > 0.0);
 }
@@ -340,7 +379,10 @@ fn whisper_vad_rejects_tone() {
     let result = vad.detect(&samples).unwrap();
 
     // Whisper VAD (Silero) is trained on speech, should reject pure tones
-    assert!(!result.has_speech, "Whisper VAD should reject non-speech tones");
+    assert!(
+        !result.has_speech,
+        "Whisper VAD should reject non-speech tones"
+    );
 }
 
 #[test]
@@ -354,7 +396,10 @@ fn whisper_vad_rejects_white_noise() {
     let result = vad.detect(&samples).unwrap();
 
     // Whisper VAD should reject white noise as non-speech
-    assert!(!result.has_speech, "Whisper VAD should reject white noise as non-speech");
+    assert!(
+        !result.has_speech,
+        "Whisper VAD should reject white noise as non-speech"
+    );
 }
 
 #[test]
@@ -368,7 +413,10 @@ fn whisper_vad_accepts_speech() {
     let result = vad.detect(&samples).unwrap();
 
     assert!(result.has_speech, "Whisper VAD should detect TTS speech");
-    assert!(result.speech_ratio > 0.5, "Most of the speech clip should be detected");
+    assert!(
+        result.speech_ratio > 0.5,
+        "Most of the speech clip should be detected"
+    );
 }
 
 #[test]
@@ -382,7 +430,10 @@ fn whisper_vad_accepts_long_speech() {
     let result = vad.detect(&samples).unwrap();
 
     assert!(result.has_speech, "Whisper VAD should detect longer speech");
-    assert!(result.speech_duration_secs > 1.0, "Should detect multiple seconds of speech");
+    assert!(
+        result.speech_duration_secs > 1.0,
+        "Should detect multiple seconds of speech"
+    );
 }
 
 #[test]
@@ -395,9 +446,15 @@ fn whisper_vad_handles_padded_speech() {
     let samples = load_wav("speech_padded.wav");
     let result = vad.detect(&samples).unwrap();
 
-    assert!(result.has_speech, "Whisper VAD should detect speech even with silence padding");
+    assert!(
+        result.has_speech,
+        "Whisper VAD should detect speech even with silence padding"
+    );
     // Speech ratio should be lower due to silence padding
-    assert!(result.speech_ratio < 0.7, "Should account for silence padding");
+    assert!(
+        result.speech_ratio < 0.7,
+        "Should account for silence padding"
+    );
 }
 
 // ============================================================================
@@ -418,7 +475,10 @@ fn compare_vad_backends_on_tone() {
     // If Whisper VAD is available, it should NOT detect tone as speech
     if let Some(whisper) = try_create_whisper_vad() {
         let whisper_result = whisper.detect(&samples).unwrap();
-        assert!(!whisper_result.has_speech, "Whisper VAD should not detect tone as speech");
+        assert!(
+            !whisper_result.has_speech,
+            "Whisper VAD should not detect tone as speech"
+        );
     }
 }
 
@@ -433,6 +493,9 @@ fn compare_vad_backends_on_speech() {
 
     if let Some(whisper) = try_create_whisper_vad() {
         let whisper_result = whisper.detect(&samples).unwrap();
-        assert!(whisper_result.has_speech, "Whisper VAD should detect speech");
+        assert!(
+            whisper_result.has_speech,
+            "Whisper VAD should detect speech"
+        );
     }
 }

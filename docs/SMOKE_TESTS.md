@@ -652,6 +652,94 @@ voxtype transcribe /path/to/audio.wav
 voxtype transcribe --model large-v3-turbo /path/to/audio.wav
 ```
 
+## Multi-Engine Transcription
+
+Tests each available transcription engine with a WAV file. Use `tests/fixtures/vad/speech_long.wav` (English) or `tests/fixtures/sensevoice/zh.wav` (Chinese) as test audio. Each engine must be compiled in (check `voxtype --version` or build features).
+
+### Engine Quick Test
+
+```bash
+# Test audio paths
+EN_AUDIO="tests/fixtures/vad/speech_long.wav"
+ZH_AUDIO="tests/fixtures/sensevoice/zh.wav"
+
+# Whisper (always available)
+voxtype transcribe --engine whisper "$EN_AUDIO"
+
+# Parakeet (requires --features parakeet)
+voxtype transcribe --engine parakeet "$EN_AUDIO"
+
+# Moonshine (requires --features moonshine)
+voxtype transcribe --engine moonshine "$EN_AUDIO"
+
+# SenseVoice (requires --features sensevoice)
+voxtype transcribe --engine sensevoice "$EN_AUDIO"
+voxtype transcribe --engine sensevoice "$ZH_AUDIO"
+
+# Paraformer (requires --features paraformer, English and Chinese models)
+voxtype transcribe --engine paraformer "$EN_AUDIO"
+
+# Dolphin (requires --features dolphin, Eastern languages only, no English)
+voxtype transcribe --engine dolphin "$ZH_AUDIO"
+
+# Omnilingual (requires --features omnilingual, 1600+ languages)
+voxtype transcribe --engine omnilingual "$EN_AUDIO"
+```
+
+### Engine Daemon Integration
+
+Test each engine running as the daemon's active engine:
+
+```bash
+# For each engine, update config.toml engine = "<name>" and restart:
+
+# SenseVoice
+# 1. Set engine = "sensevoice" in config.toml
+# 2. Restart daemon
+systemctl --user restart voxtype
+# 3. Verify model loads
+journalctl --user -u voxtype --since "10 seconds ago" | grep -iE "sensevoice|loading"
+# 4. Record and transcribe
+voxtype record start && sleep 3 && voxtype record stop
+# 5. Check logs for correct engine
+journalctl --user -u voxtype --since "30 seconds ago" | grep -i "transcri"
+
+# Repeat for: paraformer, dolphin, omnilingual, moonshine, parakeet
+# Then restore engine = "whisper" when done
+```
+
+### Engine Error Handling
+
+```bash
+# Request an engine that isn't compiled in (should give clear error)
+# e.g., if built without --features dolphin:
+voxtype transcribe --engine dolphin tests/fixtures/vad/speech_long.wav
+# Expected: error about Dolphin not being compiled in
+
+# Request unknown engine
+voxtype transcribe --engine nonexistent tests/fixtures/vad/speech_long.wav
+# Expected: error listing valid engine names
+
+# Engine with missing model
+# (temporarily rename model dir to simulate missing model)
+mv ~/.local/share/voxtype/models/sensevoice-small{,.bak}
+voxtype transcribe --engine sensevoice tests/fixtures/vad/speech_long.wav
+# Expected: clear error with "Run: voxtype setup model"
+mv ~/.local/share/voxtype/models/sensevoice-small{.bak,}
+```
+
+### Engine Performance Comparison
+
+```bash
+# Compare transcription speed across engines for the same audio file
+AUDIO="tests/fixtures/vad/speech_long.wav"
+
+for engine in whisper parakeet moonshine sensevoice paraformer omnilingual; do
+    echo -n "$engine: "
+    /usr/bin/time -f "%e seconds" voxtype transcribe --engine $engine "$AUDIO" 2>&1 | tail -1
+done
+```
+
 ## Multilingual Model Verification
 
 Tests that non-.en models load correctly and detect language:
@@ -708,13 +796,13 @@ ls -la /usr/bin/voxtype  # Should point to voxtype-vulkan
 sudo voxtype setup gpu --disable  # Switch to best CPU (avx512 or avx2)
 ls -la /usr/bin/voxtype  # Should point to voxtype-avx512 or voxtype-avx2
 
-# Parakeet mode (symlink points to voxtype-parakeet-*)
-# --enable switches to CUDA, --disable switches to best Parakeet CPU
-sudo ln -sf /usr/lib/voxtype/voxtype-parakeet-avx512 /usr/bin/voxtype
-sudo voxtype setup gpu --enable   # Switch to Parakeet CUDA
-ls -la /usr/bin/voxtype  # Should point to voxtype-parakeet-cuda
-sudo voxtype setup gpu --disable  # Switch to best Parakeet CPU
-ls -la /usr/bin/voxtype  # Should point to voxtype-parakeet-avx512
+# ONNX mode (symlink points to voxtype-onnx-*)
+# --enable switches to CUDA, --disable switches to best ONNX CPU
+sudo ln -sf /usr/lib/voxtype/voxtype-onnx-avx512 /usr/bin/voxtype
+sudo voxtype setup gpu --enable   # Switch to ONNX CUDA
+ls -la /usr/bin/voxtype  # Should point to voxtype-onnx-cuda
+sudo voxtype setup gpu --disable  # Switch to best ONNX CPU
+ls -la /usr/bin/voxtype  # Should point to voxtype-onnx-avx512
 
 # Restore to Whisper Vulkan for normal use
 sudo ln -sf /usr/lib/voxtype/voxtype-vulkan /usr/bin/voxtype
@@ -824,7 +912,7 @@ voxtype setup parakeet
 
 # Enable Parakeet (switches symlink to best parakeet binary)
 sudo voxtype setup parakeet --enable
-ls -la /usr/bin/voxtype  # Should point to voxtype-parakeet-cuda or voxtype-parakeet-avx*
+ls -la /usr/bin/voxtype  # Should point to voxtype-onnx-cuda or voxtype-onnx-avx*
 
 # Disable Parakeet (switches back to equivalent Whisper binary)
 sudo voxtype setup parakeet --disable
@@ -1025,4 +1113,299 @@ echo "Done."
 echo ""
 echo "Check logs:"
 journalctl --user -u voxtype --since "30 seconds ago" --no-pager | tail -10
+```
+
+## Meeting Mode
+
+Meeting mode provides continuous transcription with speaker attribution, export, and AI summarization. These tests cover the CLI commands and daemon integration.
+
+### Meeting Lifecycle
+
+```bash
+# Start a meeting
+voxtype meeting start --title "Test Meeting"
+# Expected: "Meeting started: <uuid>" in output
+
+# Check status
+voxtype meeting status
+# Expected: shows Active meeting with title, duration, chunk count
+
+# Pause the meeting
+voxtype meeting pause
+voxtype meeting status
+# Expected: shows Paused status
+
+# Resume the meeting
+voxtype meeting resume
+voxtype meeting status
+# Expected: shows Active status again
+
+# Stop the meeting
+voxtype meeting stop
+voxtype meeting status
+# Expected: shows Completed status or "No active meeting"
+
+# Verify in logs
+journalctl --user -u voxtype --since "2 minutes ago" | grep -i meeting
+```
+
+### Meeting List and Show
+
+```bash
+# List meetings (should include the one just created)
+voxtype meeting list
+# Expected: table with ID, title, date, duration, status
+
+# Show details of the most recent meeting
+voxtype meeting show latest
+# Expected: full metadata and transcript
+
+# Show by UUID (copy from list output)
+voxtype meeting show <uuid>
+```
+
+### Meeting Export
+
+```bash
+# Export as plain text
+voxtype meeting export latest --format text
+# Expected: plain text transcript output
+
+# Export as markdown
+voxtype meeting export latest --format markdown
+# Expected: markdown with headers and speaker labels
+
+# Export as JSON
+voxtype meeting export latest --format json
+# Expected: structured JSON with metadata and segments
+
+# Export to file
+voxtype meeting export latest --format markdown --output /tmp/meeting-export.md
+cat /tmp/meeting-export.md
+
+# Export with options
+voxtype meeting export latest --format text --timestamps --speakers
+```
+
+### Meeting Delete
+
+```bash
+# Delete a meeting (use UUID from list)
+voxtype meeting delete <uuid>
+# Expected: "Meeting deleted" confirmation
+
+# Verify deletion
+voxtype meeting list
+# Expected: deleted meeting no longer appears
+```
+
+### Speaker Labels
+
+```bash
+# Start a meeting and record some audio
+voxtype meeting start --title "Label Test"
+sleep 10
+voxtype meeting stop
+
+# Assign speaker labels
+voxtype meeting label latest SPEAKER_00 "Alice"
+voxtype meeting label latest SPEAKER_01 "Bob"
+
+# Verify labels appear in show output
+voxtype meeting show latest
+# Expected: speaker labels show as "Alice", "Bob" instead of SPEAKER_00/01
+
+# Verify labels persist in export
+voxtype meeting export latest --format text --speakers
+```
+
+### AI Summarization
+
+```bash
+# Requires: Ollama running locally, or a remote summarization endpoint configured
+
+# Summarize the latest meeting
+voxtype meeting summarize latest
+# Expected: summary with key points, action items, and decisions
+
+# Check logs for summarization
+journalctl --user -u voxtype --since "1 minute ago" | grep -i summar
+```
+
+### Meeting Without Title
+
+```bash
+# Start without a title (should auto-generate one from the date)
+voxtype meeting start
+sleep 5
+voxtype meeting stop
+
+# Verify auto-generated title in list
+voxtype meeting list
+# Expected: title like "Meeting 2026-02-16 14:30"
+```
+
+### Rapid Start/Stop
+
+```bash
+# Stress test: quick meeting cycles
+for i in {1..3}; do
+    echo "Meeting cycle $i..."
+    voxtype meeting start --title "Quick $i"
+    sleep 2
+    voxtype meeting stop
+done
+
+# Verify all meetings were saved
+voxtype meeting list
+# Expected: 3 new meetings in the list
+
+# Verify daemon is healthy
+voxtype status
+```
+
+### Meeting During Active Recording
+
+```bash
+# Verify meeting mode and push-to-talk don't conflict
+voxtype meeting start --title "Conflict Test"
+sleep 2
+
+# Try a push-to-talk recording while meeting is active
+voxtype record start
+sleep 2
+voxtype record stop
+# Expected: either clear error or both work independently
+
+voxtype meeting stop
+```
+
+### Meeting Config Validation
+
+```bash
+# Verify meeting config is shown
+voxtype config | grep -A20 "\[meeting\]"
+# Expected: meeting section with audio, storage, diarization settings
+
+# Test with custom chunk duration (edit config.toml):
+#    [meeting.audio]
+#    chunk_duration_secs = 15
+
+# Restart and verify
+systemctl --user restart voxtype
+voxtype meeting start --title "Custom Chunk"
+sleep 20
+voxtype meeting stop
+journalctl --user -u voxtype --since "1 minute ago" | grep -i chunk
+# Expected: chunks processed at 15-second intervals
+```
+
+### Storage Verification
+
+```bash
+# Check where meetings are stored
+ls ~/.local/share/voxtype/meetings/
+# Expected: directories named like "2026-02-16-test-meeting"
+
+# Verify SQLite index
+ls ~/.local/share/voxtype/meetings/index.db
+# Expected: file exists
+
+# Verify transcript files
+ls ~/.local/share/voxtype/meetings/*/transcript.json
+# Expected: JSON files for completed meetings
+
+# Verify metadata files
+cat ~/.local/share/voxtype/meetings/*/metadata.json | head -20
+# Expected: valid JSON with meeting metadata
+```
+
+### Error Handling
+
+```bash
+# Double-start (meeting already in progress)
+voxtype meeting start --title "First"
+voxtype meeting start --title "Second"
+# Expected: error "Meeting already in progress"
+voxtype meeting stop
+
+# Pause when no meeting active
+voxtype meeting pause
+# Expected: error "No active meeting to pause"
+
+# Resume when no meeting paused
+voxtype meeting resume
+# Expected: error "No paused meeting to resume"
+
+# Stop when no meeting active
+voxtype meeting stop
+# Expected: error "No meeting in progress"
+
+# Show nonexistent meeting
+voxtype meeting show 00000000-0000-0000-0000-000000000000
+# Expected: error "Meeting not found"
+
+# Export with invalid format
+voxtype meeting export latest --format invalid
+# Expected: error about unsupported format
+
+# Export with invalid meeting ID
+voxtype meeting export not-a-uuid --format text
+# Expected: error about invalid meeting ID
+
+# Label nonexistent meeting
+voxtype meeting label 00000000-0000-0000-0000-000000000000 SPEAKER_00 "Alice"
+# Expected: error "Meeting not found"
+```
+
+### Dual Audio Sources
+
+```bash
+# Verify loopback detection
+# 1. Configure loopback in config.toml:
+#    [meeting.audio]
+#    loopback_device = "auto"
+
+# 2. Start a meeting while in a video call (Zoom, Teams, etc.)
+voxtype meeting start --title "Video Call Test"
+
+# 3. Speak into mic and wait for remote participants to speak
+sleep 30
+voxtype meeting stop
+
+# 4. Check speaker attribution
+voxtype meeting show latest
+# Expected: segments attributed to "You" (mic) and "Remote" (loopback)
+
+# 5. Verify export includes speaker labels
+voxtype meeting export latest --format text --speakers
+# Expected: "You:" and "Remote:" labels in output
+
+# Disable loopback (mic-only mode)
+#    [meeting.audio]
+#    loopback_device = "disabled"
+systemctl --user restart voxtype
+voxtype meeting start --title "Mic Only Test"
+sleep 10
+voxtype meeting stop
+voxtype meeting show latest
+# Expected: all segments attributed to "You" or "Unknown"
+```
+
+### Diarization Backend Selection
+
+```bash
+# Simple diarization (default, source-based)
+voxtype config | grep -A5 "diarization"
+# Expected: backend = "simple"
+
+# ML diarization (requires ml-diarization feature)
+# 1. Configure in config.toml:
+#    [meeting.diarization]
+#    backend = "ml"
+#    max_speakers = 4
+# 2. Restart and verify
+systemctl --user restart voxtype
+journalctl --user -u voxtype --since "10 seconds ago" | grep -i diariz
+# Expected: "Using ML diarization" or "falling back to simple" if model missing
 ```

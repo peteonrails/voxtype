@@ -26,7 +26,7 @@ EXAMPLES:
   voxtype setup model      Interactive model selection (Whisper, Parakeet, or Moonshine)
   voxtype setup waybar     Show Waybar integration config
   voxtype setup gpu        Manage GPU acceleration (Vulkan/CUDA/ROCm)
-  voxtype setup parakeet   Switch between Whisper and Parakeet engines
+  voxtype setup onnx       Switch between Whisper and ONNX engines
   voxtype status --follow --format json   Waybar integration
 
 See 'voxtype <command> --help' for more info on a command.
@@ -77,7 +77,7 @@ pub struct Cli {
     #[arg(long, value_name = "PROMPT")]
     pub initial_prompt: Option<String>,
 
-    /// Override transcription engine: "whisper" (default), "parakeet", or "moonshine" (EXPERIMENTAL)
+    /// Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual
     #[arg(long, value_name = "ENGINE")]
     pub engine: Option<String>,
 
@@ -138,7 +138,7 @@ pub enum Commands {
         /// Path to audio file
         file: std::path::PathBuf,
 
-        /// Override transcription engine: "whisper", "parakeet", or "moonshine"
+        /// Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual
         #[arg(long, value_name = "ENGINE")]
         engine: Option<String>,
     },
@@ -214,6 +214,15 @@ pub enum Commands {
     Record {
         #[command(subcommand)]
         action: RecordAction,
+    },
+
+    /// Meeting transcription mode (Pro feature)
+    ///
+    /// Continuous meeting transcription with chunked processing,
+    /// speaker attribution, and export capabilities.
+    Meeting {
+        #[command(subcommand)]
+        action: MeetingAction,
     },
 }
 
@@ -300,6 +309,100 @@ pub enum RecordAction {
     },
     /// Cancel current recording or transcription (discard without output)
     Cancel,
+}
+
+/// Meeting mode actions
+#[derive(Subcommand)]
+pub enum MeetingAction {
+    /// Start a new meeting transcription
+    Start {
+        /// Meeting title (optional)
+        #[arg(long, short)]
+        title: Option<String>,
+    },
+    /// Stop the current meeting
+    Stop,
+    /// Pause the current meeting
+    Pause,
+    /// Resume a paused meeting
+    Resume,
+    /// Show meeting status
+    Status,
+    /// List past meetings
+    List {
+        /// Maximum number of meetings to show
+        #[arg(long, short, default_value = "10")]
+        limit: u32,
+    },
+    /// Export a meeting transcript
+    Export {
+        /// Meeting ID (or "latest" for most recent)
+        meeting_id: String,
+
+        /// Output format: text, markdown, json
+        #[arg(long, short, default_value = "markdown")]
+        format: String,
+
+        /// Output file path (default: stdout)
+        #[arg(long, short)]
+        output: Option<std::path::PathBuf>,
+
+        /// Include timestamps in output
+        #[arg(long)]
+        timestamps: bool,
+
+        /// Include speaker labels in output
+        #[arg(long)]
+        speakers: bool,
+
+        /// Include metadata header in output
+        #[arg(long)]
+        metadata: bool,
+    },
+    /// Show meeting details
+    Show {
+        /// Meeting ID (or "latest" for most recent)
+        meeting_id: String,
+    },
+    /// Delete a meeting
+    Delete {
+        /// Meeting ID
+        meeting_id: String,
+
+        /// Skip confirmation prompt
+        #[arg(long, short)]
+        force: bool,
+    },
+    /// Label a speaker in a meeting transcript
+    ///
+    /// Assigns a human-readable name to an auto-generated speaker ID.
+    /// Use with ML diarization to replace "SPEAKER_00" with "Alice".
+    Label {
+        /// Meeting ID (or "latest" for most recent)
+        meeting_id: String,
+
+        /// Speaker ID to label (e.g., "SPEAKER_00" or just "0")
+        speaker_id: String,
+
+        /// Human-readable label to assign
+        label: String,
+    },
+    /// Generate an AI summary of a meeting
+    ///
+    /// Uses Ollama or a remote API to generate a summary with
+    /// key points, action items, and decisions.
+    Summarize {
+        /// Meeting ID (or "latest" for most recent)
+        meeting_id: String,
+
+        /// Output format: text, json, or markdown
+        #[arg(long, short, default_value = "markdown")]
+        format: String,
+
+        /// Output file path (default: stdout)
+        #[arg(long, short)]
+        output: Option<std::path::PathBuf>,
+    },
 }
 
 impl RecordAction {
@@ -454,17 +557,30 @@ pub enum SetupAction {
         status: bool,
     },
 
-    /// Switch between Whisper and Parakeet transcription engines
-    Parakeet {
-        /// Enable Parakeet engine (switch to Parakeet binary)
+    /// Switch between Whisper and ONNX transcription engines
+    Onnx {
+        /// Enable ONNX engine (switch to ONNX binary)
         #[arg(long)]
         enable: bool,
 
-        /// Disable Parakeet engine (switch back to Whisper binary)
+        /// Disable ONNX engine (switch back to Whisper binary)
         #[arg(long)]
         disable: bool,
 
-        /// Show current Parakeet backend status
+        /// Show current ONNX backend status
+        #[arg(long)]
+        status: bool,
+    },
+
+    /// Hidden alias for 'onnx' (backwards compatibility)
+    #[command(hide = true)]
+    Parakeet {
+        #[arg(long)]
+        enable: bool,
+
+        #[arg(long)]
+        disable: bool,
+
         #[arg(long)]
         status: bool,
     },

@@ -333,6 +333,7 @@ Based on open issues and project direction:
 
 **Near Term:**
 - **Deterministic integration tests** - Automated smoke tests using pre-recorded audio files that can run in CI without LLM/human interaction
+- **Meeting echo cancellation edge trimming** - Remove residual bleed-through words at segment boundaries when loopback audio is active. GTCRN handles the bulk of echo removal, but 1-2 stray words can appear at the start/end of mic segments where the STFT window crosses a chunk boundary.
 
 **Medium Term:**
 - **Audio caching** ([#28](https://github.com/peteonrails/voxtype/issues/28)) - Save recordings for replay/re-transcription
@@ -413,25 +414,30 @@ error: the lock file Cargo.lock needs to be updated but --locked was passed to p
 
 Building on modern CPUs (Zen 4, etc.) can leak AVX-512/GFNI instructions into binaries via system libstdc++, even with RUSTFLAGS set correctly. This causes SIGILL crashes on older CPUs (Zen 3, Haswell). Docker with Ubuntu 22.04 provides a clean toolchain without AVX-512 optimizations.
 
+Building on hosts with newer glibc (e.g. 2.43 on CachyOS/Arch) can produce binaries that won't run on distros with older glibc. Docker containers cap the glibc requirement at the container's version (Ubuntu 22.04 = 2.35, Ubuntu 24.04 = 2.39). **All release binaries must be built inside Docker containers** to ensure compatibility.
+
 ### Build Strategy
+
+**CRITICAL: Every binary must be built in Docker.** Never build release binaries directly on the host, even for AVX-512 or ROCm builds that require specific hardware. Run Docker locally on the machine with the required hardware instead.
 
 **Whisper Binaries:**
 
-| Binary | Build Location | Why |
-|--------|---------------|-----|
-| AVX2 | Docker on remote pre-AVX-512 server | Clean toolchain, no AVX-512 contamination |
-| Vulkan | Docker on remote pre-AVX-512 server | GPU build on CPU without AVX-512 |
-| AVX512 | Local machine | Requires AVX-512 capable host |
+| Binary | Dockerfile | Docker Context | Base Image | Max glibc |
+|--------|-----------|----------------|------------|-----------|
+| AVX2 | `Dockerfile.build` | Remote (pre-AVX-512) | Ubuntu 22.04 | 2.35 |
+| Vulkan | `Dockerfile.vulkan` | Remote (pre-AVX-512) | Ubuntu 24.04 | 2.39 |
+| AVX-512 | `Dockerfile.avx512` | Local (AVX-512 host) | Ubuntu 22.04 | 2.35 |
 
-**Parakeet Binaries (Experimental):**
+**ONNX Binaries (all ONNX engines: Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual):**
 
-| Binary | Build Location | Why |
-|--------|---------------|-----|
-| parakeet-avx2 | Docker on remote pre-AVX-512 server | Wide CPU compatibility |
-| parakeet-avx512 | Local machine | Best CPU performance |
-| parakeet-cuda | Docker on remote server with NVIDIA GPU | GPU acceleration |
+| Binary | Dockerfile | Docker Context | Base Image | Max glibc |
+|--------|-----------|----------------|------------|-----------|
+| onnx-avx2 | `Dockerfile.onnx` | Remote (pre-AVX-512) | Ubuntu 24.04 | 2.39 |
+| onnx-avx512 | `Dockerfile.onnx-avx512` | Local (AVX-512 host) | Ubuntu 24.04 | 2.39 |
+| onnx-cuda | `Dockerfile.onnx-cuda` | Remote (NVIDIA GPU) | Ubuntu 24.04 | 2.39 |
+| onnx-rocm | `Dockerfile.onnx-rocm` | Local (AMD GPU host) | Ubuntu 24.04 | 2.39 |
 
-Note: Parakeet binaries include bundled ONNX Runtime which contains AVX-512 instructions, but ONNX Runtime uses runtime CPU detection and falls back gracefully on older CPUs.
+Note: ONNX binaries include bundled ONNX Runtime which contains AVX-512 instructions, but ONNX Runtime uses runtime CPU detection and falls back gracefully on older CPUs.
 
 ### GPU Feature Flags
 
@@ -482,14 +488,14 @@ Docker caches build layers aggressively. Without `--no-cache`, you may upload bi
 # Set version
 export VERSION=0.5.0
 
-# 1. Build Whisper binaries (AVX2 + Vulkan) on remote server
+# 1. Build Whisper + ONNX binaries on remote server (no AVX-512 contamination)
 docker context use <your-remote-context>
-docker compose -f docker-compose.build.yml build --no-cache avx2 vulkan
-docker compose -f docker-compose.build.yml up avx2 vulkan
+docker compose -f docker-compose.build.yml build --no-cache avx2 vulkan onnx-avx2
+docker compose -f docker-compose.build.yml up avx2 vulkan onnx-avx2
 
-# 2. Build Parakeet binaries on remote server
-docker compose -f docker-compose.build.yml build --no-cache parakeet-avx2
-docker compose -f docker-compose.build.yml up parakeet-avx2
+# 2. Build ONNX CUDA on remote server (has NVIDIA GPU)
+docker compose -f docker-compose.build.yml build --no-cache onnx-cuda
+docker compose -f docker-compose.build.yml up onnx-cuda
 
 # 3. Copy binaries from remote Docker volumes to local
 mkdir -p releases/${VERSION}
@@ -497,23 +503,23 @@ docker run --rm -v $(pwd)/releases/${VERSION}:/test ubuntu:24.04 ls /test  # ver
 # Use tar pipe to copy from remote Docker volume:
 docker run --rm -v $(pwd)/releases/${VERSION}:/src ubuntu:24.04 tar -cf - -C /src . | tar -xf - -C releases/${VERSION}/
 
-# 4. Build AVX-512 binaries locally (requires AVX-512 capable CPU)
-docker context use default
+# 4. Build AVX-512 + ROCm binaries locally IN DOCKER (caps glibc at container version)
+docker context use <your-local-context>
 
-# Whisper AVX-512
-cargo clean && cargo build --release
-cp target/release/voxtype releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx512
+# Whisper AVX-512 + ONNX AVX-512 (requires AVX-512 capable host)
+docker compose -f docker-compose.build.yml --profile avx512 build --no-cache avx512 onnx-avx512
+docker compose -f docker-compose.build.yml --profile avx512 up avx512 onnx-avx512
 
-# Parakeet AVX-512
-cargo clean && RUSTFLAGS="-C target-cpu=native" cargo build --release --features parakeet
-cp target/release/voxtype releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-parakeet-avx512
+# ONNX ROCm (requires AMD GPU host)
+docker compose -f docker-compose.build.yml build --no-cache onnx-rocm
+docker compose -f docker-compose.build.yml up onnx-rocm
 
 # 5. VERIFY VERSIONS before uploading (critical!)
 for bin in releases/${VERSION}/voxtype-*; do
   echo -n "$(basename $bin): "; $bin --version
 done
 
-# 6. Validate instruction sets and package
+# 6. Validate glibc, instruction sets, and package
 ./scripts/package.sh --skip-build ${VERSION}
 ```
 
@@ -527,9 +533,11 @@ releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx2 --version
 releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx512 --version
 releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-vulkan --version
 
-# Parakeet binaries (experimental)
-releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-parakeet-avx2 --version
-releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-parakeet-avx512 --version
+# ONNX binaries
+releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-onnx-avx2 --version
+releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-onnx-avx512 --version
+releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-onnx-cuda --version
+releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-onnx-rocm --version
 ```
 
 If versions don't match, the Docker cache is stale. Rebuild with `--no-cache`.
@@ -556,15 +564,46 @@ What to look for:
 - `{1to4}`, `{1to8}`, `{1to16}` = AVX-512 broadcast syntax
 - `vgf2p8`, `gf2p8` = GFNI instructions (not on Zen 3)
 
-### Parakeet Binary Instruction Leakage
+### Validating glibc Compatibility
 
-**IMPORTANT: Parakeet binaries also need AVX-512 instruction checks**, even when built on pre-AVX-512 hardware.
+**CRITICAL: All release binaries must be checked for glibc version requirements.**
+
+Building outside Docker (directly on the host) can silently link against the host's glibc, producing binaries that won't run on distros with older glibc. This caused the v0.6.0 incident where binaries built on CachyOS (glibc 2.43) failed on Omarchy/Arch (glibc 2.41) with:
+```
+/usr/bin/voxtype: /usr/lib/libm.so.6: version `GLIBC_2.43' not found
+```
+
+```bash
+# Check max glibc requirement for each binary
+for bin in releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-*; do
+  max_glibc=$(objdump -T "$bin" 2>/dev/null | grep -oP 'GLIBC_\d+\.\d+' | sort -t. -k2 -n -u | tail -1)
+  echo "$(basename $bin): $max_glibc"
+done
+```
+
+**Acceptable glibc versions:**
+
+| Binary | Base Image | Max Allowed glibc |
+|--------|-----------|-------------------|
+| avx2 | Ubuntu 22.04 | 2.35 |
+| avx512 | Ubuntu 22.04 | 2.35 |
+| vulkan | Ubuntu 24.04 | 2.39 |
+| onnx-avx2 | Ubuntu 24.04 | 2.39 |
+| onnx-avx512 | Ubuntu 24.04 | 2.39 |
+| onnx-cuda | Ubuntu 24.04 | 2.39 |
+| onnx-rocm | Ubuntu 24.04 | 2.39 |
+
+If any binary exceeds its expected glibc version, it was likely built outside Docker. Rebuild it in the appropriate Docker container.
+
+### ONNX Binary Instruction Leakage
+
+**IMPORTANT: ONNX binaries also need AVX-512 instruction checks**, even when built on pre-AVX-512 hardware.
 
 The `ort` crate downloads prebuilt ONNX Runtime binaries that may contain AVX-512 instructions regardless of the build host's CPU. This is different from Whisper builds where the leakage comes from system libraries.
 
 ```bash
-# Check Parakeet binaries for AVX-512 leakage
-objdump -d voxtype-*-parakeet-avx2 | grep -c zmm
+# Check ONNX binaries for AVX-512 leakage
+objdump -d voxtype-*-onnx-avx2 | grep -c zmm
 # If >0, the ONNX Runtime contains AVX-512 instructions
 ```
 
@@ -573,7 +612,7 @@ objdump -d voxtype-*-parakeet-avx2 | grep -c zmm
 2. **Build ONNX Runtime from source** - Use `ORT_STRATEGY=build` to compile ONNX Runtime with specific CPU flags (significantly increases build time)
 3. **Use `load-dynamic` feature** - Link against system ONNX Runtime instead of bundled (requires users to install ONNX Runtime separately)
 
-For now, Parakeet binaries may contain AVX-512 instructions from ONNX Runtime but should still run on pre-AVX-512 CPUs via runtime fallback. Test on target hardware to verify.
+For now, ONNX binaries may contain AVX-512 instructions from ONNX Runtime but should still run on pre-AVX-512 CPUs via runtime fallback. Test on target hardware to verify.
 
 ### Packaging Deb and RPM
 

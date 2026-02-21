@@ -460,16 +460,22 @@ pub async fn run_setup(
 
     let models_dir = Config::models_dir();
 
-    // Check if model_override is a Parakeet model
+    // Check if model_override is a Parakeet or SenseVoice model
     let is_parakeet = model_override
-        .map(|name| model::is_parakeet_model(name))
+        .map(model::is_parakeet_model)
+        .unwrap_or(false);
+    let is_sensevoice = model_override
+        .map(model::is_sensevoice_model)
         .unwrap_or(false);
 
     // Use model_override if provided, otherwise use config default (for Whisper)
-    let model_name: &str = match model_override {
+    let _model_name: &str = match model_override {
         Some(name) => {
-            // Validate the model name (check both Whisper and Parakeet)
-            if !model::is_valid_model(name) && !model::is_parakeet_model(name) {
+            // Validate the model name (check Whisper, Parakeet, and SenseVoice)
+            if !model::is_valid_model(name)
+                && !model::is_parakeet_model(name)
+                && !model::is_sensevoice_model(name)
+            {
                 let valid = model::valid_model_names().join(", ");
                 anyhow::bail!("Unknown model '{}'. Valid models are: {}", name, valid);
             }
@@ -478,7 +484,56 @@ pub async fn run_setup(
         None => &config.whisper.model,
     };
 
-    if is_parakeet {
+    if is_sensevoice {
+        // Handle SenseVoice model
+        #[allow(unused_variables)]
+        let model_name = model_override.unwrap(); // Safe: is_sensevoice implies Some
+
+        if !quiet {
+            println!("\nSenseVoice model...");
+        }
+
+        #[cfg(not(feature = "sensevoice"))]
+        {
+            print_failure(&format!(
+                "SenseVoice model '{}' requires the 'sensevoice' feature",
+                model_name
+            ));
+            println!("       Rebuild with: cargo build --features sensevoice");
+            anyhow::bail!("SenseVoice feature not enabled");
+        }
+
+        #[cfg(feature = "sensevoice")]
+        {
+            let dir_name = model::sensevoice_dir_name(model_name).unwrap();
+            let model_path = models_dir.join(dir_name);
+            let model_valid =
+                model_path.exists() && model::validate_sensevoice_model(&model_path).is_ok();
+
+            if model_valid {
+                if !quiet {
+                    let size = std::fs::read_dir(&model_path)
+                        .map(|entries| {
+                            entries
+                                .flatten()
+                                .filter_map(|e| e.metadata().ok())
+                                .map(|m| m.len() as f64 / 1024.0 / 1024.0)
+                                .sum::<f64>()
+                        })
+                        .unwrap_or(0.0);
+                    print_success(&format!("Model ready: {} ({:.0} MB)", model_name, size));
+                }
+            } else if download {
+                model::download_sensevoice_model(model_name)?;
+            } else if !quiet {
+                print_info(&format!("Model '{}' not downloaded yet", model_name));
+                println!(
+                    "       Run: voxtype setup --download --model {}",
+                    model_name
+                );
+            }
+        }
+    } else if is_parakeet {
         // Handle Parakeet model
         #[allow(unused_variables)]
         let model_name = model_override.unwrap(); // Safe: is_parakeet implies Some

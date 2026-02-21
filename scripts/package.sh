@@ -386,22 +386,22 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
     chmod 755 "$STAGING/usr/lib/voxtype/voxtype-avx512"
     chmod 755 "$STAGING/usr/lib/voxtype/voxtype-vulkan"
 
-    # x86_64: Parakeet binaries (ONNX-based alternative engine)
-    if [[ -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-parakeet-avx2" ]]; then
-        cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-parakeet-avx2" "$STAGING/usr/lib/voxtype/voxtype-parakeet-avx2"
-        chmod 755 "$STAGING/usr/lib/voxtype/voxtype-parakeet-avx2"
+    # x86_64: ONNX binaries (Parakeet + Moonshine engines via ONNX Runtime)
+    if [[ -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-onnx-avx2" ]]; then
+        cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-onnx-avx2" "$STAGING/usr/lib/voxtype/voxtype-onnx-avx2"
+        chmod 755 "$STAGING/usr/lib/voxtype/voxtype-onnx-avx2"
     fi
-    if [[ -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-parakeet-avx512" ]]; then
-        cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-parakeet-avx512" "$STAGING/usr/lib/voxtype/voxtype-parakeet-avx512"
-        chmod 755 "$STAGING/usr/lib/voxtype/voxtype-parakeet-avx512"
+    if [[ -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-onnx-avx512" ]]; then
+        cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-onnx-avx512" "$STAGING/usr/lib/voxtype/voxtype-onnx-avx512"
+        chmod 755 "$STAGING/usr/lib/voxtype/voxtype-onnx-avx512"
     fi
-    if [[ -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-parakeet-cuda" ]]; then
-        cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-parakeet-cuda" "$STAGING/usr/lib/voxtype/voxtype-parakeet-cuda"
-        chmod 755 "$STAGING/usr/lib/voxtype/voxtype-parakeet-cuda"
+    if [[ -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-onnx-cuda" ]]; then
+        cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-onnx-cuda" "$STAGING/usr/lib/voxtype/voxtype-onnx-cuda"
+        chmod 755 "$STAGING/usr/lib/voxtype/voxtype-onnx-cuda"
     fi
-    if [[ -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-parakeet-rocm" ]]; then
-        cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-parakeet-rocm" "$STAGING/usr/lib/voxtype/voxtype-parakeet-rocm"
-        chmod 755 "$STAGING/usr/lib/voxtype/voxtype-parakeet-rocm"
+    if [[ -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-onnx-rocm" ]]; then
+        cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-onnx-rocm" "$STAGING/usr/lib/voxtype/voxtype-onnx-rocm"
+        chmod 755 "$STAGING/usr/lib/voxtype/voxtype-onnx-rocm"
     fi
 
     # Install wrapper script as /usr/bin/voxtype

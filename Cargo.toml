@@ -3,7 +3,7 @@ members = ["xtask"]
 
 [package]
 name = "voxtype"
-version = "0.5.6"
+version = "0.6.2"
 edition = "2021"
 authors = ["Peter Jackson", "Jean-Paul van Tillo", "Máté Rémiás", "Rob Zolkos", "Dan Heuckeroth", "Igor Warzocha", "Julian Kaiser", "Kevin Miller", "konnsim", "reisset", "Zubair", "Loki Coyote", "Umesh", "Barrett Ruth", "André Silva", "Chmouel Boudjnah", "Christopher Albert", "Phuoc Thinh Vu", "Alexander Bosu-Kellett", "ayoahha", "Toizi", "kakapt"]
 description = "Push-to-talk voice-to-text for Wayland"
@@ -69,10 +69,11 @@ whisper-rs = "0.15.1"
 # Parakeet speech-to-text (optional, ONNX-based)
 parakeet-rs = { version = "0.3", optional = true }
 
-# Moonshine speech-to-text (optional, ONNX-based encoder-decoder ASR)
+# ONNX-based ASR engines (Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual)
 ort = { version = "2.0.0-rc.11", optional = true }
 ndarray = { version = "0.16", optional = true }
 tokenizers = { version = "0.20", optional = true, default-features = false, features = ["onig"] }
+rustfft = { version = "6", optional = true }
 
 # CPU count for thread detection
 num_cpus = "1.16"
@@ -83,12 +84,19 @@ notify = "6"
 # Single instance check
 pidlock = "0.1"
 
+# Meeting mode (Pro feature)
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+
 [features]
 default = []
 gpu-vulkan = ["whisper-rs/vulkan"]
 gpu-cuda = ["whisper-rs/cuda"]
 gpu-metal = ["whisper-rs/metal"]
 gpu-hipblas = ["whisper-rs/hipblas"]
+# ML-based speaker diarization (uses ONNX for embedding extraction)
+ml-diarization = ["dep:ort", "dep:ndarray"]
 # Parakeet backend (ONNX-based, alternative to Whisper)
 parakeet = ["dep:parakeet-rs"]
 parakeet-cuda = ["parakeet", "parakeet-rs/cuda"]
@@ -96,10 +104,28 @@ parakeet-tensorrt = ["parakeet", "parakeet-rs/tensorrt"]
 parakeet-rocm = ["parakeet", "parakeet-rs/rocm"]
 # Dynamic loading for system ONNX Runtime (used by Nix builds)
 parakeet-load-dynamic = ["parakeet", "parakeet-rs/load-dynamic"]
+# Shared ONNX dependencies for engines using fbank/CTC preprocessing
+onnx-common = ["dep:ort", "dep:ndarray", "dep:rustfft"]
 # Moonshine backend (ONNX-based, encoder-decoder ASR)
-moonshine = ["dep:ort", "dep:ndarray", "dep:tokenizers"]
+moonshine = ["onnx-common", "dep:tokenizers"]
 moonshine-cuda = ["moonshine", "ort/cuda"]
 moonshine-tensorrt = ["moonshine", "ort/tensorrt"]
+# SenseVoice backend (ONNX-based, CTC encoder-only ASR)
+sensevoice = ["onnx-common"]
+sensevoice-cuda = ["sensevoice", "ort/cuda"]
+sensevoice-tensorrt = ["sensevoice", "ort/tensorrt"]
+# Paraformer backend (FunASR ONNX-based CTC encoder)
+paraformer = ["onnx-common"]
+paraformer-cuda = ["paraformer", "ort/cuda"]
+paraformer-tensorrt = ["paraformer", "ort/tensorrt"]
+# Dolphin backend (ONNX-based CTC encoder, dictation-optimized)
+dolphin = ["onnx-common"]
+dolphin-cuda = ["dolphin", "ort/cuda"]
+dolphin-tensorrt = ["dolphin", "ort/tensorrt"]
+# Omnilingual backend (FunASR ONNX-based, 50+ languages)
+omnilingual = ["onnx-common"]
+omnilingual-cuda = ["omnilingual", "ort/cuda"]
+omnilingual-tensorrt = ["omnilingual", "ort/tensorrt"]
 
 [build-dependencies]
 clap = { version = "4", features = ["derive"] }

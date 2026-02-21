@@ -175,7 +175,7 @@ impl SubprocessTranscriber {
         let samples_bytes = unsafe {
             std::slice::from_raw_parts(
                 samples.as_ptr() as *const u8,
-                samples.len() * std::mem::size_of::<f32>(),
+                std::mem::size_of_val(samples),
             )
         };
         stdin.write_all(samples_bytes).map_err(|e| {

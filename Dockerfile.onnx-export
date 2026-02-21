@@ -1,0 +1,56 @@
+# ONNX export environment for NeMo Parakeet models
+#
+# Exports NeMo Parakeet models to ONNX format compatible with parakeet-rs.
+# Uses NVIDIA CUDA base image for GPU-accelerated export (falls back to CPU).
+#
+# Supported models:
+#   - nvidia/parakeet-tdt_ctc-0.6b-ja (Japanese, TDT architecture)
+#   - nvidia/parakeet-ctc-0.6b-Vietnamese (Vietnamese, CTC architecture)
+#
+# Usage:
+#   docker build -f Dockerfile.onnx-export -t voxtype-onnx-export .
+#   docker run --gpus all -v ./models/parakeet-onnx:/output voxtype-onnx-export
+#   docker run --gpus all -v ./models/parakeet-onnx:/output voxtype-onnx-export --model ja
+#
+# Output structure:
+#   /output/parakeet-tdt-0.6b-ja/    (TDT: encoder-model.onnx + decoder_joint-model.onnx + vocab.txt)
+#   /output/parakeet-ctc-0.6b-vi/    (CTC: model.onnx + model.onnx_data + tokenizer.json)
+#
+FROM nvidia/cuda:12.6.1-cudnn-devel-ubuntu24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies
+# - Python 3 + pip for NeMo/PyTorch
+# - libsndfile + ffmpeg for NeMo audio processing
+# - git for HuggingFace model downloads
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    python3-venv \
+    libsndfile1 \
+    ffmpeg \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /export
+
+# Install Python dependencies
+# Pin PyTorch to 2.8.x to avoid NeMo bug with 2.9+ dynamic_shapes vs dynamic_axes
+# Pin NeMo to 2.x (latest stable)
+# Install ONNX for external data conversion
+RUN pip3 install --break-system-packages \
+    "torch>=2.8.0,<2.9.0" \
+    "nemo_toolkit[asr]>=2.0.0,<3.0.0" \
+    "onnx>=1.16.0" \
+    "onnxruntime>=1.18.0"
+
+# Copy export script
+COPY scripts/export-parakeet-onnx.py /export/export-parakeet-onnx.py
+
+# HuggingFace cache goes inside the container (not persisted)
+ENV HF_HOME=/tmp/hf_cache
+ENV TRANSFORMERS_CACHE=/tmp/hf_cache
+
+ENTRYPOINT ["python3", "/export/export-parakeet-onnx.py"]
+CMD ["--output", "/output"]

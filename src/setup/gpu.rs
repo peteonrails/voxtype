@@ -4,7 +4,7 @@
 //! 1. Tiered mode (DEB/RPM pre-built): Multiple CPU binaries (avx2, avx512) + vulkan in /usr/lib/voxtype/
 //! 2. Simple mode (AUR source build): Native CPU binary at /usr/bin/voxtype + vulkan in /usr/lib/voxtype/
 //!
-//! Engine-aware: In Parakeet mode, switches between parakeet-cuda and parakeet-avx*.
+//! Engine-aware: In ONNX mode, switches between onnx-cuda and onnx-avx*.
 //! In Whisper mode, switches between vulkan and avx*.
 //!
 //! GPU Selection:
@@ -50,7 +50,7 @@ fn is_parakeet_binary_active() -> bool {
     if let Ok(resolved) = fs::canonicalize(active_bin) {
         if let Some(target_name) = resolved.file_name() {
             if let Some(name) = target_name.to_str() {
-                return name.contains("parakeet");
+                return name.contains("onnx") || name.contains("parakeet");
             }
         }
     }
@@ -64,7 +64,7 @@ fn detect_active_parakeet_backend() -> Option<String> {
     if let Ok(resolved) = fs::canonicalize(active_bin) {
         if let Some(target_name) = resolved.file_name() {
             if let Some(name) = target_name.to_str() {
-                if name.contains("parakeet") {
+                if name.contains("onnx") || name.contains("parakeet") {
                     return Some(name.to_string());
                 }
             }
@@ -520,11 +520,11 @@ pub fn show_status() {
         // Detect active Parakeet backend from symlink
         if let Some(target) = detect_active_parakeet_backend() {
             let display_name = match target.as_str() {
-                "voxtype-parakeet-avx2" => "Parakeet CPU (AVX2)",
-                "voxtype-parakeet-avx512" => "Parakeet CPU (AVX-512)",
-                "voxtype-parakeet-cuda" => "Parakeet GPU (CUDA)",
-                "voxtype-parakeet-rocm" => "Parakeet GPU (ROCm)",
-                _ => "Parakeet (unknown variant)",
+                "voxtype-onnx-avx2" | "voxtype-parakeet-avx2" => "ONNX CPU (AVX2)",
+                "voxtype-onnx-avx512" | "voxtype-parakeet-avx512" => "ONNX CPU (AVX-512)",
+                "voxtype-onnx-cuda" | "voxtype-parakeet-cuda" => "ONNX GPU (CUDA)",
+                "voxtype-onnx-rocm" | "voxtype-parakeet-rocm" => "ONNX GPU (ROCm)",
+                _ => "ONNX (unknown variant)",
             };
             println!("Active backend: {}", display_name);
             println!(
@@ -571,12 +571,12 @@ pub fn show_status() {
     let current = detect_current_backend();
 
     if is_parakeet {
-        // Show Parakeet backends
-        let parakeet_backends = [
-            ("voxtype-parakeet-avx2", "Parakeet CPU (AVX2)"),
-            ("voxtype-parakeet-avx512", "Parakeet CPU (AVX-512)"),
-            ("voxtype-parakeet-cuda", "Parakeet GPU (CUDA)"),
-            ("voxtype-parakeet-rocm", "Parakeet GPU (ROCm)"),
+        // Show ONNX backends (check both new and legacy names)
+        let onnx_backends = [
+            ("voxtype-onnx-avx2", "voxtype-parakeet-avx2", "ONNX CPU (AVX2)"),
+            ("voxtype-onnx-avx512", "voxtype-parakeet-avx512", "ONNX CPU (AVX-512)"),
+            ("voxtype-onnx-cuda", "voxtype-parakeet-cuda", "ONNX GPU (CUDA)"),
+            ("voxtype-onnx-rocm", "voxtype-parakeet-rocm", "ONNX GPU (ROCm)"),
         ];
 
         // Get current symlink target
@@ -584,10 +584,12 @@ pub fn show_status() {
             .ok()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()));
 
-        for (binary, display) in parakeet_backends {
+        for (binary, legacy_binary, display) in onnx_backends {
             let path = Path::new(VOXTYPE_LIB_DIR).join(binary);
-            let installed = path.exists();
-            let active = current_target.as_deref() == Some(binary);
+            let legacy_path = Path::new(VOXTYPE_LIB_DIR).join(legacy_binary);
+            let installed = path.exists() || legacy_path.exists();
+            let active = current_target.as_deref() == Some(binary)
+                || current_target.as_deref() == Some(legacy_binary);
 
             let status = if active {
                 "active"
@@ -693,41 +695,53 @@ pub fn show_status() {
             println!("To switch back to CPU:");
             println!("  sudo voxtype setup gpu --disable");
         }
-    } else {
-        if current != Some(Backend::Vulkan) && available.contains(&Backend::Vulkan) {
-            println!("To enable GPU acceleration:");
-            println!("  sudo voxtype setup gpu --enable");
-        } else if current == Some(Backend::Vulkan) {
-            println!("To switch back to CPU:");
-            println!("  sudo voxtype setup gpu --disable");
-        }
+    } else if current != Some(Backend::Vulkan) && available.contains(&Backend::Vulkan) {
+        println!("To enable GPU acceleration:");
+        println!("  sudo voxtype setup gpu --enable");
+    } else if current == Some(Backend::Vulkan) {
+        println!("To switch back to CPU:");
+        println!("  sudo voxtype setup gpu --disable");
     }
 }
 
-/// Detect the best Parakeet GPU backend based on available hardware and installed binaries
+/// Detect the best ONNX GPU backend based on available hardware and installed binaries
 fn detect_best_parakeet_gpu_backend() -> Option<(&'static str, &'static str)> {
     let gpus = detect_gpus();
 
+    // Helper to find installed binary, preferring new name over legacy
+    let find_binary =
+        |new_name: &'static str, legacy_name: &'static str| -> Option<&'static str> {
+            if Path::new(VOXTYPE_LIB_DIR).join(new_name).exists() {
+                Some(new_name)
+            } else if Path::new(VOXTYPE_LIB_DIR).join(legacy_name).exists() {
+                Some(legacy_name)
+            } else {
+                None
+            }
+        };
+
     // Check for AMD GPU and ROCm binary
     let has_amd = gpus.iter().any(|g| g.vendor == GpuVendor::Amd);
-    let rocm_path = Path::new(VOXTYPE_LIB_DIR).join("voxtype-parakeet-rocm");
-    if has_amd && rocm_path.exists() {
-        return Some(("voxtype-parakeet-rocm", "ROCm"));
+    if let Some(binary) = find_binary("voxtype-onnx-rocm", "voxtype-parakeet-rocm") {
+        if has_amd {
+            return Some((binary, "ROCm"));
+        }
     }
 
     // Check for NVIDIA GPU and CUDA binary
     let has_nvidia = gpus.iter().any(|g| g.vendor == GpuVendor::Nvidia);
-    let cuda_path = Path::new(VOXTYPE_LIB_DIR).join("voxtype-parakeet-cuda");
-    if has_nvidia && cuda_path.exists() {
-        return Some(("voxtype-parakeet-cuda", "CUDA"));
+    if let Some(binary) = find_binary("voxtype-onnx-cuda", "voxtype-parakeet-cuda") {
+        if has_nvidia {
+            return Some((binary, "CUDA"));
+        }
     }
 
     // Fall back to whichever is installed (user may have external GPU)
-    if rocm_path.exists() {
-        return Some(("voxtype-parakeet-rocm", "ROCm"));
+    if let Some(binary) = find_binary("voxtype-onnx-rocm", "voxtype-parakeet-rocm") {
+        return Some((binary, "ROCm"));
     }
-    if cuda_path.exists() {
-        return Some(("voxtype-parakeet-cuda", "CUDA"));
+    if let Some(binary) = find_binary("voxtype-onnx-cuda", "voxtype-parakeet-cuda") {
+        return Some((binary, "CUDA"));
     }
 
     None
@@ -746,16 +760,16 @@ pub fn enable() -> anyhow::Result<()> {
             let has_nvidia = gpus.iter().any(|g| g.vendor == GpuVendor::Nvidia);
 
             let hint = if has_amd {
-                "You have an AMD GPU. Install voxtype-parakeet-rocm for GPU acceleration."
+                "You have an AMD GPU. Install voxtype-onnx-rocm for GPU acceleration."
             } else if has_nvidia {
-                "You have an NVIDIA GPU. Install voxtype-parakeet-cuda for GPU acceleration."
+                "You have an NVIDIA GPU. Install voxtype-onnx-cuda for GPU acceleration."
             } else {
-                "No supported GPU detected. Parakeet GPU acceleration requires NVIDIA (CUDA) or AMD (ROCm)."
+                "No supported GPU detected. ONNX GPU acceleration requires NVIDIA (CUDA) or AMD (ROCm)."
             };
 
             anyhow::anyhow!(
-                "No Parakeet GPU backend installed.\n\
-                 Neither voxtype-parakeet-cuda nor voxtype-parakeet-rocm found in {}\n\n\
+                "No ONNX GPU backend installed.\n\
+                 Neither voxtype-onnx-cuda nor voxtype-onnx-rocm found in {}\n\n\
                  {}",
                 VOXTYPE_LIB_DIR,
                 hint
@@ -767,12 +781,12 @@ pub fn enable() -> anyhow::Result<()> {
         // Regenerate systemd service if it exists
         if super::systemd::regenerate_service_file()? {
             println!(
-                "Updated systemd service to use Parakeet {} backend.",
+                "Updated systemd service to use ONNX {} backend.",
                 backend_name
             );
         }
 
-        println!("Switched to Parakeet ({}) backend.", backend_name);
+        println!("Switched to ONNX ({}) backend.", backend_name);
         println!();
         println!("Restart voxtype to use GPU acceleration:");
         println!("  systemctl --user restart voxtype");
@@ -823,24 +837,26 @@ pub fn disable() -> anyhow::Result<()> {
     let is_parakeet = is_parakeet_binary_active();
 
     if is_parakeet {
-        // Parakeet mode: switch to best Parakeet CPU backend
+        // ONNX mode: switch to best ONNX CPU backend
         let best_backend = detect_best_parakeet_cpu_backend();
         if let Some(backend_name) = best_backend {
             switch_backend_tiered_parakeet(backend_name)?;
             println!(
-                "Switched to Parakeet ({}) backend.",
-                backend_name.trim_start_matches("voxtype-parakeet-")
+                "Switched to ONNX ({}) backend.",
+                backend_name
+                    .trim_start_matches("voxtype-onnx-")
+                    .trim_start_matches("voxtype-parakeet-")
             );
         } else {
             anyhow::bail!(
-                "No Parakeet CPU backend found.\n\
-                 Install voxtype-parakeet-avx2 or voxtype-parakeet-avx512."
+                "No ONNX CPU backend found.\n\
+                 Install voxtype-onnx-avx2 or voxtype-onnx-avx512."
             );
         }
 
         // Regenerate systemd service if it exists
         if super::systemd::regenerate_service_file()? {
-            println!("Updated systemd service to use Parakeet CPU backend.");
+            println!("Updated systemd service to use ONNX CPU backend.");
         }
 
         println!();
@@ -886,36 +902,44 @@ fn detect_best_cpu_backend() -> Backend {
     Backend::Avx2
 }
 
-/// Detect the best Parakeet CPU backend for this system
+/// Detect the best ONNX CPU backend for this system
 fn detect_best_parakeet_cpu_backend() -> Option<&'static str> {
+    // Helper to find installed binary, preferring new name over legacy
+    let find_binary =
+        |new_name: &'static str, legacy_name: &'static str| -> Option<&'static str> {
+            if Path::new(VOXTYPE_LIB_DIR).join(new_name).exists() {
+                Some(new_name)
+            } else if Path::new(VOXTYPE_LIB_DIR).join(legacy_name).exists() {
+                Some(legacy_name)
+            } else {
+                None
+            }
+        };
+
     // Check for AVX-512 support
     if let Ok(cpuinfo) = fs::read_to_string("/proc/cpuinfo") {
         if cpuinfo.contains("avx512f") {
-            let avx512_path = Path::new(VOXTYPE_LIB_DIR).join("voxtype-parakeet-avx512");
-            if avx512_path.exists() {
-                return Some("voxtype-parakeet-avx512");
+            if let Some(binary) =
+                find_binary("voxtype-onnx-avx512", "voxtype-parakeet-avx512")
+            {
+                return Some(binary);
             }
         }
     }
 
     // Fall back to AVX2
-    let avx2_path = Path::new(VOXTYPE_LIB_DIR).join("voxtype-parakeet-avx2");
-    if avx2_path.exists() {
-        return Some("voxtype-parakeet-avx2");
-    }
-
-    None
+    find_binary("voxtype-onnx-avx2", "voxtype-parakeet-avx2")
 }
 
-/// Switch to a Parakeet backend binary (tiered mode)
+/// Switch to an ONNX backend binary (tiered mode)
 fn switch_backend_tiered_parakeet(binary_name: &str) -> anyhow::Result<()> {
     let binary_path = Path::new(VOXTYPE_LIB_DIR).join(binary_name);
     let active_bin = get_active_binary_path();
 
     if !binary_path.exists() {
         anyhow::bail!(
-            "Parakeet backend not found: {}\n\
-             Install the appropriate voxtype-parakeet package.",
+            "ONNX backend not found: {}\n\
+             Install the appropriate voxtype-onnx package.",
             binary_path.display()
         );
     }
