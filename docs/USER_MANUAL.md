@@ -1379,8 +1379,18 @@ mode = "paste"
 **Cons**:
 - Requires both wl-copy and ydotool
 - Won't work in applications where Ctrl+V has a different meaning (e.g., Vim command mode)
-- Overwrites clipboard contents
+- Overwrites clipboard contents (unless clipboard restoration is enabled)
 - No fallback behavior
+
+**Clipboard Restoration**: By default, paste mode overwrites your clipboard with the transcribed text. If you want to preserve your clipboard contents, enable clipboard restoration:
+
+```toml
+[output]
+mode = "paste"
+restore_clipboard = true
+```
+
+When enabled, voxtype saves your clipboard content before pasting, then restores it after a brief delay. This works with both text and binary clipboard content (images, files) on Wayland via `wl-paste`, and with text content on X11 via `xclip`. You can also enable it from the command line with `--restore-clipboard` or the `VOXTYPE_RESTORE_CLIPBOARD=true` environment variable.
 
 ### Fallback Behavior
 

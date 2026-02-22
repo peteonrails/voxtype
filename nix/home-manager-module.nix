@@ -16,11 +16,23 @@
 #     };
 #   };
 #
-#   # Parakeet example:
+#   # ONNX engine example (SenseVoice for Chinese/Japanese/Korean):
+#   programs.voxtype = {
+#     enable = true;
+#     engine = "sensevoice";
+#     package = voxtype.packages.${system}.onnx-cuda;
+#     model.path = "/path/to/sensevoice-small";
+#     service.enable = true;
+#     settings = {
+#       hotkey.enabled = false;
+#     };
+#   };
+#
+#   # Parakeet example (English, high accuracy):
 #   programs.voxtype = {
 #     enable = true;
 #     engine = "parakeet";
-#     package = voxtype.packages.${system}.parakeet-cuda;
+#     package = voxtype.packages.${system}.onnx;
 #     model.path = "/path/to/parakeet-tdt-1.1b";
 #     service.enable = true;
 #     settings = {
@@ -34,6 +46,10 @@ let
   cfg = config.programs.voxtype;
   tomlFormat = pkgs.formats.toml { };
   modelDefs = import ./models.nix;
+
+  # Engines that use ONNX Runtime (need model.path, not model.name)
+  onnxEngines = [ "parakeet" "moonshine" "sensevoice" "paraformer" "dolphin" "omnilingual" ];
+  isOnnxEngine = builtins.elem cfg.engine onnxEngines;
 
   # Fetch model from HuggingFace if using declarative model management
   fetchedModel = lib.optionalAttrs (cfg.model.name != null) (
@@ -67,15 +83,23 @@ in {
     enable = lib.mkEnableOption "VoxType push-to-talk voice-to-text";
 
     engine = lib.mkOption {
-      type = lib.types.enum [ "whisper" "parakeet" ];
+      type = lib.types.enum [ "whisper" "parakeet" "moonshine" "sensevoice" "paraformer" "dolphin" "omnilingual" ];
       default = "whisper";
       description = ''
         Speech recognition engine to use.
-        - whisper: Local transcription via whisper.cpp (default)
-        - parakeet: NVIDIA Parakeet models via ONNX Runtime
 
-        When using parakeet, set model.name to null and use model.path
-        to point to your Parakeet model directory.
+        Whisper engine (default package):
+        - whisper: Local transcription via whisper.cpp
+
+        ONNX engines (require onnx/onnx-cuda/onnx-rocm package):
+        - parakeet: NVIDIA Parakeet models (English, high accuracy)
+        - moonshine: Moonshine models (English, fast)
+        - sensevoice: Alibaba SenseVoice (Chinese, Japanese, Korean, English)
+        - paraformer: Alibaba Paraformer (Chinese, English)
+        - dolphin: Dolphin (Chinese-focused)
+        - omnilingual: Omnilingual (multilingual)
+
+        When using ONNX engines, use model.path to point to the model directory.
       '';
     };
 
@@ -89,12 +113,12 @@ in {
         - packages.vulkan: Vulkan GPU acceleration (AMD/NVIDIA/Intel)
         - packages.rocm: ROCm/HIP acceleration (AMD only)
 
-        Parakeet packages (set engine = "parakeet"):
-        - packages.parakeet: CPU-only Parakeet
-        - packages.parakeet-cuda: CUDA acceleration (NVIDIA)
-        - packages.parakeet-rocm: ROCm acceleration (AMD)
+        ONNX packages (for parakeet, moonshine, sensevoice, etc.):
+        - packages.onnx: CPU-only ONNX engines
+        - packages.onnx-cuda: CUDA acceleration (NVIDIA)
+        - packages.onnx-rocm: ROCm acceleration (AMD, Parakeet only)
 
-        All packages include runtime dependencies (wtype, ydotool, etc.).
+        All packages include runtime dependencies (wtype, dotool, ydotool, etc.).
       '';
       example = lib.literalExpression "voxtype.packages.\${system}.vulkan";
     };
@@ -105,7 +129,7 @@ in {
         default = null;
         description = ''
           Whisper model to download from HuggingFace. Only used when engine = "whisper".
-          Set to null when using Parakeet or managing models manually.
+          Set to null when using ONNX engines or managing models manually.
 
           Available: tiny, tiny.en, base, base.en, small, small.en,
           medium, medium.en, large-v3, large-v3-turbo
@@ -118,11 +142,11 @@ in {
         description = ''
           Path to a model file or directory.
           - For Whisper: path to a .bin model file
-          - For Parakeet: path to the model directory containing ONNX files
+          - For ONNX engines: path to the model directory containing ONNX files
 
           Overrides model.name when set.
         '';
-        example = "/home/user/.local/share/voxtype/models/parakeet-tdt-1.1b";
+        example = "/home/user/.local/share/voxtype/models/sensevoice-small";
       };
     };
 
@@ -145,9 +169,9 @@ in {
             language = "en";
             translate = false;
           };
-          # For Parakeet engine:
-          # parakeet = {
-          #   model_type = "tdt";
+          # For SenseVoice engine:
+          # sensevoice = {
+          #   language = "auto";  # auto, zh, en, ja, ko, yue
           # };
           output = {
             mode = "type";
@@ -175,8 +199,8 @@ in {
         message = "programs.voxtype: cannot set both model.name and model.path";
       }
       {
-        assertion = !(cfg.engine == "parakeet" && cfg.model.name != null);
-        message = "programs.voxtype: model.name is only for Whisper models. Use model.path for Parakeet.";
+        assertion = !(isOnnxEngine && cfg.model.name != null);
+        message = "programs.voxtype: model.name is only for Whisper models. Use model.path for ONNX engines (${cfg.engine}).";
       }
     ];
 
