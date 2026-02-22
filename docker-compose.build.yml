@@ -20,33 +20,33 @@ services:
       context: .
       dockerfile: Dockerfile.build
       args:
-        VERSION: ${VERSION:-0.6.1}
+        VERSION: ${VERSION:-0.6.2}
     volumes:
-      - ./releases/${VERSION:-0.6.1}:/output
+      - ./releases/${VERSION:-0.6.2}:/output
     environment:
-      - VERSION=${VERSION:-0.6.1}
+      - VERSION=${VERSION:-0.6.2}
 
   vulkan:
     build:
       context: .
       dockerfile: Dockerfile.vulkan
       args:
-        VERSION: ${VERSION:-0.6.1}
+        VERSION: ${VERSION:-0.6.2}
     volumes:
-      - ./releases/${VERSION:-0.6.1}:/output
+      - ./releases/${VERSION:-0.6.2}:/output
     environment:
-      - VERSION=${VERSION:-0.6.1}
+      - VERSION=${VERSION:-0.6.2}
 
   avx512:
     build:
       context: .
       dockerfile: Dockerfile.avx512
       args:
-        VERSION: ${VERSION:-0.6.1}
+        VERSION: ${VERSION:-0.6.2}
     volumes:
-      - ./releases/${VERSION:-0.6.1}:/output
+      - ./releases/${VERSION:-0.6.2}:/output
     environment:
-      - VERSION=${VERSION:-0.6.1}
+      - VERSION=${VERSION:-0.6.2}
     profiles:
       - avx512  # Only build if explicitly requested (requires AVX-512 capable host)
 
@@ -56,11 +56,11 @@ services:
       context: .
       dockerfile: Dockerfile.onnx
       args:
-        VERSION: ${VERSION:-0.6.1}
+        VERSION: ${VERSION:-0.6.2}
     volumes:
-      - ./releases/${VERSION:-0.6.1}:/output
+      - ./releases/${VERSION:-0.6.2}:/output
     environment:
-      - VERSION=${VERSION:-0.6.1}
+      - VERSION=${VERSION:-0.6.2}
 
   # ONNX AVX-512 build (requires AVX-512 capable host)
   onnx-avx512:
@@ -68,11 +68,11 @@ services:
       context: .
       dockerfile: Dockerfile.onnx-avx512
       args:
-        VERSION: ${VERSION:-0.6.1}
+        VERSION: ${VERSION:-0.6.2}
     volumes:
-      - ./releases/${VERSION:-0.6.1}:/output
+      - ./releases/${VERSION:-0.6.2}:/output
     environment:
-      - VERSION=${VERSION:-0.6.1}
+      - VERSION=${VERSION:-0.6.2}
     profiles:
       - avx512  # Only build if explicitly requested (requires AVX-512 capable host)
 
@@ -82,11 +82,11 @@ services:
       context: .
       dockerfile: Dockerfile.onnx-cuda
       args:
-        VERSION: ${VERSION:-0.6.1}
+        VERSION: ${VERSION:-0.6.2}
     volumes:
-      - ./releases/${VERSION:-0.6.1}:/output
+      - ./releases/${VERSION:-0.6.2}:/output
     environment:
-      - VERSION=${VERSION:-0.6.1}
+      - VERSION=${VERSION:-0.6.2}
 
   # ONNX ROCm build (AMD GPU acceleration, requires AMD GPU host)
   onnx-rocm:
@@ -94,11 +94,11 @@ services:
       context: .
       dockerfile: Dockerfile.onnx-rocm
       args:
-        VERSION: ${VERSION:-0.6.1}
+        VERSION: ${VERSION:-0.6.2}
     volumes:
-      - ./releases/${VERSION:-0.6.1}:/output
+      - ./releases/${VERSION:-0.6.2}:/output
     environment:
-      - VERSION=${VERSION:-0.6.1}
+      - VERSION=${VERSION:-0.6.2}
 
   # ONNX model export (Japanese + Vietnamese Parakeet models)
   # Usage: docker compose -f docker-compose.build.yml up onnx-export

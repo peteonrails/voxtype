@@ -231,6 +231,48 @@ fn cleanup_profile_override() {
     let _ = std::fs::remove_file(&profile_file);
 }
 
+/// Read and consume a boolean override file from the runtime directory.
+/// Returns Some(true) or Some(false) if the file exists and is valid, None otherwise.
+fn read_bool_override(name: &str) -> Option<bool> {
+    let override_file = Config::runtime_dir().join(format!("{}_override", name));
+    if !override_file.exists() {
+        return None;
+    }
+
+    let content = match std::fs::read_to_string(&override_file) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("Failed to read {} override file: {}", name, e);
+            return None;
+        }
+    };
+
+    if let Err(e) = std::fs::remove_file(&override_file) {
+        tracing::warn!("Failed to remove {} override file: {}", name, e);
+    }
+
+    match content.trim() {
+        "true" => {
+            tracing::info!("Using {} override: true", name);
+            Some(true)
+        }
+        "false" => {
+            tracing::info!("Using {} override: false", name);
+            Some(false)
+        }
+        other => {
+            tracing::warn!("Invalid {} override value: {:?}", name, other);
+            None
+        }
+    }
+}
+
+/// Remove a boolean override file if it exists (for cleanup on cancel/error)
+fn cleanup_bool_override(name: &str) {
+    let override_file = Config::runtime_dir().join(format!("{}_override", name));
+    let _ = std::fs::remove_file(&override_file);
+}
+
 // === Meeting Mode IPC ===
 
 /// Check for meeting start command (via file trigger)
@@ -871,6 +913,8 @@ impl Daemon {
         cleanup_output_mode_override();
         cleanup_model_override();
         cleanup_profile_override();
+        cleanup_bool_override("auto_submit");
+        cleanup_bool_override("shift_enter");
         *state = State::Idle;
         self.update_state("idle");
 
@@ -1306,9 +1350,13 @@ impl Daemon {
                         return;
                     }
 
+                    // Check for per-recording boolean overrides from CLI flags
+                    let auto_submit_override = read_bool_override("auto_submit");
+                    let shift_enter_override = read_bool_override("shift_enter");
+
                     // Create output chain with potential mode override (for non-file modes)
                     // Priority: 1. CLI override, 2. profile output_mode, 3. config default
-                    let output_config = match output_override {
+                    let mut output_config = match output_override {
                         Some(OutputOverride::Mode(mode)) => {
                             let mut config = self.config.output.clone();
                             config.mode = mode;
@@ -1324,6 +1372,15 @@ impl Daemon {
                             }
                         }
                     };
+
+                    // Apply per-recording boolean overrides
+                    if let Some(auto_submit) = auto_submit_override {
+                        output_config.auto_submit = auto_submit;
+                    }
+                    if let Some(shift_enter) = shift_enter_override {
+                        output_config.shift_enter_newlines = shift_enter;
+                    }
+
                     let output_chain = output::create_output_chain(&output_config);
 
                     // Output the text

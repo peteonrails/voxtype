@@ -116,7 +116,6 @@ async fn main() -> anyhow::Result<()> {
                 model,
                 default_model
             );
-            // Send desktop notification
             let _ = Command::new("notify-send")
                 .args([
                     "--app-name=Voxtype",
@@ -145,12 +144,25 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+
+    // Hotkey overrides
     if let Some(hotkey) = cli.hotkey {
         config.hotkey.key = hotkey;
     }
     if cli.toggle {
         config.hotkey.mode = config::ActivationMode::Toggle;
     }
+    if cli.no_hotkey {
+        config.hotkey.enabled = false;
+    }
+    if let Some(cancel_key) = cli.cancel_key {
+        config.hotkey.cancel_key = Some(cancel_key);
+    }
+    if let Some(model_modifier) = cli.model_modifier {
+        config.hotkey.model_modifier = Some(model_modifier);
+    }
+
+    // Whisper overrides
     if let Some(delay) = cli.pre_type_delay {
         config.output.pre_type_delay_ms = delay;
     }
@@ -164,6 +176,66 @@ async fn main() -> anyhow::Result<()> {
     if let Some(prompt) = cli.initial_prompt {
         config.whisper.initial_prompt = Some(prompt);
     }
+    if let Some(lang) = cli.language {
+        config.whisper.language = config::LanguageConfig::from_comma_separated(&lang);
+    }
+    if cli.translate {
+        config.whisper.translate = true;
+    }
+    if let Some(threads) = cli.threads {
+        config.whisper.threads = Some(threads);
+    }
+    if cli.gpu_isolation {
+        config.whisper.gpu_isolation = true;
+    }
+    if cli.on_demand_loading {
+        config.whisper.on_demand_loading = true;
+    }
+    if let Some(ref mode) = cli.whisper_mode {
+        match mode.to_lowercase().as_str() {
+            "local" => config.whisper.mode = Some(config::WhisperMode::Local),
+            "remote" => config.whisper.mode = Some(config::WhisperMode::Remote),
+            "cli" => config.whisper.mode = Some(config::WhisperMode::Cli),
+            _ => {
+                eprintln!(
+                    "Error: Invalid whisper mode '{}'. Valid options: local, remote, cli",
+                    mode
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+    if let Some(model) = cli.secondary_model {
+        config.whisper.secondary_model = Some(model);
+    }
+    if cli.eager_processing {
+        config.whisper.eager_processing = true;
+    }
+    if let Some(endpoint) = cli.remote_endpoint {
+        config.whisper.remote_endpoint = Some(endpoint);
+    }
+    if let Some(model) = cli.remote_model {
+        config.whisper.remote_model = Some(model);
+    }
+    if let Some(key) = cli.remote_api_key {
+        config.whisper.remote_api_key = Some(key);
+    }
+
+    // Audio overrides
+    if let Some(device) = cli.audio_device {
+        config.audio.device = device;
+    }
+    if let Some(max_dur) = cli.max_duration {
+        config.audio.max_duration_secs = max_dur;
+    }
+    if cli.audio_feedback {
+        config.audio.feedback.enabled = true;
+    }
+    if cli.no_audio_feedback {
+        config.audio.feedback.enabled = false;
+    }
+
+    // Output overrides
     if let Some(append_text) = cli.append_text {
         config.output.append_text = Some(append_text);
     }
@@ -178,6 +250,66 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+    if cli.auto_submit {
+        config.output.auto_submit = true;
+    }
+    if cli.no_auto_submit {
+        config.output.auto_submit = false;
+    }
+    if cli.shift_enter_newlines {
+        config.output.shift_enter_newlines = true;
+    }
+    if cli.no_shift_enter_newlines {
+        config.output.shift_enter_newlines = false;
+    }
+    if let Some(delay) = cli.type_delay {
+        config.output.type_delay_ms = delay;
+    }
+    if cli.fallback_to_clipboard {
+        config.output.fallback_to_clipboard = true;
+    }
+    if cli.no_fallback_to_clipboard {
+        config.output.fallback_to_clipboard = false;
+    }
+    if cli.spoken_punctuation {
+        config.text.spoken_punctuation = true;
+    }
+    if let Some(keys) = cli.paste_keys {
+        config.output.paste_keys = Some(keys);
+    }
+    if let Some(layout) = cli.dotool_xkb_layout {
+        config.output.dotool_xkb_layout = Some(layout);
+    }
+    if let Some(variant) = cli.dotool_xkb_variant {
+        config.output.dotool_xkb_variant = Some(variant);
+    }
+    if let Some(path) = cli.file_path {
+        config.output.file_path = Some(path);
+    }
+    if let Some(ref mode) = cli.file_mode {
+        match mode.to_lowercase().as_str() {
+            "overwrite" => config.output.file_mode = config::FileMode::Overwrite,
+            "append" => config.output.file_mode = config::FileMode::Append,
+            _ => {
+                eprintln!(
+                    "Error: Invalid file mode '{}'. Valid options: overwrite, append",
+                    mode
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+    if let Some(cmd) = cli.pre_output_command {
+        config.output.pre_output_command = Some(cmd);
+    }
+    if let Some(cmd) = cli.post_output_command {
+        config.output.post_output_command = Some(cmd);
+    }
+    if let Some(cmd) = cli.pre_recording_command {
+        config.output.pre_recording_command = Some(cmd);
+    }
+
+    // VAD overrides
     if cli.vad {
         config.vad.enabled = true;
     }
@@ -197,6 +329,9 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         };
+    }
+    if let Some(min_speech) = cli.vad_min_speech_ms {
+        config.vad.min_speech_duration_ms = min_speech;
     }
 
     // Run the appropriate command
@@ -537,6 +672,20 @@ fn send_record_command(
         let profile_file = config::Config::runtime_dir().join("profile_override");
         std::fs::write(&profile_file, profile_name)
             .map_err(|e| anyhow::anyhow!("Failed to write profile override: {}", e))?;
+    }
+
+    // Write auto_submit override file if specified
+    if let Some(value) = action.auto_submit_override() {
+        let override_file = config::Config::runtime_dir().join("auto_submit_override");
+        std::fs::write(&override_file, if value { "true" } else { "false" })
+            .map_err(|e| anyhow::anyhow!("Failed to write auto_submit override: {}", e))?;
+    }
+
+    // Write shift_enter_newlines override file if specified
+    if let Some(value) = action.shift_enter_newlines_override() {
+        let override_file = config::Config::runtime_dir().join("shift_enter_override");
+        std::fs::write(&override_file, if value { "true" } else { "false" })
+            .map_err(|e| anyhow::anyhow!("Failed to write shift_enter override: {}", e))?;
     }
 
     // For toggle, we need to read current state to decide which signal to send

@@ -2337,15 +2337,64 @@ XDG_DATA_HOME=/custom/data voxtype
 # Models stored in: /custom/data/voxtype/models/
 ```
 
-### VOXTYPE_WHISPER_API_KEY
+### VOXTYPE_* Configuration Overrides
 
-API key for remote Whisper server authentication. Used when `backend = "remote"`.
+Any config file setting can be overridden via environment variable. These are applied after the config file is loaded but before CLI flags, following the priority order: defaults < config file < env vars < CLI flags.
+
+**Hotkey:**
+
+| Variable | Type | Config equivalent |
+|----------|------|-------------------|
+| `VOXTYPE_HOTKEY` | string | `hotkey.key` |
+| `VOXTYPE_HOTKEY_ENABLED` | bool | `hotkey.enabled` |
+| `VOXTYPE_CANCEL_KEY` | string | `hotkey.cancel_key` |
+
+**Whisper / Engine:**
+
+| Variable | Type | Config equivalent |
+|----------|------|-------------------|
+| `VOXTYPE_MODEL` | string | `whisper.model` |
+| `VOXTYPE_ENGINE` | string | `engine` |
+| `VOXTYPE_LANGUAGE` | string | `whisper.language` |
+| `VOXTYPE_TRANSLATE` | bool | `whisper.translate` |
+| `VOXTYPE_THREADS` | integer | `whisper.threads` |
+| `VOXTYPE_GPU_ISOLATION` | bool | `whisper.gpu_isolation` |
+| `VOXTYPE_ON_DEMAND_LOADING` | bool | `whisper.on_demand_loading` |
+| `VOXTYPE_REMOTE_ENDPOINT` | string | `whisper.remote_endpoint` |
+| `VOXTYPE_WHISPER_API_KEY` | string | `whisper.remote_api_key` |
+
+**Audio:**
+
+| Variable | Type | Config equivalent |
+|----------|------|-------------------|
+| `VOXTYPE_AUDIO_DEVICE` | string | `audio.device` |
+| `VOXTYPE_MAX_DURATION_SECS` | integer | `audio.max_duration_secs` |
+| `VOXTYPE_AUDIO_FEEDBACK` | bool | `audio.feedback.enabled` |
+
+**Output:**
+
+| Variable | Type | Config equivalent |
+|----------|------|-------------------|
+| `VOXTYPE_OUTPUT_MODE` | string | `output.mode` |
+| `VOXTYPE_APPEND_TEXT` | string | `output.append_text` |
+| `VOXTYPE_AUTO_SUBMIT` | bool | `output.auto_submit` |
+| `VOXTYPE_SHIFT_ENTER_NEWLINES` | bool | `output.shift_enter_newlines` |
+| `VOXTYPE_PRE_TYPE_DELAY` | integer | `output.pre_type_delay_ms` |
+| `VOXTYPE_TYPE_DELAY` | integer | `output.type_delay_ms` |
+| `VOXTYPE_FALLBACK_TO_CLIPBOARD` | bool | `output.fallback_to_clipboard` |
+| `VOXTYPE_PASTE_KEYS` | string | `output.paste_keys` |
+| `VOXTYPE_DOTOOL_XKB_LAYOUT` | string | `output.dotool_xkb_layout` |
+| `VOXTYPE_SPOKEN_PUNCTUATION` | bool | `text.spoken_punctuation` |
+
+Boolean values: `true`, `1` to enable; `false`, `0` to disable.
 
 ```bash
-export VOXTYPE_WHISPER_API_KEY="sk-..."
-```
+# Example: enable auto-submit and Shift+Enter via environment
+VOXTYPE_AUTO_SUBMIT=true VOXTYPE_SHIFT_ENTER_NEWLINES=true voxtype
 
-This is the recommended way to provide API keys instead of putting them in the config file.
+# Example: override model and language
+VOXTYPE_MODEL=large-v3-turbo VOXTYPE_LANGUAGE=auto voxtype
+```
 
 ---
 

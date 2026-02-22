@@ -68,29 +68,107 @@ pub struct Cli {
     #[arg(long, value_name = "MODEL")]
     pub model: Option<String>,
 
-    /// Disable context window optimization for short recordings
-    #[arg(long)]
-    pub no_whisper_context_optimization: bool,
-
-    /// Initial prompt to provide context for transcription.
-    /// Hints at terminology, proper nouns, or formatting conventions.
-    #[arg(long, value_name = "PROMPT")]
-    pub initial_prompt: Option<String>,
-
     /// Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual
     #[arg(long, value_name = "ENGINE")]
     pub engine: Option<String>,
 
     /// Override hotkey (e.g., SCROLLLOCK, PAUSE, F13, MEDIA, WEV_234, EVTEST_226)
-    #[arg(long, value_name = "KEY")]
+    #[arg(long, value_name = "KEY", help_heading = "Hotkey")]
     pub hotkey: Option<String>,
 
     /// Use toggle mode (press to start/stop) instead of push-to-talk (hold to record)
-    #[arg(long)]
+    #[arg(long, help_heading = "Hotkey")]
     pub toggle: bool,
 
+    /// Disable built-in hotkey detection (use compositor keybindings instead)
+    #[arg(long, help_heading = "Hotkey")]
+    pub no_hotkey: bool,
+
+    /// Cancel key for aborting recording or transcription (e.g., ESC, BACKSPACE, F12)
+    #[arg(long, value_name = "KEY", help_heading = "Hotkey")]
+    pub cancel_key: Option<String>,
+
+    /// Modifier key for secondary model selection (e.g., LEFTSHIFT)
+    #[arg(long, value_name = "KEY", help_heading = "Hotkey")]
+    pub model_modifier: Option<String>,
+
+    // -- Whisper --
+
+    /// Disable context window optimization for short recordings
+    #[arg(long, help_heading = "Whisper")]
+    pub no_whisper_context_optimization: bool,
+
+    /// Initial prompt to provide context for transcription.
+    /// Hints at terminology, proper nouns, or formatting conventions.
+    #[arg(long, value_name = "PROMPT", help_heading = "Whisper")]
+    pub initial_prompt: Option<String>,
+
+    /// Language for transcription (e.g., en, fr, auto, or comma-separated: en,fr,de)
+    #[arg(long, value_name = "LANG", help_heading = "Whisper")]
+    pub language: Option<String>,
+
+    /// Translate non-English speech to English
+    #[arg(long, help_heading = "Whisper")]
+    pub translate: bool,
+
+    /// Number of CPU threads for inference
+    #[arg(long, value_name = "N", help_heading = "Whisper")]
+    pub threads: Option<usize>,
+
+    /// Run transcription in a subprocess to release GPU memory after each recording
+    #[arg(long, help_heading = "Whisper")]
+    pub gpu_isolation: bool,
+
+    /// Load model on-demand when recording starts instead of keeping it loaded
+    #[arg(long, help_heading = "Whisper")]
+    pub on_demand_loading: bool,
+
+    /// Whisper execution mode: local, remote, or cli
+    #[arg(long, value_name = "MODE", help_heading = "Whisper")]
+    pub whisper_mode: Option<String>,
+
+    /// Secondary model for difficult audio (used with --model-modifier)
+    #[arg(long, value_name = "MODEL", help_heading = "Whisper")]
+    pub secondary_model: Option<String>,
+
+    /// Enable eager input processing (transcribe chunks while recording continues)
+    #[arg(long, help_heading = "Whisper")]
+    pub eager_processing: bool,
+
+    /// Remote server endpoint URL (for remote whisper mode)
+    #[arg(long, value_name = "URL", help_heading = "Whisper")]
+    pub remote_endpoint: Option<String>,
+
+    /// Model name to send to remote server
+    #[arg(long, value_name = "MODEL", help_heading = "Whisper")]
+    pub remote_model: Option<String>,
+
+    /// API key for remote server (or use VOXTYPE_WHISPER_API_KEY env var)
+    #[arg(long, value_name = "KEY", help_heading = "Whisper")]
+    pub remote_api_key: Option<String>,
+
+    // -- Audio --
+
+    /// Audio input device name (or "default" for system default)
+    #[arg(long, value_name = "DEVICE", help_heading = "Audio")]
+    pub audio_device: Option<String>,
+
+    /// Maximum recording duration in seconds (safety limit)
+    #[arg(long, value_name = "SECS", help_heading = "Audio")]
+    pub max_duration: Option<u32>,
+
+    /// Enable audio feedback sounds (beeps when recording starts/stops)
+    #[arg(long, help_heading = "Audio")]
+    pub audio_feedback: bool,
+
+    /// Disable audio feedback sounds
+    #[arg(long, help_heading = "Audio")]
+    pub no_audio_feedback: bool,
+
+    // -- Output --
+
     /// Delay before typing starts (ms), helps prevent first character drop
-    #[arg(long, value_name = "MS")]
+    #[arg(long, value_name = "MS", help_heading = "Output")]
     pub pre_type_delay: Option<u32>,
 
     /// DEPRECATED: Use --pre-type-delay instead
@@ -99,30 +177,97 @@ pub struct Cli {
 
     /// Text to append after each transcription (e.g., " " for a trailing space).
     /// Appended before auto_submit. Useful for separating sentences when dictating incrementally.
-    #[arg(long, value_name = "TEXT")]
+    #[arg(long, value_name = "TEXT", help_heading = "Output")]
     pub append_text: Option<String>,
 
-    /// Output driver order for type mode (comma-separated)
-    /// Overrides config driver_order. Available: wtype, dotool, ydotool, clipboard
+    /// Output driver order for type mode (comma-separated).
+    /// Available: wtype, dotool, ydotool, clipboard.
     /// Example: --driver=ydotool,wtype,clipboard
-    #[arg(long, value_name = "DRIVERS")]
+    #[arg(long, value_name = "DRIVERS", help_heading = "Output")]
     pub driver: Option<String>,
 
+    /// Auto-submit (press Enter) after outputting transcribed text
+    #[arg(long, help_heading = "Output")]
+    pub auto_submit: bool,
+
+    /// Disable auto-submit (overrides config auto_submit = true)
+    #[arg(long, conflicts_with = "auto_submit", help_heading = "Output")]
+    pub no_auto_submit: bool,
+
+    /// Convert newlines to Shift+Enter instead of regular Enter
+    #[arg(long, help_heading = "Output")]
+    pub shift_enter_newlines: bool,
+
+    /// Disable Shift+Enter newlines (overrides config)
+    #[arg(long, conflicts_with = "shift_enter_newlines", help_heading = "Output")]
+    pub no_shift_enter_newlines: bool,
+
+    /// Delay between typed characters in milliseconds (0 = fastest)
+    #[arg(long, value_name = "MS", help_heading = "Output")]
+    pub type_delay: Option<u32>,
+
+    /// Fall back to clipboard if typing fails
+    #[arg(long, help_heading = "Output")]
+    pub fallback_to_clipboard: bool,
+
+    /// Disable clipboard fallback
+    #[arg(long, conflicts_with = "fallback_to_clipboard", help_heading = "Output")]
+    pub no_fallback_to_clipboard: bool,
+
+    /// Enable spoken punctuation conversion (e.g., say "period" to get ".")
+    #[arg(long, help_heading = "Output")]
+    pub spoken_punctuation: bool,
+
+    /// Keystroke for paste mode (e.g., ctrl+v, shift+insert, ctrl+shift+v)
+    #[arg(long, value_name = "KEYS", help_heading = "Output")]
+    pub paste_keys: Option<String>,
+
+    /// Keyboard layout for dotool (e.g., de, fr)
+    #[arg(long, value_name = "LAYOUT", help_heading = "Output")]
+    pub dotool_xkb_layout: Option<String>,
+
+    /// Keyboard layout variant for dotool (e.g., nodeadkeys)
+    #[arg(long, value_name = "VARIANT", help_heading = "Output")]
+    pub dotool_xkb_variant: Option<String>,
+
+    /// File path for file output mode
+    #[arg(long, value_name = "PATH", help_heading = "Output")]
+    pub file_path: Option<std::path::PathBuf>,
+
+    /// File write mode: overwrite or append
+    #[arg(long, value_name = "MODE", help_heading = "Output")]
+    pub file_mode: Option<String>,
+
+    /// Command to run before typing output (e.g., compositor submap switch)
+    #[arg(long, value_name = "CMD", help_heading = "Output")]
+    pub pre_output_command: Option<String>,
+
+    /// Command to run after typing output (e.g., reset compositor submap)
+    #[arg(long, value_name = "CMD", help_heading = "Output")]
+    pub post_output_command: Option<String>,
+
+    /// Command to run when recording starts (e.g., switch to compositor submap)
+    #[arg(long, value_name = "CMD", help_heading = "Output")]
+    pub pre_recording_command: Option<String>,
+
+    // -- VAD --
+
     /// Enable Voice Activity Detection (filter silence before transcription)
-    #[arg(long)]
+    #[arg(long, help_heading = "VAD")]
     pub vad: bool,
 
-    /// VAD speech detection threshold (0.0-1.0, default: 0.5)
+    /// VAD speech detection threshold (0.0-1.0, default: 0.5).
     /// Lower = more sensitive, Higher = less sensitive
-    #[arg(long, value_name = "THRESHOLD")]
+    #[arg(long, value_name = "THRESHOLD", help_heading = "VAD")]
     pub vad_threshold: Option<f32>,
 
-    /// VAD backend: auto, energy, whisper (default: auto)
-    /// - auto: Whisper VAD for Whisper engine, Energy for Parakeet
-    /// - energy: Fast RMS-based detection, no model download needed
-    /// - whisper: Silero VAD via whisper-rs, more accurate, needs model
-    #[arg(long, value_name = "BACKEND")]
+    /// VAD backend: auto, energy, whisper
+    #[arg(long, value_name = "BACKEND", help_heading = "VAD")]
     pub vad_backend: Option<String>,
+
+    /// Minimum speech duration in milliseconds for VAD
+    #[arg(long, value_name = "MS", help_heading = "VAD")]
+    pub vad_min_speech_ms: Option<u32>,
 
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -264,6 +409,22 @@ pub enum RecordAction {
         /// Profiles are defined in config.toml under [profiles.name]
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
+
+        /// Auto-submit (press Enter) after this transcription
+        #[arg(long)]
+        auto_submit: bool,
+
+        /// Disable auto-submit for this transcription (overrides config)
+        #[arg(long, conflicts_with = "auto_submit")]
+        no_auto_submit: bool,
+
+        /// Use Shift+Enter for newlines in this transcription
+        #[arg(long)]
+        shift_enter_newlines: bool,
+
+        /// Disable Shift+Enter newlines for this transcription (overrides config)
+        #[arg(long, conflicts_with = "shift_enter_newlines")]
+        no_shift_enter_newlines: bool,
     },
     /// Stop recording and transcribe (send SIGUSR2 to daemon)
     Stop {
@@ -306,6 +467,22 @@ pub enum RecordAction {
         /// Profiles are defined in config.toml under [profiles.name]
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
+
+        /// Auto-submit (press Enter) after this transcription
+        #[arg(long)]
+        auto_submit: bool,
+
+        /// Disable auto-submit for this transcription (overrides config)
+        #[arg(long, conflicts_with = "auto_submit")]
+        no_auto_submit: bool,
+
+        /// Use Shift+Enter for newlines in this transcription
+        #[arg(long)]
+        shift_enter_newlines: bool,
+
+        /// Disable Shift+Enter newlines for this transcription (overrides config)
+        #[arg(long, conflicts_with = "shift_enter_newlines")]
+        no_shift_enter_newlines: bool,
     },
     /// Cancel current recording or transcription (discard without output)
     Cancel,
@@ -473,6 +650,58 @@ impl RecordAction {
             RecordAction::Start { profile, .. } => profile.as_deref(),
             RecordAction::Toggle { profile, .. } => profile.as_deref(),
             RecordAction::Stop { .. } | RecordAction::Cancel => None,
+        }
+    }
+
+    /// Get the auto_submit override from --auto-submit / --no-auto-submit flags
+    /// Returns Some(true) for --auto-submit, Some(false) for --no-auto-submit, None if unset
+    pub fn auto_submit_override(&self) -> Option<bool> {
+        let (auto_submit, no_auto_submit) = match self {
+            RecordAction::Start {
+                auto_submit,
+                no_auto_submit,
+                ..
+            } => (*auto_submit, *no_auto_submit),
+            RecordAction::Toggle {
+                auto_submit,
+                no_auto_submit,
+                ..
+            } => (*auto_submit, *no_auto_submit),
+            RecordAction::Stop { .. } | RecordAction::Cancel => return None,
+        };
+
+        if auto_submit {
+            Some(true)
+        } else if no_auto_submit {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    /// Get the shift_enter_newlines override from --shift-enter-newlines / --no-shift-enter-newlines flags
+    /// Returns Some(true) to enable, Some(false) to disable, None if unset
+    pub fn shift_enter_newlines_override(&self) -> Option<bool> {
+        let (shift_enter, no_shift_enter) = match self {
+            RecordAction::Start {
+                shift_enter_newlines,
+                no_shift_enter_newlines,
+                ..
+            } => (*shift_enter_newlines, *no_shift_enter_newlines),
+            RecordAction::Toggle {
+                shift_enter_newlines,
+                no_shift_enter_newlines,
+                ..
+            } => (*shift_enter_newlines, *no_shift_enter_newlines),
+            RecordAction::Stop { .. } | RecordAction::Cancel => return None,
+        };
+
+        if shift_enter {
+            Some(true)
+        } else if no_shift_enter {
+            Some(false)
+        } else {
+            None
         }
     }
 }
@@ -1395,6 +1624,95 @@ mod tests {
                 assert_eq!(engine, Some("whisper".to_string()));
             }
             _ => panic!("Expected Transcribe command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_auto_submit() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--auto-submit"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.auto_submit_override(), Some(true));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_no_auto_submit() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--no-auto-submit"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.auto_submit_override(), Some(false));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_auto_submit_default() {
+        let cli = Cli::parse_from(["voxtype", "record", "start"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.auto_submit_override(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_toggle_auto_submit() {
+        let cli = Cli::parse_from(["voxtype", "record", "toggle", "--auto-submit"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.auto_submit_override(), Some(true));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_shift_enter_newlines() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--shift-enter-newlines"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.shift_enter_newlines_override(), Some(true));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_no_shift_enter_newlines() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--no-shift-enter-newlines"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.shift_enter_newlines_override(), Some(false));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_shift_enter_default() {
+        let cli = Cli::parse_from(["voxtype", "record", "start"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.shift_enter_newlines_override(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_stop_has_no_auto_submit() {
+        let cli = Cli::parse_from(["voxtype", "record", "stop"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.auto_submit_override(), None);
+                assert_eq!(action.shift_enter_newlines_override(), None);
+            }
+            _ => panic!("Expected Record command"),
         }
     }
 }
