@@ -1626,4 +1626,93 @@ mod tests {
             _ => panic!("Expected Transcribe command"),
         }
     }
+
+    #[test]
+    fn test_record_start_auto_submit() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--auto-submit"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.auto_submit_override(), Some(true));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_no_auto_submit() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--no-auto-submit"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.auto_submit_override(), Some(false));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_auto_submit_default() {
+        let cli = Cli::parse_from(["voxtype", "record", "start"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.auto_submit_override(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_toggle_auto_submit() {
+        let cli = Cli::parse_from(["voxtype", "record", "toggle", "--auto-submit"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.auto_submit_override(), Some(true));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_shift_enter_newlines() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--shift-enter-newlines"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.shift_enter_newlines_override(), Some(true));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_no_shift_enter_newlines() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--no-shift-enter-newlines"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.shift_enter_newlines_override(), Some(false));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_shift_enter_default() {
+        let cli = Cli::parse_from(["voxtype", "record", "start"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.shift_enter_newlines_override(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_stop_has_no_auto_submit() {
+        let cli = Cli::parse_from(["voxtype", "record", "stop"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.auto_submit_override(), None);
+                assert_eq!(action.shift_enter_newlines_override(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
 }

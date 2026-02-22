@@ -231,10 +231,10 @@ fn cleanup_profile_override() {
     let _ = std::fs::remove_file(&profile_file);
 }
 
-/// Read and consume the auto_submit override file
-/// Returns Some(true) or Some(false) if the file exists, None otherwise
-fn read_auto_submit_override() -> Option<bool> {
-    let override_file = Config::runtime_dir().join("auto_submit_override");
+/// Read and consume a boolean override file from the runtime directory.
+/// Returns Some(true) or Some(false) if the file exists and is valid, None otherwise.
+fn read_bool_override(name: &str) -> Option<bool> {
+    let override_file = Config::runtime_dir().join(format!("{}_override", name));
     if !override_file.exists() {
         return None;
     }
@@ -242,76 +242,34 @@ fn read_auto_submit_override() -> Option<bool> {
     let content = match std::fs::read_to_string(&override_file) {
         Ok(s) => s,
         Err(e) => {
-            tracing::warn!("Failed to read auto_submit override file: {}", e);
+            tracing::warn!("Failed to read {} override file: {}", name, e);
             return None;
         }
     };
 
     if let Err(e) = std::fs::remove_file(&override_file) {
-        tracing::warn!("Failed to remove auto_submit override file: {}", e);
+        tracing::warn!("Failed to remove {} override file: {}", name, e);
     }
 
     match content.trim() {
         "true" => {
-            tracing::info!("Using auto_submit override: true");
+            tracing::info!("Using {} override: true", name);
             Some(true)
         }
         "false" => {
-            tracing::info!("Using auto_submit override: false");
+            tracing::info!("Using {} override: false", name);
             Some(false)
         }
         other => {
-            tracing::warn!("Invalid auto_submit override: {:?}", other);
+            tracing::warn!("Invalid {} override value: {:?}", name, other);
             None
         }
     }
 }
 
-/// Remove the auto_submit override file if it exists (for cleanup on cancel/error)
-fn cleanup_auto_submit_override() {
-    let override_file = Config::runtime_dir().join("auto_submit_override");
-    let _ = std::fs::remove_file(&override_file);
-}
-
-/// Read and consume the shift_enter_newlines override file
-/// Returns Some(true) or Some(false) if the file exists, None otherwise
-fn read_shift_enter_override() -> Option<bool> {
-    let override_file = Config::runtime_dir().join("shift_enter_override");
-    if !override_file.exists() {
-        return None;
-    }
-
-    let content = match std::fs::read_to_string(&override_file) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("Failed to read shift_enter override file: {}", e);
-            return None;
-        }
-    };
-
-    if let Err(e) = std::fs::remove_file(&override_file) {
-        tracing::warn!("Failed to remove shift_enter override file: {}", e);
-    }
-
-    match content.trim() {
-        "true" => {
-            tracing::info!("Using shift_enter_newlines override: true");
-            Some(true)
-        }
-        "false" => {
-            tracing::info!("Using shift_enter_newlines override: false");
-            Some(false)
-        }
-        other => {
-            tracing::warn!("Invalid shift_enter override: {:?}", other);
-            None
-        }
-    }
-}
-
-/// Remove the shift_enter override file if it exists (for cleanup on cancel/error)
-fn cleanup_shift_enter_override() {
-    let override_file = Config::runtime_dir().join("shift_enter_override");
+/// Remove a boolean override file if it exists (for cleanup on cancel/error)
+fn cleanup_bool_override(name: &str) {
+    let override_file = Config::runtime_dir().join(format!("{}_override", name));
     let _ = std::fs::remove_file(&override_file);
 }
 
@@ -955,8 +913,8 @@ impl Daemon {
         cleanup_output_mode_override();
         cleanup_model_override();
         cleanup_profile_override();
-        cleanup_auto_submit_override();
-        cleanup_shift_enter_override();
+        cleanup_bool_override("auto_submit");
+        cleanup_bool_override("shift_enter");
         *state = State::Idle;
         self.update_state("idle");
 
@@ -1393,8 +1351,8 @@ impl Daemon {
                     }
 
                     // Check for per-recording boolean overrides from CLI flags
-                    let auto_submit_override = read_auto_submit_override();
-                    let shift_enter_override = read_shift_enter_override();
+                    let auto_submit_override = read_bool_override("auto_submit");
+                    let shift_enter_override = read_bool_override("shift_enter");
 
                     // Create output chain with potential mode override (for non-file modes)
                     // Priority: 1. CLI override, 2. profile output_mode, 3. config default

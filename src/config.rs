@@ -1940,6 +1940,12 @@ impl Config {
     }
 }
 
+/// Parse a boolean from an environment variable value.
+/// Only "1" and "true" (case-insensitive) are truthy; everything else is falsy.
+fn parse_bool_env(val: &str) -> bool {
+    val == "1" || val.eq_ignore_ascii_case("true")
+}
+
 /// Load configuration from file, with defaults for missing values
 pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     // Start with defaults
@@ -1968,7 +1974,7 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
         config.hotkey.key = key;
     }
     if let Ok(val) = std::env::var("VOXTYPE_HOTKEY_ENABLED") {
-        config.hotkey.enabled = val != "0" && val.to_lowercase() != "false";
+        config.hotkey.enabled = parse_bool_env(&val);
     }
     if let Ok(key) = std::env::var("VOXTYPE_CANCEL_KEY") {
         config.hotkey.cancel_key = Some(key);
@@ -1994,7 +2000,7 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
         config.whisper.language = LanguageConfig::from_comma_separated(&lang);
     }
     if let Ok(val) = std::env::var("VOXTYPE_TRANSLATE") {
-        config.whisper.translate = val != "0" && val.to_lowercase() != "false";
+        config.whisper.translate = parse_bool_env(&val);
     }
     if let Ok(val) = std::env::var("VOXTYPE_THREADS") {
         if let Ok(n) = val.parse::<usize>() {
@@ -2002,10 +2008,10 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
         }
     }
     if let Ok(val) = std::env::var("VOXTYPE_GPU_ISOLATION") {
-        config.whisper.gpu_isolation = val != "0" && val.to_lowercase() != "false";
+        config.whisper.gpu_isolation = parse_bool_env(&val);
     }
     if let Ok(val) = std::env::var("VOXTYPE_ON_DEMAND_LOADING") {
-        config.whisper.on_demand_loading = val != "0" && val.to_lowercase() != "false";
+        config.whisper.on_demand_loading = parse_bool_env(&val);
     }
 
     // Audio
@@ -2018,7 +2024,7 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
         }
     }
     if let Ok(val) = std::env::var("VOXTYPE_AUDIO_FEEDBACK") {
-        config.audio.feedback.enabled = val != "0" && val.to_lowercase() != "false";
+        config.audio.feedback.enabled = parse_bool_env(&val);
     }
 
     // Output
@@ -2034,10 +2040,10 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
         config.output.append_text = Some(append_text);
     }
     if let Ok(val) = std::env::var("VOXTYPE_AUTO_SUBMIT") {
-        config.output.auto_submit = val != "0" && val.to_lowercase() != "false";
+        config.output.auto_submit = parse_bool_env(&val);
     }
     if let Ok(val) = std::env::var("VOXTYPE_SHIFT_ENTER_NEWLINES") {
-        config.output.shift_enter_newlines = val != "0" && val.to_lowercase() != "false";
+        config.output.shift_enter_newlines = parse_bool_env(&val);
     }
     if let Ok(val) = std::env::var("VOXTYPE_PRE_TYPE_DELAY") {
         if let Ok(n) = val.parse::<u32>() {
@@ -2050,10 +2056,10 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
         }
     }
     if let Ok(val) = std::env::var("VOXTYPE_FALLBACK_TO_CLIPBOARD") {
-        config.output.fallback_to_clipboard = val != "0" && val.to_lowercase() != "false";
+        config.output.fallback_to_clipboard = parse_bool_env(&val);
     }
     if let Ok(val) = std::env::var("VOXTYPE_SPOKEN_PUNCTUATION") {
-        config.text.spoken_punctuation = val != "0" && val.to_lowercase() != "false";
+        config.text.spoken_punctuation = parse_bool_env(&val);
     }
     if let Ok(keys) = std::env::var("VOXTYPE_PASTE_KEYS") {
         config.output.paste_keys = Some(keys);
@@ -2070,7 +2076,7 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
         config.whisper.remote_api_key = Some(key);
     }
     if let Ok(val) = std::env::var("VOXTYPE_RESTORE_CLIPBOARD") {
-        config.output.restore_clipboard = val == "1" || val.eq_ignore_ascii_case("true");
+        config.output.restore_clipboard = parse_bool_env(&val);
     }
     if let Ok(val) = std::env::var("VOXTYPE_RESTORE_CLIPBOARD_DELAY_MS") {
         if let Ok(ms) = val.parse::<u32>() {
