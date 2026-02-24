@@ -173,14 +173,24 @@ impl Transcriber for ParakeetTranscriber {
 fn build_execution_config() -> Option<ExecutionConfig> {
     #[cfg(feature = "parakeet-cuda")]
     {
-        tracing::info!("Configuring CUDA execution provider for NVIDIA GPU acceleration");
-        return Some(ExecutionConfig::new().with_execution_provider(ExecutionProvider::Cuda));
+        if probe_cuda_runtime() {
+            tracing::info!("Configuring CUDA execution provider for NVIDIA GPU acceleration");
+            return Some(ExecutionConfig::new().with_execution_provider(ExecutionProvider::Cuda));
+        }
+        tracing::warn!("CUDA not available or incompatible, falling back to CPU inference");
+        return None;
     }
 
     #[cfg(feature = "parakeet-tensorrt")]
     {
-        tracing::info!("Configuring TensorRT execution provider for NVIDIA GPU acceleration");
-        return Some(ExecutionConfig::new().with_execution_provider(ExecutionProvider::TensorRT));
+        if probe_cuda_runtime() {
+            tracing::info!("Configuring TensorRT execution provider for NVIDIA GPU acceleration");
+            return Some(
+                ExecutionConfig::new().with_execution_provider(ExecutionProvider::TensorRT),
+            );
+        }
+        tracing::warn!("CUDA not available or incompatible, falling back to CPU inference");
+        return None;
     }
 
     #[cfg(feature = "parakeet-rocm")]
@@ -197,6 +207,97 @@ fn build_execution_config() -> Option<ExecutionConfig> {
     {
         None
     }
+}
+
+/// Probe CUDA runtime availability and version compatibility.
+///
+/// The bundled ONNX Runtime (from the `ort` crate) is built against CUDA 12.x.
+/// If the system has a different major CUDA version, ONNX Runtime will segfault
+/// during EP initialization rather than returning an error.
+///
+/// Returns true if CUDA looks compatible, false if it should be skipped.
+#[cfg(any(feature = "parakeet-cuda", feature = "parakeet-tensorrt"))]
+fn probe_cuda_runtime() -> bool {
+    // Null-terminated library names to try, in order of preference
+    let lib_names: &[&[u8]] = &[
+        b"libcudart.so\0",
+        b"libcudart.so.12\0",
+        b"libcudart.so.13\0",
+    ];
+
+    let mut handle = std::ptr::null_mut();
+    for name in lib_names {
+        handle = unsafe { libc::dlopen(name.as_ptr() as *const libc::c_char, libc::RTLD_LAZY) };
+        if !handle.is_null() {
+            break;
+        }
+    }
+
+    if handle.is_null() {
+        tracing::error!(
+            "CUDA runtime library (libcudart.so) not found. \
+             Cannot initialize CUDA execution provider.\n  \
+             Install the CUDA toolkit, or use a CPU backend instead."
+        );
+        return false;
+    }
+
+    let sym = unsafe {
+        libc::dlsym(
+            handle,
+            b"cudaRuntimeGetVersion\0".as_ptr() as *const libc::c_char,
+        )
+    };
+
+    if sym.is_null() {
+        tracing::warn!("Could not find cudaRuntimeGetVersion in CUDA runtime library");
+        unsafe { libc::dlclose(handle) };
+        // Can't determine version, proceed and hope for the best
+        return true;
+    }
+
+    // cudaRuntimeGetVersion signature: cudaError_t cudaRuntimeGetVersion(int *runtimeVersion)
+    // Version is encoded as (major * 1000 + minor * 10)
+    type CudaRuntimeGetVersion = unsafe extern "C" fn(*mut i32) -> i32;
+    let get_version: CudaRuntimeGetVersion = unsafe { std::mem::transmute(sym) };
+
+    let mut version: i32 = 0;
+    let result = unsafe { get_version(&mut version) };
+    unsafe { libc::dlclose(handle) };
+
+    if result != 0 {
+        tracing::warn!("cudaRuntimeGetVersion failed (error code {})", result);
+        return true;
+    }
+
+    let major = version / 1000;
+    let minor = (version % 1000) / 10;
+    tracing::info!("Detected CUDA runtime version: {}.{}", major, minor);
+
+    // The bundled ONNX Runtime (via ort crate) is built against CUDA 12.x.
+    // A major version mismatch causes a segfault in ONNX Runtime's CUDA EP
+    // initialization - there's no way to catch this from Rust.
+    const EXPECTED_CUDA_MAJOR: i32 = 12;
+
+    if major != EXPECTED_CUDA_MAJOR {
+        tracing::error!(
+            "CUDA version mismatch: found CUDA {}.{}, but the bundled ONNX Runtime \
+             requires CUDA {}.x. Continuing would crash the process.\n  \
+             Options:\n  \
+             1. Install CUDA {} (e.g., the cuda-12 package)\n  \
+             2. Use the pre-built release binary (voxtype-onnx-cuda) which bundles \
+             compatible libraries\n  \
+             3. Build from source with --features parakeet-load-dynamic to link against \
+             your system's ONNX Runtime instead",
+            major,
+            minor,
+            EXPECTED_CUDA_MAJOR,
+            EXPECTED_CUDA_MAJOR,
+        );
+        return false;
+    }
+
+    true
 }
 
 /// Auto-detect model type from directory structure
