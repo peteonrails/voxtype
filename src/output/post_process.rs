@@ -76,11 +76,11 @@ impl PostProcessor {
 
         // Write text to stdin
         if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(text.as_bytes())
-                .await
-                .map_err(|e| PostProcessError::WriteFailed(e.to_string()))?;
-            // Close stdin to signal EOF
+            // Ignore write errors: the command may not read stdin or may exit
+            // before we finish writing (e.g., `echo` or `head -1`). The command's
+            // exit code and stdout output determine success, not whether it
+            // consumed all of stdin.
+            let _ = stdin.write_all(text.as_bytes()).await;
             drop(stdin);
         }
 
