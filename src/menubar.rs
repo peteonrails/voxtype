@@ -4,6 +4,7 @@
 //! for controlling recording and configuring settings.
 
 use crate::config::{ActivationMode, Config, OutputMode, TranscriptionEngine};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use pidlock::Pidlock;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -536,9 +537,30 @@ pub fn run(state_file: PathBuf) -> ! {
 
     // Track state
     let mut last_state = initial_state;
-    let mut last_update = Instant::now();
-    let update_interval = Duration::from_millis(500);
     let running = Arc::new(AtomicBool::new(true));
+
+    // Watch state file for changes via kqueue (instant notification, no polling)
+    let state_changed = Arc::new(AtomicBool::new(false));
+    let state_changed_writer = state_changed.clone();
+    let watch_path = state_file.clone();
+    let _watcher = {
+        let mut watcher: RecommendedWatcher =
+            notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                if let Ok(event) = res {
+                    if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+                        state_changed_writer.store(true, Ordering::SeqCst);
+                    }
+                }
+            })
+            .expect("Failed to create file watcher");
+        // Watch the parent directory since the state file may be recreated
+        if let Some(parent) = watch_path.parent() {
+            watcher
+                .watch(parent, RecursiveMode::NonRecursive)
+                .unwrap_or_else(|e| eprintln!("Warning: could not watch state dir: {}", e));
+        }
+        watcher // keep alive
+    };
 
     // Set up menu event receiver
     let menu_channel = MenuEvent::receiver();
@@ -547,7 +569,7 @@ pub fn run(state_file: PathBuf) -> ! {
     let event_loop = EventLoopBuilder::new().build();
 
     event_loop.run(move |_event, _, control_flow| {
-        // Set to poll mode so we can check state periodically
+        // Wake every 100ms to check menu events; state updates arrive via kqueue flag
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(100));
 
         // Check for menu events (non-blocking)
@@ -677,18 +699,15 @@ pub fn run(state_file: PathBuf) -> ! {
             }
         }
 
-        // Update state periodically
-        if last_update.elapsed() >= update_interval {
+        // Update state when file watcher signals a change
+        if state_changed.swap(false, Ordering::SeqCst) {
             let new_state = read_state_from_file(&state_file);
 
             if new_state != last_state {
-                // Update icon and status text
                 let _ = tray.set_title(Some(new_state.icon()));
                 let _ = status_item.set_text(new_state.status_text());
                 last_state = new_state;
             }
-
-            last_update = Instant::now();
         }
 
         if !running.load(Ordering::SeqCst) {
