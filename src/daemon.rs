@@ -268,6 +268,48 @@ fn cleanup_profile_override() {
     let _ = std::fs::remove_file(&profile_file);
 }
 
+/// Read and consume a boolean override file from the runtime directory.
+/// Returns Some(true) or Some(false) if the file exists and is valid, None otherwise.
+fn read_bool_override(name: &str) -> Option<bool> {
+    let override_file = Config::runtime_dir().join(format!("{}_override", name));
+    if !override_file.exists() {
+        return None;
+    }
+
+    let content = match std::fs::read_to_string(&override_file) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("Failed to read {} override file: {}", name, e);
+            return None;
+        }
+    };
+
+    if let Err(e) = std::fs::remove_file(&override_file) {
+        tracing::warn!("Failed to remove {} override file: {}", name, e);
+    }
+
+    match content.trim() {
+        "true" => {
+            tracing::info!("Using {} override: true", name);
+            Some(true)
+        }
+        "false" => {
+            tracing::info!("Using {} override: false", name);
+            Some(false)
+        }
+        other => {
+            tracing::warn!("Invalid {} override value: {:?}", name, other);
+            None
+        }
+    }
+}
+
+/// Remove a boolean override file if it exists (for cleanup on cancel/error)
+fn cleanup_bool_override(name: &str) {
+    let override_file = Config::runtime_dir().join(format!("{}_override", name));
+    let _ = std::fs::remove_file(&override_file);
+}
+
 // === Meeting Mode IPC ===
 
 /// Check for meeting start command (via file trigger)
@@ -337,6 +379,36 @@ fn cleanup_meeting_files() {
         if file.exists() {
             let _ = std::fs::remove_file(&file);
         }
+    }
+}
+
+/// Mark any active/paused meetings as completed on daemon startup.
+/// This handles meetings orphaned by a crash or daemon restart.
+fn cleanup_stale_meetings(config: &Config) {
+    let storage_path = if config.meeting.storage_path == "auto" {
+        Config::data_dir().join("meetings")
+    } else {
+        std::path::PathBuf::from(&config.meeting.storage_path)
+    };
+
+    let storage_config = StorageConfig {
+        storage_path,
+        retain_audio: config.meeting.retain_audio,
+        max_meetings: 0,
+    };
+
+    match meeting::MeetingStorage::open(storage_config) {
+        Ok(storage) => match storage.complete_stale_meetings() {
+            Ok(count) if count > 0 => {
+                tracing::info!("Marked {} orphaned meeting(s) as completed", count);
+                // Reset meeting state file to idle
+                let state_file = Config::runtime_dir().join("meeting_state");
+                let _ = std::fs::write(&state_file, "idle");
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("Failed to clean up stale meetings: {}", e),
+        },
+        Err(e) => tracing::warn!("Failed to open meeting storage for cleanup: {}", e),
     }
 }
 
@@ -461,12 +533,16 @@ pub struct Daemon {
     meeting_daemon: Option<MeetingDaemon>,
     // Meeting state file path
     meeting_state_file_path: Option<PathBuf>,
-    // Audio capture for meeting mode (continuous recording)
-    meeting_audio_capture: Option<Box<dyn AudioCapture>>,
-    // Chunk buffer for meeting mode
-    meeting_chunk_buffer: Vec<f32>,
+    // Audio capture for meeting mode (dual: mic + loopback)
+    meeting_audio_capture: Option<audio::DualCapture>,
+    // Chunk buffers for meeting mode (separate mic and loopback)
+    meeting_mic_buffer: Vec<f32>,
+    meeting_loopback_buffer: Vec<f32>,
     // Meeting event receiver
     meeting_event_rx: Option<tokio::sync::mpsc::Receiver<MeetingEvent>>,
+    // GTCRN speech enhancer for mic echo cancellation
+    #[cfg(feature = "onnx-common")]
+    speech_enhancer: Option<std::sync::Arc<audio::enhance::GtcrnEnhancer>>,
 }
 
 impl Daemon {
@@ -557,8 +633,11 @@ impl Daemon {
             meeting_daemon: None,
             meeting_state_file_path,
             meeting_audio_capture: None,
-            meeting_chunk_buffer: Vec::new(),
+            meeting_mic_buffer: Vec::new(),
+            meeting_loopback_buffer: Vec::new(),
             meeting_event_rx: None,
+            #[cfg(feature = "onnx-common")]
+            speech_enhancer: None,
         }
     }
 
@@ -692,13 +771,22 @@ impl Daemon {
                         self.update_meeting_state("recording", Some(&id_str));
                         tracing::info!("Meeting started: {}", meeting_id);
 
-                        // Start audio capture for meeting
-                        match audio::create_capture(&self.config.audio) {
+                        // Start dual audio capture for meeting (mic + loopback)
+                        let loopback_device = match self.config.meeting.audio.loopback_device.as_str() {
+                            "disabled" | "" => None,
+                            other => Some(other),
+                        };
+                        match audio::DualCapture::new(&self.config.audio, loopback_device) {
                             Ok(mut capture) => {
                                 if let Err(e) = capture.start().await {
                                     tracing::error!("Failed to start meeting audio: {}", e);
                                     let _ = daemon.stop().await;
                                     return Err(crate::error::VoxtypeError::Audio(e));
+                                }
+                                if capture.has_loopback() {
+                                    tracing::info!("Dual audio capture: mic + loopback");
+                                } else {
+                                    tracing::info!("Single audio capture: mic only");
                                 }
                                 self.meeting_audio_capture = Some(capture);
                             }
@@ -709,8 +797,30 @@ impl Daemon {
                             }
                         }
 
+                        // Load GTCRN speech enhancer for echo cancellation
+                        #[cfg(feature = "onnx-common")]
+                        if self.speech_enhancer.is_none()
+                            && self.config.meeting.audio.echo_cancel != "disabled"
+                        {
+                            let model_path = Config::models_dir().join("gtcrn_simple.onnx");
+                            if model_path.exists() {
+                                match audio::enhance::GtcrnEnhancer::load(&model_path) {
+                                    Ok(enhancer) => {
+                                        self.speech_enhancer = Some(std::sync::Arc::new(enhancer));
+                                        tracing::info!("GTCRN speech enhancer loaded for meeting echo cancellation");
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to load GTCRN enhancer, continuing without: {}", e);
+                                    }
+                                }
+                            } else {
+                                tracing::debug!("GTCRN model not found at {:?}, skipping speech enhancement", model_path);
+                            }
+                        }
+
                         self.meeting_daemon = Some(daemon);
-                        self.meeting_chunk_buffer.clear();
+                        self.meeting_mic_buffer.clear();
+                        self.meeting_loopback_buffer.clear();
 
                         // Play feedback
                         self.play_feedback(SoundEvent::RecordingStart);
@@ -771,7 +881,8 @@ impl Daemon {
                 }
             }
 
-            self.meeting_chunk_buffer.clear();
+            self.meeting_mic_buffer.clear();
+            self.meeting_loopback_buffer.clear();
             self.meeting_event_rx = None;
         }
 
@@ -839,6 +950,8 @@ impl Daemon {
         cleanup_output_mode_override();
         cleanup_model_override();
         cleanup_profile_override();
+        cleanup_bool_override("auto_submit");
+        cleanup_bool_override("shift_enter");
         *state = State::Idle;
         self.update_state("idle");
 
@@ -1274,9 +1387,13 @@ impl Daemon {
                         return;
                     }
 
+                    // Check for per-recording boolean overrides from CLI flags
+                    let auto_submit_override = read_bool_override("auto_submit");
+                    let shift_enter_override = read_bool_override("shift_enter");
+
                     // Create output chain with potential mode override (for non-file modes)
                     // Priority: 1. CLI override, 2. profile output_mode, 3. config default
-                    let output_config = match output_override {
+                    let mut output_config = match output_override {
                         Some(OutputOverride::Mode(mode)) => {
                             let mut config = self.config.output.clone();
                             config.mode = mode;
@@ -1292,6 +1409,15 @@ impl Daemon {
                             }
                         }
                     };
+
+                    // Apply per-recording boolean overrides
+                    if let Some(auto_submit) = auto_submit_override {
+                        output_config.auto_submit = auto_submit;
+                    }
+                    if let Some(shift_enter) = shift_enter_override {
+                        output_config.shift_enter_newlines = shift_enter;
+                    }
+
                     let output_chain = output::create_output_chain(&output_config);
 
                     // Output the text
@@ -1348,6 +1474,9 @@ impl Daemon {
 
         // Clean up any stale meeting command files
         cleanup_meeting_files();
+
+        // Mark any orphaned active meetings as completed
+        cleanup_stale_meetings(&self.config);
 
         // Write PID file for external control via signals
         self.pid_file_path = write_pid_file();
@@ -2376,28 +2505,100 @@ impl Daemon {
 
                 // Process meeting audio chunks
                 _ = tokio::time::sleep(Duration::from_millis(50)), if self.meeting_active() => {
-                    // Get samples from the audio capture
+                    // Check for meeting stop/pause/resume while active
+                    // (the 100ms polling branch is starved by this faster 50ms branch)
+                    if check_meeting_stop() && self.meeting_daemon.is_some() {
+                        tracing::debug!("Meeting stop requested via file trigger");
+                        if let Err(e) = self.stop_meeting().await {
+                            tracing::error!("Failed to stop meeting: {}", e);
+                        }
+                        continue;
+                    }
+                    if check_meeting_pause() && self.meeting_active() {
+                        tracing::debug!("Meeting pause requested via file trigger");
+                        if let Err(e) = self.pause_meeting().await {
+                            tracing::error!("Failed to pause meeting: {}", e);
+                        }
+                        continue;
+                    }
+                    if check_meeting_resume()
+                        && self.meeting_daemon.as_ref().is_some_and(|d| d.state().is_paused())
+                    {
+                        tracing::debug!("Meeting resume requested via file trigger");
+                        if let Err(e) = self.resume_meeting().await {
+                            tracing::error!("Failed to resume meeting: {}", e);
+                        }
+                        continue;
+                    }
+
+                    // Get samples from dual audio capture
                     if let Some(ref mut capture) = self.meeting_audio_capture {
-                        // Get current samples without stopping
-                        let samples = capture.get_samples().await;
-                        self.meeting_chunk_buffer.extend(samples);
+                        let dual_samples = capture.get_samples().await;
+                        self.meeting_mic_buffer.extend(dual_samples.mic);
+                        self.meeting_loopback_buffer.extend(dual_samples.loopback);
 
-                        // Check if we have enough samples for a chunk
+                        // Check if mic buffer has enough samples for a chunk
                         let chunk_samples = self.meeting_chunk_samples();
-                        if self.meeting_chunk_buffer.len() >= chunk_samples {
-                            // Extract chunk and process
-                            let chunk: Vec<f32> = self.meeting_chunk_buffer.drain(..chunk_samples).collect();
+                        if self.meeting_mic_buffer.len() >= chunk_samples {
+                            let mic_chunk: Vec<f32> = self.meeting_mic_buffer.drain(..chunk_samples).collect();
 
-                            if let Some(ref mut daemon) = self.meeting_daemon {
-                                match daemon.process_chunk(chunk).await {
-                                    Ok(Some(segments)) => {
-                                        tracing::debug!("Processed meeting chunk with {} segments", segments.len());
-                                    }
-                                    Ok(None) => {
-                                        // No segments (possibly VAD filtered)
+                            // Also drain loopback buffer up to the same amount
+                            let loopback_len = self.meeting_loopback_buffer.len().min(chunk_samples);
+                            let loopback_chunk: Vec<f32> = self.meeting_loopback_buffer.drain(..loopback_len).collect();
+
+                            // Enhance mic audio with GTCRN if available (removes echo/noise)
+                            #[cfg(feature = "onnx-common")]
+                            let mic_chunk = if let Some(ref enhancer) = self.speech_enhancer {
+                                match enhancer.enhance(&mic_chunk) {
+                                    Ok(enhanced) => {
+                                        tracing::debug!("GTCRN enhanced mic chunk ({} samples)", enhanced.len());
+                                        enhanced
                                     }
                                     Err(e) => {
-                                        tracing::error!("Error processing meeting chunk: {}", e);
+                                        tracing::warn!("GTCRN enhancement failed, using raw mic: {}", e);
+                                        mic_chunk
+                                    }
+                                }
+                            } else {
+                                mic_chunk
+                            };
+
+                            if let Some(ref mut daemon) = self.meeting_daemon {
+                                // Process mic chunk
+                                let mut had_loopback = false;
+                                match daemon.process_chunk_with_source(mic_chunk, meeting::data::AudioSource::Microphone).await {
+                                    Ok(Some(segments)) => {
+                                        tracing::debug!("Processed mic chunk with {} segments", segments.len());
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => {
+                                        tracing::error!("Error processing mic chunk: {}", e);
+                                    }
+                                }
+
+                                // Process loopback chunk if non-empty
+                                if !loopback_chunk.is_empty() {
+                                    match daemon.process_chunk_with_source(loopback_chunk, meeting::data::AudioSource::Loopback).await {
+                                        Ok(Some(segments)) => {
+                                            tracing::debug!("Processed loopback chunk with {} segments", segments.len());
+                                            if !segments.is_empty() {
+                                                had_loopback = true;
+                                            }
+                                        }
+                                        Ok(None) => {}
+                                        Err(e) => {
+                                            tracing::error!("Error processing loopback chunk: {}", e);
+                                        }
+                                    }
+                                }
+
+                                // Dedup bleed-through: strip echoed phrases from mic segments
+                                if had_loopback {
+                                    if let Some(ref mut meeting) = daemon.current_meeting_mut() {
+                                        let removed = meeting.transcript.dedup_bleed_through();
+                                        if removed > 0 {
+                                            tracing::info!("Removed {} bleed-through word(s) via dedup", removed);
+                                        }
                                     }
                                 }
                             }

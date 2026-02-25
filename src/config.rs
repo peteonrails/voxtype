@@ -181,6 +181,16 @@ type_delay_ms = 0
 # Useful for applications where Enter submits (e.g., Cursor IDE, Slack, Discord)
 # shift_enter_newlines = false
 
+# Restore clipboard content after paste mode (default: false)
+# Saves clipboard before transcription, restores it after paste keystroke
+# Only applies to mode = "paste". Useful when you want to preserve your
+# existing clipboard content across dictation operations.
+# restore_clipboard = false
+
+# Delay after paste before restoring clipboard (milliseconds)
+# Allows time for the paste operation to complete (default: 200)
+# restore_clipboard_delay_ms = 200
+
 # Pre/post output hooks (optional)
 # Commands to run before and after typing output. Useful for compositor integration.
 # Example: Block modifier keys during typing with Hyprland submap:
@@ -1260,6 +1270,14 @@ pub struct MeetingAudioConfig {
     /// Options: "auto" (detect), "disabled", or specific device name
     #[serde(default = "default_loopback")]
     pub loopback_device: String,
+
+    /// Echo cancellation mode for removing speaker bleed-through from mic
+    /// Options: "auto" (GTCRN neural enhancement + transcript dedup), "disabled"
+    /// The GTCRN model (~523KB) is auto-downloaded on first meeting start.
+    /// For system-level echo cancellation, configure PipeWire's echo-cancel module
+    /// and set this to "disabled".
+    #[serde(default = "default_echo_cancel")]
+    pub echo_cancel: String,
 }
 
 fn default_mic_device() -> String {
@@ -1270,11 +1288,16 @@ fn default_loopback() -> String {
     "auto".to_string()
 }
 
+fn default_echo_cancel() -> String {
+    "auto".to_string()
+}
+
 impl Default for MeetingAudioConfig {
     fn default() -> Self {
         Self {
             mic_device: default_mic_device(),
             loopback_device: default_loopback(),
+            echo_cancel: default_echo_cancel(),
         }
     }
 }
@@ -1479,6 +1502,10 @@ fn default_post_process_timeout() -> u64 {
     30000 // 30 seconds - generous for LLM processing
 }
 
+fn default_restore_clipboard_delay() -> u32 {
+    200 // 200ms - delay for paste to complete before restoring clipboard
+}
+
 /// Text output configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OutputConfig {
@@ -1572,6 +1599,16 @@ pub struct OutputConfig {
     /// Applies to both config-based file output and --output-file CLI flag
     #[serde(default)]
     pub file_mode: FileMode,
+
+    /// Restore original clipboard content after paste mode completes
+    /// Saves clipboard before transcription, restores it after paste keystroke
+    #[serde(default)]
+    pub restore_clipboard: bool,
+
+    /// Delay after paste before restoring clipboard content (milliseconds)
+    /// Allows time for the paste operation to complete
+    #[serde(default = "default_restore_clipboard_delay")]
+    pub restore_clipboard_delay_ms: u32,
 }
 
 impl OutputConfig {
@@ -1738,6 +1775,8 @@ impl Default for Config {
                 dotool_xkb_variant: None,
                 file_path: None,
                 file_mode: FileMode::default(),
+                restore_clipboard: false,
+                restore_clipboard_delay_ms: default_restore_clipboard_delay(),
             },
             engine: TranscriptionEngine::default(),
             parakeet: None,
@@ -1906,6 +1945,12 @@ impl Config {
     }
 }
 
+/// Parse a boolean from an environment variable value.
+/// Only "1" and "true" (case-insensitive) are truthy; everything else is falsy.
+fn parse_bool_env(val: &str) -> bool {
+    val == "1" || val.eq_ignore_ascii_case("true")
+}
+
 /// Load configuration from file, with defaults for missing values
 pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     // Start with defaults
@@ -1929,21 +1974,119 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     }
 
     // Override from environment variables
+    // Hotkey
     if let Ok(key) = std::env::var("VOXTYPE_HOTKEY") {
         config.hotkey.key = key;
     }
+    if let Ok(val) = std::env::var("VOXTYPE_HOTKEY_ENABLED") {
+        config.hotkey.enabled = parse_bool_env(&val);
+    }
+    if let Ok(key) = std::env::var("VOXTYPE_CANCEL_KEY") {
+        config.hotkey.cancel_key = Some(key);
+    }
+
+    // Whisper / engine
     if let Ok(model) = std::env::var("VOXTYPE_MODEL") {
         config.whisper.model = model;
     }
+    if let Ok(engine) = std::env::var("VOXTYPE_ENGINE") {
+        match engine.to_lowercase().as_str() {
+            "whisper" => config.engine = TranscriptionEngine::Whisper,
+            "parakeet" => config.engine = TranscriptionEngine::Parakeet,
+            "moonshine" => config.engine = TranscriptionEngine::Moonshine,
+            "sensevoice" => config.engine = TranscriptionEngine::SenseVoice,
+            "paraformer" => config.engine = TranscriptionEngine::Paraformer,
+            "dolphin" => config.engine = TranscriptionEngine::Dolphin,
+            "omnilingual" => config.engine = TranscriptionEngine::Omnilingual,
+            _ => tracing::warn!("Unknown VOXTYPE_ENGINE value: {}", engine),
+        }
+    }
+    if let Ok(lang) = std::env::var("VOXTYPE_LANGUAGE") {
+        config.whisper.language = LanguageConfig::from_comma_separated(&lang);
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_TRANSLATE") {
+        config.whisper.translate = parse_bool_env(&val);
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_THREADS") {
+        if let Ok(n) = val.parse::<usize>() {
+            config.whisper.threads = Some(n);
+        }
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_GPU_ISOLATION") {
+        config.whisper.gpu_isolation = parse_bool_env(&val);
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_ON_DEMAND_LOADING") {
+        config.whisper.on_demand_loading = parse_bool_env(&val);
+    }
+
+    // Audio
+    if let Ok(device) = std::env::var("VOXTYPE_AUDIO_DEVICE") {
+        config.audio.device = device;
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_MAX_DURATION_SECS") {
+        if let Ok(n) = val.parse::<u32>() {
+            config.audio.max_duration_secs = n;
+        }
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_AUDIO_FEEDBACK") {
+        config.audio.feedback.enabled = parse_bool_env(&val);
+    }
+
+    // Output
     if let Ok(mode) = std::env::var("VOXTYPE_OUTPUT_MODE") {
         config.output.mode = match mode.to_lowercase().as_str() {
             "clipboard" => OutputMode::Clipboard,
             "paste" => OutputMode::Paste,
+            "file" => OutputMode::File,
             _ => OutputMode::Type,
         };
     }
     if let Ok(append_text) = std::env::var("VOXTYPE_APPEND_TEXT") {
         config.output.append_text = Some(append_text);
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_AUTO_SUBMIT") {
+        config.output.auto_submit = parse_bool_env(&val);
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_SHIFT_ENTER_NEWLINES") {
+        config.output.shift_enter_newlines = parse_bool_env(&val);
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_PRE_TYPE_DELAY") {
+        if let Ok(n) = val.parse::<u32>() {
+            config.output.pre_type_delay_ms = n;
+        }
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_TYPE_DELAY") {
+        if let Ok(n) = val.parse::<u32>() {
+            config.output.type_delay_ms = n;
+        }
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_FALLBACK_TO_CLIPBOARD") {
+        config.output.fallback_to_clipboard = parse_bool_env(&val);
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_SPOKEN_PUNCTUATION") {
+        config.text.spoken_punctuation = parse_bool_env(&val);
+    }
+    if let Ok(keys) = std::env::var("VOXTYPE_PASTE_KEYS") {
+        config.output.paste_keys = Some(keys);
+    }
+    if let Ok(layout) = std::env::var("VOXTYPE_DOTOOL_XKB_LAYOUT") {
+        config.output.dotool_xkb_layout = Some(layout);
+    }
+
+    // Remote whisper
+    if let Ok(endpoint) = std::env::var("VOXTYPE_REMOTE_ENDPOINT") {
+        config.whisper.remote_endpoint = Some(endpoint);
+    }
+    if let Ok(key) = std::env::var("VOXTYPE_WHISPER_API_KEY") {
+        config.whisper.remote_api_key = Some(key);
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_RESTORE_CLIPBOARD") {
+        config.output.restore_clipboard = parse_bool_env(&val);
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_RESTORE_CLIPBOARD_DELAY_MS") {
+        if let Ok(ms) = val.parse::<u32>() {
+            config.output.restore_clipboard_delay_ms = ms;
+        }
     }
 
     Ok(config)
@@ -3390,5 +3533,64 @@ mod tests {
         assert_eq!(config.meeting.storage_path, "auto");
         assert_eq!(config.meeting.diarization.backend, "simple");
         assert_eq!(config.meeting.summary.backend, "disabled");
+    }
+
+    // =========================================================================
+    // Clipboard Restore Tests
+    // =========================================================================
+
+    #[test]
+    fn test_restore_clipboard_defaults() {
+        let config = Config::default();
+        assert!(!config.output.restore_clipboard);
+        assert_eq!(config.output.restore_clipboard_delay_ms, 200);
+    }
+
+    #[test]
+    fn test_restore_clipboard_deserialization() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 30
+
+            [whisper]
+            model = "base.en"
+
+            [output]
+            mode = "paste"
+            restore_clipboard = true
+            restore_clipboard_delay_ms = 500
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.output.restore_clipboard);
+        assert_eq!(config.output.restore_clipboard_delay_ms, 500);
+    }
+
+    #[test]
+    fn test_restore_clipboard_missing_uses_defaults() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 30
+
+            [whisper]
+            model = "base.en"
+
+            [output]
+            mode = "paste"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(!config.output.restore_clipboard);
+        assert_eq!(config.output.restore_clipboard_delay_ms, 200);
     }
 }

@@ -340,6 +340,35 @@ voxtype config > ~/.config/voxtype/config.toml
 voxtype -c /path/to/my/config.toml
 ```
 
+### Configuration Priority
+
+Settings are applied in layers, with later layers overriding earlier ones:
+
+1. **Built-in defaults** (lowest priority)
+2. **Config file** (`~/.config/voxtype/config.toml`)
+3. **Environment variables** (`VOXTYPE_*`)
+4. **CLI flags** (highest priority)
+
+Every config file option has a corresponding `VOXTYPE_*` environment variable and CLI flag. See `voxtype --help` for the full list of CLI flags, and [CONFIGURATION.md](CONFIGURATION.md#voxtype_-configuration-overrides) for the full list of environment variables.
+
+```bash
+# Override model and auto-submit via environment
+VOXTYPE_MODEL=large-v3-turbo VOXTYPE_AUTO_SUBMIT=true voxtype
+
+# Override via CLI flags (takes priority over env vars and config file)
+voxtype --model large-v3-turbo --auto-submit
+```
+
+Per-recording overrides are available on `record start` and `record toggle`:
+
+```bash
+# Auto-submit just this recording (even if config has auto_submit = false)
+voxtype record start --auto-submit
+
+# Disable auto-submit just this recording (even if config has auto_submit = true)
+voxtype record toggle --no-auto-submit
+```
+
 ---
 
 ## Hotkeys
@@ -1349,8 +1378,18 @@ mode = "paste"
 **Cons**:
 - Requires both wl-copy and ydotool
 - Won't work in applications where Ctrl+V has a different meaning (e.g., Vim command mode)
-- Overwrites clipboard contents
+- Overwrites clipboard contents (unless clipboard restoration is enabled)
 - No fallback behavior
+
+**Clipboard Restoration**: By default, paste mode overwrites your clipboard with the transcribed text. If you want to preserve your clipboard contents, enable clipboard restoration:
+
+```toml
+[output]
+mode = "paste"
+restore_clipboard = true
+```
+
+When enabled, voxtype saves your clipboard content before pasting, then restores it after a brief delay. This works with both text and binary clipboard content (images, files) on Wayland via `wl-paste`, and with text content on X11 via `xclip`. You can also enable it from the command line with `--restore-clipboard` or the `VOXTYPE_RESTORE_CLIPBOARD=true` environment variable.
 
 ### Fallback Behavior
 
@@ -1843,6 +1882,7 @@ max_duration_mins = 180          # Maximum meeting length (0 = unlimited)
 [meeting.audio]
 mic_device = "default"           # Microphone (uses audio.device if not set)
 loopback_device = "auto"         # Capture remote participants: "auto", "disabled", or device name
+echo_cancel = "auto"             # GTCRN neural enhancement + transcript dedup
 
 [meeting.diarization]
 enabled = true
@@ -1875,6 +1915,19 @@ Meeting summarization uses Ollama (local) or a remote API to generate a summary 
 # Requires [meeting.summary] backend set to "local" or "remote"
 voxtype meeting summarize latest
 voxtype meeting summarize latest --format markdown --output summary.md
+```
+
+### Echo Cancellation
+
+When `loopback_device` is enabled, meeting mode captures both your microphone and system audio (remote participants) on separate channels. Without echo cancellation, the remote participants' audio bleeds into your microphone recording and gets transcribed as your speech.
+
+Voxtype uses GTCRN, a lightweight neural speech enhancement model, to clean the mic signal before transcription. The model removes background noise and speaker bleed-through while preserving your voice. A second pass at the transcript level strips any residual echoed phrases.
+
+The GTCRN model (~523 KB) is downloaded automatically the first time you run `voxtype meeting start`. To disable echo cancellation (e.g., if you have PipeWire's `echo-cancel` module configured):
+
+```toml
+[meeting.audio]
+echo_cancel = "disabled"
 ```
 
 ---

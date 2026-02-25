@@ -236,10 +236,24 @@ impl MeetingDaemon {
         self.current_meeting.as_ref().map(|m| m.metadata.id)
     }
 
+    /// Get mutable access to current meeting data (for dedup, etc.)
+    pub fn current_meeting_mut(&mut self) -> Option<&mut MeetingData> {
+        self.current_meeting.as_mut()
+    }
+
     /// Process a chunk of audio
     pub async fn process_chunk(
         &mut self,
         samples: Vec<f32>,
+    ) -> Result<Option<Vec<TranscriptSegment>>> {
+        self.process_chunk_with_source(samples, AudioSource::Microphone).await
+    }
+
+    /// Process a chunk of audio with a specific source label
+    pub async fn process_chunk_with_source(
+        &mut self,
+        samples: Vec<f32>,
+        source: AudioSource,
     ) -> Result<Option<Vec<TranscriptSegment>>> {
         if !self.state.is_active() {
             return Ok(None);
@@ -263,7 +277,7 @@ impl MeetingDaemon {
         };
 
         let mut processor = ChunkProcessor::new(chunk_config, transcriber.clone());
-        let mut buffer = processor.new_buffer(chunk_id, AudioSource::Microphone, start_offset_ms);
+        let mut buffer = processor.new_buffer(chunk_id, source, start_offset_ms);
         buffer.add_samples(&samples);
 
         let result = processor

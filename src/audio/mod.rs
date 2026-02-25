@@ -5,6 +5,8 @@
 
 pub mod cpal_capture;
 pub mod dual_capture;
+#[cfg(feature = "onnx-common")]
+pub mod enhance;
 pub mod feedback;
 
 pub use dual_capture::{AudioSourceType, DualCapture, DualSamples, SourcedSample};

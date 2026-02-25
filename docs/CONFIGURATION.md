@@ -1201,6 +1201,47 @@ paste_keys = "shift+insert"  # For Hyprland/Omarchy
 - Letters: `a-z`
 - Special: `insert`, `enter`
 
+### restore_clipboard
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+**Applies to:** Paste mode only
+
+When `true`, voxtype saves your clipboard content before transcription and restores it after the paste operation completes. This prevents your original clipboard content from being overwritten by the transcription.
+
+**How it works:**
+1. Before transcription: Save current clipboard content (including MIME type for binary data)
+2. Copy transcribed text to clipboard
+3. Simulate paste keystroke
+4. After brief delay: Restore original clipboard content
+
+**Example:**
+```toml
+[output]
+mode = "paste"
+restore_clipboard = true  # Preserve original clipboard content
+```
+
+**Note:** This only works in `mode = "paste"`. In `mode = "clipboard"`, the user manually pastes the content, so restoration would interfere with the intended workflow.
+
+### restore_clipboard_delay_ms
+
+**Type:** Integer
+**Default:** `200`
+**Required:** No
+**Applies to:** Paste mode only (when `restore_clipboard = true`)
+
+Delay in milliseconds after the paste keystroke before restoring the original clipboard content. Increase this if the restoration happens too quickly and interferes with the paste operation. The default of 200ms works well for most applications including Electron apps (Slack, Discord, VS Code).
+
+**Example:**
+```toml
+[output]
+mode = "paste"
+restore_clipboard = true
+restore_clipboard_delay_ms = 300  # Longer delay for slower systems
+```
+
 ### fallback_to_clipboard
 
 **Type:** Boolean
@@ -1911,6 +1952,172 @@ min_speech_duration_ms = 200  # Require at least 200ms of speech
 
 ---
 
+## [meeting]
+
+Meeting mode configuration. Meeting mode provides continuous transcription with chunked processing, speaker diarization, and export capabilities.
+
+### enabled
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Enable meeting mode. When enabled, the `voxtype meeting start/stop` commands become available.
+
+### chunk_duration_secs
+
+**Type:** Integer
+**Default:** `30`
+**Required:** No
+
+Duration of audio chunks in seconds. The daemon processes audio in chunks of this size.
+
+### storage_path
+
+**Type:** String
+**Default:** `"auto"` (`~/.local/share/voxtype/meetings/`)
+**Required:** No
+
+Directory for meeting transcript storage.
+
+### retain_audio
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Keep raw audio chunk files after transcription. Useful for debugging or re-transcribing with different settings.
+
+### max_duration_mins
+
+**Type:** Integer
+**Default:** `180`
+**Required:** No
+
+Maximum meeting duration in minutes. Set to `0` for unlimited.
+
+---
+
+## [meeting.audio]
+
+Audio capture settings specific to meeting mode.
+
+### mic_device
+
+**Type:** String
+**Default:** `"default"`
+**Required:** No
+
+Microphone device for meeting recording. Falls back to the main `[audio] device` setting if not specified.
+
+### loopback_device
+
+**Type:** String (`"auto"`, `"disabled"`, or PulseAudio source name)
+**Default:** `"auto"`
+**Required:** No
+
+System audio loopback capture for recording remote meeting participants. Uses `parec` (PulseAudio recording client) to capture audio from a monitor source, which works with both PulseAudio and PipeWire.
+
+- `"auto"` - Detect a monitor source automatically via `pactl`. Prefers a source that is currently RUNNING (active audio output).
+- `"disabled"` - Mic-only capture, no loopback.
+- Explicit source name - Use a specific PulseAudio/PipeWire source (e.g., `"alsa_output.pci-0000_00_1f.3.analog-stereo.monitor"`).
+
+To list available monitor sources:
+
+```bash
+pactl list short sources | grep monitor
+```
+
+### echo_cancel
+
+**Type:** String (`"auto"`, `"disabled"`)
+**Default:** `"auto"`
+**Required:** No
+
+Echo cancellation mode for removing speaker bleed-through from the microphone signal when loopback capture is active.
+
+- `"auto"` - Use GTCRN neural speech enhancement on mic audio before transcription, followed by a phrase-level transcript dedup pass. The GTCRN model (~523 KB) is automatically downloaded on first `voxtype meeting start`.
+- `"disabled"` - No enhancement. Use this if you have system-level echo cancellation configured (e.g., PipeWire's `echo-cancel` module) or if you don't use loopback capture.
+
+**Example:**
+```toml
+[meeting.audio]
+loopback_device = "auto"
+echo_cancel = "auto"  # GTCRN enhancement + transcript dedup
+```
+
+---
+
+## [meeting.diarization]
+
+Speaker diarization settings for meeting mode.
+
+### enabled
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Enable speaker diarization to identify different speakers in meeting transcripts.
+
+### backend
+
+**Type:** String (`"simple"`, `"ml"`, `"remote"`)
+**Default:** `"simple"`
+**Required:** No
+
+Diarization backend to use:
+
+- `"simple"` - Energy-based speaker change detection. No model download required.
+- `"ml"` - Machine learning speaker embeddings (requires ONNX feature).
+- `"remote"` - Remote diarization API.
+
+### max_speakers
+
+**Type:** Integer
+**Default:** `10`
+**Required:** No
+
+Maximum number of speakers to detect.
+
+---
+
+## [meeting.summary]
+
+AI summarization settings for meeting transcripts.
+
+### backend
+
+**Type:** String (`"local"`, `"remote"`, `"disabled"`)
+**Default:** `"disabled"`
+**Required:** No
+
+- `"local"` - Use Ollama for local summarization.
+- `"remote"` - Use a remote API.
+- `"disabled"` - No summarization.
+
+### ollama_url
+
+**Type:** String
+**Default:** `"http://localhost:11434"`
+**Required:** No (only used when `backend = "local"`)
+
+### ollama_model
+
+**Type:** String
+**Default:** `"llama3.2"`
+**Required:** No (only used when `backend = "local"`)
+
+### timeout_secs
+
+**Type:** Integer
+**Default:** `120`
+**Required:** No
+
+Timeout for summarization requests.
+
+---
+
 ## [status]
 
 Controls status display icons for Waybar and other tray integrations.
@@ -2131,15 +2338,64 @@ XDG_DATA_HOME=/custom/data voxtype
 # Models stored in: /custom/data/voxtype/models/
 ```
 
-### VOXTYPE_WHISPER_API_KEY
+### VOXTYPE_* Configuration Overrides
 
-API key for remote Whisper server authentication. Used when `backend = "remote"`.
+Any config file setting can be overridden via environment variable. These are applied after the config file is loaded but before CLI flags, following the priority order: defaults < config file < env vars < CLI flags.
+
+**Hotkey:**
+
+| Variable | Type | Config equivalent |
+|----------|------|-------------------|
+| `VOXTYPE_HOTKEY` | string | `hotkey.key` |
+| `VOXTYPE_HOTKEY_ENABLED` | bool | `hotkey.enabled` |
+| `VOXTYPE_CANCEL_KEY` | string | `hotkey.cancel_key` |
+
+**Whisper / Engine:**
+
+| Variable | Type | Config equivalent |
+|----------|------|-------------------|
+| `VOXTYPE_MODEL` | string | `whisper.model` |
+| `VOXTYPE_ENGINE` | string | `engine` |
+| `VOXTYPE_LANGUAGE` | string | `whisper.language` |
+| `VOXTYPE_TRANSLATE` | bool | `whisper.translate` |
+| `VOXTYPE_THREADS` | integer | `whisper.threads` |
+| `VOXTYPE_GPU_ISOLATION` | bool | `whisper.gpu_isolation` |
+| `VOXTYPE_ON_DEMAND_LOADING` | bool | `whisper.on_demand_loading` |
+| `VOXTYPE_REMOTE_ENDPOINT` | string | `whisper.remote_endpoint` |
+| `VOXTYPE_WHISPER_API_KEY` | string | `whisper.remote_api_key` |
+
+**Audio:**
+
+| Variable | Type | Config equivalent |
+|----------|------|-------------------|
+| `VOXTYPE_AUDIO_DEVICE` | string | `audio.device` |
+| `VOXTYPE_MAX_DURATION_SECS` | integer | `audio.max_duration_secs` |
+| `VOXTYPE_AUDIO_FEEDBACK` | bool | `audio.feedback.enabled` |
+
+**Output:**
+
+| Variable | Type | Config equivalent |
+|----------|------|-------------------|
+| `VOXTYPE_OUTPUT_MODE` | string | `output.mode` |
+| `VOXTYPE_APPEND_TEXT` | string | `output.append_text` |
+| `VOXTYPE_AUTO_SUBMIT` | bool | `output.auto_submit` |
+| `VOXTYPE_SHIFT_ENTER_NEWLINES` | bool | `output.shift_enter_newlines` |
+| `VOXTYPE_PRE_TYPE_DELAY` | integer | `output.pre_type_delay_ms` |
+| `VOXTYPE_TYPE_DELAY` | integer | `output.type_delay_ms` |
+| `VOXTYPE_FALLBACK_TO_CLIPBOARD` | bool | `output.fallback_to_clipboard` |
+| `VOXTYPE_PASTE_KEYS` | string | `output.paste_keys` |
+| `VOXTYPE_DOTOOL_XKB_LAYOUT` | string | `output.dotool_xkb_layout` |
+| `VOXTYPE_SPOKEN_PUNCTUATION` | bool | `text.spoken_punctuation` |
+
+Boolean values: `true`, `1` to enable; `false`, `0` to disable.
 
 ```bash
-export VOXTYPE_WHISPER_API_KEY="sk-..."
-```
+# Example: enable auto-submit and Shift+Enter via environment
+VOXTYPE_AUTO_SUBMIT=true VOXTYPE_SHIFT_ENTER_NEWLINES=true voxtype
 
-This is the recommended way to provide API keys instead of putting them in the config file.
+# Example: override model and language
+VOXTYPE_MODEL=large-v3-turbo VOXTYPE_LANGUAGE=auto voxtype
+```
 
 ---
 

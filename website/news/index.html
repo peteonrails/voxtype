@@ -9,16 +9,16 @@
     <!-- Open Graph / Social Media -->
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://voxtype.io/news/">
-    <meta property="og:title" content="Voxtype 0.6.0: Five New Transcription Engines, Meeting Mode">
-    <meta property="og:description" content="Five new ONNX-based transcription engines for Chinese, Japanese, Korean, and 1600+ languages. Meeting mode for continuous transcription with speaker attribution and AI summaries.">
+    <meta property="og:title" content="Voxtype 0.6.3: Clipboard Restoration, Full Config Override, NixOS Improvements">
+    <meta property="og:description" content="Restore clipboard after paste mode, every config option now configurable via CLI flags and env vars, NixOS packaging improvements and bug fixes.">
     <meta property="og:image" content="https://voxtype.io/images/gpu-isolation.png">
     <meta property="og:image:width" content="1200">
     <meta property="og:image:height" content="630">
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="Voxtype 0.6.0: Five New Transcription Engines, Meeting Mode">
-    <meta name="twitter:description" content="Five new ONNX-based transcription engines for Chinese, Japanese, Korean, and 1600+ languages. Meeting mode for continuous transcription with speaker attribution and AI summaries.">
+    <meta name="twitter:title" content="Voxtype 0.6.3: Clipboard Restoration, Full Config Override, NixOS Improvements">
+    <meta name="twitter:description" content="Restore clipboard after paste mode, every config option now configurable via CLI flags and env vars, NixOS packaging improvements and bug fixes.">
     <meta name="twitter:image" content="https://voxtype.io/images/gpu-isolation.png">
 
     <title>News & Updates | Voxtype</title>
@@ -76,6 +76,112 @@
         <div class="container">
 
             <!-- v0.6.x Era Posts -->
+
+            <article class="news-article" id="v063">
+                <div class="article-meta">
+                    <time datetime="2026-02-25">February 25, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v0.6.3: Clipboard Restoration, Full Config Override, NixOS Improvements</h2>
+                <div class="article-body">
+                    <p>Voxtype 0.6.3 restores your clipboard after paste mode output, closes the config override gap so every option is configurable via CLI flags and environment variables, and includes several NixOS packaging improvements.</p>
+
+                    <h3>Clipboard Restoration</h3>
+                    <p>When using paste mode, voxtype copies transcribed text to the clipboard and simulates Ctrl+V. Previously, this replaced whatever you had on your clipboard. Now voxtype can save your clipboard contents before pasting and restore them afterward.</p>
+
+                    <p><strong>Why use it:</strong> You can dictate text without losing the link, code snippet, or image you copied earlier.</p>
+
+                    <p>Supports both Wayland (wl-paste/wl-copy) and X11 (xclip), preserving binary content and MIME types on Wayland. A 100 MB size cap prevents memory issues with large clipboard contents.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[output]
+mode = "paste"
+restore_clipboard = true
+restore_clipboard_delay_ms = 200</code></pre>
+                    </div>
+
+                    <p>The delay gives applications time to process the paste before the clipboard is restored. The default 200ms works well for most apps including Electron-based editors.</p>
+
+                    <h3>Every Option Configurable Everywhere</h3>
+                    <p>Project principle #5 says every option should be configurable via CLI flag, environment variable, or config file. This release closes that gap. The daemon now accepts 30+ CLI flags organized by section (Hotkey, Whisper, Audio, Output, VAD), and every config option has a corresponding <code>VOXTYPE_*</code> environment variable.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>CLI flags (examples)</span></div>
+                        <pre><code># Override model and language via CLI
+voxtype --model large-v3 --language en daemon
+
+# Override via environment variables
+VOXTYPE_MODEL=large-v3 VOXTYPE_LANGUAGE=en voxtype daemon</code></pre>
+                    </div>
+
+                    <p>The <code>record start</code> and <code>record toggle</code> commands also gained per-recording overrides for <code>--auto-submit</code> and <code>--shift-enter-newlines</code>, so compositor keybindings can toggle these per-dictation.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>Hyprland example</span></div>
+                        <pre><code># Normal dictation
+bind = , F8, exec, voxtype record toggle
+
+# Dictation that presses Enter after output
+bind = SHIFT, F8, exec, voxtype record toggle --auto-submit</code></pre>
+                    </div>
+
+                    <h3>NixOS Packaging</h3>
+                    <p>Several improvements for NixOS users:</p>
+                    <ul>
+                        <li>ONNX packages now include all six engines (Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual) instead of just Parakeet. The <code>parakeet</code> package names still work as aliases.</li>
+                        <li>flake.nix derives version from Cargo.toml instead of a hard-coded string, so <code>voxtype --version</code> stays in sync.</li>
+                        <li>dotool added to Nix runtime dependencies.</li>
+                        <li>LIBCLANG_PATH set correctly for the devshell.</li>
+                    </ul>
+
+                    <h3>Bug Fixes</h3>
+                    <ul>
+                        <li><strong>Post-process EPIPE errors:</strong> Commands that don't read stdin (like <code>echo</code> or <code>head -1</code>) could exit before voxtype finished writing to the pipe, causing a spurious fallback to the original text. The command's exit code and stdout now determine success, not whether it consumed all of stdin. This also fixed a deterministic test failure on aarch64 that was blocking NixOS packaging.</li>
+                    </ul>
+
+                    <h3>Contributors</h3>
+                    <p>Thanks to <a href="https://github.com/grota">grota</a> for clipboard restoration, <a href="https://github.com/digunix">digunix</a> for the flake.nix version fix, <a href="https://github.com/ekisu">ekisu</a> for dotool in Nix deps, and <a href="https://github.com/DuskyElf">DuskyElf</a> for the devshell LIBCLANG_PATH fix and NixOS packaging co-ownership.</p>
+                </div>
+            </article>
+
+            <article class="news-article" id="v062">
+                <div class="article-meta">
+                    <time datetime="2026-02-17">February 17, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v0.6.2: Echo Cancellation and Meeting Bug Fixes</h2>
+                <div class="article-body">
+                    <p>Voxtype 0.6.2 adds neural echo cancellation for meeting mode, rewrites loopback audio capture, and fixes three meeting bugs. If you use meeting mode with loopback enabled, remote participants' audio no longer bleeds into your mic transcript.</p>
+
+                    <h3>GTCRN Echo Cancellation</h3>
+                    <p>When meeting mode captures both your microphone and system audio (for remote participant transcription), the remote audio bleeds through your speakers into your mic. Previous approaches using signal subtraction and energy gating didn't work because the mic and loopback streams aren't sample-aligned.</p>
+
+                    <p>This release uses GTCRN (Group Temporal Convolutional Recurrent Network), a 48K-parameter speech enhancement model that processes mic audio frame-by-frame through STFT. It removes background noise and speaker bleed-through while preserving your voice. The model is 523 KB and runs at about 0.02x real-time on CPU, so processing 30 seconds of audio takes under 0.6 seconds.</p>
+
+                    <p><strong>Why use it:</strong> If you're in a video call and the other person's voice is showing up in your "You" segments, this fixes it. It's enabled by default when loopback capture is active.</p>
+
+                    <p>The GTCRN model downloads automatically the first time you start a meeting. To disable it (if you already have system-level echo cancellation via PipeWire):</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[meeting.audio]
+echo_cancel = "disabled"</code></pre>
+                    </div>
+
+                    <h3>Dual Audio Capture via parec</h3>
+                    <p>Loopback capture has been rewritten to use <code>parec</code> (PulseAudio recording client) instead of cpal. PipeWire's monitor sources aren't visible through ALSA, which is what cpal uses. The <code>parec</code> approach works with both PipeWire and PulseAudio and can access any monitor source listed by <code>pactl list short sources</code>.</p>
+
+                    <p>Mic and loopback audio now go into separate buffers, so they're transcribed independently. Mic chunks pass through GTCRN before transcription. A phrase-level dedup pass strips any residual echoed words that survive enhancement.</p>
+
+                    <h3>Bug Fixes</h3>
+                    <ul>
+                        <li><strong>Meeting stop/pause/resume not working:</strong> The daemon's event loop starved the meeting control channel when audio processing was active. Meeting commands now take priority.</li>
+                        <li><strong>Orphaned meetings on daemon restart:</strong> If the daemon crashed during a meeting, the meeting state file was never cleaned up, preventing new meetings from starting. The daemon now cleans up stale meeting state on startup.</li>
+                        <li><strong>ml-diarization compilation errors:</strong> Fixed type mismatches after the ort 2.0.0-rc.11 API change.</li>
+                    </ul>
+                </div>
+            </article>
 
             <article class="news-article" id="v060">
                 <div class="article-meta">

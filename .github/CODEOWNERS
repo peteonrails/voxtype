@@ -1,2 +1,7 @@
 # All files require review from the repository owner
 * @peteonrails
+
+# NixOS packaging and configuration
+flake.nix @peteonrails @digunix @DuskyElf
+flake.lock @peteonrails @digunix @DuskyElf
+nix/ @peteonrails @digunix @DuskyElf
