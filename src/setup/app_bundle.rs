@@ -25,7 +25,7 @@ pub fn app_binary_path() -> PathBuf {
     app_bundle_path()
         .join("Contents")
         .join("MacOS")
-        .join("voxtype")
+        .join("voxtype-bin")
 }
 
 /// Get the path to the logs directory
@@ -41,7 +41,7 @@ fn generate_info_plist(version: &str) -> String {
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>voxtype</string>
+    <string>voxtype-bin</string>
     <key>CFBundleIdentifier</key>
     <string>{bundle_id}</string>
     <key>CFBundleName</key>
@@ -70,34 +70,6 @@ fn generate_info_plist(version: &str) -> String {
     )
 }
 
-/// Generate wrapper script that runs the daemon and menubar
-fn generate_wrapper_script() -> String {
-    let logs = logs_dir().unwrap_or_else(|| PathBuf::from("/tmp/voxtype"));
-    format!(
-        r#"#!/bin/bash
-# Voxtype app wrapper - starts daemon and menu bar
-
-# Kill any existing instances
-pkill -9 -f "voxtype daemon" 2>/dev/null
-pkill -9 -f "voxtype menubar" 2>/dev/null
-rm -f /tmp/voxtype/voxtype.lock
-
-# Create logs directory
-mkdir -p "{logs}"
-
-# Get the directory where this script is located
-DIR="$(cd "$(dirname "$0")" && pwd)"
-
-# Start daemon in background with logging
-"$DIR/voxtype-bin" daemon >> "{logs}/stdout.log" 2>> "{logs}/stderr.log" &
-
-# Start menubar (foreground keeps app alive and shows menu bar icon)
-exec "$DIR/voxtype-bin" menubar
-"#,
-        logs = logs.display()
-    )
-}
-
 /// Create the app bundle
 pub fn create_app_bundle() -> anyhow::Result<()> {
     let app_path = app_bundle_path();
@@ -116,33 +88,49 @@ pub fn create_app_bundle() -> anyhow::Result<()> {
         generate_info_plist(version),
     )?;
 
-    // Copy the current voxtype binary
+    // Copy the current voxtype binary (handle self-copy case)
     let source_binary = get_voxtype_path();
     let dest_binary = macos_path.join("voxtype-bin");
-    fs::copy(&source_binary, &dest_binary)?;
+    let source_canon = fs::canonicalize(&source_binary).unwrap_or_else(|_| PathBuf::from(&source_binary));
+    let dest_canon = fs::canonicalize(&dest_binary).unwrap_or_else(|_| dest_binary.clone());
+
+    let binary_replaced = source_canon != dest_canon;
+    if binary_replaced {
+        // Copy via temp file for atomicity (prevents corruption if interrupted)
+        let temp_binary = macos_path.join("voxtype-bin.tmp");
+        fs::copy(&source_binary, &temp_binary)?;
+        fs::rename(&temp_binary, &dest_binary)?;
+    }
 
     // Make binary executable
     let mut perms = fs::metadata(&dest_binary)?.permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&dest_binary, perms)?;
 
-    // Create wrapper script as main executable
+    // Remove legacy wrapper script if present (replaced by direct binary launch)
     let wrapper_path = macos_path.join("voxtype");
-    fs::write(&wrapper_path, generate_wrapper_script())?;
-    let mut perms = fs::metadata(&wrapper_path)?.permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&wrapper_path, perms)?;
+    let _ = fs::remove_file(&wrapper_path);
 
-    // Code sign the app bundle (ad-hoc)
+    // Sign the Mach-O binary individually first so it gets proper code page hashes,
+    // then sign the whole bundle (--deep alone doesn't always hash inner binaries correctly)
     let _ = Command::new("codesign")
-        .args([
-            "--force",
-            "--deep",
-            "--sign",
-            "-",
-            app_path.to_str().unwrap(),
-        ])
+        .args(["--force", "--sign", "-", dest_binary.to_str().unwrap()])
         .output();
+
+    let _ = Command::new("codesign")
+        .args(["--force", "--deep", "--sign", "-", app_path.to_str().unwrap()])
+        .output();
+
+    // Reset TCC entries only when the binary changed, so macOS re-prompts for the
+    // new code signature. Skip on self-copy to preserve existing permissions.
+    if binary_replaced {
+        let _ = Command::new("tccutil")
+            .args(["reset", "Accessibility", BUNDLE_ID])
+            .output();
+        let _ = Command::new("tccutil")
+            .args(["reset", "ListenEvent", BUNDLE_ID])
+            .output();
+    }
 
     Ok(())
 }
@@ -239,6 +227,20 @@ pub async fn install() -> anyhow::Result<()> {
         print_info("Add manually: System Settings > General > Login Items");
     }
 
+    // Launch the app
+    let launched = Command::new("open")
+        .arg(app_bundle_path().as_os_str())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if launched {
+        print_success("Launched Voxtype.app");
+    } else {
+        print_warning("Could not launch automatically");
+        print_info("Start manually: open /Applications/Voxtype.app");
+    }
+
     println!("\n---");
     println!("\x1b[32m✓ Installation complete!\x1b[0m");
     println!();
@@ -252,9 +254,6 @@ pub async fn install() -> anyhow::Result<()> {
     println!();
     println!("  3. System Settings > Privacy & Security > \x1b[1mMicrophone\x1b[0m");
     println!("     Voxtype should appear after first use - enable it");
-    println!();
-    println!("To start now:");
-    println!("  open /Applications/Voxtype.app");
     println!();
     println!("Voxtype will start automatically on login.");
 

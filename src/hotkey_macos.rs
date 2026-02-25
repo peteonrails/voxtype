@@ -62,11 +62,55 @@ impl RdevHotkeyListener {
 
 impl HotkeyListener for RdevHotkeyListener {
     fn start(&mut self) -> Result<mpsc::Receiver<HotkeyEvent>> {
+        // Check/request Accessibility permission before starting the listener.
+        // This triggers the macOS system dialog if permission hasn't been granted.
+        if !check_accessibility_permission() {
+            tracing::warn!(
+                "Accessibility permission not granted. \
+                 macOS should have shown a permission dialog. \
+                 Grant access in: System Settings > Privacy & Security > Accessibility"
+            );
+        }
+
         let (tx, rx) = mpsc::channel(32);
         let target_key = self.target_key;
         let cancel_key = self.cancel_key;
         let running = self.running.clone();
         running.store(true, Ordering::SeqCst);
+
+        // If Accessibility permission isn't granted, rdev::listen() creates a dead
+        // event tap that never fires. The only fix is to restart the process after
+        // permission is granted. Spawn a watcher that re-execs when permission appears.
+        if !is_accessibility_granted() {
+            let running_watcher = running.clone();
+            std::thread::spawn(move || {
+                loop {
+                    if !running_watcher.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_secs(2));
+                    if is_accessibility_granted() {
+                        tracing::info!(
+                            "Accessibility permission granted, restarting daemon to activate hotkey..."
+                        );
+                        // Remove lock file so the new process can acquire it
+                        let lock_path = crate::config::Config::runtime_dir().join("voxtype.lock");
+                        let _ = std::fs::remove_file(&lock_path);
+                        // Spawn a new daemon and exit. The dead CGEvent tap in this
+                        // process can't be revived; a fresh process is needed.
+                        let exe = std::env::current_exe().expect("current_exe");
+                        let args: Vec<String> = std::env::args().skip(1).collect();
+                        match std::process::Command::new(&exe).args(&args).spawn() {
+                            Ok(_) => std::process::exit(0),
+                            Err(e) => {
+                                tracing::error!("Failed to restart: {}", e);
+                                return;
+                            }
+                        }
+                    }
+                }
+            });
+        }
 
         let thread_handle = std::thread::spawn(move || {
             let tx_clone = tx.clone();
@@ -225,13 +269,42 @@ pub fn create_listener(config: &HotkeyConfig) -> Result<Box<dyn HotkeyListener>>
     Ok(Box::new(RdevHotkeyListener::new(config)?))
 }
 
-/// Check if rdev hotkey capture is likely to work
-/// (Accessibility permission is required)
+/// Check if Accessibility permission is granted by trying to create an event tap.
+/// Unlike AXIsProcessTrusted(), this is not cached and reflects the current state.
+fn is_accessibility_granted() -> bool {
+    use core_graphics::event::{CGEventTap, CGEventTapLocation, CGEventTapPlacement, CGEventTapOptions, CGEventType};
+
+    let tap = CGEventTap::new(
+        CGEventTapLocation::Session,
+        CGEventTapPlacement::HeadInsertEventTap,
+        CGEventTapOptions::ListenOnly,
+        vec![CGEventType::KeyDown],
+        |_, _, _| None,
+    );
+    tap.is_ok()
+}
+
+/// Check if Accessibility permission is granted, prompting the user if not.
+///
+/// Calls AXIsProcessTrustedWithOptions with kAXTrustedCheckOptionPrompt=true,
+/// which makes macOS show the "App wants to control this computer" dialog
+/// if permission hasn't been granted yet.
 pub fn check_accessibility_permission() -> bool {
-    // On macOS, we can try to create an event tap to check permissions
-    // rdev will fail at runtime if permissions aren't granted
-    // For now, return true and let it fail gracefully with a helpful message
-    true
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrustedWithOptions(options: core_foundation::base::CFTypeRef) -> bool;
+    }
+
+    use core_foundation::base::TCFType;
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::string::CFString;
+
+    let key = CFString::new("AXTrustedCheckOptionPrompt");
+    let value = CFBoolean::true_value();
+    let options = CFDictionary::from_CFType_pairs(&[(key.as_CFType(), value.as_CFType())]);
+
+    unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef() as _) }
 }
 
 #[cfg(test)]

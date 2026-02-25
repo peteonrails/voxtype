@@ -332,8 +332,23 @@ async fn main() -> anyhow::Result<()> {
         config.vad.min_speech_duration_ms = min_speech;
     }
 
+    // On macOS, detect if launched as app bundle executable (no subcommand, binary inside .app)
+    #[cfg(target_os = "macos")]
+    let default_command = if cli.command.is_none() {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.to_str().map(|s| s.contains(".app/Contents/MacOS/")))
+            .unwrap_or(false)
+            .then_some(Commands::AppLaunch)
+            .unwrap_or(Commands::Daemon)
+    } else {
+        Commands::Daemon // unused, cli.command is Some
+    };
+    #[cfg(not(target_os = "macos"))]
+    let default_command = Commands::Daemon;
+
     // Run the appropriate command
-    match cli.command.unwrap_or(Commands::Daemon) {
+    match cli.command.unwrap_or(default_command) {
         Commands::Daemon => {
             let mut daemon = daemon::Daemon::new(config, config_path);
             daemon.run().await?;
@@ -345,6 +360,42 @@ async fn main() -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("state_file not configured"))?;
             menubar::run(state_file);
             // Note: menubar::run() never returns (runs macOS event loop)
+        }
+        #[cfg(target_os = "macos")]
+        Commands::AppLaunch => {
+            // Launched by Voxtype.app: start daemon in background, run menubar in foreground.
+            // The binary must be the CFBundleExecutable (not exec'd from a wrapper script)
+            // so macOS Control Center can register the status bar scene correctly.
+            let logs_dir = dirs::home_dir()
+                .map(|h| h.join("Library/Logs/voxtype"))
+                .unwrap_or_else(|| std::path::PathBuf::from("/tmp/voxtype"));
+            let _ = std::fs::create_dir_all(&logs_dir);
+
+            // Kill any existing instances
+            let _ = std::process::Command::new("pkill")
+                .args(["-9", "-f", "voxtype-bin daemon"])
+                .status();
+            let _ = std::process::Command::new("pkill")
+                .args(["-9", "-f", "voxtype-bin menubar"])
+                .status();
+            let _ = std::fs::remove_file("/tmp/voxtype/voxtype.lock");
+            let _ = std::fs::remove_file("/tmp/voxtype/menubar.lock");
+
+            // Start daemon as a child process with logging
+            let exe = std::env::current_exe()?;
+            let stdout = std::fs::File::create(logs_dir.join("stdout.log"))?;
+            let stderr = std::fs::File::create(logs_dir.join("stderr.log"))?;
+            let _daemon = std::process::Command::new(&exe)
+                .arg("daemon")
+                .stdout(stdout)
+                .stderr(stderr)
+                .spawn()?;
+
+            // Run menubar in this process (keeps the app alive with menu bar icon)
+            let state_file = config
+                .resolve_state_file()
+                .ok_or_else(|| anyhow::anyhow!("state_file not configured"))?;
+            menubar::run(state_file);
         }
 
         Commands::Transcribe { file, engine } => {

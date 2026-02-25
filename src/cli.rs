@@ -282,6 +282,11 @@ pub enum Commands {
     #[cfg(target_os = "macos")]
     Menubar,
 
+    /// Launch daemon + menubar (used by Voxtype.app bundle)
+    #[cfg(target_os = "macos")]
+    #[command(hide = true)]
+    AppLaunch,
+
     /// Transcribe an audio file (WAV, 16kHz, mono)
     Transcribe {
         /// Path to audio file
