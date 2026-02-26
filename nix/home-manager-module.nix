@@ -46,6 +46,15 @@ let
   cfg = config.programs.voxtype;
   tomlFormat = pkgs.formats.toml { };
   modelDefs = import ./models.nix;
+  defaultSettings = builtins.fromTOML (builtins.readFile ../config/default.toml);
+  settings = lib.recursiveUpdate
+    (lib.filterAttrs (_: v: v != null) {
+      engine = cfg.engine;
+      ${cfg.engine} = lib.optionalAttrs (resolvedModelPath != null) {
+        model = toString resolvedModelPath;
+      };
+    })
+    cfg.settings;
 
   # Engines that use ONNX Runtime (need model.path, not model.name)
   onnxEngines = [ "parakeet" "moonshine" "sensevoice" "paraformer" "dolphin" "omnilingual" ];
@@ -68,14 +77,7 @@ let
 
   # Build the config TOML from settings, injecting engine and model path
   configFile = tomlFormat.generate "voxtype-config.toml" (
-    lib.recursiveUpdate
-      (lib.filterAttrs (_: v: v != null) {
-        engine = cfg.engine;
-        ${cfg.engine} = lib.optionalAttrs (resolvedModelPath != null) {
-          model = toString resolvedModelPath;
-        };
-      })
-      cfg.settings
+    lib.recursiveUpdate defaultSettings settings
   );
 
 in {
