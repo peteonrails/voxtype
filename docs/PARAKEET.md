@@ -51,7 +51,7 @@ curl -L https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/
 # The model should be at: ~/.local/share/voxtype/models/parakeet-tdt-0.6b-v2/
 ```
 
-Alternatively, use a v3 model if available:
+Alternatively, use the v3 model (https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx):
 
 ```bash
 mkdir -p ~/.local/share/voxtype/models/parakeet-tdt-0.6b-v3
