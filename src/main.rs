@@ -160,6 +160,20 @@ async fn main() -> anyhow::Result<()> {
         config.hotkey.model_modifier = Some(model_modifier);
     }
 
+    // Service overrides
+    if cli.service {
+        config.service.enabled = true;
+    }
+    if let Some(host) = cli.service_host {
+        let trimmed = host.trim();
+        if !trimmed.is_empty() {
+            config.service.host = trimmed.to_string();
+        }
+    }
+    if let Some(port) = cli.service_port {
+        config.service.port = port;
+    }
+
     // Whisper overrides
     if let Some(delay) = cli.pre_type_delay {
         config.output.pre_type_delay_ms = delay;
