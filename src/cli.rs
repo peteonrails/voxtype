@@ -154,8 +154,21 @@ pub struct Cli {
     #[arg(long, value_name = "KEY", help_heading = "Hotkey")]
     pub model_modifier: Option<String>,
 
-    // -- Audio --
+    // -- Service --
 
+    /// Enable local OpenAI-compatible STT HTTP service alongside daemon loop
+    #[arg(long, help_heading = "Service")]
+    pub service: bool,
+
+    /// Service bind host override (default: 127.0.0.1)
+    #[arg(long, value_name = "HOST", help_heading = "Service")]
+    pub service_host: Option<String>,
+
+    /// Service bind port override (default: 8427)
+    #[arg(long, value_name = "PORT", help_heading = "Service")]
+    pub service_port: Option<u16>,
+
+    // -- Audio --
     /// Audio input device name (or "default" for system default)
     #[arg(long, value_name = "DEVICE", help_heading = "Audio")]
     pub audio_device: Option<String>,
@@ -298,7 +311,6 @@ pub struct Cli {
     pub append_text: Option<String>,
 
     // -- VAD --
-
     /// Enable Voice Activity Detection (filter silence before transcription)
     #[arg(long, help_heading = "VAD")]
     pub vad: bool,

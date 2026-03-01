@@ -516,6 +516,8 @@ pub struct Daemon {
     meeting_loopback_buffer: Vec<f32>,
     // Meeting event receiver
     meeting_event_rx: Option<tokio::sync::mpsc::Receiver<MeetingEvent>>,
+    // Local HTTP transcription service handle
+    service_handle: Option<crate::service::ServiceHandle>,
     // GTCRN speech enhancer for mic echo cancellation
     #[cfg(feature = "onnx-common")]
     speech_enhancer: Option<std::sync::Arc<audio::enhance::GtcrnEnhancer>>,
@@ -615,6 +617,7 @@ impl Daemon {
             meeting_mic_buffer: Vec::new(),
             meeting_loopback_buffer: Vec::new(),
             meeting_event_rx: None,
+            service_handle: None,
             #[cfg(feature = "onnx-common")]
             speech_enhancer: None,
             paused_media_players: Vec::new(),
@@ -1688,6 +1691,13 @@ impl Daemon {
         }
 
         self.model_manager = Some(model_manager);
+
+        // Start local HTTP service if enabled
+        if self.config.service.enabled {
+            let handle = crate::service::start(&self.config, self.config_path.clone()).await?;
+            tracing::info!("Local service listening on http://{}", handle.addr());
+            self.service_handle = Some(handle);
+        }
 
         // Start hotkey listener (if enabled)
         let mut hotkey_rx = if let Some(ref mut listener) = hotkey_listener {
@@ -2838,6 +2848,12 @@ impl Daemon {
         if self.meeting_daemon.is_some() {
             tracing::info!("Stopping active meeting on shutdown");
             let _ = self.stop_meeting().await;
+        }
+
+        // Stop local HTTP service
+        if let Some(handle) = self.service_handle.take() {
+            tracing::info!("Stopping local service");
+            handle.shutdown().await;
         }
 
         // Remove override files on shutdown
