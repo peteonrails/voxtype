@@ -309,7 +309,7 @@ Whisper is highly accurate but not perfect. For sensitive or important content:
 
 ### How can I contribute?
 
-See the [Contributing Guide](../CONTRIBUTING.md) for details. We welcome:
+See the [Contributing Guide](https://github.com/peteonrails/voxtype/blob/main/CONTRIBUTING.md) for details. We welcome:
 - Bug reports
 - Feature requests
 - Code contributions

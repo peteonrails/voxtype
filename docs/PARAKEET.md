@@ -43,20 +43,22 @@ mkdir -p ~/.local/share/voxtype/models
 
 # Download and extract the model
 cd ~/.local/share/voxtype/models
-curl -L https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2/resolve/main/onnx/encoder-model.onnx -o encoder-model.onnx
-curl -L https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2/resolve/main/onnx/encoder-model.onnx.data -o encoder-model.onnx.data
-curl -L https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2/resolve/main/onnx/decoder_joint-model.onnx -o decoder_joint-model.onnx
+curl -L https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/encoder-model.onnx -o encoder-model.onnx
+curl -L https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/encoder-model.onnx.data -o encoder-model.onnx.data
+curl -L https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/decoder_joint-model.onnx -o decoder_joint-model.onnx
+curl -L https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/vocab.txt -o vocab.txt
+curl -L https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/config.json -o config.json
 
 # Or download the full directory structure
 # The model should be at: ~/.local/share/voxtype/models/parakeet-tdt-0.6b-v2/
 ```
 
-Alternatively, use a v3 model if available:
+Alternatively, use the v3 model (https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx):
 
 ```bash
 mkdir -p ~/.local/share/voxtype/models/parakeet-tdt-0.6b-v3
 cd ~/.local/share/voxtype/models/parakeet-tdt-0.6b-v3
-# Download encoder-model.onnx, encoder-model.onnx.data, decoder_joint-model.onnx
+# Download encoder-model.onnx, encoder-model.onnx.data, decoder_joint-model.onnx, vocab.txt, config.json
 ```
 
 ## Switching to a Parakeet Binary
@@ -68,7 +70,7 @@ The standard voxtype binary does not include Parakeet support. You must switch t
 ```bash
 # Download the Parakeet binary for your CPU
 # Example: AVX-512 capable CPU
-curl -L https://github.com/peteonrails/voxtype/releases/download/v0.5.0/voxtype-0.5.0-linux-x86_64-onnx-avx512 \
+curl -L https://github.com/peteonrails/voxtype/releases/download/v0.6.3/voxtype-0.6.3-linux-x86_64-onnx-avx512 \
   -o /tmp/voxtype-onnx
 
 # Make executable and install
@@ -190,7 +192,7 @@ Ensure the model is in the correct location:
 
 ```bash
 ls ~/.local/share/voxtype/models/parakeet-tdt-0.6b-v3/
-# Should show: encoder-model.onnx, encoder-model.onnx.data, decoder_joint-model.onnx
+# Should show: encoder-model.onnx, encoder-model.onnx.data, decoder_joint-model.onnx, vocab.txt, config.json
 ```
 
 ### SIGILL crash on older CPUs
