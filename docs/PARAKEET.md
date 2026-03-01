@@ -70,7 +70,7 @@ The standard voxtype binary does not include Parakeet support. You must switch t
 ```bash
 # Download the Parakeet binary for your CPU
 # Example: AVX-512 capable CPU
-curl -L https://github.com/peteonrails/voxtype/releases/download/v0.5.0/voxtype-0.5.0-linux-x86_64-onnx-avx512 \
+curl -L https://github.com/peteonrails/voxtype/releases/download/v0.6.3/voxtype-0.6.3-linux-x86_64-onnx-avx512 \
   -o /tmp/voxtype-onnx
 
 # Make executable and install
