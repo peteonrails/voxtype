@@ -43,9 +43,9 @@ mkdir -p ~/.local/share/voxtype/models
 
 # Download and extract the model
 cd ~/.local/share/voxtype/models
-curl -L https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2/resolve/main/onnx/encoder-model.onnx -o encoder-model.onnx
-curl -L https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2/resolve/main/onnx/encoder-model.onnx.data -o encoder-model.onnx.data
-curl -L https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2/resolve/main/onnx/decoder_joint-model.onnx -o decoder_joint-model.onnx
+curl -L https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/encoder-model.onnx -o encoder-model.onnx
+curl -L https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/encoder-model.onnx.data -o encoder-model.onnx.data
+curl -L https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/decoder_joint-model.onnx -o decoder_joint-model.onnx
 
 # Or download the full directory structure
 # The model should be at: ~/.local/share/voxtype/models/parakeet-tdt-0.6b-v2/
