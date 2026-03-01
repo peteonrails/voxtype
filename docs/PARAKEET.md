@@ -46,6 +46,8 @@ cd ~/.local/share/voxtype/models
 curl -L https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/encoder-model.onnx -o encoder-model.onnx
 curl -L https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/encoder-model.onnx.data -o encoder-model.onnx.data
 curl -L https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/decoder_joint-model.onnx -o decoder_joint-model.onnx
+curl -L https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/vocab.txt -o vocab.txt
+curl -L https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/config.json -o config.json
 
 # Or download the full directory structure
 # The model should be at: ~/.local/share/voxtype/models/parakeet-tdt-0.6b-v2/
@@ -56,7 +58,7 @@ Alternatively, use the v3 model (https://huggingface.co/istupakov/parakeet-tdt-0
 ```bash
 mkdir -p ~/.local/share/voxtype/models/parakeet-tdt-0.6b-v3
 cd ~/.local/share/voxtype/models/parakeet-tdt-0.6b-v3
-# Download encoder-model.onnx, encoder-model.onnx.data, decoder_joint-model.onnx
+# Download encoder-model.onnx, encoder-model.onnx.data, decoder_joint-model.onnx, vocab.txt, config.json
 ```
 
 ## Switching to a Parakeet Binary
@@ -190,7 +192,7 @@ Ensure the model is in the correct location:
 
 ```bash
 ls ~/.local/share/voxtype/models/parakeet-tdt-0.6b-v3/
-# Should show: encoder-model.onnx, encoder-model.onnx.data, decoder_joint-model.onnx
+# Should show: encoder-model.onnx, encoder-model.onnx.data, decoder_joint-model.onnx, vocab.txt, config.json
 ```
 
 ### SIGILL crash on older CPUs
