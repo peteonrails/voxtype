@@ -270,6 +270,17 @@ on_transcription = true
 # [profiles.code]
 # post_process_command = "ollama run llama3.2:1b 'Format as code comment...'"
 # output_mode = "clipboard"
+
+# [service]
+# Run local OpenAI-compatible STT API in parallel with daemon hotkey flow.
+# Keep loopback-only unless you intentionally front it with a trusted proxy.
+#
+# enabled = false
+# host = "127.0.0.1"
+# port = 8427
+# max_upload_bytes = 10485760
+# request_timeout_ms = 90000
+# allowed_languages = ["de", "en"]
 "#;
 
 /// Hotkey activation mode
@@ -338,6 +349,10 @@ pub struct Config {
     #[serde(default)]
     pub meeting: MeetingConfig,
 
+    /// Local HTTP service configuration (OpenAI-compatible STT API)
+    #[serde(default)]
+    pub service: ServiceConfig,
+
     /// Optional path to state file for external integrations (e.g., Waybar)
     /// When set, the daemon writes current state ("idle", "recording", "transcribing")
     /// to this file whenever state changes.
@@ -386,6 +401,35 @@ pub struct HotkeyConfig {
     /// Examples: "LEFTSHIFT", "RIGHTALT", "LEFTCTRL"
     #[serde(default)]
     pub model_modifier: Option<String>,
+}
+
+/// Local HTTP service configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ServiceConfig {
+    /// Enable local HTTP service mode alongside daemon hotkey loop.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Listener host. Default is loopback only.
+    #[serde(default = "default_service_host")]
+    pub host: String,
+
+    /// Listener port.
+    #[serde(default = "default_service_port")]
+    pub port: u16,
+
+    /// Maximum request payload size in bytes.
+    #[serde(default = "default_service_max_upload_bytes")]
+    pub max_upload_bytes: usize,
+
+    /// Request timeout in milliseconds.
+    #[serde(default = "default_service_request_timeout_ms")]
+    pub request_timeout_ms: u64,
+
+    /// Allowed language set used for constrained auto-detection when callers
+    /// do not explicitly pin a language.
+    #[serde(default = "default_service_allowed_languages")]
+    pub allowed_languages: Vec<String>,
 }
 
 /// Audio capture configuration
@@ -1709,6 +1753,39 @@ fn default_true() -> bool {
     true
 }
 
+fn default_service_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_service_port() -> u16 {
+    8427
+}
+
+fn default_service_max_upload_bytes() -> usize {
+    10 * 1024 * 1024
+}
+
+fn default_service_request_timeout_ms() -> u64 {
+    90_000
+}
+
+fn default_service_allowed_languages() -> Vec<String> {
+    vec!["de".to_string(), "en".to_string()]
+}
+
+impl Default for ServiceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: default_service_host(),
+            port: default_service_port(),
+            max_upload_bytes: default_service_max_upload_bytes(),
+            request_timeout_ms: default_service_request_timeout_ms(),
+            allowed_languages: default_service_allowed_languages(),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -1784,6 +1861,7 @@ impl Default for Config {
             vad: VadConfig::default(),
             status: StatusConfig::default(),
             meeting: MeetingConfig::default(),
+            service: ServiceConfig::default(),
             state_file: Some("auto".to_string()),
             profiles: HashMap::new(),
         }
@@ -2084,6 +2162,42 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
         }
     }
 
+    // Local service
+    if let Ok(val) = std::env::var("VOXTYPE_SERVICE_ENABLED") {
+        config.service.enabled = parse_bool_env(&val);
+    }
+    if let Ok(host) = std::env::var("VOXTYPE_SERVICE_HOST") {
+        let trimmed = host.trim();
+        if !trimmed.is_empty() {
+            config.service.host = trimmed.to_string();
+        }
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_SERVICE_PORT") {
+        if let Ok(port) = val.parse::<u16>() {
+            config.service.port = port;
+        }
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_SERVICE_MAX_UPLOAD_BYTES") {
+        if let Ok(bytes) = val.parse::<usize>() {
+            config.service.max_upload_bytes = bytes;
+        }
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_SERVICE_REQUEST_TIMEOUT_MS") {
+        if let Ok(timeout_ms) = val.parse::<u64>() {
+            config.service.request_timeout_ms = timeout_ms;
+        }
+    }
+    if let Ok(raw) = std::env::var("VOXTYPE_SERVICE_ALLOWED_LANGUAGES") {
+        let langs: Vec<String> = raw
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !langs.is_empty() {
+            config.service.allowed_languages = langs;
+        }
+    }
+
     Ok(config)
 }
 
@@ -2119,6 +2233,46 @@ mod tests {
         assert_eq!(config.whisper.model, "base.en");
         assert_eq!(config.output.mode, OutputMode::Type);
         assert!(!config.output.auto_submit);
+        assert!(!config.service.enabled);
+        assert_eq!(config.service.host, "127.0.0.1");
+        assert_eq!(config.service.port, 8427);
+        assert_eq!(config.service.allowed_languages, vec!["de", "en"]);
+    }
+
+    #[test]
+    fn test_parse_service_config_toml() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [service]
+            enabled = true
+            host = "127.0.0.1"
+            port = 9027
+            max_upload_bytes = 5242880
+            request_timeout_ms = 45000
+            allowed_languages = ["en", "de"]
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.service.enabled);
+        assert_eq!(config.service.host, "127.0.0.1");
+        assert_eq!(config.service.port, 9027);
+        assert_eq!(config.service.max_upload_bytes, 5_242_880);
+        assert_eq!(config.service.request_timeout_ms, 45_000);
+        assert_eq!(config.service.allowed_languages, vec!["en", "de"]);
     }
 
     #[test]
