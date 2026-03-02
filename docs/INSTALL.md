@@ -346,7 +346,7 @@ sudo pacman -S ydotool
 # Ubuntu:
 sudo apt install ydotool
 
-# Enable and start the daemon (Arch)
+# Enable and start the daemon (Arch/Ubuntu)
 systemctl --user enable --now ydotool
 ```
 
@@ -366,7 +366,7 @@ For ydotool:
 ```bash
 # Install ydotool (see commands above for your distro)
 # Then enable and start the daemon (required!)
-systemctl --user enable --now ydotool  # Arch
+systemctl --user enable --now ydotool  # Arch/Ubuntu
 # For Fedora, see Troubleshooting guide for system service setup
 ```
 

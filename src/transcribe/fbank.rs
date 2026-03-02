@@ -235,11 +235,7 @@ pub fn apply_cmvn(features: &mut Array2<f32>, neg_mean: &[f32], inv_stddev: &[f3
 ///
 /// Returns num_mels triangular filters, each with fft_size/2+1 coefficients.
 /// Uses the standard mel scale: mel = 1127 * ln(1 + f/700)
-pub fn compute_mel_filterbank(
-    num_mels: usize,
-    fft_size: usize,
-    sample_rate: f32,
-) -> Vec<Vec<f32>> {
+pub fn compute_mel_filterbank(num_mels: usize, fft_size: usize, sample_rate: f32) -> Vec<Vec<f32>> {
     let num_bins = fft_size / 2 + 1;
     let max_freq = sample_rate / 2.0;
 

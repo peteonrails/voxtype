@@ -182,6 +182,10 @@ impl Transcriber for WhisperTranscriber {
         params.set_suppress_blank(true);
         params.set_suppress_nst(true);
 
+        // Prevent hallucination/looping by not conditioning on previous text
+        // This is especially important for short clips where Whisper can repeat itself
+        params.set_no_context(true);
+
         // Set initial prompt if configured
         if let Some(prompt) = &self.initial_prompt {
             params.set_initial_prompt(prompt);

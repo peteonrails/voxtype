@@ -1,0 +1,172 @@
+name: Build macOS
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (without v prefix)'
+        required: true
+        default: '0.5.0'
+
+jobs:
+  build:
+    runs-on: macos-14  # Apple Silicon runner for ARM64 build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust targets
+        run: |
+          rustup target add x86_64-apple-darwin
+          rustup target add aarch64-apple-darwin
+
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build for x86_64
+        run: |
+          cargo build --release --target x86_64-apple-darwin --features gpu-metal
+
+      - name: Build for aarch64
+        run: |
+          cargo build --release --target aarch64-apple-darwin --features gpu-metal
+
+      - name: Create universal binary
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          mkdir -p releases/${VERSION}
+          lipo -create \
+            target/x86_64-apple-darwin/release/voxtype \
+            target/aarch64-apple-darwin/release/voxtype \
+            -output releases/${VERSION}/voxtype-${VERSION}-macos-universal
+          chmod +x releases/${VERSION}/voxtype-${VERSION}-macos-universal
+
+      - name: Verify universal binary
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          lipo -info releases/${VERSION}/voxtype-${VERSION}-macos-universal
+          releases/${VERSION}/voxtype-${VERSION}-macos-universal --version
+
+      - name: Import certificate
+        if: env.APPLE_DEVELOPER_ID_CERT != ''
+        env:
+          APPLE_DEVELOPER_ID_CERT: ${{ secrets.APPLE_DEVELOPER_ID_CERT }}
+          APPLE_DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}
+        run: |
+          # Create temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          # Import certificate
+          echo "$APPLE_DEVELOPER_ID_CERT" | base64 --decode > certificate.p12
+          security import certificate.p12 -P "$APPLE_DEVELOPER_ID_CERT_PASSWORD" \
+            -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          rm certificate.p12
+
+          # Add keychain to search list
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+          # Allow codesign to access key
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+      - name: Sign binary
+        if: env.APPLE_DEVELOPER_ID_CERT != ''
+        env:
+          APPLE_DEVELOPER_ID_CERT: ${{ secrets.APPLE_DEVELOPER_ID_CERT }}
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          BINARY=releases/${VERSION}/voxtype-${VERSION}-macos-universal
+
+          # Find the signing identity
+          IDENTITY=$(security find-identity -v -p codesigning | \
+            grep "Developer ID Application" | head -1 | \
+            sed 's/.*"\(.*\)".*/\1/')
+
+          codesign --deep --force --verify --verbose \
+            --sign "$IDENTITY" \
+            --timestamp \
+            --options runtime \
+            "$BINARY"
+
+          codesign --verify --strict --verbose=2 "$BINARY"
+
+      - name: Notarize binary
+        if: env.APPLE_ID != ''
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          BINARY=releases/${VERSION}/voxtype-${VERSION}-macos-universal
+
+          # Create ZIP for notarization
+          ditto -c -k "$BINARY" "${BINARY}.zip"
+
+          # Submit for notarization
+          xcrun notarytool submit "${BINARY}.zip" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+
+          # Clean up and staple
+          rm "${BINARY}.zip"
+          xcrun stapler staple "$BINARY"
+
+      - name: Create DMG
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          BINARY=releases/${VERSION}/voxtype-${VERSION}-macos-universal
+          DMG=releases/${VERSION}/voxtype-${VERSION}-macos-universal.dmg
+
+          # Create temp directory with binary
+          TEMP_DIR=$(mktemp -d)
+          cp "$BINARY" "$TEMP_DIR/voxtype"
+
+          # Create simple DMG
+          hdiutil create -volname "Voxtype $VERSION" \
+            -srcfolder "$TEMP_DIR" \
+            -ov -format UDZO \
+            "$DMG"
+
+          rm -rf "$TEMP_DIR"
+
+      - name: Generate checksums
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          cd releases/${VERSION}
+          shasum -a 256 * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-release
+          path: |
+            releases/${{ steps.version.outputs.version }}/voxtype-*
+            releases/${{ steps.version.outputs.version }}/SHA256SUMS.txt
+
+      - name: Upload to release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            releases/${{ steps.version.outputs.version }}/voxtype-*
+            releases/${{ steps.version.outputs.version }}/SHA256SUMS.txt

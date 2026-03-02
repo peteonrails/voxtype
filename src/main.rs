@@ -6,8 +6,9 @@
 
 use clap::Parser;
 use std::path::PathBuf;
-use std::process::Command;
 use tracing_subscriber::EnvFilter;
+#[cfg(target_os = "macos")]
+use voxtype::menubar;
 use voxtype::{
     config, cpu, daemon, meeting, setup, transcribe, vad, Cli, Commands, MeetingAction,
     RecordAction, SetupAction,
@@ -116,14 +117,11 @@ async fn main() -> anyhow::Result<()> {
                 model,
                 default_model
             );
-            let _ = Command::new("notify-send")
-                .args([
-                    "--app-name=Voxtype",
-                    "--expire-time=5000",
-                    "Voxtype: Invalid Model",
-                    &format!("Unknown model '{}', using '{}'", model, default_model),
-                ])
-                .spawn();
+            // Send desktop notification
+            voxtype::notification::send_sync(
+                "Voxtype: Invalid Model",
+                &format!("Unknown model '{}', using '{}'", model, default_model),
+            );
         }
     }
     if let Some(engine) = cli.engine {
@@ -334,11 +332,70 @@ async fn main() -> anyhow::Result<()> {
         config.vad.min_speech_duration_ms = min_speech;
     }
 
+    // On macOS, detect if launched as app bundle executable (no subcommand, binary inside .app)
+    #[cfg(target_os = "macos")]
+    let default_command = if cli.command.is_none() {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.to_str().map(|s| s.contains(".app/Contents/MacOS/")))
+            .unwrap_or(false)
+            .then_some(Commands::AppLaunch)
+            .unwrap_or(Commands::Daemon)
+    } else {
+        Commands::Daemon // unused, cli.command is Some
+    };
+    #[cfg(not(target_os = "macos"))]
+    let default_command = Commands::Daemon;
+
     // Run the appropriate command
-    match cli.command.unwrap_or(Commands::Daemon) {
+    match cli.command.unwrap_or(default_command) {
         Commands::Daemon => {
             let mut daemon = daemon::Daemon::new(config, config_path);
             daemon.run().await?;
+        }
+        #[cfg(target_os = "macos")]
+        Commands::Menubar => {
+            let state_file = config
+                .resolve_state_file()
+                .ok_or_else(|| anyhow::anyhow!("state_file not configured"))?;
+            menubar::run(state_file);
+            // Note: menubar::run() never returns (runs macOS event loop)
+        }
+        #[cfg(target_os = "macos")]
+        Commands::AppLaunch => {
+            // Launched by Voxtype.app: start daemon in background, run menubar in foreground.
+            // The binary must be the CFBundleExecutable (not exec'd from a wrapper script)
+            // so macOS Control Center can register the status bar scene correctly.
+            let logs_dir = dirs::home_dir()
+                .map(|h| h.join("Library/Logs/voxtype"))
+                .unwrap_or_else(|| std::path::PathBuf::from("/tmp/voxtype"));
+            let _ = std::fs::create_dir_all(&logs_dir);
+
+            // Kill any existing instances
+            let _ = std::process::Command::new("pkill")
+                .args(["-9", "-f", "voxtype-bin daemon"])
+                .status();
+            let _ = std::process::Command::new("pkill")
+                .args(["-9", "-f", "voxtype-bin menubar"])
+                .status();
+            let _ = std::fs::remove_file("/tmp/voxtype/voxtype.lock");
+            let _ = std::fs::remove_file("/tmp/voxtype/menubar.lock");
+
+            // Start daemon as a child process with logging
+            let exe = std::env::current_exe()?;
+            let stdout = std::fs::File::create(logs_dir.join("stdout.log"))?;
+            let stderr = std::fs::File::create(logs_dir.join("stderr.log"))?;
+            let _daemon = std::process::Command::new(&exe)
+                .arg("daemon")
+                .stdout(stdout)
+                .stderr(stderr)
+                .spawn()?;
+
+            // Run menubar in this process (keeps the app alive with menu bar icon)
+            let state_file = config
+                .resolve_state_file()
+                .ok_or_else(|| anyhow::anyhow!("state_file not configured"))?;
+            menubar::run(state_file);
         }
 
         Commands::Transcribe { file, engine } => {
@@ -407,6 +464,39 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         setup::systemd::install().await?;
                     }
+                }
+                #[cfg(target_os = "macos")]
+                Some(SetupAction::Launchd { uninstall, status }) => {
+                    if status {
+                        setup::launchd::status().await?;
+                    } else if uninstall {
+                        setup::launchd::uninstall().await?;
+                    } else {
+                        setup::launchd::install().await?;
+                    }
+                }
+                #[cfg(target_os = "macos")]
+                Some(SetupAction::AppBundle { uninstall, status }) => {
+                    if status {
+                        setup::app_bundle::status().await?;
+                    } else if uninstall {
+                        setup::app_bundle::uninstall().await?;
+                    } else {
+                        setup::app_bundle::install().await?;
+                    }
+                }
+                #[cfg(target_os = "macos")]
+                Some(SetupAction::Hammerspoon {
+                    install,
+                    show,
+                    hotkey,
+                    toggle,
+                }) => {
+                    setup::hammerspoon::run(install, show, &hotkey, toggle).await?;
+                }
+                #[cfg(target_os = "macos")]
+                Some(SetupAction::Macos) => {
+                    setup::macos::run().await?;
                 }
                 Some(SetupAction::Waybar {
                     json,
@@ -532,6 +622,83 @@ async fn main() -> anyhow::Result<()> {
         Commands::Meeting { action } => {
             run_meeting_command(&config, action).await?;
         }
+
+        Commands::CheckUpdate => {
+            check_for_updates().await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Check for updates by comparing version with GitHub releases
+async fn check_for_updates() -> anyhow::Result<()> {
+    let current = env!("CARGO_PKG_VERSION");
+    println!("Voxtype Update Check\n");
+    println!("====================\n");
+    println!("Current version: {}", current);
+    println!("Checking for updates...\n");
+
+    // Fetch latest release from GitHub API (blocking call wrapped in spawn_blocking)
+    let result = tokio::task::spawn_blocking(|| {
+        ureq::get("https://api.github.com/repos/peteonrails/voxtype/releases/latest")
+            .set("User-Agent", "voxtype-update-checker")
+            .call()
+    })
+    .await?;
+
+    match result {
+        Ok(resp) => {
+            let release: serde_json::Value = resp.into_json()?;
+            if let Some(tag) = release["tag_name"].as_str() {
+                let latest = tag.trim_start_matches('v');
+
+                // Compare versions using semver
+                let current_ver = semver::Version::parse(current)
+                    .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
+                let latest_ver = semver::Version::parse(latest)
+                    .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
+
+                if latest_ver > current_ver {
+                    println!(
+                        "\x1b[33m⚠ Update available: {} → {}\x1b[0m\n",
+                        current, latest
+                    );
+                    println!(
+                        "Download: https://github.com/peteonrails/voxtype/releases/tag/{}",
+                        tag
+                    );
+                    println!("Website:  https://voxtype.io/download");
+
+                    // Show release notes excerpt if available
+                    if let Some(body) = release["body"].as_str() {
+                        let summary: String = body.lines().take(5).collect::<Vec<_>>().join("\n");
+                        if !summary.is_empty() {
+                            println!("\nRelease notes:");
+                            println!("{}", summary);
+                            if body.lines().count() > 5 {
+                                println!("...");
+                            }
+                        }
+                    }
+                } else {
+                    println!(
+                        "\x1b[32m✓ You're on the latest version ({}).\x1b[0m",
+                        current
+                    );
+                }
+            } else {
+                println!("Could not parse latest version from GitHub.");
+            }
+        }
+        Err(ureq::Error::Status(code, _)) => {
+            eprintln!("GitHub API returned status: {}", code);
+            eprintln!("Try again later or check manually: https://github.com/peteonrails/voxtype/releases");
+        }
+        Err(e) => {
+            eprintln!("Failed to check for updates: {}", e);
+            eprintln!("Check manually: https://github.com/peteonrails/voxtype/releases");
+        }
     }
 
     Ok(())
@@ -539,9 +706,6 @@ async fn main() -> anyhow::Result<()> {
 
 /// Check if the daemon is running, exit with error if not
 fn check_daemon_running() -> anyhow::Result<()> {
-    use nix::sys::signal::kill;
-    use nix::unistd::Pid;
-
     let pid_file = config::Config::runtime_dir().join("pid");
 
     if !pid_file.exists() {
@@ -558,8 +722,8 @@ fn check_daemon_running() -> anyhow::Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("Invalid PID in file: {}", e))?;
 
-    // Check if the process is actually running
-    if kill(Pid::from_raw(pid), None).is_err() {
+    // Check if the process is actually running (signal 0 = check existence)
+    if unsafe { libc::kill(pid, 0) } != 0 {
         // Process doesn't exist, clean up stale PID file
         let _ = std::fs::remove_file(&pid_file);
         eprintln!("Error: Voxtype daemon is not running (stale PID file removed).");
@@ -576,12 +740,10 @@ fn send_record_command(
     action: RecordAction,
     top_level_model: Option<&str>,
 ) -> anyhow::Result<()> {
-    use nix::sys::signal::{kill, Signal};
-    use nix::unistd::Pid;
     use voxtype::OutputModeOverride;
 
-    // Read PID from the pid file
-    let pid_file = config::Config::runtime_dir().join("pid");
+    // Read PID from the lock file (daemon writes PID to voxtype.lock)
+    let pid_file = config::Config::runtime_dir().join("voxtype.lock");
 
     if !pid_file.exists() {
         eprintln!("Error: Voxtype daemon is not running.");
@@ -597,8 +759,8 @@ fn send_record_command(
         .parse()
         .map_err(|e| anyhow::anyhow!("Invalid PID in file: {}", e))?;
 
-    // Check if the process is actually running
-    if kill(Pid::from_raw(pid), None).is_err() {
+    // Check if the process is actually running (signal 0 = check existence)
+    if unsafe { libc::kill(pid, 0) } != 0 {
         // Process doesn't exist, clean up stale PID file
         let _ = std::fs::remove_file(&pid_file);
         eprintln!("Error: Voxtype daemon is not running (stale PID file removed).");
@@ -689,9 +851,9 @@ fn send_record_command(
     }
 
     // For toggle, we need to read current state to decide which signal to send
-    let signal = match &action {
-        RecordAction::Start { .. } => Signal::SIGUSR1,
-        RecordAction::Stop { .. } => Signal::SIGUSR2,
+    let signal: libc::c_int = match &action {
+        RecordAction::Start { .. } => libc::SIGUSR1,
+        RecordAction::Stop { .. } => libc::SIGUSR2,
         RecordAction::Toggle { .. } => {
             // Read current state to determine action
             let state_file = match config.resolve_state_file() {
@@ -713,16 +875,21 @@ fn send_record_command(
                 std::fs::read_to_string(&state_file).unwrap_or_else(|_| "idle".to_string());
 
             if current_state.trim() == "recording" {
-                Signal::SIGUSR2 // Stop
+                libc::SIGUSR2 // Stop
             } else {
-                Signal::SIGUSR1 // Start
+                libc::SIGUSR1 // Start
             }
         }
         RecordAction::Cancel => unreachable!(), // Handled above
     };
 
-    kill(Pid::from_raw(pid), signal)
-        .map_err(|e| anyhow::anyhow!("Failed to send signal to daemon: {}", e))?;
+    let result = unsafe { libc::kill(pid, signal) };
+    if result != 0 {
+        return Err(anyhow::anyhow!(
+            "Failed to send signal to daemon: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
 
     Ok(())
 }
@@ -875,13 +1042,14 @@ fn is_daemon_running() -> bool {
         Err(_) => return false, // No PID file = not running
     };
 
-    let pid: u32 = match pid_str.trim().parse() {
+    let pid: i32 = match pid_str.trim().parse() {
         Ok(p) => p,
         Err(_) => return false, // Invalid PID = not running
     };
 
-    // Check if process exists by testing /proc/{pid}
-    std::path::Path::new(&format!("/proc/{}", pid)).exists()
+    // Check if process exists using kill(pid, 0) - works on both Linux and macOS
+    // Signal 0 doesn't send a signal, just checks if process exists and we have permission
+    unsafe { libc::kill(pid, 0) == 0 }
 }
 
 /// Run the status command - show current daemon state
@@ -1204,8 +1372,8 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
             if path.is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.contains("sensevoice") {
-                    let has_model = path.join("model.int8.onnx").exists()
-                        || path.join("model.onnx").exists();
+                    let has_model =
+                        path.join("model.int8.onnx").exists() || path.join("model.onnx").exists();
                     let has_tokens = path.join("tokens.txt").exists();
                     if has_model && has_tokens {
                         sensevoice_models.push(name);

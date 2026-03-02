@@ -418,9 +418,11 @@ Building on hosts with newer glibc (e.g. 2.43 on CachyOS/Arch) can produce binar
 
 ### Build Strategy
 
+A full release requires **7 Linux binaries**: 3 Whisper variants and 4 ONNX variants.
+
 **CRITICAL: Every binary must be built in Docker.** Never build release binaries directly on the host, even for AVX-512 or ROCm builds that require specific hardware. Run Docker locally on the machine with the required hardware instead.
 
-**Whisper Binaries:**
+**Whisper Binaries (3):**
 
 | Binary | Dockerfile | Docker Context | Base Image | Max glibc |
 |--------|-----------|----------------|------------|-----------|
@@ -450,15 +452,25 @@ GPU acceleration is enabled via Cargo features:
 | `gpu-hipblas` | ROCm/HIP | AMD GPUs (alternative to Vulkan) |
 | `gpu-metal` | Metal | macOS (not applicable for Linux builds) |
 
+**CRITICAL: Always run `cargo clean` before building with different features.**
+
+When switching between feature sets (e.g., CPU-only to GPU-enabled, or between different GPU backends), stale build artifacts can cause GPU support to silently fail at runtime. The binary will compile, have a different checksum, and appear correct, but GPU acceleration won't work.
+
+This is especially insidious because:
+- The build succeeds without errors
+- The binary size and checksum differ from previous builds
+- `--version` reports correctly
+- But GPU detection fails silently at runtime (e.g., `use gpu = 0` instead of `use gpu = 1`)
+
 ```bash
 # Build with Vulkan GPU support
-cargo build --release --features gpu-vulkan
+cargo clean && cargo build --release --features gpu-vulkan
 
 # Build with CUDA GPU support
-cargo build --release --features gpu-cuda
+cargo clean && cargo build --release --features gpu-cuda
 
 # Build CPU-only (no GPU feature)
-cargo build --release
+cargo clean && cargo build --release
 ```
 
 ### Remote Docker Context
@@ -480,9 +492,13 @@ docker context use default
 
 ### Full Release Build Process
 
-**CRITICAL: Always use `--no-cache` for release builds to prevent stale binaries.**
+**CRITICAL: Always use `--no-cache` for Docker builds and `cargo clean` for local builds.**
 
-Docker caches build layers aggressively. Without `--no-cache`, you may upload binaries with old version numbers even after updating Cargo.toml. This has caused AUR packages to ship v0.4.1 binaries labeled as v0.4.5.
+Stale build artifacts cause two categories of failures:
+
+1. **Docker cache** - Without `--no-cache`, Docker may reuse layers with old version numbers. This caused AUR packages to ship v0.4.1 binaries labeled as v0.4.5.
+
+2. **Cargo incremental compilation** - Without `cargo clean`, switching between feature sets (e.g., CPU-only to `--features gpu-vulkan`) can produce binaries where GPU support silently fails at runtime. The binary compiles, has a different checksum, and reports the correct version, but GPU acceleration doesn't work. This is undetectable without actually testing GPU functionality.
 
 ```bash
 # Set version
@@ -497,11 +513,12 @@ docker compose -f docker-compose.build.yml up avx2 vulkan onnx-avx2
 docker compose -f docker-compose.build.yml build --no-cache onnx-cuda
 docker compose -f docker-compose.build.yml up onnx-cuda
 
-# 3. Copy binaries from remote Docker volumes to local
+# 3. Copy binaries from remote Docker containers to local
 mkdir -p releases/${VERSION}
-docker run --rm -v $(pwd)/releases/${VERSION}:/test ubuntu:24.04 ls /test  # verify
-# Use tar pipe to copy from remote Docker volume:
-docker run --rm -v $(pwd)/releases/${VERSION}:/src ubuntu:24.04 tar -cf - -C /src . | tar -xf - -C releases/${VERSION}/
+docker cp macos-release-avx2-1:/output/. releases/${VERSION}/
+docker cp macos-release-vulkan-1:/output/. releases/${VERSION}/
+docker cp macos-release-onnx-avx2-1:/output/. releases/${VERSION}/
+docker cp macos-release-onnx-cuda-1:/output/. releases/${VERSION}/
 
 # 4. Build AVX-512 + ROCm binaries locally IN DOCKER (caps glibc at container version)
 docker context use <your-local-context>
@@ -525,10 +542,10 @@ done
 
 ### Version Verification Checklist
 
-**Before uploading any release, verify ALL binaries report the correct version:**
+**Before uploading any release, verify ALL 7 binaries report the correct version:**
 
 ```bash
-# Whisper binaries
+# Whisper binaries (3)
 releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx2 --version
 releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx512 --version
 releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-vulkan --version
@@ -541,6 +558,28 @@ releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-onnx-rocm --version
 ```
 
 If versions don't match, the Docker cache is stale. Rebuild with `--no-cache`.
+
+### Functional Verification (GPU Builds)
+
+**Version checks and checksums are NOT sufficient to verify GPU builds.** A binary can report the correct version, have the expected file size, and still have non-functional GPU support due to stale build artifacts.
+
+For GPU-enabled binaries (Vulkan, CUDA, ROCm), verify GPU is actually detected:
+
+```bash
+# Test Vulkan build - should show "use gpu = 1" and "ggml_vulkan: Found N devices"
+./voxtype-${VERSION}-linux-x86_64-vulkan daemon &
+sleep 3
+journalctl --user -u voxtype --since "10 seconds ago" | grep -E "(use gpu|ggml_vulkan|Found.*devices)"
+# Expected: "use gpu = 1", "ggml_vulkan: Found 1 Vulkan devices"
+# Bad: "use gpu = 0" or "no GPU found"
+
+# For ONNX ROCm - should show ROCm execution provider
+./voxtype-${VERSION}-linux-x86_64-onnx-rocm daemon &
+sleep 3
+journalctl --user -u voxtype --since "10 seconds ago" | grep -iE "(rocm|execution provider)"
+```
+
+If GPU detection fails but the binary otherwise works, the build used stale artifacts. Run `cargo clean` and rebuild.
 
 ### Validating Binaries (AVX-512 Detection)
 

@@ -447,10 +447,7 @@ mod tests {
     #[test]
     fn test_parakeet_backend_binary_names() {
         assert_eq!(ParakeetBackend::Avx2.binary_name(), "voxtype-onnx-avx2");
-        assert_eq!(
-            ParakeetBackend::Avx512.binary_name(),
-            "voxtype-onnx-avx512"
-        );
+        assert_eq!(ParakeetBackend::Avx512.binary_name(), "voxtype-onnx-avx512");
         assert_eq!(ParakeetBackend::Cuda.binary_name(), "voxtype-onnx-cuda");
         assert_eq!(ParakeetBackend::Rocm.binary_name(), "voxtype-onnx-rocm");
         assert_eq!(ParakeetBackend::Custom.binary_name(), "voxtype-onnx");
