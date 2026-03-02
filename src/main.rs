@@ -1307,7 +1307,7 @@ fn reset_sigpipe() {
 
 /// Run a meeting command
 async fn run_meeting_command(config: &config::Config, action: MeetingAction) -> anyhow::Result<()> {
-    use meeting::{ExportFormat, ExportOptions, MeetingConfig, StorageConfig};
+    use meeting::{export_meeting, ExportFormat, ExportOptions, MeetingConfig, StorageConfig};
 
     // Convert config to meeting config
     let storage_path = if config.meeting.storage_path == "auto" {
@@ -1520,24 +1520,40 @@ async fn run_meeting_command(config: &config::Config, action: MeetingAction) -> 
                 line_width: 0,
             };
 
-            match meeting::export_meeting_by_id(
-                &meeting_config,
-                &meeting_id,
-                export_format,
-                &options,
-            ) {
-                Ok(content) => {
-                    if let Some(path) = output {
-                        std::fs::write(&path, &content)?;
-                        println!("Exported to {:?}", path);
-                    } else {
-                        println!("{}", content);
-                    }
+            let meeting_data = match meeting::get_meeting(&meeting_config, &meeting_id) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("Error loading meeting: {}", e);
+                    std::process::exit(1);
                 }
+            };
+
+            let content = match export_meeting(&meeting_data, export_format, &options) {
+                Ok(c) => c,
                 Err(e) => {
                     eprintln!("Error exporting meeting: {}", e);
                     std::process::exit(1);
                 }
+            };
+
+            if let Some(path) = output {
+                let file_path = if path.is_dir() {
+                    let title = meeting_data.metadata.display_title();
+                    let safe_title =
+                        title.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "-");
+                    let basename = if safe_title.trim().is_empty() {
+                        format!("meeting-{}", meeting_data.metadata.id)
+                    } else {
+                        safe_title
+                    };
+                    path.join(format!("{}.{}", basename, export_format.extension()))
+                } else {
+                    path
+                };
+                std::fs::write(&file_path, &content)?;
+                println!("Exported to {}", file_path.display());
+            } else {
+                println!("{}", content);
             }
         }
 
