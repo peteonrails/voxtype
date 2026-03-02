@@ -122,6 +122,15 @@ impl WhisperTranscriber {
 
 impl Transcriber for WhisperTranscriber {
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
+        self.transcribe_with_options(samples, None, None)
+    }
+
+    fn transcribe_with_options(
+        &self,
+        samples: &[f32],
+        language_override: Option<&str>,
+        prompt_override: Option<&str>,
+    ) -> Result<String, TranscribeError> {
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat(
                 "Empty audio buffer".to_string(),
@@ -143,8 +152,29 @@ impl Transcriber for WhisperTranscriber {
             .create_state()
             .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
 
-        // Determine language based on configuration mode
-        let selected_language: Option<String> = if self.language.is_auto() {
+        let override_lang = language_override
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty());
+
+        // Determine language based on request override and config mode.
+        let selected_language: Option<String> = if let Some(lang) = override_lang {
+            if lang == "auto" {
+                if self.language.is_multiple() {
+                    let allowed = self.language.as_vec();
+                    tracing::debug!(
+                        "Using constrained language detection from override auto set: {:?}",
+                        allowed
+                    );
+                    Some(self.select_language_from_allowed(&mut state, samples, &allowed)?)
+                } else {
+                    tracing::debug!("Using unconstrained language auto-detection (override)");
+                    None
+                }
+            } else {
+                tracing::debug!("Using request language override: {}", lang);
+                Some(lang)
+            }
+        } else if self.language.is_auto() {
             // Unconstrained auto-detection: let Whisper detect from all languages
             tracing::debug!("Using unconstrained language auto-detection");
             None
@@ -182,8 +212,16 @@ impl Transcriber for WhisperTranscriber {
         params.set_suppress_blank(true);
         params.set_suppress_nst(true);
 
-        // Set initial prompt if configured
-        if let Some(prompt) = &self.initial_prompt {
+        // Set initial prompt (request override takes precedence).
+        let request_prompt = prompt_override.and_then(|p| {
+            let trimmed = p.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+        if let Some(prompt) = request_prompt.or(self.initial_prompt.as_deref()) {
             params.set_initial_prompt(prompt);
             tracing::debug!("Using initial prompt: {:?}", prompt);
         }

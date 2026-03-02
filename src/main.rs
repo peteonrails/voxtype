@@ -162,6 +162,20 @@ async fn main() -> anyhow::Result<()> {
         config.hotkey.model_modifier = Some(model_modifier);
     }
 
+    // Service overrides
+    if cli.service {
+        config.service.enabled = true;
+    }
+    if let Some(host) = cli.service_host {
+        let trimmed = host.trim();
+        if !trimmed.is_empty() {
+            config.service.host = trimmed.to_string();
+        }
+    }
+    if let Some(port) = cli.service_port {
+        config.service.port = port;
+    }
+
     // Whisper overrides
     if let Some(delay) = cli.pre_type_delay {
         config.output.pre_type_delay_ms = delay;
@@ -1204,8 +1218,8 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
             if path.is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.contains("sensevoice") {
-                    let has_model = path.join("model.int8.onnx").exists()
-                        || path.join("model.onnx").exists();
+                    let has_model =
+                        path.join("model.int8.onnx").exists() || path.join("model.onnx").exists();
                     let has_tokens = path.join("tokens.txt").exists();
                     if has_model && has_tokens {
                         sensevoice_models.push(name);

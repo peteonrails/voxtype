@@ -15,6 +15,7 @@ categories = ["multimedia::audio", "accessibility"]
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full", "signal", "sync", "time", "process", "io-util"] }
+axum = { version = "0.7", features = ["multipart"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }

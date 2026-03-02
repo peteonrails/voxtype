@@ -79,6 +79,7 @@ pub mod hotkey;
 pub mod meeting;
 pub mod model_manager;
 pub mod output;
+pub mod service;
 pub mod setup;
 pub mod state;
 pub mod text;

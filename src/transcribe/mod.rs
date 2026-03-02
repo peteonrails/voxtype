@@ -64,6 +64,21 @@ pub trait Transcriber: Send + Sync {
     /// Input: f32 samples, mono, 16kHz
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError>;
 
+    /// Transcribe audio with optional request-level overrides.
+    ///
+    /// Implementations may ignore unsupported options and fall back to
+    /// `transcribe(samples)`.
+    fn transcribe_with_options(
+        &self,
+        samples: &[f32],
+        language_override: Option<&str>,
+        prompt_override: Option<&str>,
+    ) -> Result<String, TranscribeError> {
+        let _ = language_override;
+        let _ = prompt_override;
+        self.transcribe(samples)
+    }
+
     /// Prepare for transcription (optional, called when recording starts)
     ///
     /// For subprocess-based transcribers, this spawns the worker process
