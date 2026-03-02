@@ -67,7 +67,7 @@ rodio = { version = "0.19", default-features = false, features = ["wav"] }
 whisper-rs = "0.15.1"
 
 # Parakeet speech-to-text (optional, ONNX-based)
-parakeet-rs = { version = "0.3", optional = true }
+parakeet-rs = { version = "^0.3.1", optional = true }
 
 # ONNX-based ASR engines (Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual)
 ort = { version = "2.0.0-rc.11", optional = true }
@@ -101,7 +101,7 @@ ml-diarization = ["dep:ort", "dep:ndarray"]
 parakeet = ["dep:parakeet-rs"]
 parakeet-cuda = ["parakeet", "parakeet-rs/cuda"]
 parakeet-tensorrt = ["parakeet", "parakeet-rs/tensorrt"]
-parakeet-rocm = ["parakeet", "parakeet-rs/rocm"]
+parakeet-rocm = ["parakeet", "parakeet-rs/migraphx"]
 # Dynamic loading for system ONNX Runtime (used by Nix builds)
 parakeet-load-dynamic = ["parakeet", "parakeet-rs/load-dynamic"]
 # Shared ONNX dependencies for engines using fbank/CTC preprocessing
@@ -146,3 +146,8 @@ opt-level = 1  # Faster dev builds, whisper still usable
 [[bin]]
 name = "voxtype"
 path = "src/main.rs"
+
+[patch.crates-io]
+# Fix MIGraphX provider options for ROCm support
+# https://github.com/pykeio/ort/issues/509
+ort = { git = "https://github.com/pykeio/ort", rev = "5913ae0a6f4468cf8329ba0da71b560de31481dc" }
