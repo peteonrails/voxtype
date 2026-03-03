@@ -262,6 +262,12 @@ async fn main() -> anyhow::Result<()> {
     if cli.no_shift_enter_newlines {
         config.output.shift_enter_newlines = false;
     }
+    if cli.smart_auto_submit {
+        config.text.smart_auto_submit = true;
+    }
+    if cli.no_smart_auto_submit {
+        config.text.smart_auto_submit = false;
+    }
     if let Some(delay) = cli.type_delay {
         config.output.type_delay_ms = delay;
     }
@@ -640,6 +646,13 @@ fn send_record_command(
         let override_file = config::Config::runtime_dir().join("model_override");
         std::fs::write(&override_file, model)
             .map_err(|e| anyhow::anyhow!("Failed to write model override: {}", e))?;
+    }
+
+    // Write smart auto-submit override file if specified
+    if let Some(enabled) = action.smart_auto_submit_override() {
+        let override_file = config::Config::runtime_dir().join("smart_auto_submit_override");
+        std::fs::write(&override_file, if enabled { "true" } else { "false" })
+            .map_err(|e| anyhow::anyhow!("Failed to write smart auto-submit override: {}", e))?;
     }
 
     // Write profile override file if specified

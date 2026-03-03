@@ -202,6 +202,14 @@ pub struct Cli {
     #[arg(long, conflicts_with = "shift_enter_newlines", help_heading = "Output")]
     pub no_shift_enter_newlines: bool,
 
+    /// Enable smart auto-submit (say "submit" to press Enter)
+    #[arg(long, help_heading = "Output")]
+    pub smart_auto_submit: bool,
+
+    /// Disable smart auto-submit (overrides config)
+    #[arg(long, conflicts_with = "smart_auto_submit", help_heading = "Output")]
+    pub no_smart_auto_submit: bool,
+
     /// Delay between typed characters in milliseconds (0 = fastest)
     #[arg(long, value_name = "MS", help_heading = "Output")]
     pub type_delay: Option<u32>,
@@ -425,6 +433,14 @@ pub enum RecordAction {
         /// Disable Shift+Enter newlines for this transcription (overrides config)
         #[arg(long, conflicts_with = "shift_enter_newlines")]
         no_shift_enter_newlines: bool,
+
+        /// Enable smart auto-submit for this recording (say "submit" to press Enter)
+        #[arg(long, conflicts_with = "no_smart_auto_submit")]
+        smart_auto_submit: bool,
+
+        /// Disable smart auto-submit for this recording
+        #[arg(long, conflicts_with = "smart_auto_submit")]
+        no_smart_auto_submit: bool,
     },
     /// Stop recording and transcribe (send SIGUSR2 to daemon)
     Stop {
@@ -483,6 +499,14 @@ pub enum RecordAction {
         /// Disable Shift+Enter newlines for this transcription (overrides config)
         #[arg(long, conflicts_with = "shift_enter_newlines")]
         no_shift_enter_newlines: bool,
+
+        /// Enable smart auto-submit for this recording (say "submit" to press Enter)
+        #[arg(long, conflicts_with = "no_smart_auto_submit")]
+        smart_auto_submit: bool,
+
+        /// Disable smart auto-submit for this recording (overrides config)
+        #[arg(long, conflicts_with = "smart_auto_submit")]
+        no_smart_auto_submit: bool,
     },
     /// Cancel current recording or transcription (discard without output)
     Cancel,
@@ -699,6 +723,32 @@ impl RecordAction {
         if shift_enter {
             Some(true)
         } else if no_shift_enter {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    /// Get the smart auto-submit override from --smart-auto-submit / --no-smart-auto-submit flags
+    /// Returns Some(true) to enable, Some(false) to disable, None if not specified
+    pub fn smart_auto_submit_override(&self) -> Option<bool> {
+        let (enable, disable) = match self {
+            RecordAction::Start {
+                smart_auto_submit,
+                no_smart_auto_submit,
+                ..
+            } => (*smart_auto_submit, *no_smart_auto_submit),
+            RecordAction::Toggle {
+                smart_auto_submit,
+                no_smart_auto_submit,
+                ..
+            } => (*smart_auto_submit, *no_smart_auto_submit),
+            RecordAction::Stop { .. } | RecordAction::Cancel => return None,
+        };
+
+        if enable {
+            Some(true)
+        } else if disable {
             Some(false)
         } else {
             None
@@ -1711,6 +1761,91 @@ mod tests {
             Some(Commands::Record { action }) => {
                 assert_eq!(action.auto_submit_override(), None);
                 assert_eq!(action.shift_enter_newlines_override(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    // =========================================================================
+    // Smart auto-submit flag tests
+    // =========================================================================
+
+    #[test]
+    fn test_record_start_smart_auto_submit_enable() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--smart-auto-submit"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.smart_auto_submit_override(), Some(true));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_no_smart_auto_submit() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--no-smart-auto-submit"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.smart_auto_submit_override(), Some(false));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_smart_auto_submit_mutual_exclusion() {
+        let result = Cli::try_parse_from([
+            "voxtype",
+            "record",
+            "start",
+            "--smart-auto-submit",
+            "--no-smart-auto-submit",
+        ]);
+        assert!(
+            result.is_err(),
+            "Should not allow both flags simultaneously"
+        );
+    }
+
+    #[test]
+    fn test_record_start_smart_auto_submit_no_flags_returns_none() {
+        let cli = Cli::parse_from(["voxtype", "record", "start"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.smart_auto_submit_override(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_toggle_smart_auto_submit_enable() {
+        let cli = Cli::parse_from(["voxtype", "record", "toggle", "--smart-auto-submit"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.smart_auto_submit_override(), Some(true));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_toggle_no_smart_auto_submit() {
+        let cli = Cli::parse_from(["voxtype", "record", "toggle", "--no-smart-auto-submit"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.smart_auto_submit_override(), Some(false));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_stop_has_no_smart_auto_submit_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "stop"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.smart_auto_submit_override(), None);
             }
             _ => panic!("Expected Record command"),
         }
