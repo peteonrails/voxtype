@@ -92,8 +92,20 @@ pub struct Cli {
     #[arg(long, value_name = "KEY", help_heading = "Hotkey")]
     pub model_modifier: Option<String>,
 
-    // -- Whisper --
+    // -- Service --
+    /// Enable local OpenAI-compatible STT HTTP service alongside daemon loop
+    #[arg(long, help_heading = "Service")]
+    pub service: bool,
 
+    /// Service bind host override (default: 127.0.0.1)
+    #[arg(long, value_name = "HOST", help_heading = "Service")]
+    pub service_host: Option<String>,
+
+    /// Service bind port override (default: 8427)
+    #[arg(long, value_name = "PORT", help_heading = "Service")]
+    pub service_port: Option<u16>,
+
+    // -- Whisper --
     /// Disable context window optimization for short recordings
     #[arg(long, help_heading = "Whisper")]
     pub no_whisper_context_optimization: bool,
@@ -148,7 +160,6 @@ pub struct Cli {
     pub remote_api_key: Option<String>,
 
     // -- Audio --
-
     /// Audio input device name (or "default" for system default)
     #[arg(long, value_name = "DEVICE", help_heading = "Audio")]
     pub audio_device: Option<String>,
@@ -166,7 +177,6 @@ pub struct Cli {
     pub no_audio_feedback: bool,
 
     // -- Output --
-
     /// Delay before typing starts (ms), helps prevent first character drop
     #[arg(long, value_name = "MS", help_heading = "Output")]
     pub pre_type_delay: Option<u32>,
@@ -211,7 +221,11 @@ pub struct Cli {
     pub fallback_to_clipboard: bool,
 
     /// Disable clipboard fallback
-    #[arg(long, conflicts_with = "fallback_to_clipboard", help_heading = "Output")]
+    #[arg(
+        long,
+        conflicts_with = "fallback_to_clipboard",
+        help_heading = "Output"
+    )]
     pub no_fallback_to_clipboard: bool,
 
     /// Enable spoken punctuation conversion (e.g., say "period" to get ".")
@@ -251,7 +265,6 @@ pub struct Cli {
     pub pre_recording_command: Option<String>,
 
     // -- VAD --
-
     /// Enable Voice Activity Detection (filter silence before transcription)
     #[arg(long, help_heading = "VAD")]
     pub vad: bool,

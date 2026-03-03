@@ -503,6 +503,8 @@ pub struct Daemon {
     meeting_loopback_buffer: Vec<f32>,
     // Meeting event receiver
     meeting_event_rx: Option<tokio::sync::mpsc::Receiver<MeetingEvent>>,
+    // Local HTTP transcription service handle
+    service_handle: Option<crate::service::ServiceHandle>,
     // GTCRN speech enhancer for mic echo cancellation
     #[cfg(feature = "onnx-common")]
     speech_enhancer: Option<std::sync::Arc<audio::enhance::GtcrnEnhancer>>,
@@ -599,6 +601,7 @@ impl Daemon {
             meeting_mic_buffer: Vec::new(),
             meeting_loopback_buffer: Vec::new(),
             meeting_event_rx: None,
+            service_handle: None,
             #[cfg(feature = "onnx-common")]
             speech_enhancer: None,
         }
@@ -735,10 +738,11 @@ impl Daemon {
                         tracing::info!("Meeting started: {}", meeting_id);
 
                         // Start dual audio capture for meeting (mic + loopback)
-                        let loopback_device = match self.config.meeting.audio.loopback_device.as_str() {
-                            "disabled" | "" => None,
-                            other => Some(other),
-                        };
+                        let loopback_device =
+                            match self.config.meeting.audio.loopback_device.as_str() {
+                                "disabled" | "" => None,
+                                other => Some(other),
+                            };
                         match audio::DualCapture::new(&self.config.audio, loopback_device) {
                             Ok(mut capture) => {
                                 if let Err(e) = capture.start().await {
@@ -773,11 +777,17 @@ impl Daemon {
                                         tracing::info!("GTCRN speech enhancer loaded for meeting echo cancellation");
                                     }
                                     Err(e) => {
-                                        tracing::warn!("Failed to load GTCRN enhancer, continuing without: {}", e);
+                                        tracing::warn!(
+                                            "Failed to load GTCRN enhancer, continuing without: {}",
+                                            e
+                                        );
                                     }
                                 }
                             } else {
-                                tracing::debug!("GTCRN model not found at {:?}, skipping speech enhancement", model_path);
+                                tracing::debug!(
+                                    "GTCRN model not found at {:?}, skipping speech enhancement",
+                                    model_path
+                                );
                             }
                         }
 
@@ -1555,6 +1565,13 @@ impl Daemon {
         }
 
         self.model_manager = Some(model_manager);
+
+        // Start local HTTP service if enabled
+        if self.config.service.enabled {
+            let handle = crate::service::start(&self.config, self.config_path.clone()).await?;
+            tracing::info!("Local service listening on http://{}", handle.addr());
+            self.service_handle = Some(handle);
+        }
 
         // Start hotkey listener (if enabled)
         let mut hotkey_rx = if let Some(ref mut listener) = hotkey_listener {
@@ -2588,6 +2605,12 @@ impl Daemon {
         if self.meeting_daemon.is_some() {
             tracing::info!("Stopping active meeting on shutdown");
             let _ = self.stop_meeting().await;
+        }
+
+        // Stop local HTTP service
+        if let Some(handle) = self.service_handle.take() {
+            tracing::info!("Stopping local service");
+            handle.shutdown().await;
         }
 
         // Remove state file on shutdown
