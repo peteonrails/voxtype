@@ -1105,11 +1105,10 @@ impl Default for OmnilingualConfig {
 }
 
 /// Transcription engine selection (which ASR technology to use)
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TranscriptionEngine {
-    /// Use Whisper (whisper.cpp via whisper-rs) - default
-    #[default]
+    /// Use Whisper (whisper.cpp via whisper-rs)
     Whisper,
     /// Use Parakeet (NVIDIA's FastConformer via ONNX Runtime)
     /// Requires: cargo build --features parakeet
@@ -1201,6 +1200,12 @@ impl Default for VadConfig {
             min_speech_duration_ms: default_min_speech_duration_ms(),
             model: None,
         }
+    }
+}
+
+impl Default for TranscriptionEngine {
+    fn default() -> Self {
+        TranscriptionEngine::Whisper
     }
 }
 

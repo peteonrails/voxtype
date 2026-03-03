@@ -27,14 +27,13 @@ pub enum HotkeyEvent {
 }
 
 /// Trait for hotkey detection implementations
-#[async_trait::async_trait]
-pub trait HotkeyListener: Send + Sync {
+pub trait HotkeyListener: Send {
     /// Start listening for hotkey events
     /// Returns a channel receiver for events
-    async fn start(&mut self) -> Result<mpsc::Receiver<HotkeyEvent>, HotkeyError>;
+    fn start(&mut self) -> Result<mpsc::Receiver<HotkeyEvent>, HotkeyError>;
 
     /// Stop listening and clean up
-    async fn stop(&mut self) -> Result<(), HotkeyError>;
+    fn stop(&mut self) -> Result<(), HotkeyError>;
 }
 
 /// Factory function to create the appropriate hotkey listener
