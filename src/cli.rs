@@ -151,6 +151,10 @@ pub struct Cli {
     #[arg(long, value_name = "URL", help_heading = "Whisper")]
     pub remote_endpoint: Option<String>,
 
+    /// Remote provider preset: auto, vllm, mistral, openai, or generic
+    #[arg(long, value_name = "PROVIDER", help_heading = "Whisper")]
+    pub remote_provider: Option<String>,
+
     /// Model name to send to remote server
     #[arg(long, value_name = "MODEL", help_heading = "Whisper")]
     pub remote_model: Option<String>,

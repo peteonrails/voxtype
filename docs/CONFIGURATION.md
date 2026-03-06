@@ -872,6 +872,9 @@ remote_endpoint = "http://192.168.1.100:8080"
 
 # OpenAI API
 remote_endpoint = "https://api.openai.com"
+
+# Mistral API
+remote_endpoint = "https://api.mistral.ai"
 ```
 
 **Security note:** Voxtype logs a warning if you use HTTP (unencrypted) for non-localhost endpoints, as your audio would be transmitted in the clear.
@@ -879,20 +882,54 @@ remote_endpoint = "https://api.openai.com"
 ### remote_model
 
 **Type:** String
-**Default:** `"whisper-1"`
+**Default:** provider-dependent
 **Required:** No
 
 The model name to send to the remote server.
 
 - For **whisper.cpp server**: This is ignored (the server uses whatever model it was started with)
-- For **OpenAI API**: Must be `"whisper-1"`
-- For **other providers**: Check their documentation
+- For **OpenAI API**: default is `"whisper-1"`
+- For **Mistral API**: default is `"voxtral-mini-latest"`
+- For **local vLLM / generic self-hosted OpenAI-compatible endpoints**: default is `"mistralai/Voxtral-Mini-3B-2507"`
+- For **other providers**: set `remote_model` explicitly
+
+### remote_provider
+
+**Type:** String
+**Default:** `"auto"`
+**Required:** No
+
+Optional provider preset used to choose the default `remote_model`.
+
+Supported values:
+- `auto`: infer from endpoint; defaults to self-hosted Voxtral when not obviously OpenAI or Mistral
+- `vllm`: self-hosted OpenAI-compatible endpoint serving Voxtral
+- `mistral`: Mistral hosted STT API
+- `openai`: OpenAI hosted Whisper API
+- `generic`: generic OpenAI-compatible endpoint, using the self-hosted Voxtral default model
 
 **Example:**
 ```toml
 [whisper]
 backend = "remote"
+remote_endpoint = "http://127.0.0.1:8000"
+remote_provider = "vllm"
+remote_model = "mistralai/Voxtral-Mini-3B-2507"
+```
+
+```toml
+[whisper]
+backend = "remote"
+remote_endpoint = "https://api.mistral.ai"
+remote_provider = "mistral"
+remote_model = "voxtral-mini-latest"
+```
+
+```toml
+[whisper]
+backend = "remote"
 remote_endpoint = "https://api.openai.com"
+remote_provider = "openai"
 remote_model = "whisper-1"
 ```
 
@@ -2361,6 +2398,8 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_GPU_ISOLATION` | bool | `whisper.gpu_isolation` |
 | `VOXTYPE_ON_DEMAND_LOADING` | bool | `whisper.on_demand_loading` |
 | `VOXTYPE_REMOTE_ENDPOINT` | string | `whisper.remote_endpoint` |
+| `VOXTYPE_REMOTE_PROVIDER` | string | `whisper.remote_provider` |
+| `VOXTYPE_REMOTE_MODEL` | string | `whisper.remote_model` |
 | `VOXTYPE_WHISPER_API_KEY` | string | `whisper.remote_api_key` |
 
 **Audio:**

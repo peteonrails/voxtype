@@ -1023,11 +1023,12 @@ backend = "remote"
 # Language setting still applies
 language = "en"
 
-# Your whisper.cpp server address
-remote_endpoint = "http://192.168.1.100:8080"
+# Your self-hosted OpenAI-compatible STT server
+remote_endpoint = "http://127.0.0.1:8000"
 
-# Model name sent to server (whisper.cpp ignores this, but OpenAI requires it)
-remote_model = "whisper-1"
+# Provider preset and default model for local Voxtral via vLLM
+remote_provider = "vllm"
+remote_model = "mistralai/Voxtral-Mini-3B-2507"
 
 # Request timeout in seconds (increase for large files or slow networks)
 remote_timeout_secs = 30
@@ -1038,13 +1039,24 @@ remote_timeout_secs = 30
 
 ### Using with Cloud Services (OpenAI, etc.)
 
-While this feature was built for self-hosted servers, it also works with OpenAI's hosted Whisper API and other compatible services:
+While this feature was built for self-hosted servers, it also works with Mistral's Voxtral API, OpenAI's hosted Whisper API, and other compatible services:
+
+```toml
+[whisper]
+backend = "remote"
+language = "en"
+remote_endpoint = "https://api.mistral.ai"
+remote_provider = "mistral"
+remote_model = "voxtral-mini-latest"
+remote_timeout_secs = 30
+```
 
 ```toml
 [whisper]
 backend = "remote"
 language = "en"
 remote_endpoint = "https://api.openai.com"
+remote_provider = "openai"
 remote_model = "whisper-1"
 remote_timeout_secs = 30
 ```

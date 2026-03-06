@@ -137,11 +137,22 @@ translate = false
 # Remote server endpoint URL (required for remote backend)
 # Examples:
 #   - whisper.cpp server: "http://192.168.1.100:8080"
+#   - local vLLM Voxtral server: "http://127.0.0.1:8000"
 #   - OpenAI API: "https://api.openai.com"
+#   - Mistral API: "https://api.mistral.ai"
 # remote_endpoint = "http://192.168.1.100:8080"
 #
-# Model name to send to remote server (default: "whisper-1")
-# remote_model = "whisper-1"
+# Remote provider preset (default: "auto")
+# - auto: infer from endpoint; prefers local Voxtral-compatible servers
+# - vllm: self-hosted OpenAI-compatible server, defaults to mistralai/Voxtral-Mini-3B-2507
+# - mistral: Mistral hosted API, defaults to voxtral-mini-latest
+# - openai: OpenAI hosted API, defaults to whisper-1
+# - generic: generic OpenAI-compatible endpoint, defaults to mistralai/Voxtral-Mini-3B-2507
+# remote_provider = "auto"
+#
+# Model name to send to remote server.
+# If unset, the provider preset selects a sensible default.
+# remote_model = "mistralai/Voxtral-Mini-3B-2507"
 #
 # API key for remote server (optional, or use VOXTYPE_WHISPER_API_KEY env var)
 # remote_api_key = ""
@@ -713,6 +724,23 @@ pub enum WhisperMode {
     Cli,
 }
 
+/// Remote API provider preset for OpenAI-compatible transcription backends.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteProvider {
+    /// Infer provider from endpoint and prefer self-hosted Voxtral-compatible backends.
+    #[default]
+    Auto,
+    /// Self-hosted vLLM or similar OpenAI-compatible server serving Voxtral.
+    Vllm,
+    /// Mistral hosted speech-to-text API.
+    Mistral,
+    /// OpenAI hosted Whisper API.
+    OpenAi,
+    /// Generic OpenAI-compatible server.
+    Generic,
+}
+
 /// Language configuration supporting single language or array of allowed languages
 ///
 /// Supports three modes:
@@ -876,9 +904,14 @@ pub struct WhisperConfig {
     #[serde(default)]
     pub remote_endpoint: Option<String>,
 
-    /// Model name to send to remote server (default: "whisper-1")
+    /// Model name to send to remote server. When unset, the remote provider
+    /// preset selects a sensible default.
     #[serde(default)]
     pub remote_model: Option<String>,
+
+    /// Remote provider preset used for default model selection.
+    #[serde(default)]
+    pub remote_provider: Option<RemoteProvider>,
 
     /// API key for remote server (optional, can also use VOXTYPE_WHISPER_API_KEY env var)
     #[serde(default)]
@@ -946,6 +979,7 @@ impl Default for WhisperConfig {
             cold_model_timeout_secs: default_cold_model_timeout(),
             remote_endpoint: None,
             remote_model: None,
+            remote_provider: None,
             remote_api_key: None,
             remote_timeout_secs: None,
             whisper_cli_path: None,
@@ -1823,6 +1857,7 @@ impl Default for Config {
                 cold_model_timeout_secs: default_cold_model_timeout(),
                 remote_endpoint: None,
                 remote_model: None,
+                remote_provider: None,
                 remote_api_key: None,
                 remote_timeout_secs: None,
                 whisper_cli_path: None,
@@ -2149,6 +2184,31 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     // Remote whisper
     if let Ok(endpoint) = std::env::var("VOXTYPE_REMOTE_ENDPOINT") {
         config.whisper.remote_endpoint = Some(endpoint);
+    }
+    if let Ok(model) = std::env::var("VOXTYPE_REMOTE_MODEL") {
+        let trimmed = model.trim();
+        if !trimmed.is_empty() {
+            config.whisper.remote_model = Some(trimmed.to_string());
+        }
+    }
+    if let Ok(provider) = std::env::var("VOXTYPE_REMOTE_PROVIDER") {
+        let trimmed = provider.trim().to_lowercase();
+        if !trimmed.is_empty() {
+            config.whisper.remote_provider = Some(match trimmed.as_str() {
+                "auto" => RemoteProvider::Auto,
+                "vllm" => RemoteProvider::Vllm,
+                "mistral" => RemoteProvider::Mistral,
+                "openai" => RemoteProvider::OpenAi,
+                "generic" => RemoteProvider::Generic,
+                other => {
+                    tracing::warn!(
+                        "Ignoring invalid VOXTYPE_REMOTE_PROVIDER '{}'; expected auto, vllm, mistral, openai, or generic",
+                        other
+                    );
+                    config.whisper.remote_provider.unwrap_or_default()
+                }
+            });
+        }
     }
     if let Ok(key) = std::env::var("VOXTYPE_WHISPER_API_KEY") {
         config.whisper.remote_api_key = Some(key);
@@ -3005,6 +3065,34 @@ mod tests {
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.whisper.mode, Some(WhisperMode::Remote));
         assert_eq!(config.whisper.effective_mode(), WhisperMode::Remote);
+    }
+
+    #[test]
+    fn test_parse_remote_provider_mistral() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            mode = "remote"
+            language = "en"
+            remote_endpoint = "https://api.mistral.ai"
+            remote_provider = "mistral"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.whisper.remote_provider,
+            Some(RemoteProvider::Mistral)
+        );
     }
 
     #[test]

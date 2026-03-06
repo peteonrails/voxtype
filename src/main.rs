@@ -228,6 +228,22 @@ async fn main() -> anyhow::Result<()> {
     if let Some(endpoint) = cli.remote_endpoint {
         config.whisper.remote_endpoint = Some(endpoint);
     }
+    if let Some(provider) = cli.remote_provider {
+        match provider.to_lowercase().as_str() {
+            "auto" => config.whisper.remote_provider = Some(config::RemoteProvider::Auto),
+            "vllm" => config.whisper.remote_provider = Some(config::RemoteProvider::Vllm),
+            "mistral" => config.whisper.remote_provider = Some(config::RemoteProvider::Mistral),
+            "openai" => config.whisper.remote_provider = Some(config::RemoteProvider::OpenAi),
+            "generic" => config.whisper.remote_provider = Some(config::RemoteProvider::Generic),
+            _ => {
+                eprintln!(
+                    "Error: Invalid remote provider '{}'. Valid options: auto, vllm, mistral, openai, generic",
+                    provider
+                );
+                std::process::exit(1);
+            }
+        }
+    }
     if let Some(model) = cli.remote_model {
         config.whisper.remote_model = Some(model);
     }

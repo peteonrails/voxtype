@@ -7,7 +7,7 @@
 //! configured, the first/primary language is used.
 
 use super::Transcriber;
-use crate::config::{LanguageConfig, WhisperConfig};
+use crate::config::{LanguageConfig, RemoteProvider, WhisperConfig};
 use crate::error::TranscribeError;
 use std::io::Cursor;
 use std::time::Duration;
@@ -68,10 +68,11 @@ impl RemoteTranscriber {
             .clone()
             .or_else(|| std::env::var("VOXTYPE_WHISPER_API_KEY").ok());
 
+        let provider = infer_remote_provider(config.remote_provider, &endpoint);
         let model = config
             .remote_model
             .clone()
-            .unwrap_or_else(|| "whisper-1".to_string());
+            .unwrap_or_else(|| default_model_for_provider(provider).to_string());
 
         let timeout = Duration::from_secs(config.remote_timeout_secs.unwrap_or(30));
 
@@ -85,8 +86,9 @@ impl RemoteTranscriber {
         }
 
         tracing::info!(
-            "Configured remote transcriber: endpoint={}, model={}, timeout={}s",
+            "Configured remote transcriber: endpoint={}, provider={:?}, model={}, timeout={}s",
             endpoint,
+            provider,
             model,
             timeout.as_secs()
         );
@@ -176,6 +178,32 @@ impl RemoteTranscriber {
         body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
 
         (boundary, body)
+    }
+}
+
+fn infer_remote_provider(configured: Option<RemoteProvider>, endpoint: &str) -> RemoteProvider {
+    if let Some(provider) = configured {
+        return provider;
+    }
+
+    let normalized = endpoint.trim().to_lowercase();
+    if normalized.contains("api.openai.com") {
+        return RemoteProvider::OpenAi;
+    }
+    if normalized.contains("api.mistral.ai") {
+        return RemoteProvider::Mistral;
+    }
+
+    RemoteProvider::Vllm
+}
+
+fn default_model_for_provider(provider: RemoteProvider) -> &'static str {
+    match provider {
+        RemoteProvider::OpenAi => "whisper-1",
+        RemoteProvider::Mistral => "voxtral-mini-latest",
+        RemoteProvider::Vllm | RemoteProvider::Generic | RemoteProvider::Auto => {
+            "mistralai/Voxtral-Mini-3B-2507"
+        }
     }
 }
 
@@ -427,5 +455,68 @@ mod tests {
 
         let transcriber = RemoteTranscriber::new(&config).unwrap();
         assert_eq!(transcriber.timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_default_provider_and_model_for_local_endpoint_prefers_voxtral() {
+        let config = WhisperConfig {
+            mode: Some(crate::config::WhisperMode::Remote),
+            remote_endpoint: Some("http://127.0.0.1:8000".to_string()),
+            ..Default::default()
+        };
+
+        let transcriber = RemoteTranscriber::new(&config).unwrap();
+        assert_eq!(
+            infer_remote_provider(None, "http://127.0.0.1:8000"),
+            RemoteProvider::Vllm
+        );
+        assert_eq!(transcriber.model, "mistralai/Voxtral-Mini-3B-2507");
+    }
+
+    #[test]
+    fn test_openai_endpoint_defaults_to_whisper_1() {
+        let config = WhisperConfig {
+            mode: Some(crate::config::WhisperMode::Remote),
+            remote_endpoint: Some("https://api.openai.com".to_string()),
+            ..Default::default()
+        };
+
+        let transcriber = RemoteTranscriber::new(&config).unwrap();
+        assert_eq!(
+            infer_remote_provider(None, "https://api.openai.com"),
+            RemoteProvider::OpenAi
+        );
+        assert_eq!(transcriber.model, "whisper-1");
+    }
+
+    #[test]
+    fn test_explicit_mistral_provider_defaults_to_voxtral_latest() {
+        let config = WhisperConfig {
+            mode: Some(crate::config::WhisperMode::Remote),
+            remote_endpoint: Some("https://gateway.example.com".to_string()),
+            remote_provider: Some(RemoteProvider::Mistral),
+            ..Default::default()
+        };
+
+        let transcriber = RemoteTranscriber::new(&config).unwrap();
+        assert_eq!(
+            infer_remote_provider(Some(RemoteProvider::Mistral), "https://gateway.example.com"),
+            RemoteProvider::Mistral
+        );
+        assert_eq!(transcriber.model, "voxtral-mini-latest");
+    }
+
+    #[test]
+    fn test_explicit_remote_model_overrides_provider_default() {
+        let config = WhisperConfig {
+            mode: Some(crate::config::WhisperMode::Remote),
+            remote_endpoint: Some("https://api.mistral.ai".to_string()),
+            remote_provider: Some(RemoteProvider::Mistral),
+            remote_model: Some("custom-voxtral".to_string()),
+            ..Default::default()
+        };
+
+        let transcriber = RemoteTranscriber::new(&config).unwrap();
+        assert_eq!(transcriber.model, "custom-voxtral");
     }
 }
