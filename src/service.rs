@@ -569,6 +569,11 @@ fn map_transcription_error(err: TranscribeError) -> ApiError {
             message: msg,
             error_type: "upstream_error",
         },
+        TranscribeError::LicenseRequired(msg) => ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: msg,
+            error_type: "license_required",
+        },
     }
 }
 
