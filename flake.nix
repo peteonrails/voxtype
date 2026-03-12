@@ -93,7 +93,7 @@
         # Wrap an ONNX package with runtime dependencies and ORT_DYLIB_PATH
         # ONNX engines need ONNX Runtime at runtime for inference
         libExt = if pkgs.stdenv.isDarwin then "dylib" else "so";
-        wrapOnnx = { onnxruntime ? pkgs.onnxruntime, pkg }: pkgs.symlinkJoin {
+        wrapOnnx = { onnxruntime ? pkgs.onnxruntime, pkg, extraWrapperArgs ? "" }: pkgs.symlinkJoin {
           name = "${pkg.pname or "voxtype"}-wrapped-${pkg.version}";
           paths = [ pkg ];
           buildInputs = [ pkgs.makeWrapper ];
@@ -101,10 +101,20 @@
             wrapProgram $out/bin/voxtype \
               --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps} \
               --set ORT_DYLIB_PATH "${onnxruntime}/lib/libonnxruntime.${libExt}" \
-              --prefix LD_LIBRARY_PATH : "${onnxruntime}/lib"
+              --prefix LD_LIBRARY_PATH : "${onnxruntime}/lib" \
+              ${extraWrapperArgs}
           '';
           inherit (pkg) meta;
         };
+
+        # Extra wrapper args for MIGraphX (ROCm) to set cache directory
+        migraphxWrapperArgs = ''
+          --run '
+            : "''${ORT_MIGRAPHX_MODEL_CACHE_PATH:=''${XDG_CACHE_HOME:-$HOME/.cache}/voxtype/migraphx}"
+            export ORT_MIGRAPHX_MODEL_CACHE_PATH
+            mkdir -p "$ORT_MIGRAPHX_MODEL_CACHE_PATH"
+          '
+        '';
 
         # ONNX Runtime variants for different GPU backends
         onnxruntimeCuda = pkgsUnfree.onnxruntime.override { cudaSupport = true; };
@@ -117,7 +127,12 @@
             version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
 
             src = ./.;
-            cargoLock.lockFile = ./Cargo.lock;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              outputHashes = {
+                "ort-2.0.0-rc.11" = "sha256-3v6wRi3mU/Fbd3fuiGxTRAXHj+VnUTsahU/oc7eiw18=";
+              };
+            };
 
             nativeBuildInputs = commonNativeBuildInputs ++ extraNativeBuildInputs;
             buildInputs = commonBuildInputs ++ extraBuildInputs;
@@ -284,12 +299,12 @@
           # Paraformer, Dolphin, Omnilingual)
           onnx = wrapOnnx { pkg = onnxUnwrapped; };
           onnx-cuda = wrapOnnx { onnxruntime = onnxruntimeCuda; pkg = onnxCudaUnwrapped; };
-          onnx-rocm = wrapOnnx { onnxruntime = onnxruntimeRocm; pkg = onnxRocmUnwrapped; };
+          onnx-rocm = wrapOnnx { onnxruntime = onnxruntimeRocm; pkg = onnxRocmUnwrapped; extraWrapperArgs = migraphxWrapperArgs; };
 
           # Backwards-compatible aliases (parakeet → onnx)
           parakeet = wrapOnnx { pkg = onnxUnwrapped; };
           parakeet-cuda = wrapOnnx { onnxruntime = onnxruntimeCuda; pkg = onnxCudaUnwrapped; };
-          parakeet-rocm = wrapOnnx { onnxruntime = onnxruntimeRocm; pkg = onnxRocmUnwrapped; };
+          parakeet-rocm = wrapOnnx { onnxruntime = onnxruntimeRocm; pkg = onnxRocmUnwrapped; extraWrapperArgs = migraphxWrapperArgs; };
 
           # Unwrapped packages (for custom wrapping scenarios)
           voxtype-unwrapped = mkVoxtypeUnwrapped {};
