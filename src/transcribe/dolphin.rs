@@ -81,9 +81,7 @@ impl DolphinTranscriber {
                 TranscribeError::InitFailed(format!("ONNX session builder failed: {}", e))
             })?
             .with_intra_threads(threads)
-            .map_err(|e| {
-                TranscribeError::InitFailed(format!("Failed to set threads: {}", e))
-            })?
+            .map_err(|e| TranscribeError::InitFailed(format!("Failed to set threads: {}", e)))?
             .commit_from_file(&model_file)
             .map_err(|e| {
                 TranscribeError::InitFailed(format!(
@@ -155,21 +153,15 @@ impl Transcriber for DolphinTranscriber {
 
         // x: shape [1, T, 80]
         let (x_data, _offset) = features.into_raw_vec_and_offset();
-        let x_tensor =
-            Tensor::<f32>::from_array(([1usize, num_frames, feat_dim], x_data)).map_err(|e| {
-                TranscribeError::InferenceFailed(format!(
-                    "Failed to create input tensor: {}",
-                    e
-                ))
+        let x_tensor = Tensor::<f32>::from_array(([1usize, num_frames, feat_dim], x_data))
+            .map_err(|e| {
+                TranscribeError::InferenceFailed(format!("Failed to create input tensor: {}", e))
             })?;
 
         // x_len: shape [1] (i64)
-        let x_len_tensor = Tensor::<i64>::from_array(([1usize], vec![num_frames as i64]))
-            .map_err(|e| {
-                TranscribeError::InferenceFailed(format!(
-                    "Failed to create length tensor: {}",
-                    e
-                ))
+        let x_len_tensor =
+            Tensor::<i64>::from_array(([1usize], vec![num_frames as i64])).map_err(|e| {
+                TranscribeError::InferenceFailed(format!("Failed to create length tensor: {}", e))
             })?;
 
         // Run inference
@@ -180,10 +172,7 @@ impl Transcriber for DolphinTranscriber {
 
         let inputs: Vec<(std::borrow::Cow<str>, ort::session::SessionInputValue)> = vec![
             (std::borrow::Cow::Borrowed("x"), x_tensor.into()),
-            (
-                std::borrow::Cow::Borrowed("x_len"),
-                x_len_tensor.into(),
-            ),
+            (std::borrow::Cow::Borrowed("x_len"), x_len_tensor.into()),
         ];
 
         let outputs = session.run(inputs).map_err(|e| {
@@ -349,10 +338,7 @@ fn read_cmvn_from_metadata(session: &Session) -> Result<(Vec<f32>, Vec<f32>), Tr
         )));
     }
 
-    tracing::debug!(
-        "Loaded CMVN stats: {} dimensions",
-        neg_mean.len()
-    );
+    tracing::debug!("Loaded CMVN stats: {} dimensions", neg_mean.len());
 
     Ok((neg_mean, inv_stddev))
 }
@@ -382,10 +368,7 @@ fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
     }
 
     // Check sherpa-onnx naming convention
-    let sherpa_name = format!(
-        "sherpa-onnx-{}-ctc-multi-lang",
-        model_dir_name
-    );
+    let sherpa_name = format!("sherpa-onnx-{}-ctc-multi-lang", model_dir_name);
     let sherpa_path = models_dir.join(&sherpa_name);
     if sherpa_path.exists() {
         return Ok(sherpa_path);

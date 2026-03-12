@@ -369,7 +369,7 @@ Selects the transcription backend.
 
 > **Privacy Notice**: When using `remote` backend, audio is transmitted over the network. See [User Manual - Remote Whisper Servers](USER_MANUAL.md#remote-whisper-servers) for privacy considerations.
 
-**When to use `cli` backend:**
+**When to use `cli` backend (Linux only):**
 The `cli` backend is a workaround for systems where the whisper-rs FFI bindings crash due to C++ exceptions crossing the FFI boundary. This affects some systems with glibc 2.42+ (e.g., Ubuntu 25.10). If voxtype crashes during transcription, try the `cli` backend.
 
 Requires `whisper-cli` from [whisper.cpp](https://github.com/ggerganov/whisper.cpp).
@@ -940,6 +940,7 @@ remote_timeout_secs = 60  # 60 second timeout for long recordings
 **Type:** String
 **Default:** Auto-detected from PATH
 **Required:** No
+**Platform:** Linux only
 
 Path to the `whisper-cli` binary. Only used when `backend = "cli"`.
 

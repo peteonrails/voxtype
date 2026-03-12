@@ -320,10 +320,7 @@ const SENSEVOICE_MODELS: &[SenseVoiceModelInfo] = &[
         size_mb: 938,
         description: "Full precision (larger, slightly better accuracy)",
         languages: "zh/en/ja/ko/yue",
-        files: &[
-            ("model.onnx", "model.onnx"),
-            ("tokens.txt", "tokens.txt"),
-        ],
+        files: &[("model.onnx", "model.onnx"), ("tokens.txt", "tokens.txt")],
         huggingface_repo: "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
     },
 ];
@@ -384,20 +381,18 @@ struct DolphinModelInfo {
     huggingface_repo: &'static str,
 }
 
-const DOLPHIN_MODELS: &[DolphinModelInfo] = &[
-    DolphinModelInfo {
-        name: "base",
-        dir_name: "dolphin-base",
-        size_mb: 198,
-        description: "Dictation-optimized (recommended)",
-        languages: "en/zh",
-        files: &[
-            ("model.int8.onnx", "model.int8.onnx"),
-            ("tokens.txt", "tokens.txt"),
-        ],
-        huggingface_repo: "csukuangfj/sherpa-onnx-dolphin-base-ctc-multi-lang-int8-2025-04-02",
-    },
-];
+const DOLPHIN_MODELS: &[DolphinModelInfo] = &[DolphinModelInfo {
+    name: "base",
+    dir_name: "dolphin-base",
+    size_mb: 198,
+    description: "Dictation-optimized (recommended)",
+    languages: "en/zh",
+    files: &[
+        ("model.int8.onnx", "model.int8.onnx"),
+        ("tokens.txt", "tokens.txt"),
+    ],
+    huggingface_repo: "csukuangfj/sherpa-onnx-dolphin-base-ctc-multi-lang-int8-2025-04-02",
+}];
 
 // =============================================================================
 // Omnilingual Model Definitions
@@ -413,20 +408,15 @@ struct OmnilingualModelInfo {
     huggingface_repo: &'static str,
 }
 
-const OMNILINGUAL_MODELS: &[OmnilingualModelInfo] = &[
-    OmnilingualModelInfo {
-        name: "300m",
-        dir_name: "omnilingual-300m",
-        size_mb: 3900,
-        description: "1600+ languages, 300M params",
-        languages: "1600+ langs",
-        files: &[
-            ("model.onnx", "model.onnx"),
-            ("tokens.txt", "tokens.txt"),
-        ],
-        huggingface_repo: "csukuangfj/sherpa-onnx-omnilingual-asr-1600-languages-300M-ctc-2025-11-12",
-    },
-];
+const OMNILINGUAL_MODELS: &[OmnilingualModelInfo] = &[OmnilingualModelInfo {
+    name: "300m",
+    dir_name: "omnilingual-300m",
+    size_mb: 3900,
+    description: "1600+ languages, 300M params",
+    languages: "1600+ langs",
+    files: &[("model.onnx", "model.onnx"), ("tokens.txt", "tokens.txt")],
+    huggingface_repo: "csukuangfj/sherpa-onnx-omnilingual-asr-1600-languages-300M-ctc-2025-11-12",
+}];
 
 // =============================================================================
 // Whisper Model Functions
@@ -448,6 +438,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     println!("=======================\n");
 
     let models_dir = Config::models_dir();
+
     println!("Models directory: {:?}\n", models_dir);
 
     // Load current config to determine active model
@@ -635,8 +626,8 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     }
 
     // --- Paraformer Section ---
-    let paraformer_offset = sensevoice_offset
-        + available_count(sensevoice_available, sensevoice_count);
+    let paraformer_offset =
+        sensevoice_offset + available_count(sensevoice_available, sensevoice_count);
     println!("\n--- Paraformer (FunASR, Chinese + English) ---\n");
 
     if paraformer_available {
@@ -669,8 +660,8 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     }
 
     // --- Dolphin Section ---
-    let dolphin_offset = paraformer_offset
-        + available_count(paraformer_available, paraformer_count);
+    let dolphin_offset =
+        paraformer_offset + available_count(paraformer_available, paraformer_count);
     println!("\n--- Dolphin (dictation-optimized CTC) ---\n");
 
     if dolphin_available {
@@ -703,8 +694,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     }
 
     // --- Omnilingual Section ---
-    let omnilingual_offset = dolphin_offset
-        + available_count(dolphin_available, dolphin_count);
+    let omnilingual_offset = dolphin_offset + available_count(dolphin_available, dolphin_count);
     println!("\n--- Omnilingual (FunASR, 50+ languages) ---\n");
 
     if omnilingual_available {
@@ -766,13 +756,40 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         handle_sensevoice_selection(sensevoice_index).await
     } else if paraformer_available && selection <= paraformer_offset + paraformer_count {
         let idx = selection - paraformer_offset;
-        handle_onnx_engine_selection("paraformer", PARAFORMER_MODELS.iter().map(|m| (m.name, m.dir_name, m.size_mb, m.files, m.huggingface_repo)).collect(), idx, validate_onnx_ctc_model).await
+        handle_onnx_engine_selection(
+            "paraformer",
+            PARAFORMER_MODELS
+                .iter()
+                .map(|m| (m.name, m.dir_name, m.size_mb, m.files, m.huggingface_repo))
+                .collect(),
+            idx,
+            validate_onnx_ctc_model,
+        )
+        .await
     } else if dolphin_available && selection <= dolphin_offset + dolphin_count {
         let idx = selection - dolphin_offset;
-        handle_onnx_engine_selection("dolphin", DOLPHIN_MODELS.iter().map(|m| (m.name, m.dir_name, m.size_mb, m.files, m.huggingface_repo)).collect(), idx, validate_onnx_ctc_model).await
+        handle_onnx_engine_selection(
+            "dolphin",
+            DOLPHIN_MODELS
+                .iter()
+                .map(|m| (m.name, m.dir_name, m.size_mb, m.files, m.huggingface_repo))
+                .collect(),
+            idx,
+            validate_onnx_ctc_model,
+        )
+        .await
     } else if omnilingual_available && selection <= omnilingual_offset + omnilingual_count {
         let idx = selection - omnilingual_offset;
-        handle_onnx_engine_selection("omnilingual", OMNILINGUAL_MODELS.iter().map(|m| (m.name, m.dir_name, m.size_mb, m.files, m.huggingface_repo)).collect(), idx, validate_onnx_ctc_model).await
+        handle_onnx_engine_selection(
+            "omnilingual",
+            OMNILINGUAL_MODELS
+                .iter()
+                .map(|m| (m.name, m.dir_name, m.size_mb, m.files, m.huggingface_repo))
+                .collect(),
+            idx,
+            validate_onnx_ctc_model,
+        )
+        .await
     } else {
         println!("\nInvalid selection.");
         Ok(())
@@ -1862,8 +1879,7 @@ pub fn validate_sensevoice_model(path: &Path) -> anyhow::Result<()> {
         anyhow::bail!("Model directory does not exist: {:?}", path);
     }
 
-    let has_model =
-        path.join("model.int8.onnx").exists() || path.join("model.onnx").exists();
+    let has_model = path.join("model.int8.onnx").exists() || path.join("model.onnx").exists();
     let has_tokens = path.join("tokens.txt").exists();
 
     if has_model && has_tokens {
@@ -2179,7 +2195,10 @@ async fn handle_onnx_engine_selection(
 
     // Validate
     validate_fn(&model_path)?;
-    print_success(&format!("Model '{}' downloaded to {:?}", dir_name, model_path));
+    print_success(&format!(
+        "Model '{}' downloaded to {:?}",
+        dir_name, model_path
+    ));
 
     // Update config and restart daemon
     update_config_engine(engine_name, name)?;
@@ -2210,10 +2229,7 @@ fn download_onnx_model(
             continue;
         }
 
-        let url = format!(
-            "https://huggingface.co/{}/resolve/main/{}",
-            repo, repo_path
-        );
+        let url = format!("https://huggingface.co/{}/resolve/main/{}", repo, repo_path);
 
         println!("Downloading {}...", local_filename);
 
@@ -2328,7 +2344,10 @@ fn update_engine_in_config(config: &str, engine_name: &str, model_name: &str) ->
     }
 
     if !has_section {
-        result.push_str(&format!("\n[{}]\nmodel = \"{}\"\n", engine_name, model_name));
+        result.push_str(&format!(
+            "\n[{}]\nmodel = \"{}\"\n",
+            engine_name, model_name
+        ));
     }
 
     if !config.ends_with('\n') && result.ends_with('\n') {
