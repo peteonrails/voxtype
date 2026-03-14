@@ -98,6 +98,31 @@ struct ParakeetModelInfo {
 
 const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
     ParakeetModelInfo {
+        name: "parakeet-tdt-0.6b-v2",
+        size_mb: 2400,
+        description: "TDT English-only, best English accuracy",
+        files: &[
+            ("encoder-model.onnx", 41_770_866),
+            ("encoder-model.onnx.data", 2_435_420_160),
+            ("decoder_joint-model.onnx", 35_792_059),
+            ("vocab.txt", 9_384),
+            ("config.json", 97),
+        ],
+        huggingface_repo: "istupakov/parakeet-tdt-0.6b-v2-onnx",
+    },
+    ParakeetModelInfo {
+        name: "parakeet-tdt-0.6b-v2-int8",
+        size_mb: 640,
+        description: "TDT English-only quantized, smaller/faster",
+        files: &[
+            ("encoder-model.int8.onnx", 652_184_014),
+            ("decoder_joint-model.int8.onnx", 8_998_286),
+            ("vocab.txt", 9_384),
+            ("config.json", 97),
+        ],
+        huggingface_repo: "istupakov/parakeet-tdt-0.6b-v2-onnx",
+    },
+    ParakeetModelInfo {
         name: "parakeet-tdt-0.6b-v3",
         size_mb: 2600,
         description: "TDT model with punctuation (recommended)",
