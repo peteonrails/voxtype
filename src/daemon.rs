@@ -18,10 +18,8 @@ use crate::text::TextProcessor;
 use crate::transcribe::Transcriber;
 use pidlock::Pidlock;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::process::Command;
 use tokio::signal::unix::{signal, SignalKind};
 
 /// Send a desktop notification with optional engine icon
@@ -37,12 +35,7 @@ async fn send_notification(
         title.to_string()
     };
 
-    let _ = Command::new("notify-send")
-        .args(["--app-name=Voxtype", "--expire-time=2000", &title, body])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await;
+    crate::output::send_desktop_notification(&title, body).await;
 }
 
 /// Write state to file for external integrations (e.g., Waybar)

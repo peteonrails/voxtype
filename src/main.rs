@@ -116,14 +116,22 @@ async fn main() -> anyhow::Result<()> {
                 model,
                 default_model
             );
-            let _ = Command::new("notify-send")
-                .args([
-                    "--app-name=Voxtype",
-                    "--expire-time=5000",
-                    "Voxtype: Invalid Model",
-                    &format!("Unknown model '{}', using '{}'", model, default_model),
-                ])
-                .spawn();
+            if cfg!(target_os = "macos") {
+                let script = format!(
+                    "display notification \"Unknown model '{}', using '{}'\" with title \"Voxtype: Invalid Model\"",
+                    model, default_model
+                );
+                let _ = Command::new("osascript").args(["-e", &script]).spawn();
+            } else {
+                let _ = Command::new("notify-send")
+                    .args([
+                        "--app-name=Voxtype",
+                        "--expire-time=5000",
+                        "Voxtype: Invalid Model",
+                        &format!("Unknown model '{}', using '{}'", model, default_model),
+                    ])
+                    .spawn();
+            }
         }
     }
     if let Some(engine) = cli.engine {
@@ -898,8 +906,8 @@ fn is_daemon_running() -> bool {
         Err(_) => return false, // Invalid PID = not running
     };
 
-    // Check if process exists by testing /proc/{pid}
-    std::path::Path::new(&format!("/proc/{}", pid)).exists()
+    // Check if process exists using kill(pid, 0) - works on all Unix platforms
+    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
 }
 
 /// Run the status command - show current daemon state

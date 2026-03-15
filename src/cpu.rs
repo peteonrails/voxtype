@@ -12,9 +12,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static SIGILL_HANDLER_INSTALLED: AtomicBool = AtomicBool::new(false);
 
-/// Constructor function that runs before main() via .init_array
+/// Constructor function that runs before main() via .init_array (Linux ELF only)
 /// This ensures the SIGILL handler is installed before any library
 /// initialization code that might use unsupported instructions.
+#[cfg(target_os = "linux")]
 #[used]
 #[link_section = ".init_array"]
 static INIT_SIGILL_HANDLER: extern "C" fn() = {

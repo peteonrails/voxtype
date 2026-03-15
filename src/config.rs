@@ -1808,10 +1808,10 @@ impl Config {
 
     /// Get the runtime directory for ephemeral files (state, sockets)
     pub fn runtime_dir() -> PathBuf {
-        // Use XDG_RUNTIME_DIR if available, otherwise fall back to /tmp
+        // Use XDG_RUNTIME_DIR if available, otherwise use platform-appropriate temp dir
         std::env::var("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/tmp"))
+            .unwrap_or_else(|_| std::env::temp_dir())
             .join("voxtype")
     }
 
