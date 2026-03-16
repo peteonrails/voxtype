@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y \
     cmake \
     pkg-config \
     libasound2-dev \
+    libdbus-1-dev \
     git \
     binutils \
     && rm -rf /var/lib/apt/lists/*
@@ -35,7 +36,7 @@ COPY . .
 # Build with native optimizations (will use AVX-512 if available on host)
 ENV RUSTFLAGS="-C target-cpu=native"
 
-RUN cargo build --release \
+RUN cargo build --release --features tray \
     && cp target/release/voxtype /tmp/voxtype-avx512
 
 # Verify AVX-512 instructions ARE present
