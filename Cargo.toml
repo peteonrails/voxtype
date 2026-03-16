@@ -98,6 +98,9 @@ ratatui = "0.29"
 crossterm = "0.28"
 toml_edit = "0.22"
 
+# System tray (StatusNotifierItem via DBus)
+ksni = { version = "0.2", optional = true }
+
 # Meeting mode (Pro feature)
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -168,6 +171,10 @@ osd-native = [
     "dep:bytemuck",
 ]
 osd-gtk4 = ["dep:gtk4", "dep:gtk4-layer-shell", "dep:cairo-rs", "dep:glib"]
+# System tray (StatusNotifierItem via DBus) for KDE Plasma / GNOME with
+# tray extensions. Provides native tray icon and menu, replacing the
+# legacy XEmbed tray approach.
+tray = ["dep:ksni"]
 gpu-vulkan = ["whisper-rs/vulkan"]
 gpu-cuda = ["whisper-rs/cuda"]
 gpu-metal = ["whisper-rs/metal"]

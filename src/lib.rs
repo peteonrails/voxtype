@@ -91,6 +91,8 @@ pub mod setup;
 pub mod state;
 pub mod text;
 pub mod transcribe;
+#[cfg(feature = "tray")]
+pub mod tray;
 pub mod tui;
 pub mod vad;
 

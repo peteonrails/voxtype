@@ -361,6 +361,18 @@ async fn main() -> anyhow::Result<()> {
         config.output.modifier_release_timeout_ms = ms;
     }
 
+    // Tray override
+    if cli.tray {
+        #[cfg(feature = "tray")]
+        {
+            config.tray.enabled = true;
+        }
+        #[cfg(not(feature = "tray"))]
+        {
+            tracing::warn!("--tray flag ignored: binary built without tray feature");
+        }
+    }
+
     // VAD overrides
     if cli.vad {
         config.vad.enabled = true;
