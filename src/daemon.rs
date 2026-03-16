@@ -1280,15 +1280,14 @@ impl Daemon {
                         }
                     }
 
-                    // Get context from last dictation if within 2 minutes
+                    // Get context from last dictation if within 60 seconds
                     let recent_context = self.last_dictation.as_ref().and_then(|(text, when)| {
-                        if when.elapsed() < Duration::from_secs(120) {
+                        if when.elapsed() < Duration::from_secs(60) {
                             Some(text.as_str())
                         } else {
                             None
                         }
                     });
-
                     // Apply post-processing command (profile overrides default)
                     let final_text = if let Some(profile) = active_profile {
                         if let Some(ref cmd) = profile.post_process_command {
@@ -1299,8 +1298,9 @@ impl Daemon {
                             };
                             let profile_processor = PostProcessor::new(&profile_config);
                             tracing::info!(
-                                "Post-processing with profile: {:?}",
-                                profile_override.as_ref().unwrap()
+                                "Post-processing with profile: {:?}, context: {:?}",
+                                profile_override.as_ref().unwrap(),
+                                recent_context
                             );
                             let result = profile_processor
                                 .process_with_context(&processed_text, recent_context)
@@ -1310,7 +1310,7 @@ impl Daemon {
                         } else {
                             // Profile exists but has no post_process_command, use default
                             if let Some(ref post_processor) = self.post_processor {
-                                tracing::info!("Post-processing: {:?}", processed_text);
+                                tracing::info!("Post-processing: {:?}, context: {:?}", processed_text, recent_context);
                                 let result = post_processor
                                     .process_with_context(&processed_text, recent_context)
                                     .await;
@@ -1321,7 +1321,7 @@ impl Daemon {
                             }
                         }
                     } else if let Some(ref post_processor) = self.post_processor {
-                        tracing::info!("Post-processing: {:?}", processed_text);
+                        tracing::info!("Post-processing: {:?}, context: {:?}", processed_text, recent_context);
                         let result = post_processor
                             .process_with_context(&processed_text, recent_context)
                             .await;
