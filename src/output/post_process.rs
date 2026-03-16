@@ -85,6 +85,8 @@ impl PostProcessor {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        // Always clear to prevent inheriting stale context from parent environment
+        cmd.env_remove("VOXTYPE_CONTEXT");
         if let Some(ctx) = context {
             cmd.env("VOXTYPE_CONTEXT", ctx);
         }

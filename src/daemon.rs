@@ -1305,7 +1305,7 @@ impl Daemon {
                             let result = profile_processor
                                 .process_with_context(&processed_text, recent_context)
                                 .await;
-                            tracing::info!("Post-processed: {:?}", result);
+                            tracing::info!("Post-processed: {:?}, changed: {}", result, result != processed_text);
                             result
                         } else {
                             // Profile exists but has no post_process_command, use default
@@ -1314,7 +1314,7 @@ impl Daemon {
                                 let result = post_processor
                                     .process_with_context(&processed_text, recent_context)
                                     .await;
-                                tracing::info!("Post-processed: {:?}", result);
+                                tracing::info!("Post-processed: {:?}, changed: {}", result, result != processed_text);
                                 result
                             } else {
                                 processed_text
@@ -1325,7 +1325,7 @@ impl Daemon {
                         let result = post_processor
                             .process_with_context(&processed_text, recent_context)
                             .await;
-                        tracing::info!("Post-processed: {:?}", result);
+                        tracing::info!("Post-processed: {:?}, changed: {}", result, result != processed_text);
                         result
                     } else {
                         processed_text
