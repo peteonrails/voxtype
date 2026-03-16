@@ -2966,14 +2966,22 @@ impl Daemon {
                 }
 
                 // Handle system tray events (pending forever when tray feature is not enabled)
-                Some(tray_event) = async {
+                tray_event = async {
                     match &mut tray_event_rx {
                         Some(rx) => rx.recv().await,
                         None => std::future::pending::<Option<DaemonTrayEvent>>().await,
                     }
                 } => {
-                    if self.handle_tray_event(tray_event, &mut state, &mut audio_capture, &transcriber_preloaded).await {
-                        break;
+                    match tray_event {
+                        Some(event) => {
+                            if self.handle_tray_event(event, &mut state, &mut audio_capture, &transcriber_preloaded).await {
+                                break;
+                            }
+                        }
+                        None => {
+                            tracing::warn!("Tray event channel closed");
+                            tray_event_rx = None;
+                        }
                     }
                 }
 

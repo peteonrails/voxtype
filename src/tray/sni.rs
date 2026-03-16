@@ -130,20 +130,20 @@ pub fn spawn() -> Option<(
 
     // Preflight: check DBus session bus is available before spawning ksni,
     // since ksni::TrayService::spawn() panics on DBus failure.
-    if std::env::var("DBUS_SESSION_BUS_ADDRESS").is_err() {
-        tracing::warn!("DBUS_SESSION_BUS_ADDRESS not set, skipping tray");
-        return None;
+    match std::env::var("DBUS_SESSION_BUS_ADDRESS") {
+        Err(_) => {
+            tracing::warn!("DBUS_SESSION_BUS_ADDRESS not set, skipping tray");
+            return None;
+        }
+        Ok(val) if val.trim().is_empty() => {
+            tracing::warn!("DBUS_SESSION_BUS_ADDRESS is empty, skipping tray");
+            return None;
+        }
+        Ok(_) => {}
     }
 
-    // Start the ksni service (runs its own event loop on a separate thread)
-    let service = ksni::TrayService::new(tray);
-
-    let handle = service.handle();
-    service.spawn();
-
-    // Dedicated thread to bridge std::sync::mpsc -> tokio::sync::mpsc.
-    // ksni callbacks run on ksni's thread, so they use std::sync::mpsc.
-    // This thread blocks on recv() and forwards to the tokio channel.
+    // Spawn the bridge thread first, before ksni service, so we don't
+    // leave an orphaned tray icon if thread creation fails.
     if std::thread::Builder::new()
         .name("tray-event-bridge".to_string())
         .spawn(move || {
@@ -158,6 +158,11 @@ pub fn spawn() -> Option<(
         tracing::warn!("Failed to spawn tray event bridge thread");
         return None;
     }
+
+    // Start the ksni service (runs its own event loop on a separate thread)
+    let service = ksni::TrayService::new(tray);
+    let handle = service.handle();
+    service.spawn();
 
     // Task: watch for state changes and update the tray
     tokio::spawn(async move {
