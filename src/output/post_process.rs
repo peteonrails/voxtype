@@ -38,18 +38,12 @@ impl PostProcessor {
 
     /// Process text with optional context from a previous chunk
     ///
-    /// When context is provided (meeting mode), formats stdin with a separator so the
-    /// post-processing command can use previous chunk text for continuity.
+    /// When context is provided, it is passed via the VOXTYPE_CONTEXT environment
+    /// variable so the post-processing command can use it for continuity.
+    /// Stdin always contains only the current text, keeping existing scripts compatible.
     /// Returns the processed text on success, or the original text on any failure.
     pub async fn process_with_context(&self, text: &str, context: Option<&str>) -> String {
-        let input = match context {
-            Some(ctx) => format!(
-                "--- CONTEXT (previous chunk) ---\n{}\n--- CURRENT (clean up this text) ---\n{}",
-                ctx, text
-            ),
-            None => text.to_string(),
-        };
-        match self.execute_command(&input).await {
+        match self.execute_command_with_env(text, context).await {
             Ok(processed) => {
                 if processed.is_empty() {
                     tracing::warn!(
@@ -80,13 +74,22 @@ impl PostProcessor {
         self.process_with_context(text, None).await
     }
 
-    async fn execute_command(&self, text: &str) -> Result<String, PostProcessError> {
-        // Spawn command via shell for proper parsing of complex commands
-        let mut child = Command::new("sh")
-            .args(["-c", &self.command])
+    async fn execute_command_with_env(
+        &self,
+        text: &str,
+        context: Option<&str>,
+    ) -> Result<String, PostProcessError> {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", &self.command])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        if let Some(ctx) = context {
+            cmd.env("VOXTYPE_CONTEXT", ctx);
+        }
+
+        let mut child = cmd
             .spawn()
             .map_err(|e| PostProcessError::SpawnFailed(e.to_string()))?;
 
