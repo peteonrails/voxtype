@@ -1455,19 +1455,41 @@ impl Default for NotificationConfig {
     }
 }
 
-/// Post-processing command configuration
+/// Post-processing configuration
 ///
-/// Pipes transcribed text through an external command for cleanup/formatting.
-/// Commonly used with local LLMs (Ollama, llama.cpp) or text processing tools.
+/// Supports two modes:
+/// 1. Shell command: pipes text through an external command (e.g., Ollama)
+/// 2. Anthropic API: sends text to a Claude model for cleanup
+///
+/// If `anthropic_model` is set, uses the Anthropic API directly.
+/// Otherwise, uses the shell `command`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PostProcessConfig {
-    /// Shell command to execute
+    /// Shell command to execute (used when anthropic_model is not set)
     /// Receives transcribed text on stdin, outputs processed text on stdout
-    pub command: String,
+    #[serde(default)]
+    pub command: Option<String>,
 
-    /// Timeout in milliseconds (default: 30000 = 30 seconds)
+    /// Timeout in milliseconds (default: 10000 for Anthropic, 30000 for command)
     #[serde(default = "default_post_process_timeout")]
     pub timeout_ms: u64,
+
+    /// Anthropic API key (or use ANTHROPIC_API_KEY env var, or anthropic_api_key_file)
+    #[serde(default)]
+    pub anthropic_api_key: Option<String>,
+
+    /// Path to file containing anthropic_api_key=... (e.g., ".env")
+    #[serde(default)]
+    pub anthropic_api_key_file: Option<String>,
+
+    /// Anthropic model to use (e.g., "claude-haiku-4-5-20251001")
+    /// Setting this enables Anthropic API mode
+    #[serde(default)]
+    pub anthropic_model: Option<String>,
+
+    /// Custom system prompt for Anthropic cleanup
+    #[serde(default)]
+    pub anthropic_prompt: Option<String>,
 }
 
 /// Named profile for context-specific settings

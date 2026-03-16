@@ -224,9 +224,22 @@ impl PasteOutput {
         }
     }
 
-    /// Copy text to clipboard using wl-copy
+    /// Copy text to clipboard using wl-copy (Wayland) or xclip (X11 fallback)
     async fn copy_to_clipboard(&self, text: &str) -> Result<(), OutputError> {
-        // Spawn wl-copy with stdin pipe
+        // Try wl-copy first (Wayland)
+        match self.copy_to_clipboard_wl_copy(text).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                tracing::debug!("wl-copy failed, trying xclip: {}", e);
+            }
+        }
+
+        // Fallback to xclip (X11)
+        self.copy_to_clipboard_xclip(text).await
+    }
+
+    /// Copy text to clipboard using wl-copy
+    async fn copy_to_clipboard_wl_copy(&self, text: &str) -> Result<(), OutputError> {
         let mut child = Command::new("wl-copy")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -240,18 +253,14 @@ impl PasteOutput {
                 }
             })?;
 
-        // Write text to stdin
         if let Some(mut stdin) = child.stdin.take() {
             stdin
                 .write_all(text.as_bytes())
                 .await
                 .map_err(|e| OutputError::InjectionFailed(e.to_string()))?;
-
-            // Close stdin to signal EOF
             drop(stdin);
         }
 
-        // Wait for completion
         let status = child
             .wait()
             .await
@@ -260,6 +269,44 @@ impl PasteOutput {
         if !status.success() {
             return Err(OutputError::InjectionFailed(
                 "wl-copy exited with error".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Copy text to clipboard using xclip (X11 fallback)
+    async fn copy_to_clipboard_xclip(&self, text: &str) -> Result<(), OutputError> {
+        let mut child = Command::new("xclip")
+            .args(["-selection", "clipboard"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    OutputError::InjectionFailed("xclip not found".to_string())
+                } else {
+                    OutputError::InjectionFailed(e.to_string())
+                }
+            })?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(text.as_bytes())
+                .await
+                .map_err(|e| OutputError::InjectionFailed(e.to_string()))?;
+            drop(stdin);
+        }
+
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| OutputError::InjectionFailed(e.to_string()))?;
+
+        if !status.success() {
+            return Err(OutputError::InjectionFailed(
+                "xclip exited with error".to_string(),
             ));
         }
 
@@ -627,7 +674,53 @@ impl PasteOutput {
         Ok(())
     }
 
-    /// Simulate paste keystroke, trying wtype first then ydotool
+    /// Simulate paste keystroke using xdotool (X11)
+    async fn simulate_paste_xdotool(&self) -> Result<(), OutputError> {
+        // Build xdotool key string: e.g., "ctrl+v" -> "ctrl+v"
+        let key_str = if self.keystroke.modifiers.is_empty() {
+            self.keystroke.key.clone()
+        } else {
+            format!(
+                "{}+{}",
+                self.keystroke.modifiers.join("+"),
+                self.keystroke.key
+            )
+        };
+
+        tracing::debug!("Running: xdotool key {}", key_str);
+
+        let output = Command::new("xdotool")
+            .args(["key", &key_str])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| OutputError::CtrlVFailed(format!("xdotool: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(OutputError::CtrlVFailed(format!("xdotool: {}", stderr)));
+        }
+
+        Ok(())
+    }
+
+    /// Check if xdotool is available (X11)
+    async fn is_xdotool_available(&self) -> bool {
+        let installed = Command::new("which")
+            .arg("xdotool")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        let display_set = std::env::var("DISPLAY").is_ok();
+        installed && display_set
+    }
+
+    /// Simulate paste keystroke, trying wtype first then xdotool then ydotool
     async fn simulate_paste_keystroke(&self) -> Result<(), OutputError> {
         // Try wtype first (preferred - no daemon needed)
         if self.is_wtype_available().await {
@@ -638,6 +731,19 @@ impl PasteOutput {
                 }
                 Err(e) => {
                     tracing::debug!("wtype paste failed: {}, trying ydotool", e);
+                }
+            }
+        }
+
+        // Fall back to xdotool (X11)
+        if self.is_xdotool_available().await {
+            match self.simulate_paste_xdotool().await {
+                Ok(()) => {
+                    tracing::debug!("Paste keystroke sent via xdotool");
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::debug!("xdotool paste failed: {}, trying ydotool", e);
                 }
             }
         }
@@ -657,7 +763,7 @@ impl PasteOutput {
         }
 
         Err(OutputError::CtrlVFailed(
-            "Neither wtype nor ydotool available for paste keystroke".to_string(),
+            "Neither wtype, xdotool, nor ydotool available for paste keystroke".to_string(),
         ))
     }
 
@@ -667,6 +773,22 @@ impl PasteOutput {
         if self.is_wtype_available().await {
             let output = Command::new("wtype")
                 .args(["-k", "Return"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+                .await;
+
+            if let Ok(out) = output {
+                if out.status.success() {
+                    return Ok(());
+                }
+            }
+        }
+
+        // Fall back to xdotool (X11)
+        if self.is_xdotool_available().await {
+            let output = Command::new("xdotool")
+                .args(["key", "Return"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
                 .output()
@@ -788,7 +910,7 @@ impl TextOutput for PasteOutput {
     }
 
     async fn is_available(&self) -> bool {
-        // Check if wl-copy exists (required for clipboard)
+        // Check if wl-copy or xclip exists (required for clipboard)
         let wl_copy_available = Command::new("which")
             .arg("wl-copy")
             .stdout(Stdio::null())
@@ -798,26 +920,39 @@ impl TextOutput for PasteOutput {
             .map(|s| s.success())
             .unwrap_or(false);
 
-        if !wl_copy_available {
-            tracing::debug!("paste mode unavailable: wl-copy not found");
+        let xclip_available = Command::new("which")
+            .arg("xclip")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if !wl_copy_available && !xclip_available {
+            tracing::debug!("paste mode unavailable: neither wl-copy nor xclip found");
             return false;
         }
 
-        // Check if EITHER wtype OR ydotool is available for keystroke simulation
+        // Check if wtype, xdotool, or ydotool is available for keystroke simulation
         let wtype_available = self.is_wtype_available().await;
+        let xdotool_available = self.is_xdotool_available().await;
         let ydotool_available = self.is_ydotool_available().await;
 
-        if !wtype_available && !ydotool_available {
+        if !wtype_available && !xdotool_available && !ydotool_available {
             tracing::debug!(
-                "paste mode unavailable: neither wtype nor ydotool available \
-                (wtype needs WAYLAND_DISPLAY, ydotool needs daemon running)"
+                "paste mode unavailable: no keystroke simulator found \
+                (need wtype, xdotool, or ydotool)"
             );
             return false;
         }
 
         tracing::debug!(
-            "paste mode available (wtype: {}, ydotool: {})",
+            "paste mode available (wl-copy: {}, xclip: {}, wtype: {}, xdotool: {}, ydotool: {})",
+            wl_copy_available,
+            xclip_available,
             wtype_available,
+            xdotool_available,
             ydotool_available
         );
         true
