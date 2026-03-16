@@ -23,6 +23,7 @@ Voxtype is a push-to-talk voice-to-text tool for Linux. Optimized for Wayland, w
 - [Profiles](#profiles)
 - [Voice Activity Detection](#voice-activity-detection)
 - [Meeting Mode](#meeting-mode)
+- [System Tray](#system-tray)
 - [Tips & Best Practices](#tips--best-practices)
 - [Keyboard Shortcuts](#keyboard-shortcuts)
 - [Integration Examples](#integration-examples)
@@ -2029,6 +2030,57 @@ The GTCRN model (~523 KB) is downloaded automatically the first time you run `vo
 [meeting.audio]
 echo_cancel = "disabled"
 ```
+
+---
+
+## System Tray
+
+Voxtype can show a system tray icon that reflects the current state and lets you control recording.
+
+### Setup
+
+Enable the tray in your config:
+
+```toml
+[tray]
+enabled = true
+```
+
+Or use the CLI flag: `voxtype --tray`
+
+Or set the environment variable: `VOXTYPE_TRAY_ENABLED=true`
+
+### Requirements
+
+The tray uses the StatusNotifierItem (SNI) DBus protocol. You need a StatusNotifierHost:
+
+- **KDE Plasma**: Built-in support
+- **GNOME**: Install the AppIndicator extension
+- **Waybar**: Enable the `tray` module in your Waybar config
+- **Other**: Any compositor/panel that supports SNI
+
+### Usage
+
+- **Left-click**: Toggle recording on/off
+- **Right-click**: Context menu with Toggle Recording, Cancel (during transcription), and Quit
+
+### Icons
+
+The tray uses XDG named icons:
+
+| State | Icon |
+|-------|------|
+| Idle | `microphone-sensitivity-high` |
+| Recording | `media-record` |
+| Transcribing | `content-loading-symbolic` |
+
+### Troubleshooting
+
+If the tray icon doesn't appear:
+
+1. Verify `DBUS_SESSION_BUS_ADDRESS` is set (required for SNI)
+2. Check that your panel/compositor has a StatusNotifierHost
+3. Run with `-vv` to see tray-related log messages
 
 ---
 

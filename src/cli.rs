@@ -297,6 +297,12 @@ pub struct Cli {
         Appended before auto_submit. Useful for separating sentences when dictating incrementally.")]
     pub append_text: Option<String>,
 
+    // -- Tray --
+
+    /// Enable system tray icon (StatusNotifierItem)
+    #[arg(long, help_heading = "Tray")]
+    pub tray: bool,
+
     // -- VAD --
 
     /// Enable Voice Activity Detection (filter silence before transcription)
