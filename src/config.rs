@@ -1850,11 +1850,11 @@ fn default_service_port() -> u16 {
 }
 
 fn default_service_max_upload_bytes() -> usize {
-    10 * 1024 * 1024
+    200 * 1024 * 1024
 }
 
 fn default_service_request_timeout_ms() -> u64 {
-    90_000
+    600_000
 }
 
 fn default_service_allowed_languages() -> Vec<String> {

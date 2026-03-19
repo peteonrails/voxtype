@@ -7,7 +7,7 @@
 //! - Auto-detect: Let Whisper detect from all ~99 supported languages
 //! - Constrained auto-detect: Detect from a user-specified subset of languages
 
-use super::Transcriber;
+use super::{Transcriber, TranscriptionResult, TranscriptionSegment};
 use crate::config::{Config, LanguageConfig, WhisperConfig};
 use crate::error::TranscribeError;
 use std::path::PathBuf;
@@ -285,6 +285,126 @@ impl Transcriber for WhisperTranscriber {
         );
 
         Ok(result)
+    }
+
+    fn transcribe_segments(
+        &self,
+        samples: &[f32],
+        language_override: Option<&str>,
+        prompt_override: Option<&str>,
+    ) -> Result<TranscriptionResult, TranscribeError> {
+        if samples.is_empty() {
+            return Err(TranscribeError::AudioFormat(
+                "Empty audio buffer".to_string(),
+            ));
+        }
+
+        let duration_secs = samples.len() as f64 / 16000.0;
+        let start = std::time::Instant::now();
+
+        let mut state = self
+            .ctx
+            .create_state()
+            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
+
+        let override_lang = language_override
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty());
+
+        let selected_language: Option<String> = if let Some(lang) = override_lang {
+            if lang == "auto" {
+                if self.language.is_multiple() {
+                    let allowed = self.language.as_vec();
+                    Some(self.select_language_from_allowed(&mut state, samples, &allowed)?)
+                } else {
+                    None
+                }
+            } else {
+                Some(lang)
+            }
+        } else if self.language.is_auto() {
+            None
+        } else if self.language.is_multiple() {
+            let allowed = self.language.as_vec();
+            Some(self.select_language_from_allowed(&mut state, samples, &allowed)?)
+        } else {
+            Some(self.language.primary().to_string())
+        };
+
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+
+        match &selected_language {
+            Some(lang) => params.set_language(Some(lang)),
+            None => params.set_language(None),
+        }
+
+        params.set_translate(self.translate);
+        params.set_n_threads(self.threads as i32);
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+        params.set_suppress_blank(true);
+        params.set_suppress_nst(true);
+
+        let request_prompt = prompt_override.and_then(|p| {
+            let trimmed = p.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+        if let Some(prompt) = request_prompt.or(self.initial_prompt.as_deref()) {
+            params.set_initial_prompt(prompt);
+        }
+
+        if self.context_window_optimization {
+            params.set_no_context(true);
+            if let Some(audio_ctx) = calculate_audio_ctx(duration_secs as f32) {
+                params.set_audio_ctx(audio_ctx);
+            }
+        }
+
+        state
+            .full(params, samples)
+            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
+
+        let mut full_text = String::new();
+        let mut segments = Vec::new();
+
+        for segment in state.as_iter() {
+            let seg_text = segment
+                .to_str()
+                .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?
+                .to_string();
+            // Timestamps are in centiseconds (10ms units)
+            let seg_start = segment.start_timestamp() as f64 / 100.0;
+            let seg_end = segment.end_timestamp() as f64 / 100.0;
+
+            full_text.push_str(&seg_text);
+            segments.push(TranscriptionSegment {
+                start: seg_start,
+                end: seg_end,
+                text: seg_text.trim().to_string(),
+            });
+        }
+
+        let detected_lang = selected_language.unwrap_or_else(|| "auto".to_string());
+
+        tracing::info!(
+            "Segment transcription completed in {:.2}s: {} segments, language={}",
+            start.elapsed().as_secs_f32(),
+            segments.len(),
+            detected_lang,
+        );
+
+        Ok(TranscriptionResult {
+            text: full_text.trim().to_string(),
+            language: detected_lang,
+            duration: duration_secs,
+            segments,
+        })
     }
 }
 

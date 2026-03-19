@@ -40,6 +40,22 @@ struct TranscriptionResponse {
 }
 
 #[derive(Serialize)]
+struct VerboseTranscriptionResponse {
+    text: String,
+    language: String,
+    duration: f64,
+    segments: Vec<VerboseSegment>,
+}
+
+#[derive(Serialize)]
+struct VerboseSegment {
+    id: usize,
+    start: f64,
+    end: f64,
+    text: String,
+}
+
+#[derive(Serialize)]
 struct ApiErrorResponse {
     error: ApiErrorBody,
 }
@@ -288,56 +304,101 @@ async fn transcribe_handler(
         .filter(|s| !s.is_empty())
         .map(ToOwned::to_owned);
 
-    let transcriber = state.transcriber.clone();
-    let mut task = tokio::task::spawn_blocking(move || {
-        transcriber.transcribe_with_options(
-            &samples,
-            language_override.as_deref(),
-            prompt_override.as_deref(),
-        )
-    });
-
-    let result = tokio::select! {
-        join = &mut task => join,
-        _ = tokio::time::sleep(state.request_timeout) => {
-            task.abort();
-            return Err(ApiError {
-                status: StatusCode::REQUEST_TIMEOUT,
-                message: format!("Transcription timed out after {}ms", state.request_timeout.as_millis()),
-                error_type: "timeout_error",
-            });
-        }
-    };
-
-    let text = match result {
-        Ok(Ok(text)) => text,
-        Ok(Err(e)) => return Err(map_transcription_error(e)),
-        Err(e) => {
-            return Err(ApiError::internal(format!(
-                "Transcription task failed: {}",
-                e
-            )))
-        }
-    };
-
     let format = response_format.trim().to_lowercase();
-    if format == "text" {
-        let mut response = text.into_response();
-        response.headers_mut().insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("text/plain; charset=utf-8"),
-        );
-        return Ok(response);
-    }
-
-    if format != "json" && format != "verbose_json" {
+    if format != "json" && format != "verbose_json" && format != "text" {
         return Err(ApiError::bad_request(format!(
             "Unsupported response_format '{}'; expected json, verbose_json, or text",
             response_format
         )));
     }
 
-    Ok(Json(TranscriptionResponse { text }).into_response())
+    let use_segments = format == "verbose_json";
+    let transcriber = state.transcriber.clone();
+    let timeout = state.request_timeout;
+
+    if use_segments {
+        let mut task = tokio::task::spawn_blocking(move || {
+            transcriber.transcribe_segments(
+                &samples,
+                language_override.as_deref(),
+                prompt_override.as_deref(),
+            )
+        });
+
+        let result = tokio::select! {
+            join = &mut task => join,
+            _ = tokio::time::sleep(timeout) => {
+                task.abort();
+                return Err(ApiError {
+                    status: StatusCode::REQUEST_TIMEOUT,
+                    message: format!("Transcription timed out after {}ms", timeout.as_millis()),
+                    error_type: "timeout_error",
+                });
+            }
+        };
+
+        let tr = match result {
+            Ok(Ok(tr)) => tr,
+            Ok(Err(e)) => return Err(map_transcription_error(e)),
+            Err(e) => return Err(ApiError::internal(format!("Transcription task failed: {}", e))),
+        };
+
+        let verbose = VerboseTranscriptionResponse {
+            text: tr.text,
+            language: tr.language,
+            duration: tr.duration,
+            segments: tr
+                .segments
+                .into_iter()
+                .enumerate()
+                .map(|(id, seg)| VerboseSegment {
+                    id,
+                    start: seg.start,
+                    end: seg.end,
+                    text: seg.text,
+                })
+                .collect(),
+        };
+
+        Ok(Json(verbose).into_response())
+    } else {
+        let mut task = tokio::task::spawn_blocking(move || {
+            transcriber.transcribe_with_options(
+                &samples,
+                language_override.as_deref(),
+                prompt_override.as_deref(),
+            )
+        });
+
+        let result = tokio::select! {
+            join = &mut task => join,
+            _ = tokio::time::sleep(timeout) => {
+                task.abort();
+                return Err(ApiError {
+                    status: StatusCode::REQUEST_TIMEOUT,
+                    message: format!("Transcription timed out after {}ms", timeout.as_millis()),
+                    error_type: "timeout_error",
+                });
+            }
+        };
+
+        let text = match result {
+            Ok(Ok(text)) => text,
+            Ok(Err(e)) => return Err(map_transcription_error(e)),
+            Err(e) => return Err(ApiError::internal(format!("Transcription task failed: {}", e))),
+        };
+
+        if format == "text" {
+            let mut response = text.into_response();
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
+            return Ok(response);
+        }
+
+        Ok(Json(TranscriptionResponse { text }).into_response())
+    }
 }
 
 fn map_transcription_error(err: TranscribeError) -> ApiError {
@@ -496,6 +557,7 @@ mod tests {
     use super::*;
     use crate::config::{WhisperConfig, WhisperMode};
     use crate::transcribe::remote::RemoteTranscriber;
+    use crate::transcribe::{TranscriptionResult, TranscriptionSegment};
     use std::sync::Mutex;
 
     struct MockTranscriber {
@@ -528,6 +590,36 @@ mod tests {
                 prompt_override.map(ToOwned::to_owned),
             ));
             Ok(self.text.clone())
+        }
+
+        fn transcribe_segments(
+            &self,
+            samples: &[f32],
+            language_override: Option<&str>,
+            prompt_override: Option<&str>,
+        ) -> Result<TranscriptionResult, TranscribeError> {
+            self.calls.lock().unwrap().push((
+                language_override.map(ToOwned::to_owned),
+                prompt_override.map(ToOwned::to_owned),
+            ));
+            let duration = samples.len() as f64 / 16000.0;
+            Ok(TranscriptionResult {
+                text: self.text.clone(),
+                language: language_override.unwrap_or("en").to_string(),
+                duration,
+                segments: vec![
+                    TranscriptionSegment {
+                        start: 0.0,
+                        end: duration / 2.0,
+                        text: "hello from".to_string(),
+                    },
+                    TranscriptionSegment {
+                        start: duration / 2.0,
+                        end: duration,
+                        text: "local service".to_string(),
+                    },
+                ],
+            })
         }
     }
 
@@ -609,6 +701,117 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("Language 'fr' is not allowed"));
+
+        handle.shutdown().await;
+    }
+
+    fn make_wav_bytes(samples: &[f32]) -> Vec<u8> {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut writer = hound::WavWriter::new(&mut cursor, spec).unwrap();
+            for &s in samples {
+                writer.write_sample((s * i16::MAX as f32) as i16).unwrap();
+            }
+            writer.finalize().unwrap();
+        }
+        cursor.into_inner()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verbose_json_returns_segments() {
+        use std::io::{Read, Write};
+
+        let mock = Arc::new(MockTranscriber::new("hello from local service"));
+        let handle =
+            spawn_test_server(mock.clone(), vec!["en".to_string(), "de".to_string()]).await;
+        let addr = handle.addr();
+
+        let samples = sine_samples(16000, 0.3, 440.0);
+        let wav_bytes = make_wav_bytes(&samples);
+
+        let boundary = "----TestBoundary1234";
+        let mut body = Vec::new();
+
+        body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+        body.extend_from_slice(
+            b"Content-Disposition: form-data; name=\"response_format\"\r\n\r\n",
+        );
+        body.extend_from_slice(b"verbose_json\r\n");
+
+        body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+        body.extend_from_slice(
+            b"Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n",
+        );
+        body.extend_from_slice(b"Content-Type: audio/wav\r\n\r\n");
+        body.extend_from_slice(&wav_bytes);
+        body.extend_from_slice(b"\r\n");
+        body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
+
+        // Use raw TCP to avoid needing reqwest
+        let request = format!(
+            "POST /v1/audio/transcriptions HTTP/1.1\r\n\
+             Host: {}\r\n\
+             Content-Type: multipart/form-data; boundary={}\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\
+             \r\n",
+            addr, boundary, body.len()
+        );
+
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        stream.write_all(&body).unwrap();
+
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+
+        // Parse HTTP response body (after blank line)
+        let body_start = response.find("\r\n\r\n").unwrap() + 4;
+        let response_body = &response[body_start..];
+
+        // Handle chunked transfer encoding
+        let json_str = if response.contains("transfer-encoding: chunked") {
+            // Parse chunked body: size\r\ndata\r\n...0\r\n
+            let mut decoded = String::new();
+            let mut remaining = response_body;
+            loop {
+                let size_end = remaining.find("\r\n").unwrap_or(0);
+                let chunk_size =
+                    usize::from_str_radix(remaining[..size_end].trim(), 16).unwrap_or(0);
+                if chunk_size == 0 {
+                    break;
+                }
+                let chunk_start = size_end + 2;
+                decoded.push_str(&remaining[chunk_start..chunk_start + chunk_size]);
+                remaining = &remaining[chunk_start + chunk_size + 2..];
+            }
+            decoded
+        } else {
+            response_body.to_string()
+        };
+
+        let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(json["text"], "hello from local service");
+        assert!(json["duration"].as_f64().unwrap() > 0.0);
+        assert!(json["language"].as_str().is_some());
+
+        let segments = json["segments"].as_array().unwrap();
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0]["id"], 0);
+        assert_eq!(segments[0]["text"], "hello from");
+        assert!(segments[0]["start"].as_f64().unwrap() >= 0.0);
+        assert_eq!(segments[1]["id"], 1);
+        assert_eq!(segments[1]["text"], "local service");
+
+        let calls = mock.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
 
         handle.shutdown().await;
     }
