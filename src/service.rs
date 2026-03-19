@@ -110,36 +110,46 @@ impl ServiceHandle {
     }
 }
 
-/// Start local OpenAI-compatible STT service with model-backed transcriber.
+/// Start local OpenAI-compatible STT service sharing an existing transcriber.
+///
+/// When `shared` is provided the service reuses it instead of loading a
+/// second copy of the model into VRAM.  Falls back to creating its own
+/// transcriber when `shared` is `None`.
 pub async fn start(
     config: &Config,
     config_path: Option<PathBuf>,
+    shared: Option<Arc<dyn Transcriber>>,
 ) -> Result<ServiceHandle, VoxtypeError> {
     let service_cfg = config.service.clone();
 
-    let mut transcriber_config = config.clone();
-    transcriber_config.whisper.language =
-        default_language_for_service(&service_cfg, &config.whisper.language);
+    let transcriber = if let Some(t) = shared {
+        tracing::info!("Service reusing daemon transcriber (shared VRAM)");
+        t
+    } else {
+        let mut transcriber_config = config.clone();
+        transcriber_config.whisper.language =
+            default_language_for_service(&service_cfg, &config.whisper.language);
 
-    let transcriber = tokio::task::spawn_blocking(move || {
-        match transcriber_config.engine {
-            TranscriptionEngine::Whisper => {
-                crate::transcribe::create_transcriber_with_config_path(
-                    &transcriber_config.whisper,
-                    config_path,
-                )
-                .map(Arc::from)
+        tokio::task::spawn_blocking(move || {
+            match transcriber_config.engine {
+                TranscriptionEngine::Whisper => {
+                    crate::transcribe::create_transcriber_with_config_path(
+                        &transcriber_config.whisper,
+                        config_path,
+                    )
+                    .map(Arc::from)
+                }
+                _ => crate::transcribe::create_transcriber(&transcriber_config).map(Arc::from),
             }
-            _ => crate::transcribe::create_transcriber(&transcriber_config).map(Arc::from),
-        }
-    })
-    .await
-    .map_err(|e| {
-        VoxtypeError::Config(format!(
-            "Service transcriber initialization task failed: {}",
-            e
-        ))
-    })??;
+        })
+        .await
+        .map_err(|e| {
+            VoxtypeError::Config(format!(
+                "Service transcriber initialization task failed: {}",
+                e
+            ))
+        })??
+    };
 
     start_with_transcriber(service_cfg, transcriber).await
 }
