@@ -9,9 +9,16 @@
 //! - Parakeet backend management
 //! - Compositor integration (modifier key fix)
 
+#[cfg(target_os = "macos")]
+pub mod app_bundle;
 pub mod compositor;
 pub mod dms;
 pub mod gpu;
+#[cfg(target_os = "macos")]
+pub mod hammerspoon;
+pub mod launchd;
+#[cfg(target_os = "macos")]
+pub mod macos;
 pub mod model;
 pub mod parakeet;
 pub mod systemd;
@@ -27,6 +34,7 @@ use tokio::process::Command;
 pub enum DisplayServer {
     Wayland,
     X11,
+    MacOS,
     Unknown,
 }
 
@@ -35,6 +43,7 @@ impl std::fmt::Display for DisplayServer {
         match self {
             DisplayServer::Wayland => write!(f, "Wayland"),
             DisplayServer::X11 => write!(f, "X11"),
+            DisplayServer::MacOS => write!(f, "macOS"),
             DisplayServer::Unknown => write!(f, "Unknown"),
         }
     }
@@ -60,6 +69,9 @@ pub struct OutputChainStatus {
     pub ydotool_daemon: bool,
     pub wl_copy: OutputToolStatus,
     pub xclip: OutputToolStatus,
+    // macOS-specific
+    pub osascript: OutputToolStatus,
+    pub pbcopy: OutputToolStatus,
     pub primary_method: Option<String>,
 }
 
@@ -119,15 +131,24 @@ pub fn print_warning(msg: &str) {
 
 /// Detect the current display server
 pub fn detect_display_server() -> DisplayServer {
-    // Check for Wayland first
-    if std::env::var("WAYLAND_DISPLAY").is_ok() {
-        return DisplayServer::Wayland;
+    // Check for macOS first
+    #[cfg(target_os = "macos")]
+    {
+        return DisplayServer::MacOS;
     }
-    // Check for X11
-    if std::env::var("DISPLAY").is_ok() {
-        return DisplayServer::X11;
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Check for Wayland first
+        if std::env::var("WAYLAND_DISPLAY").is_ok() {
+            return DisplayServer::Wayland;
+        }
+        // Check for X11
+        if std::env::var("DISPLAY").is_ok() {
+            return DisplayServer::X11;
+        }
+        DisplayServer::Unknown
     }
-    DisplayServer::Unknown
 }
 
 /// Get the path to a command if it exists
@@ -225,13 +246,39 @@ pub async fn detect_output_chain() -> OutputChainStatus {
         None
     };
 
+    // Check osascript (macOS)
+    let osascript_path = get_command_path("osascript").await;
+    let osascript_installed = osascript_path.is_some();
+    let osascript_available = osascript_installed && display_server == DisplayServer::MacOS;
+    let osascript_note = if osascript_installed && !osascript_available {
+        Some("macOS only".to_string())
+    } else if osascript_available {
+        Some("requires Accessibility permission".to_string())
+    } else {
+        None
+    };
+
+    // Check pbcopy (macOS)
+    let pbcopy_path = get_command_path("pbcopy").await;
+    let pbcopy_installed = pbcopy_path.is_some();
+    let pbcopy_available = pbcopy_installed && display_server == DisplayServer::MacOS;
+    let pbcopy_note = if pbcopy_installed && !pbcopy_available {
+        Some("macOS only".to_string())
+    } else {
+        None
+    };
+
     // Determine primary method
-    let primary_method = if wtype_available {
+    let primary_method = if osascript_available {
+        Some("osascript".to_string())
+    } else if wtype_available {
         Some("wtype".to_string())
     } else if eitype_available {
         Some("eitype".to_string())
     } else if ydotool_available {
         Some("ydotool".to_string())
+    } else if pbcopy_available {
+        Some("pbcopy".to_string())
     } else if wl_copy_available || xclip_available {
         Some("clipboard".to_string())
     } else {
@@ -276,6 +323,20 @@ pub async fn detect_output_chain() -> OutputChainStatus {
             path: xclip_path,
             note: xclip_note,
         },
+        osascript: OutputToolStatus {
+            name: "osascript",
+            installed: osascript_installed,
+            available: osascript_available,
+            path: osascript_path,
+            note: osascript_note,
+        },
+        pbcopy: OutputToolStatus {
+            name: "pbcopy",
+            installed: pbcopy_installed,
+            available: pbcopy_available,
+            path: pbcopy_path,
+            note: pbcopy_note,
+        },
         primary_method,
     }
 }
@@ -294,61 +355,72 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
             let display = std::env::var("DISPLAY").unwrap_or_default();
             format!("X11 (DISPLAY={})", display)
         }
+        DisplayServer::MacOS => "macOS (Quartz)".to_string(),
         DisplayServer::Unknown => "Unknown (no WAYLAND_DISPLAY or DISPLAY set)".to_string(),
     };
     println!("  Display server:  {}", ds_info);
 
-    // wtype
-    print_tool_status(
-        &status.wtype,
-        status.display_server == DisplayServer::Wayland,
-    );
-
-    // eitype
-    print_tool_status(
-        &status.eitype,
-        status.display_server == DisplayServer::Wayland,
-    );
-
-    // ydotool
-    if status.ydotool.installed {
-        let daemon_status = if status.ydotool_daemon {
-            "\x1b[32mdaemon running\x1b[0m"
-        } else {
-            "\x1b[31mdaemon not running\x1b[0m"
-        };
-        if let Some(ref path) = status.ydotool.path {
-            if status.ydotool.available {
-                println!(
-                    "  ydotool:         \x1b[32m✓\x1b[0m installed ({}), {}",
-                    path, daemon_status
-                );
-            } else {
-                println!(
-                    "  ydotool:         \x1b[33m⚠\x1b[0m installed ({}), {}",
-                    path, daemon_status
-                );
-            }
-        }
+    // Show platform-specific tools
+    if status.display_server == DisplayServer::MacOS {
+        // macOS tools
+        print_tool_status(&status.osascript, true);
+        print_tool_status(&status.pbcopy, true);
     } else {
-        println!("  ydotool:         \x1b[31m✗\x1b[0m not installed");
-    }
+        // Linux tools
+        // wtype
+        print_tool_status(
+            &status.wtype,
+            status.display_server == DisplayServer::Wayland,
+        );
 
-    // wl-copy
-    print_tool_status(
-        &status.wl_copy,
-        status.display_server == DisplayServer::Wayland,
-    );
+        // eitype
+        print_tool_status(
+            &status.eitype,
+            status.display_server == DisplayServer::Wayland,
+        );
 
-    // xclip (only show on X11 or if installed)
-    if status.display_server == DisplayServer::X11 || status.xclip.installed {
-        print_tool_status(&status.xclip, status.display_server == DisplayServer::X11);
+        // ydotool
+        if status.ydotool.installed {
+            let daemon_status = if status.ydotool_daemon {
+                "\x1b[32mdaemon running\x1b[0m"
+            } else {
+                "\x1b[31mdaemon not running\x1b[0m"
+            };
+            if let Some(ref path) = status.ydotool.path {
+                if status.ydotool.available {
+                    println!(
+                        "  ydotool:         \x1b[32m✓\x1b[0m installed ({}), {}",
+                        path, daemon_status
+                    );
+                } else {
+                    println!(
+                        "  ydotool:         \x1b[33m⚠\x1b[0m installed ({}), {}",
+                        path, daemon_status
+                    );
+                }
+            }
+        } else {
+            println!("  ydotool:         \x1b[31m✗\x1b[0m not installed");
+        }
+
+        // wl-copy
+        print_tool_status(
+            &status.wl_copy,
+            status.display_server == DisplayServer::Wayland,
+        );
+
+        // xclip (only show on X11 or if installed)
+        if status.display_server == DisplayServer::X11 || status.xclip.installed {
+            print_tool_status(&status.xclip, status.display_server == DisplayServer::X11);
+        }
     }
 
     // Summary
     println!();
     if let Some(ref method) = status.primary_method {
         let method_desc = match method.as_str() {
+            "osascript" => "osascript (AppleScript/System Events)",
+            "pbcopy" => "pbcopy (clipboard, requires manual paste)",
             "wtype" => "wtype (CJK supported)",
             "eitype" => "eitype (libei, GNOME/KDE native)",
             "ydotool" => "ydotool (CJK not supported)",
@@ -358,9 +430,11 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
         println!("  \x1b[32m→\x1b[0m Text will be typed via {}", method_desc);
     } else {
         println!("  \x1b[31m→\x1b[0m No text output method available!");
-        println!(
-            "    Install wtype (Wayland), eitype (GNOME/KDE), or ydotool (X11) for typing support"
-        );
+        if status.display_server == DisplayServer::MacOS {
+            println!("    osascript should be available on macOS");
+        } else {
+            println!("    Install wtype (Wayland), eitype (GNOME/KDE), or ydotool (X11) for typing support");
+        }
     }
 }
 
@@ -468,7 +542,7 @@ pub async fn run_setup(
         .map(model::is_sensevoice_model)
         .unwrap_or(false);
 
-    // Use model_override if provided, otherwise use config default (for Whisper)
+    // Validate model_override if provided (variable unused after this, each branch re-defines)
     let _model_name: &str = match model_override {
         Some(name) => {
             // Validate the model name (check Whisper, Parakeet, and SenseVoice)
@@ -668,17 +742,33 @@ pub async fn run_setup(
     if !quiet && !no_post_install {
         println!();
         println!("Next steps:");
-        println!("  1. Set up a compositor keybinding to trigger recording:");
-        println!(
-            "     Example for Hyprland: bind = , XF86AudioRecord, exec, voxtype record-toggle\n"
-        );
-        println!("  2. Start the daemon: voxtype daemon\n");
-        println!("Optional:");
-        println!("  voxtype setup check      - Verify system configuration");
-        println!("  voxtype setup model      - Download/switch whisper models");
-        println!("  voxtype setup systemd    - Install as systemd service");
-        println!("  voxtype setup waybar     - Get Waybar integration config");
-        println!("  voxtype setup compositor - Fix modifier key issues (Hyprland/Sway/River)");
+
+        #[cfg(target_os = "macos")]
+        {
+            println!("  1. Install as app bundle (recommended):");
+            println!("     voxtype setup app-bundle\n");
+            println!("  2. Or run the interactive setup wizard:");
+            println!("     voxtype setup macos\n");
+            println!("Optional:");
+            println!("  voxtype setup check             - Verify system configuration");
+            println!("  voxtype setup model             - Download/switch whisper models");
+            println!("  voxtype setup app-bundle --status - Check installation status");
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            println!("  1. Set up a compositor keybinding to trigger recording:");
+            println!(
+                "     Example for Hyprland: bind = , XF86AudioRecord, exec, voxtype record-toggle\n"
+            );
+            println!("  2. Start the daemon: voxtype daemon\n");
+            println!("Optional:");
+            println!("  voxtype setup check      - Verify system configuration");
+            println!("  voxtype setup model      - Download/switch whisper models");
+            println!("  voxtype setup systemd    - Install as systemd service");
+            println!("  voxtype setup waybar     - Get Waybar integration config");
+            println!("  voxtype setup compositor - Fix modifier key issues (Hyprland/Sway/River)");
+        }
     }
 
     Ok(())
@@ -767,24 +857,29 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
         }
     }
 
-    // Check whisper model
-    println!("\nWhisper Model:");
-    let model_name = &config.whisper.model;
-    let model_filename = crate::transcribe::whisper::get_model_filename(model_name);
-    let model_path = models_dir.join(&model_filename);
+    // Check whisper model (only if using Whisper engine)
+    if config.engine == crate::config::TranscriptionEngine::Whisper {
+        println!("\nWhisper Model:");
+        let model_name = &config.whisper.model;
+        let model_filename = crate::transcribe::whisper::get_model_filename(model_name);
+        let model_path = models_dir.join(&model_filename);
 
-    if model_path.exists() {
-        let size = std::fs::metadata(&model_path)
-            .map(|m| m.len() as f64 / 1024.0 / 1024.0)
-            .unwrap_or(0.0);
-        print_success(&format!(
-            "Model '{}' installed ({:.0} MB)",
-            model_name, size
-        ));
+        if model_path.exists() {
+            let size = std::fs::metadata(&model_path)
+                .map(|m| m.len() as f64 / 1024.0 / 1024.0)
+                .unwrap_or(0.0);
+            print_success(&format!(
+                "Model '{}' installed ({:.0} MB)",
+                model_name, size
+            ));
+        } else {
+            print_failure(&format!("Model '{}' not found", model_name));
+            println!("       Run: voxtype setup --download");
+            all_ok = false;
+        }
     } else {
-        print_failure(&format!("Model '{}' not found", model_name));
-        println!("       Run: voxtype setup --download");
-        all_ok = false;
+        println!("\nWhisper Model:");
+        print_info("Using Parakeet engine (Whisper model not required)");
     }
 
     // Check Parakeet models (experimental)
@@ -798,10 +893,11 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
             if path.is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.contains("parakeet") {
-                    // Check if it has the required ONNX files
-                    let encoder_path = path.join("encoder-model.onnx");
-                    let has_encoder = encoder_path.exists();
+                    // Check if it has the required ONNX files (including quantized variants)
+                    let has_encoder = path.join("encoder-model.onnx").exists()
+                        || path.join("encoder-model.int8.onnx").exists();
                     let has_decoder = path.join("decoder_joint-model.onnx").exists()
+                        || path.join("decoder_joint-model.int8.onnx").exists()
                         || path.join("model.onnx").exists();
                     if has_encoder || has_decoder {
                         // Get total size of model files

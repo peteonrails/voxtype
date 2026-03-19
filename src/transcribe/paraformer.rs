@@ -14,8 +14,8 @@
 //! Languages: zh+en (bilingual), zh+yue+en (trilingual)
 //! Model files: model.int8.onnx (or model.onnx), tokens.txt, am.mvn
 
-use super::fbank::{self, FbankExtractor, LfrConfig};
 use super::ctc;
+use super::fbank::{self, FbankExtractor, LfrConfig};
 use super::Transcriber;
 use crate::config::ParaformerConfig;
 use crate::error::TranscribeError;
@@ -82,9 +82,7 @@ impl ParaformerTranscriber {
                 TranscribeError::InitFailed(format!("ONNX session builder failed: {}", e))
             })?
             .with_intra_threads(threads)
-            .map_err(|e| {
-                TranscribeError::InitFailed(format!("Failed to set threads: {}", e))
-            })?
+            .map_err(|e| TranscribeError::InitFailed(format!("Failed to set threads: {}", e)))?
             .commit_from_file(&model_file)
             .map_err(|e| {
                 TranscribeError::InitFailed(format!(
@@ -169,19 +167,13 @@ impl Transcriber for ParaformerTranscriber {
         let (x_data, _offset) = features.into_raw_vec_and_offset();
         let speech_tensor = Tensor::<f32>::from_array(([1usize, num_frames, feat_dim], x_data))
             .map_err(|e| {
-                TranscribeError::InferenceFailed(format!(
-                    "Failed to create speech tensor: {}",
-                    e
-                ))
+                TranscribeError::InferenceFailed(format!("Failed to create speech tensor: {}", e))
             })?;
 
         // speech_lengths: shape [1]
         let lengths_tensor = Tensor::<i32>::from_array(([1usize], vec![num_frames as i32]))
             .map_err(|e| {
-                TranscribeError::InferenceFailed(format!(
-                    "Failed to create lengths tensor: {}",
-                    e
-                ))
+                TranscribeError::InferenceFailed(format!("Failed to create lengths tensor: {}", e))
             })?;
 
         // 5. Run inference
@@ -272,10 +264,7 @@ fn decode_paraformer_output(
     } else if shape_dims.len() == 2 {
         // [batch, seq_len] - pre-argmaxed token IDs as f32
         let seq_len = shape_dims[1] as usize;
-        let token_ids: Vec<u32> = data[..seq_len]
-            .iter()
-            .map(|&v| v as u32)
-            .collect();
+        let token_ids: Vec<u32> = data[..seq_len].iter().map(|&v| v as u32).collect();
         Ok(tokens_to_text(&token_ids, tokens))
     } else {
         Err(TranscribeError::InferenceFailed(format!(
@@ -349,9 +338,8 @@ fn tokens_to_text(token_ids: &[u32], tokens: &HashMap<u32, String>) -> String {
 fn read_cmvn_from_kaldi_mvn(
     path: &std::path::Path,
 ) -> Result<(Vec<f32>, Vec<f32>), TranscribeError> {
-    let data = std::fs::read(path).map_err(|e| {
-        TranscribeError::InitFailed(format!("Failed to read am.mvn: {}", e))
-    })?;
+    let data = std::fs::read(path)
+        .map_err(|e| TranscribeError::InitFailed(format!("Failed to read am.mvn: {}", e)))?;
 
     let mut pos = 0;
 
@@ -429,7 +417,12 @@ fn read_cmvn_from_kaldi_mvn(
         )));
     }
 
-    tracing::debug!("am.mvn: {} rows x {} cols, double={}", rows, cols, is_double);
+    tracing::debug!(
+        "am.mvn: {} rows x {} cols, double={}",
+        rows,
+        cols,
+        is_double
+    );
 
     // Read matrix data
     let feat_dim = cols - 1; // last column is the count
@@ -515,9 +508,7 @@ fn read_cmvn_from_metadata(session: &Session) -> Result<(Vec<f32>, Vec<f32>), Tr
     })?;
 
     let inv_stddev_str = metadata.custom("inv_stddev").ok_or_else(|| {
-        TranscribeError::InitFailed(
-            "Model metadata missing 'inv_stddev' key".to_string(),
-        )
+        TranscribeError::InitFailed("Model metadata missing 'inv_stddev' key".to_string())
     })?;
 
     let neg_mean: Vec<f32> = neg_mean_str

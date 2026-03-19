@@ -92,8 +92,20 @@ pub struct Cli {
     #[arg(long, value_name = "KEY", help_heading = "Hotkey")]
     pub model_modifier: Option<String>,
 
-    // -- Whisper --
+    // -- Service --
+    /// Enable local OpenAI-compatible STT HTTP service alongside daemon loop
+    #[arg(long, help_heading = "Service")]
+    pub service: bool,
 
+    /// Service bind host override (default: 127.0.0.1)
+    #[arg(long, value_name = "HOST", help_heading = "Service")]
+    pub service_host: Option<String>,
+
+    /// Service bind port override (default: 8427)
+    #[arg(long, value_name = "PORT", help_heading = "Service")]
+    pub service_port: Option<u16>,
+
+    // -- Whisper --
     /// Disable context window optimization for short recordings
     #[arg(long, help_heading = "Whisper")]
     pub no_whisper_context_optimization: bool,
@@ -148,7 +160,6 @@ pub struct Cli {
     pub remote_api_key: Option<String>,
 
     // -- Audio --
-
     /// Audio input device name (or "default" for system default)
     #[arg(long, value_name = "DEVICE", help_heading = "Audio")]
     pub audio_device: Option<String>,
@@ -166,7 +177,6 @@ pub struct Cli {
     pub no_audio_feedback: bool,
 
     // -- Output --
-
     /// Delay before typing starts (ms), helps prevent first character drop
     #[arg(long, value_name = "MS", help_heading = "Output")]
     pub pre_type_delay: Option<u32>,
@@ -219,7 +229,11 @@ pub struct Cli {
     pub fallback_to_clipboard: bool,
 
     /// Disable clipboard fallback
-    #[arg(long, conflicts_with = "fallback_to_clipboard", help_heading = "Output")]
+    #[arg(
+        long,
+        conflicts_with = "fallback_to_clipboard",
+        help_heading = "Output"
+    )]
     pub no_fallback_to_clipboard: bool,
 
     /// Enable spoken punctuation conversion (e.g., say "period" to get ".")
@@ -259,7 +273,6 @@ pub struct Cli {
     pub pre_recording_command: Option<String>,
 
     // -- VAD --
-
     /// Enable Voice Activity Detection (filter silence before transcription)
     #[arg(long, help_heading = "VAD")]
     pub vad: bool,
@@ -285,6 +298,15 @@ pub struct Cli {
 pub enum Commands {
     /// Run as daemon (default if no command specified)
     Daemon,
+
+    /// Run menu bar helper (macOS)
+    #[cfg(target_os = "macos")]
+    Menubar,
+
+    /// Launch daemon + menubar (used by Voxtype.app bundle)
+    #[cfg(target_os = "macos")]
+    #[command(hide = true)]
+    AppLaunch,
 
     /// Transcribe an audio file (WAV, 16kHz, mono)
     Transcribe {
@@ -377,6 +399,9 @@ pub enum Commands {
         #[command(subcommand)]
         action: MeetingAction,
     },
+
+    /// Check for updates
+    CheckUpdate,
 }
 
 /// Output mode override for record commands
@@ -761,7 +786,11 @@ pub enum SetupAction {
     /// Check system configuration and dependencies
     Check,
 
-    /// Install voxtype as a systemd user service
+    /// Interactive macOS setup wizard
+    #[cfg(target_os = "macos")]
+    Macos,
+
+    /// Install voxtype as a systemd user service (Linux)
     Systemd {
         /// Uninstall the service instead of installing
         #[arg(long)]
@@ -770,6 +799,55 @@ pub enum SetupAction {
         /// Show service status
         #[arg(long)]
         status: bool,
+    },
+
+    /// Install voxtype as a LaunchAgent (macOS)
+    /// Note: launchd services don't receive microphone permissions.
+    /// Use 'app-bundle' instead for full functionality.
+    #[cfg(target_os = "macos")]
+    Launchd {
+        /// Uninstall the service instead of installing
+        #[arg(long)]
+        uninstall: bool,
+
+        /// Show service status
+        #[arg(long)]
+        status: bool,
+    },
+
+    /// Install Voxtype.app bundle with Login Items (macOS, recommended)
+    /// Creates /Applications/Voxtype.app and adds to Login Items.
+    /// This method properly receives Accessibility, Input Monitoring,
+    /// and Microphone permissions (unlike launchd).
+    #[cfg(target_os = "macos")]
+    AppBundle {
+        /// Uninstall the app bundle
+        #[arg(long)]
+        uninstall: bool,
+
+        /// Show installation status
+        #[arg(long)]
+        status: bool,
+    },
+
+    /// Set up Hammerspoon hotkey integration (macOS)
+    #[cfg(target_os = "macos")]
+    Hammerspoon {
+        /// Install Hammerspoon config (copy to ~/.hammerspoon/)
+        #[arg(long)]
+        install: bool,
+
+        /// Show the Hammerspoon configuration snippet
+        #[arg(long)]
+        show: bool,
+
+        /// Hotkey to configure (default: rightalt)
+        #[arg(long, default_value = "rightalt")]
+        hotkey: String,
+
+        /// Use toggle mode instead of push-to-talk
+        #[arg(long)]
+        toggle: bool,
     },
 
     /// Show Waybar configuration snippets
