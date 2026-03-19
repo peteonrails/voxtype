@@ -70,7 +70,7 @@ tempfile = "3"
 rodio = { version = "0.19", default-features = false, features = ["wav"] }
 
 # Whisper speech-to-text
-whisper-rs = "0.15.1"
+whisper-rs = "0.16.0"
 
 # Parakeet speech-to-text (optional, ONNX-based)
 parakeet-rs = { version = "0.3", optional = true }
