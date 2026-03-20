@@ -9,16 +9,16 @@
     <!-- Open Graph / Social Media -->
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://voxtype.io/news/">
-    <meta property="og:title" content="Voxtype 0.6.3: Clipboard Restoration, Full Config Override, NixOS Improvements">
-    <meta property="og:description" content="Restore clipboard after paste mode, every config option now configurable via CLI flags and env vars, NixOS packaging improvements and bug fixes.">
+    <meta property="og:title" content="Voxtype 0.6.4: Clang 22 Compatibility, Smart Auto-Submit, CUDA Safety">
+    <meta property="og:description" content="Fixes AUR source builds on clang 22, adds auto-submit by voice trigger, and probes CUDA version before loading to prevent segfaults.">
     <meta property="og:image" content="https://voxtype.io/images/gpu-isolation.png">
     <meta property="og:image:width" content="1200">
     <meta property="og:image:height" content="630">
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="Voxtype 0.6.3: Clipboard Restoration, Full Config Override, NixOS Improvements">
-    <meta name="twitter:description" content="Restore clipboard after paste mode, every config option now configurable via CLI flags and env vars, NixOS packaging improvements and bug fixes.">
+    <meta name="twitter:title" content="Voxtype 0.6.4: Clang 22 Compatibility, Smart Auto-Submit, CUDA Safety">
+    <meta name="twitter:description" content="Fixes AUR source builds on clang 22, adds auto-submit by voice trigger, and probes CUDA version before loading to prevent segfaults.">
     <meta name="twitter:image" content="https://voxtype.io/images/gpu-isolation.png">
 
     <title>News & Updates | Voxtype</title>
@@ -76,6 +76,55 @@
         <div class="container">
 
             <!-- v0.6.x Era Posts -->
+
+            <article class="news-article" id="v064">
+                <div class="article-meta">
+                    <time datetime="2026-03-19">March 19, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v0.6.4: Clang 22 Compatibility, Smart Auto-Submit, CUDA Safety</h2>
+                <div class="article-body">
+                    <p>Voxtype 0.6.4 fixes source builds on systems with clang 22, adds voice-triggered auto-submit, and prevents CUDA version mismatch segfaults. If you build voxtype from source on Arch Linux and recently updated clang, this release unblocks you.</p>
+
+                    <h3>Clang 22 / Bindgen Compatibility</h3>
+                    <p>LLVM 22 changed how it represents certain C struct types in the AST, which broke bindgen 0.71.x during the whisper-rs build. The build would fail with type errors in the generated FFI bindings. This release bumps whisper-rs to 0.16.0, which includes bindgen 0.72.1 with the fix.</p>
+
+                    <p><strong>Why it matters:</strong> Arch Linux and other rolling distros ship clang 22 now. Without this fix, <code>makepkg</code> for the <code>voxtype</code> AUR package fails during compilation.</p>
+
+                    <h3>Smart Auto-Submit</h3>
+                    <p>You can now say "submit", "send", or "enter" at the end of your dictation to automatically press Enter after the text is output. This is useful for chat apps, terminal prompts, and search boxes where you want to dictate and send in one step.</p>
+
+                    <p><strong>Why use it:</strong> Dictate a Slack message and say "send" at the end. The text is typed and Enter is pressed, all from a single recording.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[text]
+smart_auto_submit = true</code></pre>
+                    </div>
+
+                    <p>The trigger word is stripped from the output. Works with <code>--auto-submit</code> per-recording overrides too. Trigger words are case-insensitive and must appear as the last word in the transcription.</p>
+
+                    <h3>CUDA Version Probing</h3>
+                    <p>ONNX engine binaries ship with CUDA 12.x bundled. If your system has an older CUDA version (or none at all), the previous behavior was a segfault deep inside ONNX Runtime initialization. Voxtype now probes the system CUDA version via <code>dlopen</code>/<code>dlsym</code> before attempting to load ONNX Runtime with CUDA. If the version doesn't match, it falls back to CPU with a clear warning instead of crashing.</p>
+
+                    <p><strong>Why it matters:</strong> Users with NVIDIA GPUs but older CUDA drivers no longer get unexplained crashes when selecting an ONNX engine.</p>
+
+                    <h3>Bug Fixes</h3>
+                    <ul>
+                        <li><strong>Status command ONNX detection:</strong> <code>voxtype status</code> now correctly reports the model name and backend when using ONNX engines (Parakeet, SenseVoice, etc.) instead of showing the Whisper model path.</li>
+                        <li><strong>Meeting export directory handling:</strong> When <code>--output</code> points to a directory instead of a file, voxtype now auto-generates a timestamped filename instead of failing.</li>
+                    </ul>
+
+                    <h3>Other Changes</h3>
+                    <ul>
+                        <li>NixOS Home Manager module now merges user settings into defaults instead of replacing them.</li>
+                        <li>Updated Parakeet model documentation with correct download links and file listings.</li>
+                    </ul>
+
+                    <h3>Contributors</h3>
+                    <p>Thanks to <a href="https://github.com/siebertm">Michael Siebert</a> for smart auto-submit, <a href="https://github.com/materemias">materemias</a> for meeting export improvements, <a href="https://github.com/repomaa">Joakim Repomaa</a> for the NixOS HM fix, <a href="https://github.com/benj9000">benj9000</a> for Parakeet documentation updates, and <a href="https://github.com/fazzledev">Syed Fazil Basheer</a> for diagnosing the ONNX status bug.</p>
+                </div>
+            </article>
 
             <article class="news-article" id="v063">
                 <div class="article-meta">
