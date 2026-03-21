@@ -7,7 +7,7 @@
 //! - Auto-detect: Let Whisper detect from all ~99 supported languages
 //! - Constrained auto-detect: Detect from a user-specified subset of languages
 
-use super::Transcriber;
+use super::{TranscribeOutput, Transcriber, WordInfo};
 use crate::config::{Config, LanguageConfig, WhisperConfig};
 use crate::error::TranscribeError;
 use std::path::PathBuf;
@@ -238,6 +238,99 @@ impl Transcriber for WhisperTranscriber {
 
         Ok(result)
     }
+
+    fn transcribe_detailed(
+        &self,
+        samples: &[f32],
+        prompt_tokens: Option<&[i32]>,
+    ) -> Result<TranscribeOutput, TranscribeError> {
+        if samples.is_empty() {
+            return Err(TranscribeError::AudioFormat(
+                "Empty audio buffer".to_string(),
+            ));
+        }
+
+        tracing::debug!("Detailed transcription for {} samples", samples.len());
+
+        let start = std::time::Instant::now();
+
+        let mut state = self
+            .ctx
+            .create_state()
+            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
+
+        let selected_language: Option<String> = if self.language.is_auto() {
+            tracing::debug!("Using unconstrained language auto-detection");
+            None
+        } else if self.language.is_multiple() {
+            let allowed = self.language.as_vec();
+            tracing::debug!("Using constrained language detection from: {:?}", allowed);
+            Some(self.select_language_from_allowed(&mut state, samples, &allowed)?)
+        } else {
+            let lang = self.language.primary().to_string();
+            tracing::debug!("Using specified language: {}", lang);
+            Some(lang)
+        };
+
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+
+        match &selected_language {
+            Some(lang) => params.set_language(Some(lang)),
+            None => params.set_language(None),
+        }
+
+        params.set_translate(self.translate);
+        params.set_n_threads(self.threads as i32);
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+        params.set_suppress_blank(true);
+        params.set_suppress_nst(true);
+        params.set_token_timestamps(true);
+
+        if let Some(prompt) = &self.initial_prompt {
+            params.set_initial_prompt(prompt);
+            tracing::debug!("Using initial prompt: {:?}", prompt);
+        }
+
+        if let Some(tokens) = prompt_tokens {
+            params.set_tokens(tokens);
+            tracing::debug!("Using {} prompt tokens", tokens.len());
+        }
+
+        state
+            .full(params, samples)
+            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
+
+        let mut text = String::new();
+        let mut words = Vec::new();
+        for segment in state.as_iter() {
+            match segment.to_str() {
+                Ok(seg_text) => text.push_str(seg_text),
+                Err(_) => {
+                    let fallback = segment
+                        .to_str_lossy()
+                        .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
+                    text.push_str(&fallback);
+                }
+            }
+
+            words.extend(group_tokens_into_words(&segment));
+        }
+
+        let result = text.trim().to_string();
+        tracing::info!(
+            "Detailed transcription completed in {:.2}s: {} words",
+            start.elapsed().as_secs_f32(),
+            words.len()
+        );
+
+        Ok(TranscribeOutput {
+            text: result,
+            words,
+        })
+    }
 }
 
 /// Resolve model name to file path
@@ -302,6 +395,58 @@ fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
     )))
 }
 
+fn group_tokens_into_words(segment: &whisper_rs::WhisperSegment<'_>) -> Vec<WordInfo> {
+    let mut token_parts = Vec::new();
+
+    for idx in 0..segment.n_tokens() {
+        let Some(token) = segment.get_token(idx) else {
+            continue;
+        };
+
+        let token_id = token.token_id();
+        if token_id >= 50257 {
+            continue;
+        }
+
+        let token_text = match token.to_str() {
+            Ok(text) => text.to_string(),
+            Err(_) => match token.to_str_lossy() {
+                Ok(text) => text.to_string(),
+                Err(_) => continue,
+            },
+        };
+
+        let token_data = token.token_data();
+        token_parts.push((token_text, token_data.t0, token_data.t1, token_id));
+    }
+
+    group_bpe_tokens_into_words(&token_parts)
+}
+
+fn group_bpe_tokens_into_words(token_parts: &[(String, i64, i64, i32)]) -> Vec<WordInfo> {
+    let mut words = Vec::new();
+
+    for (token_text, start, end, token_id) in token_parts {
+        let starts_new_word = token_text.starts_with(' ') || words.is_empty();
+
+        if starts_new_word {
+            words.push(WordInfo {
+                text: token_text.trim_start().to_string(),
+                start: *start,
+                end: *end,
+                tokens: vec![*token_id],
+            });
+        } else if let Some(current_word) = words.last_mut() {
+            current_word.text.push_str(token_text);
+            current_word.end = *end;
+            current_word.tokens.push(*token_id);
+        }
+    }
+
+    words.retain(|w| !w.text.trim().is_empty());
+    words
+}
+
 /// Calculate audio_ctx parameter for short clips (≤22.5s).
 /// Formula: max(duration_seconds * 50 + 128, 384), rounded up to multiple of 8
 ///
@@ -358,6 +503,10 @@ pub fn get_model_url(model: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn token(text: &str, start: i64, end: i64, token_id: i32) -> (String, i64, i64, i32) {
+        (text.to_string(), start, end, token_id)
+    }
 
     #[test]
     fn test_model_url() {
@@ -437,5 +586,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_group_bpe_tokens_into_words_multitoken_words() {
+        let words = group_bpe_tokens_into_words(&[
+            token(" Hello", 0, 10, 1),
+            token(" world", 11, 20, 2),
+            token("ly", 21, 25, 3),
+            token(" !", 26, 30, 4),
+        ]);
+
+        assert_eq!(words.len(), 3);
+        assert_eq!(words[0].text, "Hello");
+        assert_eq!(words[0].tokens, vec![1]);
+        assert_eq!(words[1].text, "worldly");
+        assert_eq!(words[1].start, 11);
+        assert_eq!(words[1].end, 25);
+        assert_eq!(words[1].tokens, vec![2, 3]);
+        assert_eq!(words[2].text, "!");
+    }
+
+    #[test]
+    fn test_group_bpe_tokens_into_words_skips_special_and_empty() {
+        let words = group_bpe_tokens_into_words(&[
+            token("", 0, 5, 50257),
+            token("", 6, 10, 50300),
+            token(" ok", 11, 15, 10),
+            token("ay", 16, 20, 11),
+            token("   ", 21, 22, 12),
+        ]);
+
+        assert_eq!(words.len(), 1);
+        assert_eq!(words[0].text, "okay");
+        assert_eq!(words[0].tokens, vec![10, 11]);
     }
 }
