@@ -14,6 +14,7 @@
 
 pub mod cli;
 pub mod remote;
+pub mod streaming;
 pub mod subprocess;
 pub mod whisper;
 pub mod worker;
@@ -84,7 +85,10 @@ pub struct TranscribeOutput {
 impl TranscribeOutput {
     /// Get all token IDs in order (for prompt carry-forward)
     pub fn all_tokens(&self) -> Vec<i32> {
-        self.words.iter().flat_map(|w| w.tokens.iter().copied()).collect()
+        self.words
+            .iter()
+            .flat_map(|w| w.tokens.iter().copied())
+            .collect()
     }
 }
 
@@ -130,8 +134,18 @@ mod tests {
         let output = TranscribeOutput {
             text: "hello world".to_string(),
             words: vec![
-                WordInfo { text: "hello".to_string(), start: 0, end: 50, tokens: vec![1, 2] },
-                WordInfo { text: "world".to_string(), start: 50, end: 100, tokens: vec![3, 4] },
+                WordInfo {
+                    text: "hello".to_string(),
+                    start: 0,
+                    end: 50,
+                    tokens: vec![1, 2],
+                },
+                WordInfo {
+                    text: "world".to_string(),
+                    start: 50,
+                    end: 100,
+                    tokens: vec![3, 4],
+                },
             ],
         };
         assert_eq!(output.text, "hello world");
