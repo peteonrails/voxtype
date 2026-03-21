@@ -99,6 +99,13 @@ translate = false
 # Number of CPU threads for inference (omit for auto-detection)
 # threads = 4
 
+# GPU device index for Vulkan/CUDA backend selection.
+# On multi-GPU systems, whisper.cpp may default to the integrated GPU (index 0),
+# causing slower transcription. For different-vendor setups (e.g., Intel iGPU +
+# NVIDIA dGPU), use VOXTYPE_VULKAN_DEVICE=nvidia instead (simpler).
+# Use gpu_device for same-vendor GPUs or precise index control.
+# gpu_device = 1
+
 # Initial prompt to provide context for transcription
 # Use this to hint at terminology, proper nouns, or formatting conventions.
 # Example: "Technical discussion about Rust, TypeScript, and Kubernetes."
@@ -778,6 +785,15 @@ pub struct WhisperConfig {
     #[serde(default)]
     pub gpu_isolation: bool,
 
+    /// GPU device index for Vulkan/CUDA/Metal backend selection.
+    /// On multi-GPU systems, whisper.cpp may select the integrated GPU (index 0)
+    /// instead of the discrete GPU, causing slower transcription.
+    /// Set this to the index of your preferred GPU (e.g., 1 for the second device).
+    /// Leave unset to use the default device (index 0).
+    /// You can also use the GGML_VK_VISIBLE_DEVICES env var for Vulkan filtering.
+    #[serde(default)]
+    pub gpu_device: Option<i32>,
+
     /// Optimize context window for short recordings (default: true)
     /// When enabled, uses a smaller context window proportional to audio length
     /// for clips under 22.5 seconds. This significantly speeds up transcription
@@ -895,6 +911,7 @@ impl Default for WhisperConfig {
             threads: None,
             on_demand_loading: default_on_demand_loading(),
             gpu_isolation: false,
+            gpu_device: None,
             context_window_optimization: default_context_window_optimization(),
             eager_processing: false,
             eager_chunk_secs: default_eager_chunk_secs(),
@@ -1744,6 +1761,7 @@ impl Default for Config {
                 threads: None,
                 on_demand_loading: default_on_demand_loading(),
                 gpu_isolation: false,
+                gpu_device: None,
                 context_window_optimization: default_context_window_optimization(),
                 eager_processing: false,
                 eager_chunk_secs: default_eager_chunk_secs(),
@@ -2018,6 +2036,11 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     }
     if let Ok(val) = std::env::var("VOXTYPE_GPU_ISOLATION") {
         config.whisper.gpu_isolation = parse_bool_env(&val);
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_GPU_DEVICE") {
+        if let Ok(n) = val.parse::<i32>() {
+            config.whisper.gpu_device = Some(n);
+        }
     }
     if let Ok(val) = std::env::var("VOXTYPE_ON_DEMAND_LOADING") {
         config.whisper.on_demand_loading = parse_bool_env(&val);

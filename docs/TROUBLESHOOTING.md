@@ -864,6 +864,39 @@ threads = 8  # Match your CPU cores
 3. **Use English-only model:**
 `.en` models are faster than multilingual models.
 
+### Slow transcription on multi-GPU systems (Vulkan)
+
+**Cause:** whisper.cpp 1.7+ enumerates integrated GPUs via Vulkan. On systems with both an integrated GPU (e.g., Intel UHD) and a discrete GPU (e.g., NVIDIA RTX), the integrated GPU gets index 0 and becomes the default. This can cause ~3x slower transcription.
+
+**Solutions:**
+
+1. **Use VOXTYPE_VULKAN_DEVICE** (recommended for different-vendor GPUs):
+
+If your integrated and discrete GPUs are from different vendors (e.g., Intel iGPU + NVIDIA dGPU), this is the simplest fix. It filters out the unwanted vendor's Vulkan driver entirely.
+
+```bash
+# In your environment or systemd override:
+VOXTYPE_VULKAN_DEVICE=nvidia
+```
+
+Valid values: `nvidia`, `amd`, `intel`. See `voxtype setup gpu` for detected GPUs.
+
+2. **Set gpu_device in config** (for same-vendor GPUs or precise index control):
+
+This passes a device index directly to whisper.cpp, useful when both GPUs are from the same vendor.
+
+```toml
+[whisper]
+gpu_device = 1  # Use discrete GPU instead of integrated at index 0
+```
+
+3. **Or use the GGML_VK_VISIBLE_DEVICES env var:**
+```bash
+GGML_VK_VISIBLE_DEVICES=1 voxtype
+```
+
+**How to find the right GPU:** Run `voxtype setup gpu` to see detected GPUs, or `vulkaninfo --summary` to see the Vulkan device list and their indices.
+
 ### High CPU usage
 
 **Cause:** Whisper inference is CPU-intensive.

@@ -37,11 +37,17 @@ impl WhisperTranscriber {
         tracing::info!("Loading whisper model from {:?}", model_path);
         let start = std::time::Instant::now();
 
+        let mut ctx_params = WhisperContextParameters::default();
+        if let Some(device) = config.gpu_device {
+            tracing::info!("Using GPU device index {}", device);
+            ctx_params.gpu_device(device);
+        }
+
         let ctx = WhisperContext::new_with_params(
             model_path
                 .to_str()
                 .ok_or_else(|| TranscribeError::ModelNotFound("Invalid path".to_string()))?,
-            WhisperContextParameters::default(),
+            ctx_params,
         )
         .map_err(|e| TranscribeError::InitFailed(e.to_string()))?;
 

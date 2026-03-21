@@ -188,6 +188,9 @@ async fn main() -> anyhow::Result<()> {
     if cli.gpu_isolation {
         config.whisper.gpu_isolation = true;
     }
+    if let Some(gpu_device) = cli.gpu_device {
+        config.whisper.gpu_device = Some(gpu_device);
+    }
     if cli.on_demand_loading {
         config.whisper.on_demand_loading = true;
     }
@@ -1113,6 +1116,9 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
     println!("  translate = {}", config.whisper.translate);
     if let Some(threads) = config.whisper.threads {
         println!("  threads = {}", threads);
+    }
+    if let Some(gpu_device) = config.whisper.gpu_device {
+        println!("  gpu_device = {}", gpu_device);
     }
 
     // Show Parakeet status (experimental)

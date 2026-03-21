@@ -568,6 +568,26 @@ gpu_isolation = true  # Release GPU memory between transcriptions
 
 **Note:** This setting only applies when using the local whisper backend (`backend = "local"`). It has no effect with remote transcription since no local GPU is used.
 
+### gpu_device
+
+**Type:** Integer
+**Default:** Not set (uses device index 0)
+**Required:** No
+
+GPU device index for Vulkan/CUDA/Metal backend selection. On multi-GPU systems, whisper.cpp may select the wrong GPU by default (e.g., an integrated GPU instead of a discrete GPU), causing slower transcription.
+
+This sets the device index passed directly to whisper.cpp. For systems where the integrated and discrete GPUs are from **different vendors** (e.g., Intel iGPU + NVIDIA dGPU), the `VOXTYPE_VULKAN_DEVICE` environment variable is usually simpler -- it filters by vendor at the Vulkan driver level. See the [Environment Variables](#environment-variables) section.
+
+Use `gpu_device` when you need precise index-level control, such as when both GPUs are from the same vendor.
+
+**Example:**
+```toml
+[whisper]
+gpu_device = 1  # Use discrete GPU (skip integrated GPU at index 0)
+```
+
+**How to find your GPU index:** Run `voxtype setup gpu` to see detected GPUs, or `vulkaninfo --summary` for Vulkan device indices.
+
 ### context_window_optimization
 
 **Type:** Boolean
@@ -2395,6 +2415,7 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_TRANSLATE` | bool | `whisper.translate` |
 | `VOXTYPE_THREADS` | integer | `whisper.threads` |
 | `VOXTYPE_GPU_ISOLATION` | bool | `whisper.gpu_isolation` |
+| `VOXTYPE_GPU_DEVICE` | integer | `whisper.gpu_device` |
 | `VOXTYPE_ON_DEMAND_LOADING` | bool | `whisper.on_demand_loading` |
 | `VOXTYPE_REMOTE_ENDPOINT` | string | `whisper.remote_endpoint` |
 | `VOXTYPE_WHISPER_API_KEY` | string | `whisper.remote_api_key` |

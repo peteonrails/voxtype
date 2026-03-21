@@ -119,6 +119,10 @@ pub struct Cli {
     #[arg(long, help_heading = "Whisper")]
     pub gpu_isolation: bool,
 
+    /// GPU device index for multi-GPU systems (e.g., 1 for discrete GPU)
+    #[arg(long, value_name = "INDEX", help_heading = "Whisper")]
+    pub gpu_device: Option<i32>,
+
     /// Load model on-demand when recording starts instead of keeping it loaded
     #[arg(long, help_heading = "Whisper")]
     pub on_demand_loading: bool,
