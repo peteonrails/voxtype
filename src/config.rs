@@ -207,6 +207,8 @@ type_delay_ms = 0
 # [output.post_process]
 # command = "ollama run llama3.2:1b 'Clean up this dictation. Fix grammar, remove filler words. Output only the cleaned text:'"
 # timeout_ms = 30000  # 30 second timeout (generous for LLM)
+# trim = true         # Strip leading/trailing whitespace from output (default: true)
+# fallback_on_empty = true  # Use original text if command returns empty (default: true)
 
 [output.notification]
 # Show notification when recording starts (hotkey pressed)
@@ -1468,6 +1470,18 @@ pub struct PostProcessConfig {
     /// Timeout in milliseconds (default: 30000 = 30 seconds)
     #[serde(default = "default_post_process_timeout")]
     pub timeout_ms: u64,
+
+    /// Whether to trim leading/trailing whitespace from command output (default: true)
+    /// Set to false when the command intentionally produces significant whitespace,
+    /// e.g. a trailing space after sentence-ending punctuation for dictation flow.
+    #[serde(default = "default_true")]
+    pub trim: bool,
+
+    /// Whether to fall back to original text when command output is empty (default: true)
+    /// Set to false when the command intentionally produces empty output,
+    /// e.g. filtering out unwanted transcriptions like [BLANK_AUDIO].
+    #[serde(default = "default_true")]
+    pub fallback_on_empty: bool,
 }
 
 /// Named profile for context-specific settings
