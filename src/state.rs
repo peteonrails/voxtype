@@ -8,17 +8,8 @@ use std::time::Instant;
 /// Audio samples collected during recording (f32, mono, 16kHz)
 pub type AudioBuffer = Vec<f32>;
 
-/// Result from transcribing a single chunk during eager processing
-#[derive(Debug, Clone)]
-pub struct ChunkResult {
-    /// Transcribed text from this chunk
-    pub text: String,
-    /// Which chunk this result corresponds to (0-indexed)
-    pub chunk_index: usize,
-}
-
 /// Application state
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum State {
     /// Waiting for hotkey press
     Idle,
@@ -37,14 +28,7 @@ pub enum State {
         started_at: Instant,
         /// Optional model override for this recording
         model_override: Option<String>,
-        /// Accumulated audio samples during recording
-        accumulated_audio: AudioBuffer,
-        /// Number of chunks already sent for transcription
-        chunks_sent: usize,
-        /// Results received from completed chunk transcriptions
-        chunk_results: Vec<ChunkResult>,
-        /// Number of transcription tasks currently in flight
-        tasks_in_flight: usize,
+        session: Box<crate::transcribe::streaming::StreamingSession>,
     },
 
     /// Hotkey released, transcribing audio
@@ -90,24 +74,6 @@ impl State {
             _ => None,
         }
     }
-
-    /// Get the number of chunks sent for transcription (eager mode only)
-    pub fn eager_chunks_sent(&self) -> Option<usize> {
-        match self {
-            State::EagerRecording { chunks_sent, .. } => Some(*chunks_sent),
-            _ => None,
-        }
-    }
-
-    /// Get the number of transcription tasks currently in flight (eager mode only)
-    pub fn eager_tasks_in_flight(&self) -> Option<usize> {
-        match self {
-            State::EagerRecording {
-                tasks_in_flight, ..
-            } => Some(*tasks_in_flight),
-            _ => None,
-        }
-    }
 }
 
 impl Default for State {
@@ -123,18 +89,11 @@ impl std::fmt::Display for State {
             State::Recording { started_at, .. } => {
                 write!(f, "Recording ({:.1}s)", started_at.elapsed().as_secs_f32())
             }
-            State::EagerRecording {
-                started_at,
-                chunks_sent,
-                tasks_in_flight,
-                ..
-            } => {
+            State::EagerRecording { started_at, .. } => {
                 write!(
                     f,
-                    "Recording ({:.1}s, {} chunks, {} pending)",
-                    started_at.elapsed().as_secs_f32(),
-                    chunks_sent,
-                    tasks_in_flight
+                    "Recording ({:.1}s, eager)",
+                    started_at.elapsed().as_secs_f32()
                 )
             }
             State::Transcribing { audio } => {
@@ -198,17 +157,14 @@ mod tests {
         let state = State::EagerRecording {
             started_at: Instant::now(),
             model_override: None,
-            accumulated_audio: vec![],
-            chunks_sent: 2,
-            chunk_results: vec![],
-            tasks_in_flight: 1,
+            session: Box::new(crate::transcribe::streaming::StreamingSession::new(
+                crate::transcribe::streaming::StreamingConfig::default(),
+            )),
         };
         assert!(state.is_recording());
         assert!(state.is_eager_recording());
         assert!(!state.is_idle());
         assert!(state.recording_duration().is_some());
-        assert_eq!(state.eager_chunks_sent(), Some(2));
-        assert_eq!(state.eager_tasks_in_flight(), Some(1));
     }
 
     #[test]
@@ -219,8 +175,6 @@ mod tests {
         };
         assert!(state.is_recording());
         assert!(!state.is_eager_recording());
-        assert_eq!(state.eager_chunks_sent(), None);
-        assert_eq!(state.eager_tasks_in_flight(), None);
     }
 
     #[test]
@@ -228,14 +182,12 @@ mod tests {
         let state = State::EagerRecording {
             started_at: Instant::now(),
             model_override: None,
-            accumulated_audio: vec![],
-            chunks_sent: 3,
-            chunk_results: vec![],
-            tasks_in_flight: 2,
+            session: Box::new(crate::transcribe::streaming::StreamingSession::new(
+                crate::transcribe::streaming::StreamingConfig::default(),
+            )),
         };
         let display = format!("{}", state);
         assert!(display.contains("Recording"));
-        assert!(display.contains("3 chunks"));
-        assert!(display.contains("2 pending"));
+        assert!(display.contains("eager"));
     }
 }

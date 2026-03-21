@@ -123,6 +123,7 @@ impl TickResult {
     }
 }
 
+#[derive(Debug)]
 pub struct StreamingSession {
     config: StreamingConfig,
     audio_buffer: Vec<f32>,

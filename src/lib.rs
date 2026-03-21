@@ -73,7 +73,6 @@ pub mod cli;
 pub mod config;
 pub mod cpu;
 pub mod daemon;
-pub mod eager;
 pub mod error;
 pub mod hotkey;
 pub mod meeting;
