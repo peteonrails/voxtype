@@ -83,17 +83,7 @@ impl YdotoolOutput {
             preview
         };
 
-        let _ = Command::new("notify-send")
-            .args([
-                "--app-name=Voxtype",
-                "--expire-time=3000",
-                "Transcribed",
-                &preview,
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
+        super::send_desktop_notification("Transcribed", &preview).await;
     }
 }
 
