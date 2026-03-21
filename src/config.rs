@@ -126,11 +126,11 @@ translate = false
 # Reduces perceived latency on slower machines by processing audio in parallel.
 # eager_processing = false
 #
-# Duration of each audio chunk in seconds (default: 5.0)
-# eager_chunk_secs = 5.0
+# How often to re-transcribe the rolling window in seconds (default: 1.0)
+# eager_tick_secs = 1.0
 #
-# Overlap between chunks in seconds (helps catch words at boundaries, default: 0.5)
-# eager_overlap_secs = 0.5
+# Maximum active audio window size in seconds before trimming (default: 15.0)
+# eager_max_buffer_secs = 15.0
 
 # --- Remote backend settings (used when backend = "remote") ---
 #
@@ -453,12 +453,12 @@ fn default_cold_model_timeout() -> u64 {
     300 // 5 minutes
 }
 
-fn default_eager_chunk_secs() -> f32 {
-    5.0
+fn default_eager_tick_secs() -> f32 {
+    1.0
 }
 
-fn default_eager_overlap_secs() -> f32 {
-    0.5
+fn default_eager_max_buffer_secs() -> f32 {
+    15.0
 }
 
 fn default_whisper_model() -> String {
@@ -792,14 +792,13 @@ pub struct WhisperConfig {
     #[serde(default)]
     pub eager_processing: bool,
 
-    /// Duration of each audio chunk in seconds for eager processing
-    #[serde(default = "default_eager_chunk_secs")]
-    pub eager_chunk_secs: f32,
+    /// How often to re-transcribe the rolling window in seconds (default: 1.0)
+#[serde(default = "default_eager_tick_secs")]
+    pub eager_tick_secs: f32,
 
-    /// Overlap between adjacent chunks in seconds for eager processing
-    /// Overlap helps catch words at chunk boundaries
-    #[serde(default = "default_eager_overlap_secs")]
-    pub eager_overlap_secs: f32,
+    /// Maximum active audio window size in seconds before trimming (default: 15.0)
+#[serde(default = "default_eager_max_buffer_secs")]
+    pub eager_max_buffer_secs: f32,
 
     /// Initial prompt to provide context for transcription
     /// Use this to hint at terminology, proper nouns, or formatting conventions.
@@ -897,8 +896,8 @@ impl Default for WhisperConfig {
             gpu_isolation: false,
             context_window_optimization: default_context_window_optimization(),
             eager_processing: false,
-            eager_chunk_secs: default_eager_chunk_secs(),
-            eager_overlap_secs: default_eager_overlap_secs(),
+            eager_tick_secs: default_eager_tick_secs(),
+            eager_max_buffer_secs: default_eager_max_buffer_secs(),
             initial_prompt: None,
             secondary_model: None,
             available_models: vec![],
@@ -1746,8 +1745,8 @@ impl Default for Config {
                 gpu_isolation: false,
                 context_window_optimization: default_context_window_optimization(),
                 eager_processing: false,
-                eager_chunk_secs: default_eager_chunk_secs(),
-                eager_overlap_secs: default_eager_overlap_secs(),
+                eager_tick_secs: default_eager_tick_secs(),
+                eager_max_buffer_secs: default_eager_max_buffer_secs(),
                 initial_prompt: None,
                 secondary_model: None,
                 available_models: vec![],

@@ -1581,7 +1581,11 @@ impl Daemon {
                                                 started_at: std::time::Instant::now(),
                                                 model_override: model_override.clone(),
                                                 session: Box::new(StreamingSession::new(
-                                                    StreamingConfig::default(),
+                                                    StreamingConfig {
+                                                        sample_rate: 16000,
+                                                        tick_interval_secs: self.config.whisper.eager_tick_secs,
+                                                        max_buffer_secs: self.config.whisper.eager_max_buffer_secs,
+                                                    },
                                                 )),
                                             };
                                         } else {
@@ -1771,7 +1775,11 @@ impl Daemon {
                                                 started_at: std::time::Instant::now(),
                                                 model_override: model_override.clone(),
                                                 session: Box::new(StreamingSession::new(
-                                                    StreamingConfig::default(),
+                                                    StreamingConfig {
+                                                        sample_rate: 16000,
+                                                        tick_interval_secs: self.config.whisper.eager_tick_secs,
+                                                        max_buffer_secs: self.config.whisper.eager_max_buffer_secs,
+                                                    },
                                                 )),
                                             };
                                         } else {
@@ -2216,7 +2224,11 @@ impl Daemon {
                                             started_at: std::time::Instant::now(),
                                             model_override,
                                             session: Box::new(StreamingSession::new(
-                                                StreamingConfig::default(),
+                                                StreamingConfig {
+                                                    sample_rate: 16000,
+                                                    tick_interval_secs: self.config.whisper.eager_tick_secs,
+                                                    max_buffer_secs: self.config.whisper.eager_max_buffer_secs,
+                                                },
                                             )),
                                         };
                                     } else {

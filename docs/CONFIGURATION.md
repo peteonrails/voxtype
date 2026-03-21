@@ -619,18 +619,19 @@ voxtype --whisper-context-optimization daemon
 **Default:** `false`
 **Required:** No
 
-Enable eager input processing. When enabled, audio is split into chunks and transcribed in parallel with continued recording, reducing perceived latency on slower machines.
+Enable eager input processing. When enabled, audio is transcribed in a rolling window while recording continues, reducing perceived latency on slower machines.
 
 **Values:**
 - `false` (default) - Traditional mode: record all audio, then transcribe
-- `true` - Eager mode: transcribe chunks while recording continues
+- `true` - Eager mode: transcribe rolling window while recording continues
 
 **How it works:**
 
-1. While recording, audio is split into fixed-size chunks (default 5 seconds)
-2. Each chunk is sent for transcription as soon as it's ready
-3. Recording continues while earlier chunks are being transcribed
-4. When recording stops, all chunk results are combined
+1. While recording, a rolling window of audio is maintained
+2. The window is re-transcribed at regular intervals (default 1.0 second)
+3. Committed text is output as it becomes stable
+4. Recording continues while transcription happens in parallel
+5. When recording stops, final transcription is completed
 
 **When to use eager processing:**
 - You have a slower CPU where transcription takes several seconds
@@ -647,8 +648,8 @@ Enable eager input processing. When enabled, audio is split into chunks and tran
 [whisper]
 model = "base.en"
 eager_processing = true
-eager_chunk_secs = 5.0    # 5 second chunks
-eager_overlap_secs = 0.5  # 0.5 second overlap
+eager_tick_secs = 1.0           # Re-transcribe interval (default: 1.0s)
+eager_max_buffer_secs = 15.0    # Max audio window before trimming (default: 15.0s)
 ```
 
 **CLI override:**
@@ -658,55 +659,53 @@ voxtype --eager-processing daemon
 
 **Note:** Eager processing is experimental. There may be occasional word duplications or omissions at chunk boundaries.
 
-### eager_chunk_secs
+### eager_tick_secs
 
 **Type:** Float
-**Default:** `5.0`
+**Default:** `1.0`
 **Required:** No
 
-Duration of each audio chunk in seconds when eager processing is enabled.
+How often to re-transcribe the rolling window in seconds when eager processing is enabled.
 
 **Example:**
 ```toml
 [whisper]
 eager_processing = true
-eager_chunk_secs = 3.0  # Shorter chunks for faster feedback
+eager_tick_secs = 0.5  # Re-transcribe every 0.5 seconds for faster feedback
 ```
 
 **CLI override:**
 ```bash
-voxtype --eager-processing --eager-chunk-secs 3.0 daemon
+voxtype --eager-processing --eager-tick-secs 0.5 daemon
 ```
 
 **Trade-offs:**
-- Shorter chunks: Faster feedback, but more boundary artifacts
-- Longer chunks: Better accuracy, but less parallelism benefit
+- Shorter intervals: Faster feedback, but more CPU usage
+- Longer intervals: Lower CPU usage, but less responsive
 
-### eager_overlap_secs
+### eager_max_buffer_secs
 
 **Type:** Float
-**Default:** `0.5`
+**Default:** `15.0`
 **Required:** No
 
-Overlap duration in seconds between adjacent chunks when eager processing is enabled. Overlap helps catch words that span chunk boundaries.
+Maximum active audio window size in seconds before trimming committed audio from the buffer when eager processing is enabled.
 
 **Example:**
 ```toml
 [whisper]
 eager_processing = true
-eager_chunk_secs = 5.0
-eager_overlap_secs = 1.0  # More overlap for better boundary handling
+eager_max_buffer_secs = 10.0  # Keep only 10 seconds of audio in active window
 ```
 
 **CLI override:**
 ```bash
-voxtype --eager-processing --eager-overlap-secs 1.0 daemon
+voxtype --eager-processing --eager-max-buffer-secs 10.0 daemon
 ```
 
 **Trade-offs:**
-- More overlap: Better word boundary handling, slightly more processing
-- Less overlap: Faster processing, but may miss words at boundaries
-
+- Larger buffer: Better context for transcription, more memory usage
+- Smaller buffer: Lower memory usage, but less context for word boundaries
 ### initial_prompt
 
 **Type:** String

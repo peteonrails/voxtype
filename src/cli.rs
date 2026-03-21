@@ -134,6 +134,13 @@ pub struct Cli {
     /// Enable eager input processing (transcribe chunks while recording continues)
     #[arg(long, help_heading = "Whisper")]
     pub eager_processing: bool,
+    /// How often to re-transcribe the rolling window in seconds (default: 1.0)
+    #[arg(long, value_name = "SECS", help_heading = "Whisper")]
+    pub eager_tick_secs: Option<f32>,
+
+    /// Maximum active audio window size in seconds before trimming (default: 15.0)
+    #[arg(long, value_name = "SECS", help_heading = "Whisper")]
+    pub eager_max_buffer_secs: Option<f32>,
 
     /// Remote server endpoint URL (for remote whisper mode)
     #[arg(long, value_name = "URL", help_heading = "Whisper")]
