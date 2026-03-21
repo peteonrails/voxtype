@@ -58,6 +58,36 @@ use crate::config::{Config, TranscriptionEngine, WhisperConfig, WhisperMode};
 use crate::error::TranscribeError;
 use crate::setup::gpu;
 
+/// A single word with timing and token information.
+/// Used throughout the streaming pipeline for local agreement and prompt carry.
+#[derive(Debug, Clone)]
+pub struct WordInfo {
+    /// The word text (trimmed, no leading space)
+    pub text: String,
+    /// Start time in centiseconds (from whisper token_data.t0)
+    pub start: i64,
+    /// End time in centiseconds (from whisper token_data.t1)
+    pub end: i64,
+    /// Token IDs that make up this word (for prompt carry-forward via set_tokens)
+    pub tokens: Vec<i32>,
+}
+
+/// Rich transcription output with word-level detail
+#[derive(Debug, Clone)]
+pub struct TranscribeOutput {
+    /// Full transcribed text
+    pub text: String,
+    /// Per-word timing and token info
+    pub words: Vec<WordInfo>,
+}
+
+impl TranscribeOutput {
+    /// Get all token IDs in order (for prompt carry-forward)
+    pub fn all_tokens(&self) -> Vec<i32> {
+        self.words.iter().flat_map(|w| w.tokens.iter().copied()).collect()
+    }
+}
+
 /// Trait for speech-to-text implementations
 pub trait Transcriber: Send + Sync {
     /// Transcribe audio samples to text
@@ -74,6 +104,39 @@ pub trait Transcriber: Send + Sync {
     /// benefit from preparation, like those with preloaded models).
     fn prepare(&self) {
         // Default: no-op
+    }
+
+    /// Transcribe with rich output (word timestamps + token IDs).
+    /// Default wraps transcribe() with no word-level detail.
+    fn transcribe_detailed(
+        &self,
+        samples: &[f32],
+        _prompt_tokens: Option<&[i32]>,
+    ) -> Result<TranscribeOutput, TranscribeError> {
+        let text = self.transcribe(samples)?;
+        Ok(TranscribeOutput {
+            text,
+            words: vec![],
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_transcribe_output_default() {
+        let output = TranscribeOutput {
+            text: "hello world".to_string(),
+            words: vec![
+                WordInfo { text: "hello".to_string(), start: 0, end: 50, tokens: vec![1, 2] },
+                WordInfo { text: "world".to_string(), start: 50, end: 100, tokens: vec![3, 4] },
+            ],
+        };
+        assert_eq!(output.text, "hello world");
+        assert_eq!(output.words.len(), 2);
+        assert_eq!(output.all_tokens(), vec![1, 2, 3, 4]);
     }
 }
 
