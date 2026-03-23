@@ -13,6 +13,7 @@
 //! - Optionally Omnilingual via ONNX Runtime (when `omnilingual` feature is enabled)
 
 pub mod cli;
+pub mod deepgram;
 pub mod remote;
 pub mod subprocess;
 pub mod whisper;
@@ -223,5 +224,9 @@ pub fn create_transcriber_with_config_path(
             tracing::info!("Using whisper-cli subprocess backend");
             Ok(Box::new(cli::CliTranscriber::new(config)?))
         }
+        WhisperMode::Streaming => Err(TranscribeError::InitFailed(
+            "Streaming mode is only available for live recording via the daemon. Use 'voxtype daemon' or 'systemctl --user start voxtype' for streaming transcription."
+                .to_string(),
+        )),
     }
 }
