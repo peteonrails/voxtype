@@ -671,6 +671,7 @@ pub enum WhisperMode {
     /// CLI transcription using whisper-cli subprocess
     /// Fallback for systems where whisper-rs FFI doesn't work (e.g., glibc 2.42+)
     Cli,
+    Streaming,
 }
 
 /// Language configuration supporting single language or array of allowed languages
@@ -844,6 +845,27 @@ pub struct WhisperConfig {
     #[serde(default)]
     pub remote_api_key: Option<String>,
 
+    #[serde(default)]
+    pub streaming_api_key: Option<String>,
+
+    #[serde(default)]
+    pub streaming_model: Option<String>,
+
+    #[serde(default)]
+    pub streaming_endpoint: Option<String>,
+
+    /// Endpointing duration in milliseconds for Deepgram streaming (default: Deepgram's default).
+    /// Controls how long Deepgram waits after silence before finalizing a transcript segment.
+    /// Recommended: 300-500ms for conversational speech, 100-200ms for voice agents.
+    #[serde(default)]
+    pub streaming_endpointing_ms: Option<u32>,
+
+    /// Timeout in seconds for finalizing Deepgram streaming transcription after recording stops.
+    /// Longer recordings may need more time for Deepgram to flush remaining segments.
+    /// Default: 15 seconds.
+    #[serde(default)]
+    pub streaming_finish_timeout_secs: Option<u64>,
+
     /// Timeout for remote requests in seconds (default: 30)
     #[serde(default)]
     pub remote_timeout_secs: Option<u64>,
@@ -871,11 +893,13 @@ impl WhisperConfig {
                     WhisperMode::Local => "local",
                     WhisperMode::Remote => "remote",
                     WhisperMode::Cli => "cli",
+                    WhisperMode::Streaming => "streaming",
                 },
                 match backend {
                     WhisperMode::Local => "local",
                     WhisperMode::Remote => "remote",
                     WhisperMode::Cli => "cli",
+                    WhisperMode::Streaming => "streaming",
                 }
             );
             return backend;
@@ -907,6 +931,11 @@ impl Default for WhisperConfig {
             remote_endpoint: None,
             remote_model: None,
             remote_api_key: None,
+            streaming_api_key: None,
+            streaming_model: None,
+            streaming_endpoint: None,
+            streaming_endpointing_ms: None,
+            streaming_finish_timeout_secs: None,
             remote_timeout_secs: None,
             whisper_cli_path: None,
         }
@@ -1756,6 +1785,11 @@ impl Default for Config {
                 remote_endpoint: None,
                 remote_model: None,
                 remote_api_key: None,
+                streaming_api_key: None,
+                streaming_model: None,
+                streaming_endpoint: None,
+                streaming_endpointing_ms: None,
+                streaming_finish_timeout_secs: None,
                 remote_timeout_secs: None,
                 whisper_cli_path: None,
             },
@@ -2078,11 +2112,31 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     }
 
     // Remote whisper
+    if let Ok(mode) = std::env::var("VOXTYPE_WHISPER_MODE") {
+        match mode.to_lowercase().as_str() {
+            "local" => config.whisper.mode = Some(WhisperMode::Local),
+            "remote" => config.whisper.mode = Some(WhisperMode::Remote),
+            "cli" => config.whisper.mode = Some(WhisperMode::Cli),
+            "streaming" => config.whisper.mode = Some(WhisperMode::Streaming),
+            _ => {
+                tracing::warn!("Invalid VOXTYPE_WHISPER_MODE value: {}", mode);
+            }
+        }
+    }
+
     if let Ok(endpoint) = std::env::var("VOXTYPE_REMOTE_ENDPOINT") {
         config.whisper.remote_endpoint = Some(endpoint);
     }
     if let Ok(key) = std::env::var("VOXTYPE_WHISPER_API_KEY") {
         config.whisper.remote_api_key = Some(key);
+    }
+    if let Ok(key) = std::env::var("VOXTYPE_DEEPGRAM_API_KEY") {
+        config.whisper.streaming_api_key = Some(key);
+    }
+    if config.whisper.streaming_api_key.is_none() {
+        if let Ok(key) = std::env::var("DEEPGRAM_API_KEY") {
+            config.whisper.streaming_api_key = Some(key);
+        }
     }
     if let Ok(val) = std::env::var("VOXTYPE_RESTORE_CLIPBOARD") {
         config.output.restore_clipboard = parse_bool_env(&val);
@@ -2863,6 +2917,31 @@ mod tests {
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.whisper.mode, Some(WhisperMode::Remote));
         assert_eq!(config.whisper.effective_mode(), WhisperMode::Remote);
+    }
+
+    #[test]
+    fn test_parse_whisper_mode_streaming() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            mode = "streaming"
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.whisper.mode, Some(WhisperMode::Streaming));
+        assert_eq!(config.whisper.effective_mode(), WhisperMode::Streaming);
     }
 
     #[test]

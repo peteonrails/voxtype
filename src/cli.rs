@@ -93,7 +93,6 @@ pub struct Cli {
     pub model_modifier: Option<String>,
 
     // -- Whisper --
-
     /// Disable context window optimization for short recordings
     #[arg(long, help_heading = "Whisper")]
     pub no_whisper_context_optimization: bool,
@@ -123,7 +122,7 @@ pub struct Cli {
     #[arg(long, help_heading = "Whisper")]
     pub on_demand_loading: bool,
 
-    /// Whisper execution mode: local, remote, or cli
+    /// Whisper execution mode: local, remote, cli, or streaming
     #[arg(long, value_name = "MODE", help_heading = "Whisper")]
     pub whisper_mode: Option<String>,
 
@@ -147,8 +146,26 @@ pub struct Cli {
     #[arg(long, value_name = "KEY", help_heading = "Whisper")]
     pub remote_api_key: Option<String>,
 
-    // -- Audio --
+    #[arg(long, value_name = "MODEL", help_heading = "Whisper")]
+    pub streaming_model: Option<String>,
 
+    #[arg(long, value_name = "URL", help_heading = "Whisper")]
+    pub streaming_endpoint: Option<String>,
+
+    #[arg(long, value_name = "KEY", help_heading = "Whisper")]
+    pub streaming_api_key: Option<String>,
+
+    /// Endpointing duration in milliseconds for Deepgram streaming.
+    /// Controls silence duration before finalizing a transcript segment (default: Deepgram's default).
+    #[arg(long, value_name = "MS", help_heading = "Whisper")]
+    pub streaming_endpointing_ms: Option<u32>,
+
+    /// Timeout in seconds for finalizing Deepgram streaming transcription after recording stops.
+    /// Longer recordings may need more time. Default: 15 seconds.
+    #[arg(long, value_name = "SECS", help_heading = "Whisper")]
+    pub streaming_finish_timeout_secs: Option<u64>,
+
+    // -- Audio --
     /// Audio input device name (or "default" for system default)
     #[arg(long, value_name = "DEVICE", help_heading = "Audio")]
     pub audio_device: Option<String>,
@@ -166,7 +183,6 @@ pub struct Cli {
     pub no_audio_feedback: bool,
 
     // -- Output --
-
     /// Delay before typing starts (ms), helps prevent first character drop
     #[arg(long, value_name = "MS", help_heading = "Output")]
     pub pre_type_delay: Option<u32>,
@@ -219,7 +235,11 @@ pub struct Cli {
     pub fallback_to_clipboard: bool,
 
     /// Disable clipboard fallback
-    #[arg(long, conflicts_with = "fallback_to_clipboard", help_heading = "Output")]
+    #[arg(
+        long,
+        conflicts_with = "fallback_to_clipboard",
+        help_heading = "Output"
+    )]
     pub no_fallback_to_clipboard: bool,
 
     /// Enable spoken punctuation conversion (e.g., say "period" to get ".")
@@ -259,7 +279,6 @@ pub struct Cli {
     pub pre_recording_command: Option<String>,
 
     // -- VAD --
-
     /// Enable Voice Activity Detection (filter silence before transcription)
     #[arg(long, help_heading = "VAD")]
     pub vad: bool,

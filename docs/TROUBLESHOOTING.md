@@ -17,6 +17,7 @@ Solutions to common issues when using Voxtype.
 - [Performance Issues](#performance-issues)
 - [Systemd Service Issues](#systemd-service-issues)
 - [Debug Mode](#debug-mode)
+- [Streaming Mode Issues](#streaming-mode-issues)
 
 ---
 
@@ -1023,6 +1024,54 @@ Include:
 - Steps to reproduce
 
 ---
+
+## Streaming Mode Issues
+
+### Deepgram API key is required
+
+**Error:** `Deepgram API key is required for streaming mode. Set VOXTYPE_DEEPGRAM_API_KEY environment variable.`
+
+Set one of:
+
+```bash
+export VOXTYPE_DEEPGRAM_API_KEY="your-api-key"
+```
+
+```toml
+[whisper]
+mode = "streaming"
+streaming_api_key = "your-api-key"
+```
+
+### Failed to open Deepgram stream
+
+**Error:** `Failed to open Deepgram stream: ...`
+
+- Check internet connection
+- Verify API key and endpoint
+- Try another model (`streaming_model = "nova-2"`)
+
+### Deepgram stream finish timed out
+
+**Error:** `Deepgram stream finish timed out ...`
+
+- Retry on a stable network
+- Switch to local mode if needed:
+
+```toml
+[whisper]
+mode = "local"
+```
+
+### Streaming mode not available for file transcription
+
+**Error:** `Streaming mode is only available for live recording via the daemon...`
+
+Use local mode for file input:
+
+```bash
+voxtype --whisper-mode local transcribe file.wav
+```
 
 ## Feedback
 

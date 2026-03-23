@@ -196,9 +196,10 @@ async fn main() -> anyhow::Result<()> {
             "local" => config.whisper.mode = Some(config::WhisperMode::Local),
             "remote" => config.whisper.mode = Some(config::WhisperMode::Remote),
             "cli" => config.whisper.mode = Some(config::WhisperMode::Cli),
+            "streaming" => config.whisper.mode = Some(config::WhisperMode::Streaming),
             _ => {
                 eprintln!(
-                    "Error: Invalid whisper mode '{}'. Valid options: local, remote, cli",
+                    "Error: Invalid whisper mode '{}'. Valid options: local, remote, cli, streaming",
                     mode
                 );
                 std::process::exit(1);
@@ -219,6 +220,21 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(key) = cli.remote_api_key {
         config.whisper.remote_api_key = Some(key);
+    }
+    if let Some(model) = cli.streaming_model {
+        config.whisper.streaming_model = Some(model);
+    }
+    if let Some(endpoint) = cli.streaming_endpoint {
+        config.whisper.streaming_endpoint = Some(endpoint);
+    }
+    if let Some(key) = cli.streaming_api_key {
+        config.whisper.streaming_api_key = Some(key);
+    }
+    if let Some(ms) = cli.streaming_endpointing_ms {
+        config.whisper.streaming_endpointing_ms = Some(ms);
+    }
+    if let Some(secs) = cli.streaming_finish_timeout_secs {
+        config.whisper.streaming_finish_timeout_secs = Some(secs);
     }
 
     // Audio overrides
@@ -1114,6 +1130,35 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
     if let Some(threads) = config.whisper.threads {
         println!("  threads = {}", threads);
     }
+
+    println!("\n[whisper.streaming]");
+    if let Some(ref key) = config.whisper.streaming_api_key {
+        let masked = if key.len() > 8 {
+            format!("{}...{}", &key[..4], &key[key.len() - 4..])
+        } else {
+            "****".to_string()
+        };
+        println!("  api_key = {:?}", masked);
+    }
+    println!(
+        "  model = {:?}",
+        config.whisper.streaming_model.as_deref().unwrap_or("nova-3")
+    );
+    println!(
+        "  endpoint = {:?}",
+        config
+            .whisper
+            .streaming_endpoint
+            .as_deref()
+            .unwrap_or("wss://api.deepgram.com/v1/listen")
+    );
+    if let Some(ms) = config.whisper.streaming_endpointing_ms {
+        println!("  endpointing = {}ms", ms);
+    }
+    println!(
+        "  finish_timeout = {}s",
+        config.whisper.streaming_finish_timeout_secs.unwrap_or(15)
+    );
 
     // Show Parakeet status (experimental)
     println!("\n[parakeet] (EXPERIMENTAL)");

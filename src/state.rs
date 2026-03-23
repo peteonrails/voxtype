@@ -18,7 +18,6 @@ pub struct ChunkResult {
 }
 
 /// Application state
-#[derive(Debug, Clone)]
 pub enum State {
     /// Waiting for hotkey press
     Idle,
@@ -47,6 +46,12 @@ pub enum State {
         tasks_in_flight: usize,
     },
 
+    StreamingRecording {
+        /// When recording started
+        started_at: Instant,
+        stream: Box<crate::transcribe::deepgram::DeepgramStream>,
+    },
+
     /// Hotkey released, transcribing audio
     Transcribing {
         /// Recorded audio samples
@@ -60,6 +65,44 @@ pub enum State {
     },
 }
 
+impl std::fmt::Debug for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            State::Idle => f.write_str("Idle"),
+            State::Recording {
+                started_at,
+                model_override,
+            } => f
+                .debug_struct("Recording")
+                .field("started_at", started_at)
+                .field("model_override", model_override)
+                .finish(),
+            State::EagerRecording {
+                started_at,
+                model_override,
+                chunks_sent,
+                tasks_in_flight,
+                ..
+            } => f
+                .debug_struct("EagerRecording")
+                .field("started_at", started_at)
+                .field("model_override", model_override)
+                .field("chunks_sent", chunks_sent)
+                .field("tasks_in_flight", tasks_in_flight)
+                .finish_non_exhaustive(),
+            State::StreamingRecording { started_at, .. } => f
+                .debug_struct("StreamingRecording")
+                .field("started_at", started_at)
+                .finish_non_exhaustive(),
+            State::Transcribing { audio } => f
+                .debug_struct("Transcribing")
+                .field("audio_len", &audio.len())
+                .finish(),
+            State::Outputting { text } => f.debug_struct("Outputting").field("text", text).finish(),
+        }
+    }
+}
+
 impl State {
     /// Create a new idle state
     pub fn new() -> Self {
@@ -71,9 +114,13 @@ impl State {
         matches!(self, State::Idle)
     }
 
-    /// Check if in recording state (normal or eager)
     pub fn is_recording(&self) -> bool {
-        matches!(self, State::Recording { .. } | State::EagerRecording { .. })
+        matches!(
+            self,
+            State::Recording { .. }
+                | State::EagerRecording { .. }
+                | State::StreamingRecording { .. }
+        )
     }
 
     /// Check if in eager recording state specifically
@@ -81,12 +128,15 @@ impl State {
         matches!(self, State::EagerRecording { .. })
     }
 
-    /// Get recording duration if currently recording (normal or eager)
+    pub fn is_streaming_recording(&self) -> bool {
+        matches!(self, State::StreamingRecording { .. })
+    }
+
     pub fn recording_duration(&self) -> Option<std::time::Duration> {
         match self {
-            State::Recording { started_at, .. } | State::EagerRecording { started_at, .. } => {
-                Some(started_at.elapsed())
-            }
+            State::Recording { started_at, .. }
+            | State::EagerRecording { started_at, .. }
+            | State::StreamingRecording { started_at, .. } => Some(started_at.elapsed()),
             _ => None,
         }
     }
@@ -135,6 +185,13 @@ impl std::fmt::Display for State {
                     started_at.elapsed().as_secs_f32(),
                     chunks_sent,
                     tasks_in_flight
+                )
+            }
+            State::StreamingRecording { started_at, .. } => {
+                write!(
+                    f,
+                    "Recording ({:.1}s, streaming)",
+                    started_at.elapsed().as_secs_f32()
                 )
             }
             State::Transcribing { audio } => {
@@ -219,6 +276,7 @@ mod tests {
         };
         assert!(state.is_recording());
         assert!(!state.is_eager_recording());
+        assert!(!state.is_streaming_recording());
         assert_eq!(state.eager_chunks_sent(), None);
         assert_eq!(state.eager_tasks_in_flight(), None);
     }
