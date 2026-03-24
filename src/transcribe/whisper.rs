@@ -10,13 +10,72 @@
 use super::{Transcriber, TranscriptionResult, TranscriptionSegment};
 use crate::config::{Config, LanguageConfig, WhisperConfig};
 use crate::error::TranscribeError;
+use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use std::sync::{Condvar, Mutex};
+use whisper_rs::{
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
+};
+
+struct StatePool<T> {
+    idle: Mutex<Vec<T>>,
+    available: Condvar,
+}
+
+impl<T> StatePool<T> {
+    fn new(items: Vec<T>) -> Self {
+        assert!(!items.is_empty(), "state pool requires at least one item");
+        Self {
+            idle: Mutex::new(items),
+            available: Condvar::new(),
+        }
+    }
+
+    fn acquire(&self) -> StatePoolLease<'_, T> {
+        let mut idle = self.idle.lock().unwrap();
+        loop {
+            if let Some(item) = idle.pop() {
+                return StatePoolLease {
+                    pool: self,
+                    item: Some(item),
+                };
+            }
+            idle = self.available.wait(idle).unwrap();
+        }
+    }
+}
+
+struct StatePoolLease<'a, T> {
+    pool: &'a StatePool<T>,
+    item: Option<T>,
+}
+
+impl<T> Deref for StatePoolLease<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.item.as_ref().unwrap()
+    }
+}
+
+impl<T> DerefMut for StatePoolLease<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.item.as_mut().unwrap()
+    }
+}
+
+impl<T> Drop for StatePoolLease<'_, T> {
+    fn drop(&mut self) {
+        let mut idle = self.pool.idle.lock().unwrap();
+        idle.push(self.item.take().unwrap());
+        self.pool.available.notify_one();
+    }
+}
 
 /// Whisper-based transcriber
 pub struct WhisperTranscriber {
-    /// Whisper context (holds the model)
-    ctx: WhisperContext,
+    /// Reused inference states backed by the loaded model context.
+    state_pool: StatePool<WhisperState>,
     /// Language configuration (single, auto, or array)
     language: LanguageConfig,
     /// Whether to translate to English
@@ -56,11 +115,24 @@ impl WhisperTranscriber {
         .map_err(|e| TranscribeError::InitFailed(e.to_string()))?;
 
         tracing::info!("Model loaded in {:.2}s", start.elapsed().as_secs_f32());
-
         let threads = config.threads.unwrap_or_else(|| num_cpus::get().min(4));
+        let state_pool_size = determine_state_pool_size(threads);
+        let mut states = Vec::with_capacity(state_pool_size);
+        for _ in 0..state_pool_size {
+            states.push(
+                ctx.create_state()
+                    .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?,
+            );
+        }
+        tracing::info!(
+            "Prepared {} reusable whisper inference state(s) with {} thread(s) each",
+            state_pool_size,
+            threads
+        );
+        let state_pool = StatePool::new(states);
 
         Ok(Self {
-            ctx,
+            state_pool,
             language: config.language.clone(),
             translate: config.translate,
             threads,
@@ -156,11 +228,7 @@ impl Transcriber for WhisperTranscriber {
 
         let start = std::time::Instant::now();
 
-        // Create state for this transcription
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
+        let mut state = self.state_pool.acquire();
 
         let override_lang = language_override
             .map(|s| s.trim().to_lowercase())
@@ -277,10 +345,16 @@ impl Transcriber for WhisperTranscriber {
         }
 
         let result = text.trim().to_string();
+        let result_language = selected_language.unwrap_or_else(|| {
+            whisper_rs::get_lang_str(state.full_lang_id_from_state())
+                .unwrap_or("auto")
+                .to_string()
+        });
 
         tracing::info!(
-            "Transcription completed in {:.2}s: {:?}",
+            "Transcription completed in {:.2}s (language={}): {:?}",
             start.elapsed().as_secs_f32(),
+            result_language,
             if result.chars().count() > 50 {
                 format!("{}...", result.chars().take(50).collect::<String>())
             } else {
@@ -306,10 +380,7 @@ impl Transcriber for WhisperTranscriber {
         let duration_secs = samples.len() as f64 / 16000.0;
         let start = std::time::Instant::now();
 
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
+        let mut state = self.state_pool.acquire();
 
         let override_lang = language_override
             .map(|s| s.trim().to_lowercase())
@@ -394,7 +465,11 @@ impl Transcriber for WhisperTranscriber {
             });
         }
 
-        let detected_lang = selected_language.unwrap_or_else(|| "auto".to_string());
+        let detected_lang = selected_language.unwrap_or_else(|| {
+            whisper_rs::get_lang_str(state.full_lang_id_from_state())
+                .unwrap_or("auto")
+                .to_string()
+        });
 
         tracing::info!(
             "Segment transcription completed in {:.2}s: {} segments, language={}",
@@ -499,6 +574,14 @@ fn calculate_audio_ctx(duration_secs: f32) -> Option<i32> {
     }
 }
 
+fn determine_state_pool_size(threads: usize) -> usize {
+    let threads = threads.max(1);
+    let parallelism = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(threads);
+    (parallelism / threads).clamp(1, 2)
+}
+
 /// Get the filename for a model
 pub fn get_model_filename(model: &str) -> String {
     match model {
@@ -530,6 +613,9 @@ pub fn get_model_url(model: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn test_model_url() {
@@ -609,5 +695,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn determine_state_pool_size_is_bounded() {
+        assert!((1..=2).contains(&determine_state_pool_size(0)));
+        assert_eq!(determine_state_pool_size(usize::MAX), 1);
+        assert!((1..=2).contains(&determine_state_pool_size(1)));
+        assert!((1..=2).contains(&determine_state_pool_size(4)));
+    }
+
+    #[test]
+    fn state_pool_returns_items_after_release() {
+        let pool = StatePool::new(vec![1usize]);
+        {
+            let mut lease = pool.acquire();
+            *lease += 1;
+        }
+        let lease = pool.acquire();
+        assert_eq!(*lease, 2);
+    }
+
+    #[test]
+    fn state_pool_blocks_until_item_is_released() {
+        let pool = Arc::new(StatePool::new(vec![7usize]));
+        let guard = pool.acquire();
+        let worker_pool = Arc::clone(&pool);
+        let started = Instant::now();
+
+        let handle = thread::spawn(move || {
+            let lease = worker_pool.acquire();
+            let waited = started.elapsed();
+            (*lease, waited)
+        });
+
+        thread::sleep(Duration::from_millis(40));
+        drop(guard);
+
+        let (value, waited) = handle.join().unwrap();
+        assert_eq!(value, 7);
+        assert!(waited >= Duration::from_millis(40));
     }
 }
