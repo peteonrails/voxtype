@@ -816,7 +816,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::OpenVino => {
                     if let Some(ref t) = transcriber_preloaded {
                         Ok(t.clone())
                     } else {
@@ -1915,7 +1916,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::OpenVino => {
                     // Parakeet/Moonshine uses its own model loading
                     transcriber_preloaded = Some(Arc::from(crate::transcribe::create_transcriber(
                         &self.config,
@@ -2028,7 +2030,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::OpenVino => {
                                             let config = self.config.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                                 crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -2057,7 +2060,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::OpenVino => {
                                             if let Some(ref t) = transcriber_preloaded {
                                                 let transcriber = t.clone();
                                                 tokio::task::spawn_blocking(move || {
@@ -2220,7 +2224,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::OpenVino => {
                                             let config = self.config.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                                 crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -2249,7 +2254,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::OpenVino => {
                                             if let Some(ref t) = transcriber_preloaded {
                                                 let transcriber = t.clone();
                                                 tokio::task::spawn_blocking(move || {
@@ -2657,7 +2663,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::OpenVino => {
                                     let config = self.config.clone();
                                     self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                         crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -2685,7 +2692,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::OpenVino => {
                                     if let Some(ref t) = transcriber_preloaded {
                                         let transcriber = t.clone();
                                         tokio::task::spawn_blocking(move || {

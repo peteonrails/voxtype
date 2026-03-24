@@ -139,9 +139,10 @@ async fn main() -> anyhow::Result<()> {
             "dolphin" => config.engine = config::TranscriptionEngine::Dolphin,
             "omnilingual" => config.engine = config::TranscriptionEngine::Omnilingual,
             "cohere" => config.engine = config::TranscriptionEngine::Cohere,
+            "openvino" => config.engine = config::TranscriptionEngine::OpenVino,
             _ => {
                 eprintln!(
-                    "Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere",
+                    "Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere, openvino",
                     engine
                 );
                 std::process::exit(1);
@@ -442,8 +443,9 @@ async fn main() -> anyhow::Result<()> {
                     "dolphin" => config.engine = config::TranscriptionEngine::Dolphin,
                     "omnilingual" => config.engine = config::TranscriptionEngine::Omnilingual,
                     "cohere" => config.engine = config::TranscriptionEngine::Cohere,
+                    "openvino" => config.engine = config::TranscriptionEngine::OpenVino,
                     _ => {
-                        eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere", engine_name);
+                        eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere, openvino", engine_name);
                         std::process::exit(1);
                     }
                 }
@@ -594,16 +596,18 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 Some(SetupAction::Variant { to }) => {
-                    let variant = setup::binary::Variant::from_binary_name(&to)
-                        .ok_or_else(|| anyhow::anyhow!(
-                            "Unknown variant '{}'. Expected one of: {}",
-                            to,
-                            setup::binary::Variant::ALL
-                                .iter()
-                                .map(|v| v.binary_name())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ))?;
+                    let variant =
+                        setup::binary::Variant::from_binary_name(&to).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Unknown variant '{}'. Expected one of: {}",
+                                to,
+                                setup::binary::Variant::ALL
+                                    .iter()
+                                    .map(|v| v.binary_name())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        })?;
                     setup::binary::switch_to(variant)?;
                     println!("Switched /usr/bin/voxtype to {}.", variant.binary_name());
                 }
@@ -694,7 +698,6 @@ async fn main() -> anyhow::Result<()> {
 /// so the user can start recording immediately after granting permissions.
 #[cfg(target_os = "macos")]
 async fn first_launch_setup(_config: &config::Config) {
-
     // Check if config file exists
     let config_exists = config::Config::default_path()
         .map(|p| p.exists())
@@ -742,7 +745,11 @@ async fn first_launch_setup(_config: &config::Config) {
                 let s = String::from_utf8_lossy(&o.stdout);
                 s.lines()
                     .find(|l| l.trim().starts_with('"'))
-                    .map(|l| l.trim().trim_matches(|c| c == '"' || c == ',').starts_with("en"))
+                    .map(|l| {
+                        l.trim()
+                            .trim_matches(|c| c == '"' || c == ',')
+                            .starts_with("en")
+                    })
                     .unwrap_or(true)
             })
             .unwrap_or(true);
@@ -770,8 +777,7 @@ async fn first_launch_setup(_config: &config::Config) {
         let download_result = {
             let model = if is_english { "base.en" } else { "base" };
             tracing::info!("First launch: downloading Whisper {} model", model);
-            setup::model::download_model(model)
-                .and_then(|_| setup::model::set_model_config(model))
+            setup::model::download_model(model).and_then(|_| setup::model::set_model_config(model))
         };
 
         match download_result {

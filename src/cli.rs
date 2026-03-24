@@ -71,7 +71,7 @@ pub struct Cli {
         long,
         value_name = "ENGINE",
         help_heading = "Transcription",
-        long_help = "Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere"
+        long_help = "Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere, openvino"
     )]
     pub engine: Option<String>,
 
@@ -489,7 +489,7 @@ pub enum Commands {
         /// Path to audio file
         file: std::path::PathBuf,
 
-        /// Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere
+        /// Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere, openvino
         #[arg(long, value_name = "ENGINE")]
         engine: Option<String>,
     },

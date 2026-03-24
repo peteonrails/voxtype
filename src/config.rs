@@ -313,10 +313,7 @@ pub fn default_config_content() -> String {
     #[cfg(target_os = "macos")]
     {
         DEFAULT_CONFIG
-            .replace(
-                "key = \"SCROLLLOCK\"",
-                "key = \"FN\"",
-            )
+            .replace("key = \"SCROLLLOCK\"", "key = \"FN\"")
             .replace(
                 "# Common choices: SCROLLLOCK, PAUSE, RIGHTALT, F13-F24",
                 "# Common choices: FN, RIGHTALT, F13-F24",
@@ -384,6 +381,10 @@ pub struct Config {
     /// Cohere Transcribe configuration (optional, only used when engine = "cohere")
     #[serde(default)]
     pub cohere: Option<CohereConfig>,
+
+    /// OpenVINO Whisper configuration (optional, only used when engine = "openvino")
+    #[serde(default)]
+    pub openvino: Option<OpenVinoConfig>,
 
     /// Text processing configuration (replacements, spoken punctuation)
     #[serde(default)]
@@ -1250,6 +1251,64 @@ impl Default for OmnilingualConfig {
     }
 }
 
+/// OpenVINO Whisper speech-to-text configuration (Intel NPU/CPU/GPU via OpenVINO Runtime)
+/// Requires: cargo build --features openvino-whisper
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OpenVinoConfig {
+    /// Model name or path to directory containing OpenVINO IR model files.
+    /// Expects: openvino_encoder_model.xml/.bin, openvino_decoder_model.xml/.bin, tokenizer.json
+    /// Short names: "base.en" (default), "small.en", "tiny", "base", "small", "medium", "large-v3"
+    pub model: String,
+
+    /// OpenVINO device to run inference on (default: "NPU")
+    /// Options: "NPU", "CPU", "GPU", "AUTO"
+    #[serde(default = "default_openvino_device")]
+    pub device: String,
+
+    /// Use int8 quantized model variants for better NPU performance (default: true)
+    #[serde(default = "default_true")]
+    pub quantized: bool,
+
+    /// Number of CPU threads for CPU inference (ignored for NPU/GPU)
+    #[serde(default)]
+    pub threads: Option<usize>,
+
+    /// Language for transcription (default: "en")
+    /// Uses Whisper language codes: "en", "zh", "fr", "de", "ja", etc.
+    #[serde(default = "default_openvino_language")]
+    pub language: String,
+
+    /// Enable translation to English (default: false)
+    #[serde(default)]
+    pub translate: bool,
+
+    /// Load model on-demand when recording starts (true) or keep loaded (false)
+    #[serde(default = "default_on_demand_loading")]
+    pub on_demand_loading: bool,
+}
+
+fn default_openvino_device() -> String {
+    "NPU".to_string()
+}
+
+fn default_openvino_language() -> String {
+    "en".to_string()
+}
+
+impl Default for OpenVinoConfig {
+    fn default() -> Self {
+        Self {
+            model: "base.en".to_string(),
+            device: default_openvino_device(),
+            quantized: true,
+            threads: None,
+            language: default_openvino_language(),
+            translate: false,
+            on_demand_loading: false,
+        }
+    }
+}
+
 /// Transcription engine selection (which ASR technology to use)
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -1278,6 +1337,11 @@ pub enum TranscriptionEngine {
     /// task tokens). Top of the Open ASR Leaderboard.
     /// Requires: cargo build --features cohere
     Cohere,
+
+    /// Use OpenVINO Whisper (Intel NPU/CPU/GPU via OpenVINO Runtime)
+    /// Requires: cargo build --features openvino-whisper
+    #[serde(rename = "openvino")]
+    OpenVino,
 }
 
 /// VAD backend selection
@@ -2028,6 +2092,7 @@ impl Default for Config {
             dolphin: None,
             omnilingual: None,
             cohere: None,
+            openvino: None,
             text: TextConfig::default(),
             vad: VadConfig::default(),
             status: StatusConfig::default(),
@@ -2170,6 +2235,11 @@ impl Config {
                 .as_ref()
                 .map(|c| c.on_demand_loading)
                 .unwrap_or(false),
+            TranscriptionEngine::OpenVino => self
+                .openvino
+                .as_ref()
+                .map(|o| o.on_demand_loading)
+                .unwrap_or(false),
         }
     }
 
@@ -2212,6 +2282,11 @@ impl Config {
                 .as_ref()
                 .map(|c| c.model.as_str())
                 .unwrap_or("cohere (not configured)"),
+            TranscriptionEngine::OpenVino => self
+                .openvino
+                .as_ref()
+                .map(|o| o.model.as_str())
+                .unwrap_or("openvino (not configured)"),
         }
     }
 
@@ -2258,9 +2333,7 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             tracing::debug!("Config file not found at {:?}, using defaults", path);
         }
     } else {
-        tracing::debug!(
-            "No config file found at user or system path, using built-in defaults"
-        );
+        tracing::debug!("No config file found at user or system path, using built-in defaults");
     }
 
     // Override from environment variables
@@ -2289,6 +2362,7 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             "dolphin" => config.engine = TranscriptionEngine::Dolphin,
             "omnilingual" => config.engine = TranscriptionEngine::Omnilingual,
             "cohere" => config.engine = TranscriptionEngine::Cohere,
+            "openvino" => config.engine = TranscriptionEngine::OpenVino,
             _ => tracing::warn!("Unknown VOXTYPE_ENGINE value: {}", engine),
         }
     }
@@ -3985,7 +4059,10 @@ mod tests {
 
     #[test]
     fn test_system_path_constant() {
-        assert_eq!(Config::system_path(), PathBuf::from("/etc/voxtype/config.toml"));
+        assert_eq!(
+            Config::system_path(),
+            PathBuf::from("/etc/voxtype/config.toml")
+        );
         assert_eq!(Config::SYSTEM_PATH, "/etc/voxtype/config.toml");
     }
 
