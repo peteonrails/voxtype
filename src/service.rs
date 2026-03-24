@@ -11,6 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::io::Cursor;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -20,7 +21,13 @@ use tokio::sync::oneshot;
 
 use crate::config::{Config, LanguageConfig, ServiceConfig, TranscriptionEngine};
 use crate::error::{TranscribeError, VoxtypeError};
-use crate::transcribe::Transcriber;
+use crate::meeting::VoiceActivityDetector;
+use crate::transcribe::{Transcriber, TranscriptionResult, TranscriptionSegment};
+
+const SERVICE_SAMPLE_RATE: usize = 16_000;
+const LONG_FORM_CHUNK_SECS: usize = 30;
+const LONG_FORM_CHUNK_THRESHOLD_SECS: usize = 90;
+const LONG_FORM_VAD_THRESHOLD: f32 = 0.01;
 
 #[derive(Clone)]
 struct AppState {
@@ -318,7 +325,8 @@ async fn transcribe_handler(
 
     if use_segments {
         let mut task = tokio::task::spawn_blocking(move || {
-            transcriber.transcribe_segments(
+            transcribe_segments_adaptive(
+                transcriber,
                 &samples,
                 language_override.as_deref(),
                 prompt_override.as_deref(),
@@ -363,7 +371,8 @@ async fn transcribe_handler(
         Ok(Json(verbose).into_response())
     } else {
         let mut task = tokio::task::spawn_blocking(move || {
-            transcriber.transcribe_with_options(
+            transcribe_text_adaptive(
+                transcriber,
                 &samples,
                 language_override.as_deref(),
                 prompt_override.as_deref(),
@@ -399,6 +408,151 @@ async fn transcribe_handler(
 
         Ok(Json(TranscriptionResponse { text }).into_response())
     }
+}
+
+fn transcribe_text_adaptive(
+    transcriber: Arc<dyn Transcriber>,
+    samples: &[f32],
+    language_override: Option<&str>,
+    prompt_override: Option<&str>,
+) -> Result<String, TranscribeError> {
+    if should_chunk_long_form(samples) {
+        return Ok(
+            transcribe_segments_adaptive(transcriber, samples, language_override, prompt_override)?
+                .text,
+        );
+    }
+
+    transcriber.transcribe_with_options(samples, language_override, prompt_override)
+}
+
+fn transcribe_segments_adaptive(
+    transcriber: Arc<dyn Transcriber>,
+    samples: &[f32],
+    language_override: Option<&str>,
+    prompt_override: Option<&str>,
+) -> Result<TranscriptionResult, TranscribeError> {
+    if !should_chunk_long_form(samples) {
+        return transcriber.transcribe_segments(samples, language_override, prompt_override);
+    }
+
+    let vad = VoiceActivityDetector::new(LONG_FORM_VAD_THRESHOLD, SERVICE_SAMPLE_RATE as u32);
+    let chunk_len = LONG_FORM_CHUNK_SECS * SERVICE_SAMPLE_RATE;
+    let total_duration = samples.len() as f64 / SERVICE_SAMPLE_RATE as f64;
+    let mut combined_text = String::new();
+    let mut combined_segments = Vec::new();
+    let mut detected_languages = BTreeSet::new();
+
+    tracing::info!(
+        "Long-form service request ({:.2}s) chunked into {}s windows",
+        total_duration,
+        LONG_FORM_CHUNK_SECS
+    );
+
+    for (chunk_index, chunk_samples) in samples.chunks(chunk_len).enumerate() {
+        if !vad.contains_speech(chunk_samples) {
+            tracing::debug!(
+                "Skipping silent long-form chunk {} ({:.2}s)",
+                chunk_index,
+                chunk_samples.len() as f64 / SERVICE_SAMPLE_RATE as f64
+            );
+            continue;
+        }
+
+        let chunk_result =
+            transcriber.transcribe_segments(chunk_samples, language_override, prompt_override)?;
+
+        let detected_language = chunk_result.language.trim().to_lowercase();
+        if !detected_language.is_empty() && detected_language != "auto" {
+            detected_languages.insert(detected_language);
+        }
+
+        push_text_piece(&mut combined_text, &chunk_result.text);
+
+        let chunk_offset = (chunk_index * chunk_len) as f64 / SERVICE_SAMPLE_RATE as f64;
+        let chunk_duration = chunk_samples.len() as f64 / SERVICE_SAMPLE_RATE as f64;
+
+        if chunk_result.segments.is_empty() {
+            let text = chunk_result.text.trim();
+            if !text.is_empty() {
+                combined_segments.push(TranscriptionSegment {
+                    start: chunk_offset,
+                    end: chunk_offset + chunk_duration,
+                    text: text.to_string(),
+                });
+            }
+            continue;
+        }
+
+        for segment in chunk_result.segments {
+            let text = segment.text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            combined_segments.push(TranscriptionSegment {
+                start: chunk_offset + segment.start,
+                end: chunk_offset + segment.end,
+                text: text.to_string(),
+            });
+        }
+    }
+
+    if combined_segments.is_empty() {
+        tracing::warn!(
+            "Long-form chunking found no speech chunks; falling back to single-pass transcription"
+        );
+        return transcriber.transcribe_segments(samples, language_override, prompt_override);
+    }
+
+    if combined_text.trim().is_empty() {
+        combined_text = combined_segments
+            .iter()
+            .map(|segment| segment.text.trim())
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+
+    Ok(TranscriptionResult {
+        text: combined_text.trim().to_string(),
+        language: summarize_detected_languages(language_override, &detected_languages),
+        duration: total_duration,
+        segments: combined_segments,
+    })
+}
+
+fn should_chunk_long_form(samples: &[f32]) -> bool {
+    samples.len() > LONG_FORM_CHUNK_THRESHOLD_SECS * SERVICE_SAMPLE_RATE
+}
+
+fn summarize_detected_languages(
+    language_override: Option<&str>,
+    detected_languages: &BTreeSet<String>,
+) -> String {
+    if let Some(language) = language_override {
+        let trimmed = language.trim();
+        if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("auto") {
+            return trimmed.to_lowercase();
+        }
+    }
+
+    match detected_languages.len() {
+        0 => language_override.unwrap_or("auto").trim().to_lowercase(),
+        1 => detected_languages.iter().next().cloned().unwrap_or_else(|| "auto".to_string()),
+        _ => "mixed".to_string(),
+    }
+}
+
+fn push_text_piece(buffer: &mut String, piece: &str) {
+    let trimmed = piece.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    if !buffer.is_empty() {
+        buffer.push(' ');
+    }
+    buffer.push_str(trimmed);
 }
 
 fn map_transcription_error(err: TranscribeError) -> ApiError {
@@ -628,6 +782,116 @@ mod tests {
         }
     }
 
+    struct ChunkCountingTranscriber {
+        calls: Mutex<Vec<usize>>,
+    }
+
+    impl ChunkCountingTranscriber {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Transcriber for ChunkCountingTranscriber {
+        fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
+            self.transcribe_with_options(samples, None, None)
+        }
+
+        fn transcribe_with_options(
+            &self,
+            samples: &[f32],
+            _language_override: Option<&str>,
+            _prompt_override: Option<&str>,
+        ) -> Result<String, TranscribeError> {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(samples.len());
+            Ok(format!("chunk {}", calls.len()))
+        }
+
+        fn transcribe_segments(
+            &self,
+            samples: &[f32],
+            _language_override: Option<&str>,
+            _prompt_override: Option<&str>,
+        ) -> Result<TranscriptionResult, TranscribeError> {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(samples.len());
+            let call_index = calls.len();
+            let duration = samples.len() as f64 / SERVICE_SAMPLE_RATE as f64;
+            Ok(TranscriptionResult {
+                text: format!("chunk {}", call_index),
+                language: "de".to_string(),
+                duration,
+                segments: vec![TranscriptionSegment {
+                    start: 0.0,
+                    end: duration,
+                    text: format!("segment {}", call_index),
+                }],
+            })
+        }
+    }
+
+    struct LanguageTrackingTranscriber {
+        languages_seen: Mutex<Vec<Option<String>>>,
+        returned_languages: Vec<String>,
+    }
+
+    impl LanguageTrackingTranscriber {
+        fn new(returned_languages: &[&str]) -> Self {
+            Self {
+                languages_seen: Mutex::new(Vec::new()),
+                returned_languages: returned_languages.iter().map(|s| s.to_string()).collect(),
+            }
+        }
+    }
+
+    impl Transcriber for LanguageTrackingTranscriber {
+        fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
+            self.transcribe_with_options(samples, None, None)
+        }
+
+        fn transcribe_with_options(
+            &self,
+            samples: &[f32],
+            language_override: Option<&str>,
+            prompt_override: Option<&str>,
+        ) -> Result<String, TranscribeError> {
+            Ok(self
+                .transcribe_segments(samples, language_override, prompt_override)?
+                .text)
+        }
+
+        fn transcribe_segments(
+            &self,
+            samples: &[f32],
+            language_override: Option<&str>,
+            _prompt_override: Option<&str>,
+        ) -> Result<TranscriptionResult, TranscribeError> {
+            let mut seen = self.languages_seen.lock().unwrap();
+            seen.push(language_override.map(ToOwned::to_owned));
+            let call_index = seen.len();
+            let duration = samples.len() as f64 / SERVICE_SAMPLE_RATE as f64;
+            let language = self
+                .returned_languages
+                .get(call_index - 1)
+                .cloned()
+                .unwrap_or_else(|| "auto".to_string());
+
+            Ok(TranscriptionResult {
+                text: format!("chunk {}", call_index),
+                language,
+                duration,
+                segments: vec![TranscriptionSegment {
+                    start: 0.0,
+                    end: duration,
+                    text: format!("segment {}", call_index),
+                }],
+            })
+        }
+    }
+
     async fn spawn_test_server(
         transcriber: Arc<dyn Transcriber>,
         allowed_languages: Vec<String>,
@@ -845,5 +1109,44 @@ mod tests {
         let decoded = decode_wav_to_mono_16k(&cursor.into_inner()).unwrap();
         assert!(decoded.len() > 7000);
         assert!(decoded.len() < 9000);
+    }
+
+    #[test]
+    fn adaptive_long_form_chunking_splits_large_inputs() {
+        let counter = Arc::new(ChunkCountingTranscriber::new());
+        let transcriber: Arc<dyn Transcriber> = counter.clone();
+        let samples = sine_samples(SERVICE_SAMPLE_RATE as u32, 95.0, 440.0);
+
+        let result =
+            transcribe_segments_adaptive(transcriber.clone(), &samples, Some("de"), None).unwrap();
+
+        let calls = counter.calls.lock().unwrap();
+        assert_eq!(calls.len(), 4);
+        assert!(calls.iter().all(|&len| len <= 30 * SERVICE_SAMPLE_RATE));
+
+        assert_eq!(result.language, "de");
+        assert_eq!(result.segments.len(), 4);
+        assert_eq!(result.segments[0].start, 0.0);
+        assert_eq!(result.segments[1].start, 30.0);
+        assert_eq!(result.segments[2].start, 60.0);
+        assert_eq!(result.segments[3].start, 90.0);
+    }
+
+    #[test]
+    fn adaptive_long_form_chunking_reports_mixed_language_when_chunks_differ() {
+        let detector = Arc::new(LanguageTrackingTranscriber::new(&["de", "en", "de", "en"]));
+        let transcriber: Arc<dyn Transcriber> = detector.clone();
+        let samples = sine_samples(SERVICE_SAMPLE_RATE as u32, 95.0, 440.0);
+
+        let result =
+            transcribe_segments_adaptive(transcriber, &samples, Some("auto"), None).unwrap();
+
+        let seen = detector.languages_seen.lock().unwrap();
+        assert_eq!(seen.len(), 4);
+        assert_eq!(seen[0].as_deref(), Some("auto"));
+        assert_eq!(seen[1].as_deref(), Some("auto"));
+        assert_eq!(seen[2].as_deref(), Some("auto"));
+        assert_eq!(seen[3].as_deref(), Some("auto"));
+        assert_eq!(result.language, "mixed");
     }
 }
