@@ -11,6 +11,7 @@
 //! - Optionally Paraformer via ONNX Runtime (when `paraformer` feature is enabled)
 //! - Optionally Dolphin via ONNX Runtime (when `dolphin` feature is enabled)
 //! - Optionally Omnilingual via ONNX Runtime (when `omnilingual` feature is enabled)
+//! - Optionally OpenVINO Whisper for Intel NPU/CPU/GPU (when `openvino-whisper` feature is enabled)
 
 pub mod cli;
 pub mod remote;
@@ -18,12 +19,13 @@ pub mod subprocess;
 pub mod whisper;
 pub mod worker;
 
-/// Shared log-mel filterbank feature extraction for ONNX-based ASR engines
+/// Shared log-mel filterbank feature extraction for ONNX-based and OpenVINO ASR engines
 #[cfg(any(
     feature = "sensevoice",
     feature = "paraformer",
     feature = "dolphin",
     feature = "omnilingual",
+    feature = "openvino-whisper",
 ))]
 pub mod fbank;
 
@@ -53,6 +55,9 @@ pub mod dolphin;
 
 #[cfg(feature = "omnilingual")]
 pub mod omnilingual;
+
+#[cfg(feature = "openvino-whisper")]
+pub mod openvino_whisper;
 
 use crate::config::{Config, TranscriptionEngine, WhisperConfig, WhisperMode};
 use crate::error::TranscribeError;
@@ -173,6 +178,19 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
         #[cfg(not(feature = "omnilingual"))]
         TranscriptionEngine::Omnilingual => Err(TranscribeError::InitFailed(
             "Omnilingual engine requested but voxtype was not compiled with --features omnilingual"
+                .to_string(),
+        )),
+        #[cfg(feature = "openvino-whisper")]
+        TranscriptionEngine::OpenVino => {
+            let default_config = crate::config::OpenVinoConfig::default();
+            let openvino_config = config.openvino.as_ref().unwrap_or(&default_config);
+            Ok(Box::new(openvino_whisper::OpenVinoTranscriber::new(
+                openvino_config,
+            )?))
+        }
+        #[cfg(not(feature = "openvino-whisper"))]
+        TranscriptionEngine::OpenVino => Err(TranscribeError::InitFailed(
+            "OpenVINO engine requested but voxtype was not compiled with --features openvino-whisper"
                 .to_string(),
         )),
     }

@@ -2338,6 +2338,200 @@ fn update_engine_in_config(config: &str, engine_name: &str, model_name: &str) ->
     result
 }
 
+// --- OpenVINO Whisper Models ---
+
+struct OpenVinoModelInfo {
+    /// Short config name (e.g., "base.en", "small.en")
+    name: &'static str,
+    /// Directory name under models/
+    dir_name: &'static str,
+    size_mb: u32,
+    description: &'static str,
+    /// Quantization type
+    quantization: &'static str,
+    /// Files to download: (repo_path, local_filename)
+    files: &'static [(&'static str, &'static str)],
+    huggingface_repo: &'static str,
+}
+
+const OPENVINO_MODELS: &[OpenVinoModelInfo] = &[
+    OpenVinoModelInfo {
+        name: "base.en-int8",
+        dir_name: "openvino-whisper-base.en-int8-ov",
+        size_mb: 100,
+        description: "English, int8 quantized (best for NPU)",
+        quantization: "int8",
+        files: &[
+            ("openvino_encoder_model.xml", "openvino_encoder_model.xml"),
+            ("openvino_encoder_model.bin", "openvino_encoder_model.bin"),
+            ("openvino_decoder_model.xml", "openvino_decoder_model.xml"),
+            ("openvino_decoder_model.bin", "openvino_decoder_model.bin"),
+            ("tokenizer.json", "tokenizer.json"),
+            ("config.json", "config.json"),
+            ("generation_config.json", "generation_config.json"),
+        ],
+        huggingface_repo: "OpenVINO/whisper-base.en-int8-ov",
+    },
+    OpenVinoModelInfo {
+        name: "base.en-fp16",
+        dir_name: "openvino-whisper-base.en-fp16-ov",
+        size_mb: 145,
+        description: "English, fp16 (higher accuracy)",
+        quantization: "fp16",
+        files: &[
+            ("openvino_encoder_model.xml", "openvino_encoder_model.xml"),
+            ("openvino_encoder_model.bin", "openvino_encoder_model.bin"),
+            ("openvino_decoder_model.xml", "openvino_decoder_model.xml"),
+            ("openvino_decoder_model.bin", "openvino_decoder_model.bin"),
+            ("tokenizer.json", "tokenizer.json"),
+            ("config.json", "config.json"),
+            ("generation_config.json", "generation_config.json"),
+        ],
+        huggingface_repo: "OpenVINO/whisper-base.en-fp16-ov",
+    },
+    OpenVinoModelInfo {
+        name: "small.en-int8",
+        dir_name: "openvino-whisper-small.en-int8-ov",
+        size_mb: 300,
+        description: "English, int8 quantized (better accuracy, NPU)",
+        quantization: "int8",
+        files: &[
+            ("openvino_encoder_model.xml", "openvino_encoder_model.xml"),
+            ("openvino_encoder_model.bin", "openvino_encoder_model.bin"),
+            ("openvino_decoder_model.xml", "openvino_decoder_model.xml"),
+            ("openvino_decoder_model.bin", "openvino_decoder_model.bin"),
+            ("tokenizer.json", "tokenizer.json"),
+            ("config.json", "config.json"),
+            ("generation_config.json", "generation_config.json"),
+        ],
+        huggingface_repo: "OpenVINO/whisper-small.en-int8-ov",
+    },
+    OpenVinoModelInfo {
+        name: "base-int8",
+        dir_name: "openvino-whisper-base-int8-ov",
+        size_mb: 100,
+        description: "Multilingual (99 langs), int8 quantized",
+        quantization: "int8",
+        files: &[
+            ("openvino_encoder_model.xml", "openvino_encoder_model.xml"),
+            ("openvino_encoder_model.bin", "openvino_encoder_model.bin"),
+            ("openvino_decoder_model.xml", "openvino_decoder_model.xml"),
+            ("openvino_decoder_model.bin", "openvino_decoder_model.bin"),
+            ("tokenizer.json", "tokenizer.json"),
+            ("config.json", "config.json"),
+            ("generation_config.json", "generation_config.json"),
+        ],
+        huggingface_repo: "OpenVINO/whisper-base-int8-ov",
+    },
+    OpenVinoModelInfo {
+        name: "large-v3-int8",
+        dir_name: "openvino-whisper-large-v3-int8-ov",
+        size_mb: 1600,
+        description: "Multilingual, best accuracy, int8 quantized",
+        quantization: "int8",
+        files: &[
+            ("openvino_encoder_model.xml", "openvino_encoder_model.xml"),
+            ("openvino_encoder_model.bin", "openvino_encoder_model.bin"),
+            ("openvino_decoder_model.xml", "openvino_decoder_model.xml"),
+            ("openvino_decoder_model.bin", "openvino_decoder_model.bin"),
+            ("tokenizer.json", "tokenizer.json"),
+            ("config.json", "config.json"),
+            ("generation_config.json", "generation_config.json"),
+        ],
+        huggingface_repo: "OpenVINO/whisper-large-v3-int8-ov",
+    },
+];
+
+/// Download an OpenVINO Whisper model by name
+pub fn download_openvino_model(model_name: &str) -> anyhow::Result<()> {
+    let model = OPENVINO_MODELS
+        .iter()
+        .find(|m| m.name == model_name)
+        .ok_or_else(|| {
+            let valid: Vec<&str> = OPENVINO_MODELS.iter().map(|m| m.name).collect();
+            anyhow::anyhow!(
+                "Unknown OpenVINO model: {}. Valid options: {}",
+                model_name,
+                valid.join(", ")
+            )
+        })?;
+
+    let models_dir = Config::models_dir();
+    let model_path = models_dir.join(model.dir_name);
+
+    std::fs::create_dir_all(&model_path)?;
+
+    println!(
+        "\nDownloading OpenVINO Whisper {} ({} MB, {})...\n",
+        model.name, model.size_mb, model.quantization
+    );
+
+    for (repo_path, local_filename) in model.files {
+        let file_path = model_path.join(local_filename);
+
+        if file_path.exists() {
+            println!("  {} already exists, skipping", local_filename);
+            continue;
+        }
+
+        let url = format!(
+            "https://huggingface.co/{}/resolve/main/{}",
+            model.huggingface_repo, repo_path
+        );
+
+        println!("Downloading {}...", local_filename);
+
+        let status = Command::new("curl")
+            .args([
+                "-L",
+                "--progress-bar",
+                "-o",
+                file_path.to_str().unwrap_or("file"),
+                &url,
+            ])
+            .status();
+
+        match status {
+            Ok(exit_status) if exit_status.success() => {}
+            Ok(exit_status) => {
+                print_failure(&format!(
+                    "Download failed: curl exited with code {}",
+                    exit_status.code().unwrap_or(-1)
+                ));
+                let _ = std::fs::remove_file(&file_path);
+                anyhow::bail!("Download failed for {}", local_filename)
+            }
+            Err(e) => {
+                print_failure(&format!("Failed to run curl: {}", e));
+                print_info("Please ensure curl is installed");
+                anyhow::bail!("curl not available: {}", e)
+            }
+        }
+    }
+
+    // Validate critical files
+    let encoder_xml = model_path.join("openvino_encoder_model.xml");
+    let decoder_xml = model_path.join("openvino_decoder_model.xml");
+    let tokenizer = model_path.join("tokenizer.json");
+
+    if !encoder_xml.exists() || !decoder_xml.exists() || !tokenizer.exists() {
+        print_failure("Model download incomplete. Missing required files.");
+        anyhow::bail!("Model download incomplete");
+    }
+
+    print_success(&format!(
+        "OpenVINO model '{}' downloaded to {:?}",
+        model.name, model_path
+    ));
+
+    Ok(())
+}
+
+/// Get list of valid OpenVINO model names
+pub fn valid_openvino_model_names() -> Vec<&'static str> {
+    OPENVINO_MODELS.iter().map(|m| m.name).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

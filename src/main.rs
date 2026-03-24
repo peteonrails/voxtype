@@ -135,9 +135,10 @@ async fn main() -> anyhow::Result<()> {
             "paraformer" => config.engine = config::TranscriptionEngine::Paraformer,
             "dolphin" => config.engine = config::TranscriptionEngine::Dolphin,
             "omnilingual" => config.engine = config::TranscriptionEngine::Omnilingual,
+            "openvino" => config.engine = config::TranscriptionEngine::OpenVino,
             _ => {
                 eprintln!(
-                    "Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual",
+                    "Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, openvino",
                     engine
                 );
                 std::process::exit(1);
@@ -357,8 +358,9 @@ async fn main() -> anyhow::Result<()> {
                     "paraformer" => config.engine = config::TranscriptionEngine::Paraformer,
                     "dolphin" => config.engine = config::TranscriptionEngine::Dolphin,
                     "omnilingual" => config.engine = config::TranscriptionEngine::Omnilingual,
+                    "openvino" => config.engine = config::TranscriptionEngine::OpenVino,
                     _ => {
-                        eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual", engine_name);
+                        eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, openvino", engine_name);
                         std::process::exit(1);
                     }
                 }

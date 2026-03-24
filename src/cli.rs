@@ -68,7 +68,7 @@ pub struct Cli {
     #[arg(long, value_name = "MODEL")]
     pub model: Option<String>,
 
-    /// Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual
+    /// Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, openvino
     #[arg(long, value_name = "ENGINE")]
     pub engine: Option<String>,
 
@@ -291,7 +291,7 @@ pub enum Commands {
         /// Path to audio file
         file: std::path::PathBuf,
 
-        /// Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual
+        /// Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, openvino
         #[arg(long, value_name = "ENGINE")]
         engine: Option<String>,
     },
