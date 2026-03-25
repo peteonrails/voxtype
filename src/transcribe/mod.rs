@@ -19,13 +19,12 @@ pub mod subprocess;
 pub mod whisper;
 pub mod worker;
 
-/// Shared log-mel filterbank feature extraction for ONNX-based and OpenVINO ASR engines
+/// Shared log-mel filterbank feature extraction for ONNX-based ASR engines
 #[cfg(any(
     feature = "sensevoice",
     feature = "paraformer",
     feature = "dolphin",
     feature = "omnilingual",
-    feature = "openvino-whisper",
 ))]
 pub mod fbank;
 

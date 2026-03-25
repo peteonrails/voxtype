@@ -1112,12 +1112,11 @@ impl Default for OmnilingualConfig {
     }
 }
 
-/// OpenVINO Whisper speech-to-text configuration (Intel NPU/CPU/GPU via OpenVINO Runtime)
+/// OpenVINO Whisper speech-to-text configuration (Intel NPU/CPU/GPU via OpenVINO GenAI)
 /// Requires: cargo build --features openvino-whisper
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OpenVinoConfig {
     /// Model name or path to directory containing OpenVINO IR model files.
-    /// Expects: openvino_encoder_model.xml/.bin, openvino_decoder_model.xml/.bin, tokenizer.json
     /// Short names: "base.en" (default), "small.en", "tiny", "base", "small", "medium", "large-v3"
     pub model: String,
 
@@ -1146,6 +1145,13 @@ pub struct OpenVinoConfig {
     /// Load model on-demand when recording starts (true) or keep loaded (false)
     #[serde(default = "default_on_demand_loading")]
     pub on_demand_loading: bool,
+
+    /// Path to the OpenVINO installation directory containing shared libraries.
+    /// When set, loads libopenvino_genai_c.so from this path instead of relying
+    /// on automatic discovery (LD_LIBRARY_PATH, OPENVINO_INSTALL_DIR, etc.).
+    /// Also settable via VOXTYPE_OPENVINO_DIR environment variable.
+    #[serde(default)]
+    pub openvino_dir: Option<String>,
 }
 
 fn default_openvino_device() -> String {
@@ -1166,6 +1172,7 @@ impl Default for OpenVinoConfig {
             language: default_openvino_language(),
             translate: false,
             on_demand_loading: false,
+            openvino_dir: None,
         }
     }
 }
@@ -2172,6 +2179,12 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     }
     if let Ok(val) = std::env::var("VOXTYPE_SMART_AUTO_SUBMIT") {
         config.text.smart_auto_submit = parse_bool_env(&val);
+    }
+
+    // OpenVINO
+    if let Ok(dir) = std::env::var("VOXTYPE_OPENVINO_DIR") {
+        let openvino = config.openvino.get_or_insert_with(OpenVinoConfig::default);
+        openvino.openvino_dir = Some(dir);
     }
 
     Ok(config)

@@ -1,612 +1,192 @@
-//! OpenVINO Whisper speech-to-text transcription
+//! OpenVINO GenAI Whisper speech-to-text transcription
 //!
-//! Uses OpenVINO Runtime to run Whisper encoder-decoder models on Intel NPU, CPU,
-//! or GPU. Models are in OpenVINO IR format (.xml + .bin) from HuggingFace
-//! (OpenVINO/whisper-* repos).
+//! Uses the OpenVINO GenAI WhisperPipeline to run Whisper models on Intel NPU, CPU,
+//! or GPU. The pipeline handles mel spectrogram extraction, encoder-decoder inference,
+//! and tokenization internally.
 //!
-//! Architecture:
-//! - Encoder: processes mel spectrogram [1, 80, 3000], outputs hidden states
-//! - Decoder: autoregressive transformer, generates tokens with greedy decoding
-//! - Tokenizer: Whisper BPE tokenizer for token-to-text conversion
-//!
-//! The mel spectrogram is extracted using the shared fbank module with Whisper
-//! settings (Hann window, no pre-emphasis, 80 mel bins).
+//! Models are in OpenVINO IR format from HuggingFace (OpenVINO/whisper-* repos),
+//! exported via `optimum-cli export openvino`.
 
-use super::fbank::{FbankConfig, FbankExtractor};
 use super::Transcriber;
 use crate::config::OpenVinoConfig;
 use crate::error::TranscribeError;
-use openvino::{Core, DeviceType, ElementType, InferRequest, Shape, Tensor};
+use openvino_genai::WhisperPipeline;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tokenizers::Tokenizer;
 
-/// Whisper special token IDs (standard across all Whisper model sizes)
-const SOT_TOKEN: i64 = 50258; // <|startoftranscript|>
-const EOT_TOKEN: i64 = 50257; // <|endoftext|>
-const TRANSCRIBE_TOKEN: i64 = 50359; // <|transcribe|>
-const TRANSLATE_TOKEN: i64 = 50358; // <|translate|>
-const NO_TIMESTAMPS_TOKEN: i64 = 50363; // <|notimestamps|>
-
-/// Language token offset: language tokens start at 50259
-/// e.g., <|en|> = 50259, <|zh|> = 50260, etc.
-const LANGUAGE_TOKEN_BASE: i64 = 50259;
-
-/// Maximum tokens to generate (Whisper limit)
-const MAX_NEW_TOKENS: usize = 448;
-
-/// Whisper mel spectrogram parameters
-const WHISPER_SAMPLE_RATE: usize = 16000;
-const WHISPER_N_FRAMES: usize = 3000; // 30 seconds at 100 fps (10ms hop)
-const WHISPER_N_MELS: usize = 80;
-
-/// Whisper language code to token ID mapping
-fn language_token_id(lang: &str) -> i64 {
-    // Subset of Whisper language codes - full list has 99 languages
-    let offset = match lang {
-        "en" => 0,
-        "zh" => 1,
-        "de" => 2,
-        "es" => 3,
-        "ru" => 4,
-        "ko" => 5,
-        "fr" => 6,
-        "ja" => 7,
-        "pt" => 8,
-        "tr" => 9,
-        "pl" => 10,
-        "ca" => 11,
-        "nl" => 12,
-        "ar" => 13,
-        "sv" => 14,
-        "it" => 15,
-        "id" => 16,
-        "hi" => 17,
-        "fi" => 18,
-        "vi" => 19,
-        "he" => 20,
-        "uk" => 21,
-        "el" => 22,
-        "ms" => 23,
-        "cs" => 24,
-        "ro" => 25,
-        "da" => 26,
-        "hu" => 27,
-        "ta" => 28,
-        "no" => 29,
-        "th" => 30,
-        "ur" => 31,
-        "hr" => 32,
-        "bg" => 33,
-        "lt" => 34,
-        "la" => 35,
-        "mi" => 36,
-        "ml" => 37,
-        "cy" => 38,
-        "sk" => 39,
-        "te" => 40,
-        "fa" => 41,
-        "lv" => 42,
-        "bn" => 43,
-        "sr" => 44,
-        "az" => 45,
-        "sl" => 46,
-        "kn" => 47,
-        "et" => 48,
-        "mk" => 49,
-        "br" => 50,
-        "eu" => 51,
-        "is" => 52,
-        "hy" => 53,
-        "ne" => 54,
-        "mn" => 55,
-        "bs" => 56,
-        "kk" => 57,
-        "sq" => 58,
-        "sw" => 59,
-        "gl" => 60,
-        "mr" => 61,
-        "pa" => 62,
-        "si" => 63,
-        "km" => 64,
-        "sn" => 65,
-        "yo" => 66,
-        "so" => 67,
-        "af" => 68,
-        "oc" => 69,
-        "ka" => 70,
-        "be" => 71,
-        "tg" => 72,
-        "sd" => 73,
-        "gu" => 74,
-        "am" => 75,
-        "yi" => 76,
-        "lo" => 77,
-        "uz" => 78,
-        "fo" => 79,
-        "ht" => 80,
-        "ps" => 81,
-        "tk" => 82,
-        "nn" => 83,
-        "mt" => 84,
-        "sa" => 85,
-        "lb" => 86,
-        "my" => 87,
-        "bo" => 88,
-        "tl" => 89,
-        "mg" => 90,
-        "as" => 91,
-        "tt" => 92,
-        "haw" => 93,
-        "ln" => 94,
-        "ha" => 95,
-        "ba" => 96,
-        "jw" => 97,
-        "su" => 98,
-        _ => {
-            tracing::warn!(
-                "Unknown language code '{}', defaulting to English",
-                lang
-            );
-            0 // English
-        }
-    };
-    LANGUAGE_TOKEN_BASE + offset
-}
-
-/// Cached inference requests from compiled OpenVINO models.
-/// Created during `prepare()` and reused across transcriptions.
-struct CompiledModels {
-    encoder_request: InferRequest,
-    decoder_request: InferRequest,
-}
-
-/// OpenVINO-based Whisper transcriber for Intel NPU/CPU/GPU.
+/// OpenVINO GenAI Whisper transcriber for Intel NPU/CPU/GPU.
 ///
-/// Model compilation is deferred to `prepare()` (called when recording starts),
-/// hiding the compilation latency behind recording time. Compiled models are
-/// cached and reused across transcriptions. If `prepare()` was not called,
-/// compilation happens on first `transcribe()` call.
+/// Pipeline creation is deferred to `prepare()` (called when recording starts),
+/// hiding the load latency behind recording time. The pipeline is cached and
+/// reused across transcriptions. If `prepare()` was not called, creation happens
+/// on first `transcribe()` call.
 pub struct OpenVinoTranscriber {
-    /// Cached compiled models (None until prepare() or first transcribe())
-    compiled: Mutex<Option<CompiledModels>>,
-    /// BPE tokenizer for decoding token IDs to text
-    tokenizer: Tokenizer,
-    /// Mel spectrogram extractor (Whisper-specific config)
-    mel_extractor: FbankExtractor,
-    /// Resolved model directory path
+    pipeline: Mutex<Option<WhisperPipeline>>,
     model_dir: PathBuf,
-    /// Configuration
     config: OpenVinoConfig,
 }
 
 impl OpenVinoTranscriber {
-    /// Create a new OpenVINO Whisper transcriber.
+    /// Create a new OpenVINO GenAI Whisper transcriber.
     ///
-    /// This only validates model files and loads the tokenizer (lightweight).
-    /// The expensive model compilation is deferred to `prepare()` or first `transcribe()`.
+    /// Resolves the model directory and optionally creates the pipeline immediately
+    /// (when `on_demand_loading` is false). The expensive pipeline creation can be
+    /// deferred to `prepare()` or first `transcribe()`.
     pub fn new(config: &OpenVinoConfig) -> Result<Self, TranscribeError> {
         let model_dir = resolve_model_path(&config.model, config.quantized)?;
 
         tracing::info!(
-            "Initializing OpenVINO Whisper from {:?} (device={}, quantized={})",
+            "Initializing OpenVINO GenAI Whisper from {:?} (device={}, quantized={})",
             model_dir,
             config.device,
             config.quantized
         );
 
-        // Validate model files exist (fast check, no loading)
-        for (filename, desc) in [
-            ("openvino_encoder_model.xml", "encoder XML"),
-            ("openvino_encoder_model.bin", "encoder BIN"),
-            ("openvino_decoder_model.xml", "decoder XML"),
-            ("openvino_decoder_model.bin", "decoder BIN"),
-        ] {
-            let path = model_dir.join(filename);
-            if !path.exists() {
-                return Err(TranscribeError::ModelNotFound(format!(
-                    "OpenVINO Whisper {} not found: {}\n  \
-                     Run 'voxtype setup model' to download, or manually from:\n  \
-                     https://huggingface.co/OpenVINO/whisper-{}",
-                    desc,
-                    path.display(),
-                    config.model
-                )));
-            }
-        }
-
-        // Load tokenizer (lightweight, needed for both prepare and transcribe)
-        let tokenizer_path = model_dir.join("tokenizer.json");
-        if !tokenizer_path.exists() {
-            return Err(TranscribeError::InitFailed(format!(
-                "OpenVINO Whisper tokenizer not found: {}\n  \
-                 Ensure tokenizer.json is in the model directory.",
-                tokenizer_path.display()
+        // Sanity check that the model directory has expected files
+        let encoder_xml = model_dir.join("openvino_encoder_model.xml");
+        if !encoder_xml.exists() {
+            return Err(TranscribeError::ModelNotFound(format!(
+                "OpenVINO Whisper encoder model not found: {}\n  \
+                 Run 'voxtype setup model' to download, or manually from:\n  \
+                 https://huggingface.co/OpenVINO/whisper-{}",
+                encoder_xml.display(),
+                config.model
             )));
         }
-        let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|e| {
-            TranscribeError::InitFailed(format!("Failed to load tokenizer: {}", e))
-        })?;
 
-        let mel_extractor = FbankExtractor::new(FbankConfig::whisper());
+        if config.threads.is_some() {
+            tracing::warn!(
+                "OpenVINO GenAI WhisperPipeline does not support thread count configuration; \
+                 the 'threads' setting will be ignored"
+            );
+        }
 
-        tracing::info!(
-            "OpenVINO Whisper initialized (tokenizer loaded, model compilation deferred to prepare())"
-        );
+        let pipeline = if config.on_demand_loading {
+            None
+        } else {
+            Some(Self::create_pipeline(&model_dir, config)?)
+        };
+
+        tracing::info!("OpenVINO GenAI Whisper initialized");
 
         Ok(Self {
-            compiled: Mutex::new(None),
-            tokenizer,
-            mel_extractor,
+            pipeline: Mutex::new(pipeline),
             model_dir,
             config: config.clone(),
         })
     }
 
-    /// Compile models for the target device (NPU/CPU/GPU).
-    /// This is the expensive operation that `prepare()` hides behind recording time.
-    /// Parse device string into DeviceType
-    fn parse_device(device_str: &str) -> DeviceType<'static> {
-        match device_str.to_uppercase().as_str() {
-            "NPU" => DeviceType::NPU,
-            "CPU" => DeviceType::CPU,
-            "GPU" => DeviceType::GPU,
-            _ => DeviceType::Other(std::borrow::Cow::Owned(device_str.to_uppercase())),
+    /// Load the OpenVINO GenAI shared library, using a custom path if configured.
+    fn load_library(config: &OpenVinoConfig) -> Result<(), TranscribeError> {
+        if let Some(ref dir) = config.openvino_dir {
+            let lib_path = find_genai_library(dir)?;
+            tracing::info!("Loading OpenVINO GenAI library from: {}", lib_path.display());
+            openvino_genai::load_from(&lib_path).map_err(|e| {
+                TranscribeError::InitFailed(format!(
+                    "Failed to load OpenVINO GenAI library from {}: {}\n  \
+                     Ensure libopenvino_genai_c.so exists in the specified openvino_dir.",
+                    lib_path.display(),
+                    e
+                ))
+            })
+        } else {
+            openvino_genai::load().map_err(|e| {
+                TranscribeError::InitFailed(format!(
+                    "Failed to load OpenVINO GenAI library: {}\n  \
+                     Install OpenVINO GenAI: pip install openvino-genai\n  \
+                     Or set openvino_dir in [openvino] config to the library directory.",
+                    e
+                ))
+            })
         }
     }
 
-    fn compile_models(model_dir: &std::path::Path, config: &OpenVinoConfig) -> Result<CompiledModels, TranscribeError> {
+    /// Create the WhisperPipeline for the configured device.
+    fn create_pipeline(
+        model_dir: &std::path::Path,
+        config: &OpenVinoConfig,
+    ) -> Result<WhisperPipeline, TranscribeError> {
         let start = std::time::Instant::now();
 
-        let mut core = Core::new().map_err(|e| {
-            TranscribeError::InitFailed(format!(
-                "OpenVINO initialization failed: {}\n  \
-                 Install OpenVINO: https://docs.openvino.ai/latest/openvino_docs_install_guides_installing_openvino_linux.html\n  \
-                 Or: pip install openvino (includes shared libraries)",
-                e
-            ))
-        })?;
+        Self::load_library(config)?;
 
-        let encoder_xml = model_dir.join("openvino_encoder_model.xml");
-        let encoder_bin = model_dir.join("openvino_encoder_model.bin");
-        let decoder_xml = model_dir.join("openvino_decoder_model.xml");
-        let decoder_bin = model_dir.join("openvino_decoder_model.bin");
+        let model_path_str = model_dir.to_str().ok_or_else(|| {
+            TranscribeError::InitFailed("Model path contains invalid UTF-8".to_string())
+        })?;
 
         let is_npu = config.device.to_uppercase() == "NPU";
 
-        // Load and compile encoder
-        tracing::debug!("Compiling encoder model for {}...", config.device);
-        let encoder_model = core
-            .read_model_from_file(
-                encoder_xml.to_str().unwrap_or_default(),
-                encoder_bin.to_str().unwrap_or_default(),
-            )
-            .map_err(|e| {
-                TranscribeError::InitFailed(format!("Failed to load encoder model: {}", e))
-            })?;
-
-        let mut compiled_encoder = core.compile_model(&encoder_model, Self::parse_device(&config.device)).map_err(|e| {
+        let pipeline = WhisperPipeline::new(model_path_str, &config.device).map_err(|e| {
             if is_npu {
                 TranscribeError::InitFailed(format!(
-                    "Failed to compile encoder for NPU: {}\n  \
-                     NPU device may not be available. Ensure intel-npu-driver is installed.\n  \
+                    "Failed to create OpenVINO GenAI Whisper pipeline for NPU: {}\n  \
+                     Ensure intel-npu-driver is installed.\n  \
                      Check: ls /dev/accel/accel*\n  \
-                     Or set device = \"CPU\" in [openvino] config to use CPU fallback.",
+                     Or set device = \"CPU\" in [openvino] config.",
                     e
                 ))
             } else {
                 TranscribeError::InitFailed(format!(
-                    "Failed to compile encoder for {}: {}",
+                    "Failed to create OpenVINO GenAI Whisper pipeline for {}: {}",
                     config.device, e
                 ))
             }
         })?;
 
-        let encoder_request = compiled_encoder.create_infer_request().map_err(|e| {
-            TranscribeError::InitFailed(format!("Failed to create encoder request: {}", e))
-        })?;
-
-        // Load and compile decoder
-        tracing::debug!("Compiling decoder model for {}...", config.device);
-        let decoder_model = core
-            .read_model_from_file(
-                decoder_xml.to_str().unwrap_or_default(),
-                decoder_bin.to_str().unwrap_or_default(),
-            )
-            .map_err(|e| {
-                TranscribeError::InitFailed(format!("Failed to load decoder model: {}", e))
-            })?;
-
-        let mut compiled_decoder = core.compile_model(&decoder_model, Self::parse_device(&config.device)).map_err(|e| {
-            TranscribeError::InitFailed(format!(
-                "Failed to compile decoder for {}: {}",
-                config.device, e
-            ))
-        })?;
-
-        let decoder_request = compiled_decoder.create_infer_request().map_err(|e| {
-            TranscribeError::InitFailed(format!("Failed to create decoder request: {}", e))
-        })?;
-
         tracing::info!(
-            "OpenVINO models compiled in {:.2}s (device={})",
+            "OpenVINO GenAI Whisper pipeline created in {:.2}s (device={})",
             start.elapsed().as_secs_f32(),
             config.device,
         );
 
-        Ok(CompiledModels {
-            encoder_request,
-            decoder_request,
-        })
+        Ok(pipeline)
     }
 
-    /// Ensure models are compiled, compiling on first use if needed.
-    /// Returns a mutable reference to the compiled models.
-    fn ensure_compiled(&self) -> Result<std::sync::MutexGuard<'_, Option<CompiledModels>>, TranscribeError> {
-        let mut guard = self.compiled.lock().map_err(|e| {
-            TranscribeError::InferenceFailed(format!("Failed to lock compiled models: {}", e))
+    /// Ensure the pipeline is created, creating on first use if needed.
+    fn ensure_pipeline(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, Option<WhisperPipeline>>, TranscribeError> {
+        let mut guard = self.pipeline.lock().map_err(|e| {
+            TranscribeError::InferenceFailed(format!("Pipeline lock poisoned: {}", e))
         })?;
 
         if guard.is_none() {
-            tracing::info!("Models not yet compiled, compiling now (prepare() was not called)");
-            *guard = Some(Self::compile_models(&self.model_dir, &self.config)?);
+            tracing::info!(
+                "Pipeline not yet created, creating now (prepare() was not called)"
+            );
+            *guard = Some(Self::create_pipeline(&self.model_dir, &self.config)?);
         }
 
         Ok(guard)
     }
-
-    /// Extract mel spectrogram and pad/transpose to Whisper format [1, 80, 3000]
-    fn extract_mel(&self, samples: &[f32]) -> Vec<f32> {
-        let fbank = self.mel_extractor.extract(samples);
-        let num_frames = fbank.nrows();
-        let num_mels = fbank.ncols();
-
-        // Pad or truncate to WHISPER_N_FRAMES (3000)
-        let target_frames = WHISPER_N_FRAMES;
-
-        // Output in [1, 80, 3000] layout (batch, mels, frames) - row-major
-        let mut mel = vec![0.0f32; WHISPER_N_MELS * target_frames];
-        let frames_to_copy = num_frames.min(target_frames);
-
-        for mel_idx in 0..num_mels.min(WHISPER_N_MELS) {
-            for frame_idx in 0..frames_to_copy {
-                mel[mel_idx * target_frames + frame_idx] = fbank[[frame_idx, mel_idx]];
-            }
-            // Remaining frames are already zero (padding)
-        }
-
-        mel
-    }
-
-    /// Build the decoder prompt token sequence
-    fn build_decoder_prompt(&self) -> Vec<i64> {
-        let lang_token = language_token_id(&self.config.language);
-        let task_token = if self.config.translate {
-            TRANSLATE_TOKEN
-        } else {
-            TRANSCRIBE_TOKEN
-        };
-
-        vec![SOT_TOKEN, lang_token, task_token, NO_TIMESTAMPS_TOKEN]
-    }
-
-    /// Run the full inference pipeline using cached compiled models
-    fn run_inference(&self, samples: &[f32]) -> Result<Vec<u32>, TranscribeError> {
-        let duration_secs = samples.len() as f32 / WHISPER_SAMPLE_RATE as f32;
-
-        // --- Mel spectrogram extraction ---
-        let mel_start = std::time::Instant::now();
-        let mel_data = self.extract_mel(samples);
-        tracing::debug!(
-            "Mel extraction completed in {:.2}s",
-            mel_start.elapsed().as_secs_f32()
-        );
-
-        // Get compiled models (compiles on first use if prepare() wasn't called)
-        let mut guard = self.ensure_compiled()?;
-        let models = guard.as_mut().unwrap();
-
-        // --- Encoder ---
-        let encoder_start = std::time::Instant::now();
-
-        // Create mel tensor [1, 80, 3000]
-        let mel_shape = Shape::new(&[1, WHISPER_N_MELS as i64, WHISPER_N_FRAMES as i64])
-            .map_err(|e| {
-                TranscribeError::InferenceFailed(format!("Failed to create mel shape: {}", e))
-            })?;
-        let mut mel_tensor = Tensor::new(ElementType::F32, &mel_shape).map_err(|e| {
-            TranscribeError::InferenceFailed(format!("Failed to create mel tensor: {}", e))
-        })?;
-        mel_tensor
-            .get_data_mut::<f32>()
-            .map_err(|e| {
-                TranscribeError::InferenceFailed(format!("Failed to get mel tensor data: {}", e))
-            })?
-            .copy_from_slice(&mel_data);
-
-        // Set input and run encoder
-        models
-            .encoder_request
-            .set_input_tensor_by_index(0,&mel_tensor)
-            .map_err(|e| {
-                TranscribeError::InferenceFailed(format!("Failed to set encoder input: {}", e))
-            })?;
-
-        models.encoder_request.infer().map_err(|e| {
-            TranscribeError::InferenceFailed(format!("Encoder inference failed: {}", e))
-        })?;
-
-        tracing::debug!(
-            "Encoder completed in {:.2}s",
-            encoder_start.elapsed().as_secs_f32()
-        );
-
-        // --- Decoder (autoregressive loop) ---
-        let decoder_start = std::time::Instant::now();
-        let prompt = self.build_decoder_prompt();
-        let max_tokens = ((duration_secs * 6.0) as usize).clamp(16, MAX_NEW_TOKENS);
-
-        let mut generated_tokens: Vec<i64> = prompt.clone();
-
-        // Get encoder output to feed into decoder
-        let encoder_output = models.encoder_request.get_output_tensor_by_index(0).map_err(|e| {
-            TranscribeError::InferenceFailed(format!("Failed to get encoder output: {}", e))
-        })?;
-
-        for step in 0..max_tokens {
-            // Create input_ids tensor
-            let input_tokens: Vec<i64> = if step == 0 {
-                generated_tokens.clone()
-            } else {
-                vec![*generated_tokens.last().unwrap()]
-            };
-
-            let ids_shape = Shape::new(&[1, input_tokens.len() as i64]).map_err(|e| {
-                TranscribeError::InferenceFailed(format!(
-                    "Failed to create input_ids shape: {}",
-                    e
-                ))
-            })?;
-            let mut ids_tensor = Tensor::new(ElementType::I64, &ids_shape).map_err(|e| {
-                TranscribeError::InferenceFailed(format!(
-                    "Failed to create input_ids tensor: {}",
-                    e
-                ))
-            })?;
-            ids_tensor
-                .get_data_mut::<i64>()
-                .map_err(|e| {
-                    TranscribeError::InferenceFailed(format!(
-                        "Failed to get input_ids data: {}",
-                        e
-                    ))
-                })?
-                .copy_from_slice(&input_tokens);
-
-            // Set decoder inputs: input_ids + encoder_hidden_states
-            models
-                .decoder_request
-                .set_input_tensor_by_index(0,&ids_tensor)
-                .map_err(|e| {
-                    TranscribeError::InferenceFailed(format!(
-                        "Failed to set decoder input_ids: {}",
-                        e
-                    ))
-                })?;
-
-            models
-                .decoder_request
-                .set_input_tensor_by_index(1,&encoder_output)
-                .map_err(|e| {
-                    TranscribeError::InferenceFailed(format!(
-                        "Failed to set encoder hidden states: {}",
-                        e
-                    ))
-                })?;
-
-            // Run decoder step
-            models.decoder_request.infer().map_err(|e| {
-                TranscribeError::InferenceFailed(format!(
-                    "Decoder inference failed at step {}: {}",
-                    step, e
-                ))
-            })?;
-
-            // Extract logits from output 0
-            let logits_tensor =
-                models.decoder_request.get_output_tensor_by_index(0).map_err(|e| {
-                    TranscribeError::InferenceFailed(format!(
-                        "Failed to get decoder output: {}",
-                        e
-                    ))
-                })?;
-
-            let logits_shape = logits_tensor.get_shape().map_err(|e| {
-                TranscribeError::InferenceFailed(format!("Failed to get logits shape: {}", e))
-            })?;
-            let logits_dims = logits_shape.get_dimensions();
-            let logits_data = logits_tensor.get_data::<f32>().map_err(|e| {
-                TranscribeError::InferenceFailed(format!("Failed to extract logits data: {}", e))
-            })?;
-
-            // Get last position logits for greedy decoding
-            let vocab_size = *logits_dims.last().unwrap_or(&0) as usize;
-            if vocab_size == 0 {
-                return Err(TranscribeError::InferenceFailed(
-                    "Decoder produced empty logits".to_string(),
-                ));
-            }
-
-            let last_position_offset = logits_data.len() - vocab_size;
-            let vocab_logits = &logits_data[last_position_offset..];
-
-            // Greedy decode: argmax
-            let next_token = vocab_logits
-                .iter()
-                .enumerate()
-                .max_by(|(_, a), (_, b)| {
-                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .map(|(idx, _)| idx as i64)
-                .ok_or_else(|| {
-                    TranscribeError::InferenceFailed("Empty logits vector".to_string())
-                })?;
-
-            // Check for end of text
-            if next_token == EOT_TOKEN {
-                tracing::debug!("Decoder reached EOT at step {}", step);
-                break;
-            }
-
-            generated_tokens.push(next_token);
-        }
-
-        tracing::debug!(
-            "Decoder completed in {:.2}s ({} tokens)",
-            decoder_start.elapsed().as_secs_f32(),
-            generated_tokens.len() - prompt.len()
-        );
-
-        // Convert tokens to u32, skip the prompt tokens
-        let token_ids: Vec<u32> = generated_tokens
-            .iter()
-            .skip(prompt.len())
-            .map(|&t| t as u32)
-            .collect();
-
-        Ok(token_ids)
-    }
 }
 
 impl Transcriber for OpenVinoTranscriber {
-    /// Compile models for the target device, caching the result.
-    ///
-    /// Called when recording starts to hide compilation latency behind recording time.
-    /// The compiled models are reused on all subsequent transcriptions.
-    /// If not called, compilation happens lazily on first `transcribe()`.
     fn prepare(&self) {
-        let mut guard = match self.compiled.lock() {
+        let mut guard = match self.pipeline.lock() {
             Ok(g) => g,
             Err(e) => {
-                tracing::error!("Failed to lock compiled models in prepare(): {}", e);
+                tracing::error!("Pipeline lock error in prepare(): {}", e);
                 return;
             }
         };
 
         if guard.is_some() {
-            tracing::debug!("Models already compiled, skipping prepare()");
+            tracing::debug!("Pipeline already created, skipping prepare()");
             return;
         }
 
-        tracing::info!("Compiling OpenVINO models for {} (triggered by prepare())...", self.config.device);
-        match Self::compile_models(&self.model_dir, &self.config) {
-            Ok(models) => {
-                *guard = Some(models);
-                tracing::info!("OpenVINO model compilation complete");
+        tracing::info!(
+            "Creating OpenVINO GenAI Whisper pipeline for {} (triggered by prepare())...",
+            self.config.device
+        );
+        match Self::create_pipeline(&self.model_dir, &self.config) {
+            Ok(p) => {
+                *guard = Some(p);
+                tracing::info!("OpenVINO GenAI pipeline creation complete");
             }
             Err(e) => {
-                tracing::error!("Failed to compile models in prepare(): {}", e);
-                // Will retry in transcribe() via ensure_compiled()
+                tracing::error!("Failed to create pipeline in prepare(): {}", e);
             }
         }
     }
@@ -618,9 +198,9 @@ impl Transcriber for OpenVinoTranscriber {
             ));
         }
 
-        let duration_secs = samples.len() as f32 / WHISPER_SAMPLE_RATE as f32;
+        let duration_secs = samples.len() as f32 / 16000.0;
         tracing::debug!(
-            "Transcribing {:.2}s of audio ({} samples) with OpenVINO Whisper (device={})",
+            "Transcribing {:.2}s of audio ({} samples) with OpenVINO GenAI (device={})",
             duration_secs,
             samples.len(),
             self.config.device
@@ -628,20 +208,86 @@ impl Transcriber for OpenVinoTranscriber {
 
         let start = std::time::Instant::now();
 
-        let token_ids = self.run_inference(samples)?;
+        // Get pipeline and run inference
+        let mut guard = self.ensure_pipeline()?;
+        let pipeline = guard.as_mut().unwrap();
 
-        // Decode tokens to text
-        let text = self
-            .tokenizer
-            .decode(&token_ids, true) // skip_special_tokens = true
-            .map_err(|e| {
-                TranscribeError::InferenceFailed(format!("Tokenizer decode failed: {}", e))
+        // Get config from the pipeline (inherits model-specific token IDs).
+        // A standalone WhisperGenerationConfig::new() uses generic defaults that may
+        // not match the model; WhisperGenerationConfig::from_json() with the model's
+        // generation_config.json is the alternative for standalone creation.
+        let mut gen_config = pipeline.get_generation_config().map_err(|e| {
+            TranscribeError::InferenceFailed(format!(
+                "Failed to get generation config: {}",
+                e
+            ))
+        })?;
+
+        // Only set language/task on multilingual models (*.en models are English-only
+        // and reject language/task overrides)
+        let is_multilingual = gen_config
+            .get_is_multilingual()
+            .unwrap_or(false);
+
+        if is_multilingual {
+            // GenAI expects language tokens in "<|xx|>" format (matching lang_to_id keys
+            // in generation_config.json), while voxtype config uses bare codes like "en"
+            let lang = &self.config.language;
+            let lang_token = if lang.starts_with("<|") {
+                lang.to_string()
+            } else {
+                format!("<|{}|>", lang)
+            };
+            gen_config.set_language(&lang_token).map_err(|e| {
+                TranscribeError::InferenceFailed(format!("Failed to set language: {}", e))
             })?;
+
+            let task = if self.config.translate {
+                "translate"
+            } else {
+                "transcribe"
+            };
+            gen_config.set_task(task).map_err(|e| {
+                TranscribeError::InferenceFailed(format!("Failed to set task: {}", e))
+            })?;
+        } else if self.config.translate {
+            tracing::warn!(
+                "Translation requested but model is not multilingual; ignoring translate setting"
+            );
+        }
+
+        gen_config.set_return_timestamps(false).map_err(|e| {
+            TranscribeError::InferenceFailed(format!(
+                "Failed to set return_timestamps: {}",
+                e
+            ))
+        })?;
+
+        let results = pipeline.generate(samples, Some(&gen_config)).map_err(|e| {
+            TranscribeError::InferenceFailed(format!(
+                "OpenVINO GenAI inference failed: {}",
+                e
+            ))
+        })?;
+
+        let text = results.get_string().map_err(|e| {
+            TranscribeError::InferenceFailed(format!(
+                "Failed to get transcription string: {}",
+                e
+            ))
+        })?;
 
         let result = text.trim().to_string();
 
+        // Log performance metrics if available
+        if let Ok(metrics) = results.get_perf_metrics() {
+            if let Ok((gen_dur, _)) = metrics.get_generate_duration() {
+                tracing::debug!("GenAI generate duration: {:.0}ms", gen_dur);
+            }
+        }
+
         tracing::info!(
-            "OpenVINO Whisper transcription completed in {:.2}s: {:?}",
+            "OpenVINO GenAI transcription completed in {:.2}s: {:?}",
             start.elapsed().as_secs_f32(),
             if result.chars().count() > 50 {
                 format!("{}...", result.chars().take(50).collect::<String>())
@@ -652,6 +298,42 @@ impl Transcriber for OpenVinoTranscriber {
 
         Ok(result)
     }
+}
+
+/// Find the libopenvino_genai_c shared library in a directory.
+fn find_genai_library(dir: &str) -> Result<PathBuf, TranscribeError> {
+    let dir_path = PathBuf::from(dir);
+    if !dir_path.is_dir() {
+        return Err(TranscribeError::InitFailed(format!(
+            "openvino_dir is not a directory: {}",
+            dir
+        )));
+    }
+
+    let lib_name = format!("{}openvino_genai_c{}", std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX);
+    let direct = dir_path.join(&lib_name);
+    if direct.is_file() {
+        return Ok(direct);
+    }
+
+    // Search known subdirectories
+    for subdir in &[
+        "runtime/lib/intel64",
+        "runtime/lib/intel64/Release",
+        ".",
+    ] {
+        let path = dir_path.join(subdir).join(&lib_name);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+
+    Err(TranscribeError::InitFailed(format!(
+        "{} not found in {}\n  \
+         Set openvino_dir to the directory containing the library,\n  \
+         or to the OpenVINO installation root.",
+        lib_name, dir
+    )))
 }
 
 /// Resolve model name to directory path
@@ -704,12 +386,7 @@ fn resolve_model_path(model: &str, quantized: bool) -> Result<PathBuf, Transcrib
         .map(|p| format!("  - {}", p.display()))
         .collect();
 
-    let hf_repo = if model.contains('.') {
-        // e.g., "base.en" -> "whisper-base.en-int8-ov"
-        format!("whisper-{}{}-ov", model, quant_suffix)
-    } else {
-        format!("whisper-{}{}-ov", model, quant_suffix)
-    };
+    let hf_repo = format!("whisper-{}{}-ov", model, quant_suffix);
 
     Err(TranscribeError::ModelNotFound(format!(
         "OpenVINO Whisper model '{}' not found. Looked in:\n{}\n\n  \
@@ -726,46 +403,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_language_token_ids() {
-        assert_eq!(language_token_id("en"), 50259);
-        assert_eq!(language_token_id("zh"), 50260);
-        assert_eq!(language_token_id("fr"), 50265);
-        assert_eq!(language_token_id("ja"), 50266);
-    }
-
-    #[test]
-    fn test_unknown_language_defaults_to_english() {
-        assert_eq!(language_token_id("xx"), 50259); // Should default to English
-    }
-
-    #[test]
-    fn test_decoder_prompt_transcribe() {
-        let config = OpenVinoConfig {
-            language: "en".to_string(),
-            translate: false,
-            ..OpenVinoConfig::default()
-        };
-        // We can't construct a full transcriber without models, but we can test the prompt logic
-        let lang_token = language_token_id(&config.language);
-        let task_token = TRANSCRIBE_TOKEN;
-        let prompt = vec![SOT_TOKEN, lang_token, task_token, NO_TIMESTAMPS_TOKEN];
-        assert_eq!(prompt, vec![50258, 50259, 50359, 50363]);
-    }
-
-    #[test]
-    fn test_decoder_prompt_translate() {
-        let config = OpenVinoConfig {
-            language: "fr".to_string(),
-            translate: true,
-            ..OpenVinoConfig::default()
-        };
-        let lang_token = language_token_id(&config.language);
-        let task_token = TRANSLATE_TOKEN;
-        let prompt = vec![SOT_TOKEN, lang_token, task_token, NO_TIMESTAMPS_TOKEN];
-        assert_eq!(prompt, vec![50258, 50265, 50358, 50363]);
-    }
-
-    #[test]
     fn test_resolve_model_path_absolute() {
         let result = resolve_model_path("/nonexistent/path", false);
         assert!(result.is_err());
@@ -780,9 +417,9 @@ mod tests {
         assert!(err.contains("huggingface.co"));
     }
 
-    /// Real-life integration test: loads a WAV file and transcribes with OpenVINO.
-    /// Requires: model files in ~/.local/share/voxtype/models/, OpenVINO libs, NPU device.
-    /// Run with: OPENVINO_INSTALL_DIR=... cargo test --features openvino-whisper -- test_openvino_real --nocapture --ignored
+    /// Real-life integration test: loads a WAV file and transcribes with OpenVINO GenAI.
+    /// Requires: model files in ~/.local/share/voxtype/models/, OpenVINO GenAI libs, NPU device.
+    /// Run with: cargo test --features openvino-whisper -- test_openvino_real --nocapture --ignored
     #[test]
     #[ignore]
     fn test_openvino_real_transcription() {
@@ -804,21 +441,28 @@ mod tests {
             .samples::<i16>()
             .map(|s| s.unwrap() as f32 / 32768.0)
             .collect();
-        println!("Loaded {} samples ({:.2}s)", samples.len(), samples.len() as f32 / 16000.0);
+        println!(
+            "Loaded {} samples ({:.2}s)",
+            samples.len(),
+            samples.len() as f32 / 16000.0
+        );
 
-        // Create transcriber with NPU device
+        // Create transcriber - use env vars for device and model override
+        let device = std::env::var("VOXTYPE_OPENVINO_DEVICE").unwrap_or_else(|_| "CPU".to_string());
+        let model = std::env::var("VOXTYPE_OPENVINO_MODEL").unwrap_or_else(|_| "base".to_string());
         let config = OpenVinoConfig {
-            model: "base.en".to_string(),
-            device: "NPU".to_string(),
+            model,
+            device: device.clone(),
             quantized: true,
+            openvino_dir: std::env::var("VOXTYPE_OPENVINO_DIR").ok(),
             ..OpenVinoConfig::default()
         };
 
-        let transcriber = OpenVinoTranscriber::new(&config)
-            .expect("Failed to create OpenVINO transcriber");
+        let transcriber =
+            OpenVinoTranscriber::new(&config).expect("Failed to create OpenVINO transcriber");
 
-        // Prepare (compile models)
-        println!("Compiling models for NPU...");
+        // Prepare (create pipeline)
+        println!("Creating pipeline for NPU...");
         transcriber.prepare();
 
         // Transcribe
