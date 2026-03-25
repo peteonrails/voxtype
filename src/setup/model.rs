@@ -638,6 +638,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let is_dolphin_engine = matches!(config.engine, TranscriptionEngine::Dolphin);
     let is_omnilingual_engine = matches!(config.engine, TranscriptionEngine::Omnilingual);
     let is_cohere_engine = matches!(config.engine, TranscriptionEngine::Cohere);
+    let is_openvino_engine = matches!(config.engine, TranscriptionEngine::OpenVino);
     let current_whisper_model = &config.whisper.model;
     let current_parakeet_model = config.parakeet.as_ref().map(|p| p.model.as_str());
     let current_moonshine_model = config.moonshine.as_ref().map(|m| m.model.as_str());
@@ -646,6 +647,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let current_dolphin_model = config.dolphin.as_ref().map(|d| d.model.as_str());
     let current_omnilingual_model = config.omnilingual.as_ref().map(|o| o.model.as_str());
     let current_cohere_model = config.cohere.as_ref().map(|c| c.model.as_str());
+    let current_openvino_model = config.openvino.as_ref().map(|o| o.model.as_str());
     let parakeet_available = cfg!(feature = "parakeet");
     let moonshine_available = cfg!(feature = "moonshine");
     let sensevoice_available = cfg!(feature = "sensevoice");
@@ -653,6 +655,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let dolphin_available = cfg!(feature = "dolphin");
     let omnilingual_available = cfg!(feature = "omnilingual");
     let cohere_available = cfg!(feature = "cohere");
+    let openvino_available = cfg!(feature = "openvino-whisper");
     let whisper_count = MODELS.len();
     let parakeet_count = PARAKEET_MODELS.len();
     let moonshine_count = MOONSHINE_MODELS.len();
@@ -661,6 +664,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let dolphin_count = DOLPHIN_MODELS.len();
     let omnilingual_count = OMNILINGUAL_MODELS.len();
     let cohere_count = COHERE_MODELS.len();
+    let openvino_count = OPENVINO_MODELS.len();
 
     let available_count = |available: bool, count: usize| if available { count } else { 0 };
     let total_count = whisper_count
@@ -670,7 +674,8 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         + available_count(paraformer_available, paraformer_count)
         + available_count(dolphin_available, dolphin_count)
         + available_count(omnilingual_available, omnilingual_count)
-        + available_count(cohere_available, cohere_count);
+        + available_count(cohere_available, cohere_count)
+        + available_count(openvino_available, openvino_count);
 
     // --- Whisper Section ---
     println!("--- Whisper (OpenAI, 99+ languages) ---\n");
@@ -970,6 +975,45 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         println!("  \x1b[90m(not available - rebuild with --features cohere)\x1b[0m");
     }
 
+    // --- OpenVINO Section ---
+    let openvino_offset = cohere_offset + available_count(cohere_available, cohere_count);
+    println!("\n--- OpenVINO Whisper (Intel NPU/CPU/GPU via OpenVINO) ---\n");
+
+    if openvino_available {
+        for (i, model) in OPENVINO_MODELS.iter().enumerate() {
+            let model_path = models_dir.join(model.dir_name);
+            let installed = model_path.exists() && validate_openvino_model(&model_path).is_ok();
+
+            let is_current = is_openvino_engine && current_openvino_model == Some(model.name);
+            let star = if is_current { "*" } else { " " };
+
+            let status = if installed {
+                "\x1b[32m[installed]\x1b[0m"
+            } else {
+                ""
+            };
+
+            let lang = if model.name.contains(".en") {
+                "en"
+            } else {
+                "multi"
+            };
+
+            println!(
+                " {}[{:>2}] {:<28} (~{:>4} MB) {} - {} {}",
+                star,
+                openvino_offset + i + 1,
+                model.name,
+                model.size_mb,
+                lang,
+                model.description,
+                status
+            );
+        }
+    } else {
+        println!("  \x1b[90m(not available - rebuild with --features openvino-whisper)\x1b[0m");
+    }
+
     println!("\n  [ 0] Cancel\n");
 
     // Get user selection
@@ -1037,6 +1081,9 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     } else if cohere_available && selection <= cohere_offset + cohere_count {
         let idx = selection - cohere_offset;
         handle_cohere_selection(idx).await
+    } else if openvino_available && selection <= openvino_offset + openvino_count {
+        let idx = selection - openvino_offset;
+        handle_openvino_selection(idx).await
     } else {
         println!("\nInvalid selection.");
         Ok(())
@@ -1476,7 +1523,39 @@ pub fn list_installed() {
     }
 
     if !found {
-        println!("  No models installed.");
+        println!("  No Whisper models installed.");
+    }
+
+    // List installed OpenVINO models
+    println!("\nInstalled OpenVINO Whisper Models\n");
+    println!("=================================\n");
+
+    let mut openvino_found = false;
+
+    for model in OPENVINO_MODELS {
+        let model_path = models_dir.join(model.dir_name);
+
+        if model_path.exists() && validate_openvino_model(&model_path).is_ok() {
+            let size = std::fs::read_dir(&model_path)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .filter_map(|e| e.metadata().ok())
+                        .map(|m| m.len() as f64 / 1024.0 / 1024.0)
+                        .sum::<f64>()
+                })
+                .unwrap_or(0.0);
+
+            println!("  {} ({:.0} MB) - {}", model.name, size, model.description);
+            openvino_found = true;
+        }
+    }
+
+    if !openvino_found {
+        println!("  No OpenVINO models installed.");
+    }
+
+    if !found && !openvino_found {
         println!("\n  Run 'voxtype setup model' to download a model.");
     }
 }
@@ -2711,6 +2790,79 @@ fn validate_onnx_ctc_model(path: &Path) -> anyhow::Result<()> {
 }
 
 /// Generic handler for ONNX engine model selection (download/config/restart)
+/// Handle OpenVINO model selection (download/config)
+async fn handle_openvino_selection(selection: usize) -> anyhow::Result<()> {
+    let models_dir = Config::models_dir();
+
+    if selection == 0 || selection > OPENVINO_MODELS.len() {
+        println!("\nCancelled.");
+        return Ok(());
+    }
+
+    let model = &OPENVINO_MODELS[selection - 1];
+    let model_path = models_dir.join(model.dir_name);
+
+    // Check if already installed
+    if model_path.exists() && validate_openvino_model(&model_path).is_ok() {
+        println!("\nModel '{}' is already installed.\n", model.name);
+        println!("  [1] Set as default model (update config)");
+        println!("  [2] Re-download");
+        println!("  [0] Cancel\n");
+
+        print!("Select option [1]: ");
+        io::stdout().flush()?;
+
+        let mut choice = String::new();
+        io::stdin().read_line(&mut choice)?;
+        let choice = choice.trim();
+
+        match choice {
+            "" | "1" => {
+                update_config_openvino(model.name)?;
+                restart_daemon_if_running().await;
+                return Ok(());
+            }
+            "2" => {
+                // Continue to download below
+            }
+            _ => {
+                println!("Cancelled.");
+                return Ok(());
+            }
+        }
+    }
+
+    // Download the model
+    download_openvino_model(model.name)?;
+
+    // Update config and restart daemon
+    update_config_openvino(model.name)?;
+    restart_daemon_if_running().await;
+
+    Ok(())
+}
+
+/// Update config to use OpenVINO engine with a specific model (with output)
+fn update_config_openvino(model_name: &str) -> anyhow::Result<()> {
+    if let Some(config_path) = Config::default_path() {
+        if config_path.exists() {
+            let content = std::fs::read_to_string(&config_path)?;
+            let updated = update_openvino_in_config(&content, model_name);
+            std::fs::write(&config_path, updated)?;
+            print_success(&format!(
+                "Config updated: engine = \"openvino\", model = \"{}\"",
+                model_name
+            ));
+            Ok(())
+        } else {
+            print_info("No config file found. Run 'voxtype setup' first.");
+            Ok(())
+        }
+    } else {
+        anyhow::bail!("Could not determine config path")
+    }
+}
+
 async fn handle_onnx_engine_selection(
     engine_name: &str,
     models: Vec<(&str, &str, u32, &[(&str, &str)], &str)>,
