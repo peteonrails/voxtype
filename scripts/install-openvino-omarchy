@@ -2,7 +2,7 @@
 #
 # OpenVINO Installation Script for Omarchy
 #
-# Installs Intel OpenVINO with CPU, GPU, and NPU support on Arch Linux-based systems.
+# Installs Intel OpenVINO and OpenVINO GenAI with CPU, GPU, and NPU support on Arch Linux-based systems.
 # Tested on: Hurrican/Performance with Arc GPU and NPU
 #
 # Usage: install-openvino [OPTIONS]
@@ -231,6 +231,7 @@ install_openvino() {
         current_version=$(pip show openvino | grep Version | cut -d' ' -f2)
         warn "OpenVINO $current_version already installed"
         if ! confirm "Reinstall/upgrade?"; then
+            install_openvino_genai
             return 0
         fi
     fi
@@ -242,6 +243,33 @@ install_openvino() {
         success "OpenVINO $installed_version installed"
     else
         fatal "Failed to install OpenVINO"
+    fi
+
+    install_openvino_genai
+}
+
+install_openvino_genai() {
+    # Ensure virtual environment is activated
+    # shellcheck source=/dev/null
+    source "$VENV_PATH/bin/activate"
+
+    # Check if already installed
+    if pip show openvino-genai &> /dev/null; then
+        local current_version
+        current_version=$(pip show openvino-genai | grep Version | cut -d' ' -f2)
+        warn "OpenVINO GenAI $current_version already installed"
+        if ! confirm "Reinstall/upgrade?"; then
+            return 0
+        fi
+    fi
+
+    info "Installing OpenVINO GenAI via pip..."
+    if pip install --upgrade openvino-genai >> "$LOG_FILE" 2>&1; then
+        local installed_version
+        installed_version=$(pip show openvino-genai | grep Version | cut -d' ' -f2)
+        success "OpenVINO GenAI $installed_version installed"
+    else
+        fatal "Failed to install OpenVINO GenAI"
     fi
 }
 
@@ -434,6 +462,10 @@ verify_installation() {
         return 1
     fi
 
+    if ! pip show openvino-genai &> /dev/null; then
+        warn "OpenVINO GenAI not installed in virtual environment"
+    fi
+
     info "Running device detection..."
     echo ""
 
@@ -495,6 +527,17 @@ try:
         print(f"  {symbol} {dev}: {status}")
     print("=" * 50)
 
+    # Check for OpenVINO GenAI
+    print()
+    try:
+        import openvino_genai
+        genai_version = openvino_genai.__version__ if hasattr(openvino_genai, '__version__') else "(version unknown)"
+        print(f"  [OK] OpenVINO GenAI: {genai_version}")
+    except ImportError:
+        print("  [--] OpenVINO GenAI: Not installed")
+    except Exception as e:
+        print(f"  [--] OpenVINO GenAI: Error - {e}")
+
 except ImportError as e:
     print(f"ERROR: Failed to import OpenVINO: {e}")
     sys.exit(1)
@@ -522,13 +565,25 @@ PYEOF
 uninstall() {
     header "Uninstalling OpenVINO"
 
-    if ! confirm "This will remove the OpenVINO virtual environment and NPU driver. Continue?"; then
+    if ! confirm "This will remove OpenVINO, OpenVINO GenAI, the virtual environment, and NPU driver. Continue?"; then
         info "Uninstall cancelled"
         exit 0
     fi
 
-    # Remove virtual environment
+    # Remove openvino-genai from venv before removing the venv itself
     if [[ -d "$VENV_PATH" ]]; then
+        # shellcheck source=/dev/null
+        source "$VENV_PATH/bin/activate"
+        if pip show openvino-genai &> /dev/null; then
+            info "Removing OpenVINO GenAI..."
+            pip uninstall -y openvino-genai >> "$LOG_FILE" 2>&1 && success "OpenVINO GenAI removed" || warn "Failed to remove OpenVINO GenAI"
+        fi
+        if pip show openvino &> /dev/null; then
+            info "Removing OpenVINO..."
+            pip uninstall -y openvino >> "$LOG_FILE" 2>&1 && success "OpenVINO removed" || warn "Failed to remove OpenVINO"
+        fi
+        deactivate 2>/dev/null || true
+
         info "Removing virtual environment at $VENV_PATH"
         rm -rf "$VENV_PATH"
         success "Virtual environment removed"

@@ -3485,30 +3485,42 @@ dependencies = [
 ]
 
 [[package]]
-name = "openvino"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94957bde49dd820f68c962949115ba8d012c0fe3d604b7722de72b6bf3398724"
-dependencies = [
- "openvino-finder",
- "openvino-sys",
-]
-
-[[package]]
 name = "openvino-finder"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf255f8d09ab4ab7f6fd08326fa5df9f875b57807ee8eb1702ce1a88db7d0390"
+checksum = "b0bc7fe2de763ebbf43d49bafd42a604d13e70f5030f1060d07dbd7b2d4d1b58"
 dependencies = [
  "cfg-if",
  "log",
 ]
 
 [[package]]
-name = "openvino-sys"
-version = "0.9.1"
+name = "openvino-genai"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ac8d4a70a99d5afb7091e6c0b7c2b2bb509b6b3322877ccb97d2075553f9c01"
+checksum = "61e580e5e0e03d658d34653f6601488a3a726b55f699af474b92af8b26d823c5"
+dependencies = [
+ "openvino-finder",
+ "openvino-genai-sys",
+]
+
+[[package]]
+name = "openvino-genai-sys"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50f5705b891e0beca7ca6d81f2dcf1027cad1f42a814f9ec1fb1b083f567cbbc"
+dependencies = [
+ "env_logger",
+ "libloading 0.8.9",
+ "openvino-finder",
+ "openvino-sys",
+]
+
+[[package]]
+name = "openvino-sys"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89fdf449e2a4706e2a34bd602b7a2d86c92d61216cfef2b639ba1acbb68929a7"
 dependencies = [
  "env_logger",
  "libloading 0.8.9",
@@ -5395,7 +5407,7 @@ dependencies = [
  "nix 0.29.0",
  "notify",
  "num_cpus",
- "openvino",
+ "openvino-genai",
  "ort",
  "parakeet-rs",
  "pidlock",
