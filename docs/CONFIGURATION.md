@@ -1188,6 +1188,21 @@ Number of CPU threads for inference. Only applies when `device = "CPU"`.
 
 When `true`, loads the model only when recording starts. When `false`, keeps the model loaded for faster response.
 
+### openvino.openvino_dir
+
+**Type:** String (optional)
+**Default:** None (automatic discovery)
+**Environment variable:** `VOXTYPE_OPENVINO_DIR`
+
+Path to the OpenVINO installation directory containing shared libraries. When set, voxtype loads `libopenvino_genai_c.so` from this directory instead of relying on automatic discovery via `LD_LIBRARY_PATH`, `OPENVINO_INSTALL_DIR`, or system package paths.
+
+The library is searched in these subdirectories:
+- `<openvino_dir>/`
+- `<openvino_dir>/runtime/lib/intel64/`
+- `<openvino_dir>/runtime/lib/intel64/Release/`
+
+This is useful when you have a custom OpenVINO build or an installation in a non-standard location (e.g., a pip install or a manual extract).
+
 **Example:**
 ```toml
 engine = "openvino"
@@ -1198,6 +1213,7 @@ device = "NPU"
 quantized = true
 language = "en"
 on_demand_loading = false
+openvino_dir = "/opt/intel/openvino"
 ```
 
 ---

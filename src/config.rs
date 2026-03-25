@@ -1117,7 +1117,8 @@ impl Default for OmnilingualConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OpenVinoConfig {
     /// Model name or path to directory containing OpenVINO IR model files.
-    /// Short names: "base.en" (default), "small.en", "tiny", "base", "small", "medium", "large-v3"
+    /// Names with quantization: "base.en-int8", "small.en-fp16", "tiny-int4", etc.
+    /// Short names also work: "base.en" (uses `quantized` to pick int8/fp16)
     pub model: String,
 
     /// OpenVINO device to run inference on (default: "NPU")

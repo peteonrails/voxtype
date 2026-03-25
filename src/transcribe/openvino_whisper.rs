@@ -80,6 +80,13 @@ impl OpenVinoTranscriber {
     fn load_library(config: &OpenVinoConfig) -> Result<(), TranscribeError> {
         if let Some(ref dir) = config.openvino_dir {
             let lib_path = find_genai_library(dir)?;
+            // Preload OpenVINO dependency libraries with RTLD_GLOBAL so that dlopen
+            // can resolve the DT_NEEDED entries in libopenvino_genai_c.so. The OpenVINO
+            // shared libraries don't set RPATH/RUNPATH, and glibc caches LD_LIBRARY_PATH
+            // at startup so setting it at runtime has no effect.
+            if let Some(lib_dir) = lib_path.parent() {
+                preload_openvino_deps(lib_dir);
+            }
             tracing::info!("Loading OpenVINO GenAI library from: {}", lib_path.display());
             openvino_genai::load_from(&lib_path).map_err(|e| {
                 TranscribeError::InitFailed(format!(
@@ -336,7 +343,49 @@ fn find_genai_library(dir: &str) -> Result<PathBuf, TranscribeError> {
     )))
 }
 
-/// Resolve model name to directory path
+/// Preload OpenVINO dependency libraries from the given directory using
+/// `RTLD_LAZY | RTLD_GLOBAL`. This makes their symbols globally available so
+/// that the subsequent dlopen of `libopenvino_genai_c.so` can resolve its
+/// DT_NEEDED entries without requiring LD_LIBRARY_PATH to be set before
+/// process startup.
+fn preload_openvino_deps(lib_dir: &std::path::Path) {
+    use std::ffi::CString;
+
+    // Order matters: libopenvino.so first (base dependency), then the others.
+    let deps = ["libopenvino.so", "libopenvino_c.so", "libopenvino_genai.so"];
+
+    for name in &deps {
+        let path = lib_dir.join(name);
+        if !path.exists() {
+            continue;
+        }
+        let Some(c_path) = path.to_str().and_then(|s| CString::new(s).ok()) else {
+            continue;
+        };
+        let handle =
+            unsafe { libc::dlopen(c_path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL) };
+        if handle.is_null() {
+            tracing::warn!("Failed to preload {}", path.display());
+        } else {
+            tracing::debug!("Preloaded {}", path.display());
+            // Intentionally not calling dlclose — keep symbols available.
+        }
+    }
+}
+
+/// Check if a model name already includes a quantization suffix (-int4, -int8, -fp16)
+fn has_quant_suffix(name: &str) -> bool {
+    name.ends_with("-int4") || name.ends_with("-int8") || name.ends_with("-fp16")
+}
+
+/// Resolve model name to directory path.
+///
+/// Handles several naming conventions:
+/// - Absolute paths: used directly
+/// - Full dir names: "openvino-whisper-base.en-int8-ov"
+/// - Short names with quantization: "base.en-int8" (from `voxtype setup model`)
+/// - Short names without quantization: "base.en" (uses `quantized` flag)
+/// - Distil models: "distil-large-v2-int8" → "openvino-distil-whisper-large-v2-int8-ov"
 fn resolve_model_path(model: &str, quantized: bool) -> Result<PathBuf, TranscribeError> {
     // If it's already an absolute path, use it directly
     let path = PathBuf::from(model);
@@ -344,35 +393,52 @@ fn resolve_model_path(model: &str, quantized: bool) -> Result<PathBuf, Transcrib
         return Ok(path);
     }
 
-    // Build directory name variants to search for
-    let quant_suffix = if quantized { "-int8" } else { "-fp16" };
-    let base_name = if model.starts_with("openvino-whisper-") {
-        model.to_string()
-    } else if model.starts_with("whisper-") {
-        format!("openvino-{}{}-ov", model, quant_suffix)
+    // If the model name already has a quantization suffix, don't add another one.
+    // Names from `voxtype setup model` include quantization (e.g., "base.en-int8").
+    let already_quantized = has_quant_suffix(model);
+    let quant_suffix = if already_quantized {
+        ""
+    } else if quantized {
+        "-int8"
     } else {
-        format!("openvino-whisper-{}{}-ov", model, quant_suffix)
+        "-fp16"
     };
 
-    // Also try without quantization suffix (user may have named it simply)
-    let simple_name = if model.starts_with("openvino-whisper-") {
-        model.to_string()
+    // Build candidate directory names.
+    // Models from setup have names like "base.en-int8" → dir "openvino-whisper-base.en-int8-ov"
+    // Distil models: "distil-large-v2-int8" → dir "openvino-distil-whisper-large-v2-int8-ov"
+    let mut candidates: Vec<String> = Vec::new();
+
+    if model.starts_with("openvino-") {
+        // Already a full directory name (e.g., "openvino-whisper-base.en-int8-ov")
+        candidates.push(model.to_string());
     } else if model.starts_with("whisper-") {
-        format!("openvino-{}", model)
+        // e.g., "whisper-base.en-int8" → "openvino-whisper-base.en-int8-ov"
+        candidates.push(format!("openvino-{}{}-ov", model, quant_suffix));
+        candidates.push(format!("openvino-{}-ov", model));
+    } else if let Some(rest) = model.strip_prefix("distil-") {
+        // e.g., "distil-large-v2-int8" → "openvino-distil-whisper-large-v2-int8-ov"
+        candidates.push(format!("openvino-distil-whisper-{}{}-ov", rest, quant_suffix));
+        candidates.push(format!("openvino-distil-whisper-{}-ov", rest));
+        // Also try the non-distil pattern in case naming differs
+        candidates.push(format!("openvino-whisper-{}{}-ov", model, quant_suffix));
+        candidates.push(format!("openvino-whisper-{}-ov", model));
     } else {
-        format!("openvino-whisper-{}", model)
-    };
+        // Short name: "base.en-int8" or "base.en"
+        candidates.push(format!("openvino-whisper-{}{}-ov", model, quant_suffix));
+        candidates.push(format!("openvino-whisper-{}-ov", model));
+    }
 
     // Search locations
     let models_dir = crate::config::Config::models_dir();
-    let search_paths = [
-        models_dir.join(&base_name),
-        models_dir.join(&simple_name),
-        PathBuf::from(&base_name),
-        PathBuf::from(&simple_name),
-        PathBuf::from("models").join(&base_name),
-        PathBuf::from("models").join(&simple_name),
-    ];
+    let mut search_paths: Vec<PathBuf> = Vec::new();
+    for candidate in &candidates {
+        search_paths.push(models_dir.join(candidate));
+    }
+    for candidate in &candidates {
+        search_paths.push(PathBuf::from(candidate));
+        search_paths.push(PathBuf::from("models").join(candidate));
+    }
 
     for search_path in &search_paths {
         if search_path.exists() && search_path.join("openvino_encoder_model.xml").exists() {
@@ -386,7 +452,12 @@ fn resolve_model_path(model: &str, quantized: bool) -> Result<PathBuf, Transcrib
         .map(|p| format!("  - {}", p.display()))
         .collect();
 
-    let hf_repo = format!("whisper-{}{}-ov", model, quant_suffix);
+    let model_with_quant = if already_quantized {
+        model.to_string()
+    } else {
+        format!("{}{}", model, quant_suffix)
+    };
+    let hf_repo = format!("whisper-{}-ov", model_with_quant);
 
     Err(TranscribeError::ModelNotFound(format!(
         "OpenVINO Whisper model '{}' not found. Looked in:\n{}\n\n  \
@@ -415,6 +486,93 @@ mod tests {
         let err = result.unwrap_err().to_string();
         assert!(err.contains("not found"));
         assert!(err.contains("huggingface.co"));
+    }
+
+    #[test]
+    fn test_has_quant_suffix() {
+        assert!(has_quant_suffix("base.en-int8"));
+        assert!(has_quant_suffix("tiny-int4"));
+        assert!(has_quant_suffix("large-v3-fp16"));
+        assert!(has_quant_suffix("distil-large-v2-int8"));
+        assert!(!has_quant_suffix("base.en"));
+        assert!(!has_quant_suffix("large-v3"));
+        assert!(!has_quant_suffix("tiny"));
+    }
+
+    #[test]
+    fn test_resolve_no_double_quant_suffix() {
+        // When model name already has quantization (from `voxtype setup model`),
+        // should NOT produce doubled suffixes like "base.en-int8-int8"
+        let result = resolve_model_path("base.en-int8", true);
+        match result {
+            Ok(path) => {
+                // Model exists on disk - verify it resolved to the right dir
+                let dir_name = path.file_name().unwrap().to_str().unwrap();
+                assert_eq!(dir_name, "openvino-whisper-base.en-int8-ov");
+            }
+            Err(err) => {
+                let err = err.to_string();
+                assert!(
+                    err.contains("openvino-whisper-base.en-int8-ov"),
+                    "Expected 'openvino-whisper-base.en-int8-ov' in error, got: {}",
+                    err
+                );
+                assert!(
+                    !err.contains("base.en-int8-int8"),
+                    "Found doubled quantization suffix in error: {}",
+                    err
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_resolve_short_name_gets_quant_suffix() {
+        // Short name without quantization should get suffix from `quantized` flag
+        let result = resolve_model_path("base.en", true);
+        match result {
+            Ok(path) => {
+                let dir_name = path.file_name().unwrap().to_str().unwrap();
+                assert_eq!(dir_name, "openvino-whisper-base.en-int8-ov");
+            }
+            Err(err) => {
+                let err = err.to_string();
+                assert!(
+                    err.contains("openvino-whisper-base.en-int8-ov"),
+                    "Expected int8 suffix for quantized=true, got: {}",
+                    err
+                );
+            }
+        }
+
+        // Use a model name unlikely to exist on disk to test fp16 path
+        let result = resolve_model_path("nonexistent-model", false);
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("openvino-whisper-nonexistent-model-fp16-ov"),
+            "Expected fp16 suffix for quantized=false, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_resolve_distil_model_path() {
+        // Use a distil model that won't exist on disk
+        let result = resolve_model_path("distil-large-v2-int4", true);
+        match result {
+            Ok(path) => {
+                let dir_name = path.file_name().unwrap().to_str().unwrap();
+                assert_eq!(dir_name, "openvino-distil-whisper-large-v2-int4-ov");
+            }
+            Err(err) => {
+                let err = err.to_string();
+                assert!(
+                    err.contains("openvino-distil-whisper-large-v2-int4-ov"),
+                    "Expected distil dir pattern in error, got: {}",
+                    err
+                );
+            }
+        }
     }
 
     /// Real-life integration test: loads a WAV file and transcribes with OpenVINO GenAI.
