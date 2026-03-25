@@ -1785,6 +1785,16 @@ dependencies = [
  "env_logger",
  "libloading 0.8.9",
  "openvino-finder",
+ "openvino-sys",
+]
+
+[[package]]
+name = "openvino-sys"
+version = "0.9.1"
+dependencies = [
+ "env_logger",
+ "libloading 0.8.9",
+ "openvino-finder",
 ]
 
 [[package]]

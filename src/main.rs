@@ -307,6 +307,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     if let Some(cmd) = cli.pre_output_command {
+
         config.output.pre_output_command = Some(cmd);
     }
     if let Some(cmd) = cli.post_output_command {

@@ -2341,7 +2341,7 @@ fn update_engine_in_config(config: &str, engine_name: &str, model_name: &str) ->
 // --- OpenVINO Whisper Models ---
 
 struct OpenVinoModelInfo {
-    /// Short config name (e.g., "base.en", "small.en")
+    /// Short config name (e.g., "base.en-int8", "small-fp16")
     name: &'static str,
     /// Directory name under models/
     dir_name: &'static str,
@@ -2349,27 +2349,113 @@ struct OpenVinoModelInfo {
     description: &'static str,
     /// Quantization type
     quantization: &'static str,
-    /// Files to download: (repo_path, local_filename)
-    files: &'static [(&'static str, &'static str)],
     huggingface_repo: &'static str,
 }
 
+/// Files common to all OpenVINO Whisper model repos
+const OPENVINO_MODEL_FILES: &[&str] = &[
+    "openvino_encoder_model.xml",
+    "openvino_encoder_model.bin",
+    "openvino_decoder_model.xml",
+    "openvino_decoder_model.bin",
+    "openvino_tokenizer.xml",
+    "openvino_tokenizer.bin",
+    "openvino_detokenizer.xml",
+    "openvino_detokenizer.bin",
+    "tokenizer.json",
+    "config.json",
+    "generation_config.json",
+];
+
 const OPENVINO_MODELS: &[OpenVinoModelInfo] = &[
+    // --- Tiny models ---
+    OpenVinoModelInfo {
+        name: "tiny-int4",
+        dir_name: "openvino-whisper-tiny-int4-ov",
+        size_mb: 25,
+        description: "Multilingual, int4 quantized (smallest)",
+        quantization: "int4",
+        huggingface_repo: "OpenVINO/whisper-tiny-int4-ov",
+    },
+    OpenVinoModelInfo {
+        name: "tiny-int8",
+        dir_name: "openvino-whisper-tiny-int8-ov",
+        size_mb: 50,
+        description: "Multilingual, int8 quantized",
+        quantization: "int8",
+        huggingface_repo: "OpenVINO/whisper-tiny-int8-ov",
+    },
+    OpenVinoModelInfo {
+        name: "tiny-fp16",
+        dir_name: "openvino-whisper-tiny-fp16-ov",
+        size_mb: 80,
+        description: "Multilingual, fp16",
+        quantization: "fp16",
+        huggingface_repo: "OpenVINO/whisper-tiny-fp16-ov",
+    },
+    OpenVinoModelInfo {
+        name: "tiny.en-int4",
+        dir_name: "openvino-whisper-tiny.en-int4-ov",
+        size_mb: 25,
+        description: "English, int4 quantized (smallest)",
+        quantization: "int4",
+        huggingface_repo: "OpenVINO/whisper-tiny.en-int4-ov",
+    },
+    OpenVinoModelInfo {
+        name: "tiny.en-int8",
+        dir_name: "openvino-whisper-tiny.en-int8-ov",
+        size_mb: 50,
+        description: "English, int8 quantized",
+        quantization: "int8",
+        huggingface_repo: "OpenVINO/whisper-tiny.en-int8-ov",
+    },
+    OpenVinoModelInfo {
+        name: "tiny.en-fp16",
+        dir_name: "openvino-whisper-tiny.en-fp16-ov",
+        size_mb: 80,
+        description: "English, fp16",
+        quantization: "fp16",
+        huggingface_repo: "OpenVINO/whisper-tiny.en-fp16-ov",
+    },
+    // --- Base models ---
+    OpenVinoModelInfo {
+        name: "base-int4",
+        dir_name: "openvino-whisper-base-int4-ov",
+        size_mb: 55,
+        description: "Multilingual, int4 quantized",
+        quantization: "int4",
+        huggingface_repo: "OpenVINO/whisper-base-int4-ov",
+    },
+    OpenVinoModelInfo {
+        name: "base-int8",
+        dir_name: "openvino-whisper-base-int8-ov",
+        size_mb: 100,
+        description: "Multilingual, int8 quantized",
+        quantization: "int8",
+        huggingface_repo: "OpenVINO/whisper-base-int8-ov",
+    },
+    OpenVinoModelInfo {
+        name: "base-fp16",
+        dir_name: "openvino-whisper-base-fp16-ov",
+        size_mb: 145,
+        description: "Multilingual, fp16",
+        quantization: "fp16",
+        huggingface_repo: "OpenVINO/whisper-base-fp16-ov",
+    },
+    OpenVinoModelInfo {
+        name: "base.en-int4",
+        dir_name: "openvino-whisper-base.en-int4-ov",
+        size_mb: 55,
+        description: "English, int4 quantized",
+        quantization: "int4",
+        huggingface_repo: "OpenVINO/whisper-base.en-int4-ov",
+    },
     OpenVinoModelInfo {
         name: "base.en-int8",
         dir_name: "openvino-whisper-base.en-int8-ov",
         size_mb: 100,
         description: "English, int8 quantized (best for NPU)",
         quantization: "int8",
-        files: &[
-            ("openvino_encoder_model.xml", "openvino_encoder_model.xml"),
-            ("openvino_encoder_model.bin", "openvino_encoder_model.bin"),
-            ("openvino_decoder_model.xml", "openvino_decoder_model.xml"),
-            ("openvino_decoder_model.bin", "openvino_decoder_model.bin"),
-            ("tokenizer.json", "tokenizer.json"),
-            ("config.json", "config.json"),
-            ("generation_config.json", "generation_config.json"),
-        ],
         huggingface_repo: "OpenVINO/whisper-base.en-int8-ov",
     },
     OpenVinoModelInfo {
@@ -2378,50 +2464,114 @@ const OPENVINO_MODELS: &[OpenVinoModelInfo] = &[
         size_mb: 145,
         description: "English, fp16 (higher accuracy)",
         quantization: "fp16",
-        files: &[
-            ("openvino_encoder_model.xml", "openvino_encoder_model.xml"),
-            ("openvino_encoder_model.bin", "openvino_encoder_model.bin"),
-            ("openvino_decoder_model.xml", "openvino_decoder_model.xml"),
-            ("openvino_decoder_model.bin", "openvino_decoder_model.bin"),
-            ("tokenizer.json", "tokenizer.json"),
-            ("config.json", "config.json"),
-            ("generation_config.json", "generation_config.json"),
-        ],
         huggingface_repo: "OpenVINO/whisper-base.en-fp16-ov",
+    },
+    // --- Small models ---
+    OpenVinoModelInfo {
+        name: "small-int4",
+        dir_name: "openvino-whisper-small-int4-ov",
+        size_mb: 160,
+        description: "Multilingual, int4 quantized",
+        quantization: "int4",
+        huggingface_repo: "OpenVINO/whisper-small-int4-ov",
+    },
+    OpenVinoModelInfo {
+        name: "small-int8",
+        dir_name: "openvino-whisper-small-int8-ov",
+        size_mb: 300,
+        description: "Multilingual, int8 quantized",
+        quantization: "int8",
+        huggingface_repo: "OpenVINO/whisper-small-int8-ov",
+    },
+    OpenVinoModelInfo {
+        name: "small-fp16",
+        dir_name: "openvino-whisper-small-fp16-ov",
+        size_mb: 470,
+        description: "Multilingual, fp16",
+        quantization: "fp16",
+        huggingface_repo: "OpenVINO/whisper-small-fp16-ov",
+    },
+    OpenVinoModelInfo {
+        name: "small.en-int4",
+        dir_name: "openvino-whisper-small.en-int4-ov",
+        size_mb: 160,
+        description: "English, int4 quantized",
+        quantization: "int4",
+        huggingface_repo: "OpenVINO/whisper-small.en-int4-ov",
     },
     OpenVinoModelInfo {
         name: "small.en-int8",
         dir_name: "openvino-whisper-small.en-int8-ov",
         size_mb: 300,
-        description: "English, int8 quantized (better accuracy, NPU)",
+        description: "English, int8 quantized",
         quantization: "int8",
-        files: &[
-            ("openvino_encoder_model.xml", "openvino_encoder_model.xml"),
-            ("openvino_encoder_model.bin", "openvino_encoder_model.bin"),
-            ("openvino_decoder_model.xml", "openvino_decoder_model.xml"),
-            ("openvino_decoder_model.bin", "openvino_decoder_model.bin"),
-            ("tokenizer.json", "tokenizer.json"),
-            ("config.json", "config.json"),
-            ("generation_config.json", "generation_config.json"),
-        ],
         huggingface_repo: "OpenVINO/whisper-small.en-int8-ov",
     },
     OpenVinoModelInfo {
-        name: "base-int8",
-        dir_name: "openvino-whisper-base-int8-ov",
-        size_mb: 100,
-        description: "Multilingual (99 langs), int8 quantized",
+        name: "small.en-fp16",
+        dir_name: "openvino-whisper-small.en-fp16-ov",
+        size_mb: 470,
+        description: "English, fp16",
+        quantization: "fp16",
+        huggingface_repo: "OpenVINO/whisper-small.en-fp16-ov",
+    },
+    // --- Medium models ---
+    OpenVinoModelInfo {
+        name: "medium-int4",
+        dir_name: "openvino-whisper-medium-int4-ov",
+        size_mb: 400,
+        description: "Multilingual, int4 quantized",
+        quantization: "int4",
+        huggingface_repo: "OpenVINO/whisper-medium-int4-ov",
+    },
+    OpenVinoModelInfo {
+        name: "medium-int8",
+        dir_name: "openvino-whisper-medium-int8-ov",
+        size_mb: 780,
+        description: "Multilingual, int8 quantized",
         quantization: "int8",
-        files: &[
-            ("openvino_encoder_model.xml", "openvino_encoder_model.xml"),
-            ("openvino_encoder_model.bin", "openvino_encoder_model.bin"),
-            ("openvino_decoder_model.xml", "openvino_decoder_model.xml"),
-            ("openvino_decoder_model.bin", "openvino_decoder_model.bin"),
-            ("tokenizer.json", "tokenizer.json"),
-            ("config.json", "config.json"),
-            ("generation_config.json", "generation_config.json"),
-        ],
-        huggingface_repo: "OpenVINO/whisper-base-int8-ov",
+        huggingface_repo: "OpenVINO/whisper-medium-int8-ov",
+    },
+    OpenVinoModelInfo {
+        name: "medium-fp16",
+        dir_name: "openvino-whisper-medium-fp16-ov",
+        size_mb: 1500,
+        description: "Multilingual, fp16",
+        quantization: "fp16",
+        huggingface_repo: "OpenVINO/whisper-medium-fp16-ov",
+    },
+    OpenVinoModelInfo {
+        name: "medium.en-int4",
+        dir_name: "openvino-whisper-medium.en-int4-ov",
+        size_mb: 400,
+        description: "English, int4 quantized",
+        quantization: "int4",
+        huggingface_repo: "OpenVINO/whisper-medium.en-int4-ov",
+    },
+    OpenVinoModelInfo {
+        name: "medium.en-int8",
+        dir_name: "openvino-whisper-medium.en-int8-ov",
+        size_mb: 780,
+        description: "English, int8 quantized",
+        quantization: "int8",
+        huggingface_repo: "OpenVINO/whisper-medium.en-int8-ov",
+    },
+    OpenVinoModelInfo {
+        name: "medium.en-fp16",
+        dir_name: "openvino-whisper-medium.en-fp16-ov",
+        size_mb: 1500,
+        description: "English, fp16",
+        quantization: "fp16",
+        huggingface_repo: "OpenVINO/whisper-medium.en-fp16-ov",
+    },
+    // --- Large-v3 models ---
+    OpenVinoModelInfo {
+        name: "large-v3-int4",
+        dir_name: "openvino-whisper-large-v3-int4-ov",
+        size_mb: 850,
+        description: "Multilingual, best accuracy, int4 quantized",
+        quantization: "int4",
+        huggingface_repo: "OpenVINO/whisper-large-v3-int4-ov",
     },
     OpenVinoModelInfo {
         name: "large-v3-int8",
@@ -2429,16 +2579,64 @@ const OPENVINO_MODELS: &[OpenVinoModelInfo] = &[
         size_mb: 1600,
         description: "Multilingual, best accuracy, int8 quantized",
         quantization: "int8",
-        files: &[
-            ("openvino_encoder_model.xml", "openvino_encoder_model.xml"),
-            ("openvino_encoder_model.bin", "openvino_encoder_model.bin"),
-            ("openvino_decoder_model.xml", "openvino_decoder_model.xml"),
-            ("openvino_decoder_model.bin", "openvino_decoder_model.bin"),
-            ("tokenizer.json", "tokenizer.json"),
-            ("config.json", "config.json"),
-            ("generation_config.json", "generation_config.json"),
-        ],
         huggingface_repo: "OpenVINO/whisper-large-v3-int8-ov",
+    },
+    OpenVinoModelInfo {
+        name: "large-v3-fp16",
+        dir_name: "openvino-whisper-large-v3-fp16-ov",
+        size_mb: 3100,
+        description: "Multilingual, best accuracy, fp16",
+        quantization: "fp16",
+        huggingface_repo: "OpenVINO/whisper-large-v3-fp16-ov",
+    },
+    // --- Distil-whisper models (distilled, faster) ---
+    OpenVinoModelInfo {
+        name: "distil-large-v2-int4",
+        dir_name: "openvino-distil-whisper-large-v2-int4-ov",
+        size_mb: 500,
+        description: "Distilled large-v2, int4 quantized (fast)",
+        quantization: "int4",
+        huggingface_repo: "OpenVINO/distil-whisper-large-v2-int4-ov",
+    },
+    OpenVinoModelInfo {
+        name: "distil-large-v2-int8",
+        dir_name: "openvino-distil-whisper-large-v2-int8-ov",
+        size_mb: 950,
+        description: "Distilled large-v2, int8 quantized (fast)",
+        quantization: "int8",
+        huggingface_repo: "OpenVINO/distil-whisper-large-v2-int8-ov",
+    },
+    OpenVinoModelInfo {
+        name: "distil-large-v2-fp16",
+        dir_name: "openvino-distil-whisper-large-v2-fp16-ov",
+        size_mb: 1800,
+        description: "Distilled large-v2, fp16 (fast)",
+        quantization: "fp16",
+        huggingface_repo: "OpenVINO/distil-whisper-large-v2-fp16-ov",
+    },
+    OpenVinoModelInfo {
+        name: "distil-large-v3-int4",
+        dir_name: "openvino-distil-whisper-large-v3-int4-ov",
+        size_mb: 400,
+        description: "Distilled large-v3, int4 quantized (fast)",
+        quantization: "int4",
+        huggingface_repo: "OpenVINO/distil-whisper-large-v3-int4-ov",
+    },
+    OpenVinoModelInfo {
+        name: "distil-large-v3-int8",
+        dir_name: "openvino-distil-whisper-large-v3-int8-ov",
+        size_mb: 750,
+        description: "Distilled large-v3, int8 quantized (fast)",
+        quantization: "int8",
+        huggingface_repo: "OpenVINO/distil-whisper-large-v3-int8-ov",
+    },
+    OpenVinoModelInfo {
+        name: "distil-large-v3-fp16",
+        dir_name: "openvino-distil-whisper-large-v3-fp16-ov",
+        size_mb: 1400,
+        description: "Distilled large-v3, fp16 (fast)",
+        quantization: "fp16",
+        huggingface_repo: "OpenVINO/distil-whisper-large-v3-fp16-ov",
     },
 ];
 
@@ -2462,24 +2660,24 @@ pub fn download_openvino_model(model_name: &str) -> anyhow::Result<()> {
     std::fs::create_dir_all(&model_path)?;
 
     println!(
-        "\nDownloading OpenVINO Whisper {} ({} MB, {})...\n",
+        "\nDownloading OpenVINO Whisper {} (~{} MB, {})...\n",
         model.name, model.size_mb, model.quantization
     );
 
-    for (repo_path, local_filename) in model.files {
-        let file_path = model_path.join(local_filename);
+    for filename in OPENVINO_MODEL_FILES {
+        let file_path = model_path.join(filename);
 
         if file_path.exists() {
-            println!("  {} already exists, skipping", local_filename);
+            println!("  {} already exists, skipping", filename);
             continue;
         }
 
         let url = format!(
             "https://huggingface.co/{}/resolve/main/{}",
-            model.huggingface_repo, repo_path
+            model.huggingface_repo, filename
         );
 
-        println!("Downloading {}...", local_filename);
+        println!("  Downloading {}...", filename);
 
         let status = Command::new("curl")
             .args([
@@ -2499,7 +2697,7 @@ pub fn download_openvino_model(model_name: &str) -> anyhow::Result<()> {
                     exit_status.code().unwrap_or(-1)
                 ));
                 let _ = std::fs::remove_file(&file_path);
-                anyhow::bail!("Download failed for {}", local_filename)
+                anyhow::bail!("Download failed for {}", filename)
             }
             Err(e) => {
                 print_failure(&format!("Failed to run curl: {}", e));
@@ -2510,14 +2708,10 @@ pub fn download_openvino_model(model_name: &str) -> anyhow::Result<()> {
     }
 
     // Validate critical files
-    let encoder_xml = model_path.join("openvino_encoder_model.xml");
-    let decoder_xml = model_path.join("openvino_decoder_model.xml");
-    let tokenizer = model_path.join("tokenizer.json");
-
-    if !encoder_xml.exists() || !decoder_xml.exists() || !tokenizer.exists() {
+    validate_openvino_model(&model_path).map_err(|e| {
         print_failure("Model download incomplete. Missing required files.");
-        anyhow::bail!("Model download incomplete");
-    }
+        e
+    })?;
 
     print_success(&format!(
         "OpenVINO model '{}' downloaded to {:?}",
@@ -2530,6 +2724,127 @@ pub fn download_openvino_model(model_name: &str) -> anyhow::Result<()> {
 /// Get list of valid OpenVINO model names
 pub fn valid_openvino_model_names() -> Vec<&'static str> {
     OPENVINO_MODELS.iter().map(|m| m.name).collect()
+}
+
+/// Check if a model name is an OpenVINO model
+pub fn is_openvino_model(name: &str) -> bool {
+    OPENVINO_MODELS.iter().any(|m| m.name == name)
+}
+
+/// Get the directory name for an OpenVINO model
+pub fn openvino_dir_name(name: &str) -> Option<&'static str> {
+    OPENVINO_MODELS
+        .iter()
+        .find(|m| m.name == name)
+        .map(|m| m.dir_name)
+}
+
+/// Validate that an OpenVINO model directory has required files
+pub fn validate_openvino_model(path: &std::path::Path) -> anyhow::Result<()> {
+    let required = [
+        "openvino_encoder_model.xml",
+        "openvino_encoder_model.bin",
+        "openvino_decoder_model.xml",
+        "openvino_decoder_model.bin",
+        "tokenizer.json",
+    ];
+    for file in &required {
+        if !path.join(file).exists() {
+            anyhow::bail!("Missing required file: {}", file);
+        }
+    }
+    Ok(())
+}
+
+/// Update config to use OpenVINO engine with a specific model
+pub fn set_openvino_config(model_name: &str) -> anyhow::Result<()> {
+    if let Some(config_path) = Config::default_path() {
+        if config_path.exists() {
+            let content = std::fs::read_to_string(&config_path)?;
+            let updated = update_openvino_in_config(&content, model_name);
+            std::fs::write(&config_path, updated)?;
+        }
+        Ok(())
+    } else {
+        anyhow::bail!("Could not determine config path")
+    }
+}
+
+/// Update the config to use OpenVINO engine with a specific model
+fn update_openvino_in_config(config: &str, model_name: &str) -> String {
+    let mut result = String::new();
+    let mut has_engine_line = false;
+    let mut has_openvino_section = false;
+    let mut in_openvino_section = false;
+    let mut openvino_model_updated = false;
+
+    for line in config.lines() {
+        let trimmed = line.trim();
+
+        // Track sections
+        if trimmed.starts_with('[') {
+            // If we were in openvino section and didn't update model, add it
+            if in_openvino_section && !openvino_model_updated {
+                result.push_str(&format!("model = \"{}\"\n", model_name));
+                openvino_model_updated = true;
+            }
+            in_openvino_section = trimmed == "[openvino]";
+            if in_openvino_section {
+                has_openvino_section = true;
+            }
+        }
+
+        // Update or add engine line at the top level
+        if trimmed.starts_with("engine") && !trimmed.starts_with('[') {
+            result.push_str("engine = \"openvino\"\n");
+            has_engine_line = true;
+        }
+        // Update model line in openvino section
+        else if in_openvino_section && trimmed.starts_with("model") {
+            result.push_str(&format!("model = \"{}\"\n", model_name));
+            openvino_model_updated = true;
+        } else {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+
+    // If we were in openvino section at EOF and didn't update model, add it
+    if in_openvino_section && !openvino_model_updated {
+        result.push_str(&format!("model = \"{}\"\n", model_name));
+    }
+
+    // Add engine line if not present
+    if !has_engine_line {
+        let mut new_result = String::new();
+        let mut engine_added = false;
+        for line in result.lines() {
+            let trimmed = line.trim();
+            if !engine_added
+                && !trimmed.is_empty()
+                && !trimmed.starts_with('#')
+                && !trimmed.starts_with("engine")
+            {
+                new_result.push_str("engine = \"openvino\"\n\n");
+                engine_added = true;
+            }
+            new_result.push_str(line);
+            new_result.push('\n');
+        }
+        result = new_result;
+    }
+
+    // Add [openvino] section if not present
+    if !has_openvino_section {
+        result.push_str(&format!("\n[openvino]\nmodel = \"{}\"\n", model_name));
+    }
+
+    // Remove trailing newline if original didn't have one
+    if !config.ends_with('\n') && result.ends_with('\n') {
+        result.pop();
+    }
+
+    result
 }
 
 #[cfg(test)]
