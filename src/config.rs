@@ -325,6 +325,10 @@ pub struct Config {
     #[serde(default)]
     pub omnilingual: Option<OmnilingualConfig>,
 
+    /// OpenVINO GenAI configuration (optional, only used when engine = "openvino-genai")
+    #[serde(default)]
+    pub openvino_genai: Option<OpenvinoGenaiConfig>,
+
     /// Text processing configuration (replacements, spoken punctuation)
     #[serde(default)]
     pub text: TextConfig,
@@ -1108,6 +1112,43 @@ impl Default for OmnilingualConfig {
     }
 }
 
+/// OpenVINO GenAI speech-to-text configuration
+/// Uses WhisperPipeline for hardware-accelerated transcription on CPU/GPU/NPU
+/// Requires: cargo build --features openvino-genai
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OpenvinoGenaiConfig {
+    /// Model name or path to OpenVINO IR model directory
+    pub model: String,
+
+    /// Device to run inference on: "CPU", "GPU", or "NPU"
+    #[serde(default)]
+    pub device: Option<String>,
+
+    /// Language code (e.g., "en", "fr", "zh") or None for auto-detect
+    #[serde(default)]
+    pub language: Option<String>,
+
+    /// Translate to English instead of transcribing
+    #[serde(default)]
+    pub translate: Option<bool>,
+
+    /// Load model on-demand when recording starts (true) or keep loaded (false)
+    #[serde(default = "default_on_demand_loading")]
+    pub on_demand_loading: bool,
+}
+
+impl Default for OpenvinoGenaiConfig {
+    fn default() -> Self {
+        Self {
+            model: "whisper-base-ov".to_string(),
+            device: Some("CPU".to_string()),
+            language: Some("en".to_string()),
+            translate: None,
+            on_demand_loading: false,
+        }
+    }
+}
+
 /// Transcription engine selection (which ASR technology to use)
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -1133,6 +1174,10 @@ pub enum TranscriptionEngine {
     /// Use Omnilingual (FunASR 50+ language CTC encoder via ONNX Runtime)
     /// Requires: cargo build --features omnilingual
     Omnilingual,
+    /// Use OpenVINO GenAI WhisperPipeline (Intel CPU/GPU/NPU acceleration)
+    /// Requires: cargo build --features openvino-genai
+    #[serde(rename = "openvino-genai")]
+    OpenvinoGenai,
 }
 
 /// VAD backend selection
@@ -1789,6 +1834,7 @@ impl Default for Config {
             paraformer: None,
             dolphin: None,
             omnilingual: None,
+            openvino_genai: None,
             text: TextConfig::default(),
             vad: VadConfig::default(),
             status: StatusConfig::default(),
@@ -1897,6 +1943,11 @@ impl Config {
                 .as_ref()
                 .map(|o| o.on_demand_loading)
                 .unwrap_or(false),
+            TranscriptionEngine::OpenvinoGenai => self
+                .openvino_genai
+                .as_ref()
+                .map(|o| o.on_demand_loading)
+                .unwrap_or(false),
         }
     }
 
@@ -1934,6 +1985,11 @@ impl Config {
                 .as_ref()
                 .map(|o| o.model.as_str())
                 .unwrap_or("omnilingual (not configured)"),
+            TranscriptionEngine::OpenvinoGenai => self
+                .openvino_genai
+                .as_ref()
+                .map(|o| o.model.as_str())
+                .unwrap_or("openvino-genai (not configured)"),
         }
     }
 
@@ -2002,6 +2058,7 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             "paraformer" => config.engine = TranscriptionEngine::Paraformer,
             "dolphin" => config.engine = TranscriptionEngine::Dolphin,
             "omnilingual" => config.engine = TranscriptionEngine::Omnilingual,
+            "openvino-genai" | "openvino" => config.engine = TranscriptionEngine::OpenvinoGenai,
             _ => tracing::warn!("Unknown VOXTYPE_ENGINE value: {}", engine),
         }
     }
