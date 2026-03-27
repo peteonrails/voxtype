@@ -1676,6 +1676,26 @@ Make it executable: `chmod +x ~/.config/voxtype/lm-studio-cleanup.sh`
 | Local LLMs (Ollama, llama.cpp) | 30000-60000ms (30-60 seconds) |
 | Remote APIs | 30000ms or higher |
 
+### Context from Previous Dictation
+
+When post-processing is enabled, voxtype automatically passes the previous dictation's text to your script via the `VOXTYPE_CONTEXT` environment variable if the previous dictation was within 60 seconds. This helps LLMs maintain continuity when you dictate in quick succession.
+
+Your script receives:
+- **Stdin**: Current text only (existing scripts work unchanged)
+- **`$VOXTYPE_CONTEXT`**: Previous dictation text (optional, read it if you want context)
+
+Example usage in a cleanup script:
+```bash
+PROMPT="Clean up this dictation:"
+if [[ -n "${VOXTYPE_CONTEXT:-}" ]]; then
+  printf -v PROMPT '%s\n\nPrevious dictation for context (do NOT include in output):\n%s\n\nCurrent text to clean up:' "$PROMPT" "$VOXTYPE_CONTEXT"
+fi
+```
+
+In meeting mode, context is tracked separately for microphone and loopback audio to prevent speaker bleed.
+
+See the example scripts in `examples/` for full implementations.
+
 ### Error Handling
 
 Post-processing is designed to be fault-tolerant:

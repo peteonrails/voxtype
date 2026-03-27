@@ -1665,6 +1665,16 @@ command = "ollama run llama3.2:1b 'Clean up:'"
 timeout_ms = 45000  # 45 second timeout for LLM
 ```
 
+### Context from Previous Dictation
+
+When post-processing is enabled, voxtype passes the previous dictation's text via the `VOXTYPE_CONTEXT` environment variable (if the previous dictation was within 60 seconds). This helps LLM-based cleanup scripts maintain continuity across rapid-fire dictations.
+
+- Stdin always contains only the current text (existing scripts work unchanged)
+- Scripts that want context can optionally read `$VOXTYPE_CONTEXT`
+- In meeting mode, context is tracked per audio source (mic/loopback) to prevent speaker bleed
+
+See the example scripts in `examples/` for how to use `VOXTYPE_CONTEXT`.
+
 ### Error Handling
 
 If the post-processing command fails for any reason (command not found, non-zero

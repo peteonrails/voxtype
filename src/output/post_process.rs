@@ -36,12 +36,14 @@ impl PostProcessor {
         }
     }
 
-    /// Process text through the external command
+    /// Process text with optional context from a previous chunk
     ///
+    /// When context is provided, it is passed via the VOXTYPE_CONTEXT environment
+    /// variable so the post-processing command can use it for continuity.
+    /// Stdin always contains only the current text, keeping existing scripts compatible.
     /// Returns the processed text on success, or the original text on any failure.
-    /// This ensures voice-to-text always produces output even when post-processing fails.
-    pub async fn process(&self, text: &str) -> String {
-        match self.execute_command(text).await {
+    pub async fn process_with_context(&self, text: &str, context: Option<&str>) -> String {
+        match self.execute_command_with_env(text, context).await {
             Ok(processed) => {
                 if processed.is_empty() {
                     tracing::warn!(
@@ -64,13 +66,32 @@ impl PostProcessor {
         }
     }
 
-    async fn execute_command(&self, text: &str) -> Result<String, PostProcessError> {
-        // Spawn command via shell for proper parsing of complex commands
-        let mut child = Command::new("sh")
-            .args(["-c", &self.command])
+    /// Process text through the external command
+    ///
+    /// Returns the processed text on success, or the original text on any failure.
+    /// This ensures voice-to-text always produces output even when post-processing fails.
+    pub async fn process(&self, text: &str) -> String {
+        self.process_with_context(text, None).await
+    }
+
+    async fn execute_command_with_env(
+        &self,
+        text: &str,
+        context: Option<&str>,
+    ) -> Result<String, PostProcessError> {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", &self.command])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        // Always clear to prevent inheriting stale context from parent environment
+        cmd.env_remove("VOXTYPE_CONTEXT");
+        if let Some(ctx) = context {
+            cmd.env("VOXTYPE_CONTEXT", ctx);
+        }
+
+        let mut child = cmd
             .spawn()
             .map_err(|e| PostProcessError::SpawnFailed(e.to_string()))?;
 
