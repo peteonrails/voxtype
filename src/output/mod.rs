@@ -12,6 +12,7 @@
 //!
 //! Paste mode (clipboard + Ctrl+V) helps with system with non US keyboard layouts.
 
+pub mod anthropic;
 pub mod clipboard;
 pub mod dotool;
 pub mod eitype;
