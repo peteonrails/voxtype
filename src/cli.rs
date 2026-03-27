@@ -262,6 +262,12 @@ pub struct Cli {
     #[arg(long, value_name = "CMD", help_heading = "Output")]
     pub pre_recording_command: Option<String>,
 
+    // -- Tray --
+
+    /// Enable system tray icon (StatusNotifierItem)
+    #[arg(long, help_heading = "Tray")]
+    pub tray: bool,
+
     // -- VAD --
 
     /// Enable Voice Activity Detection (filter silence before transcription)
