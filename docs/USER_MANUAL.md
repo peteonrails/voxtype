@@ -16,6 +16,7 @@ Voxtype is a push-to-talk voice-to-text tool for Linux. Optimized for Wayland, w
 - [Improving Transcription Accuracy](#improving-transcription-accuracy)
 - [Whisper Models](#whisper-models)
 - [Remote Whisper Servers](#remote-whisper-servers)
+- [Streaming Mode (Deepgram)](#streaming-mode-deepgram)
 - [CLI Backend (whisper-cli)](#cli-backend-whisper-cli)
 - [Eager Processing](#eager-processing)
 - [Output Modes](#output-modes)
@@ -2176,6 +2177,64 @@ voxtype setup dms --qml        # Output raw QML (for scripting)
 ```
 
 ---
+
+## Streaming Mode (Deepgram)
+
+Real-time transcription using Deepgram's WebSocket API. Audio is transcribed as you speak, with results appearing instantly.
+
+### Quick Start
+
+1. Create a Deepgram account at https://console.deepgram.com (free tier available)
+2. Get your API key from the Deepgram console
+3. Set your API key in config or environment:
+
+```toml
+[whisper]
+mode = "streaming"
+streaming_api_key = "your-api-key-here"
+```
+
+```bash
+export VOXTYPE_DEEPGRAM_API_KEY="your-api-key-here"
+voxtype daemon
+```
+
+### How It Works
+
+1. Opens a WebSocket connection when recording starts
+2. Sends audio chunks while you speak
+3. Receives transcription in real-time
+4. Returns final text when recording stops
+
+### Configuration
+
+```toml
+[whisper]
+mode = "streaming"
+streaming_api_key = "your-api-key"
+streaming_model = "nova-3"
+streaming_endpoint = "wss://api.deepgram.com/v1/listen"
+```
+
+### Differences from Local
+
+| Feature | Streaming | Local |
+|---------|-----------|-------|
+| Requires internet | Yes | No |
+| Real-time results | Yes | No |
+| Model download | No | Yes |
+| Privacy | Audio sent to Deepgram | Stays local |
+
+### Troubleshooting
+
+- Deepgram API key missing: set `VOXTYPE_DEEPGRAM_API_KEY` or `streaming_api_key`
+- Failed to open stream: check network and API key
+- Finish timeout: retry or switch to local mode
+- Empty transcripts: verify sample rate/language/model
+
+### Privacy Considerations
+
+Streaming mode sends audio to Deepgram servers for transcription. Review https://deepgram.com/privacy.
 
 ## Feedback
 

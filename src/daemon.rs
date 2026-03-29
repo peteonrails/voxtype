@@ -5,7 +5,7 @@
 
 use crate::audio::feedback::{AudioFeedback, SoundEvent};
 use crate::audio::{self, AudioCapture};
-use crate::config::{ActivationMode, Config, FileMode, OutputMode};
+use crate::config::{ActivationMode, Config, FileMode, OutputMode, WhisperMode};
 use crate::eager::{self, EagerConfig};
 use crate::error::Result;
 use crate::hotkey::{self, HotkeyEvent};
@@ -15,6 +15,7 @@ use crate::output;
 use crate::output::post_process::PostProcessor;
 use crate::state::{ChunkResult, State};
 use crate::text::TextProcessor;
+use crate::transcribe::deepgram::DeepgramStream;
 use crate::transcribe::Transcriber;
 use pidlock::Pidlock;
 use std::path::PathBuf;
@@ -25,7 +26,7 @@ use tokio::process::Command;
 use tokio::signal::unix::{signal, SignalKind};
 
 /// Send a desktop notification with optional engine icon
-async fn send_notification(
+fn send_notification(
     title: &str,
     body: &str,
     show_engine_icon: bool,
@@ -36,13 +37,19 @@ async fn send_notification(
     } else {
         title.to_string()
     };
+    let body = body.to_string();
 
-    let _ = Command::new("notify-send")
-        .args(["--app-name=Voxtype", "--expire-time=2000", &title, body])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await;
+    // Fire-and-forget: don't block the event loop waiting for notify-send.
+    // Previously this was async and awaited, which delayed audio capture start
+    // by 50-200ms (the dbus round-trip for notify-send on COSMIC/GNOME).
+    tokio::spawn(async move {
+        let _ = Command::new("notify-send")
+            .args(["--app-name=Voxtype", "--expire-time=2000", &title, &body])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+    });
 }
 
 /// Write state to file for external integrations (e.g., Waybar)
@@ -508,6 +515,27 @@ pub struct Daemon {
     speech_enhancer: Option<std::sync::Arc<audio::enhance::GtcrnEnhancer>>,
 }
 
+fn build_deepgram_config(
+    whisper_config: &crate::config::WhisperConfig,
+    audio_sample_rate: u32,
+) -> crate::transcribe::deepgram::DeepgramConfig {
+    crate::transcribe::deepgram::DeepgramConfig {
+        api_key: whisper_config.streaming_api_key.clone().unwrap_or_default(),
+        model: whisper_config
+            .streaming_model
+            .clone()
+            .unwrap_or_else(|| "nova-3".to_string()),
+        language: whisper_config.language.primary().to_string(),
+        sample_rate: audio_sample_rate,
+        smart_format: true,
+        endpoint: whisper_config
+            .streaming_endpoint
+            .clone()
+            .unwrap_or_else(|| "wss://api.deepgram.com/v1/listen".to_string()),
+        endpointing_ms: whisper_config.streaming_endpointing_ms,
+    }
+}
+
 impl Daemon {
     /// Create a new daemon with the given configuration
     pub fn new(config: Config, config_path: Option<PathBuf>) -> Self {
@@ -797,13 +825,7 @@ impl Daemon {
 
                         // Notification
                         if self.config.output.notification.on_recording_start {
-                            send_notification(
-                                "Meeting Started",
-                                &format!("ID: {}", meeting_id),
-                                false,
-                                self.config.engine,
-                            )
-                            .await;
+                            send_notification("Meeting Started", &format!("ID: {}", meeting_id), false, self.config.engine);
                         }
                     }
                     Err(e) => {
@@ -837,13 +859,7 @@ impl Daemon {
                     self.play_feedback(SoundEvent::RecordingStop);
 
                     if self.config.output.notification.on_recording_stop {
-                        send_notification(
-                            "Meeting Ended",
-                            &format!("ID: {}", meeting_id),
-                            false,
-                            self.config.engine,
-                        )
-                        .await;
+                        send_notification("Meeting Ended", &format!("ID: {}", meeting_id), false, self.config.engine);
                     }
                 }
                 Err(e) => {
@@ -868,13 +884,7 @@ impl Daemon {
             tracing::info!("Meeting paused");
 
             if self.config.output.notification.on_recording_stop {
-                send_notification(
-                    "Meeting Paused",
-                    "Recording paused",
-                    false,
-                    self.config.engine,
-                )
-                .await;
+                send_notification("Meeting Paused", "Recording paused", false, self.config.engine);
             }
         }
         Ok(())
@@ -889,13 +899,7 @@ impl Daemon {
             tracing::info!("Meeting resumed");
 
             if self.config.output.notification.on_recording_start {
-                send_notification(
-                    "Meeting Resumed",
-                    "Recording resumed",
-                    false,
-                    self.config.engine,
-                )
-                .await;
+                send_notification("Meeting Resumed", "Recording resumed", false, self.config.engine);
             }
         }
         Ok(())
@@ -1134,6 +1138,41 @@ impl Daemon {
         }
     }
 
+    async fn finish_streaming_recording(
+        &mut self,
+        state: &mut State,
+        audio_capture: &mut Option<Box<dyn AudioCapture>>,
+    ) -> std::result::Result<String, crate::error::TranscribeError> {
+        // Get final audio samples and send to Deepgram before closing the stream.
+        // Without this, audio captured since the last 100ms polling tick is lost.
+        if let Some(mut capture) = audio_capture.take() {
+            if let Ok(final_samples) = capture.stop().await {
+                if !final_samples.is_empty() {
+                    if let State::StreamingRecording { ref stream, .. } = state {
+                        if let Err(e) = stream.send_audio(&final_samples) {
+                            tracing::warn!("Failed to send final audio to Deepgram: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+
+        let stream = match std::mem::replace(state, State::Idle) {
+            State::StreamingRecording { stream, .. } => stream,
+            _ => unreachable!(),
+        };
+
+        match tokio::time::timeout(Duration::from_secs(5), (*stream).finish()).await {
+            Ok(result) => result,
+            Err(_) => {
+                tracing::warn!("Deepgram stream finish timed out after 5s");
+                Err(crate::error::TranscribeError::RemoteError(
+                    "Deepgram stream finish timed out".to_string(),
+                ))
+            }
+        }
+    }
+
     /// Start transcription task (non-blocking, stores JoinHandle for later completion)
     /// Returns true if transcription was started, false if skipped (too short)
     async fn start_transcription_task(
@@ -1150,13 +1189,7 @@ impl Daemon {
 
         // Send notification if enabled
         if self.config.output.notification.on_recording_stop {
-            send_notification(
-                "Recording Stopped",
-                "Transcribing...",
-                self.config.output.notification.show_engine_icon,
-                self.config.engine,
-            )
-            .await;
+            send_notification("Recording Stopped", "Transcribing...", self.config.output.notification.show_engine_icon, self.config.engine);
         }
 
         // Stop recording and get samples
@@ -1488,6 +1521,10 @@ impl Daemon {
             crate::error::VoxtypeError::Config(format!("Failed to set up SIGTERM handler: {}", e))
         })?;
 
+        if self.config.whisper.effective_mode() == WhisperMode::Streaming {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        }
+
         // Ensure required directories exist
         Config::ensure_directories().map_err(|e| {
             crate::error::VoxtypeError::Config(format!("Failed to create directories: {}", e))
@@ -1552,7 +1589,9 @@ impl Daemon {
 
         // Pre-load transcription model if on_demand_loading is disabled
         let mut transcriber_preloaded: Option<Arc<dyn Transcriber>> = None;
-        if !self.config.on_demand_loading() {
+        if !self.config.on_demand_loading()
+            && self.config.whisper.effective_mode() != WhisperMode::Streaming
+        {
             tracing::info!("Loading transcription model: {}", self.config.model_name());
             match self.config.engine {
                 crate::config::TranscriptionEngine::Whisper => {
@@ -1644,11 +1683,13 @@ impl Daemon {
 
                                 // Send notification if enabled
                                 if self.config.output.notification.on_recording_start {
-                                    send_notification("Push to Talk Active", "Recording...", self.config.output.notification.show_engine_icon, self.config.engine).await;
+                                    send_notification("Push to Talk Active", "Recording...", self.config.output.notification.show_engine_icon, self.config.engine);
                                 }
 
                                 // Prepare model for transcription
-                                if self.config.on_demand_loading() {
+                                if self.config.on_demand_loading()
+                                    && self.config.whisper.effective_mode() != WhisperMode::Streaming
+                                {
                                     // Start model loading in background
                                     match self.config.engine {
                                         crate::config::TranscriptionEngine::Whisper => {
@@ -1673,7 +1714,7 @@ impl Daemon {
                                         }
                                     }
                                     tracing::debug!("Started background model loading");
-                                } else {
+                                } else if self.config.whisper.effective_mode() != WhisperMode::Streaming {
                                     // Prepare model (spawns subprocess for gpu_isolation mode)
                                     match self.config.engine {
                                         crate::config::TranscriptionEngine::Whisper => {
@@ -1711,8 +1752,30 @@ impl Daemon {
                                         tracing::debug!("Audio capture started successfully");
                                         audio_capture = Some(capture);
 
-                                        // Use EagerRecording state if eager_processing is enabled
-                                        if self.config.whisper.eager_processing {
+                                        if self.config.whisper.effective_mode()
+                                            == crate::config::WhisperMode::Streaming
+                                        {
+                                            let deepgram_config = build_deepgram_config(
+                                                &self.config.whisper,
+                                                self.config.audio.sample_rate,
+                                            );
+                                            match DeepgramStream::open(&deepgram_config) {
+                                                Ok(stream) => {
+                                                    state = State::StreamingRecording {
+                                                        started_at: std::time::Instant::now(),
+                                                        stream: Box::new(stream),
+                                                    };
+                                                }
+                                                Err(e) => {
+                                                    tracing::error!("Failed to open Deepgram stream: {}", e);
+                                                    self.play_feedback(SoundEvent::Error);
+                                                    if let Some(mut capture) = audio_capture.take() {
+                                                        let _ = capture.stop().await;
+                                                    }
+                                                    continue;
+                                                }
+                                            }
+                                        } else if self.config.whisper.eager_processing {
                                             tracing::info!("Using eager input processing");
                                             state = State::EagerRecording {
                                                 started_at: std::time::Instant::now(),
@@ -1779,7 +1842,7 @@ impl Daemon {
                                 self.play_feedback(SoundEvent::RecordingStop);
 
                                 if self.config.output.notification.on_recording_stop {
-                                    send_notification("Recording Stopped", "Transcribing...", self.config.output.notification.show_engine_icon, self.config.engine).await;
+                                    send_notification("Recording Stopped", "Transcribing...", self.config.output.notification.show_engine_icon, self.config.engine);
                                 }
 
                                 // Stop audio capture and get remaining samples
@@ -1814,6 +1877,46 @@ impl Daemon {
                                     tracing::debug!("Eager recording produced empty result");
                                     self.reset_to_idle(&mut state).await;
                                 }
+                            } else if let State::StreamingRecording { .. } = &state {
+                                let duration = state.recording_duration().unwrap_or_default();
+                                tracing::info!(
+                                    "Streaming recording stopped ({:.1}s)",
+                                    duration.as_secs_f32()
+                                );
+
+                                self.play_feedback(SoundEvent::RecordingStop);
+
+                                if self.config.output.notification.on_recording_stop {
+                                    send_notification(
+                                        "Recording Stopped",
+                                        "Finishing transcription...",
+                                        self.config.output.notification.show_engine_icon,
+                                        self.config.engine,
+                                    );
+                                }
+
+                                match self
+                                    .finish_streaming_recording(&mut state, &mut audio_capture)
+                                    .await
+                                {
+                                    Ok(text) => {
+                                        if text.is_empty() {
+                                            tracing::debug!("Streaming transcription was empty");
+                                            self.reset_to_idle(&mut state).await;
+                                        } else {
+                                            tracing::info!("Streaming transcribed: {:?}", text);
+                                            state = State::Outputting { text: text.clone() };
+                                            self.update_state("outputting");
+                                            self.handle_transcription_result(&mut state, Ok(Ok(text)))
+                                                .await;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Streaming transcription error: {}", e);
+                                        self.play_feedback(SoundEvent::Error);
+                                        self.reset_to_idle(&mut state).await;
+                                    }
+                                }
                             }
                         }
 
@@ -1827,11 +1930,13 @@ impl Daemon {
                                 tracing::info!("Recording started (toggle mode)");
 
                                 if self.config.output.notification.on_recording_start {
-                                    send_notification("Recording Started", "Press hotkey again to stop", self.config.output.notification.show_engine_icon, self.config.engine).await;
+                                    send_notification("Recording Started", "Press hotkey again to stop", self.config.output.notification.show_engine_icon, self.config.engine);
                                 }
 
                                 // Prepare model for transcription
-                                if self.config.on_demand_loading() {
+                                if self.config.on_demand_loading()
+                                    && self.config.whisper.effective_mode() != WhisperMode::Streaming
+                                {
                                     // Start model loading in background
                                     match self.config.engine {
                                         crate::config::TranscriptionEngine::Whisper => {
@@ -1856,7 +1961,7 @@ impl Daemon {
                                         }
                                     }
                                     tracing::debug!("Started background model loading");
-                                } else {
+                                } else if self.config.whisper.effective_mode() != WhisperMode::Streaming {
                                     // Prepare model (spawns subprocess for gpu_isolation mode)
                                     match self.config.engine {
                                         crate::config::TranscriptionEngine::Whisper => {
@@ -1891,8 +1996,30 @@ impl Daemon {
                                         }
                                         audio_capture = Some(capture);
 
-                                        // Use EagerRecording state if eager_processing is enabled
-                                        if self.config.whisper.eager_processing {
+                                        if self.config.whisper.effective_mode()
+                                            == crate::config::WhisperMode::Streaming
+                                        {
+                                            let deepgram_config = build_deepgram_config(
+                                                &self.config.whisper,
+                                                self.config.audio.sample_rate,
+                                            );
+                                            match DeepgramStream::open(&deepgram_config) {
+                                                Ok(stream) => {
+                                                    state = State::StreamingRecording {
+                                                        started_at: std::time::Instant::now(),
+                                                        stream: Box::new(stream),
+                                                    };
+                                                }
+                                                Err(e) => {
+                                                    tracing::error!("Failed to open Deepgram stream: {}", e);
+                                                    self.play_feedback(SoundEvent::Error);
+                                                    if let Some(mut capture) = audio_capture.take() {
+                                                        let _ = capture.stop().await;
+                                                    }
+                                                    continue;
+                                                }
+                                            }
+                                        } else if self.config.whisper.eager_processing {
                                             tracing::info!("Using eager input processing");
                                             state = State::EagerRecording {
                                                 started_at: std::time::Instant::now(),
@@ -1942,6 +2069,41 @@ impl Daemon {
                                     &mut audio_capture,
                                     transcriber,
                                 ).await;
+                            } else if let State::StreamingRecording { .. } = &state {
+                                tracing::info!("Streaming recording stopped (toggle mode)");
+                                self.play_feedback(SoundEvent::RecordingStop);
+
+                                if self.config.output.notification.on_recording_stop {
+                                    send_notification(
+                                        "Recording Stopped",
+                                        "Finishing transcription...",
+                                        self.config.output.notification.show_engine_icon,
+                                        self.config.engine,
+                                    );
+                                }
+
+                                match self
+                                    .finish_streaming_recording(&mut state, &mut audio_capture)
+                                    .await
+                                {
+                                    Ok(text) => {
+                                        if text.is_empty() {
+                                            tracing::debug!("Streaming transcription was empty");
+                                            self.reset_to_idle(&mut state).await;
+                                        } else {
+                                            tracing::info!("Streaming transcribed: {:?}", text);
+                                            state = State::Outputting { text: text.clone() };
+                                            self.update_state("outputting");
+                                            self.handle_transcription_result(&mut state, Ok(Ok(text)))
+                                                .await;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Streaming transcription error: {}", e);
+                                        self.play_feedback(SoundEvent::Error);
+                                        self.reset_to_idle(&mut state).await;
+                                    }
+                                }
                             } else if state.is_eager_recording() {
                                 // Handle eager recording stop in toggle mode - extract model_override first
                                 let model_override = match &state {
@@ -1955,7 +2117,7 @@ impl Daemon {
                                 self.play_feedback(SoundEvent::RecordingStop);
 
                                 if self.config.output.notification.on_recording_stop {
-                                    send_notification("Recording Stopped", "Transcribing...", self.config.output.notification.show_engine_icon, self.config.engine).await;
+                                    send_notification("Recording Stopped", "Transcribing...", self.config.output.notification.show_engine_icon, self.config.engine);
                                 }
 
                                 // Stop audio capture and get remaining samples
@@ -2034,7 +2196,7 @@ impl Daemon {
                                 }
 
                                 if self.config.output.notification.on_recording_stop {
-                                    send_notification("Cancelled", "Recording discarded", self.config.output.notification.show_engine_icon, self.config.engine).await;
+                                    send_notification("Cancelled", "Recording discarded", self.config.output.notification.show_engine_icon, self.config.engine);
                                 }
                             } else if matches!(state, State::Transcribing { .. }) {
                                 tracing::info!("Transcription cancelled via hotkey");
@@ -2060,7 +2222,7 @@ impl Daemon {
                                 }
 
                                 if self.config.output.notification.on_recording_stop {
-                                    send_notification("Cancelled", "Transcription aborted", self.config.output.notification.show_engine_icon, self.config.engine).await;
+                                    send_notification("Cancelled", "Transcription aborted", self.config.output.notification.show_engine_icon, self.config.engine);
                                 }
                             } else {
                                 tracing::trace!("Cancel ignored - not recording or transcribing");
@@ -2121,7 +2283,7 @@ impl Daemon {
                         }
 
                         if self.config.output.notification.on_recording_stop {
-                            send_notification("Cancelled", "Recording discarded", self.config.output.notification.show_engine_icon, self.config.engine).await;
+                            send_notification("Cancelled", "Recording discarded", self.config.output.notification.show_engine_icon, self.config.engine);
                         }
 
                         continue;
@@ -2145,6 +2307,17 @@ impl Daemon {
                                     Err(e) => {
                                         tracing::warn!("Failed to create eager transcriber: {}", e);
                                     }
+                                }
+                            }
+                        }
+                    }
+
+                    if let State::StreamingRecording { stream, .. } = &mut state {
+                        if let Some(ref mut capture) = audio_capture {
+                            let new_samples = capture.get_samples().await;
+                            if !new_samples.is_empty() {
+                                if let Err(e) = stream.send_audio(&new_samples) {
+                                    tracing::warn!("Failed to send audio to Deepgram stream: {}", e);
                                 }
                             }
                         }
@@ -2195,27 +2368,56 @@ impl Daemon {
                             cleanup_profile_override();
                             cleanup_bool_override("smart_auto_submit");
 
-                            // Get model override from state before transitioning
-                            let model_override = match &state {
-                                State::Recording { model_override, .. } => model_override.as_deref(),
-                                State::EagerRecording { model_override, .. } => model_override.as_deref(),
-                                _ => None,
-                            };
-
-                            // Get transcriber for this recording
-                            let transcriber = match self.get_transcriber_for_recording(
-                                model_override,
-                                &transcriber_preloaded,
-                            ).await {
-                                Ok(t) => Some(t),
-                                Err(()) => {
-                                    state = State::Idle;
-                                    self.update_state("idle");
-                                    continue;
+                            if let State::StreamingRecording { .. } = &state {
+                                if self.config.output.notification.on_recording_stop {
+                                    send_notification(
+                                        "Recording Stopped",
+                                        "Finishing transcription...",
+                                        self.config.output.notification.show_engine_icon,
+                                        self.config.engine,
+                                    );
                                 }
-                            };
 
-                            if state.is_eager_recording() {
+                                match self
+                                    .finish_streaming_recording(&mut state, &mut audio_capture)
+                                    .await
+                                {
+                                    Ok(text) => {
+                                        if text.is_empty() {
+                                            tracing::debug!("Streaming transcription timeout produced empty result");
+                                            self.reset_to_idle(&mut state).await;
+                                        } else {
+                                            state = State::Outputting { text: text.clone() };
+                                            self.update_state("outputting");
+                                            self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Streaming transcription error: {}", e);
+                                        self.play_feedback(SoundEvent::Error);
+                                        self.reset_to_idle(&mut state).await;
+                                    }
+                                }
+                            } else {
+                                let model_override = match &state {
+                                    State::Recording { model_override, .. } => model_override.as_deref(),
+                                    State::EagerRecording { model_override, .. } => model_override.as_deref(),
+                                    _ => None,
+                                };
+
+                                let transcriber = match self
+                                    .get_transcriber_for_recording(model_override, &transcriber_preloaded)
+                                    .await
+                                {
+                                    Ok(t) => Some(t),
+                                    Err(()) => {
+                                        state = State::Idle;
+                                        self.update_state("idle");
+                                        continue;
+                                    }
+                                };
+
+                                if state.is_eager_recording() {
                                 if let Some(mut capture) = audio_capture.take() {
                                     if let Ok(final_samples) = capture.stop().await {
                                         if let State::EagerRecording { accumulated_audio, .. } = &mut state {
@@ -2245,6 +2447,7 @@ impl Daemon {
                                     &mut audio_capture,
                                     transcriber,
                                 ).await;
+                                }
                             }
                         }
                     }
@@ -2259,11 +2462,13 @@ impl Daemon {
                         tracing::info!("Recording started (external trigger), model_override = {:?}", model_override);
 
                         if self.config.output.notification.on_recording_start {
-                            send_notification("Recording Started", "External trigger", self.config.output.notification.show_engine_icon, self.config.engine).await;
+                            send_notification("Recording Started", "External trigger", self.config.output.notification.show_engine_icon, self.config.engine);
                         }
 
                         // Prepare model for transcription
-                        if self.config.on_demand_loading() {
+                        if self.config.on_demand_loading()
+                            && self.config.whisper.effective_mode() != WhisperMode::Streaming
+                        {
                             // Start model loading in background
                             match self.config.engine {
                                 crate::config::TranscriptionEngine::Whisper => {
@@ -2287,7 +2492,7 @@ impl Daemon {
                                     }));
                                 }
                             }
-                        } else {
+                        } else if self.config.whisper.effective_mode() != WhisperMode::Streaming {
                             // Prepare model (spawns subprocess for gpu_isolation mode)
                             match self.config.engine {
                                 crate::config::TranscriptionEngine::Whisper => {
@@ -2320,8 +2525,30 @@ impl Daemon {
                                 } else {
                                     audio_capture = Some(capture);
 
-                                    // Use EagerRecording state if eager_processing is enabled
-                                    if self.config.whisper.eager_processing {
+                                    if self.config.whisper.effective_mode()
+                                        == crate::config::WhisperMode::Streaming
+                                    {
+                                        let deepgram_config = build_deepgram_config(
+                                            &self.config.whisper,
+                                            self.config.audio.sample_rate,
+                                        );
+                                        match DeepgramStream::open(&deepgram_config) {
+                                            Ok(stream) => {
+                                                state = State::StreamingRecording {
+                                                    started_at: std::time::Instant::now(),
+                                                    stream: Box::new(stream),
+                                                };
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("Failed to open Deepgram stream: {}", e);
+                                                self.play_feedback(SoundEvent::Error);
+                                                if let Some(mut capture) = audio_capture.take() {
+                                                    let _ = capture.stop().await;
+                                                }
+                                                continue;
+                                            }
+                                        }
+                                    } else if self.config.whisper.eager_processing {
                                         tracing::info!("Using eager input processing");
                                         state = State::EagerRecording {
                                             started_at: std::time::Instant::now(),
@@ -2377,6 +2604,44 @@ impl Daemon {
                             &mut audio_capture,
                             transcriber,
                         ).await;
+                    } else if let State::StreamingRecording { .. } = &state {
+                        let duration = state.recording_duration().unwrap_or_default();
+                        tracing::info!(
+                            "Streaming recording stopped ({:.1}s)",
+                            duration.as_secs_f32()
+                        );
+                        self.play_feedback(SoundEvent::RecordingStop);
+
+                        if self.config.output.notification.on_recording_stop {
+                            send_notification(
+                                "Recording Stopped",
+                                "Finishing transcription...",
+                                self.config.output.notification.show_engine_icon,
+                                self.config.engine,
+                            );
+                        }
+
+                        match self
+                            .finish_streaming_recording(&mut state, &mut audio_capture)
+                            .await
+                        {
+                            Ok(text) => {
+                                if text.is_empty() {
+                                    tracing::debug!("Streaming transcription was empty");
+                                    self.reset_to_idle(&mut state).await;
+                                } else {
+                                    tracing::info!("Streaming transcribed: {:?}", text);
+                                    state = State::Outputting { text: text.clone() };
+                                    self.update_state("outputting");
+                                    self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Streaming transcription error: {}", e);
+                                self.play_feedback(SoundEvent::Error);
+                                self.reset_to_idle(&mut state).await;
+                            }
+                        }
                     } else if state.is_eager_recording() {
                         // Handle eager recording stop via external trigger - extract model_override first
                         let model_override = match &state {
@@ -2390,7 +2655,7 @@ impl Daemon {
                         self.play_feedback(SoundEvent::RecordingStop);
 
                         if self.config.output.notification.on_recording_stop {
-                            send_notification("Recording Stopped", "Transcribing...", self.config.output.notification.show_engine_icon, self.config.engine).await;
+                            send_notification("Recording Stopped", "Transcribing...", self.config.output.notification.show_engine_icon, self.config.engine);
                         }
 
                         // Stop audio capture and get remaining samples
@@ -2463,7 +2728,7 @@ impl Daemon {
                         }
 
                         if self.config.output.notification.on_recording_stop {
-                            send_notification("Cancelled", "Transcription aborted", self.config.output.notification.show_engine_icon, self.config.engine).await;
+                            send_notification("Cancelled", "Transcription aborted", self.config.output.notification.show_engine_icon, self.config.engine);
                         }
                     }
                 }
@@ -2924,6 +3189,22 @@ mod tests {
             let _ = fs::remove_file(&override_file);
             // Should not panic
         });
+    }
+
+    #[test]
+    fn test_deepgram_config_uses_audio_sample_rate() {
+        use crate::config::WhisperConfig;
+
+        let whisper_config = WhisperConfig::default();
+
+        let config = build_deepgram_config(&whisper_config, 16000);
+        assert_eq!(config.sample_rate, 16000);
+
+        let config = build_deepgram_config(&whisper_config, 44100);
+        assert_eq!(config.sample_rate, 44100);
+
+        let config = build_deepgram_config(&whisper_config, 8000);
+        assert_eq!(config.sample_rate, 8000);
     }
 
     fn test_pidlock_acquisition_succeeds() {
