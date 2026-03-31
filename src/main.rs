@@ -478,6 +478,22 @@ async fn main() -> anyhow::Result<()> {
                         setup::gpu::show_status();
                     }
                 }
+                Some(SetupAction::Npu {
+                    enable,
+                    disable,
+                    status,
+                }) => {
+                    warn_if_root("npu");
+                    if status {
+                        setup::npu::show_status();
+                    } else if enable {
+                        setup::npu::enable()?;
+                    } else if disable {
+                        setup::npu::disable()?;
+                    } else {
+                        setup::npu::show_status();
+                    }
+                }
                 Some(SetupAction::Onnx {
                     enable,
                     disable,

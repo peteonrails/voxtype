@@ -6,6 +6,7 @@
 //! - Interactive model selection
 //! - Output chain detection
 //! - GPU backend management
+//! - NPU backend management (Intel NPU via OpenVINO)
 //! - Parakeet backend management
 //! - Compositor integration (modifier key fix)
 
@@ -13,6 +14,7 @@ pub mod compositor;
 pub mod dms;
 pub mod gpu;
 pub mod model;
+pub mod npu;
 pub mod parakeet;
 pub mod systemd;
 pub mod vad;

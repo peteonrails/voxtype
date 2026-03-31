@@ -836,6 +836,21 @@ pub enum SetupAction {
         status: bool,
     },
 
+    /// Manage NPU acceleration (Intel NPU via OpenVINO)
+    Npu {
+        /// Enable NPU acceleration (set engine to OpenVINO, download model if needed)
+        #[arg(long)]
+        enable: bool,
+
+        /// Disable NPU acceleration (revert engine to Whisper)
+        #[arg(long)]
+        disable: bool,
+
+        /// Show NPU hardware and configuration status
+        #[arg(long)]
+        status: bool,
+    },
+
     /// Switch between Whisper and ONNX transcription engines
     Onnx {
         /// Enable ONNX engine (switch to ONNX binary)
