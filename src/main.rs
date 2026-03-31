@@ -329,7 +329,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     if let Some(cmd) = cli.pre_output_command {
-
         config.output.pre_output_command = Some(cmd);
     }
     if let Some(cmd) = cli.post_output_command {
@@ -594,6 +593,22 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         // Default: show status
                         setup::gpu::show_status();
+                    }
+                }
+                Some(SetupAction::Npu {
+                    enable,
+                    disable,
+                    status,
+                }) => {
+                    warn_if_root("npu");
+                    if status {
+                        setup::npu::show_status();
+                    } else if enable {
+                        setup::npu::enable()?;
+                    } else if disable {
+                        setup::npu::disable()?;
+                    } else {
+                        setup::npu::show_status();
                     }
                 }
                 Some(SetupAction::Variant { to }) => {
