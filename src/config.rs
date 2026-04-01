@@ -397,6 +397,12 @@ pub struct HotkeyConfig {
     /// Examples: "LEFTSHIFT", "RIGHTALT", "LEFTCTRL"
     #[serde(default)]
     pub model_modifier: Option<String>,
+
+    /// Optional modifier keys that activate named profiles (evdev KEY_* names, without KEY_ prefix)
+    /// When held while pressing the hotkey, activates the named profile for post-processing
+    /// Example: { "LEFTSHIFT" = "translate" } activates [profiles.translate] when Shift is held
+    #[serde(default)]
+    pub profile_modifiers: HashMap<String, String>,
 }
 
 /// Audio capture configuration
@@ -1745,6 +1751,7 @@ impl Default for Config {
                 enabled: true,
                 cancel_key: None,
                 model_modifier: None,
+                profile_modifiers: std::collections::HashMap::new(),
             },
             audio: AudioConfig {
                 device: "default".to_string(),
@@ -3622,5 +3629,80 @@ mod tests {
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(!config.output.restore_clipboard);
         assert_eq!(config.output.restore_clipboard_delay_ms, 200);
+    }
+
+    #[test]
+    fn test_parse_profile_modifiers() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [hotkey.profile_modifiers]
+            LEFTSHIFT = "translate"
+            RIGHTALT = "formal"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [profiles.translate]
+            post_process_command = "translate.sh"
+
+            [profiles.formal]
+            post_process_command = "formal.sh"
+            post_process_timeout_ms = 15000
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.hotkey.profile_modifiers.len(), 2);
+        assert_eq!(
+            config.hotkey.profile_modifiers.get("LEFTSHIFT").unwrap(),
+            "translate"
+        );
+        assert_eq!(
+            config.hotkey.profile_modifiers.get("RIGHTALT").unwrap(),
+            "formal"
+        );
+        assert!(config.get_profile("translate").is_some());
+        assert!(config.get_profile("formal").is_some());
+        assert_eq!(
+            config
+                .get_profile("translate")
+                .unwrap()
+                .post_process_command
+                .as_deref(),
+            Some("translate.sh")
+        );
+    }
+
+    #[test]
+    fn test_profile_modifiers_default_empty() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.hotkey.profile_modifiers.is_empty());
     }
 }
