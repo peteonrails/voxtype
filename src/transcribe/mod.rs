@@ -54,7 +54,10 @@ pub mod dolphin;
 #[cfg(feature = "omnilingual")]
 pub mod omnilingual;
 
-use crate::config::{Config, TranscriptionEngine, WhisperConfig, WhisperMode};
+#[cfg(feature = "openvino-genai")]
+pub mod openvino_genai;
+
+use crate::config::{Config, OpenvinoGenaiConfig, TranscriptionEngine, WhisperConfig, WhisperMode};
 use crate::error::TranscribeError;
 use crate::setup::gpu;
 
@@ -173,6 +176,17 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
         #[cfg(not(feature = "omnilingual"))]
         TranscriptionEngine::Omnilingual => Err(TranscribeError::InitFailed(
             "Omnilingual engine requested but voxtype was not compiled with --features omnilingual"
+                .to_string(),
+        )),
+        #[cfg(feature = "openvino-genai")]
+        TranscriptionEngine::OpenvinoGenai => {
+            let default_cfg = crate::config::OpenvinoGenaiConfig::default();
+            let cfg = config.openvino_genai.as_ref().unwrap_or(&default_cfg);
+            Ok(Box::new(openvino_genai::OpenvinoGenaiTranscriber::new(cfg)?))
+        }
+        #[cfg(not(feature = "openvino-genai"))]
+        TranscriptionEngine::OpenvinoGenai => Err(TranscribeError::InitFailed(
+            "OpenVINO GenAI engine requested but voxtype was not compiled with --features openvino-genai"
                 .to_string(),
         )),
     }
