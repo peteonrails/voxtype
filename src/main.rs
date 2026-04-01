@@ -307,7 +307,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     if let Some(cmd) = cli.pre_output_command {
-
         config.output.pre_output_command = Some(cmd);
     }
     if let Some(cmd) = cli.post_output_command {
@@ -1241,8 +1240,8 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
             if path.is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.contains("sensevoice") {
-                    let has_model = path.join("model.int8.onnx").exists()
-                        || path.join("model.onnx").exists();
+                    let has_model =
+                        path.join("model.int8.onnx").exists() || path.join("model.onnx").exists();
                     let has_tokens = path.join("tokens.txt").exists();
                     if has_model && has_tokens {
                         sensevoice_models.push(name);

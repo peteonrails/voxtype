@@ -36,8 +36,7 @@ impl ChunkState {
 }
 
 /// Meeting transcription state
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub enum MeetingState {
     /// No meeting in progress
     #[default]
@@ -73,7 +72,6 @@ pub enum MeetingState {
         total_chunks: u32,
     },
 }
-
 
 impl MeetingState {
     /// Create a new idle state

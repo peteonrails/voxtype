@@ -139,12 +139,13 @@ impl MlDiarizer {
     #[cfg(feature = "ml-diarization")]
     pub fn extract_embedding(&self, samples: &[f32]) -> Result<Vec<f32>, String> {
         let mutex = self.session.as_ref().ok_or("Model not loaded")?;
-        let mut session = mutex.lock().map_err(|e| format!("Session lock poisoned: {}", e))?;
+        let mut session = mutex
+            .lock()
+            .map_err(|e| format!("Session lock poisoned: {}", e))?;
 
         // Prepare input tensor: [batch=1, samples]
-        let input_tensor =
-            Tensor::<f32>::from_array(([1usize, samples.len()], samples.to_vec()))
-                .map_err(|e| format!("Failed to create input tensor: {}", e))?;
+        let input_tensor = Tensor::<f32>::from_array(([1usize, samples.len()], samples.to_vec()))
+            .map_err(|e| format!("Failed to create input tensor: {}", e))?;
 
         // Run inference
         let outputs = session

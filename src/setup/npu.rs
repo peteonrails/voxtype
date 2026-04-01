@@ -14,14 +14,12 @@ fn detect_npu_hardware() -> bool {
     Path::new("/dev/accel").is_dir()
         && std::fs::read_dir("/dev/accel")
             .map(|entries| {
-                entries
-                    .filter_map(|e| e.ok())
-                    .any(|e| {
-                        e.file_name()
-                            .to_str()
-                            .map(|n| n.starts_with("accel"))
-                            .unwrap_or(false)
-                    })
+                entries.filter_map(|e| e.ok()).any(|e| {
+                    e.file_name()
+                        .to_str()
+                        .map(|n| n.starts_with("accel"))
+                        .unwrap_or(false)
+                })
             })
             .unwrap_or(false)
 }
@@ -96,7 +94,9 @@ pub fn show_status() {
         super::print_success("openvino-whisper feature compiled in");
     } else {
         super::print_failure("openvino-whisper feature not compiled");
-        super::print_info("Install voxtype-openvino package or rebuild with --features openvino-whisper");
+        super::print_info(
+            "Install voxtype-openvino package or rebuild with --features openvino-whisper",
+        );
     }
 
     // Config check
@@ -122,9 +122,15 @@ pub fn show_status() {
 
     // Model check
     if has_openvino_model() {
-        super::print_success(&format!("Default OpenVINO model ({}) installed", DEFAULT_OPENVINO_MODEL));
+        super::print_success(&format!(
+            "Default OpenVINO model ({}) installed",
+            DEFAULT_OPENVINO_MODEL
+        ));
     } else {
-        super::print_info(&format!("Default OpenVINO model ({}) not installed", DEFAULT_OPENVINO_MODEL));
+        super::print_info(&format!(
+            "Default OpenVINO model ({}) not installed",
+            DEFAULT_OPENVINO_MODEL
+        ));
     }
 }
 

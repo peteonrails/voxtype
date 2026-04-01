@@ -87,7 +87,10 @@ impl OpenVinoTranscriber {
             if let Some(lib_dir) = lib_path.parent() {
                 preload_openvino_deps(lib_dir);
             }
-            tracing::info!("Loading OpenVINO GenAI library from: {}", lib_path.display());
+            tracing::info!(
+                "Loading OpenVINO GenAI library from: {}",
+                lib_path.display()
+            );
             openvino_genai::load_from(&lib_path).map_err(|e| {
                 TranscribeError::InitFailed(format!(
                     "Failed to load OpenVINO GenAI library from {}: {}\n  \
@@ -158,9 +161,7 @@ impl OpenVinoTranscriber {
         })?;
 
         if guard.is_none() {
-            tracing::info!(
-                "Pipeline not yet created, creating now (prepare() was not called)"
-            );
+            tracing::info!("Pipeline not yet created, creating now (prepare() was not called)");
             *guard = Some(Self::create_pipeline(&self.model_dir, &self.config)?);
         }
 
@@ -224,17 +225,12 @@ impl Transcriber for OpenVinoTranscriber {
         // not match the model; WhisperGenerationConfig::from_json() with the model's
         // generation_config.json is the alternative for standalone creation.
         let mut gen_config = pipeline.get_generation_config().map_err(|e| {
-            TranscribeError::InferenceFailed(format!(
-                "Failed to get generation config: {}",
-                e
-            ))
+            TranscribeError::InferenceFailed(format!("Failed to get generation config: {}", e))
         })?;
 
         // Only set language/task on multilingual models (*.en models are English-only
         // and reject language/task overrides)
-        let is_multilingual = gen_config
-            .get_is_multilingual()
-            .unwrap_or(false);
+        let is_multilingual = gen_config.get_is_multilingual().unwrap_or(false);
 
         if is_multilingual {
             // GenAI expects language tokens in "<|xx|>" format (matching lang_to_id keys
@@ -264,24 +260,15 @@ impl Transcriber for OpenVinoTranscriber {
         }
 
         gen_config.set_return_timestamps(false).map_err(|e| {
-            TranscribeError::InferenceFailed(format!(
-                "Failed to set return_timestamps: {}",
-                e
-            ))
+            TranscribeError::InferenceFailed(format!("Failed to set return_timestamps: {}", e))
         })?;
 
         let results = pipeline.generate(samples, Some(&gen_config)).map_err(|e| {
-            TranscribeError::InferenceFailed(format!(
-                "OpenVINO GenAI inference failed: {}",
-                e
-            ))
+            TranscribeError::InferenceFailed(format!("OpenVINO GenAI inference failed: {}", e))
         })?;
 
         let text = results.get_string().map_err(|e| {
-            TranscribeError::InferenceFailed(format!(
-                "Failed to get transcription string: {}",
-                e
-            ))
+            TranscribeError::InferenceFailed(format!("Failed to get transcription string: {}", e))
         })?;
 
         let result = text.trim().to_string();
@@ -317,18 +304,18 @@ fn find_genai_library(dir: &str) -> Result<PathBuf, TranscribeError> {
         )));
     }
 
-    let lib_name = format!("{}openvino_genai_c{}", std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX);
+    let lib_name = format!(
+        "{}openvino_genai_c{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
     let direct = dir_path.join(&lib_name);
     if direct.is_file() {
         return Ok(direct);
     }
 
     // Search known subdirectories
-    for subdir in &[
-        "runtime/lib/intel64",
-        "runtime/lib/intel64/Release",
-        ".",
-    ] {
+    for subdir in &["runtime/lib/intel64", "runtime/lib/intel64/Release", "."] {
         let path = dir_path.join(subdir).join(&lib_name);
         if path.is_file() {
             return Ok(path);
@@ -362,8 +349,7 @@ fn preload_openvino_deps(lib_dir: &std::path::Path) {
         let Some(c_path) = path.to_str().and_then(|s| CString::new(s).ok()) else {
             continue;
         };
-        let handle =
-            unsafe { libc::dlopen(c_path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL) };
+        let handle = unsafe { libc::dlopen(c_path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL) };
         if handle.is_null() {
             tracing::warn!("Failed to preload {}", path.display());
         } else {
@@ -418,7 +404,10 @@ fn resolve_model_path(model: &str, quantized: bool) -> Result<PathBuf, Transcrib
         candidates.push(format!("openvino-{}-ov", model));
     } else if let Some(rest) = model.strip_prefix("distil-") {
         // e.g., "distil-large-v2-int8" → "openvino-distil-whisper-large-v2-int8-ov"
-        candidates.push(format!("openvino-distil-whisper-{}{}-ov", rest, quant_suffix));
+        candidates.push(format!(
+            "openvino-distil-whisper-{}{}-ov",
+            rest, quant_suffix
+        ));
         candidates.push(format!("openvino-distil-whisper-{}-ov", rest));
         // Also try the non-distil pattern in case naming differs
         candidates.push(format!("openvino-whisper-{}{}-ov", model, quant_suffix));

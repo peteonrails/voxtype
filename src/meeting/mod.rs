@@ -246,7 +246,8 @@ impl MeetingDaemon {
         &mut self,
         samples: Vec<f32>,
     ) -> Result<Option<Vec<TranscriptSegment>>> {
-        self.process_chunk_with_source(samples, AudioSource::Microphone).await
+        self.process_chunk_with_source(samples, AudioSource::Microphone)
+            .await
     }
 
     /// Process a chunk of audio with a specific source label
