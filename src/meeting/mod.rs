@@ -40,7 +40,9 @@ pub use state::{ChunkState, MeetingState};
 pub use storage::{MeetingStorage, StorageConfig, StorageError};
 
 use crate::error::{MeetingError, Result};
+use crate::output::post_process::PostProcessor;
 use crate::transcribe::{self, Transcriber};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -100,6 +102,10 @@ pub struct MeetingDaemon {
     transcriber: Option<Arc<dyn Transcriber>>,
     engine_name: String,
     event_tx: mpsc::Sender<MeetingEvent>,
+    post_processor: Option<PostProcessor>,
+    /// Previous chunk's post-processed text, tracked per audio source
+    /// so mic and loopback contexts don't bleed into each other
+    last_chunk_text: HashMap<AudioSource, String>,
 }
 
 impl MeetingDaemon {
@@ -116,6 +122,15 @@ impl MeetingDaemon {
             Arc::from(transcribe::create_transcriber(app_config)?);
         let engine_name = format!("{:?}", app_config.engine).to_lowercase();
 
+        let post_processor = app_config.output.post_process.as_ref().map(|cfg| {
+            tracing::info!(
+                "Meeting post-processing enabled: command={:?}, timeout={}ms",
+                cfg.command,
+                cfg.timeout_ms
+            );
+            PostProcessor::new(cfg)
+        });
+
         Ok(Self {
             config,
             state: MeetingState::Idle,
@@ -124,6 +139,8 @@ impl MeetingDaemon {
             transcriber: Some(transcriber),
             engine_name,
             event_tx,
+            post_processor,
+            last_chunk_text: HashMap::new(),
         })
     }
 
@@ -190,6 +207,7 @@ impl MeetingDaemon {
         }
 
         self.state = std::mem::take(&mut self.state).stop();
+        self.last_chunk_text.clear();
 
         // Finalize meeting
         if let Some(ref mut meeting) = self.current_meeting {
@@ -280,9 +298,26 @@ impl MeetingDaemon {
         let mut buffer = processor.new_buffer(chunk_id, source, start_offset_ms);
         buffer.add_samples(&samples);
 
-        let result = processor
+        let mut result = processor
             .process_chunk(buffer)
             .map_err(crate::error::VoxtypeError::Transcribe)?;
+
+        // Post-process segment text if configured
+        if let Some(ref post_processor) = self.post_processor {
+            let context = self.last_chunk_text.get(&source).map(|s| s.as_str());
+            for segment in &mut result.segments {
+                if !segment.text.is_empty() {
+                    segment.text = post_processor
+                        .process_with_context(&segment.text, context)
+                        .await;
+                }
+            }
+            // Update context for next chunk (per source)
+            if let Some(last_seg) = result.segments.last() {
+                self.last_chunk_text
+                    .insert(source, last_seg.text.clone());
+            }
+        }
 
         // Add segments to transcript
         if let Some(ref mut meeting) = self.current_meeting {
