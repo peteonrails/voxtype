@@ -75,6 +75,9 @@ ndarray = { version = "0.16", optional = true }
 tokenizers = { version = "0.20", optional = true, default-features = false, features = ["onig"] }
 rustfft = { version = "6", optional = true }
 
+# OpenVINO GenAI backend (Intel NPU/CPU/GPU via OpenVINO GenAI WhisperPipeline)
+openvino-genai = { path = "../openvino-rs/crates/openvino-genai", optional = true, features = ["runtime-linking"] }
+
 # CPU count for thread detection
 num_cpus = "1.16"
 
@@ -126,6 +129,8 @@ dolphin-tensorrt = ["dolphin", "ort/tensorrt"]
 omnilingual = ["onnx-common"]
 omnilingual-cuda = ["omnilingual", "ort/cuda"]
 omnilingual-tensorrt = ["omnilingual", "ort/tensorrt"]
+# OpenVINO Whisper backend (Intel NPU/CPU/GPU via OpenVINO GenAI WhisperPipeline)
+openvino-whisper = ["dep:openvino-genai"]
 
 [build-dependencies]
 clap = { version = "4", features = ["derive"] }

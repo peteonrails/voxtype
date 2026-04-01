@@ -332,6 +332,10 @@ pub struct Config {
     #[serde(default)]
     pub omnilingual: Option<OmnilingualConfig>,
 
+    /// OpenVINO Whisper configuration (optional, only used when engine = "openvino")
+    #[serde(default)]
+    pub openvino: Option<OpenVinoConfig>,
+
     /// Text processing configuration (replacements, spoken punctuation)
     #[serde(default)]
     pub text: TextConfig,
@@ -1125,6 +1129,72 @@ impl Default for OmnilingualConfig {
     }
 }
 
+/// OpenVINO Whisper speech-to-text configuration (Intel NPU/CPU/GPU via OpenVINO GenAI)
+/// Requires: cargo build --features openvino-whisper
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OpenVinoConfig {
+    /// Model name or path to directory containing OpenVINO IR model files.
+    /// Names with quantization: "base.en-int8", "small.en-fp16", "tiny-int4", etc.
+    /// Short names also work: "base.en" (uses `quantized` to pick int8/fp16)
+    pub model: String,
+
+    /// OpenVINO device to run inference on (default: "NPU")
+    /// Options: "NPU", "CPU", "GPU", "AUTO"
+    #[serde(default = "default_openvino_device")]
+    pub device: String,
+
+    /// Use int8 quantized model variants for better NPU performance (default: true)
+    #[serde(default = "default_true")]
+    pub quantized: bool,
+
+    /// Number of CPU threads for CPU inference (ignored for NPU/GPU)
+    #[serde(default)]
+    pub threads: Option<usize>,
+
+    /// Language for transcription (default: "en")
+    /// Uses Whisper language codes: "en", "zh", "fr", "de", "ja", etc.
+    #[serde(default = "default_openvino_language")]
+    pub language: String,
+
+    /// Enable translation to English (default: false)
+    #[serde(default)]
+    pub translate: bool,
+
+    /// Load model on-demand when recording starts (true) or keep loaded (false)
+    #[serde(default = "default_on_demand_loading")]
+    pub on_demand_loading: bool,
+
+    /// Path to the OpenVINO installation directory containing shared libraries.
+    /// When set, loads libopenvino_genai_c.so from this path instead of relying
+    /// on automatic discovery (LD_LIBRARY_PATH, OPENVINO_INSTALL_DIR, etc.).
+    /// Also settable via VOXTYPE_OPENVINO_DIR environment variable.
+    #[serde(default)]
+    pub openvino_dir: Option<String>,
+}
+
+fn default_openvino_device() -> String {
+    "NPU".to_string()
+}
+
+fn default_openvino_language() -> String {
+    "en".to_string()
+}
+
+impl Default for OpenVinoConfig {
+    fn default() -> Self {
+        Self {
+            model: "base.en".to_string(),
+            device: default_openvino_device(),
+            quantized: true,
+            threads: None,
+            language: default_openvino_language(),
+            translate: false,
+            on_demand_loading: false,
+            openvino_dir: None,
+        }
+    }
+}
+
 /// Transcription engine selection (which ASR technology to use)
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -1150,6 +1220,10 @@ pub enum TranscriptionEngine {
     /// Use Omnilingual (FunASR 50+ language CTC encoder via ONNX Runtime)
     /// Requires: cargo build --features omnilingual
     Omnilingual,
+    /// Use OpenVINO Whisper (Intel NPU/CPU/GPU via OpenVINO Runtime)
+    /// Requires: cargo build --features openvino-whisper
+    #[serde(rename = "openvino")]
+    OpenVino,
 }
 
 /// VAD backend selection
@@ -1807,6 +1881,7 @@ impl Default for Config {
             paraformer: None,
             dolphin: None,
             omnilingual: None,
+            openvino: None,
             text: TextConfig::default(),
             vad: VadConfig::default(),
             status: StatusConfig::default(),
@@ -1915,6 +1990,11 @@ impl Config {
                 .as_ref()
                 .map(|o| o.on_demand_loading)
                 .unwrap_or(false),
+            TranscriptionEngine::OpenVino => self
+                .openvino
+                .as_ref()
+                .map(|o| o.on_demand_loading)
+                .unwrap_or(false),
         }
     }
 
@@ -1952,6 +2032,11 @@ impl Config {
                 .as_ref()
                 .map(|o| o.model.as_str())
                 .unwrap_or("omnilingual (not configured)"),
+            TranscriptionEngine::OpenVino => self
+                .openvino
+                .as_ref()
+                .map(|o| o.model.as_str())
+                .unwrap_or("openvino (not configured)"),
         }
     }
 
@@ -2020,6 +2105,7 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             "paraformer" => config.engine = TranscriptionEngine::Paraformer,
             "dolphin" => config.engine = TranscriptionEngine::Dolphin,
             "omnilingual" => config.engine = TranscriptionEngine::Omnilingual,
+            "openvino" => config.engine = TranscriptionEngine::OpenVino,
             _ => tracing::warn!("Unknown VOXTYPE_ENGINE value: {}", engine),
         }
     }
@@ -2117,6 +2203,12 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     }
     if let Ok(val) = std::env::var("VOXTYPE_SMART_AUTO_SUBMIT") {
         config.text.smart_auto_submit = parse_bool_env(&val);
+    }
+
+    // OpenVINO
+    if let Ok(dir) = std::env::var("VOXTYPE_OPENVINO_DIR") {
+        let openvino = config.openvino.get_or_insert_with(OpenVinoConfig::default);
+        openvino.openvino_dir = Some(dir);
     }
 
     Ok(config)

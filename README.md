@@ -12,7 +12,7 @@ Hold a hotkey (default: ScrollLock) while speaking, release to transcribe and ou
 
 - **Works on any Linux desktop** - Uses compositor keybindings (Hyprland, Sway, River) with evdev fallback for X11 and other environments
 - **Fully offline by default** - Uses whisper.cpp for local transcription, with optional remote server support
-- **7 transcription engines** - Whisper, Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, and Omnilingual (see [Supported Engines](#supported-engines) below)
+- **8 transcription engines** - Whisper, Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual, and OpenVINO Whisper (see [Supported Engines](#supported-engines) below)
 - **Chinese, Japanese, Korean, and 1600+ languages** - SenseVoice, Dolphin, and Omnilingual add native support for CJK and other non-Latin scripts
 - **Meeting mode** - Continuous meeting transcription with chunked processing, speaker attribution, and export to Markdown, JSON, SRT, or VTT
 - **Fallback chain** - Types via wtype (best CJK support), falls back to dotool (keyboard layout support), ydotool, then clipboard
@@ -331,11 +331,12 @@ Voxtype ships separate binaries for Whisper and ONNX engines. Use `voxtype setup
 | **Paraformer** | zh+en, zh+yue+en | Non-autoregressive (ONNX) | Chinese-English bilingual |
 | **Dolphin** | 40 languages + 22 Chinese dialects | CTC E-Branchformer (ONNX) | Eastern languages (no English) |
 | **Omnilingual** | 1600+ languages | wav2vec2 CTC (ONNX) | Low-resource and rare languages |
+| **OpenVINO Whisper** | 99 languages | Encoder-decoder (OpenVINO) | Intel NPU (Lunar Lake), CPU/GPU fallback |
 
 To set the engine in your config:
 
 ```toml
-engine = "sensevoice"  # or: whisper, parakeet, moonshine, paraformer, dolphin, omnilingual
+engine = "sensevoice"  # or: whisper, parakeet, moonshine, paraformer, dolphin, omnilingual, openvino
 ```
 
 Or override on the command line:
@@ -391,6 +392,35 @@ cargo build --release --features gpu-metal
 ```bash
 cargo build --release --features gpu-hipblas
 ```
+
+### Intel NPU (Lunar Lake, Arrow Lake, Meteor Lake)
+
+Intel NPU acceleration uses OpenVINO Runtime with Whisper models exported in OpenVINO IR format:
+
+```bash
+# Build with OpenVINO support
+cargo build --release --features openvino-whisper
+
+# Install OpenVINO Runtime (required at runtime)
+# Arch:
+pip install openvino
+# Ubuntu:
+sudo apt install openvino
+
+# Download a model
+voxtype setup model  # Select an OpenVINO model
+
+# Configure
+cat >> ~/.config/voxtype/config.toml << 'EOF'
+engine = "openvino"
+
+[openvino]
+model = "base.en-int8"
+device = "NPU"
+EOF
+```
+
+The NPU requires the Intel NPU driver (`intel-npu-driver`). Set `device = "CPU"` to fall back to CPU inference on systems without an NPU.
 
 ### Performance Comparison
 

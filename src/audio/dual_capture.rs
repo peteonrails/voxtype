@@ -59,7 +59,8 @@ impl ParecLoopback {
     fn start(&mut self) -> Result<(), AudioError> {
         let mut child = std::process::Command::new("parec")
             .args([
-                "--device", &self.source,
+                "--device",
+                &self.source,
                 "--format=float32le",
                 "--channels=1",
                 "--rate=16000",
@@ -70,7 +71,9 @@ impl ParecLoopback {
             .spawn()
             .map_err(|e| AudioError::Connection(format!("Failed to start parec: {}", e)))?;
 
-        let mut stdout = child.stdout.take()
+        let mut stdout = child
+            .stdout
+            .take()
             .ok_or_else(|| AudioError::Connection("Failed to capture parec stdout".to_string()))?;
 
         self.child = Some(child);
@@ -160,18 +163,16 @@ impl DualCapture {
 
         let loopback = match loopback_device {
             Some("disabled") | Some("") | None => None,
-            Some("auto") => {
-                match Self::find_monitor_source() {
-                    Some(source) => {
-                        tracing::info!("Auto-detected loopback source: {}", source);
-                        Some(ParecLoopback::new(source))
-                    }
-                    None => {
-                        tracing::warn!("No monitor source found, using mic only");
-                        None
-                    }
+            Some("auto") => match Self::find_monitor_source() {
+                Some(source) => {
+                    tracing::info!("Auto-detected loopback source: {}", source);
+                    Some(ParecLoopback::new(source))
                 }
-            }
+                None => {
+                    tracing::warn!("No monitor source found, using mic only");
+                    None
+                }
+            },
             Some(device) => {
                 tracing::info!("Using configured loopback source: {}", device);
                 Some(ParecLoopback::new(device.to_string()))

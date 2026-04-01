@@ -135,9 +135,10 @@ async fn main() -> anyhow::Result<()> {
             "paraformer" => config.engine = config::TranscriptionEngine::Paraformer,
             "dolphin" => config.engine = config::TranscriptionEngine::Dolphin,
             "omnilingual" => config.engine = config::TranscriptionEngine::Omnilingual,
+            "openvino" => config.engine = config::TranscriptionEngine::OpenVino,
             _ => {
                 eprintln!(
-                    "Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual",
+                    "Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, openvino",
                     engine
                 );
                 std::process::exit(1);
@@ -360,8 +361,9 @@ async fn main() -> anyhow::Result<()> {
                     "paraformer" => config.engine = config::TranscriptionEngine::Paraformer,
                     "dolphin" => config.engine = config::TranscriptionEngine::Dolphin,
                     "omnilingual" => config.engine = config::TranscriptionEngine::Omnilingual,
+                    "openvino" => config.engine = config::TranscriptionEngine::OpenVino,
                     _ => {
-                        eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual", engine_name);
+                        eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, openvino", engine_name);
                         std::process::exit(1);
                     }
                 }
@@ -476,6 +478,22 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         // Default: show status
                         setup::gpu::show_status();
+                    }
+                }
+                Some(SetupAction::Npu {
+                    enable,
+                    disable,
+                    status,
+                }) => {
+                    warn_if_root("npu");
+                    if status {
+                        setup::npu::show_status();
+                    } else if enable {
+                        setup::npu::enable()?;
+                    } else if disable {
+                        setup::npu::disable()?;
+                    } else {
+                        setup::npu::show_status();
                     }
                 }
                 Some(SetupAction::Onnx {
@@ -1228,8 +1246,8 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
             if path.is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.contains("sensevoice") {
-                    let has_model = path.join("model.int8.onnx").exists()
-                        || path.join("model.onnx").exists();
+                    let has_model =
+                        path.join("model.int8.onnx").exists() || path.join("model.onnx").exists();
                     let has_tokens = path.join("tokens.txt").exists();
                     if has_model && has_tokens {
                         sensevoice_models.push(name);
