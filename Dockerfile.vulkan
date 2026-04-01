@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y \
     cmake \
     pkg-config \
     libasound2-dev \
+    libdbus-1-dev \
     git \
     binutils \
     libvulkan-dev \
@@ -57,7 +58,7 @@ ENV GGML_NATIVE=ON
 
 # Build Vulkan binary (verbose to show progress)
 # Override Cargo.toml's LTO settings to prevent linking hangs
-RUN cargo build --release --features gpu-vulkan \
+RUN cargo build --release --features gpu-vulkan,tray \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
     -vv 2>&1 | tee /tmp/build.log \

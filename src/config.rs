@@ -271,6 +271,12 @@ on_transcription = true
 # transcribing = "⏳"
 # stopped = ""
 
+# [tray]
+# System tray icon via StatusNotifierItem (DBus)
+# Requires building with --features tray (included in release binaries)
+# Requires a StatusNotifierHost (KDE Plasma, GNOME with AppIndicator, Waybar tray module)
+# enabled = false
+
 # [profiles]
 # Named profiles for context-specific post-processing
 # Use with: voxtype record start --profile slack
@@ -356,11 +362,29 @@ pub struct Config {
     #[serde(default = "default_state_file")]
     pub state_file: Option<String>,
 
+    /// System tray configuration
+    #[serde(default)]
+    pub tray: TrayConfig,
+
     /// Named profiles for context-specific settings
     /// Example: [profiles.slack], [profiles.code]
     /// Use with: `voxtype record start --profile slack`
     #[serde(default)]
     pub profiles: HashMap<String, Profile>,
+}
+
+/// System tray (StatusNotifierItem) configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TrayConfig {
+    /// Enable the system tray icon (default: false)
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+impl Default for TrayConfig {
+    fn default() -> Self {
+        Self { enabled: false }
+    }
 }
 
 /// Hotkey detection configuration
@@ -1811,6 +1835,7 @@ impl Default for Config {
             vad: VadConfig::default(),
             status: StatusConfig::default(),
             meeting: MeetingConfig::default(),
+            tray: TrayConfig::default(),
             state_file: Some("auto".to_string()),
             profiles: HashMap::new(),
         }
@@ -2117,6 +2142,11 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     }
     if let Ok(val) = std::env::var("VOXTYPE_SMART_AUTO_SUBMIT") {
         config.text.smart_auto_submit = parse_bool_env(&val);
+    }
+
+    // Tray
+    if let Ok(val) = std::env::var("VOXTYPE_TRAY_ENABLED") {
+        config.tray.enabled = parse_bool_env(&val);
     }
 
     Ok(config)
@@ -3567,6 +3597,60 @@ mod tests {
 
     // =========================================================================
     // Clipboard Restore Tests
+    // =========================================================================
+
+    // =========================================================================
+    // Tray config tests
+    // =========================================================================
+
+    #[test]
+    fn test_tray_disabled_by_default() {
+        let config = Config::default();
+        assert!(!config.tray.enabled);
+    }
+
+    #[test]
+    fn test_tray_enabled_from_toml() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 30
+
+            [whisper]
+            model = "base.en"
+
+            [output]
+            mode = "type"
+
+            [tray]
+            enabled = true
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.tray.enabled);
+    }
+
+    #[test]
+    fn test_tray_env_var_override() {
+        // Set env var before loading config
+        std::env::set_var("VOXTYPE_TRAY_ENABLED", "true");
+        let config = load_config(None).unwrap();
+        assert!(config.tray.enabled, "VOXTYPE_TRAY_ENABLED=true should enable tray");
+
+        std::env::set_var("VOXTYPE_TRAY_ENABLED", "false");
+        let config = load_config(None).unwrap();
+        assert!(!config.tray.enabled, "VOXTYPE_TRAY_ENABLED=false should disable tray");
+
+        // Clean up
+        std::env::remove_var("VOXTYPE_TRAY_ENABLED");
+    }
+
+    // =========================================================================
+    // Restore clipboard tests
     // =========================================================================
 
     #[test]

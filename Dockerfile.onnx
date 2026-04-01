@@ -33,6 +33,7 @@ RUN apt-get update && apt-get install -y \
     cmake \
     pkg-config \
     libasound2-dev \
+    libdbus-1-dev \
     libssl-dev \
     protobuf-compiler \
     libprotobuf-dev \
@@ -62,7 +63,7 @@ ENV ORT_STRATEGY=download
 
 # Disable LTO for faster builds (can hang on TrueNAS)
 # Build with all ONNX engines
-RUN cargo build --release --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual \
+RUN cargo build --release --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual,tray \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
     && cp target/release/voxtype /tmp/voxtype-onnx-avx2

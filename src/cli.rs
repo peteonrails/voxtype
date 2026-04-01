@@ -262,6 +262,12 @@ pub struct Cli {
     #[arg(long, value_name = "CMD", help_heading = "Output")]
     pub pre_recording_command: Option<String>,
 
+    // -- Tray --
+
+    /// Enable system tray icon (StatusNotifierItem)
+    #[arg(long, help_heading = "Tray")]
+    pub tray: bool,
+
     // -- VAD --
 
     /// Enable Voice Activity Detection (filter silence before transcription)
@@ -1853,5 +1859,21 @@ mod tests {
             }
             _ => panic!("Expected Record command"),
         }
+    }
+
+    // =========================================================================
+    // Tray flag tests
+    // =========================================================================
+
+    #[test]
+    fn test_tray_flag() {
+        let cli = Cli::parse_from(["voxtype", "--tray"]);
+        assert!(cli.tray, "--tray should set tray=true");
+    }
+
+    #[test]
+    fn test_no_tray_flag_by_default() {
+        let cli = Cli::parse_from(["voxtype"]);
+        assert!(!cli.tray, "tray should be false by default");
     }
 }
