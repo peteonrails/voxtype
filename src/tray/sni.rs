@@ -116,7 +116,7 @@ pub fn spawn() -> Option<(
     let (state_tx, mut state_rx) = tokio::sync::watch::channel(TrayState::Idle);
     let (event_tx, event_rx) = tokio::sync::mpsc::channel::<TrayEvent>(8);
 
-    // Bridge channel: ksni thread (std::sync) -> tokio task -> tokio mpsc
+    // Bridge channel: ksni thread (std::sync) -> bridge thread -> tokio mpsc
     let (std_event_tx, std_event_rx) = std::sync::mpsc::channel::<TrayEvent>();
 
     let shared = Arc::new(Mutex::new(SharedState {
