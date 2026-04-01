@@ -31,7 +31,7 @@ impl PostProcessor {
     /// Create a new post-processor from configuration
     pub fn new(config: &PostProcessConfig) -> Self {
         Self {
-            command: config.command.clone(),
+            command: config.command.clone().unwrap_or_default(),
             timeout: Duration::from_millis(config.timeout_ms),
         }
     }
@@ -151,8 +151,12 @@ mod tests {
 
     fn make_config(command: &str, timeout_ms: u64) -> PostProcessConfig {
         PostProcessConfig {
-            command: command.to_string(),
+            command: Some(command.to_string()),
             timeout_ms,
+            anthropic_api_key: None,
+            anthropic_api_key_file: None,
+            anthropic_model: None,
+            anthropic_prompt: None,
         }
     }
 
