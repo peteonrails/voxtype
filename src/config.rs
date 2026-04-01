@@ -3677,6 +3677,60 @@ mod tests {
     // Clipboard Restore Tests
     // =========================================================================
 
+    // =========================================================================
+    // Tray config tests
+    // =========================================================================
+
+    #[test]
+    fn test_tray_disabled_by_default() {
+        let config = Config::default();
+        assert!(!config.tray.enabled);
+    }
+
+    #[test]
+    fn test_tray_enabled_from_toml() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 30
+
+            [whisper]
+            model = "base.en"
+
+            [output]
+            mode = "type"
+
+            [tray]
+            enabled = true
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.tray.enabled);
+    }
+
+    #[test]
+    fn test_tray_env_var_override() {
+        // Set env var before loading config
+        std::env::set_var("VOXTYPE_TRAY_ENABLED", "true");
+        let config = load_config(None).unwrap();
+        assert!(config.tray.enabled, "VOXTYPE_TRAY_ENABLED=true should enable tray");
+
+        std::env::set_var("VOXTYPE_TRAY_ENABLED", "false");
+        let config = load_config(None).unwrap();
+        assert!(!config.tray.enabled, "VOXTYPE_TRAY_ENABLED=false should disable tray");
+
+        // Clean up
+        std::env::remove_var("VOXTYPE_TRAY_ENABLED");
+    }
+
+    // =========================================================================
+    // Restore clipboard tests
+    // =========================================================================
+
     #[test]
     fn test_restore_clipboard_defaults() {
         let config = Config::default();
