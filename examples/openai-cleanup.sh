@@ -29,21 +29,33 @@ if [[ -z "$INPUT" ]]; then
     exit 0
 fi
 
+# Build prompt with optional context from previous dictation
+SYSTEM_PROMPT="You clean up dictated text. Remove filler words (um, uh, like), fix grammar and punctuation. Output ONLY the cleaned text - no quotes, no emojis, no explanations."
+
+if [[ -n "${VOXTYPE_CONTEXT:-}" ]]; then
+  SYSTEM_PROMPT="${SYSTEM_PROMPT} You will receive the previous dictation for context - do NOT include it in your output, only clean up the current text."
+fi
+
 # Build JSON payload with jq to handle special characters
-JSON=$(jq -n --arg text "$INPUT" '{
-  model: "gpt-4o-mini",
-  messages: [
-    {
-      role: "system",
-      content: "You clean up dictated text. Remove filler words (um, uh, like), fix grammar and punctuation. Output ONLY the cleaned text - no quotes, no emojis, no explanations."
-    },
-    {
-      role: "user",
-      content: $text
-    }
-  ],
-  max_tokens: 1000
-}')
+if [[ -n "${VOXTYPE_CONTEXT:-}" ]]; then
+  JSON=$(jq -n --arg text "$INPUT" --arg system "$SYSTEM_PROMPT" --arg context "$VOXTYPE_CONTEXT" '{
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: $system },
+      { role: "user", content: ("Previous dictation for context:\n" + $context + "\n\nCurrent text to clean up:\n" + $text) }
+    ],
+    max_tokens: 1000
+  }')
+else
+  JSON=$(jq -n --arg text "$INPUT" --arg system "$SYSTEM_PROMPT" '{
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: $system },
+      { role: "user", content: $text }
+    ],
+    max_tokens: 1000
+  }')
+fi
 
 # Call OpenAI API
 RESPONSE=$(curl -s --max-time 8 \

@@ -20,7 +20,7 @@ use pidlock::Pidlock;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::signal::unix::{signal, SignalKind};
 
@@ -475,6 +475,8 @@ pub struct Daemon {
     audio_feedback: Option<AudioFeedback>,
     text_processor: TextProcessor,
     post_processor: Option<PostProcessor>,
+    /// Last post-processed text and when it was produced, for context in subsequent dictations
+    last_dictation: Option<(String, Instant)>,
     // Model manager for multi-model support
     model_manager: Option<ModelManager>,
     // Background task for loading model on-demand
@@ -588,6 +590,7 @@ impl Daemon {
             audio_feedback,
             text_processor,
             post_processor,
+            last_dictation: None,
             model_manager: None,
             model_load_task: None,
             transcription_task: None,
@@ -1231,7 +1234,7 @@ impl Daemon {
 
     /// Handle transcription completion (called when transcription_task completes)
     async fn handle_transcription_result(
-        &self,
+        &mut self,
         state: &mut State,
         result: std::result::Result<TranscriptionResult, tokio::task::JoinError>,
     ) {
@@ -1277,6 +1280,14 @@ impl Daemon {
                         }
                     }
 
+                    // Get context from last dictation if within 60 seconds
+                    let recent_context = self.last_dictation.as_ref().and_then(|(text, when)| {
+                        if when.elapsed() < Duration::from_secs(60) {
+                            Some(text.clone())
+                        } else {
+                            None
+                        }
+                    });
                     // Apply post-processing command (profile overrides default)
                     let final_text = if let Some(profile) = active_profile {
                         if let Some(ref cmd) = profile.post_process_command {
@@ -1287,31 +1298,48 @@ impl Daemon {
                             };
                             let profile_processor = PostProcessor::new(&profile_config);
                             tracing::info!(
-                                "Post-processing with profile: {:?}",
-                                profile_override.as_ref().unwrap()
+                                "Post-processing with profile: {:?}, has_context: {}",
+                                profile_override.as_ref().unwrap(),
+                                recent_context.is_some()
                             );
-                            let result = profile_processor.process(&processed_text).await;
-                            tracing::info!("Post-processed: {:?}", result);
+                            tracing::debug!("Post-processing context: {:?}", recent_context);
+                            let result = profile_processor
+                                .process_with_context(&processed_text, recent_context.as_deref())
+                                .await;
+                            tracing::info!("Post-processed: changed: {}", result != processed_text);
+                            tracing::debug!("Post-processed result: {:?}", result);
                             result
                         } else {
                             // Profile exists but has no post_process_command, use default
                             if let Some(ref post_processor) = self.post_processor {
-                                tracing::info!("Post-processing: {:?}", processed_text);
-                                let result = post_processor.process(&processed_text).await;
-                                tracing::info!("Post-processed: {:?}", result);
+                                tracing::info!("Post-processing, has_context: {}", recent_context.is_some());
+                                tracing::debug!("Post-processing input: {:?}, context: {:?}", processed_text, recent_context);
+                                let result = post_processor
+                                    .process_with_context(&processed_text, recent_context.as_deref())
+                                    .await;
+                                tracing::info!("Post-processed: changed: {}", result != processed_text);
+                                tracing::debug!("Post-processed result: {:?}", result);
                                 result
                             } else {
                                 processed_text
                             }
                         }
                     } else if let Some(ref post_processor) = self.post_processor {
-                        tracing::info!("Post-processing: {:?}", processed_text);
-                        let result = post_processor.process(&processed_text).await;
-                        tracing::info!("Post-processed: {:?}", result);
+                        tracing::info!("Post-processing, has_context: {}", recent_context.is_some());
+                        tracing::debug!("Post-processing input: {:?}, context: {:?}", processed_text, recent_context);
+                        let result = post_processor
+                            .process_with_context(&processed_text, recent_context.as_deref())
+                            .await;
+                        tracing::info!("Post-processed: changed: {}", result != processed_text);
+                        tracing::debug!("Post-processed result: {:?}", result);
                         result
                     } else {
                         processed_text
                     };
+
+                    // Track last dictation for context in subsequent post-processing
+                    self.last_dictation =
+                        Some((final_text.clone(), Instant::now()));
 
                     if smart_submit {
                         tracing::debug!(
