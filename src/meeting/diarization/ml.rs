@@ -10,7 +10,6 @@ use crate::meeting::data::AudioSource;
 use crate::meeting::TranscriptSegment;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 #[cfg(feature = "ml-diarization")]
 use ort::session::Session;
@@ -235,7 +234,7 @@ impl Default for MlDiarizer {
 impl Diarizer for MlDiarizer {
     fn diarize(
         &self,
-        samples: &[f32],
+        _samples: &[f32],
         _source: AudioSource,
         transcript_segments: &[TranscriptSegment],
     ) -> Vec<DiarizedSegment> {

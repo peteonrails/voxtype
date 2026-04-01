@@ -2861,9 +2861,8 @@ pub fn download_openvino_model(model_name: &str) -> anyhow::Result<()> {
     }
 
     // Validate critical files
-    validate_openvino_model(&model_path).map_err(|e| {
+    validate_openvino_model(&model_path).inspect_err(|_| {
         print_failure("Model download incomplete. Missing required files.");
-        e
     })?;
 
     print_success(&format!(
