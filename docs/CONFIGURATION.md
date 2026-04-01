@@ -241,6 +241,39 @@ cancel_key = "ESC"  # Press Escape to cancel
 
 **Note:** This only applies when using evdev hotkey detection (`enabled = true`). When using compositor keybindings, use `voxtype record cancel` instead. See [User Manual - Canceling Transcription](USER_MANUAL.md#canceling-transcription).
 
+### [hotkey.profile_modifiers]
+
+**Type:** Table (key = modifier name, value = profile name)
+**Default:** Empty (disabled)
+**Required:** No
+
+Maps modifier keys to named profiles. When a profile modifier is held while pressing the hotkey, that profile's post-processing command is used instead of the default. Profiles are defined in `[profiles.<name>]` sections.
+
+**Example:**
+```toml
+[hotkey]
+key = "SCROLLLOCK"
+
+[hotkey.profile_modifiers]
+RIGHTSHIFT = "translate"   # Shift + hotkey activates [profiles.translate]
+RIGHTALT = "formal"        # RightAlt + hotkey activates [profiles.formal]
+
+[profiles.translate]
+post_process_command = "my-script.sh --translate-en"
+timeout_ms = 10000
+
+[profiles.formal]
+post_process_command = "my-script.sh --formal"
+```
+
+**Valid key names:** Same modifier keys as `modifiers` option:
+- `LEFTSHIFT`, `RIGHTSHIFT`
+- `LEFTCTRL`, `RIGHTCTRL`
+- `LEFTALT`, `RIGHTALT`
+- `LEFTMETA`, `RIGHTMETA`
+
+**Note:** This only applies when using evdev hotkey detection (`enabled = true`). When using compositor keybindings, use `voxtype record start --profile <name>` instead. Avoid using the same key in both `modifiers` and `profile_modifiers` -- every hotkey press would always activate that profile.
+
 ---
 
 ## [audio]
