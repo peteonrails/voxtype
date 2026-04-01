@@ -635,7 +635,11 @@ impl Daemon {
             let tray_state = match state_name {
                 "recording" => crate::tray::TrayState::Recording,
                 "transcribing" => crate::tray::TrayState::Transcribing,
-                _ => crate::tray::TrayState::Idle,
+                "idle" => crate::tray::TrayState::Idle,
+                other => {
+                    tracing::warn!("Unknown daemon state '{}', defaulting tray to Idle", other);
+                    crate::tray::TrayState::Idle
+                }
             };
             let _ = tx.send(tray_state);
         }

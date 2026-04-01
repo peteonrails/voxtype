@@ -1860,4 +1860,20 @@ mod tests {
             _ => panic!("Expected Record command"),
         }
     }
+
+    // =========================================================================
+    // Tray flag tests
+    // =========================================================================
+
+    #[test]
+    fn test_tray_flag() {
+        let cli = Cli::parse_from(["voxtype", "--tray"]);
+        assert!(cli.tray, "--tray should set tray=true");
+    }
+
+    #[test]
+    fn test_no_tray_flag_by_default() {
+        let cli = Cli::parse_from(["voxtype"]);
+        assert!(!cli.tray, "tray should be false by default");
+    }
 }
