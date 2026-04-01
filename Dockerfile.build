@@ -30,6 +30,7 @@ RUN apt-get update && apt-get install -y \
     cmake \
     pkg-config \
     libasound2-dev \
+    libdbus-1-dev \
     git \
     binutils \
     && rm -rf /var/lib/apt/lists/*
@@ -54,7 +55,7 @@ ENV CMAKE_C_FLAGS="-mno-avx512f -mno-avx512vl -mno-avx512bw -mno-avx512dq -mno-a
 ENV CMAKE_CXX_FLAGS="-mno-avx512f -mno-avx512vl -mno-avx512bw -mno-avx512dq -mno-avx512cd -mno-gfni -mno-avxvnni"
 
 # Build AVX2 binary
-RUN cargo build --release \
+RUN cargo build --release --features tray \
     && cp target/release/voxtype /tmp/voxtype-avx2
 
 # Verify no AVX-512 or GFNI instructions

@@ -27,6 +27,7 @@ RUN apt-get update && apt-get install -y \
     cmake \
     pkg-config \
     libasound2-dev \
+    libdbus-1-dev \
     libssl-dev \
     protobuf-compiler \
     libprotobuf-dev \
@@ -49,7 +50,7 @@ ENV ORT_STRATEGY=download
 
 # Disable LTO for faster builds
 # Build with all ONNX engines + CUDA support for NVIDIA GPUs
-RUN cargo build --release --features parakeet-cuda,moonshine-cuda,sensevoice-cuda,paraformer-cuda,dolphin-cuda,omnilingual-cuda \
+RUN cargo build --release --features parakeet-cuda,moonshine-cuda,sensevoice-cuda,paraformer-cuda,dolphin-cuda,omnilingual-cuda,tray \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
     && cp target/release/voxtype /tmp/voxtype-onnx-cuda
