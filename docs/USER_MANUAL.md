@@ -436,6 +436,26 @@ Available modifiers:
 - `LEFTSHIFT`, `RIGHTSHIFT`
 - `LEFTMETA`, `RIGHTMETA` (Super/Windows key)
 
+### Profile Modifiers
+
+Map modifier keys to named profiles for different post-processing per recording. Hold a profile modifier while pressing the hotkey to activate that profile:
+
+```toml
+[hotkey]
+key = "SCROLLLOCK"
+
+[hotkey.profile_modifiers]
+RIGHTSHIFT = "translate"
+
+[profiles.translate]
+post_process_command = "my-cleanup.sh --translate-en"
+post_process_timeout_ms = 10000
+```
+
+With this config, bare ScrollLock uses default post-processing, while Right Shift + ScrollLock translates to English. See [Configuration - profile_modifiers](CONFIGURATION.md#hotkeyprofile_modifiers) for details.
+
+When using compositor keybindings instead of evdev, use `voxtype record start --profile <name>` to achieve the same effect.
+
 ---
 
 ## Compositor Keybindings
