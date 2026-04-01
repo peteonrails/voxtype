@@ -1014,8 +1014,8 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
             let path = entry.path();
             if path.is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("openvino-whisper") {
-                    if model::validate_openvino_model(&path).is_ok() {
+                if name.starts_with("openvino-whisper")
+                    && model::validate_openvino_model(&path).is_ok() {
                         let size = std::fs::read_dir(&path)
                             .map(|entries| {
                                 entries
@@ -1027,7 +1027,6 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
                             .unwrap_or(0);
                         openvino_models.push((name, size));
                     }
-                }
             }
         }
     }
