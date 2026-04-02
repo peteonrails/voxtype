@@ -103,6 +103,37 @@ pub fn engine_icon(engine: crate::config::TranscriptionEngine) -> &'static str {
     }
 }
 
+/// Send a desktop notification (cross-platform)
+pub async fn send_desktop_notification(title: &str, body: &str) {
+    if cfg!(target_os = "macos") {
+        // Use osascript on macOS
+        let script = format!(
+            "display notification \"{}\" with title \"{}\"",
+            body.replace('\\', "\\\\").replace('"', "\\\""),
+            title.replace('\\', "\\\\").replace('"', "\\\""),
+        );
+        let _ = Command::new("osascript")
+            .args(["-e", &script])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+    } else {
+        let _ = Command::new("notify-send")
+            .args([
+                "--app-name=Voxtype",
+                "--urgency=low",
+                "--expire-time=3000",
+                title,
+                body,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+    }
+}
+
 /// Send a transcription notification with optional engine icon
 pub async fn send_transcription_notification(
     text: &str,
@@ -122,18 +153,7 @@ pub async fn send_transcription_notification(
         "Transcribed".to_string()
     };
 
-    let _ = Command::new("notify-send")
-        .args([
-            "--app-name=Voxtype",
-            "--urgency=low",
-            "--expire-time=3000",
-            &title,
-            &preview,
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await;
+    send_desktop_notification(&title, &preview).await;
 }
 
 /// Trait for text output implementations

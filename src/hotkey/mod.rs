@@ -1,11 +1,10 @@
 //! Hotkey detection module
 //!
-//! Provides kernel-level key event detection using evdev.
-//! This approach works on all Wayland compositors because it
-//! operates at the Linux input subsystem level.
-//!
-//! Requires the user to be in the 'input' group.
+//! On Linux, provides kernel-level key event detection using evdev.
+//! On macOS, hotkey detection is not built-in; use `voxtype record toggle`
+//! bound to a system keyboard shortcut instead.
 
+#[cfg(target_os = "linux")]
 pub mod evdev_listener;
 
 use crate::config::HotkeyConfig;
@@ -38,6 +37,7 @@ pub trait HotkeyListener: Send + Sync {
 }
 
 /// Factory function to create the appropriate hotkey listener
+#[cfg(target_os = "linux")]
 pub fn create_listener(
     config: &HotkeyConfig,
     secondary_model: Option<String>,
@@ -45,4 +45,19 @@ pub fn create_listener(
     let mut listener = evdev_listener::EvdevListener::new(config)?;
     listener.set_secondary_model(secondary_model);
     Ok(Box::new(listener))
+}
+
+/// Factory function to create the appropriate hotkey listener
+/// On macOS, built-in hotkey detection is not available.
+#[cfg(not(target_os = "linux"))]
+pub fn create_listener(
+    _config: &HotkeyConfig,
+    _secondary_model: Option<String>,
+) -> Result<Box<dyn HotkeyListener>, HotkeyError> {
+    Err(HotkeyError::Evdev(
+        "Built-in hotkey detection is not available on macOS. \
+         Set [hotkey] enabled = false in config.toml and use \
+         'voxtype record toggle' bound to a system keyboard shortcut."
+            .to_string(),
+    ))
 }
