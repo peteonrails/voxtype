@@ -51,6 +51,10 @@ hound = "3"  # WAV file reading/writing
 # HTTP client for remote transcription
 ureq = { version = "2", features = ["json"] }
 
+deepgram = { version = "0.9", default-features = false, features = ["listen"] }
+# TLS crypto provider for rustls (required by deepgram's WebSocket client)
+rustls = { version = "0.23", features = ["ring"] }
+
 # JSON parsing (for CLI backend)
 serde_json = "1"
 
