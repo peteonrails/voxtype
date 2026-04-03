@@ -1284,6 +1284,8 @@ impl Daemon {
                             let profile_config = crate::config::PostProcessConfig {
                                 command: cmd.clone(),
                                 timeout_ms,
+                                trim: true,
+                                fallback_on_empty: true,
                             };
                             let profile_processor = PostProcessor::new(&profile_config);
                             tracing::info!(
