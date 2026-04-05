@@ -794,6 +794,12 @@ pub struct WhisperConfig {
     #[serde(default)]
     pub gpu_device: Option<i32>,
 
+    /// Enable flash attention for GPU inference (default: false)
+    /// Reduces memory bandwidth pressure in the attention layers.
+    /// Requires a compatible GPU backend (CUDA or Vulkan).
+    #[serde(default)]
+    pub flash_attention: bool,
+
     /// Optimize context window for short recordings (default: true)
     /// When enabled, uses a smaller context window proportional to audio length
     /// for clips under 22.5 seconds. This significantly speeds up transcription
@@ -912,6 +918,7 @@ impl Default for WhisperConfig {
             on_demand_loading: default_on_demand_loading(),
             gpu_isolation: false,
             gpu_device: None,
+            flash_attention: false,
             context_window_optimization: default_context_window_optimization(),
             eager_processing: false,
             eager_chunk_secs: default_eager_chunk_secs(),
@@ -1762,6 +1769,7 @@ impl Default for Config {
                 on_demand_loading: default_on_demand_loading(),
                 gpu_isolation: false,
                 gpu_device: None,
+                flash_attention: false,
                 context_window_optimization: default_context_window_optimization(),
                 eager_processing: false,
                 eager_chunk_secs: default_eager_chunk_secs(),

@@ -42,6 +42,8 @@ impl WhisperTranscriber {
             tracing::info!("Using GPU device index {}", device);
             ctx_params.gpu_device(device);
         }
+        ctx_params.flash_attn(config.flash_attention);
+        tracing::info!("Flash attention: {}", config.flash_attention);
 
         let ctx = WhisperContext::new_with_params(
             model_path
