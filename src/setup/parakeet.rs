@@ -132,23 +132,27 @@ fn detect_best_parakeet_backend() -> Option<ParakeetBackend> {
         return None;
     }
 
-    // Prefer CUDA if available and NVIDIA GPU detected
-    if available.contains(&ParakeetBackend::Cuda) && detect_nvidia_gpu() {
+    let has_avx512 = fs::read_to_string("/proc/cpuinfo")
+        .map(|info| info.contains("avx512f"))
+        .unwrap_or(false);
+
+    // Prefer CUDA if available and NVIDIA GPU detected.
+    // The CUDA binary bundles ONNX Runtime which may contain AVX-512 instructions,
+    // so only select it if the CPU supports AVX-512.
+    if available.contains(&ParakeetBackend::Cuda) && detect_nvidia_gpu() && has_avx512 {
         return Some(ParakeetBackend::Cuda);
     }
 
-    // Prefer ROCm if available and AMD GPU detected
-    if available.contains(&ParakeetBackend::Rocm) && detect_amd_gpu() {
+    // Prefer ROCm if available and AMD GPU detected.
+    // The ROCm binary bundles ONNX Runtime which contains AVX-512 instructions,
+    // so only select it if the CPU supports AVX-512.
+    if available.contains(&ParakeetBackend::Rocm) && detect_amd_gpu() && has_avx512 {
         return Some(ParakeetBackend::Rocm);
     }
 
-    // Check for AVX-512 support
-    if available.contains(&ParakeetBackend::Avx512) {
-        if let Ok(cpuinfo) = fs::read_to_string("/proc/cpuinfo") {
-            if cpuinfo.contains("avx512f") {
-                return Some(ParakeetBackend::Avx512);
-            }
-        }
+    // Check for AVX-512 CPU-only backend
+    if available.contains(&ParakeetBackend::Avx512) && has_avx512 {
+        return Some(ParakeetBackend::Avx512);
     }
 
     // Fall back to AVX2
@@ -316,6 +320,10 @@ pub fn show_status() {
     println!();
     let has_nvidia = detect_nvidia_gpu();
     let has_amd = detect_amd_gpu();
+    let has_avx512 = fs::read_to_string("/proc/cpuinfo")
+        .map(|info| info.contains("avx512f"))
+        .unwrap_or(false);
+
     if has_nvidia {
         println!("NVIDIA GPU: detected");
     }
@@ -324,6 +332,11 @@ pub fn show_status() {
     }
     if !has_nvidia && !has_amd {
         println!("GPU: not detected");
+    }
+    if (has_nvidia || has_amd) && !has_avx512 {
+        println!("\nNote: ONNX GPU binaries (CUDA/ROCm) require AVX-512 CPU support.");
+        println!("  Your CPU supports AVX2 only. Use ONNX (AVX2) for CPU-based inference,");
+        println!("  or use the Whisper engine with Vulkan for GPU acceleration.");
     }
 
     // Usage hints

@@ -1121,8 +1121,8 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
         println!("  gpu_device = {}", gpu_device);
     }
 
-    // Show Parakeet status (experimental)
-    println!("\n[parakeet] (EXPERIMENTAL)");
+    // Show Parakeet status
+    println!("\n[parakeet]");
     if let Some(ref parakeet_config) = config.parakeet {
         println!("  model = {:?}", parakeet_config.model);
         if let Some(ref model_type) = parakeet_config.model_type {

@@ -1,10 +1,6 @@
-# Parakeet Backend (Experimental)
+# Parakeet Backend
 
-> **WARNING: Experimental Feature**
->
-> Parakeet support is experimental and not yet fully integrated into voxtype's setup system. Configuration requires manual editing of config files. The API and configuration options may change in future releases. Use at your own risk.
-
-Voxtype 0.5.0+ includes experimental support for NVIDIA's Parakeet ASR models as an alternative to Whisper. Parakeet uses ONNX Runtime and offers excellent CPU performance without requiring a GPU.
+Voxtype supports NVIDIA's Parakeet ASR models as an alternative to Whisper. Parakeet uses ONNX Runtime and offers excellent CPU performance without requiring a GPU.
 
 ## What is Parakeet?
 
@@ -211,7 +207,7 @@ Please report the issue at https://github.com/peteonrails/voxtype/issues with:
 
 ## Feedback
 
-Parakeet support is experimental. Please report issues at:
+Please report issues at:
 https://github.com/peteonrails/voxtype/issues
 
 Include:

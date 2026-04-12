@@ -25,7 +25,7 @@ Selects which speech-to-text engine to use for transcription.
 
 **Values:**
 - `whisper` - OpenAI Whisper via whisper.cpp (default, recommended)
-- `parakeet` - NVIDIA Parakeet via ONNX Runtime (experimental, requires special binary)
+- `parakeet` - NVIDIA Parakeet via ONNX Runtime (requires ONNX binary)
 - `moonshine` - Moonshine encoder-decoder transformer via ONNX Runtime (experimental, requires special binary)
 
 **Example:**
@@ -994,7 +994,7 @@ sudo cp build/bin/whisper-cli /usr/local/bin/
 
 Configuration for the Parakeet speech-to-text engine. This section is only used when `engine = "parakeet"`.
 
-> **Note:** Parakeet support is experimental. See [PARAKEET.md](PARAKEET.md) for detailed setup instructions.
+See [PARAKEET.md](PARAKEET.md) for detailed setup instructions.
 
 ### model
 

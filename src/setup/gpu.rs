@@ -708,6 +708,17 @@ pub fn show_status() {
 fn detect_best_parakeet_gpu_backend() -> Option<(&'static str, &'static str)> {
     let gpus = detect_gpus();
 
+    // The CUDA and ROCm binaries bundle ONNX Runtime which contains AVX-512
+    // instructions. On CPUs without AVX-512 (e.g., Zen 3), these binaries will
+    // crash with SIGILL. Only select GPU backends if the CPU supports AVX-512.
+    let has_avx512 = fs::read_to_string("/proc/cpuinfo")
+        .map(|info| info.contains("avx512f"))
+        .unwrap_or(false);
+
+    if !has_avx512 {
+        return None;
+    }
+
     // Helper to find installed binary, preferring new name over legacy
     let find_binary =
         |new_name: &'static str, legacy_name: &'static str| -> Option<&'static str> {
@@ -758,8 +769,18 @@ pub fn enable() -> anyhow::Result<()> {
             let gpus = detect_gpus();
             let has_amd = gpus.iter().any(|g| g.vendor == GpuVendor::Amd);
             let has_nvidia = gpus.iter().any(|g| g.vendor == GpuVendor::Nvidia);
+            let has_avx512 = fs::read_to_string("/proc/cpuinfo")
+                .map(|info| info.contains("avx512f"))
+                .unwrap_or(false);
 
-            let hint = if has_amd {
+            let hint = if (has_amd || has_nvidia) && !has_avx512 {
+                "You have a GPU, but the ONNX GPU binaries (CUDA/ROCm) require a CPU with \
+                 AVX-512 support. Your CPU only supports AVX2.\n\n\
+                 Use ONNX on CPU instead:\n  \
+                 sudo ln -sf /usr/lib/voxtype/voxtype-onnx-avx2 /usr/bin/voxtype\n\n\
+                 Or use the Whisper engine with Vulkan GPU acceleration:\n  \
+                 voxtype setup onnx --disable && sudo voxtype setup gpu --enable"
+            } else if has_amd {
                 "You have an AMD GPU. Install voxtype-onnx-rocm for GPU acceleration."
             } else if has_nvidia {
                 "You have an NVIDIA GPU. Install voxtype-onnx-cuda for GPU acceleration."
@@ -768,10 +789,8 @@ pub fn enable() -> anyhow::Result<()> {
             };
 
             anyhow::anyhow!(
-                "No ONNX GPU backend installed.\n\
-                 Neither voxtype-onnx-cuda nor voxtype-onnx-rocm found in {}\n\n\
+                "No compatible ONNX GPU backend found.\n\n\
                  {}",
-                VOXTYPE_LIB_DIR,
                 hint
             )
         })?;

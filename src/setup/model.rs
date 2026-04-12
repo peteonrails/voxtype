@@ -1501,8 +1501,8 @@ fn update_parakeet_in_config(config: &str, model_name: &str) -> String {
 
 /// List installed Parakeet models
 pub fn list_installed_parakeet() {
-    println!("\nInstalled Parakeet Models (EXPERIMENTAL)\n");
-    println!("=========================================\n");
+    println!("\nInstalled Parakeet Models\n");
+    println!("=========================\n");
 
     let models_dir = Config::models_dir();
 
