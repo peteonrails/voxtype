@@ -126,6 +126,8 @@ dolphin-tensorrt = ["dolphin", "ort/tensorrt"]
 omnilingual = ["onnx-common"]
 omnilingual-cuda = ["omnilingual", "ort/cuda"]
 omnilingual-tensorrt = ["omnilingual", "ort/tensorrt"]
+# OpenVINO GenAI backend (Intel CPU/GPU/NPU via WhisperPipeline)
+openvino-genai = []
 
 [build-dependencies]
 clap = { version = "4", features = ["derive"] }
