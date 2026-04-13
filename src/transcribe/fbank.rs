@@ -1,11 +1,15 @@
 //! Shared Fbank (log-mel filterbank) feature extraction
 //!
-//! Used by SenseVoice, Paraformer, and FireRedASR backends. These models share
-//! identical preprocessing: 80-dim Fbank features, LFR stacking (m=7, n=6),
-//! and CMVN normalization with the same constants (16kHz, 25ms/10ms frames,
+//! Used by SenseVoice, Paraformer, FireRedASR, and OpenVINO Whisper backends.
+//! SenseVoice/Paraformer share identical preprocessing: 80-dim Fbank features,
+//! LFR stacking (m=7, n=6), and CMVN normalization (16kHz, 25ms/10ms frames,
 //! Hamming window, 0.97 pre-emphasis).
 //!
-//! Pipeline: Audio (f32, 16kHz) -> Fbank (80-dim) -> LFR (560-dim) -> CMVN
+//! OpenVINO Whisper uses different settings: Hann window, no pre-emphasis,
+//! no int16 scaling, FFT size 400. Use `FbankConfig::whisper()` for this.
+//!
+//! Pipeline (CTC models): Audio (f32, 16kHz) -> Fbank (80-dim) -> LFR (560-dim) -> CMVN
+//! Pipeline (Whisper):     Audio (f32, 16kHz) -> Fbank (80-dim) -> pad/transpose
 
 use ndarray::Array2;
 use rustfft::num_complex::Complex;
@@ -29,6 +33,17 @@ const DEFAULT_FRAME_SHIFT: usize = 160;
 /// Default pre-emphasis coefficient
 const DEFAULT_PREEMPH_COEFF: f32 = 0.97;
 
+/// Window function type for STFT
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WindowType {
+    /// Hamming window: 0.54 - 0.46 * cos(2π*n/(N-1))
+    /// Used by SenseVoice, Paraformer, and other Kaldi-style models
+    Hamming,
+    /// Hann window: 0.5 * (1 - cos(2π*n/(N-1)))
+    /// Used by Whisper
+    Hann,
+}
+
 /// Default LFR window size (stack 7 consecutive frames)
 const DEFAULT_LFR_M: usize = 7;
 
@@ -43,6 +58,10 @@ pub struct FbankConfig {
     pub frame_length: usize,
     pub frame_shift: usize,
     pub preemph_coeff: f32,
+    /// Window function type (Hamming for Kaldi-style, Hann for Whisper)
+    pub window_type: WindowType,
+    /// Scale audio to int16 range before processing (Kaldi convention)
+    pub scale_to_int16: bool,
 }
 
 impl Default for FbankConfig {
@@ -54,6 +73,25 @@ impl Default for FbankConfig {
             frame_length: DEFAULT_FRAME_LENGTH,
             frame_shift: DEFAULT_FRAME_SHIFT,
             preemph_coeff: DEFAULT_PREEMPH_COEFF,
+            window_type: WindowType::Hamming,
+            scale_to_int16: true,
+        }
+    }
+}
+
+impl FbankConfig {
+    /// Configuration for Whisper-style mel extraction.
+    /// Hann window, no pre-emphasis, no int16 scaling, FFT size matches frame length.
+    pub fn whisper() -> Self {
+        Self {
+            sample_rate: DEFAULT_SAMPLE_RATE,
+            fft_size: DEFAULT_FRAME_LENGTH, // Whisper uses FFT size = frame length (400)
+            num_mels: DEFAULT_NUM_MELS,
+            frame_length: DEFAULT_FRAME_LENGTH,
+            frame_shift: DEFAULT_FRAME_SHIFT,
+            preemph_coeff: 0.0,
+            window_type: WindowType::Hann,
+            scale_to_int16: false,
         }
     }
 }
@@ -110,15 +148,24 @@ impl FbankExtractor {
         let frame_shift = self.config.frame_shift;
         let fft_size = self.config.fft_size;
 
-        // Scale to int16 range (kaldi convention)
-        let scaled: Vec<f32> = samples.iter().map(|&s| s * 32768.0).collect();
+        // Optionally scale to int16 range (Kaldi convention, not used by Whisper)
+        let scaled: Vec<f32> = if self.config.scale_to_int16 {
+            samples.iter().map(|&s| s * 32768.0).collect()
+        } else {
+            samples.to_vec()
+        };
 
-        // Pre-emphasis
-        let mut emphasized = Vec::with_capacity(scaled.len());
-        emphasized.push(scaled[0]);
-        for i in 1..scaled.len() {
-            emphasized.push(scaled[i] - self.config.preemph_coeff * scaled[i - 1]);
-        }
+        // Pre-emphasis (coefficient 0.0 = no pre-emphasis, used by Whisper)
+        let emphasized = if self.config.preemph_coeff > 0.0 {
+            let mut emp = Vec::with_capacity(scaled.len());
+            emp.push(scaled[0]);
+            for i in 1..scaled.len() {
+                emp.push(scaled[i] - self.config.preemph_coeff * scaled[i - 1]);
+            }
+            emp
+        } else {
+            scaled
+        };
 
         // Compute number of frames
         let num_frames = if emphasized.len() >= frame_length {
@@ -131,11 +178,14 @@ impl FbankExtractor {
             return Array2::zeros((0, num_mels));
         }
 
-        // Pre-compute Hamming window
-        let hamming: Vec<f32> = (0..frame_length)
+        // Pre-compute window function
+        let window: Vec<f32> = (0..frame_length)
             .map(|n| {
-                0.54 - 0.46
-                    * (2.0 * std::f32::consts::PI * n as f32 / (frame_length as f32 - 1.0)).cos()
+                let x = 2.0 * std::f32::consts::PI * n as f32 / (frame_length as f32 - 1.0);
+                match self.config.window_type {
+                    WindowType::Hamming => 0.54 - 0.46 * x.cos(),
+                    WindowType::Hann => 0.5 * (1.0 - x.cos()),
+                }
             })
             .collect();
 
@@ -151,7 +201,7 @@ impl FbankExtractor {
             // Window the frame
             let mut fft_input: Vec<Complex<f32>> = Vec::with_capacity(fft_size);
             for i in 0..frame_length {
-                fft_input.push(Complex::new(emphasized[start + i] * hamming[i], 0.0));
+                fft_input.push(Complex::new(emphasized[start + i] * window[i], 0.0));
             }
             // Zero-pad to fft_size
             fft_input.resize(fft_size, Complex::new(0.0, 0.0));
@@ -235,11 +285,7 @@ pub fn apply_cmvn(features: &mut Array2<f32>, neg_mean: &[f32], inv_stddev: &[f3
 ///
 /// Returns num_mels triangular filters, each with fft_size/2+1 coefficients.
 /// Uses the standard mel scale: mel = 1127 * ln(1 + f/700)
-pub fn compute_mel_filterbank(
-    num_mels: usize,
-    fft_size: usize,
-    sample_rate: f32,
-) -> Vec<Vec<f32>> {
+pub fn compute_mel_filterbank(num_mels: usize, fft_size: usize, sample_rate: f32) -> Vec<Vec<f32>> {
     let num_bins = fft_size / 2 + 1;
     let max_freq = sample_rate / 2.0;
 

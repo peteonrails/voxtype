@@ -80,20 +80,15 @@ impl GtcrnEnhancer {
                 mix_data[i * 2 + 1] = bin.im;
             }
 
-            let mix_tensor =
-                Tensor::<f32>::from_array(([1usize, FREQ_BINS, 1, 2], mix_data)).map_err(|e| {
-                    format!("Failed to create mix tensor: {}", e)
-                })?;
+            let mix_tensor = Tensor::<f32>::from_array(([1usize, FREQ_BINS, 1, 2], mix_data))
+                .map_err(|e| format!("Failed to create mix tensor: {}", e))?;
 
-            let conv_tensor = Tensor::<f32>::from_array((
-                [2usize, 1, 16, 16, 33],
-                conv_cache.clone(),
-            ))
-            .map_err(|e| format!("Failed to create conv_cache tensor: {}", e))?;
+            let conv_tensor =
+                Tensor::<f32>::from_array(([2usize, 1, 16, 16, 33], conv_cache.clone()))
+                    .map_err(|e| format!("Failed to create conv_cache tensor: {}", e))?;
 
-            let tra_tensor =
-                Tensor::<f32>::from_array(([2usize, 3, 1, 1, 16], tra_cache.clone()))
-                    .map_err(|e| format!("Failed to create tra_cache tensor: {}", e))?;
+            let tra_tensor = Tensor::<f32>::from_array(([2usize, 3, 1, 1, 16], tra_cache.clone()))
+                .map_err(|e| format!("Failed to create tra_cache tensor: {}", e))?;
 
             let inter_tensor =
                 Tensor::<f32>::from_array(([2usize, 1, 33, 16], inter_cache.clone()))
@@ -101,10 +96,7 @@ impl GtcrnEnhancer {
 
             let inputs: Vec<(std::borrow::Cow<str>, ort::session::SessionInputValue)> = vec![
                 (std::borrow::Cow::Borrowed("mix"), mix_tensor.into()),
-                (
-                    std::borrow::Cow::Borrowed("conv_cache"),
-                    conv_tensor.into(),
-                ),
+                (std::borrow::Cow::Borrowed("conv_cache"), conv_tensor.into()),
                 (std::borrow::Cow::Borrowed("tra_cache"), tra_tensor.into()),
                 (
                     std::borrow::Cow::Borrowed("inter_cache"),

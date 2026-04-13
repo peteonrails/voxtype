@@ -27,6 +27,7 @@ Selects which speech-to-text engine to use for transcription.
 - `whisper` - OpenAI Whisper via whisper.cpp (default, recommended)
 - `parakeet` - NVIDIA Parakeet via ONNX Runtime (experimental, requires special binary)
 - `moonshine` - Moonshine encoder-decoder transformer via ONNX Runtime (experimental, requires special binary)
+- `openvino` - OpenVINO Whisper for Intel NPU/CPU/GPU (requires `--features openvino-whisper`)
 
 **Example:**
 ```toml
@@ -1148,6 +1149,91 @@ engine = "moonshine"
 model = "base"
 quantized = true
 on_demand_loading = false  # Keep model loaded for fast response
+```
+
+---
+
+## [openvino]
+
+Configuration for the OpenVINO Whisper speech-to-text engine. This section is only used when `engine = "openvino"`. Requires building with `--features openvino-whisper` and OpenVINO Runtime installed.
+
+### openvino.model
+
+**Type:** String
+**Default:** `"base.en"`
+
+Model name or absolute path to directory containing OpenVINO IR model files. The directory must contain `openvino_encoder_model.xml/.bin`, `openvino_decoder_model.xml/.bin`, and `tokenizer.json`.
+
+Short names available: `"base.en-int8"`, `"base.en-fp16"`, `"small.en-int8"`, `"base-int8"`, `"large-v3-int8"`.
+
+### openvino.device
+
+**Type:** String
+**Default:** `"NPU"`
+
+OpenVINO device to run inference on. Options: `"NPU"` (Intel Neural Processing Unit), `"CPU"`, `"GPU"`, `"AUTO"` (automatic device selection).
+
+### openvino.quantized
+
+**Type:** Boolean
+**Default:** `true`
+
+Prefer int8 quantized model variants. Int8 models are smaller and run faster on NPU. Set to `false` for fp16 models which may have slightly higher accuracy.
+
+### openvino.language
+
+**Type:** String
+**Default:** `"en"`
+
+Language code for transcription. Uses Whisper language codes: `"en"`, `"zh"`, `"fr"`, `"de"`, `"ja"`, `"ko"`, etc.
+
+### openvino.translate
+
+**Type:** Boolean
+**Default:** `false`
+
+When true, translates non-English speech to English instead of transcribing in the source language.
+
+### openvino.threads
+
+**Type:** Integer (optional)
+**Default:** System-detected
+
+Number of CPU threads for inference. Only applies when `device = "CPU"`.
+
+### openvino.on_demand_loading
+
+**Type:** Boolean
+**Default:** `false`
+
+When `true`, loads the model only when recording starts. When `false`, keeps the model loaded for faster response.
+
+### openvino.openvino_dir
+
+**Type:** String (optional)
+**Default:** None (automatic discovery)
+**Environment variable:** `VOXTYPE_OPENVINO_DIR`
+
+Path to the OpenVINO installation directory containing shared libraries. When set, voxtype loads `libopenvino_genai_c.so` from this directory instead of relying on automatic discovery via `LD_LIBRARY_PATH`, `OPENVINO_INSTALL_DIR`, or system package paths.
+
+The library is searched in these subdirectories:
+- `<openvino_dir>/`
+- `<openvino_dir>/runtime/lib/intel64/`
+- `<openvino_dir>/runtime/lib/intel64/Release/`
+
+This is useful when you have a custom OpenVINO build or an installation in a non-standard location (e.g., a pip install or a manual extract).
+
+**Example:**
+```toml
+engine = "openvino"
+
+[openvino]
+model = "base.en-int8"
+device = "NPU"
+quantized = true
+language = "en"
+on_demand_loading = false
+openvino_dir = "/opt/intel/openvino"
 ```
 
 ---
