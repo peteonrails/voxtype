@@ -2673,6 +2673,79 @@ voxtype setup --download --model medium.en
 
 ---
 
+## Streaming Mode (Deepgram)
+
+Real-time transcription via Deepgram WebSocket API. Transcription begins immediately as you speak, with results streamed back in real-time.
+
+### When to Use
+
+- **Real-time feedback:** See transcription results while still recording
+- **Long recordings:** No waiting for transcription to complete after recording stops
+- **Latency-sensitive applications:** Immediate text output for live captioning or accessibility
+- **Internet available:** Requires stable internet connection to Deepgram servers
+
+### Prerequisites
+
+1. Deepgram account (free tier available at https://console.deepgram.com)
+2. API key from your Deepgram account
+3. Internet connection to Deepgram servers
+
+### Configuration
+
+Enable streaming mode and set your API key:
+
+```toml
+[whisper]
+mode = "streaming"
+streaming_api_key = "your-deepgram-api-key"
+```
+
+Or use environment variable:
+
+```bash
+export VOXTYPE_DEEPGRAM_API_KEY="your-deepgram-api-key"
+voxtype daemon
+```
+
+Or CLI flag:
+
+```bash
+voxtype --whisper-mode streaming --streaming-api-key "your-key" daemon
+```
+
+### Streaming Options
+
+```toml
+[whisper]
+mode = "streaming"
+streaming_api_key = "your-api-key"
+streaming_model = "nova-3"
+streaming_endpoint = "wss://api.deepgram.com/v1/listen"
+```
+
+`streaming_model` chooses the Deepgram model.
+`streaming_endpoint` lets you target self-hosted or custom endpoints.
+
+### CLI Flags
+
+```bash
+voxtype --whisper-mode streaming daemon
+voxtype --streaming-model nova-3 daemon
+voxtype --streaming-endpoint "wss://custom.server/v1/listen" daemon
+voxtype --streaming-api-key "your-key" daemon
+```
+
+### Limitations
+
+- Requires internet access
+- Requires valid Deepgram API credentials
+- `voxtype transcribe file.wav` is not supported in streaming mode
+- Local model preparation is skipped in streaming mode
+
+### Privacy
+
+Streaming mode sends audio to Deepgram servers for transcription. See https://deepgram.com/privacy for details.
+
 ## Deprecated Options
 
 The following configuration options are deprecated but still supported for backwards compatibility. They will log a warning when used.
