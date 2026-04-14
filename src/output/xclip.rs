@@ -37,18 +37,7 @@ impl XclipOutput {
             text.to_string()
         };
 
-        let _ = Command::new("notify-send")
-            .args([
-                "--app-name=Voxtype",
-                "--urgency=low",
-                "--expire-time=3000",
-                "Copied to clipboard",
-                &preview,
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
+        super::send_desktop_notification("Copied to clipboard", &preview).await;
     }
 }
 

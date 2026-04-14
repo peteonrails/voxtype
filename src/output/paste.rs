@@ -224,10 +224,15 @@ impl PasteOutput {
         }
     }
 
-    /// Copy text to clipboard using wl-copy
+    /// Copy text to clipboard
     async fn copy_to_clipboard(&self, text: &str) -> Result<(), OutputError> {
-        // Spawn wl-copy with stdin pipe
-        let mut child = Command::new("wl-copy")
+        let cmd = if cfg!(target_os = "macos") {
+            "pbcopy"
+        } else {
+            "wl-copy"
+        };
+
+        let mut child = Command::new(cmd)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -259,16 +264,21 @@ impl PasteOutput {
 
         if !status.success() {
             return Err(OutputError::InjectionFailed(
-                "wl-copy exited with error".to_string(),
+                format!("{} exited with error", cmd),
             ));
         }
 
         Ok(())
     }
 
-    /// Read current clipboard content using wl-paste (Wayland) or xclip (X11 fallback)
+    /// Read current clipboard content
     async fn read_clipboard(&self) -> Result<Option<ClipboardContent>, OutputError> {
-        // Try wl-paste first (Wayland)
+        // macOS: use pbpaste
+        if cfg!(target_os = "macos") {
+            return self.read_clipboard_pbpaste().await;
+        }
+
+        // Linux: try wl-paste first (Wayland), then xclip (X11)
         if std::env::var("WAYLAND_DISPLAY").is_ok() {
             match self.read_clipboard_wl_paste().await {
                 Ok(content) => return Ok(content),
@@ -280,6 +290,34 @@ impl PasteOutput {
 
         // Fallback to xclip (X11)
         self.read_clipboard_xclip().await
+    }
+
+    /// Read clipboard using pbpaste (macOS)
+    async fn read_clipboard_pbpaste(&self) -> Result<Option<ClipboardContent>, OutputError> {
+        let output = Command::new("pbpaste")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| OutputError::InjectionFailed(e.to_string()))?;
+
+        if !output.status.success() || output.stdout.is_empty() {
+            return Ok(None);
+        }
+
+        const MAX_CLIPBOARD_SIZE: usize = 100 * 1024 * 1024; // 100 MB
+        if output.stdout.len() > MAX_CLIPBOARD_SIZE {
+            tracing::warn!(
+                "Clipboard content too large ({} bytes), skipping restoration",
+                output.stdout.len()
+            );
+            return Ok(None);
+        }
+
+        Ok(Some(ClipboardContent {
+            data: output.stdout,
+            mime_type: "text/plain".to_string(),
+        }))
     }
 
     /// Read clipboard using wl-paste
@@ -402,12 +440,17 @@ impl PasteOutput {
         }))
     }
 
-    /// Restore clipboard content using wl-copy or xclip
+    /// Restore clipboard content
     async fn restore_clipboard_content(
         &self,
         content: &ClipboardContent,
     ) -> Result<(), OutputError> {
-        // Try wl-copy first (Wayland)
+        // macOS: use pbcopy
+        if cfg!(target_os = "macos") {
+            return self.restore_clipboard_pbcopy(content).await;
+        }
+
+        // Linux: try wl-copy first (Wayland)
         if std::env::var("WAYLAND_DISPLAY").is_ok() {
             match self.restore_clipboard_wl_copy(content).await {
                 Ok(()) => return Ok(()),
@@ -419,6 +462,37 @@ impl PasteOutput {
 
         // Fallback to xclip
         self.restore_clipboard_xclip(content).await
+    }
+
+    /// Restore clipboard using pbcopy (macOS)
+    async fn restore_clipboard_pbcopy(&self, content: &ClipboardContent) -> Result<(), OutputError> {
+        let mut child = Command::new("pbcopy")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| OutputError::InjectionFailed(e.to_string()))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(&content.data)
+                .await
+                .map_err(|e| OutputError::InjectionFailed(e.to_string()))?;
+            drop(stdin);
+        }
+
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| OutputError::InjectionFailed(e.to_string()))?;
+
+        if !status.success() {
+            return Err(OutputError::InjectionFailed(
+                "pbcopy exited with error during restore".to_string(),
+            ));
+        }
+
+        Ok(())
     }
 
     /// Restore clipboard using wl-copy with MIME type preservation
@@ -627,9 +701,38 @@ impl PasteOutput {
         Ok(())
     }
 
-    /// Simulate paste keystroke, trying wtype first then ydotool
+    /// Simulate paste keystroke using osascript (macOS)
+    async fn simulate_paste_osascript(&self) -> Result<(), OutputError> {
+        let output = Command::new("osascript")
+            .args([
+                "-e",
+                "tell application \"System Events\" to keystroke \"v\" using command down",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| OutputError::CtrlVFailed(e.to_string()))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(OutputError::CtrlVFailed(format!(
+                "osascript failed: {}. Grant Accessibility permissions in System Settings.",
+                stderr
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Simulate paste keystroke, trying platform-appropriate methods
     async fn simulate_paste_keystroke(&self) -> Result<(), OutputError> {
-        // Try wtype first (preferred - no daemon needed)
+        // macOS: use osascript
+        if cfg!(target_os = "macos") {
+            return self.simulate_paste_osascript().await;
+        }
+
+        // Linux: try wtype first (preferred - no daemon needed)
         if self.is_wtype_available().await {
             match self.simulate_paste_wtype().await {
                 Ok(()) => {
@@ -663,7 +766,28 @@ impl PasteOutput {
 
     /// Send Enter key after paste
     async fn send_enter(&self) -> Result<(), OutputError> {
-        // Try wtype first
+        // macOS: use osascript
+        if cfg!(target_os = "macos") {
+            let output = Command::new("osascript")
+                .args([
+                    "-e",
+                    "tell application \"System Events\" to key code 36", // Return key
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+                .await;
+
+            if let Ok(out) = output {
+                if out.status.success() {
+                    return Ok(());
+                }
+            }
+            tracing::warn!("Failed to send Enter key via osascript");
+            return Ok(());
+        }
+
+        // Linux: try wtype first
         if self.is_wtype_available().await {
             let output = Command::new("wtype")
                 .args(["-k", "Return"])
@@ -788,7 +912,27 @@ impl TextOutput for PasteOutput {
     }
 
     async fn is_available(&self) -> bool {
-        // Check if wl-copy exists (required for clipboard)
+        // macOS: check for pbcopy + osascript (always available on macOS)
+        if cfg!(target_os = "macos") {
+            let pbcopy_available = Command::new("which")
+                .arg("pbcopy")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await
+                .map(|s| s.success())
+                .unwrap_or(false);
+
+            if !pbcopy_available {
+                tracing::debug!("paste mode unavailable: pbcopy not found");
+                return false;
+            }
+
+            tracing::debug!("paste mode available (macOS: pbcopy + osascript)");
+            return true;
+        }
+
+        // Linux: check if wl-copy exists (required for clipboard)
         let wl_copy_available = Command::new("which")
             .arg("wl-copy")
             .stdout(Stdio::null())

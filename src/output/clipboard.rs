@@ -1,15 +1,22 @@
 //! Clipboard-based text output
 //!
-//! Uses wl-copy to copy text to the Wayland clipboard.
-//! This is the most reliable fallback as it works on all Wayland compositors.
-//!
-//! Requires: wl-clipboard package installed
+//! On Linux, uses wl-copy to copy text to the Wayland clipboard.
+//! On macOS, uses pbcopy to copy text to the system clipboard.
 
 use super::TextOutput;
 use crate::error::OutputError;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+
+/// Get the clipboard copy command for the current platform
+fn clipboard_copy_cmd() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "pbcopy"
+    } else {
+        "wl-copy"
+    }
+}
 
 /// Clipboard-based text output
 pub struct ClipboardOutput {
@@ -37,18 +44,7 @@ impl ClipboardOutput {
             text.to_string()
         };
 
-        let _ = Command::new("notify-send")
-            .args([
-                "--app-name=Voxtype",
-                "--urgency=low",
-                "--expire-time=3000",
-                "Copied to clipboard",
-                &preview,
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
+        super::send_desktop_notification("Copied to clipboard", &preview).await;
     }
 }
 
@@ -66,8 +62,10 @@ impl TextOutput for ClipboardOutput {
             std::borrow::Cow::Borrowed(text)
         };
 
-        // Spawn wl-copy with stdin pipe
-        let mut child = Command::new("wl-copy")
+        let cmd = clipboard_copy_cmd();
+
+        // Spawn clipboard command with stdin pipe
+        let mut child = Command::new(cmd)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -99,7 +97,7 @@ impl TextOutput for ClipboardOutput {
 
         if !status.success() {
             return Err(OutputError::InjectionFailed(
-                "wl-copy exited with error".to_string(),
+                format!("{} exited with error", cmd),
             ));
         }
 
@@ -113,8 +111,9 @@ impl TextOutput for ClipboardOutput {
     }
 
     async fn is_available(&self) -> bool {
+        let cmd = clipboard_copy_cmd();
         Command::new("which")
-            .arg("wl-copy")
+            .arg(cmd)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -124,7 +123,11 @@ impl TextOutput for ClipboardOutput {
     }
 
     fn name(&self) -> &'static str {
-        "clipboard (wl-copy)"
+        if cfg!(target_os = "macos") {
+            "clipboard (pbcopy)"
+        } else {
+            "clipboard (wl-copy)"
+        }
     }
 }
 
