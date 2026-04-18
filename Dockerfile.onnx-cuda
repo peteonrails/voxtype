@@ -49,7 +49,7 @@ ENV ORT_STRATEGY=download
 
 # Disable LTO for faster builds
 # Build with all ONNX engines + CUDA support for NVIDIA GPUs
-RUN cargo build --release --features parakeet-cuda,moonshine-cuda,sensevoice-cuda,paraformer-cuda,dolphin-cuda,omnilingual-cuda \
+RUN cargo build --release --features parakeet-cuda,moonshine-cuda,sensevoice-cuda,paraformer-cuda,dolphin-cuda,omnilingual-cuda,ml-diarization \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
     && cp target/release/voxtype /tmp/voxtype-onnx-cuda

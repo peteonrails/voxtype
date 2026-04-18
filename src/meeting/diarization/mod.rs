@@ -115,6 +115,12 @@ pub fn create_diarizer(config: &DiarizationConfig) -> Box<dyn Diarizer> {
         "ml" => {
             #[cfg(feature = "ml-diarization")]
             {
+                // Auto-download model if missing
+                if !ml::MlDiarizer::default_model_path().exists() {
+                    tracing::info!("Speaker embedding model not found, attempting download...");
+                    crate::setup::model::ensure_ecapa_model();
+                }
+
                 let mut diarizer = ml::MlDiarizer::new(config);
                 if diarizer.model_exists() {
                     if let Err(e) = diarizer.load_model() {

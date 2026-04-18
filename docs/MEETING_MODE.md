@@ -279,7 +279,7 @@ max_speakers = 10
 **Backends:**
 
 - **simple**: Uses audio source (mic vs loopback) to attribute speech as "You" or "Remote". No ML model needed.
-- **ml**: Uses ONNX-based speaker embeddings to identify individual speakers. Requires the `ml-diarization` feature and a downloaded model.
+- **ml**: Uses ONNX-based speaker embeddings (ECAPA-TDNN) to identify individual remote speakers. The model is downloaded automatically on first use. **Experimental:** speaker clustering works best with longer speech segments; short segments may produce too many unique speaker IDs.
 - **subprocess**: Same as `ml` but runs in a separate process for memory isolation.
 
 For most users, `simple` is sufficient. Use `ml` if you need to distinguish between multiple remote participants.

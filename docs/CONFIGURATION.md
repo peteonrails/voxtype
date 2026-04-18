@@ -2199,8 +2199,8 @@ Enable speaker diarization to identify different speakers in meeting transcripts
 
 Diarization backend to use:
 
-- `"simple"` - Energy-based speaker change detection. No model download required.
-- `"ml"` - Machine learning speaker embeddings (requires ONNX feature).
+- `"simple"` - Uses audio source (mic vs loopback) to attribute speech as "You" or "Remote". No model download required.
+- `"ml"` - ONNX-based speaker embeddings (ECAPA-TDNN) to identify individual remote speakers. The model is downloaded automatically on first use. **Experimental:** speaker clustering works best with longer speech segments; short segments may produce too many unique speaker IDs.
 - `"remote"` - Remote diarization API.
 
 ### max_speakers

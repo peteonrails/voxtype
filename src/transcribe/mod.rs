@@ -58,11 +58,37 @@ use crate::config::{Config, TranscriptionEngine, WhisperConfig, WhisperMode};
 use crate::error::TranscribeError;
 use crate::setup::gpu;
 
+/// A timed segment from transcription (word or sentence level)
+#[derive(Debug, Clone)]
+pub struct TimedSegment {
+    pub text: String,
+    /// Start time in seconds relative to the audio input
+    pub start_secs: f32,
+    /// End time in seconds relative to the audio input
+    pub end_secs: f32,
+}
+
 /// Trait for speech-to-text implementations
 pub trait Transcriber: Send + Sync {
     /// Transcribe audio samples to text
     /// Input: f32 samples, mono, 16kHz
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError>;
+
+    /// Transcribe with word-level timestamps.
+    /// Default implementation falls back to transcribe() with a single segment.
+    fn transcribe_timed(&self, samples: &[f32]) -> Result<Vec<TimedSegment>, TranscribeError> {
+        let text = self.transcribe(samples)?;
+        let duration = samples.len() as f32 / 16000.0;
+        if text.is_empty() {
+            Ok(vec![])
+        } else {
+            Ok(vec![TimedSegment {
+                text,
+                start_secs: 0.0,
+                end_secs: duration,
+            }])
+        }
+    }
 
     /// Prepare for transcription (optional, called when recording starts)
     ///

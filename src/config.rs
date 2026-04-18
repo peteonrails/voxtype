@@ -1368,6 +1368,14 @@ pub struct MeetingDiarizationConfig {
     /// Maximum number of speakers to detect
     #[serde(default = "default_max_speakers")]
     pub max_speakers: u32,
+
+    /// Path to ONNX model for ML backend (uses default if not set)
+    #[serde(default)]
+    pub model_path: Option<String>,
+
+    /// Minimum segment duration in milliseconds for ML embedding extraction
+    #[serde(default = "default_min_segment_ms")]
+    pub min_segment_ms: u64,
 }
 
 fn default_diarization_backend() -> String {
@@ -1376,6 +1384,10 @@ fn default_diarization_backend() -> String {
 
 fn default_max_speakers() -> u32 {
     10
+}
+
+fn default_min_segment_ms() -> u64 {
+    500
 }
 
 fn default_chunk_duration() -> u32 {
@@ -1396,6 +1408,8 @@ impl Default for MeetingDiarizationConfig {
             enabled: true,
             backend: default_diarization_backend(),
             max_speakers: default_max_speakers(),
+            model_path: None,
+            min_segment_ms: default_min_segment_ms(),
         }
     }
 }

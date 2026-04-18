@@ -737,6 +737,23 @@ impl Daemon {
         }
 
         // Create meeting config from main config
+        tracing::debug!(
+            "Diarization config: enabled={}, backend={}",
+            self.config.meeting.diarization.enabled,
+            self.config.meeting.diarization.backend
+        );
+        let diarization_config = if self.config.meeting.diarization.enabled {
+            Some(meeting::diarization::DiarizationConfig {
+                enabled: true,
+                backend: self.config.meeting.diarization.backend.clone(),
+                max_speakers: self.config.meeting.diarization.max_speakers,
+                min_segment_ms: self.config.meeting.diarization.min_segment_ms,
+                model_path: self.config.meeting.diarization.model_path.clone(),
+            })
+        } else {
+            None
+        };
+
         let meeting_config = meeting::MeetingConfig {
             enabled: self.config.meeting.enabled,
             chunk_duration_secs: self.config.meeting.chunk_duration_secs,
@@ -751,6 +768,7 @@ impl Daemon {
             },
             retain_audio: self.config.meeting.retain_audio,
             max_duration_mins: self.config.meeting.max_duration_mins,
+            diarization: diarization_config,
         };
 
         // Create event channel

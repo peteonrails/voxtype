@@ -59,6 +59,8 @@ pub struct MeetingConfig {
     pub retain_audio: bool,
     /// Maximum meeting duration in minutes (0 = unlimited)
     pub max_duration_mins: u32,
+    /// Diarization configuration (None = disabled)
+    pub diarization: Option<diarization::DiarizationConfig>,
 }
 
 impl Default for MeetingConfig {
@@ -69,6 +71,7 @@ impl Default for MeetingConfig {
             storage: StorageConfig::default(),
             retain_audio: false,
             max_duration_mins: 180,
+            diarization: None,
         }
     }
 }
@@ -100,6 +103,7 @@ pub struct MeetingDaemon {
     storage: MeetingStorage,
     current_meeting: Option<MeetingData>,
     transcriber: Option<Arc<dyn Transcriber>>,
+    diarizer: Option<Box<dyn diarization::Diarizer>>,
     engine_name: String,
     event_tx: mpsc::Sender<MeetingEvent>,
     post_processor: Option<PostProcessor>,
@@ -131,12 +135,24 @@ impl MeetingDaemon {
             PostProcessor::new(cfg)
         });
 
+        // Create diarizer if configured
+        let diarizer = config.diarization.as_ref().and_then(|diar_config| {
+            if diar_config.enabled {
+                let d = diarization::create_diarizer(diar_config);
+                tracing::info!("Meeting diarization enabled: {}", d.name());
+                Some(d)
+            } else {
+                None
+            }
+        });
+
         Ok(Self {
             config,
             state: MeetingState::Idle,
             storage,
             current_meeting: None,
             transcriber: Some(transcriber),
+            diarizer,
             engine_name,
             event_tx,
             post_processor,
@@ -264,7 +280,8 @@ impl MeetingDaemon {
         &mut self,
         samples: Vec<f32>,
     ) -> Result<Option<Vec<TranscriptSegment>>> {
-        self.process_chunk_with_source(samples, AudioSource::Microphone).await
+        self.process_chunk_with_source(samples, AudioSource::Microphone)
+            .await
     }
 
     /// Process a chunk of audio with a specific source label
@@ -317,6 +334,17 @@ impl MeetingDaemon {
             if let Some(last_seg) = result.segments.iter().rfind(|s| !s.text.is_empty()) {
                 self.last_chunk_text
                     .insert(source, last_seg.text.clone());
+            }
+        }
+
+        // Run diarization on the transcribed segments
+        if let Some(ref diarizer) = self.diarizer {
+            if !result.segments.is_empty() {
+                let diarized = diarizer.diarize(&samples, source, &result.segments);
+                for (seg, diar) in result.segments.iter_mut().zip(diarized.iter()) {
+                    seg.speaker_id = Some(diar.speaker.display_name());
+                    seg.confidence = Some(diar.confidence);
+                }
             }
         }
 

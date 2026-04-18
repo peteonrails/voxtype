@@ -7,7 +7,7 @@
 //! - CTC (Connectionist Temporal Classification): faster, character-level output
 //! - TDT (Token-Duration-Transducer): recommended, proper punctuation and word boundaries
 
-use super::Transcriber;
+use super::{TimedSegment, Transcriber};
 use crate::config::{ParakeetConfig, ParakeetModelType};
 use crate::error::TranscribeError;
 #[cfg(any(
@@ -166,6 +166,123 @@ impl Transcriber for ParakeetTranscriber {
         );
 
         Ok(text)
+    }
+
+    fn transcribe_timed(&self, samples: &[f32]) -> Result<Vec<TimedSegment>, TranscribeError> {
+        let start = std::time::Instant::now();
+
+        let result = match &self.model {
+            ParakeetModel::Ctc(parakeet) => {
+                let mut parakeet = parakeet.lock().map_err(|e| {
+                    TranscribeError::InferenceFailed(format!(
+                        "Failed to lock Parakeet mutex: {}",
+                        e
+                    ))
+                })?;
+                parakeet
+                    .transcribe_samples(samples.to_vec(), 16000, 1, None)
+                    .map_err(|e| {
+                        TranscribeError::InferenceFailed(format!(
+                            "Parakeet CTC inference failed: {}",
+                            e
+                        ))
+                    })?
+            }
+            ParakeetModel::Tdt(parakeet) => {
+                let mut parakeet = parakeet.lock().map_err(|e| {
+                    TranscribeError::InferenceFailed(format!(
+                        "Failed to lock Parakeet mutex: {}",
+                        e
+                    ))
+                })?;
+                parakeet
+                    .transcribe_samples(samples.to_vec(), 16000, 1, None)
+                    .map_err(|e| {
+                        TranscribeError::InferenceFailed(format!(
+                            "Parakeet TDT inference failed: {}",
+                            e
+                        ))
+                    })?
+            }
+        };
+
+        // Split the full text on sentence boundaries (.!?) and map each sentence
+        // back to token timestamps. result.text is properly assembled by parakeet-rs;
+        // individual tokens are subword pieces that can't be naively joined.
+        let full_text = result.text.trim();
+        let tokens = &result.tokens;
+
+        if full_text.is_empty() || tokens.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Split text into sentences on .!? boundaries
+        let mut sentences: Vec<String> = Vec::new();
+        let mut current = String::new();
+        for ch in full_text.chars() {
+            current.push(ch);
+            if ch == '.' || ch == '!' || ch == '?' {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    sentences.push(trimmed);
+                }
+                current = String::new();
+            }
+        }
+        if !current.trim().is_empty() {
+            sentences.push(current.trim().to_string());
+        }
+
+        // Map sentences to timestamps by distributing tokens proportionally.
+        // Each sentence gets the time span of its corresponding token range.
+        let total_sentences = sentences.len();
+        let total_tokens = tokens.len();
+        let tokens_per_sentence = if total_sentences > 0 {
+            total_tokens / total_sentences
+        } else {
+            total_tokens
+        };
+
+        let mut segments = Vec::new();
+        let mut token_idx = 0;
+
+        for (i, sentence) in sentences.iter().enumerate() {
+            let start_secs = if token_idx < tokens.len() {
+                tokens[token_idx].start
+            } else {
+                tokens.last().map(|t| t.end).unwrap_or(0.0)
+            };
+
+            // Last sentence gets all remaining tokens
+            let end_token_idx = if i == total_sentences - 1 {
+                total_tokens
+            } else {
+                (token_idx + tokens_per_sentence).min(total_tokens)
+            };
+
+            let end_secs = if end_token_idx > 0 && end_token_idx <= tokens.len() {
+                tokens[end_token_idx - 1].end
+            } else {
+                start_secs
+            };
+
+            segments.push(TimedSegment {
+                text: sentence.clone(),
+                start_secs,
+                end_secs,
+            });
+
+            token_idx = end_token_idx;
+        }
+
+        tracing::info!(
+            "Parakeet {:?} timed transcription completed in {:.2}s: {} segments",
+            self.model_type,
+            start.elapsed().as_secs_f32(),
+            segments.len()
+        );
+
+        Ok(segments)
     }
 }
 
