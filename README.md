@@ -638,7 +638,7 @@ We want to hear from you! Voxtype is a young project and your feedback helps mak
 
 - [Peter Jackson](https://github.com/peteonrails) - Creator and maintainer
 - [jvantillo](https://github.com/jvantillo) - GPU acceleration patch, whisper-rs 0.15.1 compatibility
-- [materemias](https://github.com/materemias) - Paste output mode, on-demand model loading, single-instance safeguard, PKGBUILD fix
+- [materemias](https://github.com/materemias) - Paste output mode, on-demand model loading, single-instance safeguard, meeting mode post-processing, PKGBUILD fix
 - [Dan Heuckeroth](https://github.com/danheuck) - NixOS Home Manager module design
 - [Kevin Miller](https://github.com/digunix) - NixOS module enhancements, ROCm support
 - [reisset](https://github.com/reisset) - Testing and feedback on post-processing feature
@@ -651,6 +651,8 @@ We want to hear from you! Voxtype is a young project and your feedback helps mak
 - [Loki Coyote](https://github.com/lokkju) - eitype output driver for KDE/GNOME support, media keys and numeric keycode hotkey support
 - [Umesh](https://github.com/radiorambo) - Documentation website
 - [Sami Jawhar](https://github.com/sjawhar) - Eager input processing wiring
+- [KaiStarkk](https://github.com/KaiStarkk) - Post-process trim and fallback_on_empty options
+- [graysky](https://github.com/graysky2) - Flash attention config fix
 
 ## License
 
