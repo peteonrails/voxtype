@@ -12,6 +12,7 @@ use crate::hotkey::{self, HotkeyEvent};
 use crate::meeting::{self, MeetingDaemon, MeetingEvent, StorageConfig};
 use crate::model_manager::ModelManager;
 use crate::output;
+use crate::output::anthropic::AnthropicPostProcessor;
 use crate::output::post_process::PostProcessor;
 use crate::state::{ChunkResult, State};
 use crate::text::TextProcessor;
@@ -486,6 +487,7 @@ pub struct Daemon {
     audio_feedback: Option<AudioFeedback>,
     text_processor: TextProcessor,
     post_processor: Option<PostProcessor>,
+    anthropic_processor: Option<AnthropicPostProcessor>,
     // Model manager for multi-model support
     model_manager: Option<ModelManager>,
     // Background task for loading model on-demand
@@ -557,14 +559,49 @@ impl Daemon {
         }
 
         // Initialize post-processor if configured
-        let post_processor = config.output.post_process.as_ref().map(|cfg| {
-            tracing::info!(
-                "Post-processing enabled: command={:?}, timeout={}ms",
-                cfg.command,
-                cfg.timeout_ms
-            );
-            PostProcessor::new(cfg)
-        });
+        let mut post_processor = None;
+        let mut anthropic_processor = None;
+
+        if let Some(cfg) = config.output.post_process.as_ref() {
+            if cfg.anthropic_model.is_some() {
+                // Anthropic API mode
+                use crate::output::anthropic::{resolve_api_key, AnthropicPostProcessor};
+                let api_key = resolve_api_key(
+                    cfg.anthropic_api_key.as_deref(),
+                    cfg.anthropic_api_key_file.as_deref(),
+                );
+                if let Some(api_key) = api_key {
+                    let model = cfg
+                        .anthropic_model
+                        .clone()
+                        .unwrap_or_else(|| "claude-haiku-4-5-20251001".to_string());
+                    tracing::info!(
+                        "Post-processing enabled: Anthropic API (model={}), timeout={}ms",
+                        model,
+                        cfg.timeout_ms
+                    );
+                    anthropic_processor = Some(AnthropicPostProcessor::new(
+                        api_key,
+                        model,
+                        cfg.anthropic_prompt.clone(),
+                        cfg.timeout_ms,
+                    ));
+                } else {
+                    tracing::error!(
+                        "Anthropic post-processing configured but no API key found. \
+                         Set anthropic_api_key, ANTHROPIC_API_KEY env var, or anthropic_api_key_file"
+                    );
+                }
+            } else if let Some(ref command) = cfg.command {
+                // Shell command mode
+                tracing::info!(
+                    "Post-processing enabled: command={:?}, timeout={}ms",
+                    command,
+                    cfg.timeout_ms
+                );
+                post_processor = Some(PostProcessor::new(cfg));
+            }
+        }
 
         // Initialize Voice Activity Detection if enabled
         let vad = match crate::vad::create_vad(&config) {
@@ -599,6 +636,7 @@ impl Daemon {
             audio_feedback,
             text_processor,
             post_processor,
+            anthropic_processor,
             model_manager: None,
             model_load_task: None,
             transcription_task: None,
@@ -1293,8 +1331,12 @@ impl Daemon {
                         if let Some(ref cmd) = profile.post_process_command {
                             let timeout_ms = profile.post_process_timeout_ms.unwrap_or(30000);
                             let profile_config = crate::config::PostProcessConfig {
-                                command: cmd.clone(),
+                                command: Some(cmd.clone()),
                                 timeout_ms,
+                                anthropic_api_key: None,
+                                anthropic_api_key_file: None,
+                                anthropic_model: None,
+                                anthropic_prompt: None,
                             };
                             let profile_processor = PostProcessor::new(&profile_config);
                             tracing::info!(
@@ -1306,7 +1348,12 @@ impl Daemon {
                             result
                         } else {
                             // Profile exists but has no post_process_command, use default
-                            if let Some(ref post_processor) = self.post_processor {
+                            if let Some(ref anthropic_processor) = self.anthropic_processor {
+                                tracing::info!("Post-processing via Anthropic: {:?}", processed_text);
+                                let result = anthropic_processor.process(&processed_text).await;
+                                tracing::info!("Post-processed: {:?}", result);
+                                result
+                            } else if let Some(ref post_processor) = self.post_processor {
                                 tracing::info!("Post-processing: {:?}", processed_text);
                                 let result = post_processor.process(&processed_text).await;
                                 tracing::info!("Post-processed: {:?}", result);
@@ -1315,6 +1362,11 @@ impl Daemon {
                                 processed_text
                             }
                         }
+                    } else if let Some(ref anthropic_processor) = self.anthropic_processor {
+                        tracing::info!("Post-processing via Anthropic: {:?}", processed_text);
+                        let result = anthropic_processor.process(&processed_text).await;
+                        tracing::info!("Post-processed: {:?}", result);
+                        result
                     } else if let Some(ref post_processor) = self.post_processor {
                         tracing::info!("Post-processing: {:?}", processed_text);
                         let result = post_processor.process(&processed_text).await;
