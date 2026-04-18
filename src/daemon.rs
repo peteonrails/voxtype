@@ -1901,6 +1901,7 @@ impl Daemon {
                                     tracing::debug!("Eager recording produced empty result");
                                     self.reset_to_idle(&mut state).await;
                                 }
+                                eager_transcriber = None;
                             }
                         }
 
@@ -2082,6 +2083,7 @@ impl Daemon {
                                     tracing::debug!("Eager recording produced empty result");
                                     self.reset_to_idle(&mut state).await;
                                 }
+                                eager_transcriber = None;
                             }
                         }
 
@@ -2329,6 +2331,7 @@ impl Daemon {
                                         self.reset_to_idle(&mut state).await;
                                     }
                                 }
+                                eager_transcriber = None;
                             } else {
                                 for (_, task) in self.eager_chunk_tasks.drain(..) {
                                     task.abort();
@@ -2518,6 +2521,7 @@ impl Daemon {
                             tracing::debug!("Eager recording produced empty result");
                             self.reset_to_idle(&mut state).await;
                         }
+                        eager_transcriber = None;
                     }
                 }
 

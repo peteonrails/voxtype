@@ -650,6 +650,7 @@ We want to hear from you! Voxtype is a young project and your feedback helps mak
 - [ayoahha](https://github.com/ayoahha) - CLI backend for whisper-cli subprocess transcription
 - [Loki Coyote](https://github.com/lokkju) - eitype output driver for KDE/GNOME support, media keys and numeric keycode hotkey support
 - [Umesh](https://github.com/radiorambo) - Documentation website
+- [Sami Jawhar](https://github.com/sjawhar) - Eager input processing wiring
 
 ## License
 
