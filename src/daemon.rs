@@ -1374,6 +1374,7 @@ impl Daemon {
                                     FileMode::Append => "appended",
                                 };
                                 tracing::info!("{} transcription to {:?}", mode_str, output_path);
+                                self.play_feedback(SoundEvent::TranscriptionComplete);
                             }
                             Err(e) => {
                                 tracing::error!(
@@ -1442,14 +1443,18 @@ impl Daemon {
                             .await
                     {
                         tracing::error!("Output failed: {}", e);
-                    } else if self.config.output.notification.on_transcription {
-                        // Send notification on successful output
-                        output::send_transcription_notification(
-                            &final_text,
-                            self.config.output.notification.show_engine_icon,
-                            self.config.engine,
-                        )
-                        .await;
+                    } else {
+                        self.play_feedback(SoundEvent::TranscriptionComplete);
+
+                        if self.config.output.notification.on_transcription {
+                            // Send notification on successful output
+                            output::send_transcription_notification(
+                                &final_text,
+                                self.config.output.notification.show_engine_icon,
+                                self.config.engine,
+                            )
+                            .await;
+                        }
                     }
 
                     *state = State::Idle;
