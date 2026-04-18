@@ -319,7 +319,6 @@ pub fn create_output_chain_with_override(
                 config.append_text.clone(),
             )));
             chain.push(Box::new(xclip::XclipOutput::new(
-                config.notification.on_transcription,
                 config.append_text.clone(),
             )));
         }
