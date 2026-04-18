@@ -47,7 +47,9 @@ sudo apt install wtype
 
 ### Compositor Keybindings
 
-Voxtype works best with your compositor's native keybindings. Add these to your compositor config:
+Voxtype works best with your compositor's native keybindings. Add these to your compositor config.
+
+> **Not sure which compositor you have?** Run `echo $XDG_CURRENT_DESKTOP` in a terminal. Common values: `Hyprland`, `sway`, `river`, `KDE`, `GNOME`.
 
 **Hyprland** (`~/.config/hypr/hyprland.conf`):
 ```
@@ -66,6 +68,15 @@ bindsym --release $mod+v exec voxtype record stop
 riverctl map normal Super V spawn 'voxtype record start'
 riverctl map -release normal Super V spawn 'voxtype record stop'
 ```
+
+**KDE Plasma (KWin):**
+
+KDE does not support key-release events, so use toggle mode. Open **System Settings > Shortcuts > Custom Shortcuts**, create a new shortcut, and set the command to:
+```
+voxtype record toggle
+```
+
+Assign your preferred key combination (e.g., Meta+V). Since KDE handles the keybinding, the built-in hotkey should be disabled (see below).
 
 Then disable the built-in hotkey in your config:
 ```toml
@@ -451,11 +462,21 @@ sudo dnf install alsa-lib-devel
 # Ubuntu:
 sudo apt install libasound2-dev
 
-# Build
+# Build (Whisper engine only)
 cargo build --release
+
+# Build with ONNX engines (Parakeet, Moonshine, SenseVoice, etc.)
+cargo build --release --features parakeet,moonshine,sensevoice,paraformer,dolphin
+
+# Or just the engine you need
+cargo build --release --features parakeet
 
 # Binary is at: target/release/voxtype
 ```
+
+ONNX engines require the corresponding Cargo feature at build time. Without it, setting
+`engine = "parakeet"` in your config will fail with an error. The prebuilt release binaries
+(`-onnx-avx2`, `-onnx-cuda`, etc.) include all ONNX engines.
 
 ## Waybar Integration
 
@@ -629,6 +650,7 @@ We want to hear from you! Voxtype is a young project and your feedback helps mak
 - [ayoahha](https://github.com/ayoahha) - CLI backend for whisper-cli subprocess transcription
 - [Loki Coyote](https://github.com/lokkju) - eitype output driver for KDE/GNOME support, media keys and numeric keycode hotkey support
 - [Umesh](https://github.com/radiorambo) - Documentation website
+- [Sami Jawhar](https://github.com/sjawhar) - Eager input processing wiring
 
 ## License
 

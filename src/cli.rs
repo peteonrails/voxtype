@@ -93,7 +93,6 @@ pub struct Cli {
     pub model_modifier: Option<String>,
 
     // -- Whisper --
-
     /// Disable context window optimization for short recordings
     #[arg(long, help_heading = "Whisper")]
     pub no_whisper_context_optimization: bool,
@@ -118,6 +117,14 @@ pub struct Cli {
     /// Run transcription in a subprocess to release GPU memory after each recording
     #[arg(long, help_heading = "Whisper")]
     pub gpu_isolation: bool,
+
+    /// GPU device index for multi-GPU systems (e.g., 1 for discrete GPU)
+    #[arg(long, value_name = "INDEX", help_heading = "Whisper")]
+    pub gpu_device: Option<i32>,
+
+    /// Enable flash attention for reduced GPU memory usage and faster inference
+    #[arg(long, help_heading = "Whisper")]
+    pub flash_attention: bool,
 
     /// Load model on-demand when recording starts instead of keeping it loaded
     #[arg(long, help_heading = "Whisper")]
@@ -148,7 +155,6 @@ pub struct Cli {
     pub remote_api_key: Option<String>,
 
     // -- Audio --
-
     /// Audio input device name (or "default" for system default)
     #[arg(long, value_name = "DEVICE", help_heading = "Audio")]
     pub audio_device: Option<String>,
@@ -165,8 +171,11 @@ pub struct Cli {
     #[arg(long, help_heading = "Audio")]
     pub no_audio_feedback: bool,
 
-    // -- Output --
+    /// Pause MPRIS media players during recording (requires playerctl)
+    #[arg(long, help_heading = "Audio")]
+    pub pause_media: bool,
 
+    // -- Output --
     /// Delay before typing starts (ms), helps prevent first character drop
     #[arg(long, value_name = "MS", help_heading = "Output")]
     pub pre_type_delay: Option<u32>,
@@ -179,6 +188,11 @@ pub struct Cli {
     /// Appended before auto_submit. Useful for separating sentences when dictating incrementally.
     #[arg(long, value_name = "TEXT", help_heading = "Output")]
     pub append_text: Option<String>,
+
+    /// Prefix wtype output with a Shift key press/release.
+    /// Workaround for apps (e.g., Discord) that drop the first CJK character.
+    #[arg(long)]
+    pub wtype_shift_prefix: bool,
 
     /// Output driver order for type mode (comma-separated).
     /// Available: wtype, dotool, ydotool, clipboard.
@@ -219,7 +233,11 @@ pub struct Cli {
     pub fallback_to_clipboard: bool,
 
     /// Disable clipboard fallback
-    #[arg(long, conflicts_with = "fallback_to_clipboard", help_heading = "Output")]
+    #[arg(
+        long,
+        conflicts_with = "fallback_to_clipboard",
+        help_heading = "Output"
+    )]
     pub no_fallback_to_clipboard: bool,
 
     /// Enable spoken punctuation conversion (e.g., say "period" to get ".")
@@ -259,7 +277,6 @@ pub struct Cli {
     pub pre_recording_command: Option<String>,
 
     // -- VAD --
-
     /// Enable Voice Activity Detection (filter silence before transcription)
     #[arg(long, help_heading = "VAD")]
     pub vad: bool,

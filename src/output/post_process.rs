@@ -40,12 +40,14 @@ impl PostProcessor {
         }
     }
 
-    /// Process text through the external command
+    /// Process text with optional context from a previous chunk
     ///
+    /// When context is provided, it is passed via the VOXTYPE_CONTEXT environment
+    /// variable so the post-processing command can use it for continuity.
+    /// Stdin always contains only the current text, keeping existing scripts compatible.
     /// Returns the processed text on success, or the original text on any failure.
-    /// This ensures voice-to-text always produces output even when post-processing fails.
-    pub async fn process(&self, text: &str) -> String {
-        match self.execute_command(text).await {
+    pub async fn process_with_context(&self, text: &str, context: Option<&str>) -> String {
+        match self.execute_command_with_env(text, context).await {
             Ok(processed) => {
                 if processed.is_empty() && self.fallback_on_empty {
                     tracing::warn!(
@@ -71,13 +73,32 @@ impl PostProcessor {
         }
     }
 
-    async fn execute_command(&self, text: &str) -> Result<String, PostProcessError> {
-        // Spawn command via shell for proper parsing of complex commands
-        let mut child = Command::new("sh")
-            .args(["-c", &self.command])
+    /// Process text through the external command
+    ///
+    /// Returns the processed text on success, or the original text on any failure.
+    /// This ensures voice-to-text always produces output even when post-processing fails.
+    pub async fn process(&self, text: &str) -> String {
+        self.process_with_context(text, None).await
+    }
+
+    async fn execute_command_with_env(
+        &self,
+        text: &str,
+        context: Option<&str>,
+    ) -> Result<String, PostProcessError> {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", &self.command])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        // Always clear to prevent inheriting stale context from parent environment
+        cmd.env_remove("VOXTYPE_CONTEXT");
+        if let Some(ctx) = context {
+            cmd.env("VOXTYPE_CONTEXT", ctx);
+        }
+
+        let mut child = cmd
             .spawn()
             .map_err(|e| PostProcessError::SpawnFailed(e.to_string()))?;
 
@@ -310,5 +331,38 @@ mod tests {
         let processor = PostProcessor::new(&config);
         let result = processor.process("original text").await;
         assert_eq!(result, "original text");
+    }
+
+    #[tokio::test]
+    async fn test_context_passed_via_env_var() {
+        // Command prints VOXTYPE_CONTEXT env var, stdin is current text
+        let config = make_config("echo \"context:$VOXTYPE_CONTEXT stdin:$(cat)\"", 5000);
+        let processor = PostProcessor::new(&config);
+        let result = processor
+            .process_with_context("current text", Some("previous text"))
+            .await;
+        assert_eq!(result, "context:previous text stdin:current text");
+    }
+
+    #[tokio::test]
+    async fn test_no_context_env_var_when_none() {
+        // VOXTYPE_CONTEXT should not be set when context is None
+        let config = make_config("echo \"context:${VOXTYPE_CONTEXT:-unset} stdin:$(cat)\"", 5000);
+        let processor = PostProcessor::new(&config);
+        let result = processor.process_with_context("current text", None).await;
+        assert_eq!(result, "context:unset stdin:current text");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_context_env_not_inherited_from_parent() {
+        // Even if VOXTYPE_CONTEXT is set in parent env, it should be cleared when context is None.
+        // Uses current_thread runtime because std::env::set_var is not thread-safe
+        // and will become unsafe in Rust edition 2024.
+        std::env::set_var("VOXTYPE_CONTEXT", "stale parent context");
+        let config = make_config("echo \"${VOXTYPE_CONTEXT:-unset}\"", 5000);
+        let processor = PostProcessor::new(&config);
+        let result = processor.process_with_context("text", None).await;
+        std::env::remove_var("VOXTYPE_CONTEXT");
+        assert_eq!(result, "unset");
     }
 }

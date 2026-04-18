@@ -20,7 +20,7 @@ use pidlock::Pidlock;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::signal::unix::{signal, SignalKind};
 
@@ -229,6 +229,17 @@ fn read_profile_override() -> Option<String> {
 fn cleanup_profile_override() {
     let profile_file = Config::runtime_dir().join("profile_override");
     let _ = std::fs::remove_file(&profile_file);
+}
+
+/// Write a profile override file so the daemon uses the named profile for post-processing.
+/// Same mechanism as `voxtype record start --profile <name>`.
+fn write_profile_override(profile_name: &str) {
+    let profile_file = Config::runtime_dir().join("profile_override");
+    if let Err(e) = std::fs::write(&profile_file, profile_name) {
+        tracing::warn!("Failed to write profile override: {}", e);
+    } else {
+        tracing::info!("Profile modifier activated: {}", profile_name);
+    }
 }
 
 /// Read and consume a boolean override file from the runtime directory.
@@ -475,6 +486,8 @@ pub struct Daemon {
     audio_feedback: Option<AudioFeedback>,
     text_processor: TextProcessor,
     post_processor: Option<PostProcessor>,
+    /// Last post-processed text and when it was produced, for context in subsequent dictations
+    last_dictation: Option<(String, Instant)>,
     // Model manager for multi-model support
     model_manager: Option<ModelManager>,
     // Background task for loading model on-demand
@@ -506,6 +519,8 @@ pub struct Daemon {
     // GTCRN speech enhancer for mic echo cancellation
     #[cfg(feature = "onnx-common")]
     speech_enhancer: Option<std::sync::Arc<audio::enhance::GtcrnEnhancer>>,
+    // Media players that were paused when recording started (for resume on stop)
+    paused_media_players: Vec<String>,
 }
 
 impl Daemon {
@@ -588,6 +603,7 @@ impl Daemon {
             audio_feedback,
             text_processor,
             post_processor,
+            last_dictation: None,
             model_manager: None,
             model_load_task: None,
             transcription_task: None,
@@ -601,6 +617,7 @@ impl Daemon {
             meeting_event_rx: None,
             #[cfg(feature = "onnx-common")]
             speech_enhancer: None,
+            paused_media_players: Vec::new(),
         }
     }
 
@@ -608,6 +625,21 @@ impl Daemon {
     fn play_feedback(&self, event: SoundEvent) {
         if let Some(ref feedback) = self.audio_feedback {
             feedback.play(event);
+        }
+    }
+
+    /// Pause MPRIS media players if configured, storing which ones were paused
+    async fn pause_media_players(&mut self) {
+        if self.config.audio.pause_media {
+            self.paused_media_players = audio::media::pause_playing_players().await;
+        }
+    }
+
+    /// Resume any MPRIS media players that were paused at recording start
+    fn resume_media_players(&mut self) {
+        if !self.paused_media_players.is_empty() {
+            let players = std::mem::take(&mut self.paused_media_players);
+            tokio::spawn(audio::media::resume_players(players));
         }
     }
 
@@ -916,13 +948,14 @@ impl Daemon {
 
     /// Reset state to idle and run post_output_command to reset compositor submap
     /// Call this when exiting from recording/transcribing without normal output flow
-    async fn reset_to_idle(&self, state: &mut State) {
+    async fn reset_to_idle(&mut self, state: &mut State) {
         cleanup_output_mode_override();
         cleanup_model_override();
         cleanup_profile_override();
         cleanup_bool_override("auto_submit");
         cleanup_bool_override("shift_enter");
         cleanup_bool_override("smart_auto_submit");
+        self.resume_media_players();
         *state = State::Idle;
         self.update_state("idle");
 
@@ -1231,7 +1264,7 @@ impl Daemon {
 
     /// Handle transcription completion (called when transcription_task completes)
     async fn handle_transcription_result(
-        &self,
+        &mut self,
         state: &mut State,
         result: std::result::Result<TranscriptionResult, tokio::task::JoinError>,
     ) {
@@ -1277,6 +1310,14 @@ impl Daemon {
                         }
                     }
 
+                    // Get context from last dictation if within 60 seconds
+                    let recent_context = self.last_dictation.as_ref().and_then(|(text, when)| {
+                        if when.elapsed() < Duration::from_secs(60) {
+                            Some(text.clone())
+                        } else {
+                            None
+                        }
+                    });
                     // Apply post-processing command (profile overrides default)
                     let final_text = if let Some(profile) = active_profile {
                         if let Some(ref cmd) = profile.post_process_command {
@@ -1289,31 +1330,48 @@ impl Daemon {
                             };
                             let profile_processor = PostProcessor::new(&profile_config);
                             tracing::info!(
-                                "Post-processing with profile: {:?}",
-                                profile_override.as_ref().unwrap()
+                                "Post-processing with profile: {:?}, has_context: {}",
+                                profile_override.as_ref().unwrap(),
+                                recent_context.is_some()
                             );
-                            let result = profile_processor.process(&processed_text).await;
-                            tracing::info!("Post-processed: {:?}", result);
+                            tracing::debug!("Post-processing context: {:?}", recent_context);
+                            let result = profile_processor
+                                .process_with_context(&processed_text, recent_context.as_deref())
+                                .await;
+                            tracing::info!("Post-processed: changed: {}", result != processed_text);
+                            tracing::debug!("Post-processed result: {:?}", result);
                             result
                         } else {
                             // Profile exists but has no post_process_command, use default
                             if let Some(ref post_processor) = self.post_processor {
-                                tracing::info!("Post-processing: {:?}", processed_text);
-                                let result = post_processor.process(&processed_text).await;
-                                tracing::info!("Post-processed: {:?}", result);
+                                tracing::info!("Post-processing, has_context: {}", recent_context.is_some());
+                                tracing::debug!("Post-processing input: {:?}, context: {:?}", processed_text, recent_context);
+                                let result = post_processor
+                                    .process_with_context(&processed_text, recent_context.as_deref())
+                                    .await;
+                                tracing::info!("Post-processed: changed: {}", result != processed_text);
+                                tracing::debug!("Post-processed result: {:?}", result);
                                 result
                             } else {
                                 processed_text
                             }
                         }
                     } else if let Some(ref post_processor) = self.post_processor {
-                        tracing::info!("Post-processing: {:?}", processed_text);
-                        let result = post_processor.process(&processed_text).await;
-                        tracing::info!("Post-processed: {:?}", result);
+                        tracing::info!("Post-processing, has_context: {}", recent_context.is_some());
+                        tracing::debug!("Post-processing input: {:?}, context: {:?}", processed_text, recent_context);
+                        let result = post_processor
+                            .process_with_context(&processed_text, recent_context.as_deref())
+                            .await;
+                        tracing::info!("Post-processed: changed: {}", result != processed_text);
+                        tracing::debug!("Post-processed result: {:?}", result);
                         result
                     } else {
                         processed_text
                     };
+
+                    // Track last dictation for context in subsequent post-processing
+                    self.last_dictation =
+                        Some((final_text.clone(), Instant::now()));
 
                     if smart_submit {
                         tracing::debug!(
@@ -1365,6 +1423,7 @@ impl Daemon {
                                     FileMode::Append => "appended",
                                 };
                                 tracing::info!("{} transcription to {:?}", mode_str, output_path);
+                                self.play_feedback(SoundEvent::TranscriptionComplete);
                             }
                             Err(e) => {
                                 tracing::error!(
@@ -1375,6 +1434,7 @@ impl Daemon {
                             }
                         }
 
+                        self.resume_media_players();
                         *state = State::Idle;
                         self.update_state("idle");
                         return;
@@ -1433,16 +1493,21 @@ impl Daemon {
                             .await
                     {
                         tracing::error!("Output failed: {}", e);
-                    } else if self.config.output.notification.on_transcription {
-                        // Send notification on successful output
-                        output::send_transcription_notification(
-                            &final_text,
-                            self.config.output.notification.show_engine_icon,
-                            self.config.engine,
-                        )
-                        .await;
+                    } else {
+                        self.play_feedback(SoundEvent::TranscriptionComplete);
+
+                        if self.config.output.notification.on_transcription {
+                            // Send notification on successful output
+                            output::send_transcription_notification(
+                                &final_text,
+                                self.config.output.notification.show_engine_icon,
+                                self.config.engine,
+                            )
+                            .await;
+                        }
                     }
 
+                    self.resume_media_players();
                     *state = State::Idle;
                     self.update_state("idle");
                 }
@@ -1467,8 +1532,9 @@ impl Daemon {
     pub async fn run(&mut self) -> Result<()> {
         tracing::info!("Starting voxtype daemon");
 
-        // Clean up any stale cancel file from previous runs
+        // Clean up any stale cancel and profile override files from previous runs
         cleanup_cancel_file();
+        cleanup_profile_override();
 
         // Clean up any stale meeting command files
         cleanup_meeting_files();
@@ -1525,6 +1591,20 @@ impl Daemon {
         // Initialize hotkey listener (if enabled)
         let mut hotkey_listener = if self.config.hotkey.enabled {
             tracing::info!("Hotkey: {}", self.config.hotkey.key);
+
+            // Warn about profile modifiers that reference undefined profiles
+            for (key_name, profile_name) in &self.config.hotkey.profile_modifiers {
+                if self.config.get_profile(profile_name).is_none() {
+                    tracing::warn!(
+                        "Profile modifier {} references undefined profile '{}' — \
+                         add a [profiles.{}] section to your config",
+                        key_name,
+                        profile_name,
+                        profile_name
+                    );
+                }
+            }
+
             let secondary_model = self.config.whisper.secondary_model.clone();
             Some(hotkey::create_listener(
                 &self.config.hotkey,
@@ -1624,6 +1704,9 @@ impl Daemon {
         self.update_state("idle");
 
         // Main event loop
+        // Cached transcriber for eager chunk processing during recording
+        let mut eager_transcriber: Option<Arc<dyn Transcriber>> = None;
+
         loop {
             tokio::select! {
                 // Handle hotkey events (only if hotkey listener is enabled)
@@ -1635,10 +1718,15 @@ impl Daemon {
                 } => {
                     match (hotkey_event, activation_mode) {
                         // === PUSH-TO-TALK MODE ===
-                        (HotkeyEvent::Pressed { model_override }, ActivationMode::PushToTalk) => {
-                            tracing::debug!("Received HotkeyEvent::Pressed (push-to-talk), state.is_idle() = {}, model_override = {:?}",
-                                state.is_idle(), model_override);
+                        (HotkeyEvent::Pressed { model_override, profile_override }, ActivationMode::PushToTalk) => {
+                            tracing::debug!("Received HotkeyEvent::Pressed (push-to-talk), state.is_idle() = {}, model_override = {:?}, profile_override = {:?}",
+                                state.is_idle(), model_override, profile_override);
                             if state.is_idle() {
+                                // Write profile override file if a profile modifier was held
+                                if let Some(ref profile_name) = profile_override {
+                                    write_profile_override(profile_name);
+                                }
+
                                 tracing::info!("Recording started");
 
                                 // Send notification if enabled
@@ -1729,6 +1817,7 @@ impl Daemon {
                                         }
                                         self.update_state("recording");
                                         self.play_feedback(SoundEvent::RecordingStart);
+                                        self.pause_media_players().await;
 
                                         // Run pre-recording hook (e.g., enter compositor submap for cancel)
                                         if let Some(cmd) = &self.config.output.pre_recording_command {
@@ -1739,6 +1828,7 @@ impl Daemon {
                                     }
                                     Err(e) => {
                                         tracing::error!("Failed to create audio capture: {}", e);
+                                        cleanup_profile_override();
                                         self.play_feedback(SoundEvent::Error);
                                     }
                                 }
@@ -1813,15 +1903,21 @@ impl Daemon {
                                     tracing::debug!("Eager recording produced empty result");
                                     self.reset_to_idle(&mut state).await;
                                 }
+                                eager_transcriber = None;
                             }
                         }
 
                         // === TOGGLE MODE ===
-                        (HotkeyEvent::Pressed { model_override }, ActivationMode::Toggle) => {
-                            tracing::debug!("Received HotkeyEvent::Pressed (toggle), state.is_idle() = {}, state.is_recording() = {}, model_override = {:?}",
-                                state.is_idle(), state.is_recording(), model_override);
+                        (HotkeyEvent::Pressed { model_override, profile_override }, ActivationMode::Toggle) => {
+                            tracing::debug!("Received HotkeyEvent::Pressed (toggle), state.is_idle() = {}, state.is_recording() = {}, model_override = {:?}, profile_override = {:?}",
+                                state.is_idle(), state.is_recording(), model_override, profile_override);
 
                             if state.is_idle() {
+                                // Write profile override file if a profile modifier was held
+                                if let Some(ref profile_name) = profile_override {
+                                    write_profile_override(profile_name);
+                                }
+
                                 // Start recording
                                 tracing::info!("Recording started (toggle mode)");
 
@@ -1909,6 +2005,7 @@ impl Daemon {
                                         }
                                         self.update_state("recording");
                                         self.play_feedback(SoundEvent::RecordingStart);
+                                        self.pause_media_players().await;
 
                                         // Run pre-recording hook (e.g., enter compositor submap for cancel)
                                         if let Some(cmd) = &self.config.output.pre_recording_command {
@@ -1919,6 +2016,7 @@ impl Daemon {
                                     }
                                     Err(e) => {
                                         tracing::error!("Failed to create audio capture: {}", e);
+                                        cleanup_profile_override();
                                         self.play_feedback(SoundEvent::Error);
                                     }
                                 }
@@ -1987,6 +2085,7 @@ impl Daemon {
                                     tracing::debug!("Eager recording produced empty result");
                                     self.reset_to_idle(&mut state).await;
                                 }
+                                eager_transcriber = None;
                             }
                         }
 
@@ -2089,11 +2188,26 @@ impl Daemon {
                             task.abort();
                         }
 
+                        if let State::EagerRecording {
+                            accumulated_audio,
+                            chunk_results,
+                            chunks_sent,
+                            tasks_in_flight,
+                            ..
+                        } = &mut state
+                        {
+                            accumulated_audio.clear();
+                            chunk_results.clear();
+                            *chunks_sent = 0;
+                            *tasks_in_flight = 0;
+                        }
+
                         cleanup_output_mode_override();
                         cleanup_model_override();
                         cleanup_profile_override();
                         cleanup_bool_override("smart_auto_submit");
                         state = State::Idle;
+                        eager_transcriber = None;
                         self.update_state("idle");
                         self.play_feedback(SoundEvent::Cancelled);
 
@@ -2111,6 +2225,61 @@ impl Daemon {
                         continue;
                     }
 
+                    // Populate eager transcriber cache on first poll
+                    if eager_transcriber.is_none() && state.is_eager_recording() {
+                        let model_override = match &state {
+                            State::EagerRecording { model_override, .. } => model_override.as_deref(),
+                            _ => None,
+                        };
+                        eager_transcriber = transcriber_preloaded.clone();
+                        if eager_transcriber.is_none() {
+                            // Whisper engine: get from model manager
+                            if let Some(ref mut mm) = self.model_manager {
+                                match mm.get_prepared_transcriber(model_override) {
+                                    Ok(t) => {
+                                        tracing::debug!("Created eager transcriber for chunk dispatch");
+                                        eager_transcriber = Some(t);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to create eager transcriber: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if let State::EagerRecording {
+                        accumulated_audio,
+                        chunks_sent,
+                        chunk_results,
+                        tasks_in_flight,
+                        ..
+                    } = &mut state
+                    {
+                        if let Some(ref mut capture) = audio_capture {
+                            let new_samples = capture.get_samples().await;
+                            if !new_samples.is_empty() {
+                                accumulated_audio.extend(new_samples);
+                            }
+                        }
+
+                        if let Some(ref transcriber) = eager_transcriber {
+                            let transcriber = transcriber.clone();
+                            self.process_eager_chunks(
+                                accumulated_audio,
+                                chunks_sent,
+                                tasks_in_flight,
+                                &transcriber,
+                            );
+                        }
+
+                        let completed = self.poll_chunk_tasks().await;
+                        if !completed.is_empty() {
+                            *tasks_in_flight = tasks_in_flight.saturating_sub(completed.len());
+                            chunk_results.extend(completed);
+                        }
+                    }
+
                     // Check for recording timeout
                     if let Some(duration) = state.recording_duration() {
                         if duration > max_duration {
@@ -2118,11 +2287,6 @@ impl Daemon {
                                 "Recording timeout ({:.0}s limit), transcribing captured audio",
                                 max_duration.as_secs_f32()
                             );
-
-                            // Cancel any pending eager chunk tasks
-                            for (_, task) in self.eager_chunk_tasks.drain(..) {
-                                task.abort();
-                            }
 
                             cleanup_output_mode_override();
                             cleanup_model_override();
@@ -2149,12 +2313,38 @@ impl Daemon {
                                 }
                             };
 
-                            // Transcribe the captured audio
-                            self.start_transcription_task(
-                                &mut state,
-                                &mut audio_capture,
-                                transcriber,
-                            ).await;
+                            if state.is_eager_recording() {
+                                if let Some(mut capture) = audio_capture.take() {
+                                    if let Ok(final_samples) = capture.stop().await {
+                                        if let State::EagerRecording { accumulated_audio, .. } = &mut state {
+                                            accumulated_audio.extend(final_samples);
+                                        }
+                                    }
+                                }
+
+                                if let Some(transcriber) = transcriber {
+                                    self.update_state("transcribing");
+
+                                    if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
+                                        state = State::Transcribing { audio: Vec::new() };
+                                        self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
+                                    } else {
+                                        tracing::debug!("Eager recording timeout produced empty result");
+                                        self.reset_to_idle(&mut state).await;
+                                    }
+                                }
+                                eager_transcriber = None;
+                            } else {
+                                for (_, task) in self.eager_chunk_tasks.drain(..) {
+                                    task.abort();
+                                }
+
+                                self.start_transcription_task(
+                                    &mut state,
+                                    &mut audio_capture,
+                                    transcriber,
+                                ).await;
+                            }
                         }
                     }
                 }
@@ -2248,6 +2438,7 @@ impl Daemon {
                                     }
                                     self.update_state("recording");
                                     self.play_feedback(SoundEvent::RecordingStart);
+                                    self.pause_media_players().await;
 
                                     // Run pre-recording hook (e.g., enter compositor submap for cancel)
                                     if let Some(cmd) = &self.config.output.pre_recording_command {
@@ -2332,6 +2523,7 @@ impl Daemon {
                             tracing::debug!("Eager recording produced empty result");
                             self.reset_to_idle(&mut state).await;
                         }
+                        eager_transcriber = None;
                     }
                 }
 
@@ -2629,6 +2821,9 @@ impl Daemon {
             tracing::info!("Stopping active meeting on shutdown");
             let _ = self.stop_meeting().await;
         }
+
+        // Remove override files on shutdown
+        cleanup_profile_override();
 
         // Remove state file on shutdown
         if let Some(ref path) = self.state_file_path {

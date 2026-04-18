@@ -21,8 +21,6 @@ pub struct DotoolOutput {
     type_delay_ms: u32,
     /// Delay before typing starts in milliseconds
     pre_type_delay_ms: u32,
-    /// Whether to show a desktop notification
-    notify: bool,
     /// Whether to send Enter key after output
     auto_submit: bool,
     /// Text to append after transcription (before auto_submit)
@@ -38,7 +36,6 @@ impl DotoolOutput {
     pub fn new(
         type_delay_ms: u32,
         pre_type_delay_ms: u32,
-        notify: bool,
         auto_submit: bool,
         append_text: Option<String>,
         xkb_layout: Option<String>,
@@ -50,35 +47,11 @@ impl DotoolOutput {
         Self {
             type_delay_ms,
             pre_type_delay_ms,
-            notify,
             auto_submit,
             append_text,
             xkb_layout,
             xkb_variant,
         }
-    }
-
-    /// Send a desktop notification
-    async fn send_notification(&self, text: &str) {
-        // Truncate preview for notification
-        let preview: String = text.chars().take(100).collect();
-        let preview = if text.len() > 100 {
-            format!("{}...", preview)
-        } else {
-            preview
-        };
-
-        let _ = Command::new("notify-send")
-            .args([
-                "--app-name=Voxtype",
-                "--expire-time=3000",
-                "Transcribed",
-                &preview,
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
     }
 
     /// Build the dotool command string to send via stdin
@@ -185,11 +158,6 @@ impl TextOutput for DotoolOutput {
 
         tracing::info!("Text typed via dotool ({} chars)", text.len());
 
-        // Send notification if enabled
-        if self.notify {
-            self.send_notification(text).await;
-        }
-
         Ok(())
     }
 
@@ -216,24 +184,23 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = DotoolOutput::new(10, 0, true, false, None, Some("de".to_string()), None);
+        let output = DotoolOutput::new(10, 0, false, None, Some("de".to_string()), None);
         assert_eq!(output.type_delay_ms, 10);
         assert_eq!(output.pre_type_delay_ms, 0);
-        assert!(output.notify);
         assert!(!output.auto_submit);
         assert_eq!(output.xkb_layout, Some("de".to_string()));
     }
 
     #[test]
     fn test_build_commands_simple() {
-        let output = DotoolOutput::new(0, 0, false, false, None, None, None);
+        let output = DotoolOutput::new(0, 0, false, None, None, None);
         let cmds = output.build_commands("Hello world");
         assert_eq!(cmds, "type Hello world\n");
     }
 
     #[test]
     fn test_build_commands_with_delay() {
-        let output = DotoolOutput::new(10, 0, false, false, None, None, None);
+        let output = DotoolOutput::new(10, 0, false, None, None, None);
         let cmds = output.build_commands("Test");
         assert!(cmds.contains("typedelay 10"));
         assert!(cmds.contains("typehold 10"));
@@ -242,7 +209,7 @@ mod tests {
 
     #[test]
     fn test_build_commands_with_enter() {
-        let output = DotoolOutput::new(0, 0, false, true, None, None, None);
+        let output = DotoolOutput::new(0, 0, true, None, None, None);
         let cmds = output.build_commands("Test");
         assert!(cmds.contains("type Test"));
         assert!(cmds.contains("key enter"));

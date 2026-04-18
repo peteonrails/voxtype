@@ -13,42 +13,14 @@ use tokio::process::Command;
 
 /// Clipboard-based text output
 pub struct ClipboardOutput {
-    /// Whether to show a desktop notification
-    notify: bool,
     /// Text to append after transcription
     append_text: Option<String>,
 }
 
 impl ClipboardOutput {
     /// Create a new clipboard output
-    pub fn new(notify: bool, append_text: Option<String>) -> Self {
-        Self {
-            notify,
-            append_text,
-        }
-    }
-
-    /// Send a desktop notification
-    async fn send_notification(&self, text: &str) {
-        // Truncate preview for notification (use chars() to handle multi-byte UTF-8)
-        let preview = if text.chars().count() > 80 {
-            format!("{}...", text.chars().take(80).collect::<String>())
-        } else {
-            text.to_string()
-        };
-
-        let _ = Command::new("notify-send")
-            .args([
-                "--app-name=Voxtype",
-                "--urgency=low",
-                "--expire-time=3000",
-                "Copied to clipboard",
-                &preview,
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
+    pub fn new(append_text: Option<String>) -> Self {
+        Self { append_text }
     }
 }
 
@@ -103,11 +75,6 @@ impl TextOutput for ClipboardOutput {
             ));
         }
 
-        // Send notification if enabled
-        if self.notify {
-            self.send_notification(&text).await;
-        }
-
         tracing::info!("Text copied to clipboard ({} chars)", text.len());
         Ok(())
     }
@@ -134,10 +101,10 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = ClipboardOutput::new(true, None);
-        assert!(output.notify);
+        let output = ClipboardOutput::new(None);
+        assert!(output.append_text.is_none());
 
-        let output = ClipboardOutput::new(false, None);
-        assert!(!output.notify);
+        let output = ClipboardOutput::new(Some(" ".to_string()));
+        assert_eq!(output.append_text, Some(" ".to_string()));
     }
 }

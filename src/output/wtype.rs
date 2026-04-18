@@ -26,6 +26,8 @@ pub struct WtypeOutput {
     pre_type_delay_ms: u32,
     /// Convert newlines to Shift+Enter (for apps where Enter submits)
     shift_enter_newlines: bool,
+    /// Prefix output with Shift press/release (workaround for CJK first char drop)
+    shift_prefix: bool,
 }
 
 impl WtypeOutput {
@@ -36,6 +38,7 @@ impl WtypeOutput {
         type_delay_ms: u32,
         pre_type_delay_ms: u32,
         shift_enter_newlines: bool,
+        shift_prefix: bool,
     ) -> Self {
         Self {
             auto_submit,
@@ -43,6 +46,7 @@ impl WtypeOutput {
             type_delay_ms,
             pre_type_delay_ms,
             shift_enter_newlines,
+            shift_prefix,
         }
     }
 
@@ -65,6 +69,12 @@ impl WtypeOutput {
         if self.type_delay_ms > 0 {
             cmd.arg("-d").arg(self.type_delay_ms.to_string());
             debug_args.push(format!("-d {}", self.type_delay_ms));
+        }
+
+        // Add Shift prefix to prevent first CJK character drop in some apps
+        if self.shift_prefix {
+            cmd.arg("-P").arg("Shift_L").arg("-p").arg("Shift_L");
+            debug_args.push("-P Shift_L -p Shift_L".to_string());
         }
 
         debug_args.push("--".to_string());
@@ -207,7 +217,7 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = WtypeOutput::new(false, None, 0, 0, false);
+        let output = WtypeOutput::new(false, None, 0, 0, false, false);
         assert!(!output.auto_submit);
         assert_eq!(output.type_delay_ms, 0);
         assert_eq!(output.pre_type_delay_ms, 0);
@@ -216,13 +226,13 @@ mod tests {
 
     #[test]
     fn test_new_with_enter() {
-        let output = WtypeOutput::new(true, None, 0, 0, false);
+        let output = WtypeOutput::new(true, None, 0, 0, false, false);
         assert!(output.auto_submit);
     }
 
     #[test]
     fn test_new_with_type_delay() {
-        let output = WtypeOutput::new(false, None, 50, 0, false);
+        let output = WtypeOutput::new(false, None, 50, 0, false, false);
         assert!(!output.auto_submit);
         assert_eq!(output.type_delay_ms, 50);
         assert_eq!(output.pre_type_delay_ms, 0);
@@ -230,14 +240,20 @@ mod tests {
 
     #[test]
     fn test_new_with_pre_type_delay() {
-        let output = WtypeOutput::new(false, None, 0, 200, false);
+        let output = WtypeOutput::new(false, None, 0, 200, false, false);
         assert_eq!(output.type_delay_ms, 0);
         assert_eq!(output.pre_type_delay_ms, 200);
     }
 
     #[test]
     fn test_new_with_shift_enter_newlines() {
-        let output = WtypeOutput::new(false, None, 0, 0, true);
+        let output = WtypeOutput::new(false, None, 0, 0, true, false);
         assert!(output.shift_enter_newlines);
+    }
+
+    #[test]
+    fn test_new_with_shift_prefix() {
+        let output = WtypeOutput::new(false, None, 0, 0, false, true);
+        assert!(output.shift_prefix);
     }
 }

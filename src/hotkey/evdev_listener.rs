@@ -31,6 +31,8 @@ pub struct EvdevListener {
     model_modifier: Option<Key>,
     /// Secondary model to use when model_modifier is held
     secondary_model: Option<String>,
+    /// Modifier keys that activate named profiles for post-processing
+    profile_modifiers: HashMap<Key, String>,
     /// Signal to stop the listener task
     stop_signal: Option<oneshot::Sender<()>>,
 }
@@ -60,6 +62,33 @@ impl EvdevListener {
             .map(|k| parse_key_name(k))
             .transpose()?;
 
+        // Parse profile modifier keys
+        let profile_modifiers = config
+            .profile_modifiers
+            .iter()
+            .map(|(k, v)| Ok((parse_key_name(k)?, v.clone())))
+            .collect::<Result<HashMap<Key, String>, HotkeyError>>()?;
+
+        // Warn if profile modifier keys overlap with required modifiers or model modifier
+        for (key, profile_name) in &profile_modifiers {
+            if modifier_keys.contains(key) {
+                tracing::warn!(
+                    "Profile modifier {:?} for profile '{}' is also a required modifier — \
+                     every hotkey press will activate this profile",
+                    key,
+                    profile_name
+                );
+            }
+            if model_modifier == Some(*key) {
+                tracing::warn!(
+                    "Profile modifier {:?} for profile '{}' is also the model modifier — \
+                     holding this key will activate both a model override and a profile override",
+                    key,
+                    profile_name
+                );
+            }
+        }
+
         // Verify we can access /dev/input (permission check)
         std::fs::read_dir("/dev/input")
             .map_err(|e| HotkeyError::DeviceAccess(format!("/dev/input: {}", e)))?;
@@ -70,6 +99,7 @@ impl EvdevListener {
             cancel_key,
             model_modifier,
             secondary_model: None, // Set later via set_secondary_model
+            profile_modifiers,
             stop_signal: None,
         })
     }
@@ -92,6 +122,7 @@ impl HotkeyListener for EvdevListener {
         let cancel_key = self.cancel_key;
         let model_modifier = self.model_modifier;
         let secondary_model = self.secondary_model.clone();
+        let profile_modifiers = self.profile_modifiers.clone();
 
         // Spawn the listener task
         tokio::task::spawn_blocking(move || {
@@ -101,6 +132,7 @@ impl HotkeyListener for EvdevListener {
                 cancel_key,
                 model_modifier,
                 secondary_model,
+                profile_modifiers,
                 tx,
                 stop_rx,
             ) {
@@ -366,6 +398,7 @@ fn evdev_listener_loop(
     cancel_key: Option<Key>,
     model_modifier: Option<Key>,
     secondary_model: Option<String>,
+    profile_modifiers: HashMap<Key, String>,
     tx: mpsc::Sender<HotkeyEvent>,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<(), HotkeyError> {
@@ -376,6 +409,10 @@ fn evdev_listener_loop(
 
     // Track if model modifier is currently held
     let mut model_modifier_held = false;
+
+    // Track which profile modifier keys are currently held and the most recently pressed profile
+    let mut held_profile_modifiers: HashSet<Key> = HashSet::new();
+    let mut last_pressed_profile: Option<String> = None;
 
     // Track if we're currently "pressed" (to handle repeat events)
     let mut is_pressed = false;
@@ -422,6 +459,8 @@ fn evdev_listener_loop(
             // Clear state when devices change
             active_modifiers.clear();
             model_modifier_held = false;
+            held_profile_modifiers.clear();
+            last_pressed_profile = None;
             is_pressed = false;
             manager.handle_device_changes();
         }
@@ -432,6 +471,8 @@ fn evdev_listener_loop(
                 // Devices were removed, clear state
                 active_modifiers.clear();
                 model_modifier_held = false;
+                held_profile_modifiers.clear();
+                last_pressed_profile = None;
                 is_pressed = false;
                 tracing::debug!("Stale devices removed during validation");
             }
@@ -474,6 +515,23 @@ fn evdev_listener_loop(
                 }
             }
 
+            // Track profile modifier state
+            if let Some(profile_name) = profile_modifiers.get(&key) {
+                match value {
+                    1 => {
+                        held_profile_modifiers.insert(key);
+                        last_pressed_profile = Some(profile_name.clone());
+                    }
+                    0 => {
+                        held_profile_modifiers.remove(&key);
+                        if held_profile_modifiers.is_empty() {
+                            last_pressed_profile = None;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
             // Check cancel key first (if configured)
             if let Some(cancel) = cancel_key {
                 if key == cancel && value == 1 {
@@ -504,17 +562,25 @@ fn evdev_listener_loop(
                                 None
                             };
 
-                            if model_override.is_some() {
+                            // Determine profile override from held profile modifier keys
+                            // If multiple are held, the most recently pressed wins
+                            let profile_override = last_pressed_profile.clone();
+
+                            if model_override.is_some() || profile_override.is_some() {
                                 tracing::debug!(
-                                    "Hotkey pressed with model override: {:?}",
-                                    model_override
+                                    "Hotkey pressed with model_override: {:?}, profile_override: {:?}",
+                                    model_override,
+                                    profile_override
                                 );
                             } else {
                                 tracing::debug!("Hotkey pressed");
                             }
 
                             if tx
-                                .blocking_send(HotkeyEvent::Pressed { model_override })
+                                .blocking_send(HotkeyEvent::Pressed {
+                                    model_override,
+                                    profile_override,
+                                })
                                 .is_err()
                             {
                                 return Ok(()); // Channel closed

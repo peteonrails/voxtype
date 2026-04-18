@@ -188,6 +188,12 @@ async fn main() -> anyhow::Result<()> {
     if cli.gpu_isolation {
         config.whisper.gpu_isolation = true;
     }
+    if let Some(gpu_device) = cli.gpu_device {
+        config.whisper.gpu_device = Some(gpu_device);
+    }
+    if cli.flash_attention {
+        config.whisper.flash_attention = true;
+    }
     if cli.on_demand_loading {
         config.whisper.on_demand_loading = true;
     }
@@ -234,10 +240,16 @@ async fn main() -> anyhow::Result<()> {
     if cli.no_audio_feedback {
         config.audio.feedback.enabled = false;
     }
+    if cli.pause_media {
+        config.audio.pause_media = true;
+    }
 
     // Output overrides
     if let Some(append_text) = cli.append_text {
         config.output.append_text = Some(append_text);
+    }
+    if cli.wtype_shift_prefix {
+        config.output.wtype_shift_prefix = true;
     }
     if let Some(ref driver_str) = cli.driver {
         match parse_driver_order(driver_str) {
@@ -1114,9 +1126,12 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
     if let Some(threads) = config.whisper.threads {
         println!("  threads = {}", threads);
     }
+    if let Some(gpu_device) = config.whisper.gpu_device {
+        println!("  gpu_device = {}", gpu_device);
+    }
 
-    // Show Parakeet status (experimental)
-    println!("\n[parakeet] (EXPERIMENTAL)");
+    // Show Parakeet status
+    println!("\n[parakeet]");
     if let Some(ref parakeet_config) = config.parakeet {
         println!("  model = {:?}", parakeet_config.model);
         if let Some(ref model_type) = parakeet_config.model_type {
@@ -1222,8 +1237,8 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
             if path.is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.contains("sensevoice") {
-                    let has_model = path.join("model.int8.onnx").exists()
-                        || path.join("model.onnx").exists();
+                    let has_model =
+                        path.join("model.int8.onnx").exists() || path.join("model.onnx").exists();
                     let has_tokens = path.join("tokens.txt").exists();
                     if has_model && has_tokens {
                         sensevoice_models.push(name);

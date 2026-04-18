@@ -239,6 +239,13 @@ mod tests {
     }
 
     #[test]
+    fn test_count_complete_chunks_twelve_seconds() {
+        let config = test_config();
+        let audio_len = 192000;
+        assert_eq!(count_complete_chunks(audio_len, &config), 2);
+    }
+
+    #[test]
     fn test_extract_chunk_insufficient_data() {
         let config = test_config();
         let audio = vec![0.0; 40000]; // Less than one chunk
@@ -262,6 +269,22 @@ mod tests {
         assert_eq!(chunk.len(), 80000);
         // Second chunk starts at stride (72000)
         assert_eq!(chunk[0], 72000.0);
+    }
+
+    #[test]
+    fn test_extract_chunk_ranges_for_twelve_seconds_audio() {
+        let config = test_config();
+        let audio: Vec<f32> = (0..192000).map(|i| i as f32).collect();
+
+        let chunk0 = extract_chunk(&audio, 0, &config).unwrap();
+        assert_eq!(chunk0.len(), 80000);
+        assert_eq!(chunk0[0], 0.0);
+        assert_eq!(chunk0[79999], 79999.0);
+
+        let chunk1 = extract_chunk(&audio, 1, &config).unwrap();
+        assert_eq!(chunk1.len(), 80000);
+        assert_eq!(chunk1[0], 72000.0);
+        assert_eq!(chunk1[79999], 151999.0);
     }
 
     #[test]
@@ -343,6 +366,25 @@ mod tests {
             },
         ];
         assert_eq!(combine_chunk_results(results), "hello world foo bar baz");
+    }
+
+    #[test]
+    fn test_combine_chunk_results_deduplicates_overlap_boundary() {
+        let results = vec![
+            ChunkResult {
+                text: "we should deploy this now".to_string(),
+                chunk_index: 0,
+            },
+            ChunkResult {
+                text: "deploy this now please".to_string(),
+                chunk_index: 1,
+            },
+        ];
+
+        assert_eq!(
+            combine_chunk_results(results),
+            "we should deploy this now please"
+        );
     }
 
     #[test]

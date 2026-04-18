@@ -47,12 +47,19 @@ impl TextProcessor {
     pub fn process(&self, text: &str) -> String {
         let mut result = text.to_string();
 
-        // Apply spoken punctuation first (so user replacements can override if needed)
+        // Apply replacements first so phrases containing spoken punctuation words
+        // (e.g. "slash pr" → "/pr") match before those words are converted to
+        // punctuation characters.
+        if !self.replacements.is_empty() {
+            result = self.apply_replacements(&result);
+        }
+
         if self.spoken_punctuation {
             result = self.apply_spoken_punctuation(&result);
         }
 
-        // Apply custom replacements
+        // Apply replacements again to catch patterns that only became matchable
+        // after spoken punctuation conversion.
         if !self.replacements.is_empty() {
             result = self.apply_replacements(&result);
         }
@@ -505,5 +512,23 @@ mod tests {
         let (text, submit) = processor.detect_submit("hello world submit", Some(false));
         assert_eq!(text, "hello world submit");
         assert!(!submit);
+    }
+
+    #[test]
+    fn test_replacements_match_spoken_words_before_punctuation() {
+        // "slash pr" should match the replacement before "slash" is converted to "/"
+        let config = make_config(true, &[("slash pr", "/pr")]);
+        let processor = TextProcessor::new(&config);
+
+        assert_eq!(processor.process("slash pr"), "/pr");
+    }
+
+    #[test]
+    fn test_replacements_with_multiple_spoken_punctuation_words() {
+        // "dash dash" should match the replacement before each "dash" is converted to "-"
+        let config = make_config(true, &[("dash dash", "--")]);
+        let processor = TextProcessor::new(&config);
+
+        assert_eq!(processor.process("dash dash"), "--");
     }
 }
