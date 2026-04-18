@@ -462,11 +462,21 @@ sudo dnf install alsa-lib-devel
 # Ubuntu:
 sudo apt install libasound2-dev
 
-# Build
+# Build (Whisper engine only)
 cargo build --release
+
+# Build with ONNX engines (Parakeet, Moonshine, SenseVoice, etc.)
+cargo build --release --features parakeet,moonshine,sensevoice,paraformer,dolphin
+
+# Or just the engine you need
+cargo build --release --features parakeet
 
 # Binary is at: target/release/voxtype
 ```
+
+ONNX engines require the corresponding Cargo feature at build time. Without it, setting
+`engine = "parakeet"` in your config will fail with an error. The prebuilt release binaries
+(`-onnx-avx2`, `-onnx-cuda`, etc.) include all ONNX engines.
 
 ## Waybar Integration
 
