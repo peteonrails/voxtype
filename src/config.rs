@@ -1668,7 +1668,7 @@ impl OutputConfig {
 pub enum OutputMode {
     /// Simulate keyboard input (requires ydotool)
     Type,
-    /// Copy to clipboard (requires wl-copy)
+    /// Copy to clipboard (wl-copy on Wayland, xclip on X11)
     Clipboard,
     /// Copy to clipboard then paste with Ctrl+V (requires wl-copy and ydotool)
     Paste,

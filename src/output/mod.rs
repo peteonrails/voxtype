@@ -314,8 +314,12 @@ pub fn create_output_chain_with_override(
             }
         }
         crate::config::OutputMode::Clipboard => {
-            // Only clipboard
+            // Clipboard with X11 fallback: wl-copy first, then xclip
             chain.push(Box::new(clipboard::ClipboardOutput::new(
+                config.append_text.clone(),
+            )));
+            chain.push(Box::new(xclip::XclipOutput::new(
+                config.notification.on_transcription,
                 config.append_text.clone(),
             )));
         }
