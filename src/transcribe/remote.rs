@@ -26,6 +26,8 @@ pub struct RemoteTranscriber {
     translate: bool,
     /// Optional API key for authentication
     api_key: Option<String>,
+    /// Optional initial prompt for transcription context
+    initial_prompt: Option<String>,
     /// Request timeout
     timeout: Duration,
 }
@@ -91,12 +93,19 @@ impl RemoteTranscriber {
             timeout.as_secs()
         );
 
+        let initial_prompt = config
+            .initial_prompt
+            .as_ref()
+            .filter(|s| !s.is_empty())
+            .cloned();
+
         Ok(Self {
             endpoint,
             model,
             language: config.language.clone(),
             translate: config.translate,
             api_key,
+            initial_prompt,
             timeout,
         })
     }
@@ -164,6 +173,14 @@ impl RemoteTranscriber {
             body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
             body.extend_from_slice(b"Content-Disposition: form-data; name=\"language\"\r\n\r\n");
             body.extend_from_slice(self.language.primary().as_bytes());
+            body.extend_from_slice(b"\r\n");
+        }
+
+        // Add prompt field (if initial_prompt is configured)
+        if let Some(ref prompt) = self.initial_prompt {
+            body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+            body.extend_from_slice(b"Content-Disposition: form-data; name=\"prompt\"\r\n\r\n");
+            body.extend_from_slice(prompt.as_bytes());
             body.extend_from_slice(b"\r\n");
         }
 
@@ -343,6 +360,61 @@ mod tests {
         assert!(body_str.contains("name=\"language\""));
         assert!(body_str.contains("name=\"response_format\""));
         assert!(body_str.contains("json"));
+    }
+
+    #[test]
+    fn test_multipart_body_includes_prompt() {
+        let config = WhisperConfig {
+            mode: Some(crate::config::WhisperMode::Remote),
+            remote_endpoint: Some("http://localhost:8080".to_string()),
+            initial_prompt: Some("Technical discussion about Rust and Kubernetes.".to_string()),
+            ..Default::default()
+        };
+
+        let transcriber = RemoteTranscriber::new(&config).unwrap();
+        let wav_data = vec![0u8; 100];
+
+        let (_boundary, body) = transcriber.build_multipart_body(&wav_data);
+        let body_str = String::from_utf8_lossy(&body);
+
+        assert!(body_str.contains("name=\"prompt\""));
+        assert!(body_str.contains("Technical discussion about Rust and Kubernetes."));
+    }
+
+    #[test]
+    fn test_multipart_body_excludes_empty_prompt() {
+        let config = WhisperConfig {
+            mode: Some(crate::config::WhisperMode::Remote),
+            remote_endpoint: Some("http://localhost:8080".to_string()),
+            initial_prompt: Some("".to_string()),
+            ..Default::default()
+        };
+
+        let transcriber = RemoteTranscriber::new(&config).unwrap();
+        let wav_data = vec![0u8; 100];
+
+        let (_boundary, body) = transcriber.build_multipart_body(&wav_data);
+        let body_str = String::from_utf8_lossy(&body);
+
+        assert!(!body_str.contains("name=\"prompt\""));
+    }
+
+    #[test]
+    fn test_multipart_body_excludes_prompt_when_none() {
+        let config = WhisperConfig {
+            mode: Some(crate::config::WhisperMode::Remote),
+            remote_endpoint: Some("http://localhost:8080".to_string()),
+            initial_prompt: None,
+            ..Default::default()
+        };
+
+        let transcriber = RemoteTranscriber::new(&config).unwrap();
+        let wav_data = vec![0u8; 100];
+
+        let (_boundary, body) = transcriber.build_multipart_body(&wav_data);
+        let body_str = String::from_utf8_lossy(&body);
+
+        assert!(!body_str.contains("name=\"prompt\""));
     }
 
     #[test]
