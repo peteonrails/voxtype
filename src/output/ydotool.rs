@@ -22,8 +22,6 @@ pub struct YdotoolOutput {
     type_delay_ms: u32,
     /// Delay before typing starts in milliseconds
     pre_type_delay_ms: u32,
-    /// Whether to show a desktop notification
-    notify: bool,
     /// Whether ydotool supports --key-hold flag (added in newer versions)
     supports_key_hold: bool,
     /// Whether to send Enter key after output
@@ -41,7 +39,6 @@ impl YdotoolOutput {
     pub fn new(
         type_delay_ms: u32,
         pre_type_delay_ms: u32,
-        notify: bool,
         auto_submit: bool,
         append_text: Option<String>,
     ) -> Self {
@@ -55,7 +52,6 @@ impl YdotoolOutput {
         Self {
             type_delay_ms,
             pre_type_delay_ms,
-            notify,
             supports_key_hold,
             auto_submit,
             append_text,
@@ -84,29 +80,6 @@ impl YdotoolOutput {
                 stdout.contains("--key-hold") || stderr.contains("--key-hold")
             })
             .unwrap_or(false)
-    }
-
-    /// Send a desktop notification
-    async fn send_notification(&self, text: &str) {
-        // Truncate preview for notification
-        let preview: String = text.chars().take(100).collect();
-        let preview = if text.len() > 100 {
-            format!("{}...", preview)
-        } else {
-            preview
-        };
-
-        let _ = Command::new("notify-send")
-            .args([
-                "--app-name=Voxtype",
-                "--expire-time=3000",
-                "Transcribed",
-                &preview,
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
     }
 }
 
@@ -229,11 +202,6 @@ impl TextOutput for YdotoolOutput {
             }
         }
 
-        // Send notification if enabled
-        if self.notify {
-            self.send_notification(text).await;
-        }
-
         Ok(())
     }
 
@@ -274,10 +242,9 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = YdotoolOutput::new(10, 0, true, false, None);
+        let output = YdotoolOutput::new(10, 0, false, None);
         assert_eq!(output.type_delay_ms, 10);
         assert_eq!(output.pre_type_delay_ms, 0);
-        assert!(output.notify);
         assert!(!output.auto_submit);
         // supports_key_hold depends on system ydotool version, so we just check it's set
         let _ = output.supports_key_hold;
@@ -285,15 +252,14 @@ mod tests {
 
     #[test]
     fn test_new_with_enter() {
-        let output = YdotoolOutput::new(0, 0, false, true, None);
+        let output = YdotoolOutput::new(0, 0, true, None);
         assert_eq!(output.type_delay_ms, 0);
-        assert!(!output.notify);
         assert!(output.auto_submit);
     }
 
     #[test]
     fn test_new_with_pre_type_delay() {
-        let output = YdotoolOutput::new(0, 200, false, false, None);
+        let output = YdotoolOutput::new(0, 200, false, None);
         assert_eq!(output.type_delay_ms, 0);
         assert_eq!(output.pre_type_delay_ms, 200);
     }

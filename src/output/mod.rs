@@ -221,11 +221,7 @@ fn create_driver_output(
     driver: OutputDriver,
     config: &OutputConfig,
     pre_type_delay_ms: u32,
-    is_first: bool,
 ) -> Box<dyn TextOutput> {
-    // Only the first driver in the chain should show notifications
-    let show_notification = is_first && config.notification.on_transcription;
-
     match driver {
         OutputDriver::Wtype => Box::new(wtype::WtypeOutput::new(
             config.auto_submit,
@@ -244,7 +240,6 @@ fn create_driver_output(
         OutputDriver::Dotool => Box::new(dotool::DotoolOutput::new(
             config.type_delay_ms,
             pre_type_delay_ms,
-            show_notification,
             config.auto_submit,
             config.append_text.clone(),
             config.dotool_xkb_layout.clone(),
@@ -253,18 +248,13 @@ fn create_driver_output(
         OutputDriver::Ydotool => Box::new(ydotool::YdotoolOutput::new(
             config.type_delay_ms,
             pre_type_delay_ms,
-            show_notification,
             config.auto_submit,
             config.append_text.clone(),
         )),
-        OutputDriver::Clipboard => Box::new(clipboard::ClipboardOutput::new(
-            show_notification,
-            config.append_text.clone(),
-        )),
-        OutputDriver::Xclip => Box::new(xclip::XclipOutput::new(
-            show_notification,
-            config.append_text.clone(),
-        )),
+        OutputDriver::Clipboard => {
+            Box::new(clipboard::ClipboardOutput::new(config.append_text.clone()))
+        }
+        OutputDriver::Xclip => Box::new(xclip::XclipOutput::new(config.append_text.clone())),
     }
 }
 
@@ -310,12 +300,7 @@ pub fn create_output_chain_with_override(
                     continue;
                 }
 
-                chain.push(create_driver_output(
-                    *driver,
-                    config,
-                    pre_type_delay_ms,
-                    i == 0,
-                ));
+                chain.push(create_driver_output(*driver, config, pre_type_delay_ms));
             }
 
             // If fallback_to_clipboard is true but clipboard wasn't in the custom order, add it
@@ -324,7 +309,6 @@ pub fn create_output_chain_with_override(
                 && !driver_order.contains(&OutputDriver::Clipboard)
             {
                 chain.push(Box::new(clipboard::ClipboardOutput::new(
-                    false,
                     config.append_text.clone(),
                 )));
             }
@@ -332,7 +316,6 @@ pub fn create_output_chain_with_override(
         crate::config::OutputMode::Clipboard => {
             // Only clipboard
             chain.push(Box::new(clipboard::ClipboardOutput::new(
-                config.notification.on_transcription,
                 config.append_text.clone(),
             )));
         }
@@ -355,7 +338,6 @@ pub fn create_output_chain_with_override(
                 "Output mode is 'file' but no file_path configured. Falling back to clipboard."
             );
             chain.push(Box::new(clipboard::ClipboardOutput::new(
-                config.notification.on_transcription,
                 config.append_text.clone(),
             )));
         }
