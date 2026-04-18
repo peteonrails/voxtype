@@ -10,6 +10,8 @@
 
 use super::TextOutput;
 use crate::error::OutputError;
+use crate::output::find_ydotool_socket;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
@@ -20,14 +22,14 @@ pub struct YdotoolOutput {
     type_delay_ms: u32,
     /// Delay before typing starts in milliseconds
     pre_type_delay_ms: u32,
-    /// Whether to show a desktop notification
-    notify: bool,
     /// Whether ydotool supports --key-hold flag (added in newer versions)
     supports_key_hold: bool,
     /// Whether to send Enter key after output
     auto_submit: bool,
     /// Text to append after transcription (before auto_submit)
     append_text: Option<String>,
+    /// Path to ydotoold socket, if found at a non-default location
+    socket_path: Option<PathBuf>,
 }
 
 impl YdotoolOutput {
@@ -37,7 +39,6 @@ impl YdotoolOutput {
     pub fn new(
         type_delay_ms: u32,
         pre_type_delay_ms: u32,
-        notify: bool,
         auto_submit: bool,
         append_text: Option<String>,
     ) -> Self {
@@ -47,13 +48,21 @@ impl YdotoolOutput {
         } else {
             tracing::debug!("ydotool does not support --key-hold flag, using --key-delay only");
         }
+        let socket_path = find_ydotool_socket();
         Self {
             type_delay_ms,
             pre_type_delay_ms,
-            notify,
             supports_key_hold,
             auto_submit,
             append_text,
+            socket_path,
+        }
+    }
+
+    /// Apply the discovered socket path to a ydotool Command, if any.
+    fn apply_socket_env(&self, cmd: &mut Command) {
+        if let Some(ref path) = self.socket_path {
+            cmd.env("YDOTOOL_SOCKET", path);
         }
     }
 
@@ -71,29 +80,6 @@ impl YdotoolOutput {
                 stdout.contains("--key-hold") || stderr.contains("--key-hold")
             })
             .unwrap_or(false)
-    }
-
-    /// Send a desktop notification
-    async fn send_notification(&self, text: &str) {
-        // Truncate preview for notification
-        let preview: String = text.chars().take(100).collect();
-        let preview = if text.len() > 100 {
-            format!("{}...", preview)
-        } else {
-            preview
-        };
-
-        let _ = Command::new("notify-send")
-            .args([
-                "--app-name=Voxtype",
-                "--expire-time=3000",
-                "Transcribed",
-                &preview,
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
     }
 }
 
@@ -114,6 +100,7 @@ impl TextOutput for YdotoolOutput {
         }
 
         let mut cmd = Command::new("ydotool");
+        self.apply_socket_env(&mut cmd);
         cmd.arg("type");
 
         // Always set delay explicitly (ydotool defaults to 12ms if not specified)
@@ -166,6 +153,7 @@ impl TextOutput for YdotoolOutput {
         // Append text if configured (e.g., a space to separate sentences)
         if let Some(ref append) = self.append_text {
             let mut append_cmd = Command::new("ydotool");
+            self.apply_socket_env(&mut append_cmd);
             append_cmd.arg("type");
             append_cmd
                 .arg("--key-delay")
@@ -196,7 +184,9 @@ impl TextOutput for YdotoolOutput {
         // ydotool key uses evdev key codes: 28 is KEY_ENTER
         // Format: keycode:press (1) then keycode:release (0)
         if self.auto_submit {
-            let enter_output = Command::new("ydotool")
+            let mut enter_cmd = Command::new("ydotool");
+            self.apply_socket_env(&mut enter_cmd);
+            let enter_output = enter_cmd
                 .args(["key", "28:1", "28:0"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
@@ -210,11 +200,6 @@ impl TextOutput for YdotoolOutput {
                 let stderr = String::from_utf8_lossy(&enter_output.stderr);
                 tracing::warn!("Failed to send Enter key: {}", stderr);
             }
-        }
-
-        // Send notification if enabled
-        if self.notify {
-            self.send_notification(text).await;
         }
 
         Ok(())
@@ -235,8 +220,9 @@ impl TextOutput for YdotoolOutput {
 
         // Check if ydotoold is running by trying a no-op
         // ydotool type "" should succeed quickly if daemon is running
-        Command::new("ydotool")
-            .args(["type", ""])
+        let mut cmd = Command::new("ydotool");
+        self.apply_socket_env(&mut cmd);
+        cmd.args(["type", ""])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -256,10 +242,9 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = YdotoolOutput::new(10, 0, true, false, None);
+        let output = YdotoolOutput::new(10, 0, false, None);
         assert_eq!(output.type_delay_ms, 10);
         assert_eq!(output.pre_type_delay_ms, 0);
-        assert!(output.notify);
         assert!(!output.auto_submit);
         // supports_key_hold depends on system ydotool version, so we just check it's set
         let _ = output.supports_key_hold;
@@ -267,15 +252,14 @@ mod tests {
 
     #[test]
     fn test_new_with_enter() {
-        let output = YdotoolOutput::new(0, 0, false, true, None);
+        let output = YdotoolOutput::new(0, 0, true, None);
         assert_eq!(output.type_delay_ms, 0);
-        assert!(!output.notify);
         assert!(output.auto_submit);
     }
 
     #[test]
     fn test_new_with_pre_type_delay() {
-        let output = YdotoolOutput::new(0, 200, false, false, None);
+        let output = YdotoolOutput::new(0, 200, false, None);
         assert_eq!(output.type_delay_ms, 0);
         assert_eq!(output.pre_type_delay_ms, 200);
     }

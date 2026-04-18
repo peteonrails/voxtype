@@ -186,6 +186,10 @@ bindsym $mod+v exec voxtype record start
 bindsym --release $mod+v exec voxtype record stop
 ```
 
+**KDE Plasma (KWin):**
+
+KDE does not support key-release events, so use toggle mode. Open **System Settings > Shortcuts > Custom Shortcuts**, create a new global shortcut, and set the command to `voxtype record toggle`. Assign your preferred key combination (e.g., Meta+V).
+
 **Note:** For `toggle` mode to work correctly, you must also set `state_file = "auto"` so voxtype can track its current state.
 
 See [User Manual - Compositor Keybindings](USER_MANUAL.md#compositor-keybindings) for complete setup instructions.

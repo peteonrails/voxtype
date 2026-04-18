@@ -240,6 +240,9 @@ async fn main() -> anyhow::Result<()> {
     if cli.no_audio_feedback {
         config.audio.feedback.enabled = false;
     }
+    if cli.pause_media {
+        config.audio.pause_media = true;
+    }
 
     // Output overrides
     if let Some(append_text) = cli.append_text {
@@ -1231,8 +1234,8 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
             if path.is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.contains("sensevoice") {
-                    let has_model = path.join("model.int8.onnx").exists()
-                        || path.join("model.onnx").exists();
+                    let has_model =
+                        path.join("model.int8.onnx").exists() || path.join("model.onnx").exists();
                     let has_tokens = path.join("tokens.txt").exists();
                     if has_model && has_tokens {
                         sensevoice_models.push(name);

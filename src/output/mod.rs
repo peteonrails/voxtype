@@ -25,8 +25,65 @@ use crate::config::{OutputConfig, OutputDriver};
 use crate::error::OutputError;
 use std::borrow::Cow;
 use std::fs;
+use std::os::unix::fs::FileTypeExt;
+use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::process::Command;
+
+/// Find the ydotool daemon socket by checking known locations.
+///
+/// Fedora places the socket at `/tmp/.ydotool_socket`, while the ydotool CLI
+/// defaults to `$XDG_RUNTIME_DIR/.ydotool_socket`. Without setting `YDOTOOL_SOCKET`
+/// explicitly, ydotool commands fail on distros that use a non-default path.
+///
+/// Search order:
+/// 1. `$YDOTOOL_SOCKET` env var (user override)
+/// 2. `$XDG_RUNTIME_DIR/.ydotool_socket` (ydotool CLI default)
+/// 3. `/tmp/.ydotool_socket` (Fedora / systemd-wide service)
+/// 4. `/run/user/$UID/.ydotool_socket` (fallback if XDG_RUNTIME_DIR unset)
+pub fn find_ydotool_socket() -> Option<PathBuf> {
+    let candidates: Vec<PathBuf> = {
+        let mut paths = Vec::new();
+
+        // 1. Explicit env override
+        if let Ok(val) = std::env::var("YDOTOOL_SOCKET") {
+            paths.push(PathBuf::from(val));
+        }
+
+        // 2. XDG_RUNTIME_DIR (ydotool CLI default)
+        if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
+            paths.push(PathBuf::from(xdg).join(".ydotool_socket"));
+        }
+
+        // 3. /tmp (Fedora systemd-wide ydotoold)
+        paths.push(PathBuf::from("/tmp/.ydotool_socket"));
+
+        // 4. /run/user/$UID fallback
+        let uid = unsafe { libc::getuid() };
+        paths.push(PathBuf::from(format!("/run/user/{}/.ydotool_socket", uid)));
+
+        paths
+    };
+
+    for path in &candidates {
+        if let Ok(meta) = fs::metadata(path) {
+            if meta.file_type().is_socket() {
+                tracing::debug!("Found ydotool socket at {}", path.display());
+                return Some(path.clone());
+            }
+        }
+    }
+
+    tracing::debug!(
+        "No ydotool socket found in: {}",
+        candidates
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    None
+}
 
 /// Normalize Unicode curly quotes to ASCII equivalents.
 ///
@@ -93,13 +150,13 @@ pub fn is_parakeet_binary_active() -> bool {
 /// Get the engine icon for notifications based on configured engine
 pub fn engine_icon(engine: crate::config::TranscriptionEngine) -> &'static str {
     match engine {
-        crate::config::TranscriptionEngine::Parakeet => "\u{1F99C}",     // 🦜
+        crate::config::TranscriptionEngine::Parakeet => "\u{1F99C}", // 🦜
         crate::config::TranscriptionEngine::Whisper => "\u{1F5E3}\u{FE0F}", // 🗣️
-        crate::config::TranscriptionEngine::Moonshine => "\u{1F319}",    // 🌙
-        crate::config::TranscriptionEngine::SenseVoice => "\u{1F442}",   // 👂
-        crate::config::TranscriptionEngine::Paraformer => "\u{1F4AC}",   // 💬
-        crate::config::TranscriptionEngine::Dolphin => "\u{1F42C}",      // 🐬
-        crate::config::TranscriptionEngine::Omnilingual => "\u{1F30D}",  // 🌍
+        crate::config::TranscriptionEngine::Moonshine => "\u{1F319}", // 🌙
+        crate::config::TranscriptionEngine::SenseVoice => "\u{1F442}", // 👂
+        crate::config::TranscriptionEngine::Paraformer => "\u{1F4AC}", // 💬
+        crate::config::TranscriptionEngine::Dolphin => "\u{1F42C}",  // 🐬
+        crate::config::TranscriptionEngine::Omnilingual => "\u{1F30D}", // 🌍
     }
 }
 
@@ -164,11 +221,7 @@ fn create_driver_output(
     driver: OutputDriver,
     config: &OutputConfig,
     pre_type_delay_ms: u32,
-    is_first: bool,
 ) -> Box<dyn TextOutput> {
-    // Only the first driver in the chain should show notifications
-    let show_notification = is_first && config.notification.on_transcription;
-
     match driver {
         OutputDriver::Wtype => Box::new(wtype::WtypeOutput::new(
             config.auto_submit,
@@ -187,7 +240,6 @@ fn create_driver_output(
         OutputDriver::Dotool => Box::new(dotool::DotoolOutput::new(
             config.type_delay_ms,
             pre_type_delay_ms,
-            show_notification,
             config.auto_submit,
             config.append_text.clone(),
             config.dotool_xkb_layout.clone(),
@@ -196,18 +248,13 @@ fn create_driver_output(
         OutputDriver::Ydotool => Box::new(ydotool::YdotoolOutput::new(
             config.type_delay_ms,
             pre_type_delay_ms,
-            show_notification,
             config.auto_submit,
             config.append_text.clone(),
         )),
-        OutputDriver::Clipboard => Box::new(clipboard::ClipboardOutput::new(
-            show_notification,
-            config.append_text.clone(),
-        )),
-        OutputDriver::Xclip => Box::new(xclip::XclipOutput::new(
-            show_notification,
-            config.append_text.clone(),
-        )),
+        OutputDriver::Clipboard => {
+            Box::new(clipboard::ClipboardOutput::new(config.append_text.clone()))
+        }
+        OutputDriver::Xclip => Box::new(xclip::XclipOutput::new(config.append_text.clone())),
     }
 }
 
@@ -253,12 +300,7 @@ pub fn create_output_chain_with_override(
                     continue;
                 }
 
-                chain.push(create_driver_output(
-                    *driver,
-                    config,
-                    pre_type_delay_ms,
-                    i == 0,
-                ));
+                chain.push(create_driver_output(*driver, config, pre_type_delay_ms));
             }
 
             // If fallback_to_clipboard is true but clipboard wasn't in the custom order, add it
@@ -267,15 +309,16 @@ pub fn create_output_chain_with_override(
                 && !driver_order.contains(&OutputDriver::Clipboard)
             {
                 chain.push(Box::new(clipboard::ClipboardOutput::new(
-                    false,
                     config.append_text.clone(),
                 )));
             }
         }
         crate::config::OutputMode::Clipboard => {
-            // Only clipboard
+            // Clipboard with X11 fallback: wl-copy first, then xclip
             chain.push(Box::new(clipboard::ClipboardOutput::new(
-                config.notification.on_transcription,
+                config.append_text.clone(),
+            )));
+            chain.push(Box::new(xclip::XclipOutput::new(
                 config.append_text.clone(),
             )));
         }
@@ -298,7 +341,6 @@ pub fn create_output_chain_with_override(
                 "Output mode is 'file' but no file_path configured. Falling back to clipboard."
             );
             chain.push(Box::new(clipboard::ClipboardOutput::new(
-                config.notification.on_transcription,
                 config.append_text.clone(),
             )));
         }
@@ -438,5 +480,33 @@ mod tests {
         let text = "Café \u{2019} emoji 😀";
         let result = normalize_quotes(text);
         assert_eq!(result, "Café ' emoji 😀");
+    }
+
+    #[test]
+    fn test_find_ydotool_socket_returns_none_when_no_socket() {
+        // In a test environment there should be no ydotoold running, so this
+        // should return None (no socket file exists at any candidate path).
+        // This primarily verifies the function does not panic.
+        let _result = find_ydotool_socket();
+    }
+
+    #[test]
+    fn test_find_ydotool_socket_respects_env_override() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join(".ydotool_socket");
+
+        // Create a real Unix socket so metadata().file_type().is_socket() is true
+        let _listener = UnixListener::bind(&sock_path).unwrap();
+
+        // Temporarily set YDOTOOL_SOCKET to point at our test socket.
+        // This is inherently racy in multi-threaded test runs, but it's the
+        // simplest way to exercise the env-var priority path.
+        std::env::set_var("YDOTOOL_SOCKET", &sock_path);
+        let result = find_ydotool_socket();
+        std::env::remove_var("YDOTOOL_SOCKET");
+
+        assert_eq!(result, Some(sock_path));
     }
 }

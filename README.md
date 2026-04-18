@@ -47,7 +47,9 @@ sudo apt install wtype
 
 ### Compositor Keybindings
 
-Voxtype works best with your compositor's native keybindings. Add these to your compositor config:
+Voxtype works best with your compositor's native keybindings. Add these to your compositor config.
+
+> **Not sure which compositor you have?** Run `echo $XDG_CURRENT_DESKTOP` in a terminal. Common values: `Hyprland`, `sway`, `river`, `KDE`, `GNOME`.
 
 **Hyprland** (`~/.config/hypr/hyprland.conf`):
 ```
@@ -66,6 +68,15 @@ bindsym --release $mod+v exec voxtype record stop
 riverctl map normal Super V spawn 'voxtype record start'
 riverctl map -release normal Super V spawn 'voxtype record stop'
 ```
+
+**KDE Plasma (KWin):**
+
+KDE does not support key-release events, so use toggle mode. Open **System Settings > Shortcuts > Custom Shortcuts**, create a new shortcut, and set the command to:
+```
+voxtype record toggle
+```
+
+Assign your preferred key combination (e.g., Meta+V). Since KDE handles the keybinding, the built-in hotkey should be disabled (see below).
 
 Then disable the built-in hotkey in your config:
 ```toml

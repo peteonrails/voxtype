@@ -534,9 +534,32 @@ riverctl map -release normal Super V spawn 'voxtype record stop'
 riverctl map normal Super V spawn 'voxtype record toggle'
 ```
 
+### KDE Plasma (KWin)
+
+KDE Plasma uses KWin as its compositor. KWin does not support key-release events, so push-to-talk (hold to record) is not available. Use toggle mode instead (press once to start recording, press again to stop).
+
+1. Open **System Settings > Shortcuts > Custom Shortcuts**.
+2. Click **Edit > New > Global Shortcut > Command/URL**.
+3. Name it something like "Voxtype Toggle".
+4. On the **Trigger** tab, click the button and press your desired key combination (e.g., Meta+V).
+5. On the **Action** tab, set the command to:
+   ```
+   voxtype record toggle
+   ```
+6. Click **Apply**.
+
+Then disable the built-in hotkey in `~/.config/voxtype/config.toml`:
+
+```toml
+[hotkey]
+enabled = false
+```
+
+Restart the voxtype daemon after changing the config.
+
 ### Other Compositors/Desktops
 
-For compositors without key release support (GNOME, KDE), use toggle mode:
+For other compositors without key release support (GNOME, etc.), use toggle mode:
 
 ```bash
 # Generic: bind this to your preferred key
