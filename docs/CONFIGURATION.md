@@ -2440,6 +2440,27 @@ voxtype status --format json --icon-theme nerd-font
 
 ---
 
+## [tray]
+
+System tray icon via StatusNotifierItem (DBus). Disabled by default.
+
+Requires building with `--features tray` (included in release binaries) and a StatusNotifierHost (KDE Plasma, GNOME with AppIndicator extension, Waybar with tray module).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | `false` | Show system tray icon |
+
+**Environment variable:** `VOXTYPE_TRAY_ENABLED=true`
+
+**CLI flag:** `--tray`
+
+```toml
+[tray]
+enabled = true
+```
+
+---
+
 ## Environment Variables
 
 ### RUST_LOG
