@@ -8,25 +8,14 @@ use crate::audio::{self, AudioCapture};
 use crate::config::{ActivationMode, Config, FileMode, OutputMode};
 use crate::eager::{self, EagerConfig};
 use crate::error::Result;
-#[cfg(target_os = "linux")]
 use crate::hotkey::{self, HotkeyEvent};
-#[cfg(target_os = "macos")]
-use crate::hotkey_macos::{self as hotkey, HotkeyEvent};
 use crate::meeting::{self, MeetingDaemon, MeetingEvent, StorageConfig};
 use crate::model_manager::ModelManager;
-#[cfg(target_os = "macos")]
-use crate::notification;
 use crate::output;
 use crate::output::post_process::PostProcessor;
-use crate::output::streaming::StreamingSession;
-use crate::output::TextOutput;
 use crate::state::{ChunkResult, State};
 use crate::text::TextProcessor;
-use crate::transcribe::{StreamHandle, StreamingEvent, Transcriber};
-#[cfg(target_os = "linux")]
-use nix::sys::signal::{kill, Signal};
-#[cfg(target_os = "linux")]
-use nix::unistd::Pid;
+use crate::transcribe::Transcriber;
 use pidlock::Pidlock;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -41,49 +30,19 @@ async fn send_notification(
     body: &str,
     show_engine_icon: bool,
     engine: crate::config::TranscriptionEngine,
-    urgency: &str,
 ) {
-    // On Linux, add emoji to title. On macOS, use content image instead.
-    #[cfg(target_os = "linux")]
     let title = if show_engine_icon {
         format!("{} {}", crate::output::engine_icon(engine), title)
     } else {
         title.to_string()
     };
-    #[cfg(not(target_os = "linux"))]
-    let title = title.to_string();
 
-    #[cfg(target_os = "linux")]
-    {
-        let urgency_arg = format!("--urgency={}", crate::output::sanitize_urgency(urgency));
-        // Synchronous + transient hints ([#345]): force a single Voxtype
-        // notification slot the compositor overwrites in place, and prevent
-        // status updates from accumulating in the notification history.
-        let _ = Command::new("notify-send")
-            .args([
-                "--app-name=Voxtype",
-                &urgency_arg,
-                "--expire-time=2000",
-                "-h",
-                "string:x-canonical-private-synchronous:voxtype",
-                "-h",
-                "int:transient:1",
-                &title,
-                body,
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        // terminal-notifier has no urgency concept; ignore the arg on macOS.
-        let _ = urgency;
-        let engine_for_icon = if show_engine_icon { Some(engine) } else { None };
-        notification::send_with_engine(&title, body, engine_for_icon).await;
-    }
+    let _ = Command::new("notify-send")
+        .args(["--app-name=Voxtype", "--expire-time=2000", &title, body])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
 }
 
 /// Write state to file for external integrations (e.g., Waybar)
@@ -132,36 +91,6 @@ fn write_pid_file() -> Option<PathBuf> {
 
     tracing::debug!("PID file written: {:?} (pid={})", pid_path, pid);
     Some(pid_path)
-}
-
-/// Check if a PID is still running (Linux version using nix)
-#[cfg(target_os = "linux")]
-fn is_pid_running(pid: i32) -> bool {
-    // kill with signal 0 checks if process exists without sending a signal
-    kill(Pid::from_raw(pid), Signal::SIGCONT).is_ok() || kill(Pid::from_raw(pid), None).is_ok()
-}
-
-/// Check if a PID is still running (macOS version using libc)
-#[cfg(target_os = "macos")]
-fn is_pid_running(pid: i32) -> bool {
-    // kill with signal 0 checks if process exists without sending a signal
-    unsafe { libc::kill(pid, 0) == 0 }
-}
-
-/// Check if lockfile is stale (PID no longer running) and remove it if so
-#[cfg(unix)]
-fn cleanup_stale_lockfile(lock_path: &std::path::Path) -> bool {
-    if let Ok(contents) = std::fs::read_to_string(lock_path) {
-        if let Ok(pid) = contents.trim().parse::<i32>() {
-            if pid > 0 && !is_pid_running(pid) {
-                tracing::info!("Removing stale lockfile (PID {} is no longer running)", pid);
-                if std::fs::remove_file(lock_path).is_ok() {
-                    return true;
-                }
-            }
-        }
-    }
-    false
 }
 
 /// Remove PID file on shutdown
@@ -567,17 +496,6 @@ pub struct Daemon {
     post_processor: Option<PostProcessor>,
     /// Last post-processed text and when it was produced, for context in subsequent dictations
     last_dictation: Option<(String, Instant)>,
-    /// Audio level broadcaster for the OSD (None when disabled or bind failed)
-    level_hub: Option<audio::levels::LevelHub>,
-    /// Active per-recording level emitter task; aborted when recording stops
-    level_emitter_task: Option<tokio::task::JoinHandle<()>>,
-    /// Synthetic zero-level publisher that keeps the OSD visible while a
-    /// streaming session is draining server-side after the mic stopped.
-    /// Aborted in `end_streaming`.
-    streaming_drain_pump: Option<tokio::task::JoinHandle<()>>,
-    /// OSD child supervisor task. Holds the JoinHandle so dropping it (on
-    /// daemon shutdown) kill_on_drop's the spawned voxtype-osd process.
-    osd_supervisor_task: Option<tokio::task::JoinHandle<()>>,
     // Model manager for multi-model support
     model_manager: Option<ModelManager>,
     // Background task for loading model on-demand
@@ -586,17 +504,8 @@ pub struct Daemon {
             std::result::Result<Arc<dyn Transcriber>, crate::error::TranscribeError>,
         >,
     >,
-    // Background task that spawns and prepares the gpu_isolation subprocess
-    // worker. Awaited before transcription so audio capture can start
-    // immediately while the worker loads its model in parallel.
-    whisper_prepare_task: Option<tokio::task::JoinHandle<()>>,
     // Background task for transcription (allows cancel during transcription)
     transcription_task: Option<tokio::task::JoinHandle<TranscriptionResult>>,
-    // Transcriber Arc used for the in-flight transcription_task. Held so the
-    // result handler can query language metadata (e.g. detected language for
-    // keyboard-layout hints to eitype/dotool, see issue #180) after the task
-    // completes. Cleared when transcription_task is taken.
-    active_transcriber: Option<Arc<dyn Transcriber>>,
     // Background tasks for eager chunk transcriptions (chunk_index, task)
     eager_chunk_tasks: Vec<(
         usize,
@@ -706,15 +615,9 @@ impl Daemon {
             text_processor,
             post_processor,
             last_dictation: None,
-            level_hub: None,
-            level_emitter_task: None,
-            streaming_drain_pump: None,
-            osd_supervisor_task: None,
             model_manager: None,
             model_load_task: None,
-            whisper_prepare_task: None,
             transcription_task: None,
-            active_transcriber: None,
             eager_chunk_tasks: Vec::new(),
             vad,
             meeting_daemon: None,
@@ -774,331 +677,6 @@ impl Daemon {
         }
     }
 
-    /// Start a push-to-talk audio capture and (if enabled) a level emitter.
-    ///
-    /// Returns the capture handle on success. The chunk receiver from the
-    /// capture is plumbed into the level hub so the OSD sees audio frames
-    /// at 100 Hz during recording. The emitter task is tracked so it can
-    /// be cleanly aborted when recording stops.
-    async fn start_recording_capture(&mut self) -> std::result::Result<Box<dyn AudioCapture>, ()> {
-        match audio::create_capture(&self.config.audio) {
-            Ok(mut capture) => match capture.start().await {
-                Ok(chunk_rx) => {
-                    if let Some(hub) = &self.level_hub {
-                        // Cancel any prior emitter (defensive; should be idle).
-                        if let Some(handle) = self.level_emitter_task.take() {
-                            handle.abort();
-                        }
-                        let handle = audio::levels::spawn_emitter(chunk_rx, hub.frame_sink());
-                        self.level_emitter_task = Some(handle);
-                    }
-                    // If level_hub is None we still return Ok; the chunk_rx
-                    // is dropped here, matching previous behaviour.
-                    Ok(capture)
-                }
-                Err(e) => {
-                    tracing::error!("Failed to start audio: {}", e);
-                    self.play_feedback(SoundEvent::Error);
-                    Err(())
-                }
-            },
-            Err(e) => {
-                tracing::error!("Failed to create audio capture: {}", e);
-                self.play_feedback(SoundEvent::Error);
-                Err(())
-            }
-        }
-    }
-
-    /// Stop the level emitter task (if running). The capture's chunk
-    /// receiver will close when the capture itself is dropped, which would
-    /// also end the emitter naturally — this just tightens the loop on
-    /// state transitions.
-    fn stop_level_emitter(&mut self) {
-        if let Some(handle) = self.level_emitter_task.take() {
-            handle.abort();
-        }
-    }
-
-    /// Attempt to start a streaming transcription session.
-    ///
-    /// Returns `true` and populates the streaming locals on success. Returns
-    /// `false` (and does nothing) when:
-    /// - the preloaded transcriber is `None` (e.g., on_demand_loading without
-    ///   a successful background load yet);
-    /// - the preloaded transcriber's `as_streaming()` returns `None`;
-    /// - audio capture or `start_stream` fail.
-    ///
-    /// On `false`, callers should fall through to the existing batch
-    /// recording path.
-    #[allow(clippy::too_many_arguments)]
-    async fn try_start_streaming(
-        &mut self,
-        transcriber_preloaded: &Option<Arc<dyn Transcriber>>,
-        state: &mut State,
-        audio_capture: &mut Option<Box<dyn AudioCapture>>,
-        streaming_handle: &mut Option<StreamHandle>,
-        streaming_session: &mut Option<StreamingSession>,
-        streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
-        model_override: Option<String>,
-    ) -> bool {
-        let Some(transcriber) = transcriber_preloaded.as_ref() else {
-            return false;
-        };
-        if transcriber.as_streaming().is_none() {
-            return false;
-        }
-
-        let (capture, samples_rx) = match self.start_streaming_capture().await {
-            Ok(v) => v,
-            Err(()) => return false,
-        };
-
-        let streaming = transcriber.as_streaming().expect("checked above");
-        let handle = match streaming.start_stream(samples_rx) {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::error!("Failed to start streaming session: {}", e);
-                self.play_feedback(SoundEvent::Error);
-                // Drop the capture cleanly; ignore final samples.
-                let mut c = capture;
-                let _ = c.stop().await;
-                return false;
-            }
-        };
-
-        *audio_capture = Some(capture);
-        *streaming_handle = Some(handle);
-        *streaming_session = Some(StreamingSession::new());
-        *streaming_chain = Some(output::create_output_chain(&self.config.output));
-        *state = State::Streaming {
-            started_at: std::time::Instant::now(),
-            model_override,
-            partial_buffer: String::new(),
-            finalized_text: String::new(),
-            typed_chars: 0,
-        };
-        self.update_state("streaming");
-        self.play_feedback(SoundEvent::RecordingStart);
-        self.pause_media_players().await;
-
-        if let Some(cmd) = &self.config.output.pre_recording_command {
-            if let Err(e) = output::run_hook(cmd, "pre_recording").await {
-                tracing::warn!("{}", e);
-            }
-        }
-
-        if self.config.output.notification.on_recording_start {
-            send_notification(
-                "Streaming Active",
-                "Listening...",
-                self.config.output.notification.show_engine_icon,
-                self.config.engine,
-                &self.config.output.notification.urgency,
-            )
-            .await;
-        }
-
-        true
-    }
-
-    /// End a streaming session gracefully (called when the backend emits
-    /// `Ended`, or as a teardown after an error). Stops audio capture, awaits
-    /// the backend task, and drops the session locals.
-    /// Start the OSD "draining" pump that publishes silent frames at
-    /// ~30 Hz to keep the visualizer on screen while the streaming
-    /// backend is flushing pending finals after the mic has stopped.
-    /// No-op if the pump is already running or the OSD level hub is
-    /// disabled.
-    fn start_streaming_drain_pump(&mut self) {
-        if self.streaming_drain_pump.is_some() {
-            return;
-        }
-        if let Some(hub) = &self.level_hub {
-            self.streaming_drain_pump = Some(audio::levels::spawn_silence_pump(hub.frame_sink()));
-        }
-    }
-
-    /// Cut audio flow to the streaming backend immediately. Aborts the
-    /// chunk-rx → streaming_tx pump so any samples still in the audio
-    /// capture's buffer never reach the backend — without this, the
-    /// ~50–100ms of residual samples between the user's stop press and
-    /// the actual mic shutdown leak in as low-level noise and cause
-    /// hallucinated trailing tokens.
-    fn cut_streaming_audio(&mut self) {
-        if let Some(handle) = self.level_emitter_task.take() {
-            handle.abort();
-        }
-    }
-
-    /// Abort the OSD draining pump (if running) so the visualizer can
-    /// fade out on its idle timer once the session is fully closed.
-    fn stop_streaming_drain_pump(&mut self) {
-        if let Some(h) = self.streaming_drain_pump.take() {
-            h.abort();
-        }
-    }
-
-    /// Early-stop the streaming capture: cut audio flow to the backend,
-    /// start the OSD silence pump so the visualizer stays alive during
-    /// drain, and stop the mic. Leaves `streaming_session`/`_chain` for
-    /// the caller to disown (or keep, to receive trailing finals).
-    async fn stop_streaming_capture(&mut self, audio_capture: &mut Option<Box<dyn AudioCapture>>) {
-        self.cut_streaming_audio();
-        self.start_streaming_drain_pump();
-        if let Some(mut c) = audio_capture.take() {
-            let _ = c.stop().await;
-        }
-    }
-
-    async fn end_streaming(
-        &mut self,
-        state: &mut State,
-        audio_capture: &mut Option<Box<dyn AudioCapture>>,
-        streaming_handle: &mut Option<StreamHandle>,
-        streaming_session: &mut Option<StreamingSession>,
-        streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
-    ) {
-        if let Some(mut c) = audio_capture.take() {
-            let _ = c.stop().await;
-        }
-        if let Some(h) = streaming_handle.take() {
-            // Don't error on join failure; the task may have already
-            // completed. We drop events implicitly here.
-            let _ = h.task.await;
-        }
-        self.stop_streaming_drain_pump();
-        *streaming_session = None;
-        *streaming_chain = None;
-
-        self.play_feedback(SoundEvent::TranscriptionComplete);
-
-        if let Some(cmd) = &self.config.output.post_output_command {
-            if let Err(e) = output::run_hook(cmd, "post_output").await {
-                tracing::warn!("{}", e);
-            }
-        }
-
-        self.resume_media_players();
-        *state = State::Idle;
-        self.update_state("idle");
-    }
-
-    /// Cancel an active streaming session: signal the backend, drop capture,
-    /// rewind any typed text, and reset to idle (with cancel feedback +
-    /// notification).
-    #[allow(clippy::too_many_arguments)]
-    async fn cancel_streaming_to_idle(
-        &mut self,
-        state: &mut State,
-        audio_capture: &mut Option<Box<dyn AudioCapture>>,
-        streaming_handle: &mut Option<StreamHandle>,
-        streaming_session: &mut Option<StreamingSession>,
-        streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
-        notification_body: &str,
-    ) {
-        if let Some(h) = streaming_handle.take() {
-            let _ = h.cancel.send(());
-            let _ = h.task.await;
-        }
-        if let Some(mut c) = audio_capture.take() {
-            let _ = c.stop().await;
-        }
-        if let Some(s) = streaming_session.as_mut() {
-            if let Err(e) = s.rewind().await {
-                tracing::warn!("Streaming rewind failed: {}", e);
-            }
-        }
-        self.stop_streaming_drain_pump();
-        *streaming_session = None;
-        *streaming_chain = None;
-
-        cleanup_output_mode_override();
-        cleanup_model_override();
-        cleanup_profile_override();
-        cleanup_bool_override("auto_submit");
-        cleanup_bool_override("shift_enter");
-        cleanup_bool_override("smart_auto_submit");
-        self.resume_media_players();
-        *state = State::Idle;
-        self.update_state("idle");
-        self.play_feedback(SoundEvent::Cancelled);
-
-        if let Some(cmd) = &self.config.output.post_output_command {
-            if let Err(e) = output::run_hook(cmd, "post_output").await {
-                tracing::warn!("{}", e);
-            }
-        }
-
-        if self.config.output.notification.on_recording_stop {
-            send_notification(
-                "Cancelled",
-                notification_body,
-                self.config.output.notification.show_engine_icon,
-                self.config.engine,
-                &self.config.output.notification.urgency,
-            )
-            .await;
-        }
-    }
-
-    /// Start a streaming-mode audio capture.
-    ///
-    /// Like [`start_recording_capture`] but additionally returns a receiver
-    /// of audio chunks for the streaming transcription backend to consume.
-    /// The OSD level emitter still runs and gets the same chunk stream
-    /// (when `level_hub` is configured), so streaming and the audio-level
-    /// OSD coexist without contention on the capture's mpsc.
-    ///
-    /// Returns `(capture, streaming_samples_rx)` on success.
-    async fn start_streaming_capture(
-        &mut self,
-    ) -> std::result::Result<(Box<dyn AudioCapture>, tokio::sync::mpsc::Receiver<Vec<f32>>), ()>
-    {
-        match audio::create_capture(&self.config.audio) {
-            Ok(mut capture) => match capture.start().await {
-                Ok(chunk_rx) => {
-                    // Bounded; backed-up streaming backend drops chunks
-                    // rather than back-pressuring the capture.
-                    let (streaming_tx, streaming_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(64);
-
-                    if let Some(handle) = self.level_emitter_task.take() {
-                        handle.abort();
-                    }
-                    let handle = if let Some(hub) = &self.level_hub {
-                        audio::levels::spawn_emitter_with_streaming_tap(
-                            chunk_rx,
-                            hub.frame_sink(),
-                            Some(streaming_tx),
-                        )
-                    } else {
-                        // No OSD: still need to drive chunk_rx → streaming_tx.
-                        tokio::spawn(async move {
-                            let mut rx = chunk_rx;
-                            while let Some(chunk) = rx.recv().await {
-                                if streaming_tx.try_send(chunk).is_err() {
-                                    // Backend slow or gone; drop and keep going.
-                                }
-                            }
-                        })
-                    };
-                    self.level_emitter_task = Some(handle);
-                    Ok((capture, streaming_rx))
-                }
-                Err(e) => {
-                    tracing::error!("Failed to start audio: {}", e);
-                    self.play_feedback(SoundEvent::Error);
-                    Err(())
-                }
-            },
-            Err(e) => {
-                tracing::error!("Failed to create audio capture: {}", e);
-                self.play_feedback(SoundEvent::Error);
-                Err(())
-            }
-        }
-    }
-
     /// Get the transcriber for the current recording session
     ///
     /// For on-demand loading: waits for the background model load task to complete
@@ -1154,15 +732,6 @@ impl Daemon {
                     }
                 }
                 crate::config::TranscriptionEngine::Whisper => {
-                    // Wait for the gpu_isolation worker to finish preparing
-                    // (model load) before we hand the transcriber to the
-                    // recording stop path. Otherwise transcribe() would race
-                    // with the in-flight prepare and spawn a second worker.
-                    if let Some(task) = self.whisper_prepare_task.take() {
-                        if let Err(e) = task.await {
-                            tracing::warn!("Whisper prepare task failed: {}", e);
-                        }
-                    }
                     if let Some(ref mut mm) = self.model_manager {
                         match mm.get_prepared_transcriber(model_override) {
                             Ok(t) => Ok(t),
@@ -1312,7 +881,6 @@ impl Daemon {
                                 &format!("ID: {}", meeting_id),
                                 false,
                                 self.config.engine,
-                                &self.config.output.notification.urgency,
                             )
                             .await;
                         }
@@ -1353,7 +921,6 @@ impl Daemon {
                             &format!("ID: {}", meeting_id),
                             false,
                             self.config.engine,
-                            &self.config.output.notification.urgency,
                         )
                         .await;
                     }
@@ -1385,7 +952,6 @@ impl Daemon {
                     "Recording paused",
                     false,
                     self.config.engine,
-                    &self.config.output.notification.urgency,
                 )
                 .await;
             }
@@ -1407,7 +973,6 @@ impl Daemon {
                     "Recording resumed",
                     false,
                     self.config.engine,
-                    &self.config.output.notification.urgency,
                 )
                 .await;
             }
@@ -1670,13 +1235,9 @@ impl Daemon {
                 "Transcribing...",
                 self.config.output.notification.show_engine_icon,
                 self.config.engine,
-                &self.config.output.notification.urgency,
             )
             .await;
         }
-
-        // Tear down the OSD audio-frame emitter for this session.
-        self.stop_level_emitter();
 
         // Stop recording and get samples
         if let Some(mut capture) = audio_capture.take() {
@@ -1726,11 +1287,6 @@ impl Daemon {
 
                     // Spawn transcription task (non-blocking)
                     if let Some(t) = transcriber {
-                        // Hold an Arc clone so the result handler can query
-                        // post-transcription metadata (e.g. detected language
-                        // for layout hints, issue #180) without re-fetching
-                        // the transcriber.
-                        self.active_transcriber = Some(t.clone());
                         self.transcription_task =
                             Some(tokio::task::spawn_blocking(move || t.transcribe(&samples)));
                         true
@@ -1759,11 +1315,6 @@ impl Daemon {
         state: &mut State,
         result: std::result::Result<TranscriptionResult, tokio::task::JoinError>,
     ) {
-        // Take ownership of the transcriber Arc we cloned at spawn time so it
-        // is dropped on every exit path (success, transcription error, or
-        // task error). The Ok(Ok(_)) branch consults it for the language
-        // layout hint before letting it drop.
-        let active_transcriber = self.active_transcriber.take();
         match result {
             Ok(Ok(text)) => {
                 if text.is_empty() {
@@ -1991,45 +1542,6 @@ impl Daemon {
                         output_config.auto_submit = true;
                     }
 
-                    // Inject a keyboard-layout hint derived from the
-                    // transcriber's detected language (issue #180). Skipped
-                    // when the user has already set an explicit
-                    // `eitype_xkb_layout` / `dotool_xkb_layout`, so static
-                    // configuration wins over auto-detection. Only the
-                    // `language_to_layout` map is consulted; if the language
-                    // isn't mapped, no hint is applied (eitype/dotool fall
-                    // back to the system layout).
-                    if let Some(ref transcriber) = active_transcriber {
-                        if let Some(lang) = transcriber.last_detected_language() {
-                            if let Some(layout) =
-                                self.config.output.language_to_layout.get(&lang).cloned()
-                            {
-                                if output_config.eitype_xkb_layout.is_none() {
-                                    tracing::debug!(
-                                        "Auto layout for eitype: language='{}' -> layout='{}'",
-                                        lang,
-                                        layout
-                                    );
-                                    output_config.eitype_xkb_layout = Some(layout.clone());
-                                }
-                                if output_config.dotool_xkb_layout.is_none() {
-                                    tracing::debug!(
-                                        "Auto layout for dotool: language='{}' -> layout='{}'",
-                                        lang,
-                                        layout
-                                    );
-                                    output_config.dotool_xkb_layout = Some(layout);
-                                }
-                            } else {
-                                tracing::debug!(
-                                    "No layout mapping for detected language '{}'; \
-                                     not setting a layout hint",
-                                    lang
-                                );
-                            }
-                        }
-                    }
-
                     let output_chain = output::create_output_chain(&output_config);
 
                     // Output the text
@@ -2087,6 +1599,176 @@ impl Daemon {
         }
     }
 
+    /// Begin recording: prepare model, start audio capture, transition state.
+    ///
+    /// Callers are responsible for sending notifications (text varies per trigger)
+    /// and handling profile overrides (hotkey-only concern) before/after this call.
+    /// Returns `true` if recording started successfully, `false` on failure.
+    async fn begin_recording(
+        &mut self,
+        state: &mut State,
+        audio_capture: &mut Option<Box<dyn AudioCapture>>,
+        transcriber_preloaded: &Option<Arc<dyn Transcriber>>,
+        model_override: Option<String>,
+    ) -> bool {
+        // Prepare model for transcription
+        if self.config.on_demand_loading() {
+            match self.config.engine {
+                crate::config::TranscriptionEngine::Whisper => {
+                    let config = self.config.whisper.clone();
+                    let config_path = self.config_path.clone();
+                    let model_to_load = model_override.clone();
+                    self.model_load_task = Some(tokio::task::spawn_blocking(move || {
+                        let mut temp_manager = ModelManager::new(&config, config_path);
+                        temp_manager.get_transcriber(model_to_load.as_deref())
+                    }));
+                }
+                crate::config::TranscriptionEngine::Parakeet
+                | crate::config::TranscriptionEngine::Moonshine
+                | crate::config::TranscriptionEngine::SenseVoice
+                | crate::config::TranscriptionEngine::Paraformer
+                | crate::config::TranscriptionEngine::Dolphin
+                | crate::config::TranscriptionEngine::Omnilingual
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Soniox => {
+                    let config = self.config.clone();
+                    self.model_load_task = Some(tokio::task::spawn_blocking(move || {
+                        crate::transcribe::create_transcriber(&config).map(Arc::from)
+                    }));
+                }
+            }
+        } else {
+            match self.config.engine {
+                crate::config::TranscriptionEngine::Whisper => {
+                    if let Some(ref mut mm) = self.model_manager {
+                        if let Err(e) = mm.prepare_model(model_override.as_deref()) {
+                            tracing::warn!("Failed to prepare model: {}", e);
+                        }
+                    }
+                }
+                crate::config::TranscriptionEngine::Parakeet
+                | crate::config::TranscriptionEngine::Moonshine
+                | crate::config::TranscriptionEngine::SenseVoice
+                | crate::config::TranscriptionEngine::Paraformer
+                | crate::config::TranscriptionEngine::Dolphin
+                | crate::config::TranscriptionEngine::Omnilingual
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Soniox => {
+                    if let Some(ref t) = transcriber_preloaded {
+                        let transcriber = t.clone();
+                        tokio::task::spawn_blocking(move || {
+                            transcriber.prepare();
+                        });
+                    }
+                }
+            }
+        }
+
+        // Create and start audio capture
+        match audio::create_capture(&self.config.audio) {
+            Ok(mut capture) => {
+                if let Err(e) = capture.start().await {
+                    tracing::error!("Failed to start audio: {}", e);
+                    self.play_feedback(SoundEvent::Error);
+                    return false;
+                }
+                *audio_capture = Some(capture);
+
+                if self.config.whisper.eager_processing {
+                    tracing::info!("Using eager input processing");
+                    *state = State::EagerRecording {
+                        started_at: std::time::Instant::now(),
+                        model_override,
+                        accumulated_audio: Vec::new(),
+                        chunks_sent: 0,
+                        chunk_results: Vec::new(),
+                        tasks_in_flight: 0,
+                    };
+                } else {
+                    *state = State::Recording {
+                        started_at: std::time::Instant::now(),
+                        model_override,
+                    };
+                }
+                self.update_state("recording");
+                self.play_feedback(SoundEvent::RecordingStart);
+                self.pause_media_players().await;
+
+                if let Some(cmd) = &self.config.output.pre_recording_command {
+                    if let Err(e) = output::run_hook(cmd, "pre_recording").await {
+                        tracing::warn!("{}", e);
+                    }
+                }
+                true
+            }
+            Err(e) => {
+                tracing::error!("Failed to create audio capture: {}", e);
+                self.play_feedback(SoundEvent::Error);
+                false
+            }
+        }
+    }
+
+    /// Stop eager recording, transcribe, and handle the result.
+    async fn stop_eager_recording_and_transcribe(
+        &mut self,
+        state: &mut State,
+        audio_capture: &mut Option<Box<dyn AudioCapture>>,
+        transcriber_preloaded: &Option<Arc<dyn Transcriber>>,
+    ) {
+        let model_override = match state {
+            State::EagerRecording { model_override, .. } => model_override.clone(),
+            _ => None,
+        };
+
+        let duration = state.recording_duration().unwrap_or_default();
+        tracing::info!("Eager recording stopped ({:.1}s)", duration.as_secs_f32());
+
+        self.play_feedback(SoundEvent::RecordingStop);
+
+        if self.config.output.notification.on_recording_stop {
+            send_notification(
+                "Recording Stopped",
+                "Transcribing...",
+                self.config.output.notification.show_engine_icon,
+                self.config.engine,
+            )
+            .await;
+        }
+
+        if let Some(mut capture) = audio_capture.take() {
+            if let Ok(final_samples) = capture.stop().await {
+                if let State::EagerRecording {
+                    accumulated_audio, ..
+                } = state
+                {
+                    accumulated_audio.extend(final_samples);
+                }
+            }
+        }
+
+        let transcriber = match self
+            .get_transcriber_for_recording(model_override.as_deref(), transcriber_preloaded)
+            .await
+        {
+            Ok(t) => t,
+            Err(()) => {
+                self.reset_to_idle(state).await;
+                return;
+            }
+        };
+
+        self.update_state("transcribing");
+
+        if let Some(text) = self.finish_eager_recording(state, transcriber).await {
+            *state = State::Transcribing { audio: Vec::new() };
+            self.handle_transcription_result(state, Ok(Ok(text))).await;
+        } else {
+            tracing::debug!("Eager recording produced empty result");
+            self.reset_to_idle(state).await;
+        }
+    }
+
     /// Handle a single tray event. Returns `true` if the daemon should quit.
     #[cfg(feature = "tray")]
     async fn handle_tray_event(
@@ -2110,109 +1792,13 @@ impl Daemon {
                             "Tray toggle",
                             self.config.output.notification.show_engine_icon,
                             self.config.engine,
-                            &self.config.output.notification.urgency,
                         )
                         .await;
                     }
 
-                    if self.config.on_demand_loading() {
-                        match self.config.engine {
-                            crate::config::TranscriptionEngine::Whisper => {
-                                let config = self.config.whisper.clone();
-                                let config_path = self.config_path.clone();
-                                self.model_load_task =
-                                    Some(tokio::task::spawn_blocking(move || {
-                                        let mut temp_manager =
-                                            ModelManager::new(&config, config_path);
-                                        temp_manager.get_transcriber(None)
-                                    }));
-                            }
-                            crate::config::TranscriptionEngine::Parakeet
-                            | crate::config::TranscriptionEngine::Moonshine
-                            | crate::config::TranscriptionEngine::SenseVoice
-                            | crate::config::TranscriptionEngine::Paraformer
-                            | crate::config::TranscriptionEngine::Dolphin
-                            | crate::config::TranscriptionEngine::Omnilingual
-                            | crate::config::TranscriptionEngine::Cohere
-                            | crate::config::TranscriptionEngine::Soniox => {
-                                let config = self.config.clone();
-                                self.model_load_task =
-                                    Some(tokio::task::spawn_blocking(move || {
-                                        crate::transcribe::create_transcriber(&config)
-                                            .map(Arc::from)
-                                    }));
-                            }
-                        }
-                    } else {
-                        match self.config.engine {
-                            crate::config::TranscriptionEngine::Whisper => {
-                                if let Some(ref mut mm) = self.model_manager {
-                                    if let Err(e) = mm.prepare_model(None) {
-                                        tracing::warn!("Failed to prepare model: {}", e);
-                                    }
-                                }
-                            }
-                            crate::config::TranscriptionEngine::Parakeet
-                            | crate::config::TranscriptionEngine::Moonshine
-                            | crate::config::TranscriptionEngine::SenseVoice
-                            | crate::config::TranscriptionEngine::Paraformer
-                            | crate::config::TranscriptionEngine::Dolphin
-                            | crate::config::TranscriptionEngine::Omnilingual
-                            | crate::config::TranscriptionEngine::Cohere
-                            | crate::config::TranscriptionEngine::Soniox => {
-                                if let Some(ref t) = transcriber_preloaded {
-                                    let transcriber = t.clone();
-                                    tokio::task::spawn_blocking(move || {
-                                        transcriber.prepare();
-                                    });
-                                }
-                            }
-                        }
-                    }
-
-                    match audio::create_capture(&self.config.audio) {
-                        Ok(mut capture) => {
-                            if let Err(e) = capture.start().await {
-                                tracing::error!("Failed to start audio: {}", e);
-                            } else {
-                                *audio_capture = Some(capture);
-
-                                if self.config.whisper.eager_processing {
-                                    tracing::info!("Using eager input processing");
-                                    *state = State::EagerRecording {
-                                        started_at: std::time::Instant::now(),
-                                        model_override: None,
-                                        accumulated_audio: Vec::new(),
-                                        chunks_sent: 0,
-                                        chunk_results: Vec::new(),
-                                        tasks_in_flight: 0,
-                                    };
-                                } else {
-                                    *state = State::Recording {
-                                        started_at: std::time::Instant::now(),
-                                        model_override: None,
-                                    };
-                                }
-                                self.update_state("recording");
-                                self.play_feedback(SoundEvent::RecordingStart);
-
-                                // Run pre-recording hook
-                                if let Some(cmd) = &self.config.output.pre_recording_command {
-                                    if let Err(e) = output::run_hook(cmd, "pre_recording").await {
-                                        tracing::warn!("{}", e);
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to create audio capture: {}", e);
-                            self.play_feedback(SoundEvent::Error);
-                        }
-                    }
-                } else if let State::Recording {
-                    model_override, ..
-                } = state
-                {
+                    self.begin_recording(state, audio_capture, transcriber_preloaded, None)
+                        .await;
+                } else if let State::Recording { model_override, .. } = state {
                     let transcriber = match self
                         .get_transcriber_for_recording(
                             model_override.as_deref(),
@@ -2222,8 +1808,7 @@ impl Daemon {
                     {
                         Ok(t) => Some(t),
                         Err(()) => {
-                            *state = State::Idle;
-                            self.update_state("idle");
+                            self.reset_to_idle(state).await;
                             return false;
                         }
                     };
@@ -2231,69 +1816,12 @@ impl Daemon {
                     self.start_transcription_task(state, audio_capture, transcriber)
                         .await;
                 } else if state.is_eager_recording() {
-                    // Stop eager recording (same path as SIGUSR2 eager stop)
-                    let model_override = match state {
-                        State::EagerRecording { model_override, .. } => model_override.clone(),
-                        _ => None,
-                    };
-
-                    let duration = state.recording_duration().unwrap_or_default();
-                    tracing::info!(
-                        "Eager recording stopped via tray ({:.1}s)",
-                        duration.as_secs_f32()
-                    );
-
-                    self.play_feedback(SoundEvent::RecordingStop);
-
-                    if self.config.output.notification.on_recording_stop {
-                        send_notification(
-                            "Recording Stopped",
-                            "Transcribing...",
-                            self.config.output.notification.show_engine_icon,
-                            self.config.engine,
-                            &self.config.output.notification.urgency,
-                        )
-                        .await;
-                    }
-
-                    if let Some(mut capture) = audio_capture.take() {
-                        if let Ok(final_samples) = capture.stop().await {
-                            if let State::EagerRecording {
-                                accumulated_audio, ..
-                            } = state
-                            {
-                                accumulated_audio.extend(final_samples);
-                            }
-                        }
-                    }
-
-                    let transcriber = match self
-                        .get_transcriber_for_recording(
-                            model_override.as_deref(),
-                            transcriber_preloaded,
-                        )
-                        .await
-                    {
-                        Ok(t) => t,
-                        Err(()) => {
-                            *state = State::Idle;
-                            self.update_state("idle");
-                            return false;
-                        }
-                    };
-
-                    self.update_state("transcribing");
-
-                    if let Some(text) =
-                        self.finish_eager_recording(state, transcriber).await
-                    {
-                        *state = State::Transcribing { audio: Vec::new() };
-                        self.handle_transcription_result(state, Ok(Ok(text)))
-                            .await;
-                    } else {
-                        tracing::debug!("Eager recording produced empty result");
-                        self.reset_to_idle(state).await;
-                    }
+                    self.stop_eager_recording_and_transcribe(
+                        state,
+                        audio_capture,
+                        transcriber_preloaded,
+                    )
+                    .await;
                 }
             }
             TrayEvent::CancelTranscription => {
@@ -2333,27 +1861,6 @@ impl Daemon {
     pub async fn run(&mut self) -> Result<()> {
         tracing::info!("Starting voxtype daemon");
 
-        // Streaming dictation types characters at the cursor while the user is
-        // still holding the PTT key. On Wayland compositors backed by libinput
-        // (Hyprland, Sway, River) those synthetic key events clobber the held-
-        // key state tracker, so the physical key release never fires bindrd and
-        // the daemon gets stuck in streaming. Force toggle activation when
-        // streaming is enabled. The user's config file is left untouched; this
-        // override only applies to the running daemon.
-        if self.config.streaming_active()
-            && self.config.hotkey.mode == crate::config::ActivationMode::PushToTalk
-        {
-            tracing::warn!(
-                "Streaming transcription requires toggle activation, not push-to-talk. \
-                 Auto-promoting [hotkey] mode from push_to_talk to toggle for this session. \
-                 Streaming output types characters at the cursor while you dictate; if your \
-                 PTT key is held during typing, libinput-based compositors (Hyprland, Sway, \
-                 River) lose track of the held-key state and the release event never fires. \
-                 Update your config to set [hotkey] mode = \"toggle\" to silence this warning."
-            );
-            self.config.hotkey.mode = crate::config::ActivationMode::Toggle;
-        }
-
         // Clean up any stale cancel and profile override files from previous runs
         cleanup_cancel_file();
         cleanup_profile_override();
@@ -2383,31 +1890,6 @@ impl Daemon {
             crate::error::VoxtypeError::Config(format!("Failed to create directories: {}", e))
         })?;
 
-        // Start the audio-level broadcaster for the OSD. Failure to bind
-        // the socket is not fatal: the daemon still runs without an OSD
-        // feed, and downstream code treats `level_hub == None` as "no OSD".
-        let level_socket = audio::levels::default_socket_path();
-        match audio::levels::LevelHub::start(level_socket.clone()).await {
-            Ok(hub) => {
-                tracing::info!("OSD audio level socket: {:?}", hub.socket_path());
-                self.level_hub = Some(hub);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Could not start OSD audio level socket at {:?}: {}",
-                    level_socket,
-                    e
-                );
-            }
-        }
-
-        // Spawn the OSD child if enabled and the level socket bound. Without
-        // the socket the frontend has nothing to render, so skip the spawn
-        // rather than burning a slot in the launcher's restart logic.
-        if self.config.osd.enabled && self.level_hub.is_some() {
-            self.osd_supervisor_task = Some(crate::osd::supervisor::spawn());
-        }
-
         // Check if another instance is already running (single-instance safeguard)
         let lock_path = Config::runtime_dir().join("voxtype.lock");
         let lock_path_str = lock_path.to_string_lossy().to_string();
@@ -2417,38 +1899,14 @@ impl Daemon {
             Ok(_) => {
                 tracing::debug!("Acquired PID lock at {:?}", lock_path);
             }
-            Err(_) => {
-                // Check if the lock is stale (previous daemon crashed)
-                #[cfg(unix)]
-                if cleanup_stale_lockfile(&lock_path) {
-                    // Try again after removing stale lock
-                    pidlock = Pidlock::new(&lock_path_str);
-                    if let Err(e) = pidlock.acquire() {
-                        tracing::error!("Failed to acquire lock after stale cleanup: {:?}", e);
-                        return Err(crate::error::VoxtypeError::Config(format!(
-                            "Another voxtype instance is already running (lock error: {:?})",
-                            e
-                        )));
-                    }
-                    tracing::debug!("Acquired PID lock at {:?} (after stale cleanup)", lock_path);
-                } else {
-                    tracing::error!(
-                        "Failed to acquire lock: another voxtype instance is already running"
-                    );
-                    return Err(crate::error::VoxtypeError::Config(
-                        "Another voxtype instance is already running".to_string(),
-                    ));
-                }
-                #[cfg(not(unix))]
-                {
-                    tracing::error!(
-                        "Failed to acquire lock: another voxtype instance is already running"
-                    );
-                    return Err(crate::error::VoxtypeError::Config(
-                        "Another voxtype instance is already running".to_string(),
-                    )
-                    .into());
-                }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to acquire lock: another voxtype instance is already running"
+                );
+                return Err(crate::error::VoxtypeError::Config(format!(
+                    "Another voxtype instance is already running (lock error: {:?})",
+                    e
+                )));
             }
         }
 
@@ -2459,10 +1917,11 @@ impl Daemon {
             tracing::info!("State file: {:?}", path);
         }
 
-        // Warn about profile modifiers that reference undefined profiles. Runs
-        // before either platform's hotkey listener is created so the warning
-        // surfaces regardless of evdev/rdev backend.
-        if self.config.hotkey.enabled {
+        // Initialize hotkey listener (if enabled)
+        let mut hotkey_listener = if self.config.hotkey.enabled {
+            tracing::info!("Hotkey: {}", self.config.hotkey.key);
+
+            // Warn about profile modifiers that reference undefined profiles
             for (key_name, profile_name) in &self.config.hotkey.profile_modifiers {
                 if self.config.get_profile(profile_name).is_none() {
                     tracing::warn!(
@@ -2474,53 +1933,16 @@ impl Daemon {
                     );
                 }
             }
-        }
 
-        // Initialize hotkey listener (Linux: evdev, macOS: rdev)
-        #[cfg(target_os = "linux")]
-        let mut hotkey_listener: Option<Box<dyn hotkey::HotkeyListener>> =
-            if self.config.hotkey.enabled {
-                tracing::info!("Hotkey: {}", self.config.hotkey.key);
-                let secondary_model = self.config.whisper.secondary_model.clone();
-                Some(hotkey::create_listener(
-                    &self.config.hotkey,
-                    secondary_model,
-                )?)
-            } else {
-                tracing::info!(
-                "Built-in hotkey disabled, use 'voxtype record' commands or compositor keybindings"
-            );
-                None
-            };
-
-        #[cfg(target_os = "macos")]
-        let mut hotkey_listener: Option<Box<dyn hotkey::HotkeyListener>> = if self
-            .config
-            .hotkey
-            .enabled
-        {
-            tracing::info!("Hotkey: {}", self.config.hotkey.key);
             let secondary_model = self.config.whisper.secondary_model.clone();
-            match hotkey::create_listener(&self.config.hotkey, secondary_model) {
-                Ok(listener) => Some(listener),
-                Err(e) => {
-                    tracing::warn!("Failed to create hotkey listener: {}. Use 'voxtype record' commands instead.", e);
-                    None
-                }
-            }
+            Some(hotkey::create_listener(
+                &self.config.hotkey,
+                secondary_model,
+            )?)
         } else {
             tracing::info!(
                 "Built-in hotkey disabled, use 'voxtype record' commands or compositor keybindings"
             );
-            None
-        };
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        let hotkey_listener: Option<()> = {
-            if self.config.hotkey.enabled {
-                tracing::warn!(
-                    "Built-in hotkey not supported on this platform, use 'voxtype record' commands"
-                );
-            }
             None
         };
 
@@ -2559,8 +1981,7 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::Soniox => {
-                    // Non-Whisper engines do their own setup; Soniox just validates
-                    // API key + endpoint at construction (no model to download).
+                    // Parakeet/Moonshine uses its own model loading
                     transcriber_preloaded = Some(Arc::from(crate::transcribe::create_transcriber(
                         &self.config,
                     )?));
@@ -2582,20 +2003,11 @@ impl Daemon {
         self.model_manager = Some(model_manager);
 
         // Start hotkey listener (if enabled)
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let mut hotkey_rx = if let Some(ref mut listener) = hotkey_listener {
-            match listener.start() {
-                Ok(rx) => Some(rx),
-                Err(e) => {
-                    tracing::warn!("Failed to start hotkey listener: {}. Use 'voxtype record' commands instead.", e);
-                    None
-                }
-            }
+            Some(listener.start()?)
         } else {
             None
         };
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        let mut hotkey_rx: Option<tokio::sync::mpsc::Receiver<HotkeyEvent>> = None;
 
         // Current state
         let mut state = State::Idle;
@@ -2646,11 +2058,6 @@ impl Daemon {
         // Cached transcriber for eager chunk processing during recording
         let mut eager_transcriber: Option<Arc<dyn Transcriber>> = None;
 
-        // Streaming session locals (Some only while State::Streaming).
-        let mut streaming_handle: Option<StreamHandle> = None;
-        let mut streaming_session: Option<StreamingSession> = None;
-        let mut streaming_chain: Option<Vec<Box<dyn TextOutput>>> = None;
-
         loop {
             tokio::select! {
                 // Handle hotkey events (only if hotkey listener is enabled)
@@ -2666,148 +2073,25 @@ impl Daemon {
                             tracing::debug!("Received HotkeyEvent::Pressed (push-to-talk), state.is_idle() = {}, model_override = {:?}, profile_override = {:?}",
                                 state.is_idle(), model_override, profile_override);
                             if state.is_idle() {
-                                // Write profile override file if a profile modifier was held
                                 if let Some(ref profile_name) = profile_override {
                                     write_profile_override(profile_name);
                                 }
 
                                 tracing::info!("Recording started");
 
-                                // Send notification if enabled
                                 if self.config.output.notification.on_recording_start {
-                                    send_notification("Push to Talk Active", "Recording...", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency).await;
+                                    send_notification("Push to Talk Active", "Recording...", self.config.output.notification.show_engine_icon, self.config.engine).await;
                                 }
 
-                                // Prepare model for transcription
-                                if self.config.on_demand_loading() {
-                                    // Start model loading in background
-                                    match self.config.engine {
-                                        crate::config::TranscriptionEngine::Whisper => {
-                                            let config = self.config.whisper.clone();
-                                            let config_path = self.config_path.clone();
-                                            let model_to_load = model_override.clone();
-                                            self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                                let mut temp_manager = ModelManager::new(&config, config_path);
-                                                temp_manager.get_transcriber(model_to_load.as_deref())
-                                            }));
-                                        }
-                                        crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine
-                                        | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::Soniox => {
-                                            let config = self.config.clone();
-                                            self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                                crate::transcribe::create_transcriber(&config).map(Arc::from)
-                                            }));
-                                        }
-                                    }
-                                    tracing::debug!("Started background model loading");
-                                } else {
-                                    // Prepare model (spawns subprocess for gpu_isolation mode)
-                                    match self.config.engine {
-                                        crate::config::TranscriptionEngine::Whisper => {
-                                            if let Some(ref mut mm) = self.model_manager {
-                                                match mm.prepare_model(model_override.as_deref()) {
-                                                    Ok(handle) => {
-                                                        self.whisper_prepare_task = handle;
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::warn!("Failed to prepare model: {}", e);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine
-                                        | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::Soniox => {
-                                            if let Some(ref t) = transcriber_preloaded {
-                                                let transcriber = t.clone();
-                                                tokio::task::spawn_blocking(move || {
-                                                    transcriber.prepare();
-                                                });
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // Try streaming first; fall through to batch if the engine
-                                // doesn't support streaming or setup fails.
-                                if self.try_start_streaming(
-                                    &transcriber_preloaded,
-                                    &mut state,
-                                    &mut audio_capture,
-                                    &mut streaming_handle,
-                                    &mut streaming_session,
-                                    &mut streaming_chain,
-                                    model_override.clone(),
-                                ).await {
-                                    tracing::info!("Streaming session started (push-to-talk)");
-                                } else {
-                                    // Create and start audio capture
-                                    tracing::debug!("Creating audio capture with device: {}", self.config.audio.device);
-                                    match self.start_recording_capture().await {
-                                        Ok(capture) => {
-                                            tracing::debug!("Audio capture started successfully");
-                                            audio_capture = Some(capture);
-
-                                            // Use EagerRecording state if eager_processing is enabled
-                                            if self.config.whisper.eager_processing {
-                                                tracing::info!("Using eager input processing");
-                                                state = State::EagerRecording {
-                                                    started_at: std::time::Instant::now(),
-                                                    model_override: model_override.clone(),
-                                                    accumulated_audio: Vec::new(),
-                                                    chunks_sent: 0,
-                                                    chunk_results: Vec::new(),
-                                                    tasks_in_flight: 0,
-                                                };
-                                            } else {
-                                                state = State::Recording {
-                                                    started_at: std::time::Instant::now(),
-                                                    model_override: model_override.clone(),
-                                                };
-                                            }
-                                            self.update_state("recording");
-                                            self.play_feedback(SoundEvent::RecordingStart);
-                                            self.pause_media_players().await;
-
-                                            // Run pre-recording hook (e.g., enter compositor submap for cancel)
-                                            if let Some(cmd) = &self.config.output.pre_recording_command {
-                                                if let Err(e) = output::run_hook(cmd, "pre_recording").await {
-                                                    tracing::warn!("{}", e);
-                                                }
-                                            }
-                                        }
-                                        Err(()) => {
-                                            // Helper already logged and played the error sound.
-                                            cleanup_profile_override();
-                                        }
-                                    }
+                                if !self.begin_recording(&mut state, &mut audio_capture, &transcriber_preloaded, model_override.clone()).await {
+                                    cleanup_profile_override();
                                 }
                             }
                         }
 
                         (HotkeyEvent::Released, ActivationMode::PushToTalk) => {
                             tracing::debug!("Received HotkeyEvent::Released (push-to-talk), state.is_recording() = {}", state.is_recording());
-                            if state.is_streaming() {
-                                tracing::debug!("Streaming push-to-talk released; closing audio capture and disowning session");
-                                self.stop_streaming_capture(&mut audio_capture).await;
-                                // Drop session/chain so the backend's
-                                // post-stop flush emission is dropped at
-                                // the event pump instead of typed.
-                                // Matches the SIGUSR2 stop path.
-                                streaming_session = None;
-                                streaming_chain = None;
-                            } else if let State::Recording { model_override, .. } = &state {
+                            if let State::Recording { model_override, .. } = &state {
                                 let transcriber = match self.get_transcriber_for_recording(
                                     model_override.as_deref(),
                                     &transcriber_preloaded,
@@ -2826,53 +2110,7 @@ impl Daemon {
                                     transcriber,
                                 ).await;
                             } else if state.is_eager_recording() {
-                                // Handle eager recording stop - extract model_override first
-                                let model_override = match &state {
-                                    State::EagerRecording { model_override, .. } => model_override.clone(),
-                                    _ => None,
-                                };
-
-                                let duration = state.recording_duration().unwrap_or_default();
-                                tracing::info!("Eager recording stopped ({:.1}s)", duration.as_secs_f32());
-
-                                self.play_feedback(SoundEvent::RecordingStop);
-
-                                if self.config.output.notification.on_recording_stop {
-                                    send_notification("Recording Stopped", "Transcribing...", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency).await;
-                                }
-
-                                // Stop audio capture and get remaining samples
-                                if let Some(mut capture) = audio_capture.take() {
-                                    if let Ok(final_samples) = capture.stop().await {
-                                        // Add final samples to accumulated audio
-                                        if let State::EagerRecording { accumulated_audio, .. } = &mut state {
-                                            accumulated_audio.extend(final_samples);
-                                        }
-                                    }
-                                }
-
-                                let transcriber = match self.get_transcriber_for_recording(
-                                    model_override.as_deref(),
-                                    &transcriber_preloaded,
-                                ).await {
-                                    Ok(t) => t,
-                                    Err(()) => {
-                                        state = State::Idle;
-                                        self.update_state("idle");
-                                        continue;
-                                    }
-                                };
-
-                                self.update_state("transcribing");
-
-                                if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
-                                    // Move to outputting state and handle via transcription result flow
-                                    state = State::Transcribing { audio: Vec::new() };
-                                    self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
-                                } else {
-                                    tracing::debug!("Eager recording produced empty result");
-                                    self.reset_to_idle(&mut state).await;
-                                }
+                                self.stop_eager_recording_and_transcribe(&mut state, &mut audio_capture, &transcriber_preloaded).await;
                                 eager_transcriber = None;
                             }
                         }
@@ -2883,131 +2121,19 @@ impl Daemon {
                                 state.is_idle(), state.is_recording(), model_override, profile_override);
 
                             if state.is_idle() {
-                                // Write profile override file if a profile modifier was held
                                 if let Some(ref profile_name) = profile_override {
                                     write_profile_override(profile_name);
                                 }
 
-                                // Start recording
                                 tracing::info!("Recording started (toggle mode)");
 
                                 if self.config.output.notification.on_recording_start {
-                                    send_notification("Recording Started", "Press hotkey again to stop", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency).await;
+                                    send_notification("Recording Started", "Press hotkey again to stop", self.config.output.notification.show_engine_icon, self.config.engine).await;
                                 }
 
-                                // Prepare model for transcription
-                                if self.config.on_demand_loading() {
-                                    // Start model loading in background
-                                    match self.config.engine {
-                                        crate::config::TranscriptionEngine::Whisper => {
-                                            let config = self.config.whisper.clone();
-                                            let config_path = self.config_path.clone();
-                                            let model_to_load = model_override.clone();
-                                            self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                                let mut temp_manager = ModelManager::new(&config, config_path);
-                                                temp_manager.get_transcriber(model_to_load.as_deref())
-                                            }));
-                                        }
-                                        crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine
-                                        | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::Soniox => {
-                                            let config = self.config.clone();
-                                            self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                                crate::transcribe::create_transcriber(&config).map(Arc::from)
-                                            }));
-                                        }
-                                    }
-                                    tracing::debug!("Started background model loading");
-                                } else {
-                                    // Prepare model (spawns subprocess for gpu_isolation mode)
-                                    match self.config.engine {
-                                        crate::config::TranscriptionEngine::Whisper => {
-                                            if let Some(ref mut mm) = self.model_manager {
-                                                match mm.prepare_model(model_override.as_deref()) {
-                                                    Ok(handle) => {
-                                                        self.whisper_prepare_task = handle;
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::warn!("Failed to prepare model: {}", e);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine
-                                        | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::Soniox => {
-                                            if let Some(ref t) = transcriber_preloaded {
-                                                let transcriber = t.clone();
-                                                tokio::task::spawn_blocking(move || {
-                                                    transcriber.prepare();
-                                                });
-                                            }
-                                        }
-                                    }
+                                if !self.begin_recording(&mut state, &mut audio_capture, &transcriber_preloaded, model_override.clone()).await {
+                                    cleanup_profile_override();
                                 }
-
-                                if self.try_start_streaming(
-                                    &transcriber_preloaded,
-                                    &mut state,
-                                    &mut audio_capture,
-                                    &mut streaming_handle,
-                                    &mut streaming_session,
-                                    &mut streaming_chain,
-                                    model_override.clone(),
-                                ).await {
-                                    tracing::info!("Streaming session started (toggle)");
-                                } else {
-                                    match self.start_recording_capture().await {
-                                        Ok(capture) => {
-                                            audio_capture = Some(capture);
-
-                                            // Use EagerRecording state if eager_processing is enabled
-                                            if self.config.whisper.eager_processing {
-                                                tracing::info!("Using eager input processing");
-                                                state = State::EagerRecording {
-                                                    started_at: std::time::Instant::now(),
-                                                    model_override: model_override.clone(),
-                                                    accumulated_audio: Vec::new(),
-                                                    chunks_sent: 0,
-                                                    chunk_results: Vec::new(),
-                                                    tasks_in_flight: 0,
-                                                };
-                                            } else {
-                                                state = State::Recording {
-                                                    started_at: std::time::Instant::now(),
-                                                    model_override: model_override.clone(),
-                                                };
-                                            }
-                                            self.update_state("recording");
-                                            self.play_feedback(SoundEvent::RecordingStart);
-                                            self.pause_media_players().await;
-
-                                            // Run pre-recording hook (e.g., enter compositor submap for cancel)
-                                            if let Some(cmd) = &self.config.output.pre_recording_command {
-                                                if let Err(e) = output::run_hook(cmd, "pre_recording").await {
-                                                    tracing::warn!("{}", e);
-                                                }
-                                            }
-                                        }
-                                        Err(()) => {
-                                            // Helper already logged and played the error sound.
-                                            cleanup_profile_override();
-                                        }
-                                    }
-                                }
-                            } else if state.is_streaming() {
-                                tracing::info!("Toggle stop while streaming; closing capture");
-                                self.stop_streaming_capture(&mut audio_capture).await;
                             } else if let State::Recording { model_override: current_model_override, .. } = &state {
                                 let transcriber = match self.get_transcriber_for_recording(
                                     current_model_override.as_deref(),
@@ -3028,51 +2154,7 @@ impl Daemon {
                                     transcriber,
                                 ).await;
                             } else if state.is_eager_recording() {
-                                // Handle eager recording stop in toggle mode - extract model_override first
-                                let model_override = match &state {
-                                    State::EagerRecording { model_override, .. } => model_override.clone(),
-                                    _ => None,
-                                };
-
-                                let duration = state.recording_duration().unwrap_or_default();
-                                tracing::info!("Eager recording stopped ({:.1}s)", duration.as_secs_f32());
-
-                                self.play_feedback(SoundEvent::RecordingStop);
-
-                                if self.config.output.notification.on_recording_stop {
-                                    send_notification("Recording Stopped", "Transcribing...", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency).await;
-                                }
-
-                                // Stop audio capture and get remaining samples
-                                if let Some(mut capture) = audio_capture.take() {
-                                    if let Ok(final_samples) = capture.stop().await {
-                                        if let State::EagerRecording { accumulated_audio, .. } = &mut state {
-                                            accumulated_audio.extend(final_samples);
-                                        }
-                                    }
-                                }
-
-                                let transcriber = match self.get_transcriber_for_recording(
-                                    model_override.as_deref(),
-                                    &transcriber_preloaded,
-                                ).await {
-                                    Ok(t) => t,
-                                    Err(()) => {
-                                        state = State::Idle;
-                                        self.update_state("idle");
-                                        continue;
-                                    }
-                                };
-
-                                self.update_state("transcribing");
-
-                                if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
-                                    state = State::Transcribing { audio: Vec::new() };
-                                    self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
-                                } else {
-                                    tracing::debug!("Eager recording produced empty result");
-                                    self.reset_to_idle(&mut state).await;
-                                }
+                                self.stop_eager_recording_and_transcribe(&mut state, &mut audio_capture, &transcriber_preloaded).await;
                                 eager_transcriber = None;
                             }
                         }
@@ -3086,17 +2168,7 @@ impl Daemon {
                         (HotkeyEvent::Cancel, _) => {
                             tracing::debug!("Received HotkeyEvent::Cancel");
 
-                            if state.is_streaming() {
-                                tracing::info!("Streaming cancelled via hotkey");
-                                self.cancel_streaming_to_idle(
-                                    &mut state,
-                                    &mut audio_capture,
-                                    &mut streaming_handle,
-                                    &mut streaming_session,
-                                    &mut streaming_chain,
-                                    "Recording discarded",
-                                ).await;
-                            } else if state.is_recording() {
+                            if state.is_recording() {
                                 tracing::info!("Recording cancelled via hotkey");
 
                                 // Stop recording and discard audio
@@ -3130,7 +2202,7 @@ impl Daemon {
                                 }
 
                                 if self.config.output.notification.on_recording_stop {
-                                    send_notification("Cancelled", "Recording discarded", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency).await;
+                                    send_notification("Cancelled", "Recording discarded", self.config.output.notification.show_engine_icon, self.config.engine).await;
                                 }
                             } else if matches!(state, State::Transcribing { .. }) {
                                 tracing::info!("Transcription cancelled via hotkey");
@@ -3139,9 +2211,6 @@ impl Daemon {
                                 if let Some(task) = self.transcription_task.take() {
                                     task.abort();
                                 }
-                                // Drop the cloned transcriber Arc so it isn't
-                                // held until the next transcription.
-                                self.active_transcriber = None;
 
                                 cleanup_output_mode_override();
                                 cleanup_model_override();
@@ -3159,7 +2228,7 @@ impl Daemon {
                                 }
 
                                 if self.config.output.notification.on_recording_stop {
-                                    send_notification("Cancelled", "Transcription aborted", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency).await;
+                                    send_notification("Cancelled", "Transcription aborted", self.config.output.notification.show_engine_icon, self.config.engine).await;
                                 }
                             } else {
                                 tracing::trace!("Cancel ignored - not recording or transcribing");
@@ -3220,7 +2289,7 @@ impl Daemon {
                         }
 
                         if self.config.output.notification.on_recording_stop {
-                            send_notification("Cancelled", "Recording discarded", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency).await;
+                            send_notification("Cancelled", "Recording discarded", self.config.output.notification.show_engine_icon, self.config.engine).await;
                         }
 
                         continue;
@@ -3281,85 +2350,71 @@ impl Daemon {
                         }
                     }
 
-                    // Check for recording timeout. Skip when audio_capture is
-                    // already gone so we don't re-fire cleanup on every 100ms
-                    // tick while the streaming session drains server-side
-                    // (state stays Streaming until Ended arrives).
-                    let timeout_fired = audio_capture.is_some()
-                        && state.recording_duration().is_some_and(|d| d > max_duration);
-                    if timeout_fired {
-                        // Streaming has its own clean stop path: skip the
-                        // batch_transcribe branch below to avoid opening a
-                        // second WS session for audio already being processed
-                        // by the active streaming one.
-                        if state.is_streaming() {
+                    // Check for recording timeout
+                    if let Some(duration) = state.recording_duration() {
+                        if duration > max_duration {
                             tracing::warn!(
-                                "Recording timeout ({:.0}s limit) while streaming; closing capture",
+                                "Recording timeout ({:.0}s limit), transcribing captured audio",
                                 max_duration.as_secs_f32()
                             );
-                            self.stop_streaming_capture(&mut audio_capture).await;
-                            continue;
-                        }
 
-                        tracing::warn!(
-                            "Recording timeout ({:.0}s limit), transcribing captured audio",
-                            max_duration.as_secs_f32()
-                        );
+                            cleanup_output_mode_override();
+                            cleanup_model_override();
+                            cleanup_profile_override();
+                            cleanup_bool_override("smart_auto_submit");
 
-                        cleanup_output_mode_override();
-                        cleanup_model_override();
-                        cleanup_profile_override();
-                        cleanup_bool_override("smart_auto_submit");
+                            // Get model override from state before transitioning
+                            let model_override = match &state {
+                                State::Recording { model_override, .. } => model_override.as_deref(),
+                                State::EagerRecording { model_override, .. } => model_override.as_deref(),
+                                _ => None,
+                            };
 
-                        let model_override = match &state {
-                            State::Recording { model_override, .. } => model_override.as_deref(),
-                            State::EagerRecording { model_override, .. } => model_override.as_deref(),
-                            _ => None,
-                        };
+                            // Get transcriber for this recording
+                            let transcriber = match self.get_transcriber_for_recording(
+                                model_override,
+                                &transcriber_preloaded,
+                            ).await {
+                                Ok(t) => Some(t),
+                                Err(()) => {
+                                    state = State::Idle;
+                                    self.update_state("idle");
+                                    continue;
+                                }
+                            };
 
-                        let transcriber = match self.get_transcriber_for_recording(
-                            model_override,
-                            &transcriber_preloaded,
-                        ).await {
-                            Ok(t) => Some(t),
-                            Err(()) => {
-                                state = State::Idle;
-                                self.update_state("idle");
-                                continue;
-                            }
-                        };
-
-                        if state.is_eager_recording() {
-                            if let Some(mut capture) = audio_capture.take() {
-                                if let Ok(final_samples) = capture.stop().await {
-                                    if let State::EagerRecording { accumulated_audio, .. } = &mut state {
-                                        accumulated_audio.extend(final_samples);
+                            if state.is_eager_recording() {
+                                if let Some(mut capture) = audio_capture.take() {
+                                    if let Ok(final_samples) = capture.stop().await {
+                                        if let State::EagerRecording { accumulated_audio, .. } = &mut state {
+                                            accumulated_audio.extend(final_samples);
+                                        }
                                     }
                                 }
-                            }
 
-                            if let Some(transcriber) = transcriber {
-                                self.update_state("transcribing");
+                                if let Some(transcriber) = transcriber {
+                                    self.update_state("transcribing");
 
-                                if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
-                                    state = State::Transcribing { audio: Vec::new() };
-                                    self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
-                                } else {
-                                    tracing::debug!("Eager recording timeout produced empty result");
-                                    self.reset_to_idle(&mut state).await;
+                                    if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
+                                        state = State::Transcribing { audio: Vec::new() };
+                                        self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
+                                    } else {
+                                        tracing::debug!("Eager recording timeout produced empty result");
+                                        self.reset_to_idle(&mut state).await;
+                                    }
                                 }
-                            }
-                            eager_transcriber = None;
-                        } else {
-                            for (_, task) in self.eager_chunk_tasks.drain(..) {
-                                task.abort();
-                            }
+                                eager_transcriber = None;
+                            } else {
+                                for (_, task) in self.eager_chunk_tasks.drain(..) {
+                                    task.abort();
+                                }
 
-                            self.start_transcription_task(
-                                &mut state,
-                                &mut audio_capture,
-                                transcriber,
-                            ).await;
+                                self.start_transcription_task(
+                                    &mut state,
+                                    &mut audio_capture,
+                                    transcriber,
+                                ).await;
+                            }
                         }
                     }
                 }
@@ -3368,140 +2423,21 @@ impl Daemon {
                 _ = sigusr1.recv() => {
                     tracing::debug!("Received SIGUSR1 (start recording)");
                     if state.is_idle() {
-                        // Read model override from file (set by `voxtype record start --model X`)
                         let model_override = read_model_override();
                         tracing::info!("Recording started (external trigger), model_override = {:?}", model_override);
 
                         if self.config.output.notification.on_recording_start {
-                            send_notification("Recording Started", "External trigger", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency).await;
+                            send_notification("Recording Started", "External trigger", self.config.output.notification.show_engine_icon, self.config.engine).await;
                         }
 
-                        // Prepare model for transcription
-                        if self.config.on_demand_loading() {
-                            // Start model loading in background
-                            match self.config.engine {
-                                crate::config::TranscriptionEngine::Whisper => {
-                                    let config = self.config.whisper.clone();
-                                    let config_path = self.config_path.clone();
-                                    let model_to_load = model_override.clone();
-                                    self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                        let mut temp_manager = ModelManager::new(&config, config_path);
-                                        temp_manager.get_transcriber(model_to_load.as_deref())
-                                    }));
-                                }
-                                crate::config::TranscriptionEngine::Parakeet
-                                | crate::config::TranscriptionEngine::Moonshine
-                                | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::Soniox => {
-                                    let config = self.config.clone();
-                                    self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                        crate::transcribe::create_transcriber(&config).map(Arc::from)
-                                    }));
-                                }
-                            }
-                        } else {
-                            // Prepare model (spawns subprocess for gpu_isolation mode)
-                            match self.config.engine {
-                                crate::config::TranscriptionEngine::Whisper => {
-                                    if let Some(ref mut mm) = self.model_manager {
-                                        match mm.prepare_model(model_override.as_deref()) {
-                                            Ok(handle) => {
-                                                self.whisper_prepare_task = handle;
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!("Failed to prepare model: {}", e);
-                                            }
-                                        }
-                                    }
-                                }
-                                crate::config::TranscriptionEngine::Parakeet
-                                | crate::config::TranscriptionEngine::Moonshine
-                                | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::Soniox => {
-                                    if let Some(ref t) = transcriber_preloaded {
-                                        let transcriber = t.clone();
-                                        tokio::task::spawn_blocking(move || {
-                                            transcriber.prepare();
-                                        });
-                                    }
-                                }
-                            }
-                        }
-
-                        if self.try_start_streaming(
-                            &transcriber_preloaded,
-                            &mut state,
-                            &mut audio_capture,
-                            &mut streaming_handle,
-                            &mut streaming_session,
-                            &mut streaming_chain,
-                            model_override.clone(),
-                        ).await {
-                            tracing::info!("Streaming session started (SIGUSR1)");
-                        } else {
-                            match self.start_recording_capture().await {
-                                Ok(capture) => {
-                                    audio_capture = Some(capture);
-
-                                    // Use EagerRecording state if eager_processing is enabled
-                                    if self.config.whisper.eager_processing {
-                                        tracing::info!("Using eager input processing");
-                                        state = State::EagerRecording {
-                                            started_at: std::time::Instant::now(),
-                                            model_override,
-                                            accumulated_audio: Vec::new(),
-                                            chunks_sent: 0,
-                                            chunk_results: Vec::new(),
-                                            tasks_in_flight: 0,
-                                        };
-                                    } else {
-                                        state = State::Recording {
-                                            started_at: std::time::Instant::now(),
-                                            model_override,
-                                        };
-                                    }
-                                    self.update_state("recording");
-                                    self.play_feedback(SoundEvent::RecordingStart);
-                                    self.pause_media_players().await;
-
-                                    // Run pre-recording hook (e.g., enter compositor submap for cancel)
-                                    if let Some(cmd) = &self.config.output.pre_recording_command {
-                                        if let Err(e) = output::run_hook(cmd, "pre_recording").await {
-                                            tracing::warn!("{}", e);
-                                        }
-                                    }
-                                }
-                                Err(()) => {
-                                    // Helper already logged and played the error sound.
-                                }
-                            }
-                        }
+                        self.begin_recording(&mut state, &mut audio_capture, &transcriber_preloaded, model_override).await;
                     }
                 }
 
                 // Handle SIGUSR2 - stop recording (for compositor keybindings)
                 _ = sigusr2.recv() => {
                     tracing::debug!("Received SIGUSR2 (stop recording)");
-                    if state.is_streaming() {
-                        tracing::info!("SIGUSR2 stop while streaming; closing capture and disowning session");
-                        self.stop_streaming_capture(&mut audio_capture).await;
-                        // Drop the typing surface synchronously so any
-                        // Final/Partial events the backend emits while
-                        // draining its internal buffer reach the event-pump
-                        // arm with `streaming_session = None` and get
-                        // discarded instead of typed into whatever window
-                        // has focus by then.
-                        streaming_session = None;
-                        streaming_chain = None;
-                    } else if let State::Recording { model_override, .. } = &state {
+                    if let State::Recording { model_override, .. } = &state {
                         let transcriber = match self.get_transcriber_for_recording(
                             model_override.as_deref(),
                             &transcriber_preloaded,
@@ -3520,51 +2456,7 @@ impl Daemon {
                             transcriber,
                         ).await;
                     } else if state.is_eager_recording() {
-                        // Handle eager recording stop via external trigger - extract model_override first
-                        let model_override = match &state {
-                            State::EagerRecording { model_override, .. } => model_override.clone(),
-                            _ => None,
-                        };
-
-                        let duration = state.recording_duration().unwrap_or_default();
-                        tracing::info!("Eager recording stopped ({:.1}s)", duration.as_secs_f32());
-
-                        self.play_feedback(SoundEvent::RecordingStop);
-
-                        if self.config.output.notification.on_recording_stop {
-                            send_notification("Recording Stopped", "Transcribing...", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency).await;
-                        }
-
-                        // Stop audio capture and get remaining samples
-                        if let Some(mut capture) = audio_capture.take() {
-                            if let Ok(final_samples) = capture.stop().await {
-                                if let State::EagerRecording { accumulated_audio, .. } = &mut state {
-                                    accumulated_audio.extend(final_samples);
-                                }
-                            }
-                        }
-
-                        let transcriber = match self.get_transcriber_for_recording(
-                            model_override.as_deref(),
-                            &transcriber_preloaded,
-                        ).await {
-                            Ok(t) => t,
-                            Err(()) => {
-                                state = State::Idle;
-                                self.update_state("idle");
-                                continue;
-                            }
-                        };
-
-                        self.update_state("transcribing");
-
-                        if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
-                            state = State::Transcribing { audio: Vec::new() };
-                            self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
-                        } else {
-                            tracing::debug!("Eager recording produced empty result");
-                            self.reset_to_idle(&mut state).await;
-                        }
+                        self.stop_eager_recording_and_transcribe(&mut state, &mut audio_capture, &transcriber_preloaded).await;
                         eager_transcriber = None;
                     }
                 }
@@ -3580,102 +2472,6 @@ impl Daemon {
                     self.handle_transcription_result(&mut state, result).await;
                 }
 
-                // Streaming event pump (active only while State::Streaming).
-                event = async {
-                    match streaming_handle.as_mut() {
-                        Some(h) => h.events.recv().await,
-                        None => std::future::pending().await,
-                    }
-                }, if state.is_streaming() && streaming_handle.is_some() => {
-                    match event {
-                        Some(StreamingEvent::Partial { text, .. }) => {
-                            if let (Some(s), Some(chain)) =
-                                (streaming_session.as_mut(), streaming_chain.as_ref())
-                            {
-                                if let Err(e) = s.type_partial_delta(
-                                    chain,
-                                    text,
-                                    self.config.output.pre_output_command.as_deref(),
-                                    self.config.output.post_output_command.as_deref(),
-                                ).await {
-                                    tracing::warn!("Streaming partial delta type failed: {}", e);
-                                }
-                                if let State::Streaming { typed_chars, .. } = &mut state {
-                                    *typed_chars = s.typed_chars();
-                                }
-                            }
-                        }
-                        Some(StreamingEvent::Final { text, .. }) => {
-                            if let (Some(s), Some(chain)) =
-                                (streaming_session.as_mut(), streaming_chain.as_ref())
-                            {
-                                let pp = self.post_processor.as_ref();
-                                if let Err(e) = s.commit_segment(
-                                    chain,
-                                    &text,
-                                    pp,
-                                    self.config.output.pre_output_command.as_deref(),
-                                    self.config.output.post_output_command.as_deref(),
-                                ).await {
-                                    tracing::error!("Streaming commit_segment failed: {}", e);
-                                }
-                                // Mirror typed_chars onto the state for cancel-rewind.
-                                if let State::Streaming { typed_chars, finalized_text, .. } = &mut state {
-                                    *typed_chars = s.typed_chars();
-                                    finalized_text.clear();
-                                    finalized_text.push_str(s.finalized_text());
-                                }
-                            }
-                        }
-                        Some(StreamingEvent::Replace { backspace, text, .. }) => {
-                            if let (Some(s), Some(chain)) =
-                                (streaming_session.as_mut(), streaming_chain.as_ref())
-                            {
-                                if let Err(e) = s.replace_and_commit(
-                                    chain,
-                                    backspace,
-                                    &text,
-                                    self.config.output.pre_output_command.as_deref(),
-                                    self.config.output.post_output_command.as_deref(),
-                                ).await {
-                                    tracing::error!("Streaming replace_and_commit failed: {}", e);
-                                }
-                                if let State::Streaming { typed_chars, finalized_text, .. } = &mut state {
-                                    *typed_chars = s.typed_chars();
-                                    finalized_text.clear();
-                                    finalized_text.push_str(s.finalized_text());
-                                }
-                            }
-                        }
-                        Some(StreamingEvent::Error(err)) => {
-                            tracing::error!("Streaming backend error: {}", err);
-                            send_notification(
-                                "Streaming Error",
-                                &err.to_string(),
-                                self.config.output.notification.show_engine_icon,
-                                self.config.engine,
-                                "critical",
-                            ).await;
-                            self.end_streaming(
-                                &mut state,
-                                &mut audio_capture,
-                                &mut streaming_handle,
-                                &mut streaming_session,
-                                &mut streaming_chain,
-                            ).await;
-                        }
-                        Some(StreamingEvent::Ended) | None => {
-                            self.end_streaming(
-                                &mut state,
-                                &mut audio_capture,
-                                &mut streaming_handle,
-                                &mut streaming_session,
-                                &mut streaming_chain,
-                            ).await;
-                        }
-                    }
-                }
-
                 // Check for cancel during transcription
                 _ = tokio::time::sleep(Duration::from_millis(100)), if matches!(state, State::Transcribing { .. }) => {
                     if check_cancel_requested() {
@@ -3685,9 +2481,6 @@ impl Daemon {
                         if let Some(task) = self.transcription_task.take() {
                             task.abort();
                         }
-                        // Drop the cloned transcriber Arc so it isn't held
-                        // until the next transcription.
-                        self.active_transcriber = None;
 
                         cleanup_output_mode_override();
                         cleanup_model_override();
@@ -3705,7 +2498,7 @@ impl Daemon {
                         }
 
                         if self.config.output.notification.on_recording_stop {
-                            send_notification("Cancelled", "Transcription aborted", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency).await;
+                            send_notification("Cancelled", "Transcription aborted", self.config.output.notification.show_engine_icon, self.config.engine).await;
                         }
                     }
                 }
@@ -3811,13 +2604,7 @@ impl Daemon {
                         if self.meeting_mic_buffer.len() >= chunk_samples {
                             let mic_chunk: Vec<f32> = self.meeting_mic_buffer.drain(..chunk_samples).collect();
 
-                            // Also drain loopback buffer up to the same amount.
-                            // Do NOT pad to chunk_samples — diluting real speech
-                            // with silence can drop the VAD speech-frame ratio
-                            // below threshold and cause remote audio to be
-                            // discarded. Instead we reconcile timestamp offsets
-                            // after both sources have been dispatched via
-                            // sync_source_offsets.
+                            // Also drain loopback buffer up to the same amount
                             let loopback_len = self.meeting_loopback_buffer.len().min(chunk_samples);
                             let loopback_chunk: Vec<f32> = self.meeting_loopback_buffer.drain(..loopback_len).collect();
 
@@ -3851,12 +2638,7 @@ impl Daemon {
                                     }
                                 }
 
-                                // Process loopback chunk if we have any real samples.
-                                // If the monitor is lagging we simply skip — the
-                                // sync_source_offsets call below bumps loopback's
-                                // timestamp offset to match mic so the next
-                                // loopback chunk lands at the correct wall-clock
-                                // position.
+                                // Process loopback chunk if non-empty
                                 if !loopback_chunk.is_empty() {
                                     match daemon.process_chunk_with_source(loopback_chunk, meeting::data::AudioSource::Loopback).await {
                                         Ok(Some(segments)) => {
@@ -3871,11 +2653,6 @@ impl Daemon {
                                         }
                                     }
                                 }
-
-                                // Reconcile per-source offsets so any source that
-                                // received a short or skipped chunk this iteration
-                                // catches up to wall-clock before the next one.
-                                daemon.sync_source_offsets();
 
                                 // Dedup bleed-through: strip echoed phrases from mic segments
                                 if had_loopback {
@@ -3978,19 +2755,15 @@ impl Daemon {
             }
         }
 
-        // Cleanup hotkey listener
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        // Cleanup
         if let Some(mut listener) = hotkey_listener {
-            let _ = listener.stop(); // Best effort cleanup
+            listener.stop()?;
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        let _ = hotkey_listener; // Silence unused variable warning
 
         // Abort any pending transcription task
         if let Some(task) = self.transcription_task.take() {
             task.abort();
         }
-        self.active_transcriber = None;
 
         // Abort any pending eager chunk tasks
         for (_, task) in self.eager_chunk_tasks.drain(..) {
@@ -4019,12 +2792,6 @@ impl Daemon {
         // Remove PID file on shutdown
         if let Some(ref path) = self.pid_file_path {
             cleanup_pid_file(path);
-        }
-
-        // Remove the OSD audio level socket so a stale path doesn't
-        // confuse the next daemon start.
-        if let Some(ref hub) = self.level_hub {
-            hub.cleanup();
         }
 
         tracing::info!("Daemon stopped");
@@ -4217,7 +2984,6 @@ mod tests {
         });
     }
 
-    #[test]
     fn test_pidlock_acquisition_succeeds() {
         with_test_runtime_dir(|dir| {
             let lock_path = dir.join("voxtype.lock");
@@ -4272,39 +3038,6 @@ mod tests {
                 "Lock acquisition should succeed after previous lock released: {:?}",
                 result.err()
             );
-        });
-    }
-
-    #[test]
-    fn test_stale_lockfile_cleanup() {
-        with_test_runtime_dir(|dir| {
-            let lock_path = dir.join("voxtype.lock");
-
-            // Write a stale lockfile with a PID that doesn't exist
-            // PID 99999999 is very unlikely to exist
-            std::fs::write(&lock_path, "99999999").expect("Failed to write stale lockfile");
-            assert!(lock_path.exists(), "Stale lockfile should exist");
-
-            // cleanup_stale_lockfile should detect and remove it
-            let cleaned = cleanup_stale_lockfile(&lock_path);
-            assert!(cleaned, "Stale lockfile should be cleaned up");
-            assert!(!lock_path.exists(), "Stale lockfile should be removed");
-        });
-    }
-
-    #[test]
-    fn test_stale_lockfile_not_cleaned_if_pid_running() {
-        with_test_runtime_dir(|dir| {
-            let lock_path = dir.join("voxtype.lock");
-
-            // Write a lockfile with our own PID (which is running)
-            let our_pid = std::process::id();
-            std::fs::write(&lock_path, our_pid.to_string()).expect("Failed to write lockfile");
-
-            // cleanup_stale_lockfile should NOT remove it (PID is running)
-            let cleaned = cleanup_stale_lockfile(&lock_path);
-            assert!(!cleaned, "Lockfile with running PID should not be cleaned");
-            assert!(lock_path.exists(), "Lockfile should still exist");
         });
     }
 }

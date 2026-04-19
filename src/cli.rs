@@ -498,7 +498,6 @@ pub struct Cli {
     pub append_text: Option<String>,
 
     // -- Tray --
-
     /// Enable system tray icon (StatusNotifierItem)
     #[arg(long, help_heading = "Tray")]
     pub tray: bool,

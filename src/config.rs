@@ -449,17 +449,11 @@ pub struct Config {
 }
 
 /// System tray (StatusNotifierItem) configuration
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct TrayConfig {
     /// Enable the system tray icon (default: false)
     #[serde(default)]
     pub enabled: bool,
-}
-
-impl Default for TrayConfig {
-    fn default() -> Self {
-        Self { enabled: false }
-    }
 }
 
 /// Hotkey detection configuration
@@ -4302,11 +4296,17 @@ mod tests {
         // Set env var before loading config
         std::env::set_var("VOXTYPE_TRAY_ENABLED", "true");
         let config = load_config(None).unwrap();
-        assert!(config.tray.enabled, "VOXTYPE_TRAY_ENABLED=true should enable tray");
+        assert!(
+            config.tray.enabled,
+            "VOXTYPE_TRAY_ENABLED=true should enable tray"
+        );
 
         std::env::set_var("VOXTYPE_TRAY_ENABLED", "false");
         let config = load_config(None).unwrap();
-        assert!(!config.tray.enabled, "VOXTYPE_TRAY_ENABLED=false should disable tray");
+        assert!(
+            !config.tray.enabled,
+            "VOXTYPE_TRAY_ENABLED=false should disable tray"
+        );
 
         // Clean up
         std::env::remove_var("VOXTYPE_TRAY_ENABLED");
