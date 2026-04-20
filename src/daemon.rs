@@ -498,6 +498,10 @@ pub struct Daemon {
     >,
     // Background task for transcription (allows cancel during transcription)
     transcription_task: Option<tokio::task::JoinHandle<TranscriptionResult>>,
+    // Model override that was active for the in-flight transcription_task, so
+    // corpus metadata can record the actual model used even after the
+    // Recording → Transcribing state transition drops the override.
+    pending_model_override: Option<String>,
     // Background tasks for eager chunk transcriptions (chunk_index, task)
     eager_chunk_tasks: Vec<(
         usize,
@@ -519,6 +523,9 @@ pub struct Daemon {
     // GTCRN speech enhancer for mic echo cancellation
     #[cfg(feature = "onnx-common")]
     speech_enhancer: Option<std::sync::Arc<audio::enhance::GtcrnEnhancer>>,
+    /// Corpus writer for post-processing training data capture.
+    /// None when `config.corpus.enabled == false` or startup failed.
+    corpus_writer: Option<std::sync::Arc<crate::corpus::CorpusWriter>>,
     // Media players that were paused when recording started (for resume on stop)
     paused_media_players: Vec<String>,
 }
@@ -607,6 +614,7 @@ impl Daemon {
             model_manager: None,
             model_load_task: None,
             transcription_task: None,
+            pending_model_override: None,
             eager_chunk_tasks: Vec::new(),
             vad,
             meeting_daemon: None,
@@ -617,6 +625,7 @@ impl Daemon {
             meeting_event_rx: None,
             #[cfg(feature = "onnx-common")]
             speech_enhancer: None,
+            corpus_writer: None,
             paused_media_players: Vec::new(),
         }
     }
@@ -1196,6 +1205,13 @@ impl Daemon {
         let duration = state.recording_duration().unwrap_or_default();
         tracing::info!("Recording stopped ({:.1}s)", duration.as_secs_f32());
 
+        // Preserve the active model_override so corpus metadata can record it
+        // after the Recording → Transcribing state transition drops it.
+        self.pending_model_override = match state {
+            State::Recording { model_override, .. } => model_override.clone(),
+            _ => None,
+        };
+
         // Play audio feedback
         self.play_feedback(SoundEvent::RecordingStop);
 
@@ -1285,6 +1301,8 @@ impl Daemon {
         &mut self,
         state: &mut State,
         result: std::result::Result<TranscriptionResult, tokio::task::JoinError>,
+        captured_audio: Vec<f32>,
+        model_override: Option<String>,
     ) {
         match result {
             Ok(Ok(text)) => {
@@ -1313,6 +1331,9 @@ impl Daemon {
                         );
                     }
 
+                    // Save before it's consumed by the final_text block (needed for corpus capture).
+                    let processed_text_for_corpus = processed_text.clone();
+
                     // Check for profile override from CLI flags
                     let profile_override = read_profile_override();
                     let active_profile = profile_override
@@ -1337,6 +1358,7 @@ impl Daemon {
                         }
                     });
                     // Apply post-processing command (profile overrides default)
+                    let mut post_processor_ran = false;
                     let final_text = if let Some(profile) = active_profile {
                         if let Some(ref cmd) = profile.post_process_command {
                             let timeout_ms = profile.post_process_timeout_ms.unwrap_or(30000);
@@ -1358,6 +1380,7 @@ impl Daemon {
                                 .await;
                             tracing::info!("Post-processed: changed: {}", result != processed_text);
                             tracing::debug!("Post-processed result: {:?}", result);
+                            post_processor_ran = true;
                             result
                         } else {
                             // Profile exists but has no post_process_command, use default
@@ -1369,6 +1392,7 @@ impl Daemon {
                                     .await;
                                 tracing::info!("Post-processed: changed: {}", result != processed_text);
                                 tracing::debug!("Post-processed result: {:?}", result);
+                                post_processor_ran = true;
                                 result
                             } else {
                                 processed_text
@@ -1382,6 +1406,7 @@ impl Daemon {
                             .await;
                         tracing::info!("Post-processed: changed: {}", result != processed_text);
                         tracing::debug!("Post-processed result: {:?}", result);
+                        post_processor_ran = true;
                         result
                     } else {
                         processed_text
@@ -1390,6 +1415,58 @@ impl Daemon {
                     // Track last dictation for context in subsequent post-processing
                     self.last_dictation =
                         Some((final_text.clone(), Instant::now()));
+
+                    // Corpus capture: fire-and-forget save of this session.
+                    // Skip when captured_audio is empty — this is a defensive guard for
+                    // callers that didn't have a buffer to pass in (e.g. error paths). The
+                    // eager-mode path also threads its accumulated buffer through here.
+                    if let Some(writer) = self.corpus_writer.clone().filter(|_| !captured_audio.is_empty()) {
+                        let post_ran = post_processor_ran;
+                        let active_profile_for_corpus = profile_override
+                            .as_ref()
+                            .and_then(|name| self.config.get_profile(name));
+                        let post_cmd: Option<String> = if post_ran {
+                            active_profile_for_corpus
+                                .and_then(|p| p.post_process_command.clone())
+                                .or_else(|| {
+                                    self.config
+                                        .output
+                                        .post_process
+                                        .as_ref()
+                                        .map(|pp| pp.command.clone())
+                                })
+                        } else {
+                            None
+                        };
+
+                        let duration_secs = (captured_audio.len() as f32)
+                            / (self.config.audio.sample_rate as f32);
+                        let session = crate::corpus::CorpusSession {
+                            samples: captured_audio,
+                            sample_rate: self.config.audio.sample_rate,
+                            raw_text: text.clone(),
+                            processed_text: processed_text_for_corpus.clone(),
+                            post_text: if post_ran { Some(final_text.clone()) } else { None },
+                            engine: self.config.engine.name().to_string(),
+                            model: model_override.clone().unwrap_or_else(|| self.config.model_name().to_string()),
+                            language: if self.config.whisper.language.is_auto() {
+                                None
+                            } else {
+                                Some(self.config.whisper.language.primary().to_string())
+                            },
+                            profile: profile_override.clone(),
+                            post_process_command: post_cmd,
+                            duration_secs,
+                            recorded_at: chrono::Local::now(),
+                        };
+
+                        tokio::task::spawn_blocking(move || {
+                            match writer.save(session) {
+                                Ok(id) => tracing::debug!("Corpus: saved session {}", id),
+                                Err(e) => tracing::warn!("Corpus save failed: {}", e),
+                            }
+                        });
+                    }
 
                     if smart_submit {
                         tracing::debug!(
@@ -1559,6 +1636,30 @@ impl Daemon {
 
         // Mark any orphaned active meetings as completed
         cleanup_stale_meetings(&self.config);
+
+        // Initialize corpus writer if enabled.
+        self.corpus_writer = if self.config.corpus.enabled {
+            let resolved = if self.config.corpus.path == "auto" {
+                Config::data_dir().join("corpus")
+            } else {
+                std::path::PathBuf::from(&self.config.corpus.path)
+            };
+            let cfg = crate::corpus::CorpusConfig {
+                path: resolved.clone(),
+            };
+            match crate::corpus::CorpusWriter::open(cfg) {
+                Ok(w) => {
+                    tracing::info!("Corpus capture enabled at {:?}", resolved);
+                    Some(std::sync::Arc::new(w))
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to open corpus dir {:?}: {}", resolved, e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         // Write PID file for external control via signals
         self.pid_file_path = write_pid_file();
@@ -1914,9 +2015,17 @@ impl Daemon {
                                 self.update_state("transcribing");
 
                                 if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
-                                    // Move to outputting state and handle via transcription result flow
+                                    // Extract accumulated audio and model_override before transitioning state.
+                                    // finish_eager_recording clones internally, so the state's buffer is still populated here.
+                                    let (captured_audio, captured_model_override) = match &mut state {
+                                        State::EagerRecording { accumulated_audio, model_override, .. } => (
+                                            std::mem::take(accumulated_audio),
+                                            model_override.clone(),
+                                        ),
+                                        _ => (Vec::new(), None),
+                                    };
                                     state = State::Transcribing { audio: Vec::new() };
-                                    self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
+                                    self.handle_transcription_result(&mut state, Ok(Ok(text)), captured_audio, captured_model_override).await;
                                 } else {
                                     tracing::debug!("Eager recording produced empty result");
                                     self.reset_to_idle(&mut state).await;
@@ -2097,8 +2206,17 @@ impl Daemon {
                                 self.update_state("transcribing");
 
                                 if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
+                                    // Extract accumulated audio and model_override before transitioning state.
+                                    // finish_eager_recording clones internally, so the state's buffer is still populated here.
+                                    let (captured_audio, captured_model_override) = match &mut state {
+                                        State::EagerRecording { accumulated_audio, model_override, .. } => (
+                                            std::mem::take(accumulated_audio),
+                                            model_override.clone(),
+                                        ),
+                                        _ => (Vec::new(), None),
+                                    };
                                     state = State::Transcribing { audio: Vec::new() };
-                                    self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
+                                    self.handle_transcription_result(&mut state, Ok(Ok(text)), captured_audio, captured_model_override).await;
                                 } else {
                                     tracing::debug!("Eager recording produced empty result");
                                     self.reset_to_idle(&mut state).await;
@@ -2159,6 +2277,7 @@ impl Daemon {
                                 if let Some(task) = self.transcription_task.take() {
                                     task.abort();
                                 }
+                                self.pending_model_override = None;
 
                                 cleanup_output_mode_override();
                                 cleanup_model_override();
@@ -2344,8 +2463,17 @@ impl Daemon {
                                     self.update_state("transcribing");
 
                                     if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
+                                        // Extract accumulated audio and model_override before transitioning state.
+                                        // finish_eager_recording clones internally, so the state's buffer is still populated here.
+                                        let (captured_audio, captured_model_override) = match &mut state {
+                                            State::EagerRecording { accumulated_audio, model_override, .. } => (
+                                                std::mem::take(accumulated_audio),
+                                                model_override.clone(),
+                                            ),
+                                            _ => (Vec::new(), None),
+                                        };
                                         state = State::Transcribing { audio: Vec::new() };
-                                        self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
+                                        self.handle_transcription_result(&mut state, Ok(Ok(text)), captured_audio, captured_model_override).await;
                                     } else {
                                         tracing::debug!("Eager recording timeout produced empty result");
                                         self.reset_to_idle(&mut state).await;
@@ -2535,8 +2663,17 @@ impl Daemon {
                         self.update_state("transcribing");
 
                         if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
+                            // Extract accumulated audio and model_override before transitioning state.
+                            // finish_eager_recording clones internally, so the state's buffer is still populated here.
+                            let (captured_audio, captured_model_override) = match &mut state {
+                                State::EagerRecording { accumulated_audio, model_override, .. } => (
+                                    std::mem::take(accumulated_audio),
+                                    model_override.clone(),
+                                ),
+                                _ => (Vec::new(), None),
+                            };
                             state = State::Transcribing { audio: Vec::new() };
-                            self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
+                            self.handle_transcription_result(&mut state, Ok(Ok(text)), captured_audio, captured_model_override).await;
                         } else {
                             tracing::debug!("Eager recording produced empty result");
                             self.reset_to_idle(&mut state).await;
@@ -2553,7 +2690,13 @@ impl Daemon {
                     }
                 }, if self.transcription_task.is_some() => {
                     self.transcription_task = None;
-                    self.handle_transcription_result(&mut state, result).await;
+                    let captured_audio = if let State::Transcribing { audio } = &mut state {
+                        std::mem::take(audio)
+                    } else {
+                        Vec::new()
+                    };
+                    let model_override = self.pending_model_override.take();
+                    self.handle_transcription_result(&mut state, result, captured_audio, model_override).await;
                 }
 
                 // Check for cancel during transcription
@@ -2565,6 +2708,7 @@ impl Daemon {
                         if let Some(task) = self.transcription_task.take() {
                             task.abort();
                         }
+                        self.pending_model_override = None;
 
                         cleanup_output_mode_override();
                         cleanup_model_override();

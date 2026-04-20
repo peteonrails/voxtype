@@ -71,6 +71,7 @@
 pub mod audio;
 pub mod cli;
 pub mod config;
+pub mod corpus;
 pub mod cpu;
 pub mod daemon;
 pub mod eager;

@@ -2249,6 +2249,34 @@ voxtype setup dms --qml        # Output raw QML (for scripting)
 
 ---
 
+## Building a Training Corpus
+
+Voxtype can autosave every push-to-talk session as an `(audio, raw_text, processed_text, post_text, metadata)` tuple so you can iteratively build a dataset for training or evaluating LLM post-processing. The `processed_text` stage (spoken-punctuation and word replacements) is written only when it differs from the raw transcription.
+
+Enable it in your config:
+
+```toml
+[corpus]
+enabled = true
+path = "auto"  # ~/.local/share/voxtype/corpus/
+```
+
+Or via CLI for a single run:
+
+```bash
+voxtype --corpus --corpus-path ~/my-corpus
+```
+
+Every successful recording produces files sharing a timestamped stem (e.g. `2026-04-20T14-32-05_a7f3.wav`, `.raw.txt`, optional `.processed.txt` when it differs from raw, `.post.txt` when a post-processor ran, `.json`). The sidecar `text_stages` object indicates which text files are present. See `docs/CONFIGURATION.md` for the full schema.
+
+The corpus is designed for downstream tooling: HuggingFace `datasets` (`load_dataset("audiofolder", ...)`), pandas, or a custom script that reads the JSON sidecars and text files.
+
+### Secrets caveat
+
+The sidecar JSON records the `post_process_command` string that was used for each recording. If you embed credentials directly in the command (e.g. `API_KEY=sk-... curl ...`), those credentials end up in every sidecar. Prefer script files that read secrets from env vars or config files, and keep the command in your voxtype config limited to the script name or a non-sensitive invocation.
+
+---
+
 ## Feedback
 
 We want to hear from you! Voxtype is a young project and your feedback helps make it better.

@@ -1050,6 +1050,21 @@ journalctl --user -u pulseaudio -n 20
 
 ---
 
+## Corpus files aren't appearing
+
+If you enabled `[corpus] enabled = true` (or `--corpus` / `VOXTYPE_CORPUS_ENABLED=1`) but no files appear in the corpus directory after recording:
+
+1. Check the daemon logs (`-vv` or `journalctl --user -u voxtype`). Look for one of:
+   - `Failed to open corpus dir "...": ...` - the directory cannot be created (permission, read-only mount). Check the path and filesystem permissions.
+   - `Corpus save failed: ...` - a single session failed to write. Common causes: disk full, directory turned read-only mid-session, or the file system doesn't support long filenames.
+2. Eager-mode recordings worked, but you're using the main (non-eager) path and still no files: confirm the recording actually produced transcribed text. Empty transcriptions are intentionally skipped before reaching the corpus save site.
+3. Verify the resolved path. If `path = "auto"`, corpus writes to `~/.local/share/voxtype/corpus/`. Check with:
+   ```bash
+   ls -la ~/.local/share/voxtype/corpus/
+   ```
+
+---
+
 ## Getting Help
 
 If you're still having issues:

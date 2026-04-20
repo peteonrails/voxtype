@@ -295,6 +295,20 @@ on_transcription = true
 # [profiles.code]
 # post_process_command = "ollama run llama3.2:1b 'Format as code comment...'"
 # output_mode = "clipboard"
+
+[corpus]
+# Autosave push-to-talk sessions as paired (audio, text, metadata) tuples
+# for building a training corpus to improve LLM post-processing.
+# When enabled, each recording produces a set of files in the corpus path:
+#   <timestamp>_<id>.wav          — 16 kHz mono int16 audio
+#   <timestamp>_<id>.raw.txt      — raw ASR output
+#   <timestamp>_<id>.processed.txt — text after replacements/spoken punctuation (if different)
+#   <timestamp>_<id>.post.txt     — text after LLM post-processing (if post-processor ran)
+#   <timestamp>_<id>.json         — metadata sidecar
+enabled = false
+
+# Storage path ("auto" = ~/.local/share/voxtype/corpus/)
+path = "auto"
 "#;
 
 /// Hotkey activation mode
@@ -362,6 +376,10 @@ pub struct Config {
     /// Meeting transcription configuration
     #[serde(default)]
     pub meeting: MeetingConfig,
+
+    /// Corpus capture configuration (post-processing training)
+    #[serde(default)]
+    pub corpus: CorpusConfig,
 
     /// Optional path to state file for external integrations (e.g., Waybar)
     /// When set, the daemon writes current state ("idle", "recording", "transcribing")
@@ -1183,6 +1201,21 @@ pub enum TranscriptionEngine {
     Omnilingual,
 }
 
+impl TranscriptionEngine {
+    /// Stable lowercase identifier used in logs, corpus metadata, etc.
+    pub fn name(&self) -> &'static str {
+        match self {
+            TranscriptionEngine::Whisper => "whisper",
+            TranscriptionEngine::Parakeet => "parakeet",
+            TranscriptionEngine::Moonshine => "moonshine",
+            TranscriptionEngine::SenseVoice => "sensevoice",
+            TranscriptionEngine::Paraformer => "paraformer",
+            TranscriptionEngine::Dolphin => "dolphin",
+            TranscriptionEngine::Omnilingual => "omnilingual",
+        }
+    }
+}
+
 /// VAD backend selection
 ///
 /// Determines which voice activity detection algorithm to use.
@@ -1484,6 +1517,33 @@ impl Default for MeetingConfig {
             summary: MeetingSummaryConfig::default(),
         }
     }
+}
+
+/// Corpus capture configuration — autosaves push-to-talk sessions
+/// as paired (audio, text, metadata) artifacts for training/evaluation.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CorpusConfig {
+    /// Enable corpus capture (default: false)
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Storage path for corpus artifacts ("auto" for default location)
+    /// Default: ~/.local/share/voxtype/corpus/
+    #[serde(default = "default_corpus_path")]
+    pub path: String,
+}
+
+impl Default for CorpusConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: default_corpus_path(),
+        }
+    }
+}
+
+fn default_corpus_path() -> String {
+    "auto".to_string()
 }
 
 /// Notification configuration
@@ -1877,6 +1937,7 @@ impl Default for Config {
             vad: VadConfig::default(),
             status: StatusConfig::default(),
             meeting: MeetingConfig::default(),
+            corpus: CorpusConfig::default(),
             state_file: Some("auto".to_string()),
             profiles: HashMap::new(),
         }
@@ -3775,5 +3836,61 @@ mod tests {
 
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.hotkey.profile_modifiers.is_empty());
+    }
+
+    #[test]
+    fn test_corpus_config_defaults() {
+        let config = Config::default();
+        assert!(!config.corpus.enabled);
+        assert_eq!(config.corpus.path, "auto");
+    }
+
+    #[test]
+    fn test_corpus_config_parses_from_toml() {
+        let toml = r#"
+[hotkey]
+key = "SCROLLLOCK"
+
+[audio]
+device = "default"
+sample_rate = 16000
+max_duration_secs = 60
+
+[output]
+mode = "type"
+
+[corpus]
+enabled = true
+path = "/tmp/corpus"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.corpus.enabled);
+        assert_eq!(config.corpus.path, "/tmp/corpus");
+    }
+
+    #[test]
+    fn test_corpus_config_omitted_uses_defaults() {
+        let toml = r#"
+[hotkey]
+key = "SCROLLLOCK"
+
+[audio]
+device = "default"
+sample_rate = 16000
+max_duration_secs = 60
+
+[output]
+mode = "type"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(!config.corpus.enabled);
+        assert_eq!(config.corpus.path, "auto");
+    }
+
+    #[test]
+    fn default_config_template_parses_and_has_corpus_defaults() {
+        let config: Config = toml::from_str(DEFAULT_CONFIG).unwrap();
+        assert!(!config.corpus.enabled);
+        assert_eq!(config.corpus.path, "auto");
     }
 }
