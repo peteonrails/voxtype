@@ -316,6 +316,25 @@ pub struct Cli {
     #[arg(long, value_name = "MS", help_heading = "VAD", hide_short_help = true)]
     pub vad_min_speech_ms: Option<u32>,
 
+    // -- Corpus capture --
+
+    /// Enable corpus capture for this daemon run (overrides config)
+    #[arg(long, help_heading = "Corpus",
+        long_help = "Autosave every push-to-talk session as an\n\
+        (audio, raw, processed, post, metadata) tuple into the corpus directory.\n\
+        The processed and post files are only written when they differ from raw\n\
+        or when a post-processor runs, respectively.\n\
+        Useful for building a training corpus for LLM post-processing.")]
+    pub corpus: bool,
+
+    /// Disable corpus capture for this daemon run (overrides config)
+    #[arg(long, help_heading = "Corpus", conflicts_with = "corpus")]
+    pub no_corpus: bool,
+
+    /// Override corpus storage directory (implies --corpus unless --no-corpus is set)
+    #[arg(long, value_name = "DIR", help_heading = "Corpus")]
+    pub corpus_path: Option<std::path::PathBuf>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -1888,5 +1907,26 @@ mod tests {
             }
             _ => panic!("Expected Record command"),
         }
+    }
+
+    #[test]
+    fn corpus_flags_parse() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["voxtype", "--corpus", "--corpus-path", "/tmp/c"]).unwrap();
+        assert!(cli.corpus);
+        assert!(!cli.no_corpus);
+        assert_eq!(cli.corpus_path, Some(std::path::PathBuf::from("/tmp/c")));
+    }
+
+    #[test]
+    fn corpus_and_no_corpus_conflict() {
+        use clap::Parser;
+        let result = Cli::try_parse_from(["voxtype", "--corpus", "--no-corpus"]);
+        assert!(result.is_err(), "expected conflict error");
+        let msg = match result {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected Err"),
+        };
+        assert!(msg.contains("--no-corpus") || msg.contains("--corpus"));
     }
 }

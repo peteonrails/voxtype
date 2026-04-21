@@ -162,6 +162,34 @@ async fn main() -> anyhow::Result<()> {
         config.hotkey.model_modifier = Some(model_modifier);
     }
 
+    // Corpus overrides
+    if let Ok(val) = std::env::var("VOXTYPE_CORPUS_ENABLED") {
+        match val.to_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => config.corpus.enabled = true,
+            "0" | "false" | "no" | "off" => config.corpus.enabled = false,
+            other => tracing::warn!(
+                "Ignoring VOXTYPE_CORPUS_ENABLED={:?} (expected one of: 1/0, true/false, yes/no, on/off)",
+                other
+            ),
+        }
+    }
+    if let Ok(path) = std::env::var("VOXTYPE_CORPUS_PATH") {
+        config.corpus.path = path;
+    }
+    if let Some(path) = &cli.corpus_path {
+        config.corpus.path = path.display().to_string();
+        // --corpus-path implies enabled unless explicitly disabled
+        if !cli.no_corpus {
+            config.corpus.enabled = true;
+        }
+    }
+    if cli.corpus {
+        config.corpus.enabled = true;
+    }
+    if cli.no_corpus {
+        config.corpus.enabled = false;
+    }
+
     // Whisper overrides
     if let Some(delay) = cli.pre_type_delay {
         config.output.pre_type_delay_ms = delay;

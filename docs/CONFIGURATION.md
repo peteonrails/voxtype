@@ -2249,6 +2249,41 @@ Timeout for summarization requests.
 
 ---
 
+## `[corpus]` - Training Corpus Capture
+
+Autosaves push-to-talk sessions as paired `(audio, text, metadata)` artifacts so you can build a dataset for training or evaluating LLM post-processing.
+
+### `enabled` (bool)
+**Default:** `false`
+
+When true, each successful push-to-talk recording writes a set of files to the corpus directory. No data is captured when disabled.
+
+### `path` (string)
+**Default:** `"auto"` (resolves to `~/.local/share/voxtype/corpus/`)
+
+Directory where corpus artifacts are written. Created automatically if it does not exist.
+
+### Files per session
+
+Each session produces files sharing a timestamped stem (e.g. `2026-04-20T14-32-05_a7f3`):
+
+| File | Always present? | Content |
+|------|-----------------|---------|
+| `<stem>.wav` | yes | 16 kHz mono int16 audio passed to the transcriber |
+| `<stem>.raw.txt` | yes | Raw ASR output |
+| `<stem>.processed.txt` | only if differs from raw | Text after spoken punctuation / replacements |
+| `<stem>.post.txt` | only if post-processor ran | Final text delivered as output |
+| `<stem>.json` | yes | Metadata sidecar (model, engine, language, profile, duration, ...) |
+
+### Overrides
+
+| Layer | Setting |
+|-------|---------|
+| CLI | `--corpus` / `--no-corpus` / `--corpus-path <DIR>` |
+| Env | `VOXTYPE_CORPUS_ENABLED=true`, `VOXTYPE_CORPUS_PATH=/path` |
+
+---
+
 ## [status]
 
 Controls status display icons for Waybar and other tray integrations.
