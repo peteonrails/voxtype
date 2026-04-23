@@ -54,6 +54,8 @@ pub mod dolphin;
 #[cfg(feature = "omnilingual")]
 pub mod omnilingual;
 
+use serde::Serialize;
+
 use crate::config::{Config, TranscriptionEngine, WhisperConfig, WhisperMode};
 use crate::error::TranscribeError;
 use crate::setup::gpu;
@@ -66,6 +68,23 @@ pub struct TimedSegment {
     pub start_secs: f32,
     /// End time in seconds relative to the audio input
     pub end_secs: f32,
+}
+
+/// A single transcription segment with timestamps.
+#[derive(Debug, Clone, Serialize)]
+pub struct TranscriptionSegment {
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+}
+
+/// Structured transcription result with segments.
+#[derive(Debug, Clone, Serialize)]
+pub struct TranscriptionResult {
+    pub text: String,
+    pub language: String,
+    pub duration: f64,
+    pub segments: Vec<TranscriptionSegment>,
 }
 
 /// Trait for speech-to-text implementations
@@ -88,6 +107,46 @@ pub trait Transcriber: Send + Sync {
                 end_secs: duration,
             }])
         }
+    }
+
+    /// Transcribe audio with optional request-level overrides.
+    ///
+    /// Implementations may ignore unsupported options and fall back to
+    /// `transcribe(samples)`.
+    fn transcribe_with_options(
+        &self,
+        samples: &[f32],
+        language_override: Option<&str>,
+        prompt_override: Option<&str>,
+    ) -> Result<String, TranscribeError> {
+        let _ = language_override;
+        let _ = prompt_override;
+        self.transcribe(samples)
+    }
+
+    /// Transcribe with segment-level timestamps.
+    ///
+    /// Default implementation wraps `transcribe_with_options` into a single
+    /// segment spanning the full duration. Implementations that can produce
+    /// per-segment timestamps (e.g. WhisperTranscriber) should override this.
+    fn transcribe_segments(
+        &self,
+        samples: &[f32],
+        language_override: Option<&str>,
+        prompt_override: Option<&str>,
+    ) -> Result<TranscriptionResult, TranscribeError> {
+        let text = self.transcribe_with_options(samples, language_override, prompt_override)?;
+        let duration = samples.len() as f64 / 16000.0;
+        Ok(TranscriptionResult {
+            text: text.clone(),
+            language: language_override.unwrap_or("auto").to_string(),
+            duration,
+            segments: vec![TranscriptionSegment {
+                start: 0.0,
+                end: duration,
+                text,
+            }],
+        })
     }
 
     /// Prepare for transcription (optional, called when recording starts)

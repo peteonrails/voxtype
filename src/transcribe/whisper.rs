@@ -7,16 +7,75 @@
 //! - Auto-detect: Let Whisper detect from all ~99 supported languages
 //! - Constrained auto-detect: Detect from a user-specified subset of languages
 
-use super::Transcriber;
+use super::{Transcriber, TranscriptionResult, TranscriptionSegment};
 use crate::config::{Config, LanguageConfig, WhisperConfig};
 use crate::error::TranscribeError;
+use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use std::sync::{Condvar, Mutex};
+use whisper_rs::{
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
+};
+
+struct StatePool<T> {
+    idle: Mutex<Vec<T>>,
+    available: Condvar,
+}
+
+impl<T> StatePool<T> {
+    fn new(items: Vec<T>) -> Self {
+        assert!(!items.is_empty(), "state pool requires at least one item");
+        Self {
+            idle: Mutex::new(items),
+            available: Condvar::new(),
+        }
+    }
+
+    fn acquire(&self) -> StatePoolLease<'_, T> {
+        let mut idle = self.idle.lock().unwrap();
+        loop {
+            if let Some(item) = idle.pop() {
+                return StatePoolLease {
+                    pool: self,
+                    item: Some(item),
+                };
+            }
+            idle = self.available.wait(idle).unwrap();
+        }
+    }
+}
+
+struct StatePoolLease<'a, T> {
+    pool: &'a StatePool<T>,
+    item: Option<T>,
+}
+
+impl<T> Deref for StatePoolLease<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.item.as_ref().unwrap()
+    }
+}
+
+impl<T> DerefMut for StatePoolLease<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.item.as_mut().unwrap()
+    }
+}
+
+impl<T> Drop for StatePoolLease<'_, T> {
+    fn drop(&mut self) {
+        let mut idle = self.pool.idle.lock().unwrap();
+        idle.push(self.item.take().unwrap());
+        self.pool.available.notify_one();
+    }
+}
 
 /// Whisper-based transcriber
 pub struct WhisperTranscriber {
-    /// Whisper context (holds the model)
-    ctx: WhisperContext,
+    /// Reused inference states backed by the loaded model context.
+    state_pool: StatePool<WhisperState>,
     /// Language configuration (single, auto, or array)
     language: LanguageConfig,
     /// Whether to translate to English
@@ -56,11 +115,24 @@ impl WhisperTranscriber {
         .map_err(|e| TranscribeError::InitFailed(e.to_string()))?;
 
         tracing::info!("Model loaded in {:.2}s", start.elapsed().as_secs_f32());
-
         let threads = config.threads.unwrap_or_else(|| num_cpus::get().min(4));
+        let state_pool_size = determine_state_pool_size(threads);
+        let mut states = Vec::with_capacity(state_pool_size);
+        for _ in 0..state_pool_size {
+            states.push(
+                ctx.create_state()
+                    .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?,
+            );
+        }
+        tracing::info!(
+            "Prepared {} reusable whisper inference state(s) with {} thread(s) each",
+            state_pool_size,
+            threads
+        );
+        let state_pool = StatePool::new(states);
 
         Ok(Self {
-            ctx,
+            state_pool,
             language: config.language.clone(),
             translate: config.translate,
             threads,
@@ -132,6 +204,15 @@ impl WhisperTranscriber {
 
 impl Transcriber for WhisperTranscriber {
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
+        self.transcribe_with_options(samples, None, None)
+    }
+
+    fn transcribe_with_options(
+        &self,
+        samples: &[f32],
+        language_override: Option<&str>,
+        prompt_override: Option<&str>,
+    ) -> Result<String, TranscribeError> {
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat(
                 "Empty audio buffer".to_string(),
@@ -147,14 +228,31 @@ impl Transcriber for WhisperTranscriber {
 
         let start = std::time::Instant::now();
 
-        // Create state for this transcription
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
+        let mut state = self.state_pool.acquire();
 
-        // Determine language based on configuration mode
-        let selected_language: Option<String> = if self.language.is_auto() {
+        let override_lang = language_override
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty());
+
+        // Determine language based on request override and config mode.
+        let selected_language: Option<String> = if let Some(lang) = override_lang {
+            if lang == "auto" {
+                if self.language.is_multiple() {
+                    let allowed = self.language.as_vec();
+                    tracing::debug!(
+                        "Using constrained language detection from override auto set: {:?}",
+                        allowed
+                    );
+                    Some(self.select_language_from_allowed(&mut state, samples, &allowed)?)
+                } else {
+                    tracing::debug!("Using unconstrained language auto-detection (override)");
+                    None
+                }
+            } else {
+                tracing::debug!("Using request language override: {}", lang);
+                Some(lang)
+            }
+        } else if self.language.is_auto() {
             // Unconstrained auto-detection: let Whisper detect from all languages
             tracing::debug!("Using unconstrained language auto-detection");
             None
@@ -192,8 +290,16 @@ impl Transcriber for WhisperTranscriber {
         params.set_suppress_blank(true);
         params.set_suppress_nst(true);
 
-        // Set initial prompt if configured
-        if let Some(prompt) = &self.initial_prompt {
+        // Set initial prompt (request override takes precedence).
+        let request_prompt = prompt_override.and_then(|p| {
+            let trimmed = p.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+        if let Some(prompt) = request_prompt.or(self.initial_prompt.as_deref()) {
             params.set_initial_prompt(prompt);
             tracing::debug!("Using initial prompt: {:?}", prompt);
         }
@@ -235,10 +341,16 @@ impl Transcriber for WhisperTranscriber {
         }
 
         let result = text.trim().to_string();
+        let result_language = selected_language.unwrap_or_else(|| {
+            whisper_rs::get_lang_str(state.full_lang_id_from_state())
+                .unwrap_or("auto")
+                .to_string()
+        });
 
         tracing::info!(
-            "Transcription completed in {:.2}s: {:?}",
+            "Transcription completed in {:.2}s (language={}): {:?}",
             start.elapsed().as_secs_f32(),
+            result_language,
             if result.chars().count() > 50 {
                 format!("{}...", result.chars().take(50).collect::<String>())
             } else {
@@ -247,6 +359,127 @@ impl Transcriber for WhisperTranscriber {
         );
 
         Ok(result)
+    }
+
+    fn transcribe_segments(
+        &self,
+        samples: &[f32],
+        language_override: Option<&str>,
+        prompt_override: Option<&str>,
+    ) -> Result<TranscriptionResult, TranscribeError> {
+        if samples.is_empty() {
+            return Err(TranscribeError::AudioFormat(
+                "Empty audio buffer".to_string(),
+            ));
+        }
+
+        let duration_secs = samples.len() as f64 / 16000.0;
+        let start = std::time::Instant::now();
+
+        let mut state = self.state_pool.acquire();
+
+        let override_lang = language_override
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty());
+
+        let selected_language: Option<String> = if let Some(lang) = override_lang {
+            if lang == "auto" {
+                if self.language.is_multiple() {
+                    let allowed = self.language.as_vec();
+                    Some(self.select_language_from_allowed(&mut state, samples, &allowed)?)
+                } else {
+                    None
+                }
+            } else {
+                Some(lang)
+            }
+        } else if self.language.is_auto() {
+            None
+        } else if self.language.is_multiple() {
+            let allowed = self.language.as_vec();
+            Some(self.select_language_from_allowed(&mut state, samples, &allowed)?)
+        } else {
+            Some(self.language.primary().to_string())
+        };
+
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+
+        match &selected_language {
+            Some(lang) => params.set_language(Some(lang)),
+            None => params.set_language(None),
+        }
+
+        params.set_translate(self.translate);
+        params.set_n_threads(self.threads as i32);
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+        params.set_suppress_blank(true);
+        params.set_suppress_nst(true);
+
+        let request_prompt = prompt_override.and_then(|p| {
+            let trimmed = p.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+        if let Some(prompt) = request_prompt.or(self.initial_prompt.as_deref()) {
+            params.set_initial_prompt(prompt);
+        }
+
+        if self.context_window_optimization {
+            params.set_no_context(true);
+            if let Some(audio_ctx) = calculate_audio_ctx(duration_secs as f32) {
+                params.set_audio_ctx(audio_ctx);
+            }
+        }
+
+        state
+            .full(params, samples)
+            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
+
+        let mut full_text = String::new();
+        let mut segments = Vec::new();
+
+        for segment in state.as_iter() {
+            let seg_text = segment
+                .to_str()
+                .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?
+                .to_string();
+            // Timestamps are in centiseconds (10ms units)
+            let seg_start = segment.start_timestamp() as f64 / 100.0;
+            let seg_end = segment.end_timestamp() as f64 / 100.0;
+
+            full_text.push_str(&seg_text);
+            segments.push(TranscriptionSegment {
+                start: seg_start,
+                end: seg_end,
+                text: seg_text.trim().to_string(),
+            });
+        }
+
+        let detected_lang = selected_language.unwrap_or_else(|| {
+            whisper_rs::get_lang_str(state.full_lang_id_from_state())
+                .unwrap_or("auto")
+                .to_string()
+        });
+
+        tracing::info!(
+            "Segment transcription completed in {:.2}s: {} segments, language={}",
+            start.elapsed().as_secs_f32(),
+            segments.len(),
+            detected_lang,
+        );
+
+        Ok(TranscriptionResult {
+            text: full_text.trim().to_string(),
+            language: detected_lang,
+            duration: duration_secs,
+            segments,
+        })
     }
 }
 
@@ -337,6 +570,14 @@ fn calculate_audio_ctx(duration_secs: f32) -> Option<i32> {
     }
 }
 
+fn determine_state_pool_size(threads: usize) -> usize {
+    let threads = threads.max(1);
+    let parallelism = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(threads);
+    (parallelism / threads).clamp(1, 2)
+}
+
 /// Get the filename for a model
 pub fn get_model_filename(model: &str) -> String {
     match model {
@@ -368,6 +609,9 @@ pub fn get_model_url(model: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn test_model_url() {
@@ -447,5 +691,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn determine_state_pool_size_is_bounded() {
+        assert!((1..=2).contains(&determine_state_pool_size(0)));
+        assert_eq!(determine_state_pool_size(usize::MAX), 1);
+        assert!((1..=2).contains(&determine_state_pool_size(1)));
+        assert!((1..=2).contains(&determine_state_pool_size(4)));
+    }
+
+    #[test]
+    fn state_pool_returns_items_after_release() {
+        let pool = StatePool::new(vec![1usize]);
+        {
+            let mut lease = pool.acquire();
+            *lease += 1;
+        }
+        let lease = pool.acquire();
+        assert_eq!(*lease, 2);
+    }
+
+    #[test]
+    fn state_pool_blocks_until_item_is_released() {
+        let pool = Arc::new(StatePool::new(vec![7usize]));
+        let guard = pool.acquire();
+        let worker_pool = Arc::clone(&pool);
+        let started = Instant::now();
+
+        let handle = thread::spawn(move || {
+            let lease = worker_pool.acquire();
+            let waited = started.elapsed();
+            (*lease, waited)
+        });
+
+        thread::sleep(Duration::from_millis(40));
+        drop(guard);
+
+        let (value, waited) = handle.join().unwrap();
+        assert_eq!(value, 7);
+        assert!(waited >= Duration::from_millis(40));
     }
 }
