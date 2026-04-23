@@ -277,6 +277,18 @@ impl MeetingDaemon {
         self.current_meeting.as_ref().map(|m| m.metadata.id)
     }
 
+    /// Align all per-source timestamp offsets to the furthest-advanced source.
+    ///
+    /// Call this after dispatching the per-iteration chunks for all sources so
+    /// any source that received a short or empty chunk (e.g. loopback monitor
+    /// lagging at startup) catches up to wall-clock before the next iteration.
+    pub fn sync_source_offsets(&mut self) {
+        let max_offset = self.source_offsets.values().copied().max().unwrap_or(0);
+        for offset in self.source_offsets.values_mut() {
+            *offset = max_offset;
+        }
+    }
+
     /// Get mutable access to current meeting data (for dedup, etc.)
     pub fn current_meeting_mut(&mut self) -> Option<&mut MeetingData> {
         self.current_meeting.as_mut()
@@ -317,6 +329,16 @@ impl MeetingDaemon {
         // and roughly doubling apparent meeting length on dual-track captures.
         let start_offset_ms = *self.source_offsets.entry(source).or_insert(0);
 
+        // Advance the per-source offset up front, based on the input sample
+        // count, so the offset tracks wall-clock even when transcription errors
+        // or VAD skips this chunk (the caller has already drained these samples
+        // from its buffer, so the time has elapsed regardless).
+        let audio_duration_ms =
+            (samples.len() as f64 / chunk_config.sample_rate as f64 * 1000.0) as u64;
+        if let Some(offset) = self.source_offsets.get_mut(&source) {
+            *offset += audio_duration_ms;
+        }
+
         let mut processor = ChunkProcessor::new(chunk_config, transcriber.clone());
         let mut buffer = processor.new_buffer(chunk_id, source, start_offset_ms);
         buffer.add_samples(&samples);
@@ -324,12 +346,6 @@ impl MeetingDaemon {
         let mut result = processor
             .process_chunk(buffer)
             .map_err(crate::error::VoxtypeError::Transcribe)?;
-
-        // Advance the per-source offset by the actual audio duration consumed,
-        // regardless of whether VAD found speech in this chunk.
-        if let Some(offset) = self.source_offsets.get_mut(&source) {
-            *offset += result.audio_duration_ms;
-        }
 
         // Post-process segment text if configured
         if let Some(ref post_processor) = self.post_processor {

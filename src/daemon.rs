@@ -2689,15 +2689,14 @@ impl Daemon {
                             let mic_chunk: Vec<f32> = self.meeting_mic_buffer.drain(..chunk_samples).collect();
 
                             // Also drain loopback buffer up to the same amount.
-                            // Pad with silence so it matches the mic chunk length —
-                            // keeps the per-source timestamp offsets advancing in
-                            // lockstep with wall-clock even if the loopback monitor
-                            // has a short startup lag or a transient gap.
+                            // Do NOT pad to chunk_samples — diluting real speech
+                            // with silence can drop the VAD speech-frame ratio
+                            // below threshold and cause remote audio to be
+                            // discarded. Instead we reconcile timestamp offsets
+                            // after both sources have been dispatched via
+                            // sync_source_offsets.
                             let loopback_len = self.meeting_loopback_buffer.len().min(chunk_samples);
-                            let mut loopback_chunk: Vec<f32> = self.meeting_loopback_buffer.drain(..loopback_len).collect();
-                            if loopback_chunk.len() < chunk_samples {
-                                loopback_chunk.resize(chunk_samples, 0.0);
-                            }
+                            let loopback_chunk: Vec<f32> = self.meeting_loopback_buffer.drain(..loopback_len).collect();
 
                             // Enhance mic audio with GTCRN if available (removes echo/noise)
                             #[cfg(feature = "onnx-common")]
@@ -2729,22 +2728,31 @@ impl Daemon {
                                     }
                                 }
 
-                                // Process loopback chunk. Always process (even when
-                                // padded silence) so the loopback source offset
-                                // advances in lockstep with mic; VAD filters out
-                                // the silent frames without running transcription.
-                                match daemon.process_chunk_with_source(loopback_chunk, meeting::data::AudioSource::Loopback).await {
-                                    Ok(Some(segments)) => {
-                                        tracing::debug!("Processed loopback chunk with {} segments", segments.len());
-                                        if !segments.is_empty() {
-                                            had_loopback = true;
+                                // Process loopback chunk if we have any real samples.
+                                // If the monitor is lagging we simply skip — the
+                                // sync_source_offsets call below bumps loopback's
+                                // timestamp offset to match mic so the next
+                                // loopback chunk lands at the correct wall-clock
+                                // position.
+                                if !loopback_chunk.is_empty() {
+                                    match daemon.process_chunk_with_source(loopback_chunk, meeting::data::AudioSource::Loopback).await {
+                                        Ok(Some(segments)) => {
+                                            tracing::debug!("Processed loopback chunk with {} segments", segments.len());
+                                            if !segments.is_empty() {
+                                                had_loopback = true;
+                                            }
+                                        }
+                                        Ok(None) => {}
+                                        Err(e) => {
+                                            tracing::error!("Error processing loopback chunk: {}", e);
                                         }
                                     }
-                                    Ok(None) => {}
-                                    Err(e) => {
-                                        tracing::error!("Error processing loopback chunk: {}", e);
-                                    }
                                 }
+
+                                // Reconcile per-source offsets so any source that
+                                // received a short or skipped chunk this iteration
+                                // catches up to wall-clock before the next one.
+                                daemon.sync_source_offsets();
 
                                 // Dedup bleed-through: strip echoed phrases from mic segments
                                 if had_loopback {
