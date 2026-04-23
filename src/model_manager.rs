@@ -68,6 +68,12 @@ impl ModelManager {
         &mut self,
         model: Option<&str>,
     ) -> Result<Arc<dyn Transcriber>, TranscribeError> {
+        // Remote API models are endpoint-specific and should not be validated
+        // against local whisper.cpp model names.
+        if self.config.effective_mode() == WhisperMode::Remote {
+            return self.create_remote_transcriber(model);
+        }
+
         // Clone the model name to avoid borrow issues
         let model_name = model
             .map(|s| s.to_string())
@@ -81,11 +87,6 @@ impl ModelManager {
                 self.config.model
             );
             return self.get_transcriber(None);
-        }
-
-        // For remote backend, create transcriber with model override
-        if self.config.effective_mode() == WhisperMode::Remote {
-            return self.create_remote_transcriber(&model_name);
         }
 
         // For CLI backend, create transcriber each time (no caching needed)
@@ -105,11 +106,12 @@ impl ModelManager {
     /// Create a remote transcriber with model override
     fn create_remote_transcriber(
         &self,
-        model: &str,
+        model: Option<&str>,
     ) -> Result<Arc<dyn Transcriber>, TranscribeError> {
         let mut config = self.config.clone();
-        // Override remote_model with requested model
-        config.remote_model = Some(model.to_string());
+        if let Some(model) = model {
+            config.remote_model = Some(model.to_string());
+        }
         let transcriber = transcribe::remote::RemoteTranscriber::new(&config)?;
         Ok(Arc::new(transcriber))
     }
@@ -247,6 +249,11 @@ impl ModelManager {
     /// For subprocess mode, this spawns the worker early so it can load
     /// the model while the user is speaking.
     pub fn prepare_model(&mut self, model: Option<&str>) -> Result<(), TranscribeError> {
+        if self.config.effective_mode() == WhisperMode::Remote {
+            tracing::debug!("Skipping model preparation (remote backend)");
+            return Ok(());
+        }
+
         let model_name = model
             .map(|s| s.to_string())
             .unwrap_or_else(|| self.config.model.clone());
@@ -287,6 +294,10 @@ impl ModelManager {
         &mut self,
         model: Option<&str>,
     ) -> Result<Arc<dyn Transcriber>, TranscribeError> {
+        if self.config.effective_mode() == WhisperMode::Remote {
+            return self.get_transcriber(model);
+        }
+
         let model_name = model
             .map(|s| s.to_string())
             .unwrap_or_else(|| self.config.model.clone());
@@ -315,6 +326,10 @@ impl ModelManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
 
     fn test_config() -> WhisperConfig {
         WhisperConfig {
@@ -355,5 +370,76 @@ mod tests {
         assert_eq!(manager.max_loaded, 2);
         assert_eq!(manager.cold_timeout, Duration::from_secs(300));
         assert!(manager.loaded_models.is_empty());
+    }
+
+    fn remote_api_server() -> (String, mpsc::Receiver<Vec<u8>>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = mpsc::channel();
+
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut data = Vec::new();
+            let mut buf = [0_u8; 1024];
+
+            let header_end = loop {
+                let n = stream.read(&mut buf).unwrap();
+                assert!(n > 0);
+                data.extend_from_slice(&buf[..n]);
+                if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break pos;
+                }
+            };
+
+            let headers = String::from_utf8_lossy(&data[..header_end]);
+            let content_len = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length").then_some(value)
+                })
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap();
+            let body_start = header_end + 4;
+            while data.len() < body_start + content_len {
+                let n = stream.read(&mut buf).unwrap();
+                assert!(n > 0);
+                data.extend_from_slice(&buf[..n]);
+            }
+
+            tx.send(data[body_start..body_start + content_len].to_vec())
+                .unwrap();
+            let response = b"HTTP/1.1 200 OK\r\n\
+                Content-Type: application/json\r\n\
+                Content-Length: 13\r\n\
+                \r\n\
+                {\"text\":\"ok\"}";
+            stream.write_all(response).unwrap();
+        });
+
+        (endpoint, rx, handle)
+    }
+
+    #[test]
+    fn test_remote_backend_uses_remote_model_not_local_model() {
+        let (endpoint, request_body, handle) = remote_api_server();
+        let mut config = test_config();
+        config.mode = Some(WhisperMode::Remote);
+        config.remote_endpoint = Some(endpoint);
+        config.remote_model = Some("whisper-1".to_string());
+
+        let mut manager = ModelManager::new(&config, None);
+        let transcriber = manager.get_prepared_transcriber(None).unwrap();
+        assert_eq!(transcriber.transcribe(&[0.0; 1600]).unwrap(), "ok");
+
+        let body = request_body
+            .recv_timeout(Duration::from_secs(5))
+            .expect("server received request");
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("name=\"model\""));
+        assert!(body.contains("\r\nwhisper-1\r\n"));
+        assert!(!body.contains("\r\nbase.en\r\n"));
+
+        handle.join().unwrap();
     }
 }
