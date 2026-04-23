@@ -25,6 +25,8 @@ use tokio::time::timeout;
 pub struct PostProcessor {
     command: String,
     timeout: Duration,
+    trim: bool,
+    fallback_on_empty: bool,
 }
 
 impl PostProcessor {
@@ -33,21 +35,28 @@ impl PostProcessor {
         Self {
             command: config.command.clone(),
             timeout: Duration::from_millis(config.timeout_ms),
+            trim: config.trim,
+            fallback_on_empty: config.fallback_on_empty,
         }
     }
 
-    /// Process text through the external command
+    /// Process text with optional context from a previous chunk
     ///
+    /// When context is provided, it is passed via the VOXTYPE_CONTEXT environment
+    /// variable so the post-processing command can use it for continuity.
+    /// Stdin always contains only the current text, keeping existing scripts compatible.
     /// Returns the processed text on success, or the original text on any failure.
-    /// This ensures voice-to-text always produces output even when post-processing fails.
-    pub async fn process(&self, text: &str) -> String {
-        match self.execute_command(text).await {
+    pub async fn process_with_context(&self, text: &str, context: Option<&str>) -> String {
+        match self.execute_command_with_env(text, context).await {
             Ok(processed) => {
-                if processed.is_empty() {
+                if processed.is_empty() && self.fallback_on_empty {
                     tracing::warn!(
                         "Post-process command returned empty output, using original text"
                     );
                     text.to_string()
+                } else if processed.is_empty() {
+                    tracing::debug!("Post-process command returned empty output");
+                    String::new()
                 } else {
                     tracing::debug!(
                         "Post-processed ({} -> {} chars)",
@@ -64,13 +73,32 @@ impl PostProcessor {
         }
     }
 
-    async fn execute_command(&self, text: &str) -> Result<String, PostProcessError> {
-        // Spawn command via shell for proper parsing of complex commands
-        let mut child = Command::new("sh")
-            .args(["-c", &self.command])
+    /// Process text through the external command
+    ///
+    /// Returns the processed text on success, or the original text on any failure.
+    /// This ensures voice-to-text always produces output even when post-processing fails.
+    pub async fn process(&self, text: &str) -> String {
+        self.process_with_context(text, None).await
+    }
+
+    async fn execute_command_with_env(
+        &self,
+        text: &str,
+        context: Option<&str>,
+    ) -> Result<String, PostProcessError> {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", &self.command])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        // Always clear to prevent inheriting stale context from parent environment
+        cmd.env_remove("VOXTYPE_CONTEXT");
+        if let Some(ctx) = context {
+            cmd.env("VOXTYPE_CONTEXT", ctx);
+        }
+
+        let mut child = cmd
             .spawn()
             .map_err(|e| PostProcessError::SpawnFailed(e.to_string()))?;
 
@@ -103,7 +131,12 @@ impl PostProcessor {
         let processed = String::from_utf8(output.stdout)
             .map_err(|e| PostProcessError::InvalidUtf8(e.to_string()))?;
 
-        Ok(processed.trim().to_string())
+        if self.trim {
+            Ok(processed.trim().to_string())
+        } else {
+            // Only strip trailing newlines (artifact of shell output), preserve other whitespace
+            Ok(processed.trim_end_matches('\n').to_string())
+        }
     }
 }
 
@@ -153,6 +186,8 @@ mod tests {
         PostProcessConfig {
             command: command.to_string(),
             timeout_ms,
+            trim: true,
+            fallback_on_empty: true,
         }
     }
 
@@ -247,5 +282,92 @@ mod tests {
         let processor = PostProcessor::new(&config);
         let result = processor.process("test input").await;
         assert_eq!(result, "prefix:\ntest input");
+    }
+
+    #[tokio::test]
+    async fn test_no_trim_preserves_trailing_space() {
+        // When trim = false, trailing spaces from the command should be preserved
+        let config = PostProcessConfig {
+            command: "printf '%s ' \"$( cat )\"".to_string(),
+            timeout_ms: 5000,
+            trim: false,
+            fallback_on_empty: true,
+        };
+        let processor = PostProcessor::new(&config);
+        let result = processor.process("hello world.").await;
+        assert_eq!(result, "hello world. ");
+    }
+
+    #[tokio::test]
+    async fn test_no_trim_still_strips_trailing_newlines() {
+        // Even with trim = false, trailing newlines (shell artifacts) are stripped
+        let config = PostProcessConfig {
+            command: "echo 'hello'".to_string(),
+            timeout_ms: 5000,
+            trim: false,
+            fallback_on_empty: true,
+        };
+        let processor = PostProcessor::new(&config);
+        let result = processor.process("ignored").await;
+        assert_eq!(result, "hello");
+    }
+
+    #[tokio::test]
+    async fn test_no_fallback_on_empty_returns_empty() {
+        // When fallback_on_empty = false, empty output is returned as-is
+        let config = PostProcessConfig {
+            command: "printf ''".to_string(),
+            timeout_ms: 5000,
+            trim: true,
+            fallback_on_empty: false,
+        };
+        let processor = PostProcessor::new(&config);
+        let result = processor.process("original text").await;
+        assert_eq!(result, "");
+    }
+
+    #[tokio::test]
+    async fn test_fallback_on_empty_default_returns_original() {
+        // Default behavior: empty output falls back to original text
+        let config = make_config("printf ''", 5000);
+        let processor = PostProcessor::new(&config);
+        let result = processor.process("original text").await;
+        assert_eq!(result, "original text");
+    }
+
+    #[tokio::test]
+    async fn test_context_passed_via_env_var() {
+        // Command prints VOXTYPE_CONTEXT env var, stdin is current text
+        let config = make_config("echo \"context:$VOXTYPE_CONTEXT stdin:$(cat)\"", 5000);
+        let processor = PostProcessor::new(&config);
+        let result = processor
+            .process_with_context("current text", Some("previous text"))
+            .await;
+        assert_eq!(result, "context:previous text stdin:current text");
+    }
+
+    #[tokio::test]
+    async fn test_no_context_env_var_when_none() {
+        // VOXTYPE_CONTEXT should not be set when context is None
+        let config = make_config(
+            "echo \"context:${VOXTYPE_CONTEXT:-unset} stdin:$(cat)\"",
+            5000,
+        );
+        let processor = PostProcessor::new(&config);
+        let result = processor.process_with_context("current text", None).await;
+        assert_eq!(result, "context:unset stdin:current text");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_context_env_not_inherited_from_parent() {
+        // Even if VOXTYPE_CONTEXT is set in parent env, it should be cleared when context is None.
+        // Uses current_thread runtime because std::env::set_var is not thread-safe
+        // and will become unsafe in Rust edition 2024.
+        std::env::set_var("VOXTYPE_CONTEXT", "stale parent context");
+        let config = make_config("echo \"${VOXTYPE_CONTEXT:-unset}\"", 5000);
+        let processor = PostProcessor::new(&config);
+        let result = processor.process_with_context("text", None).await;
+        std::env::remove_var("VOXTYPE_CONTEXT");
+        assert_eq!(result, "unset");
     }
 }

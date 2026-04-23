@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Compare Voxtype and Speed of Sound for Linux speech-to-text. Daemon vs GUI app. Both support Wayland and multiple engines.">
+    <title>Voxtype vs Speed of Sound | Linux Speech-to-Text Comparison</title>
+    <link rel="stylesheet" href="../css/style.css">
+    <link rel="stylesheet" href="../css/compare.css">
+    <link rel="icon" type="image/svg+xml" href="../images/favicon.svg">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-container">
+            <a href="../" class="nav-logo">
+                <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                    <line x1="12" y1="19" x2="12" y2="23"/>
+                    <line x1="8" y1="23" x2="16" y2="23"/>
+                </svg>
+                <span>Voxtype</span>
+            </a>
+            <div class="nav-links">
+                <a href="../#features">Features</a>
+                <a href="../#demo">Demo</a>
+                <a href="../download/">Download</a>
+                <a href="./">Compare</a>
+                <a href="../news/">News</a>
+                <a href="https://github.com/peteonrails/voxtype/tree/main/docs">Docs</a>
+                <a href="https://github.com/peteonrails/voxtype" class="nav-github">GitHub</a>
+            </div>
+        </div>
+    </nav>
+
+    <article class="compare-article container">
+        <a href="./" class="back-link">&larr; All Comparisons</a>
+
+        <h1>Voxtype vs Speed of Sound</h1>
+        <p class="lead">Both tools support Wayland, multiple engines, and fully offline transcription. Voxtype is a background daemon controlled by hotkeys, Speed of Sound is a GUI app that integrates with the desktop via XDG portals.</p>
+
+        <h2>At a Glance</h2>
+        <table class="inline-table">
+            <tr>
+                <th>Aspect</th>
+                <th>Voxtype</th>
+                <th>Speed of Sound</th>
+            </tr>
+            <tr>
+                <td>Engine</td>
+                <td>Whisper, Parakeet, Moonshine, Remote API</td>
+                <td>Sherpa ONNX (Whisper, Parakeet, Canary), cloud providers</td>
+            </tr>
+            <tr>
+                <td>Language</td>
+                <td>Rust</td>
+                <td>Kotlin (JVM)</td>
+            </tr>
+            <tr>
+                <td>Architecture</td>
+                <td>Systemd daemon</td>
+                <td>GUI app (GTK4)</td>
+            </tr>
+            <tr>
+                <td>Text Output</td>
+                <td>wtype, dotool, ydotool, clipboard</td>
+                <td>XDG Remote Desktop Portal</td>
+            </tr>
+            <tr>
+                <td>CJK/Unicode Output</td>
+                <td>Yes (wtype, Wayland)</td>
+                <td>Yes (XDG Desktop Portal)</td>
+            </tr>
+            <tr>
+                <td>GPU Acceleration</td>
+                <td>Vulkan, CUDA, ROCm (built-in)</td>
+                <td>Via external server (e.g. vLLM)</td>
+            </tr>
+            <tr>
+                <td>Recording Limit</td>
+                <td>Configurable (default: 120s)</td>
+                <td>30 seconds per session</td>
+            </tr>
+            <tr>
+                <td>Offline by Default</td>
+                <td>Yes</td>
+                <td>Yes</td>
+            </tr>
+            <tr>
+                <td>Packages</td>
+                <td>deb, rpm, AUR</td>
+                <td>Flatpak, Snap, AppImage, deb, rpm</td>
+            </tr>
+        </table>
+
+        <h2>Architecture</h2>
+
+        <h3>Voxtype: Background Daemon</h3>
+        <p>Voxtype runs as a systemd user service. It starts at login, runs in the background, and responds to hotkeys. There is no window to manage.</p>
+        <pre><code>systemctl --user enable --now voxtype
+# Running in the background, activated by hotkey</code></pre>
+        <p>Hotkeys can be configured via compositor bindings (Hyprland, Sway, River) or via kernel-level evdev detection as a fallback.</p>
+
+        <h3>Speed of Sound: GUI App</h3>
+        <p>Speed of Sound is a GTK4 application. It runs in the foreground with a visible window. Activation can be done via a global shortcut (on desktops that support the XDG Global Shortcuts Portal) or via an included trigger script.</p>
+        <pre><code># Start the app, then use the configured shortcut to record
+speedofsound</code></pre>
+
+        <h2>Text Output</h2>
+
+        <h3>Voxtype</h3>
+        <p>Voxtype uses a fallback chain: wtype (Wayland-native) &rarr; dotool &rarr; ydotool &rarr; clipboard. On Wayland, wtype injects text directly without requiring any portal permissions.</p>
+
+        <h3>Speed of Sound</h3>
+        <p>Speed of Sound uses the XDG Remote Desktop Portal for text input. This requires granting portal permissions on first launch and works across GNOME, KDE, and other desktops that implement the portal backend.</p>
+
+        <h2>GPU Acceleration</h2>
+
+        <h3>Voxtype</h3>
+        <p>GPU support is built into the binary. Pre-built binaries are available for Vulkan (AMD, Intel), CUDA (NVIDIA), and ROCm (AMD). No external services are required.</p>
+
+        <h3>Speed of Sound</h3>
+        <p>The local Sherpa ONNX engine runs on CPU only. GPU acceleration is available by pointing Speed of Sound at a local OpenAI-compatible ASR server such as vLLM, which can run Voxtral, Granite, Phi-4 on the GPU. The built-in cloud providers (OpenAI, Google, Anthropic) also offload transcription to remote servers.</p>
+
+        <h2>Engine and Language Support</h2>
+        <p>Both tools support multiple offline engines and can connect to remote APIs. Voxtype's remote backend uses any OpenAI-compatible Whisper endpoint. Speed of Sound supports Anthropic, Google, and OpenAI cloud providers in addition to local Sherpa ONNX models.</p>
+        <p>Speed of Sound also optionally passes transcribed text through an LLM for cleanup before typing it.</p>
+
+        <h2>Recording Duration</h2>
+        <p>Speed of Sound caps recordings at 30 seconds per session. Voxtype's limit is configurable, the default is 120 seconds. For long-form dictation, this difference matters.</p>
+
+        <div class="verdict-box">
+            <h3>Which to Choose?</h3>
+            <p><strong>Choose Voxtype if:</strong> You want a daemon that runs automatically in the background, need built-in GPU acceleration, or regularly dictate more than 30 seconds at a time.</p>
+            <p><strong>Choose Speed of Sound if:</strong> You prefer a GUI app, want Flatpak/Snap packaging, or need built-in LLM text cleanup after transcription.</p>
+        </div>
+
+        <h2>Links</h2>
+        <ul>
+            <li><a href="https://voxtype.io">Voxtype</a></li>
+            <li><a href="https://www.speedofsound.io">Speed of Sound documentation</a></li>
+            <li><a href="https://github.com/zugaldia/speedofsound">Speed of Sound on GitHub</a></li>
+        </ul>
+    </article>
+
+    <footer class="footer">
+        <div class="container">
+            <div class="footer-content">
+                <p>&copy; 2024, 2025, 2026 Voxtype. MIT License.</p>
+            </div>
+        </div>
+    </footer>
+</body>
+</html>

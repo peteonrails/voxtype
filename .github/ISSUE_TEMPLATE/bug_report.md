@@ -34,7 +34,7 @@ What actually happened.
 
 ## Logs
 
-Run `voxtype -vv` and paste relevant output:
+Run `voxtype -vv` (single dash, two v's) and paste relevant output:
 
 ```
 (paste logs here)

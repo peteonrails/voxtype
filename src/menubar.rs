@@ -84,7 +84,6 @@ mod menu_ids {
 
     // Auto-start
     pub const AUTOSTART_ENABLE: &str = "autostart_enable";
-    pub const AUTOSTART_DISABLE: &str = "autostart_disable";
 
     // Quit
     pub const QUIT: &str = "quit";

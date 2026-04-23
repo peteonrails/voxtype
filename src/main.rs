@@ -186,6 +186,12 @@ async fn main() -> anyhow::Result<()> {
     if cli.gpu_isolation {
         config.whisper.gpu_isolation = true;
     }
+    if let Some(gpu_device) = cli.gpu_device {
+        config.whisper.gpu_device = Some(gpu_device);
+    }
+    if cli.flash_attention {
+        config.whisper.flash_attention = true;
+    }
     if cli.on_demand_loading {
         config.whisper.on_demand_loading = true;
     }
@@ -232,10 +238,16 @@ async fn main() -> anyhow::Result<()> {
     if cli.no_audio_feedback {
         config.audio.feedback.enabled = false;
     }
+    if cli.pause_media {
+        config.audio.pause_media = true;
+    }
 
     // Output overrides
     if let Some(append_text) = cli.append_text {
         config.output.append_text = Some(append_text);
+    }
+    if cli.wtype_shift_prefix {
+        config.output.wtype_shift_prefix = true;
     }
     if let Some(ref driver_str) = cli.driver {
         match parse_driver_order(driver_str) {
@@ -259,6 +271,12 @@ async fn main() -> anyhow::Result<()> {
     }
     if cli.no_shift_enter_newlines {
         config.output.shift_enter_newlines = false;
+    }
+    if cli.smart_auto_submit {
+        config.text.smart_auto_submit = true;
+    }
+    if cli.no_smart_auto_submit {
+        config.text.smart_auto_submit = false;
     }
     if let Some(delay) = cli.type_delay {
         config.output.type_delay_ms = delay;
@@ -804,6 +822,13 @@ fn send_record_command(
             .map_err(|e| anyhow::anyhow!("Failed to write model override: {}", e))?;
     }
 
+    // Write smart auto-submit override file if specified
+    if let Some(enabled) = action.smart_auto_submit_override() {
+        let override_file = config::Config::runtime_dir().join("smart_auto_submit_override");
+        std::fs::write(&override_file, if enabled { "true" } else { "false" })
+            .map_err(|e| anyhow::anyhow!("Failed to write smart auto-submit override: {}", e))?;
+    }
+
     // Write profile override file if specified
     if let Some(profile_name) = action.profile() {
         // Validate that the profile exists in config
@@ -1013,19 +1038,24 @@ struct ExtendedStatusInfo {
 
 impl ExtendedStatusInfo {
     fn from_config(config: &config::Config) -> Self {
-        let backend = setup::gpu::detect_current_backend()
-            .map(|b| match b {
+        // Try Whisper backend detection first, then fall back to ONNX backend detection
+        let backend = if let Some(b) = setup::gpu::detect_current_backend() {
+            match b {
                 setup::gpu::Backend::Cpu => "CPU (legacy)",
                 setup::gpu::Backend::Native => "CPU (native)",
                 setup::gpu::Backend::Avx2 => "CPU (AVX2)",
                 setup::gpu::Backend::Avx512 => "CPU (AVX-512)",
                 setup::gpu::Backend::Vulkan => "GPU (Vulkan)",
-            })
-            .unwrap_or("unknown")
-            .to_string();
+            }
+            .to_string()
+        } else if let Some(pb) = setup::parakeet::detect_current_parakeet_backend() {
+            pb.display_name().to_string()
+        } else {
+            "unknown".to_string()
+        };
 
         Self {
-            model: config.whisper.model.clone(),
+            model: config.model_name().to_string(),
             device: config.audio.device.clone(),
             backend,
         }
@@ -1264,9 +1294,12 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
     if let Some(threads) = config.whisper.threads {
         println!("  threads = {}", threads);
     }
+    if let Some(gpu_device) = config.whisper.gpu_device {
+        println!("  gpu_device = {}", gpu_device);
+    }
 
-    // Show Parakeet status (experimental)
-    println!("\n[parakeet] (EXPERIMENTAL)");
+    // Show Parakeet status
+    println!("\n[parakeet]");
     if let Some(ref parakeet_config) = config.parakeet {
         println!("  model = {:?}", parakeet_config.model);
         if let Some(ref model_type) = parakeet_config.model_type {
@@ -1475,7 +1508,7 @@ fn reset_sigpipe() {
 
 /// Run a meeting command
 async fn run_meeting_command(config: &config::Config, action: MeetingAction) -> anyhow::Result<()> {
-    use meeting::{ExportFormat, ExportOptions, MeetingConfig, StorageConfig};
+    use meeting::{export_meeting, ExportFormat, ExportOptions, MeetingConfig, StorageConfig};
 
     // Convert config to meeting config
     let storage_path = if config.meeting.storage_path == "auto" {
@@ -1494,6 +1527,7 @@ async fn run_meeting_command(config: &config::Config, action: MeetingAction) -> 
         },
         retain_audio: config.meeting.retain_audio,
         max_duration_mins: config.meeting.max_duration_mins,
+        diarization: None,
     };
 
     match action {
@@ -1688,24 +1722,40 @@ async fn run_meeting_command(config: &config::Config, action: MeetingAction) -> 
                 line_width: 0,
             };
 
-            match meeting::export_meeting_by_id(
-                &meeting_config,
-                &meeting_id,
-                export_format,
-                &options,
-            ) {
-                Ok(content) => {
-                    if let Some(path) = output {
-                        std::fs::write(&path, &content)?;
-                        println!("Exported to {:?}", path);
-                    } else {
-                        println!("{}", content);
-                    }
+            let meeting_data = match meeting::get_meeting(&meeting_config, &meeting_id) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("Error loading meeting: {}", e);
+                    std::process::exit(1);
                 }
+            };
+
+            let content = match export_meeting(&meeting_data, export_format, &options) {
+                Ok(c) => c,
                 Err(e) => {
                     eprintln!("Error exporting meeting: {}", e);
                     std::process::exit(1);
                 }
+            };
+
+            if let Some(path) = output {
+                let file_path = if path.is_dir() {
+                    let title = meeting_data.metadata.display_title();
+                    let safe_title =
+                        title.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "-");
+                    let basename = if safe_title.trim().is_empty() {
+                        format!("meeting-{}", meeting_data.metadata.id)
+                    } else {
+                        safe_title
+                    };
+                    path.join(format!("{}.{}", basename, export_format.extension()))
+                } else {
+                    path
+                };
+                std::fs::write(&file_path, &content)?;
+                println!("Exported to {}", file_path.display());
+            } else {
+                println!("{}", content);
             }
         }
 

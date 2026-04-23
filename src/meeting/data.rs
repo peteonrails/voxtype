@@ -44,7 +44,7 @@ impl std::str::FromStr for MeetingId {
 }
 
 /// Audio source for speaker attribution
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum AudioSource {

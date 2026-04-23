@@ -1,0 +1,9 @@
+#!/bin/sh
+# AppRun entry point for voxtype AppImage
+# Sets library path so the wrapper script finds binaries inside the AppImage
+
+APPDIR="$(dirname "$(readlink -f "$0")")"
+
+export VOXTYPE_LIB="$APPDIR/usr/lib/voxtype"
+
+exec "$APPDIR/usr/bin/voxtype" "$@"

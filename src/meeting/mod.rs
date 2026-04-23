@@ -40,7 +40,9 @@ pub use state::{ChunkState, MeetingState};
 pub use storage::{MeetingStorage, StorageConfig, StorageError};
 
 use crate::error::{MeetingError, Result};
+use crate::output::post_process::PostProcessor;
 use crate::transcribe::{self, Transcriber};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -57,6 +59,8 @@ pub struct MeetingConfig {
     pub retain_audio: bool,
     /// Maximum meeting duration in minutes (0 = unlimited)
     pub max_duration_mins: u32,
+    /// Diarization configuration (None = disabled)
+    pub diarization: Option<diarization::DiarizationConfig>,
 }
 
 impl Default for MeetingConfig {
@@ -67,6 +71,7 @@ impl Default for MeetingConfig {
             storage: StorageConfig::default(),
             retain_audio: false,
             max_duration_mins: 180,
+            diarization: None,
         }
     }
 }
@@ -98,8 +103,13 @@ pub struct MeetingDaemon {
     storage: MeetingStorage,
     current_meeting: Option<MeetingData>,
     transcriber: Option<Arc<dyn Transcriber>>,
+    diarizer: Option<Box<dyn diarization::Diarizer>>,
     engine_name: String,
     event_tx: mpsc::Sender<MeetingEvent>,
+    post_processor: Option<PostProcessor>,
+    /// Previous chunk's post-processed text, tracked per audio source
+    /// so mic and loopback contexts don't bleed into each other
+    last_chunk_text: HashMap<AudioSource, String>,
 }
 
 impl MeetingDaemon {
@@ -116,14 +126,37 @@ impl MeetingDaemon {
             Arc::from(transcribe::create_transcriber(app_config)?);
         let engine_name = format!("{:?}", app_config.engine).to_lowercase();
 
+        let post_processor = app_config.output.post_process.as_ref().map(|cfg| {
+            tracing::info!(
+                "Meeting post-processing enabled: command={:?}, timeout={}ms",
+                cfg.command,
+                cfg.timeout_ms
+            );
+            PostProcessor::new(cfg)
+        });
+
+        // Create diarizer if configured
+        let diarizer = config.diarization.as_ref().and_then(|diar_config| {
+            if diar_config.enabled {
+                let d = diarization::create_diarizer(diar_config);
+                tracing::info!("Meeting diarization enabled: {}", d.name());
+                Some(d)
+            } else {
+                None
+            }
+        });
+
         Ok(Self {
             config,
             state: MeetingState::Idle,
             storage,
             current_meeting: None,
             transcriber: Some(transcriber),
+            diarizer,
             engine_name,
             event_tx,
+            post_processor,
+            last_chunk_text: HashMap::new(),
         })
     }
 
@@ -190,6 +223,7 @@ impl MeetingDaemon {
         }
 
         self.state = std::mem::take(&mut self.state).stop();
+        self.last_chunk_text.clear();
 
         // Finalize meeting
         if let Some(ref mut meeting) = self.current_meeting {
@@ -246,7 +280,8 @@ impl MeetingDaemon {
         &mut self,
         samples: Vec<f32>,
     ) -> Result<Option<Vec<TranscriptSegment>>> {
-        self.process_chunk_with_source(samples, AudioSource::Microphone).await
+        self.process_chunk_with_source(samples, AudioSource::Microphone)
+            .await
     }
 
     /// Process a chunk of audio with a specific source label
@@ -280,9 +315,37 @@ impl MeetingDaemon {
         let mut buffer = processor.new_buffer(chunk_id, source, start_offset_ms);
         buffer.add_samples(&samples);
 
-        let result = processor
+        let mut result = processor
             .process_chunk(buffer)
             .map_err(crate::error::VoxtypeError::Transcribe)?;
+
+        // Post-process segment text if configured
+        if let Some(ref post_processor) = self.post_processor {
+            let context = self.last_chunk_text.get(&source).cloned();
+            for segment in &mut result.segments {
+                if !segment.text.is_empty() {
+                    segment.text = post_processor
+                        .process_with_context(&segment.text, context.as_deref())
+                        .await;
+                }
+            }
+            // Update context for next chunk (per source), using the last non-empty
+            // segment to avoid losing useful context when a chunk ends with silence
+            if let Some(last_seg) = result.segments.iter().rfind(|s| !s.text.is_empty()) {
+                self.last_chunk_text.insert(source, last_seg.text.clone());
+            }
+        }
+
+        // Run diarization on the transcribed segments
+        if let Some(ref diarizer) = self.diarizer {
+            if !result.segments.is_empty() {
+                let diarized = diarizer.diarize(&samples, source, &result.segments);
+                for (seg, diar) in result.segments.iter_mut().zip(diarized.iter()) {
+                    seg.speaker_id = Some(diar.speaker.display_name());
+                    seg.confidence = Some(diar.confidence);
+                }
+            }
+        }
 
         // Add segments to transcript
         if let Some(ref mut meeting) = self.current_meeting {

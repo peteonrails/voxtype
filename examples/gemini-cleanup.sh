@@ -29,13 +29,20 @@ if [[ -z "$INPUT" ]]; then
     exit 0
 fi
 
+# Build prompt with optional context from previous dictation
+PROMPT="Clean up this dictated text. Remove filler words (um, uh, like), fix grammar and punctuation. Output ONLY the cleaned text - no quotes, no emojis, no explanations:"
+
+if [[ -n "${VOXTYPE_CONTEXT:-}" ]]; then
+  printf -v PROMPT '%s\n\nPrevious dictation for context (do NOT include this in your output):\n%s\n\nCurrent text to clean up:' "$PROMPT" "$VOXTYPE_CONTEXT"
+fi
+
 # Build JSON payload with jq to handle special characters
-JSON=$(jq -n --arg text "$INPUT" '{
+JSON=$(jq -n --arg text "$INPUT" --arg prompt "$PROMPT" '{
   contents: [
     {
       parts: [
         {
-          text: ("Clean up this dictated text. Remove filler words (um, uh, like), fix grammar and punctuation. Output ONLY the cleaned text - no quotes, no emojis, no explanations:\n\n" + $text)
+          text: ($prompt + "\n\n" + $text)
         }
       ]
     }

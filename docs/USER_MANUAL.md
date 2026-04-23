@@ -436,6 +436,26 @@ Available modifiers:
 - `LEFTSHIFT`, `RIGHTSHIFT`
 - `LEFTMETA`, `RIGHTMETA` (Super/Windows key)
 
+### Profile Modifiers
+
+Map modifier keys to named profiles for different post-processing per recording. Hold a profile modifier while pressing the hotkey to activate that profile:
+
+```toml
+[hotkey]
+key = "SCROLLLOCK"
+
+[hotkey.profile_modifiers]
+RIGHTSHIFT = "translate"
+
+[profiles.translate]
+post_process_command = "my-cleanup.sh --translate-en"
+post_process_timeout_ms = 10000
+```
+
+With this config, bare ScrollLock uses default post-processing, while Right Shift + ScrollLock translates to English. See [Configuration - profile_modifiers](CONFIGURATION.md#hotkeyprofile_modifiers) for details.
+
+When using compositor keybindings instead of evdev, use `voxtype record start --profile <name>` to achieve the same effect.
+
 ---
 
 ## Compositor Keybindings
@@ -514,9 +534,32 @@ riverctl map -release normal Super V spawn 'voxtype record stop'
 riverctl map normal Super V spawn 'voxtype record toggle'
 ```
 
+### KDE Plasma (KWin)
+
+KDE Plasma uses KWin as its compositor. KWin does not support key-release events, so push-to-talk (hold to record) is not available. Use toggle mode instead (press once to start recording, press again to stop).
+
+1. Open **System Settings > Shortcuts > Custom Shortcuts**.
+2. Click **Edit > New > Global Shortcut > Command/URL**.
+3. Name it something like "Voxtype Toggle".
+4. On the **Trigger** tab, click the button and press your desired key combination (e.g., Meta+V).
+5. On the **Action** tab, set the command to:
+   ```
+   voxtype record toggle
+   ```
+6. Click **Apply**.
+
+Then disable the built-in hotkey in `~/.config/voxtype/config.toml`:
+
+```toml
+[hotkey]
+enabled = false
+```
+
+Restart the voxtype daemon after changing the config.
+
 ### Other Compositors/Desktops
 
-For compositors without key release support (GNOME, KDE), use toggle mode:
+For other compositors without key release support (GNOME, etc.), use toggle mode:
 
 ```bash
 # Generic: bind this to your preferred key
@@ -1451,6 +1494,33 @@ auto_submit = true  # Press Enter after transcription
 
 Useful for chat applications or command lines where you want to submit immediately after dictating.
 
+**Smart auto-submit (say "submit" to press Enter):**
+
+```toml
+[text]
+smart_auto_submit = true
+```
+
+With this enabled, ending your dictation with the word "submit" strips that word from the output and presses Enter. Unlike `auto_submit` (which always presses Enter), this only fires when you choose to say it.
+
+```
+# You say:   "reply to Alice and cc Bob submit"
+# Voxtype types: "reply to Alice and cc Bob"  [then presses Enter]
+```
+
+Per-recording override (useful with compositor keybindings):
+
+```bash
+voxtype record start --smart-auto-submit   # force on for this recording
+voxtype record start --no-smart-auto-submit  # force off for this recording
+```
+
+Or via environment variable for the whole session:
+
+```bash
+VOXTYPE_SMART_AUTO_SUBMIT=true voxtype
+```
+
 **Shift+Enter for newlines:**
 
 ```toml
@@ -1460,7 +1530,16 @@ shift_enter_newlines = true  # Use Shift+Enter instead of Enter for line breaks
 
 Many chat apps (Slack, Discord, Teams) and AI assistants (Cursor) use Enter to send and Shift+Enter for line breaks. Enable this when dictating multi-line messages to prevent premature submission.
 
-**Combining both options:**
+**Shift prefix for CJK character drop:**
+
+```toml
+[output]
+wtype_shift_prefix = true  # Prefix wtype output with Shift press/release
+```
+
+Some apps (notably Discord) drop the first CJK character when wtype types text. This option prefixes each wtype invocation with a Shift key press and release, which prevents the character from being swallowed. Only affects the wtype driver.
+
+**Combining shift_enter_newlines and auto_submit:**
 
 ```toml
 [output]
@@ -1647,6 +1726,26 @@ Make it executable: `chmod +x ~/.config/voxtype/lm-studio-cleanup.sh`
 | Simple shell commands (sed, tr) | 5000ms (5 seconds) |
 | Local LLMs (Ollama, llama.cpp) | 30000-60000ms (30-60 seconds) |
 | Remote APIs | 30000ms or higher |
+
+### Context from Previous Dictation
+
+When post-processing is enabled, voxtype automatically passes the previous dictation's text to your script via the `VOXTYPE_CONTEXT` environment variable if the previous dictation was within 60 seconds. This helps LLMs maintain continuity when you dictate in quick succession.
+
+Your script receives:
+- **Stdin**: Current text only (existing scripts work unchanged)
+- **`$VOXTYPE_CONTEXT`**: Previous dictation text (optional, read it if you want context)
+
+Example usage in a cleanup script:
+```bash
+PROMPT="Clean up this dictation:"
+if [[ -n "${VOXTYPE_CONTEXT:-}" ]]; then
+  printf -v PROMPT '%s\n\nPrevious dictation for context (do NOT include in output):\n%s\n\nCurrent text to clean up:' "$PROMPT" "$VOXTYPE_CONTEXT"
+fi
+```
+
+In meeting mode, context is tracked separately for microphone and loopback audio to prevent speaker bleed.
+
+See the example scripts in `examples/` for full implementations.
 
 ### Error Handling
 

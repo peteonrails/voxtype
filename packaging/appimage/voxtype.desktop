@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Voxtype
+GenericName=Voice to Text
+Comment=Push-to-talk voice-to-text daemon for Linux
+Exec=voxtype daemon
+Icon=voxtype
+Categories=AudioVideo;Audio;Utility;Accessibility;
+Keywords=voice;speech;dictation;transcription;whisper;
+Terminal=false
+NoDisplay=true

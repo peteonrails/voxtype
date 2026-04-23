@@ -91,7 +91,8 @@ pub fn create_app_bundle() -> anyhow::Result<()> {
     // Copy the current voxtype binary (handle self-copy case)
     let source_binary = get_voxtype_path();
     let dest_binary = macos_path.join("voxtype-bin");
-    let source_canon = fs::canonicalize(&source_binary).unwrap_or_else(|_| PathBuf::from(&source_binary));
+    let source_canon =
+        fs::canonicalize(&source_binary).unwrap_or_else(|_| PathBuf::from(&source_binary));
     let dest_canon = fs::canonicalize(&dest_binary).unwrap_or_else(|_| dest_binary.clone());
 
     let binary_replaced = source_canon != dest_canon;
@@ -118,7 +119,13 @@ pub fn create_app_bundle() -> anyhow::Result<()> {
         .output();
 
     let _ = Command::new("codesign")
-        .args(["--force", "--deep", "--sign", "-", app_path.to_str().unwrap()])
+        .args([
+            "--force",
+            "--deep",
+            "--sign",
+            "-",
+            app_path.to_str().unwrap(),
+        ])
         .output();
 
     // Reset TCC entries only when the binary changed, so macOS re-prompts for the

@@ -8,35 +8,20 @@ use crate::meeting::data::AudioSource;
 use crate::meeting::TranscriptSegment;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
-
 /// Subprocess-based diarizer wrapper
-#[allow(dead_code)]
 pub struct SubprocessDiarizer {
     /// Diarization configuration
     config: DiarizationConfig,
-    /// Child process handle
-    child: Option<Child>,
 }
 
 impl SubprocessDiarizer {
     /// Create a new subprocess diarizer
     pub fn new(config: DiarizationConfig) -> Self {
-        Self {
-            config,
-            child: None,
-        }
+        Self { config }
     }
 
-    /// Spawn the worker subprocess
-    #[allow(dead_code)]
-    fn spawn_worker(&mut self) -> Result<&mut Child, String> {
-        if self.child.is_some() {
-            return self
-                .child
-                .as_mut()
-                .ok_or("Child already exists".to_string());
-        }
-
+    /// Spawn the worker subprocess, returning the child handle
+    fn spawn_worker(config: &DiarizationConfig) -> Result<Child, String> {
         let exe = std::env::current_exe().map_err(|e| format!("Failed to get exe path: {}", e))?;
 
         let mut cmd = Command::new(exe);
@@ -45,25 +30,21 @@ impl SubprocessDiarizer {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
 
-        if let Some(ref model_path) = self.config.model_path {
+        if let Some(ref model_path) = config.model_path {
             cmd.arg("--model").arg(model_path);
         }
 
-        let child = cmd
-            .spawn()
-            .map_err(|e| format!("Failed to spawn worker: {}", e))?;
-        self.child = Some(child);
-        self.child.as_mut().ok_or("Failed to get child".to_string())
+        cmd.spawn()
+            .map_err(|e| format!("Failed to spawn worker: {}", e))
     }
 
-    /// Send audio samples to worker and receive embeddings
-    #[allow(dead_code)]
+    /// Send audio samples to worker and receive diarized segments
     fn process_in_worker(
-        &mut self,
+        config: &DiarizationConfig,
         samples: &[f32],
         segments: &[TranscriptSegment],
     ) -> Result<Vec<DiarizedSegment>, String> {
-        let child = self.spawn_worker()?;
+        let mut child = Self::spawn_worker(config)?;
 
         let stdin = child.stdin.as_mut().ok_or("No stdin")?;
         let stdout = child.stdout.as_mut().ok_or("No stdout")?;
@@ -124,17 +105,13 @@ impl SubprocessDiarizer {
         }
 
         // Kill the subprocess to release memory
-        if let Some(ref mut child) = self.child {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        self.child = None;
+        let _ = child.kill();
+        let _ = child.wait();
 
         Ok(results)
     }
 }
 
-#[allow(dead_code)]
 fn parse_speaker_id(s: &str) -> SpeakerId {
     match s {
         "You" => SpeakerId::You,
@@ -154,30 +131,37 @@ fn parse_speaker_id(s: &str) -> SpeakerId {
 impl Diarizer for SubprocessDiarizer {
     fn diarize(
         &self,
-        _samples: &[f32],
-        _source: AudioSource,
+        samples: &[f32],
+        source: AudioSource,
         transcript_segments: &[TranscriptSegment],
     ) -> Vec<DiarizedSegment> {
-        // Note: Diarizer trait takes &self, but we need &mut self for subprocess
-        // This is a limitation - in practice, we'd use interior mutability
-        // For now, return simple attribution as fallback
-        transcript_segments
-            .iter()
-            .map(|seg| {
-                let speaker = match seg.source {
-                    AudioSource::Microphone => SpeakerId::You,
-                    AudioSource::Loopback => SpeakerId::Remote,
-                    AudioSource::Unknown => SpeakerId::Unknown,
-                };
-                DiarizedSegment {
-                    speaker,
-                    start_ms: seg.start_ms,
-                    end_ms: seg.end_ms,
-                    text: seg.text.clone(),
-                    confidence: 0.5,
-                }
-            })
-            .collect()
+        match Self::process_in_worker(&self.config, samples, transcript_segments) {
+            Ok(results) => results,
+            Err(e) => {
+                tracing::warn!(
+                    "Subprocess diarization failed, using source attribution: {}",
+                    e
+                );
+                // Fall back to simple source-based attribution
+                transcript_segments
+                    .iter()
+                    .map(|seg| {
+                        let speaker = match source {
+                            AudioSource::Microphone => SpeakerId::You,
+                            AudioSource::Loopback => SpeakerId::Remote,
+                            AudioSource::Unknown => SpeakerId::Unknown,
+                        };
+                        DiarizedSegment {
+                            speaker,
+                            start_ms: seg.start_ms,
+                            end_ms: seg.end_ms,
+                            text: seg.text.clone(),
+                            confidence: 0.5,
+                        }
+                    })
+                    .collect()
+            }
+        }
     }
 
     fn name(&self) -> &'static str {
@@ -247,8 +231,9 @@ pub fn run_worker(_model_path: Option<&str>) -> Result<(), String> {
         }
     }
 
-    // Process with ML diarizer (simplified - just return with unknown speaker for now)
-    // In a real implementation, we'd load the ONNX model and run inference
+    // TODO: Load ONNX model and run real ML diarization when ml-diarization feature is enabled.
+    // For now, return segments with Unknown speaker (the subprocess IPC plumbing works).
+    let _ = &samples; // Will be used for embedding extraction
     for (start_ms, end_ms, text) in segments {
         writeln!(stdout, "Unknown {} {} 0.5 {}", start_ms, end_ms, text)
             .map_err(|e| format!("Write error: {}", e))?;

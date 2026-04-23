@@ -36,7 +36,7 @@ impl Default for ChunkConfig {
 /// Audio buffer for a chunk being recorded
 #[derive(Debug)]
 pub struct ChunkBuffer {
-    /// Audio samples (mono, f32, 16kHz)
+    /// Audio samples (mono, f32)
     samples: Vec<f32>,
     /// Start time of this chunk
     started_at: Instant,
@@ -46,17 +46,20 @@ pub struct ChunkBuffer {
     source: AudioSource,
     /// Start time offset in milliseconds (relative to meeting start)
     start_offset_ms: u64,
+    /// Sample rate in Hz
+    sample_rate: u32,
 }
 
 impl ChunkBuffer {
     /// Create a new chunk buffer
-    pub fn new(chunk_id: u32, source: AudioSource, start_offset_ms: u64) -> Self {
+    pub fn new(chunk_id: u32, source: AudioSource, start_offset_ms: u64, sample_rate: u32) -> Self {
         Self {
-            samples: Vec::with_capacity(16000 * 30), // Pre-allocate for 30 seconds
+            samples: Vec::with_capacity(sample_rate as usize * 30), // Pre-allocate for 30 seconds
             started_at: Instant::now(),
             chunk_id,
             source,
             start_offset_ms,
+            sample_rate,
         }
     }
 
@@ -67,7 +70,7 @@ impl ChunkBuffer {
 
     /// Get the duration of audio in seconds
     pub fn duration_secs(&self) -> f32 {
-        self.samples.len() as f32 / 16000.0
+        self.samples.len() as f32 / self.sample_rate as f32
     }
 
     /// Get the elapsed wall-clock time
@@ -240,15 +243,17 @@ impl ChunkProcessor {
         let start_offset_ms = buffer.start_offset_ms;
 
         let samples = buffer.samples;
-        let audio_duration_ms = (samples.len() as f64 / 16000.0 * 1000.0) as u64;
+        let sample_rate = self.config.sample_rate as f64;
+        let audio_duration_ms = (samples.len() as f64 / sample_rate * 1000.0) as u64;
 
         // Skip if too short
-        let min_samples = (self.config.min_chunk_duration_secs * 16000.0) as usize;
+        let min_samples =
+            (self.config.min_chunk_duration_secs * self.config.sample_rate as f32) as usize;
         if samples.len() < min_samples {
             tracing::debug!(
                 "Chunk {} too short ({:.2}s), skipping",
                 chunk_id,
-                samples.len() as f32 / 16000.0
+                samples.len() as f32 / self.config.sample_rate as f32
             );
             return Ok(ProcessedChunk {
                 chunk_id,
@@ -273,23 +278,27 @@ impl ChunkProcessor {
         tracing::info!(
             "Transcribing chunk {} ({:.1}s of audio)",
             chunk_id,
-            samples.len() as f32 / 16000.0
+            samples.len() as f32 / self.config.sample_rate as f32
         );
 
-        let text = self.transcriber.transcribe(&samples)?;
+        let timed_segments = self.transcriber.transcribe_timed(&samples)?;
 
         let mut segments = vec![];
-        if !text.is_empty() && !text.trim().is_empty() {
-            // Create a single segment for the whole chunk
-            // Phase 3 will add proper sentence segmentation based on whisper timestamps
+        for timed in &timed_segments {
+            if timed.text.trim().is_empty() {
+                continue;
+            }
             let segment_id = self.next_segment_id;
             self.next_segment_id += 1;
 
+            let seg_start_ms = start_offset_ms + (timed.start_secs * 1000.0) as u64;
+            let seg_end_ms = start_offset_ms + (timed.end_secs * 1000.0) as u64;
+
             let mut segment = TranscriptSegment::new(
                 segment_id,
-                start_offset_ms,
-                start_offset_ms + audio_duration_ms,
-                text.trim().to_string(),
+                seg_start_ms,
+                seg_end_ms,
+                timed.text.clone(),
                 chunk_id,
             );
             segment.source = source;
@@ -320,7 +329,7 @@ impl ChunkProcessor {
         source: AudioSource,
         start_offset_ms: u64,
     ) -> ChunkBuffer {
-        ChunkBuffer::new(chunk_id, source, start_offset_ms)
+        ChunkBuffer::new(chunk_id, source, start_offset_ms, self.config.sample_rate)
     }
 }
 
@@ -346,7 +355,7 @@ mod tests {
 
     #[test]
     fn test_chunk_buffer_duration() {
-        let mut buffer = ChunkBuffer::new(0, AudioSource::Microphone, 0);
+        let mut buffer = ChunkBuffer::new(0, AudioSource::Microphone, 0, 16000);
         buffer.add_samples(&vec![0.0; 16000]); // 1 second
         assert!((buffer.duration_secs() - 1.0).abs() < 0.01);
     }
@@ -405,14 +414,14 @@ mod tests {
 
     #[test]
     fn test_chunk_buffer_empty() {
-        let buffer = ChunkBuffer::new(0, AudioSource::Microphone, 0);
+        let buffer = ChunkBuffer::new(0, AudioSource::Microphone, 0, 16000);
         assert!(!buffer.has_audio());
         assert!((buffer.duration_secs() - 0.0).abs() < 0.01);
     }
 
     #[test]
     fn test_chunk_buffer_take_samples() {
-        let mut buffer = ChunkBuffer::new(0, AudioSource::Microphone, 0);
+        let mut buffer = ChunkBuffer::new(0, AudioSource::Microphone, 0, 16000);
         buffer.add_samples(&[0.1, 0.2, 0.3]);
         assert!(buffer.has_audio());
 
@@ -423,7 +432,7 @@ mod tests {
 
     #[test]
     fn test_chunk_buffer_multiple_adds() {
-        let mut buffer = ChunkBuffer::new(0, AudioSource::Microphone, 0);
+        let mut buffer = ChunkBuffer::new(0, AudioSource::Microphone, 0, 16000);
         buffer.add_samples(&vec![0.0; 8000]); // 0.5 seconds
         buffer.add_samples(&vec![0.0; 8000]); // 0.5 seconds
         assert!((buffer.duration_secs() - 1.0).abs() < 0.01);
@@ -431,7 +440,7 @@ mod tests {
 
     #[test]
     fn test_chunk_buffer_elapsed() {
-        let buffer = ChunkBuffer::new(0, AudioSource::Microphone, 0);
+        let buffer = ChunkBuffer::new(0, AudioSource::Microphone, 0, 16000);
         std::thread::sleep(std::time::Duration::from_millis(10));
         assert!(buffer.elapsed() >= std::time::Duration::from_millis(10));
     }
@@ -466,6 +475,7 @@ mod tests {
         // Speech covers the entire buffer
         let (start, end) = segments[0];
         assert_eq!(start, 0);
+        assert_eq!(end, speech.len());
     }
 
     #[test]

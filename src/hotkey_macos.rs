@@ -18,9 +18,10 @@ use tokio::sync::mpsc;
 /// Hotkey events that can be sent from the listener
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HotkeyEvent {
-    /// The hotkey was pressed (model_override not supported on macOS, always None)
+    /// The hotkey was pressed (overrides are not supported on macOS, always None)
     Pressed {
         model_override: Option<String>,
+        profile_override: Option<String>,
     },
     Released,
     Cancel,
@@ -137,6 +138,7 @@ impl HotkeyListener for RdevHotkeyListener {
                                 *last = Instant::now();
                                 let _ = tx_clone.blocking_send(HotkeyEvent::Pressed {
                                     model_override: None,
+                                    profile_override: None,
                                 });
                             }
                         } else if Some(key) == cancel_key {
@@ -265,14 +267,19 @@ fn parse_key_name(name: &str) -> Option<Key> {
 }
 
 /// Create a hotkey listener for macOS
-pub fn create_listener(config: &HotkeyConfig) -> Result<Box<dyn HotkeyListener>> {
+pub fn create_listener(
+    config: &HotkeyConfig,
+    _secondary_model: Option<String>,
+) -> Result<Box<dyn HotkeyListener>> {
     Ok(Box::new(RdevHotkeyListener::new(config)?))
 }
 
 /// Check if Accessibility permission is granted by trying to create an event tap.
 /// Unlike AXIsProcessTrusted(), this is not cached and reflects the current state.
 fn is_accessibility_granted() -> bool {
-    use core_graphics::event::{CGEventTap, CGEventTapLocation, CGEventTapPlacement, CGEventTapOptions, CGEventType};
+    use core_graphics::event::{
+        CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
+    };
 
     let tap = CGEventTap::new(
         CGEventTapLocation::Session,

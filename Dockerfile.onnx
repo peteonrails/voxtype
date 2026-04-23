@@ -68,7 +68,7 @@ ENV ORT_STRATEGY=download
 
 # Disable LTO for faster builds (can hang on TrueNAS)
 # Build with all ONNX engines
-RUN cargo build --release --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual \
+RUN cargo build --release --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual,ml-diarization \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
     && cp target/release/voxtype /tmp/voxtype-onnx-avx2

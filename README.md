@@ -47,7 +47,9 @@ sudo apt install wtype
 
 ### Compositor Keybindings
 
-Voxtype works best with your compositor's native keybindings. Add these to your compositor config:
+Voxtype works best with your compositor's native keybindings. Add these to your compositor config.
+
+> **Not sure which compositor you have?** Run `echo $XDG_CURRENT_DESKTOP` in a terminal. Common values: `Hyprland`, `sway`, `river`, `KDE`, `GNOME`.
 
 **Hyprland** (`~/.config/hypr/hyprland.conf`):
 ```
@@ -66,6 +68,15 @@ bindsym --release $mod+v exec voxtype record stop
 riverctl map normal Super V spawn 'voxtype record start'
 riverctl map -release normal Super V spawn 'voxtype record stop'
 ```
+
+**KDE Plasma (KWin):**
+
+KDE does not support key-release events, so use toggle mode. Open **System Settings > Shortcuts > Custom Shortcuts**, create a new shortcut, and set the command to:
+```
+voxtype record toggle
+```
+
+Assign your preferred key combination (e.g., Meta+V). Since KDE handles the keybinding, the built-in hotkey should be disabled (see below).
 
 Then disable the built-in hotkey in your config:
 ```toml
@@ -451,11 +462,45 @@ sudo dnf install alsa-lib-devel
 # Ubuntu:
 sudo apt install libasound2-dev
 
-# Build
+# Build (Whisper engine only)
 cargo build --release
+
+# Build with ONNX engines (Parakeet, Moonshine, SenseVoice, etc.)
+cargo build --release --features parakeet,moonshine,sensevoice,paraformer,dolphin
+
+# Or just the engine you need
+cargo build --release --features parakeet
 
 # Binary is at: target/release/voxtype
 ```
+
+ONNX engines require the corresponding Cargo feature at build time. Without it, setting
+`engine = "parakeet"` in your config will fail with an error. The prebuilt release binaries
+(`-onnx-avx2`, `-onnx-cuda`, etc.) include all ONNX engines.
+
+## AppImage (Universal)
+
+AppImage works on any Linux distribution without installation:
+
+```bash
+# Download the appropriate AppImage from the GitHub release
+chmod +x voxtype-*-x86_64.AppImage
+
+# Move to a permanent location
+mv voxtype-*-x86_64.AppImage ~/.local/bin/voxtype
+
+# Run setup (downloads model, configures service)
+~/.local/bin/voxtype setup
+```
+
+Available AppImage variants:
+- `voxtype-{ver}-x86_64.AppImage` - Whisper engine with CPU and Vulkan GPU support (recommended)
+- `voxtype-{ver}-onnx-x86_64.AppImage` - ONNX engines (Parakeet, Moonshine, etc.) + Vulkan Whisper
+- `voxtype-{ver}-onnx-cuda-x86_64.AppImage` - ONNX engines with NVIDIA CUDA + Vulkan Whisper
+
+Each ONNX AppImage also includes the Vulkan Whisper binary, so you can switch between
+engines via `engine = "whisper"` or `engine = "parakeet"` in your config without changing
+AppImages. For GPU-accelerated Whisper in the Whisper-only AppImage, set `VOXTYPE_GPU=1`.
 
 ## Waybar Integration
 
@@ -617,7 +662,7 @@ We want to hear from you! Voxtype is a young project and your feedback helps mak
 
 - [Peter Jackson](https://github.com/peteonrails) - Creator and maintainer
 - [jvantillo](https://github.com/jvantillo) - GPU acceleration patch, whisper-rs 0.15.1 compatibility
-- [materemias](https://github.com/materemias) - Paste output mode, on-demand model loading, single-instance safeguard, PKGBUILD fix
+- [materemias](https://github.com/materemias) - Paste output mode, on-demand model loading, single-instance safeguard, meeting mode post-processing, PKGBUILD fix
 - [Dan Heuckeroth](https://github.com/danheuck) - NixOS Home Manager module design
 - [Kevin Miller](https://github.com/digunix) - NixOS module enhancements, ROCm support
 - [reisset](https://github.com/reisset) - Testing and feedback on post-processing feature
@@ -630,6 +675,9 @@ We want to hear from you! Voxtype is a young project and your feedback helps mak
 - [Loki Coyote](https://github.com/lokkju) - eitype output driver for KDE/GNOME support, media keys and numeric keycode hotkey support
 - [Christopher Albert](https://github.com/krystophny) - macOS port foundation, CoreAudio capture, CGEvent output, Homebrew packaging
 - [Umesh](https://github.com/radiorambo) - Documentation website
+- [Sami Jawhar](https://github.com/sjawhar) - Eager input processing wiring
+- [KaiStarkk](https://github.com/KaiStarkk) - Post-process trim and fallback_on_empty options
+- [graysky](https://github.com/graysky2) - Flash attention config fix
 
 ## License
 

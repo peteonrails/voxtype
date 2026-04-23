@@ -64,7 +64,6 @@ impl CGEventOutput {
             fn AXIsProcessTrustedWithOptions(options: core_foundation::base::CFTypeRef) -> bool;
         }
 
-        use core_foundation::base::CFType;
         use core_foundation::boolean::CFBoolean;
         use core_foundation::dictionary::CFDictionary;
         use core_foundation::string::CFString;

@@ -96,6 +96,12 @@ pub fn get_voxtype_path() -> String {
 /// so backend switching only requires a service restart rather than regenerating
 /// the service file.
 pub fn get_voxtype_service_path() -> String {
+    // AppImage: use the .AppImage file path directly
+    // The APPIMAGE env var is set automatically by the AppImage runtime
+    if let Ok(appimage_path) = std::env::var("APPIMAGE") {
+        return appimage_path;
+    }
+
     const VOXTYPE_BIN: &str = "/usr/bin/voxtype";
 
     // If /usr/bin/voxtype exists (either as symlink or binary), use it
@@ -613,7 +619,7 @@ pub async fn run_setup(
         let model_name = model_override.unwrap(); // Safe: is_parakeet implies Some
 
         if !quiet {
-            println!("\nParakeet model (EXPERIMENTAL)...");
+            println!("\nParakeet model...");
         }
 
         // Check if parakeet feature is enabled
@@ -882,8 +888,8 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
         print_info("Using Parakeet engine (Whisper model not required)");
     }
 
-    // Check Parakeet models (experimental)
-    println!("\nParakeet Models (EXPERIMENTAL):");
+    // Check Parakeet models
+    println!("\nParakeet Models:");
 
     // Find available Parakeet models
     let mut parakeet_models: Vec<(String, u64)> = Vec::new();

@@ -98,6 +98,31 @@ struct ParakeetModelInfo {
 
 const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
     ParakeetModelInfo {
+        name: "parakeet-tdt-0.6b-v2",
+        size_mb: 2400,
+        description: "TDT English-only, best English accuracy",
+        files: &[
+            ("encoder-model.onnx", 41_770_866),
+            ("encoder-model.onnx.data", 2_435_420_160),
+            ("decoder_joint-model.onnx", 35_792_059),
+            ("vocab.txt", 9_384),
+            ("config.json", 97),
+        ],
+        huggingface_repo: "istupakov/parakeet-tdt-0.6b-v2-onnx",
+    },
+    ParakeetModelInfo {
+        name: "parakeet-tdt-0.6b-v2-int8",
+        size_mb: 640,
+        description: "TDT English-only quantized, smaller/faster",
+        files: &[
+            ("encoder-model.int8.onnx", 652_184_014),
+            ("decoder_joint-model.int8.onnx", 8_998_286),
+            ("vocab.txt", 9_384),
+            ("config.json", 97),
+        ],
+        huggingface_repo: "istupakov/parakeet-tdt-0.6b-v2-onnx",
+    },
+    ParakeetModelInfo {
         name: "parakeet-tdt-0.6b-v3",
         size_mb: 2600,
         description: "TDT model with punctuation (recommended)",
@@ -1060,6 +1085,11 @@ pub fn download_model(model_name: &str) -> anyhow::Result<()> {
 const GTCRN_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/gtcrn_simple.onnx";
 const GTCRN_MODEL_FILENAME: &str = "gtcrn_simple.onnx";
 
+/// ECAPA-TDNN speaker embedding model URL and filename
+const ECAPA_MODEL_URL: &str =
+    "https://huggingface.co/pranjal-pravesh/ecapa_tdnn_onnx/resolve/main/ecapa_tdnn.onnx";
+const ECAPA_MODEL_FILENAME: &str = "ecapa_tdnn.onnx";
+
 /// Ensure the GTCRN speech enhancement model is downloaded.
 /// Returns the path to the model file if available, or None if download fails.
 pub fn ensure_gtcrn_model() -> Option<std::path::PathBuf> {
@@ -1100,6 +1130,52 @@ pub fn ensure_gtcrn_model() -> Option<std::path::PathBuf> {
         }
         Err(_) => {
             eprintln!("Warning: curl not available. Speech enhancement model not downloaded.");
+            None
+        }
+    }
+}
+
+/// Ensure the ECAPA-TDNN speaker embedding model is downloaded.
+/// Returns the path to the model file if available, or None if download fails.
+/// Used by ML-based speaker diarization in meeting mode.
+pub fn ensure_ecapa_model() -> Option<std::path::PathBuf> {
+    let models_dir = Config::models_dir();
+    let model_path = models_dir.join(ECAPA_MODEL_FILENAME);
+
+    if model_path.exists() {
+        return Some(model_path);
+    }
+
+    // Ensure directory exists
+    if let Err(e) = std::fs::create_dir_all(&models_dir) {
+        eprintln!("Warning: Could not create models directory: {}", e);
+        return None;
+    }
+
+    println!("Downloading ECAPA-TDNN speaker embedding model (~26 MB)...");
+
+    let status = Command::new("curl")
+        .args([
+            "-L",
+            "--progress-bar",
+            "-o",
+            model_path.to_str().unwrap_or(ECAPA_MODEL_FILENAME),
+            ECAPA_MODEL_URL,
+        ])
+        .status();
+
+    match status {
+        Ok(exit_status) if exit_status.success() => {
+            println!("Speaker embedding model downloaded.");
+            Some(model_path)
+        }
+        Ok(_) => {
+            eprintln!("Warning: Failed to download speaker embedding model. ML diarization will fall back to simple speaker attribution.");
+            let _ = std::fs::remove_file(&model_path);
+            None
+        }
+        Err(_) => {
+            eprintln!("Warning: curl not available. Speaker embedding model not downloaded.");
             None
         }
     }
@@ -1493,8 +1569,8 @@ fn update_parakeet_in_config(config: &str, model_name: &str) -> String {
 
 /// List installed Parakeet models
 pub fn list_installed_parakeet() {
-    println!("\nInstalled Parakeet Models (EXPERIMENTAL)\n");
-    println!("=========================================\n");
+    println!("\nInstalled Parakeet Models\n");
+    println!("=========================\n");
 
     let models_dir = Config::models_dir();
 

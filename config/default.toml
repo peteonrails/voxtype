@@ -41,6 +41,16 @@ modifiers = []
 # - toggle: Press hotkey once to start recording, press again to stop
 # mode = "push_to_talk"
 
+# Modifier key for secondary model selection (evdev only)
+# Hold this key while pressing the hotkey to use secondary_model
+# model_modifier = "LEFTSHIFT"
+
+# Profile modifiers for context-aware post-processing (evdev only)
+# Maps modifier keys to named profiles defined in [profiles.*] sections
+# [hotkey.profile_modifiers]
+# LEFTSHIFT = "translate"   # Shift+hotkey activates [profiles.translate]
+# RIGHTALT = "formal"       # RightAlt+hotkey activates [profiles.formal]
+
 [audio]
 # Audio input device ("default" uses system default)
 # List devices with: pactl list sources short

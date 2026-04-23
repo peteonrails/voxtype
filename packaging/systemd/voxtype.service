@@ -7,7 +7,7 @@ Wants=ydotool.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/voxtype daemon
+ExecStart=/usr/bin/voxtype -q daemon
 Restart=on-failure
 RestartSec=5
 

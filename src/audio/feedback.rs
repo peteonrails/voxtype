@@ -15,6 +15,8 @@ pub enum SoundEvent {
     RecordingStart,
     /// Recording stopped
     RecordingStop,
+    /// Transcription completed and text output successfully
+    TranscriptionComplete,
     /// Recording/transcription cancelled
     Cancelled,
     /// Error occurred
@@ -33,6 +35,7 @@ pub struct AudioFeedback {
 struct SoundTheme {
     start: Vec<u8>,
     stop: Vec<u8>,
+    complete: Vec<u8>,
     cancel: Vec<u8>,
     error: Vec<u8>,
 }
@@ -62,6 +65,7 @@ impl AudioFeedback {
         let sound_data = match event {
             SoundEvent::RecordingStart => &self.theme.start,
             SoundEvent::RecordingStop => &self.theme.stop,
+            SoundEvent::TranscriptionComplete => &self.theme.complete,
             SoundEvent::Cancelled => &self.theme.cancel,
             SoundEvent::Error => &self.theme.error,
         };
@@ -117,6 +121,7 @@ fn load_custom_theme(path: &str) -> Result<SoundTheme, String> {
     Ok(SoundTheme {
         start: load_file("start.wav"),
         stop: load_file("stop.wav"),
+        complete: load_file("complete.wav"),
         cancel: load_file("cancel.wav"),
         error: load_file("error.wav"),
     })
@@ -234,6 +239,8 @@ fn generate_default_theme() -> SoundTheme {
         start: generate_two_tone_wav(440.0, 880.0, 150, 20),
         // Falling two-tone: 880Hz -> 440Hz (completion)
         stop: generate_two_tone_wav(880.0, 440.0, 150, 20),
+        // High ping: short 1200Hz tone (distinct from start/stop two-tones)
+        complete: generate_tone_wav(1200.0, 80, 15),
         // Quick descending triple-beep for cancel (distinct from stop)
         cancel: generate_tone_wav(600.0, 80, 10),
         // Low warning tone
@@ -248,6 +255,8 @@ fn generate_subtle_theme() -> SoundTheme {
         start: generate_tone_wav(1200.0, 50, 10),
         // Soft low click
         stop: generate_tone_wav(800.0, 50, 10),
+        // Gentle rising two-tone pip
+        complete: generate_two_tone_wav(900.0, 1100.0, 60, 10),
         // Quick mid-tone for cancel
         cancel: generate_tone_wav(600.0, 40, 8),
         // Double low click
@@ -262,6 +271,8 @@ fn generate_mechanical_theme() -> SoundTheme {
         start: generate_click_wav(30),
         // Softer click
         stop: generate_click_wav(20),
+        // Carriage return bell
+        complete: generate_tone_wav(2000.0, 40, 8),
         // Double click for cancel
         cancel: generate_click_wav(15),
         // Buzzer
@@ -287,15 +298,18 @@ mod tests {
         let default = generate_default_theme();
         assert!(!default.start.is_empty());
         assert!(!default.stop.is_empty());
+        assert!(!default.complete.is_empty());
         assert!(!default.cancel.is_empty());
         assert!(!default.error.is_empty());
 
         let subtle = generate_subtle_theme();
         assert!(!subtle.start.is_empty());
+        assert!(!subtle.complete.is_empty());
         assert!(!subtle.cancel.is_empty());
 
         let mechanical = generate_mechanical_theme();
         assert!(!mechanical.start.is_empty());
+        assert!(!mechanical.complete.is_empty());
         assert!(!mechanical.cancel.is_empty());
     }
 }

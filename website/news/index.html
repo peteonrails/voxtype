@@ -9,16 +9,16 @@
     <!-- Open Graph / Social Media -->
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://voxtype.io/news/">
-    <meta property="og:title" content="Voxtype 0.6.3: Clipboard Restoration, Full Config Override, NixOS Improvements">
-    <meta property="og:description" content="Restore clipboard after paste mode, every config option now configurable via CLI flags and env vars, NixOS packaging improvements and bug fixes.">
+    <meta property="og:title" content="Voxtype 0.6.6: Media Pause, Audio Feedback, KDE Support, 7 Bug Fixes">
+    <meta property="og:description" content="Pauses media players during recording, plays audio feedback on transcription completion, documents KDE Plasma keybindings, and fixes seven output driver and text processing bugs.">
     <meta property="og:image" content="https://voxtype.io/images/gpu-isolation.png">
     <meta property="og:image:width" content="1200">
     <meta property="og:image:height" content="630">
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="Voxtype 0.6.3: Clipboard Restoration, Full Config Override, NixOS Improvements">
-    <meta name="twitter:description" content="Restore clipboard after paste mode, every config option now configurable via CLI flags and env vars, NixOS packaging improvements and bug fixes.">
+    <meta name="twitter:title" content="Voxtype 0.6.6: Media Pause, Audio Feedback, KDE Support, 7 Bug Fixes">
+    <meta name="twitter:description" content="Pauses media players during recording, plays audio feedback on transcription completion, documents KDE Plasma keybindings, and fixes seven output driver and text processing bugs.">
     <meta name="twitter:image" content="https://voxtype.io/images/gpu-isolation.png">
 
     <title>News & Updates | Voxtype</title>
@@ -76,6 +76,184 @@
         <div class="container">
 
             <!-- v0.6.x Era Posts -->
+
+            <article class="news-article" id="v066">
+                <div class="article-meta">
+                    <time datetime="2026-04-18">April 18, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v0.6.6: Media Pause, Audio Feedback, KDE Support, 7 Bug Fixes</h2>
+                <div class="article-body">
+                    <p>Voxtype 0.6.6 adds media player pausing during recording, audio feedback when transcription finishes, KDE Plasma compositor keybinding documentation, and finer control over post-processing behavior. This release also fixes seven bugs across output drivers, text processing, and the remote backend.</p>
+
+                    <h3>Media Player Pause</h3>
+                    <p>Voxtype can now pause your media player when you start recording and resume it when you stop. This prevents music or podcasts from bleeding into your transcription. It uses playerctl, which supports Spotify, Firefox, VLC, and any MPRIS-compatible player.</p>
+
+                    <p><strong>Why use it:</strong> If you listen to music while working and use push-to-talk dictation, you no longer need to manually pause before speaking.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[audio]
+pause_media = true</code></pre>
+                    </div>
+
+                    <p>Also available as <code>--pause-media</code> on the CLI or <code>VOXTYPE_PAUSE_MEDIA=true</code> as an environment variable.</p>
+
+                    <h3>Audio Feedback</h3>
+                    <p>A new sound event plays when transcription finishes, so you know your text has been output without looking at the screen. Three built-in themes are available: default, subtle, and mechanical.</p>
+
+                    <p><strong>Why use it:</strong> When transcription takes a few seconds (especially on CPU), audio feedback tells you the text is ready. This is particularly helpful when dictating into a window that isn't visible.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[audio]
+feedback_theme = "default"    # default, subtle, or mechanical</code></pre>
+                    </div>
+
+                    <p>The existing start/stop recording sounds continue to work as before. The new TranscriptionComplete event is an addition, not a replacement.</p>
+
+                    <h3>KDE Plasma Keybindings</h3>
+                    <p>KDE Plasma on Wayland is now documented as a supported compositor for keybinding setup. The README, User Manual, and Configuration guide include step-by-step instructions for configuring push-to-talk via KWin's custom shortcuts.</p>
+
+                    <h3>Post-Process Control</h3>
+                    <p>Two new options for the post-processing pipeline give you more control over LLM cleanup output.</p>
+
+                    <p><code>trim</code> strips leading and trailing whitespace from post-processed text. This is useful when LLM commands return text with extra newlines or spaces.</p>
+
+                    <p><code>fallback_on_empty</code> controls what happens when your post-process command returns empty output. When enabled (the default), voxtype falls back to the original transcription. When disabled, empty output is treated as intentional, which is useful for commands that deliberately filter out certain transcriptions.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[output]
+post_process_command = "ollama run llama3.2 'Clean up this dictation:'"
+post_process_trim = true
+post_process_fallback_on_empty = true</code></pre>
+                    </div>
+
+                    <h3>Meeting Mode Post-Processing</h3>
+                    <p>Meeting mode now supports post-processing with dictation context. When a post-process command is configured, meeting transcription chunks are processed through it before being added to the transcript. The command receives the raw transcription on stdin along with meeting context (title, speaker, timestamp) via environment variables.</p>
+
+                    <p><strong>Why use it:</strong> If you use LLM cleanup for regular dictation, this extends that pipeline to meeting mode. The additional context variables let the LLM make better decisions about formatting and cleanup.</p>
+
+                    <h3>CLI Help Reorganization</h3>
+                    <p>The CLI help output has been reorganized for progressive disclosure. Options are grouped by section (Audio, Whisper, Output, VAD, Meeting) with the most commonly used options appearing first. The <code>--help</code> output is shorter and more scannable, while subcommand help still shows full details.</p>
+
+                    <h3>Bug Fixes</h3>
+                    <ul>
+                        <li><strong>ydotool socket detection:</strong> Fedora puts the ydotool socket at <code>/tmp/.ydotool_socket</code> instead of the standard path. Voxtype now searches common locations automatically. (<a href="https://github.com/peteonrails/voxtype/issues/306">#306</a>)</li>
+                        <li><strong>Duplicate desktop notifications:</strong> The ydotool, dotool, clipboard, and xclip output drivers were sending their own notifications in addition to the daemon's. Notifications are now handled consistently by the daemon. (<a href="https://github.com/peteonrails/voxtype/issues/268">#268</a>)</li>
+                        <li><strong>Remote backend initial_prompt:</strong> The remote transcription backend now forwards <code>initial_prompt</code> as the <code>prompt</code> field in the multipart form, matching the OpenAI API spec. (<a href="https://github.com/peteonrails/voxtype/issues/278">#278</a>)</li>
+                        <li><strong>Text replacement ordering:</strong> Text replacements are now applied before spoken punctuation conversion. Patterns like "slash pr" now work correctly. (<a href="https://github.com/peteonrails/voxtype/issues/172">#172</a>)</li>
+                        <li><strong>KDE Plasma paste support:</strong> eitype added to the Ctrl+V simulation chain in paste mode for KDE Plasma Wayland. (<a href="https://github.com/peteonrails/voxtype/issues/259">#259</a>)</li>
+                        <li><strong>X11 clipboard fallback:</strong> xclip added as a fallback in clipboard mode for X11 sessions where wl-copy isn't available. (<a href="https://github.com/peteonrails/voxtype/issues/256">#256</a>)</li>
+                        <li><strong>CJK first character drop in Discord:</strong> New <code>wtype_shift_prefix</code> option works around a Discord bug where the first CJK character is dropped when using wtype. (<a href="https://github.com/peteonrails/voxtype/issues/208">#208</a>)</li>
+                    </ul>
+
+                    <h3>Contributors</h3>
+                    <p>Thanks to <a href="https://github.com/KaiStarkk">KaiStarkk</a> for post-process trim and fallback_on_empty, <a href="https://github.com/graysky2">graysky2</a> for fixing flash attention config wiring, and <a href="https://github.com/materemias">materemias</a> for meeting mode post-processing with dictation context.</p>
+                </div>
+            </article>
+
+            <article class="news-article" id="v065">
+                <div class="article-meta">
+                    <time datetime="2026-03-31">March 31, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v0.6.5: Eager Processing, Multi-GPU Device Selection, Parakeet TDT English-Only Models</h2>
+                <div class="article-body">
+                    <p>Voxtype 0.6.5 adds real-time transcription during recording, fixes a performance regression on multi-GPU systems, and brings new English-only Parakeet models. If you have both an integrated and discrete GPU, the <code>gpu_device</code> option gives you direct control over which one runs inference.</p>
+
+                    <h3>Eager Processing</h3>
+                    <p>Voxtype can now transcribe audio chunks while you are still recording. Instead of waiting until you release the hotkey and then processing all the audio at once, eager mode splits your recording into overlapping chunks and transcribes them in parallel. When you stop recording, the partial results are combined into the final output.</p>
+
+                    <p><strong>Why use it:</strong> On slower CPUs where transcription takes several seconds, eager processing reduces the wait after you stop speaking. On fast systems with GPU acceleration, the difference is negligible.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[whisper]
+eager_processing = true
+eager_chunk_secs = 5.0       # Chunk size (seconds)
+eager_overlap_secs = 0.5     # Overlap to avoid losing words at boundaries</code></pre>
+                    </div>
+
+                    <p>Per-recording overrides work too: <code>voxtype --eager-processing record start</code></p>
+
+                    <h3>Multi-GPU Device Selection</h3>
+                    <p>whisper-rs 0.16.0 began enumerating integrated GPUs via Vulkan, which gave them priority over discrete GPUs. On systems with both (common on laptops and hybrid desktops), this caused transcription to run on the integrated GPU at roughly 3x slower speeds with no obvious indication.</p>
+
+                    <p>The new <code>gpu_device</code> option lets you specify the exact GPU device index for whisper.cpp:</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[whisper]
+gpu_device = 1    # Use device index 1 (your discrete GPU)</code></pre>
+                    </div>
+
+                    <p>Also available as <code>--gpu-device 1</code> on the CLI or <code>VOXTYPE_GPU_DEVICE=1</code> as an environment variable. Use <code>voxtype setup gpu</code> or <code>vulkaninfo --summary</code> to find your device indices.</p>
+
+                    <p>This complements the existing <code>VOXTYPE_VULKAN_DEVICE</code> env var, which filters by vendor name ("amd", "nvidia", "intel"). Use <code>gpu_device</code> when you need precise index control, especially with same-vendor multi-GPU setups.</p>
+
+                    <h3>Parakeet TDT English-Only Models</h3>
+                    <p>Two new Parakeet model options for English-only transcription:</p>
+                    <ul>
+                        <li><strong>parakeet-tdt-0.6b-v2</strong> (2.4 GB): Full-precision TDT model with best English accuracy</li>
+                        <li><strong>parakeet-tdt-0.6b-v2-int8</strong> (640 MB): Quantized variant, about 20% faster and 75% smaller at the cost of minor accuracy</li>
+                    </ul>
+                    <p>Select them via <code>voxtype setup model</code>. These are alternatives to the existing v3 models, which have better punctuation but are multilingual.</p>
+
+                    <h3>Contributors</h3>
+                    <p>Thanks to <a href="https://github.com/sjawhar">Sami Jawhar</a> for wiring eager processing into the daemon, <a href="https://github.com/rinormaloku">Rinor Maloku</a> for the Parakeet TDT English-only model definitions, and <a href="https://github.com/DuskyElf">jan Lemata (DuskyElf)</a> for the multi-GPU device selection.</p>
+                </div>
+            </article>
+
+            <article class="news-article" id="v064">
+                <div class="article-meta">
+                    <time datetime="2026-03-19">March 19, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v0.6.4: Clang 22 Compatibility, Smart Auto-Submit, CUDA Safety</h2>
+                <div class="article-body">
+                    <p>Voxtype 0.6.4 fixes source builds on systems with clang 22, adds voice-triggered auto-submit, and prevents CUDA version mismatch segfaults. If you build voxtype from source on Arch Linux and recently updated clang, this release unblocks you.</p>
+
+                    <h3>Clang 22 / Bindgen Compatibility</h3>
+                    <p>LLVM 22 changed how it represents certain C struct types in the AST, which broke bindgen 0.71.x during the whisper-rs build. The build would fail with type errors in the generated FFI bindings. This release bumps whisper-rs to 0.16.0, which includes bindgen 0.72.1 with the fix.</p>
+
+                    <p><strong>Why it matters:</strong> Arch Linux and other rolling distros ship clang 22 now. Without this fix, <code>makepkg</code> for the <code>voxtype</code> AUR package fails during compilation.</p>
+
+                    <h3>Smart Auto-Submit</h3>
+                    <p>You can now say "submit", "send", or "enter" at the end of your dictation to automatically press Enter after the text is output. This is useful for chat apps, terminal prompts, and search boxes where you want to dictate and send in one step.</p>
+
+                    <p><strong>Why use it:</strong> Dictate a Slack message and say "send" at the end. The text is typed and Enter is pressed, all from a single recording.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[text]
+smart_auto_submit = true</code></pre>
+                    </div>
+
+                    <p>The trigger word is stripped from the output. Works with <code>--auto-submit</code> per-recording overrides too. Trigger words are case-insensitive and must appear as the last word in the transcription.</p>
+
+                    <h3>CUDA Version Probing</h3>
+                    <p>ONNX engine binaries ship with CUDA 12.x bundled. If your system has an older CUDA version (or none at all), the previous behavior was a segfault deep inside ONNX Runtime initialization. Voxtype now probes the system CUDA version via <code>dlopen</code>/<code>dlsym</code> before attempting to load ONNX Runtime with CUDA. If the version doesn't match, it falls back to CPU with a clear warning instead of crashing.</p>
+
+                    <p><strong>Why it matters:</strong> Users with NVIDIA GPUs but older CUDA drivers no longer get unexplained crashes when selecting an ONNX engine.</p>
+
+                    <h3>Bug Fixes</h3>
+                    <ul>
+                        <li><strong>Status command ONNX detection:</strong> <code>voxtype status</code> now correctly reports the model name and backend when using ONNX engines (Parakeet, SenseVoice, etc.) instead of showing the Whisper model path.</li>
+                        <li><strong>Meeting export directory handling:</strong> When <code>--output</code> points to a directory instead of a file, voxtype now auto-generates a timestamped filename instead of failing.</li>
+                    </ul>
+
+                    <h3>Other Changes</h3>
+                    <ul>
+                        <li>NixOS Home Manager module now merges user settings into defaults instead of replacing them.</li>
+                        <li>Updated Parakeet model documentation with correct download links and file listings.</li>
+                    </ul>
+
+                    <h3>Contributors</h3>
+                    <p>Thanks to <a href="https://github.com/siebertm">Michael Siebert</a> for smart auto-submit, <a href="https://github.com/sjawhar">Sami Jawhar</a> for wiring eager input processing into the daemon, <a href="https://github.com/materemias">materemias</a> for meeting export improvements, <a href="https://github.com/repomaa">Joakim Repomaa</a> for the NixOS HM fix, <a href="https://github.com/benj9000">benj9000</a> for Parakeet documentation updates, and <a href="https://github.com/fazzledev">Syed Fazil Basheer</a> for diagnosing the ONNX status bug.</p>
+                </div>
+            </article>
 
             <article class="news-article" id="v063">
                 <div class="article-meta">

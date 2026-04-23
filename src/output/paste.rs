@@ -5,12 +5,14 @@
 //!
 //! Requires:
 //! - wl-copy installed (for clipboard access)
-//! - wtype OR ydotool installed (for keystroke simulation)
+//! - wtype OR eitype OR ydotool installed (for keystroke simulation)
 //!   - wtype: Wayland-native, no daemon needed (preferred)
+//!   - eitype: EI protocol, works on GNOME/KDE/Sway with libei
 //!   - ydotool: Works on X11/Wayland/TTY, requires ydotoold daemon
 
 use super::TextOutput;
 use crate::error::OutputError;
+use crate::output::find_ydotool_socket;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -71,6 +73,24 @@ impl ParsedKeystroke {
             args.push("-m".to_string());
             args.push(modifier.clone());
         }
+
+        args
+    }
+
+    /// Convert to eitype arguments
+    /// e.g., "ctrl+v" -> ["-M", "ctrl", "-k", "v"]
+    fn to_eitype_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+
+        // Press modifiers
+        for modifier in &self.modifiers {
+            args.push("-M".to_string());
+            args.push(modifier.clone());
+        }
+
+        // Tap the key
+        args.push("-k".to_string());
+        args.push(self.key.clone());
 
         args
     }
@@ -521,6 +541,18 @@ impl PasteOutput {
         std::env::var("WAYLAND_DISPLAY").is_ok()
     }
 
+    /// Check if eitype is available
+    async fn is_eitype_available(&self) -> bool {
+        Command::new("which")
+            .arg("eitype")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
     /// Check if ydotool is available (installed and daemon running)
     async fn is_ydotool_available(&self) -> bool {
         // Check if ydotool exists
@@ -538,8 +570,11 @@ impl PasteOutput {
         }
 
         // Check if ydotoold is running by trying a no-op
-        Command::new("ydotool")
-            .args(["type", ""])
+        let mut cmd = Command::new("ydotool");
+        if let Some(socket) = find_ydotool_socket() {
+            cmd.env("YDOTOOL_SOCKET", socket);
+        }
+        cmd.args(["type", ""])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -578,6 +613,36 @@ impl PasteOutput {
         Ok(())
     }
 
+    /// Simulate paste keystroke using eitype
+    async fn simulate_paste_eitype(&self) -> Result<(), OutputError> {
+        let args = self.keystroke.to_eitype_args();
+        tracing::debug!("Running: eitype {}", args.join(" "));
+
+        let output = Command::new("eitype")
+            .args(&args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    OutputError::EitypeNotFound
+                } else {
+                    OutputError::CtrlVFailed(e.to_string())
+                }
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(OutputError::CtrlVFailed(format!(
+                "eitype failed: {}",
+                stderr
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Simulate paste keystroke using ydotool
     async fn simulate_paste_ydotool(&self) -> Result<(), OutputError> {
         let args = self.keystroke.to_ydotool_args().map_err(|e| {
@@ -591,6 +656,9 @@ impl PasteOutput {
         );
 
         let mut cmd = Command::new("ydotool");
+        if let Some(socket) = find_ydotool_socket() {
+            cmd.env("YDOTOOL_SOCKET", socket);
+        }
         cmd.arg("key");
 
         // Only add delay parameter if configured
@@ -627,7 +695,7 @@ impl PasteOutput {
         Ok(())
     }
 
-    /// Simulate paste keystroke, trying wtype first then ydotool
+    /// Simulate paste keystroke, trying wtype first, then eitype, then ydotool
     async fn simulate_paste_keystroke(&self) -> Result<(), OutputError> {
         // Try wtype first (preferred - no daemon needed)
         if self.is_wtype_available().await {
@@ -637,7 +705,20 @@ impl PasteOutput {
                     return Ok(());
                 }
                 Err(e) => {
-                    tracing::debug!("wtype paste failed: {}, trying ydotool", e);
+                    tracing::debug!("wtype paste failed: {}, trying eitype", e);
+                }
+            }
+        }
+
+        // Try eitype (EI protocol - works on GNOME/KDE/Sway with libei)
+        if self.is_eitype_available().await {
+            match self.simulate_paste_eitype().await {
+                Ok(()) => {
+                    tracing::debug!("Paste keystroke sent via eitype");
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::debug!("eitype paste failed: {}, trying ydotool", e);
                 }
             }
         }
@@ -657,7 +738,7 @@ impl PasteOutput {
         }
 
         Err(OutputError::CtrlVFailed(
-            "Neither wtype nor ydotool available for paste keystroke".to_string(),
+            "No keystroke tool available (tried wtype, eitype, ydotool)".to_string(),
         ))
     }
 
@@ -679,9 +760,29 @@ impl PasteOutput {
             }
         }
 
+        // Try eitype
+        if self.is_eitype_available().await {
+            let output = Command::new("eitype")
+                .args(["-k", "return"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+                .await;
+
+            if let Ok(out) = output {
+                if out.status.success() {
+                    return Ok(());
+                }
+            }
+        }
+
         // Fall back to ydotool
         if self.is_ydotool_available().await {
-            let output = Command::new("ydotool")
+            let mut cmd = Command::new("ydotool");
+            if let Some(socket) = find_ydotool_socket() {
+                cmd.env("YDOTOOL_SOCKET", socket);
+            }
+            let output = cmd
                 .args(["key", "28:1", "28:0"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
@@ -803,21 +904,23 @@ impl TextOutput for PasteOutput {
             return false;
         }
 
-        // Check if EITHER wtype OR ydotool is available for keystroke simulation
+        // Check if wtype, eitype, or ydotool is available for keystroke simulation
         let wtype_available = self.is_wtype_available().await;
+        let eitype_available = self.is_eitype_available().await;
         let ydotool_available = self.is_ydotool_available().await;
 
-        if !wtype_available && !ydotool_available {
+        if !wtype_available && !eitype_available && !ydotool_available {
             tracing::debug!(
-                "paste mode unavailable: neither wtype nor ydotool available \
-                (wtype needs WAYLAND_DISPLAY, ydotool needs daemon running)"
+                "paste mode unavailable: no keystroke tool available \
+                (wtype needs WAYLAND_DISPLAY, eitype needs libei, ydotool needs daemon running)"
             );
             return false;
         }
 
         tracing::debug!(
-            "paste mode available (wtype: {}, ydotool: {})",
+            "paste mode available (wtype: {}, eitype: {}, ydotool: {})",
             wtype_available,
+            eitype_available,
             ydotool_available
         );
         true

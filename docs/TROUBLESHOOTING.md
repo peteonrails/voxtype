@@ -725,6 +725,23 @@ Some applications (terminals, games) may block simulated input.
 mode = "clipboard"
 ```
 
+### First CJK character dropped (wtype)
+
+**Symptom:** When using wtype, the first Chinese, Japanese, or Korean character is missing from the output. This happens in some apps like Discord.
+
+**Cause:** Some Wayland applications swallow the first character from wtype's virtual keyboard input, particularly with CJK text.
+
+**Solution:** Enable the Shift prefix workaround:
+
+```toml
+[output]
+wtype_shift_prefix = true
+```
+
+This prefixes each wtype command with a Shift key press and release (`-P Shift_L -p Shift_L`), which prevents the first character from being dropped. It only affects the wtype driver and has no visible effect on the output text.
+
+You can also enable it via CLI flag (`--wtype-shift-prefix`) or environment variable (`VOXTYPE_WTYPE_SHIFT_PREFIX=true`).
+
 ### Characters dropped or garbled
 
 **Cause:** Typing too fast for the application.
@@ -809,6 +826,39 @@ threads = 8  # Match your CPU cores
 
 3. **Use English-only model:**
 `.en` models are faster than multilingual models.
+
+### Slow transcription on multi-GPU systems (Vulkan)
+
+**Cause:** whisper.cpp 1.7+ enumerates integrated GPUs via Vulkan. On systems with both an integrated GPU (e.g., Intel UHD) and a discrete GPU (e.g., NVIDIA RTX), the integrated GPU gets index 0 and becomes the default. This can cause ~3x slower transcription.
+
+**Solutions:**
+
+1. **Use VOXTYPE_VULKAN_DEVICE** (recommended for different-vendor GPUs):
+
+If your integrated and discrete GPUs are from different vendors (e.g., Intel iGPU + NVIDIA dGPU), this is the simplest fix. It filters out the unwanted vendor's Vulkan driver entirely.
+
+```bash
+# In your environment or systemd override:
+VOXTYPE_VULKAN_DEVICE=nvidia
+```
+
+Valid values: `nvidia`, `amd`, `intel`. See `voxtype setup gpu` for detected GPUs.
+
+2. **Set gpu_device in config** (for same-vendor GPUs or precise index control):
+
+This passes a device index directly to whisper.cpp, useful when both GPUs are from the same vendor.
+
+```toml
+[whisper]
+gpu_device = 1  # Use discrete GPU instead of integrated at index 0
+```
+
+3. **Or use the GGML_VK_VISIBLE_DEVICES env var:**
+```bash
+GGML_VK_VISIBLE_DEVICES=1 voxtype
+```
+
+**How to find the right GPU:** Run `voxtype setup gpu` to see detected GPUs, or `vulkaninfo --summary` to see the Vulkan device list and their indices.
 
 ### High CPU usage
 
