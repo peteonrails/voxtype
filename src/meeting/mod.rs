@@ -110,6 +110,11 @@ pub struct MeetingDaemon {
     /// Previous chunk's post-processed text, tracked per audio source
     /// so mic and loopback contexts don't bleed into each other
     last_chunk_text: HashMap<AudioSource, String>,
+    /// Cumulative audio duration consumed per source, in milliseconds.
+    /// Used to compute per-source start offsets so mic and loopback
+    /// timelines stay anchored to real wall-clock elapsed time instead
+    /// of being pushed forward by the other source's segments.
+    source_offsets: HashMap<AudioSource, u64>,
 }
 
 impl MeetingDaemon {
@@ -157,6 +162,7 @@ impl MeetingDaemon {
             event_tx,
             post_processor,
             last_chunk_text: HashMap::new(),
+            source_offsets: HashMap::new(),
         })
     }
 
@@ -224,6 +230,7 @@ impl MeetingDaemon {
 
         self.state = std::mem::take(&mut self.state).stop();
         self.last_chunk_text.clear();
+        self.source_offsets.clear();
 
         // Finalize meeting
         if let Some(ref mut meeting) = self.current_meeting {
@@ -304,12 +311,11 @@ impl MeetingDaemon {
             ..Default::default()
         };
 
-        // Calculate start offset
-        let start_offset_ms = if let Some(ref meeting) = self.current_meeting {
-            meeting.transcript.duration_ms()
-        } else {
-            0
-        };
+        // Start offset is tracked per source: each source has its own wall-clock
+        // timeline. Deriving this from transcript.duration_ms() would conflate
+        // mic and loopback, pushing every new chunk past the other source's end
+        // and roughly doubling apparent meeting length on dual-track captures.
+        let start_offset_ms = *self.source_offsets.entry(source).or_insert(0);
 
         let mut processor = ChunkProcessor::new(chunk_config, transcriber.clone());
         let mut buffer = processor.new_buffer(chunk_id, source, start_offset_ms);
@@ -318,6 +324,12 @@ impl MeetingDaemon {
         let mut result = processor
             .process_chunk(buffer)
             .map_err(crate::error::VoxtypeError::Transcribe)?;
+
+        // Advance the per-source offset by the actual audio duration consumed,
+        // regardless of whether VAD found speech in this chunk.
+        if let Some(offset) = self.source_offsets.get_mut(&source) {
+            *offset += result.audio_duration_ms;
+        }
 
         // Post-process segment text if configured
         if let Some(ref post_processor) = self.post_processor {

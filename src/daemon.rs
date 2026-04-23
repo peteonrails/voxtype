@@ -2688,9 +2688,16 @@ impl Daemon {
                         if self.meeting_mic_buffer.len() >= chunk_samples {
                             let mic_chunk: Vec<f32> = self.meeting_mic_buffer.drain(..chunk_samples).collect();
 
-                            // Also drain loopback buffer up to the same amount
+                            // Also drain loopback buffer up to the same amount.
+                            // Pad with silence so it matches the mic chunk length —
+                            // keeps the per-source timestamp offsets advancing in
+                            // lockstep with wall-clock even if the loopback monitor
+                            // has a short startup lag or a transient gap.
                             let loopback_len = self.meeting_loopback_buffer.len().min(chunk_samples);
-                            let loopback_chunk: Vec<f32> = self.meeting_loopback_buffer.drain(..loopback_len).collect();
+                            let mut loopback_chunk: Vec<f32> = self.meeting_loopback_buffer.drain(..loopback_len).collect();
+                            if loopback_chunk.len() < chunk_samples {
+                                loopback_chunk.resize(chunk_samples, 0.0);
+                            }
 
                             // Enhance mic audio with GTCRN if available (removes echo/noise)
                             #[cfg(feature = "onnx-common")]
@@ -2722,19 +2729,20 @@ impl Daemon {
                                     }
                                 }
 
-                                // Process loopback chunk if non-empty
-                                if !loopback_chunk.is_empty() {
-                                    match daemon.process_chunk_with_source(loopback_chunk, meeting::data::AudioSource::Loopback).await {
-                                        Ok(Some(segments)) => {
-                                            tracing::debug!("Processed loopback chunk with {} segments", segments.len());
-                                            if !segments.is_empty() {
-                                                had_loopback = true;
-                                            }
+                                // Process loopback chunk. Always process (even when
+                                // padded silence) so the loopback source offset
+                                // advances in lockstep with mic; VAD filters out
+                                // the silent frames without running transcription.
+                                match daemon.process_chunk_with_source(loopback_chunk, meeting::data::AudioSource::Loopback).await {
+                                    Ok(Some(segments)) => {
+                                        tracing::debug!("Processed loopback chunk with {} segments", segments.len());
+                                        if !segments.is_empty() {
+                                            had_loopback = true;
                                         }
-                                        Ok(None) => {}
-                                        Err(e) => {
-                                            tracing::error!("Error processing loopback chunk: {}", e);
-                                        }
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => {
+                                        tracing::error!("Error processing loopback chunk: {}", e);
                                     }
                                 }
 
