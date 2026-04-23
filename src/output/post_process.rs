@@ -233,8 +233,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_output_fallback() {
-        // echo -n outputs nothing, which should trigger fallback
-        let config = make_config("echo -n ''", 5000);
+        // printf '' outputs nothing, which should trigger fallback
+        // (echo -n is not portable across platforms)
+        let config = make_config("printf ''", 5000);
         let processor = PostProcessor::new(&config);
         let result = processor.process("original text").await;
         assert_eq!(result, "original text"); // Falls back to original
@@ -267,7 +268,8 @@ mod tests {
     #[tokio::test]
     async fn test_whitespace_trimming() {
         // Output has trailing newline which should be trimmed
-        let config = make_config("echo 'hello'", 5000);
+        // Use printf with \n to be portable across platforms
+        let config = make_config("printf 'hello\\n'", 5000);
         let processor = PostProcessor::new(&config);
         let result = processor.process("ignored").await;
         assert_eq!(result, "hello");
@@ -314,7 +316,7 @@ mod tests {
     async fn test_no_fallback_on_empty_returns_empty() {
         // When fallback_on_empty = false, empty output is returned as-is
         let config = PostProcessConfig {
-            command: "echo -n ''".to_string(),
+            command: "printf ''".to_string(),
             timeout_ms: 5000,
             trim: true,
             fallback_on_empty: false,
@@ -327,7 +329,7 @@ mod tests {
     #[tokio::test]
     async fn test_fallback_on_empty_default_returns_original() {
         // Default behavior: empty output falls back to original text
-        let config = make_config("echo -n ''", 5000);
+        let config = make_config("printf ''", 5000);
         let processor = PostProcessor::new(&config);
         let result = processor.process("original text").await;
         assert_eq!(result, "original text");
@@ -347,7 +349,10 @@ mod tests {
     #[tokio::test]
     async fn test_no_context_env_var_when_none() {
         // VOXTYPE_CONTEXT should not be set when context is None
-        let config = make_config("echo \"context:${VOXTYPE_CONTEXT:-unset} stdin:$(cat)\"", 5000);
+        let config = make_config(
+            "echo \"context:${VOXTYPE_CONTEXT:-unset} stdin:$(cat)\"",
+            5000,
+        );
         let processor = PostProcessor::new(&config);
         let result = processor.process_with_context("current text", None).await;
         assert_eq!(result, "context:unset stdin:current text");

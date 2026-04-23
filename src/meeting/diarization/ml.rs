@@ -107,18 +107,22 @@ impl MlDiarizerState {
             // Return existing speaker
             tracing::debug!(
                 "Speaker match: {} (similarity: {:.3})",
-                self.speaker_embeddings[idx].speaker_id, sim
+                self.speaker_embeddings[idx].speaker_id,
+                sim
             );
             self.speaker_embeddings[idx].speaker_id.clone()
         } else if self.next_speaker_id < max_speakers {
             // Log best similarity for debugging
-            let best_sim = self.speaker_embeddings.iter()
+            let best_sim = self
+                .speaker_embeddings
+                .iter()
                 .map(|e| new_embedding.cosine_similarity(e))
                 .fold(f32::NEG_INFINITY, f32::max);
             if !self.speaker_embeddings.is_empty() {
                 tracing::debug!(
                     "New speaker (best similarity: {:.3}, threshold: {:.3})",
-                    best_sim, similarity_threshold
+                    best_sim,
+                    similarity_threshold
                 );
             }
             // Create new speaker
@@ -322,10 +326,7 @@ impl Diarizer for MlDiarizer {
 
             // Segment timestamps are meeting-relative, but samples are chunk-relative.
             // Subtract the chunk's base offset to get correct sample indices.
-            let chunk_offset_ms = transcript_segments
-                .first()
-                .map(|s| s.start_ms)
-                .unwrap_or(0);
+            let chunk_offset_ms = transcript_segments.first().map(|s| s.start_ms).unwrap_or(0);
 
             let mut results = Vec::new();
 

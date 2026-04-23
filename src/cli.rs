@@ -55,17 +55,24 @@ pub struct Cli {
     pub quiet: bool,
 
     // -- Transcription (engine-agnostic) --
-
     /// Override transcription model
-    #[arg(long, value_name = "MODEL", help_heading = "Transcription",
+    #[arg(
+        long,
+        value_name = "MODEL",
+        help_heading = "Transcription",
         long_help = "Override model for transcription.\n\
         Whisper: tiny, base, small, medium, large-v3, large-v3-turbo (and .en variants).\n\
-        Parakeet: parakeet-tdt-0.6b-v3, parakeet-tdt-0.6b-v3-int8")]
+        Parakeet: parakeet-tdt-0.6b-v3, parakeet-tdt-0.6b-v3-int8"
+    )]
     pub model: Option<String>,
 
     /// Override transcription engine
-    #[arg(long, value_name = "ENGINE", help_heading = "Transcription",
-        long_help = "Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual")]
+    #[arg(
+        long,
+        value_name = "ENGINE",
+        help_heading = "Transcription",
+        long_help = "Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual"
+    )]
     pub engine: Option<String>,
 
     /// Language for transcription (e.g., en, fr, auto, or comma-separated: en,fr,de)
@@ -85,7 +92,12 @@ pub struct Cli {
     pub gpu_isolation: bool,
 
     /// GPU device index for multi-GPU systems (e.g., 1 for discrete GPU)
-    #[arg(long, value_name = "INDEX", help_heading = "Transcription", hide_short_help = true)]
+    #[arg(
+        long,
+        value_name = "INDEX",
+        help_heading = "Transcription",
+        hide_short_help = true
+    )]
     pub gpu_device: Option<i32>,
 
     /// Load model on-demand when recording starts instead of keeping it loaded
@@ -93,7 +105,12 @@ pub struct Cli {
     pub on_demand_loading: bool,
 
     /// Secondary model for difficult audio (used with --model-modifier)
-    #[arg(long, value_name = "MODEL", help_heading = "Transcription", hide_short_help = true)]
+    #[arg(
+        long,
+        value_name = "MODEL",
+        help_heading = "Transcription",
+        hide_short_help = true
+    )]
     pub secondary_model: Option<String>,
 
     /// Enable eager input processing (transcribe chunks while recording continues)
@@ -101,15 +118,19 @@ pub struct Cli {
     pub eager_processing: bool,
 
     // -- Whisper-specific --
-
     /// Disable context window optimization for short recordings
     #[arg(long, help_heading = "Whisper", hide_short_help = true)]
     pub no_whisper_context_optimization: bool,
 
     /// Initial prompt to provide context for transcription
-    #[arg(long, value_name = "PROMPT", help_heading = "Whisper", hide_short_help = true,
+    #[arg(
+        long,
+        value_name = "PROMPT",
+        help_heading = "Whisper",
+        hide_short_help = true,
         long_help = "Initial prompt to provide context for transcription.\n\
-        Hints at terminology, proper nouns, or formatting conventions.")]
+        Hints at terminology, proper nouns, or formatting conventions."
+    )]
     pub initial_prompt: Option<String>,
 
     /// Enable flash attention for reduced GPU memory usage and faster inference
@@ -117,23 +138,42 @@ pub struct Cli {
     pub flash_attention: bool,
 
     /// Whisper execution mode: local, remote, or cli
-    #[arg(long, value_name = "MODE", help_heading = "Whisper", hide_short_help = true)]
+    #[arg(
+        long,
+        value_name = "MODE",
+        help_heading = "Whisper",
+        hide_short_help = true
+    )]
     pub whisper_mode: Option<String>,
 
     /// Remote server endpoint URL (for remote whisper mode)
-    #[arg(long, value_name = "URL", help_heading = "Whisper", hide_short_help = true)]
+    #[arg(
+        long,
+        value_name = "URL",
+        help_heading = "Whisper",
+        hide_short_help = true
+    )]
     pub remote_endpoint: Option<String>,
 
     /// Model name to send to remote server
-    #[arg(long, value_name = "MODEL", help_heading = "Whisper", hide_short_help = true)]
+    #[arg(
+        long,
+        value_name = "MODEL",
+        help_heading = "Whisper",
+        hide_short_help = true
+    )]
     pub remote_model: Option<String>,
 
     /// API key for remote server (or use VOXTYPE_WHISPER_API_KEY env var)
-    #[arg(long, value_name = "KEY", help_heading = "Whisper", hide_short_help = true)]
+    #[arg(
+        long,
+        value_name = "KEY",
+        help_heading = "Whisper",
+        hide_short_help = true
+    )]
     pub remote_api_key: Option<String>,
 
     // -- Hotkey --
-
     /// Override hotkey (e.g., SCROLLLOCK, PAUSE, F13, MEDIA, WEV_234, EVTEST_226)
     #[arg(long, value_name = "KEY", help_heading = "Hotkey")]
     pub hotkey: Option<String>,
@@ -155,13 +195,17 @@ pub struct Cli {
     pub model_modifier: Option<String>,
 
     // -- Audio --
-
     /// Audio input device name (or "default" for system default)
     #[arg(long, value_name = "DEVICE", help_heading = "Audio")]
     pub audio_device: Option<String>,
 
     /// Maximum recording duration in seconds (safety limit)
-    #[arg(long, value_name = "SECS", help_heading = "Audio", hide_short_help = true)]
+    #[arg(
+        long,
+        value_name = "SECS",
+        help_heading = "Audio",
+        hide_short_help = true
+    )]
     pub max_duration: Option<u32>,
 
     /// Enable audio feedback sounds (beeps when recording starts/stops)
@@ -177,7 +221,6 @@ pub struct Cli {
     pub pause_media: bool,
 
     // -- Output (delivery, timing, file output, hooks) --
-
     /// Force clipboard mode (don't try to type)
     #[arg(long, help_heading = "Output")]
     pub clipboard: bool,
@@ -187,20 +230,32 @@ pub struct Cli {
     pub paste: bool,
 
     /// Restore clipboard after paste mode
-    #[arg(long, help_heading = "Output",
+    #[arg(
+        long,
+        help_heading = "Output",
         long_help = "Restore clipboard content after paste mode completes.\n\
-        Saves clipboard before transcription and restores it after paste.")]
+        Saves clipboard before transcription and restores it after paste."
+    )]
     pub restore_clipboard: bool,
 
     /// Delay in milliseconds after paste before restoring clipboard (default: 200)
-    #[arg(long, value_name = "MS", help_heading = "Output", hide_short_help = true)]
+    #[arg(
+        long,
+        value_name = "MS",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
     pub restore_clipboard_delay_ms: Option<u32>,
 
     /// Output driver order (comma-separated)
-    #[arg(long, value_name = "DRIVERS", help_heading = "Output",
+    #[arg(
+        long,
+        value_name = "DRIVERS",
+        help_heading = "Output",
         long_help = "Output driver order for type mode (comma-separated).\n\
         Available: wtype, dotool, ydotool, clipboard.\n\
-        Example: --driver=ydotool,wtype,clipboard")]
+        Example: --driver=ydotool,wtype,clipboard"
+    )]
     pub driver: Option<String>,
 
     /// Auto-submit (press Enter) after outputting transcribed text
@@ -208,7 +263,12 @@ pub struct Cli {
     pub auto_submit: bool,
 
     /// Disable auto-submit (overrides config auto_submit = true)
-    #[arg(long, conflicts_with = "auto_submit", help_heading = "Output", hide_short_help = true)]
+    #[arg(
+        long,
+        conflicts_with = "auto_submit",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
     pub no_auto_submit: bool,
 
     /// Fall back to clipboard if typing fails
@@ -216,11 +276,21 @@ pub struct Cli {
     pub fallback_to_clipboard: bool,
 
     /// Disable clipboard fallback
-    #[arg(long, conflicts_with = "fallback_to_clipboard", help_heading = "Output", hide_short_help = true)]
+    #[arg(
+        long,
+        conflicts_with = "fallback_to_clipboard",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
     pub no_fallback_to_clipboard: bool,
 
     /// Keystroke for paste mode (e.g., ctrl+v, shift+insert, ctrl+shift+v)
-    #[arg(long, value_name = "KEYS", help_heading = "Output", hide_short_help = true)]
+    #[arg(
+        long,
+        value_name = "KEYS",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
     pub paste_keys: Option<String>,
 
     /// File path for file output mode
@@ -228,11 +298,21 @@ pub struct Cli {
     pub file_path: Option<std::path::PathBuf>,
 
     /// File write mode: overwrite or append
-    #[arg(long, value_name = "MODE", help_heading = "Output", hide_short_help = true)]
+    #[arg(
+        long,
+        value_name = "MODE",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
     pub file_mode: Option<String>,
 
     /// Delay before typing starts (ms), helps prevent first character drop
-    #[arg(long, value_name = "MS", help_heading = "Output", hide_short_help = true)]
+    #[arg(
+        long,
+        value_name = "MS",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
     pub pre_type_delay: Option<u32>,
 
     /// DEPRECATED: Use --pre-type-delay instead
@@ -240,37 +320,70 @@ pub struct Cli {
     pub wtype_delay: Option<u32>,
 
     /// Prefix wtype output with a Shift key press/release
-    #[arg(long, help_heading = "Output", hide_short_help = true,
+    #[arg(
+        long,
+        help_heading = "Output",
+        hide_short_help = true,
         long_help = "Prefix wtype output with a Shift key press/release.\n\
-        Workaround for apps (e.g., Discord) that drop the first CJK character.")]
+        Workaround for apps (e.g., Discord) that drop the first CJK character."
+    )]
     pub wtype_shift_prefix: bool,
 
     /// Delay between typed characters in milliseconds (0 = fastest)
-    #[arg(long, value_name = "MS", help_heading = "Output", hide_short_help = true)]
+    #[arg(
+        long,
+        value_name = "MS",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
     pub type_delay: Option<u32>,
 
     /// Keyboard layout for dotool (e.g., de, fr)
-    #[arg(long, value_name = "LAYOUT", help_heading = "Output", hide_short_help = true)]
+    #[arg(
+        long,
+        value_name = "LAYOUT",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
     pub dotool_xkb_layout: Option<String>,
 
     /// Keyboard layout variant for dotool (e.g., nodeadkeys)
-    #[arg(long, value_name = "VARIANT", help_heading = "Output", hide_short_help = true)]
+    #[arg(
+        long,
+        value_name = "VARIANT",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
     pub dotool_xkb_variant: Option<String>,
 
     /// Command to run before typing output (e.g., compositor submap switch)
-    #[arg(long, value_name = "CMD", help_heading = "Output", hide_short_help = true)]
+    #[arg(
+        long,
+        value_name = "CMD",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
     pub pre_output_command: Option<String>,
 
     /// Command to run after typing output (e.g., reset compositor submap)
-    #[arg(long, value_name = "CMD", help_heading = "Output", hide_short_help = true)]
+    #[arg(
+        long,
+        value_name = "CMD",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
     pub post_output_command: Option<String>,
 
     /// Command to run when recording starts (e.g., switch to compositor submap)
-    #[arg(long, value_name = "CMD", help_heading = "Output", hide_short_help = true)]
+    #[arg(
+        long,
+        value_name = "CMD",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
     pub pre_recording_command: Option<String>,
 
     // -- Text Processing --
-
     /// Enable spoken punctuation conversion (e.g., say "period" to get ".")
     #[arg(long, help_heading = "Text Processing")]
     pub spoken_punctuation: bool,
@@ -280,7 +393,12 @@ pub struct Cli {
     pub shift_enter_newlines: bool,
 
     /// Disable Shift+Enter newlines (overrides config)
-    #[arg(long, conflicts_with = "shift_enter_newlines", help_heading = "Text Processing", hide_short_help = true)]
+    #[arg(
+        long,
+        conflicts_with = "shift_enter_newlines",
+        help_heading = "Text Processing",
+        hide_short_help = true
+    )]
     pub no_shift_enter_newlines: bool,
 
     /// Enable smart auto-submit (say "submit" to press Enter)
@@ -288,28 +406,47 @@ pub struct Cli {
     pub smart_auto_submit: bool,
 
     /// Disable smart auto-submit (overrides config)
-    #[arg(long, conflicts_with = "smart_auto_submit", help_heading = "Text Processing", hide_short_help = true)]
+    #[arg(
+        long,
+        conflicts_with = "smart_auto_submit",
+        help_heading = "Text Processing",
+        hide_short_help = true
+    )]
     pub no_smart_auto_submit: bool,
 
     /// Text to append after each transcription (e.g., " " for trailing space)
-    #[arg(long, value_name = "TEXT", help_heading = "Text Processing", hide_short_help = true,
+    #[arg(
+        long,
+        value_name = "TEXT",
+        help_heading = "Text Processing",
+        hide_short_help = true,
         long_help = "Text to append after each transcription (e.g., \" \" for a trailing space).\n\
-        Appended before auto_submit. Useful for separating sentences when dictating incrementally.")]
+        Appended before auto_submit. Useful for separating sentences when dictating incrementally."
+    )]
     pub append_text: Option<String>,
 
     // -- VAD --
-
     /// Enable Voice Activity Detection (filter silence before transcription)
     #[arg(long, help_heading = "VAD")]
     pub vad: bool,
 
     /// VAD speech detection threshold (0.0-1.0, default: 0.5).
     /// Lower = more sensitive, Higher = less sensitive
-    #[arg(long, value_name = "THRESHOLD", help_heading = "VAD", hide_short_help = true)]
+    #[arg(
+        long,
+        value_name = "THRESHOLD",
+        help_heading = "VAD",
+        hide_short_help = true
+    )]
     pub vad_threshold: Option<f32>,
 
     /// VAD backend: auto, energy, whisper
-    #[arg(long, value_name = "BACKEND", help_heading = "VAD", hide_short_help = true)]
+    #[arg(
+        long,
+        value_name = "BACKEND",
+        help_heading = "VAD",
+        hide_short_help = true
+    )]
     pub vad_backend: Option<String>,
 
     /// Minimum speech duration in milliseconds for VAD
@@ -324,6 +461,15 @@ pub struct Cli {
 pub enum Commands {
     /// Run as daemon (default if no command specified)
     Daemon,
+
+    /// Run menu bar helper (macOS)
+    #[cfg(target_os = "macos")]
+    Menubar,
+
+    /// Launch daemon + menubar (used by Voxtype.app bundle)
+    #[cfg(target_os = "macos")]
+    #[command(hide = true)]
+    AppLaunch,
 
     /// Transcribe an audio file (WAV, 16kHz, mono)
     Transcribe {
@@ -416,6 +562,9 @@ pub enum Commands {
         #[command(subcommand)]
         action: MeetingAction,
     },
+
+    /// Check for updates
+    CheckUpdate,
 }
 
 /// Output mode override for record commands
@@ -800,7 +949,11 @@ pub enum SetupAction {
     /// Check system configuration and dependencies
     Check,
 
-    /// Install voxtype as a systemd user service
+    /// Interactive macOS setup wizard
+    #[cfg(target_os = "macos")]
+    Macos,
+
+    /// Install voxtype as a systemd user service (Linux)
     Systemd {
         /// Uninstall the service instead of installing
         #[arg(long)]
@@ -809,6 +962,55 @@ pub enum SetupAction {
         /// Show service status
         #[arg(long)]
         status: bool,
+    },
+
+    /// Install voxtype as a LaunchAgent (macOS)
+    /// Note: launchd services don't receive microphone permissions.
+    /// Use 'app-bundle' instead for full functionality.
+    #[cfg(target_os = "macos")]
+    Launchd {
+        /// Uninstall the service instead of installing
+        #[arg(long)]
+        uninstall: bool,
+
+        /// Show service status
+        #[arg(long)]
+        status: bool,
+    },
+
+    /// Install Voxtype.app bundle with Login Items (macOS, recommended)
+    /// Creates /Applications/Voxtype.app and adds to Login Items.
+    /// This method properly receives Accessibility, Input Monitoring,
+    /// and Microphone permissions (unlike launchd).
+    #[cfg(target_os = "macos")]
+    AppBundle {
+        /// Uninstall the app bundle
+        #[arg(long)]
+        uninstall: bool,
+
+        /// Show installation status
+        #[arg(long)]
+        status: bool,
+    },
+
+    /// Set up Hammerspoon hotkey integration (macOS)
+    #[cfg(target_os = "macos")]
+    Hammerspoon {
+        /// Install Hammerspoon config (copy to ~/.hammerspoon/)
+        #[arg(long)]
+        install: bool,
+
+        /// Show the Hammerspoon configuration snippet
+        #[arg(long)]
+        show: bool,
+
+        /// Hotkey to configure (default: rightalt)
+        #[arg(long, default_value = "rightalt")]
+        hotkey: String,
+
+        /// Use toggle mode instead of push-to-talk
+        #[arg(long)]
+        toggle: bool,
     },
 
     /// Show Waybar configuration snippets

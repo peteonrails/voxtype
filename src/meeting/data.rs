@@ -57,7 +57,6 @@ pub enum AudioSource {
     Unknown,
 }
 
-
 impl std::fmt::Display for AudioSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -360,7 +359,6 @@ pub enum MeetingStatus {
     /// Meeting was cancelled/abandoned
     Cancelled,
 }
-
 
 /// Metadata for a meeting
 #[derive(Debug, Clone, Serialize, Deserialize)]

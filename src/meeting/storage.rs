@@ -899,7 +899,7 @@ mod tests {
 
     #[test]
     fn test_create_meeting_creates_directory() {
-        let (storage, temp) = create_test_storage();
+        let (storage, _temp) = create_test_storage();
         let metadata = MeetingMetadata::new(Some("Dir Test".to_string()));
         let path = storage.create_meeting(&metadata).unwrap();
         assert!(path.exists());
