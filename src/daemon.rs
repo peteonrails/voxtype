@@ -1804,18 +1804,15 @@ impl Daemon {
         // Start local HTTP service if enabled, sharing the daemon's transcriber
         if self.config.service.enabled {
             let shared_transcriber: Option<Arc<dyn Transcriber>> = match self.config.engine {
-                crate::config::TranscriptionEngine::Whisper => {
-                    self.model_manager
-                        .as_mut()
-                        .and_then(|mm| mm.get_transcriber(None).ok())
-                }
+                crate::config::TranscriptionEngine::Whisper => self
+                    .model_manager
+                    .as_mut()
+                    .and_then(|mm| mm.get_transcriber(None).ok()),
                 _ => transcriber_preloaded.clone(),
             };
-            let handle = crate::service::start(
-                &self.config,
-                self.config_path.clone(),
-                shared_transcriber,
-            ).await?;
+            let handle =
+                crate::service::start(&self.config, self.config_path.clone(), shared_transcriber)
+                    .await?;
             tracing::info!("Local service listening on http://{}", handle.addr());
             self.service_handle = Some(handle);
         }

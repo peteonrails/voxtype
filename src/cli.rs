@@ -195,7 +195,6 @@ pub struct Cli {
     pub model_modifier: Option<String>,
 
     // -- Service --
-
     /// Enable local OpenAI-compatible STT HTTP service alongside daemon loop
     #[arg(long, help_heading = "Service")]
     pub service: bool,

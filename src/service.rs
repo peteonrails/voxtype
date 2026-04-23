@@ -153,17 +153,13 @@ pub async fn start(
         transcriber_config.whisper.language =
             default_language_for_service(&service_cfg, &config.whisper.language);
 
-        tokio::task::spawn_blocking(move || {
-            match transcriber_config.engine {
-                TranscriptionEngine::Whisper => {
-                    crate::transcribe::create_transcriber_with_config_path(
-                        &transcriber_config.whisper,
-                        config_path,
-                    )
-                    .map(Arc::from)
-                }
-                _ => crate::transcribe::create_transcriber(&transcriber_config).map(Arc::from),
-            }
+        tokio::task::spawn_blocking(move || match transcriber_config.engine {
+            TranscriptionEngine::Whisper => crate::transcribe::create_transcriber_with_config_path(
+                &transcriber_config.whisper,
+                config_path,
+            )
+            .map(Arc::from),
+            _ => crate::transcribe::create_transcriber(&transcriber_config).map(Arc::from),
         })
         .await
         .map_err(|e| {
@@ -348,7 +344,12 @@ async fn transcribe_handler(
         let tr = match result {
             Ok(Ok(tr)) => tr,
             Ok(Err(e)) => return Err(map_transcription_error(e)),
-            Err(e) => return Err(ApiError::internal(format!("Transcription task failed: {}", e))),
+            Err(e) => {
+                return Err(ApiError::internal(format!(
+                    "Transcription task failed: {}",
+                    e
+                )))
+            }
         };
 
         let verbose = VerboseTranscriptionResponse {
@@ -394,7 +395,12 @@ async fn transcribe_handler(
         let text = match result {
             Ok(Ok(text)) => text,
             Ok(Err(e)) => return Err(map_transcription_error(e)),
-            Err(e) => return Err(ApiError::internal(format!("Transcription task failed: {}", e))),
+            Err(e) => {
+                return Err(ApiError::internal(format!(
+                    "Transcription task failed: {}",
+                    e
+                )))
+            }
         };
 
         if format == "text" {
@@ -417,10 +423,13 @@ fn transcribe_text_adaptive(
     prompt_override: Option<&str>,
 ) -> Result<String, TranscribeError> {
     if should_chunk_long_form(samples) {
-        return Ok(
-            transcribe_segments_adaptive(transcriber, samples, language_override, prompt_override)?
-                .text,
-        );
+        return Ok(transcribe_segments_adaptive(
+            transcriber,
+            samples,
+            language_override,
+            prompt_override,
+        )?
+        .text);
     }
 
     transcriber.transcribe_with_options(samples, language_override, prompt_override)
@@ -538,7 +547,11 @@ fn summarize_detected_languages(
 
     match detected_languages.len() {
         0 => language_override.unwrap_or("auto").trim().to_lowercase(),
-        1 => detected_languages.iter().next().cloned().unwrap_or_else(|| "auto".to_string()),
+        1 => detected_languages
+            .iter()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| "auto".to_string()),
         _ => "mixed".to_string(),
     }
 }
@@ -905,7 +918,9 @@ mod tests {
             allowed_languages,
         };
 
-        start_with_transcriber(service_cfg, transcriber).await.unwrap()
+        start_with_transcriber(service_cfg, transcriber)
+            .await
+            .unwrap()
     }
 
     fn sine_samples(sample_rate: u32, duration_secs: f32, freq_hz: f32) -> Vec<f32> {
@@ -1008,9 +1023,7 @@ mod tests {
         let mut body = Vec::new();
 
         body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
-        body.extend_from_slice(
-            b"Content-Disposition: form-data; name=\"response_format\"\r\n\r\n",
-        );
+        body.extend_from_slice(b"Content-Disposition: form-data; name=\"response_format\"\r\n\r\n");
         body.extend_from_slice(b"verbose_json\r\n");
 
         body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
@@ -1030,7 +1043,9 @@ mod tests {
              Content-Length: {}\r\n\
              Connection: close\r\n\
              \r\n",
-            addr, boundary, body.len()
+            addr,
+            boundary,
+            body.len()
         );
 
         let mut stream = std::net::TcpStream::connect(addr).unwrap();
