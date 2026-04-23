@@ -110,6 +110,11 @@ pub struct MeetingDaemon {
     /// Previous chunk's post-processed text, tracked per audio source
     /// so mic and loopback contexts don't bleed into each other
     last_chunk_text: HashMap<AudioSource, String>,
+    /// Cumulative audio duration consumed per source, in milliseconds.
+    /// Used to compute per-source start offsets so mic and loopback
+    /// timelines stay anchored to real wall-clock elapsed time instead
+    /// of being pushed forward by the other source's segments.
+    source_offsets: HashMap<AudioSource, u64>,
 }
 
 impl MeetingDaemon {
@@ -157,6 +162,7 @@ impl MeetingDaemon {
             event_tx,
             post_processor,
             last_chunk_text: HashMap::new(),
+            source_offsets: HashMap::new(),
         })
     }
 
@@ -224,6 +230,7 @@ impl MeetingDaemon {
 
         self.state = std::mem::take(&mut self.state).stop();
         self.last_chunk_text.clear();
+        self.source_offsets.clear();
 
         // Finalize meeting
         if let Some(ref mut meeting) = self.current_meeting {
@@ -270,6 +277,18 @@ impl MeetingDaemon {
         self.current_meeting.as_ref().map(|m| m.metadata.id)
     }
 
+    /// Align all per-source timestamp offsets to the furthest-advanced source.
+    ///
+    /// Call this after dispatching the per-iteration chunks for all sources so
+    /// any source that received a short or empty chunk (e.g. loopback monitor
+    /// lagging at startup) catches up to wall-clock before the next iteration.
+    pub fn sync_source_offsets(&mut self) {
+        let max_offset = self.source_offsets.values().copied().max().unwrap_or(0);
+        for offset in self.source_offsets.values_mut() {
+            *offset = max_offset;
+        }
+    }
+
     /// Get mutable access to current meeting data (for dedup, etc.)
     pub fn current_meeting_mut(&mut self) -> Option<&mut MeetingData> {
         self.current_meeting.as_mut()
@@ -304,12 +323,21 @@ impl MeetingDaemon {
             ..Default::default()
         };
 
-        // Calculate start offset
-        let start_offset_ms = if let Some(ref meeting) = self.current_meeting {
-            meeting.transcript.duration_ms()
-        } else {
-            0
-        };
+        // Start offset is tracked per source: each source has its own wall-clock
+        // timeline. Deriving this from transcript.duration_ms() would conflate
+        // mic and loopback, pushing every new chunk past the other source's end
+        // and roughly doubling apparent meeting length on dual-track captures.
+        let start_offset_ms = *self.source_offsets.entry(source).or_insert(0);
+
+        // Advance the per-source offset up front, based on the input sample
+        // count, so the offset tracks wall-clock even when transcription errors
+        // or VAD skips this chunk (the caller has already drained these samples
+        // from its buffer, so the time has elapsed regardless).
+        let audio_duration_ms =
+            (samples.len() as f64 / chunk_config.sample_rate as f64 * 1000.0) as u64;
+        if let Some(offset) = self.source_offsets.get_mut(&source) {
+            *offset += audio_duration_ms;
+        }
 
         let mut processor = ChunkProcessor::new(chunk_config, transcriber.clone());
         let mut buffer = processor.new_buffer(chunk_id, source, start_offset_ms);

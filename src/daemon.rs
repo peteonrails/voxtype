@@ -2688,7 +2688,13 @@ impl Daemon {
                         if self.meeting_mic_buffer.len() >= chunk_samples {
                             let mic_chunk: Vec<f32> = self.meeting_mic_buffer.drain(..chunk_samples).collect();
 
-                            // Also drain loopback buffer up to the same amount
+                            // Also drain loopback buffer up to the same amount.
+                            // Do NOT pad to chunk_samples — diluting real speech
+                            // with silence can drop the VAD speech-frame ratio
+                            // below threshold and cause remote audio to be
+                            // discarded. Instead we reconcile timestamp offsets
+                            // after both sources have been dispatched via
+                            // sync_source_offsets.
                             let loopback_len = self.meeting_loopback_buffer.len().min(chunk_samples);
                             let loopback_chunk: Vec<f32> = self.meeting_loopback_buffer.drain(..loopback_len).collect();
 
@@ -2722,7 +2728,12 @@ impl Daemon {
                                     }
                                 }
 
-                                // Process loopback chunk if non-empty
+                                // Process loopback chunk if we have any real samples.
+                                // If the monitor is lagging we simply skip — the
+                                // sync_source_offsets call below bumps loopback's
+                                // timestamp offset to match mic so the next
+                                // loopback chunk lands at the correct wall-clock
+                                // position.
                                 if !loopback_chunk.is_empty() {
                                     match daemon.process_chunk_with_source(loopback_chunk, meeting::data::AudioSource::Loopback).await {
                                         Ok(Some(segments)) => {
@@ -2737,6 +2748,11 @@ impl Daemon {
                                         }
                                     }
                                 }
+
+                                // Reconcile per-source offsets so any source that
+                                // received a short or skipped chunk this iteration
+                                // catches up to wall-clock before the next one.
+                                daemon.sync_source_offsets();
 
                                 // Dedup bleed-through: strip echoed phrases from mic segments
                                 if had_loopback {
