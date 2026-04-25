@@ -89,12 +89,42 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# OSD native frontend (SCTK + wgpu + egui-wgpu). All optional, gated by the
+# `osd-native` feature so users not opting in don't pay the build cost.
+smithay-client-toolkit = { version = "0.20", optional = true }
+calloop = { version = "0.14", optional = true }
+calloop-wayland-source = { version = "0.4", optional = true }
+wayland-client = { version = "0.31", optional = true, features = ["system"] }
+wayland-backend = { version = "0.3", optional = true, features = ["client_system"] }
+wayland-protocols = { version = "0.32", optional = true, features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", optional = true, features = ["client"] }
+wgpu = { version = "29", optional = true, default-features = false, features = ["vulkan", "gles", "wgsl", "std"] }
+egui = { version = "0.34", optional = true }
+egui-wgpu = { version = "0.34", optional = true, default-features = false }
+raw-window-handle = { version = "0.6", optional = true }
+pollster = { version = "0.4", optional = true }
+bytemuck = { version = "1", optional = true }
+
 [features]
 default = []
 # OSD frontends. Each binary is gated on its own feature so users can
 # build only the rendering stack they need. Real GUI deps land in
 # Commits 4a/4b; the lists below grow then.
-osd-native = []
+osd-native = [
+    "dep:smithay-client-toolkit",
+    "dep:calloop",
+    "dep:calloop-wayland-source",
+    "dep:wayland-client",
+    "dep:wayland-backend",
+    "dep:wayland-protocols",
+    "dep:wayland-protocols-wlr",
+    "dep:wgpu",
+    "dep:egui",
+    "dep:egui-wgpu",
+    "dep:raw-window-handle",
+    "dep:pollster",
+    "dep:bytemuck",
+]
 osd-gtk4 = []
 gpu-vulkan = ["whisper-rs/vulkan"]
 gpu-cuda = ["whisper-rs/cuda"]
@@ -154,7 +184,7 @@ path = "src/main.rs"
 
 [[bin]]
 name = "voxtype-osd-native"
-path = "src/bin/voxtype_osd_native.rs"
+path = "src/bin/voxtype_osd_native/main.rs"
 required-features = ["osd-native"]
 
 [[bin]]

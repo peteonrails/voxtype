@@ -139,8 +139,99 @@ shared logic both binaries consume, and replaces the single
   them in. Both feature flags currently have empty `dep:` lists so
   the build works today and grows naturally.
 
+## Commit 4a — native (SCTK + wgpu + egui-wgpu) rendering
+
+Landed: real GUI for `voxtype-osd-native`. The binary now opens a
+wlr-layer-shell surface on demand and renders the waveform + peak meter
+via egui-wgpu, with the architecture described below.
+
+### Architecture
+
+The binary splits into a main thread that runs the calloop event loop
+(Wayland + render timer) and a dedicated IPC thread that owns a
+single-threaded Tokio runtime to drive `osd::ipc::run_ipc_loop`. The IPC
+thread pushes decoded `AudioFrame`s into the shared `Arc<Mutex<FrameRing>>`,
+updates the `Arc<Mutex<PeakHold>>`, and pings the main thread via
+`calloop::ping::Ping` after every frame. Pings coalesce, so 100 Hz of
+notifications is fine.
+
+Lifecycle:
+
+- Surface is created on the first frame ping (initial connect, or after
+  the daemon resumes recording). All wgpu/egui state lives in
+  `RenderSurface`, which is `None` while idle.
+- Surface is destroyed after `IDLE_TEARDOWN_SECS` (5 s) without a frame.
+  This matches the BRIEF: surface destroyed when Idle, not just hidden.
+- `LayerShellHandler::configure` accepts the compositor's size, configures
+  the wgpu swapchain, and triggers an immediate render so the surface
+  becomes visible. Subsequent renders are driven by a 16 ms calloop timer.
+- Click-through is set up by attaching an empty `wl_region` as the input
+  region (`KeyboardInteractivity::None` in addition).
+
+### Files
+
+- `src/bin/voxtype_osd_native/main.rs` — CLI parsing, IPC thread spawn,
+  entry into the Wayland event loop. Replaces the old single-file
+  `src/bin/voxtype_osd_native.rs`.
+- `src/bin/voxtype_osd_native/app.rs` — all SCTK + wgpu + egui glue.
+  Single file because the borrow relationships between the SCTK state,
+  the wgpu device/queue, and the egui renderer fight when split.
+
+### Rendering
+
+- Waveform: `osd::visual::project_envelope` with 3 s of frames mapped onto
+  ~95 % of the surface width. Filled `Shape::convex_polygon` (mirrored
+  min/max columns) in `palette.accent` over `palette.background`.
+- Peak meter: 10 vertical segments, color zones from `MeterZone::from_dbfs`,
+  segment fill via `peak_meter_fraction(peak_dbfs, -60.0)`. Held-peak tick
+  drawn as a thin foreground bar at the held position; held-peak decays
+  through `osd::visual::PeakHold` (already updated on the IPC thread).
+- Background uses `Palette::fallback()` today (Commit 5 swaps in real
+  Omarchy parsing without changing this surface).
+
+### Cargo.toml
+
+`osd-native` now pulls in:
+
+- `smithay-client-toolkit 0.20`, `calloop 0.14`, `calloop-wayland-source 0.4`
+- `wayland-client 0.31` (with `system` feature) + `wayland-backend 0.3`
+  (with `client_system` feature) so we can hand wgpu the raw libwayland
+  pointers
+- `wayland-protocols 0.32` and `wayland-protocols-wlr 0.3`
+- `wgpu 29` (default-features off; `vulkan + gles + wgsl + std`)
+- `egui 0.34` and `egui-wgpu 0.34`
+- `raw-window-handle 0.6`, `pollster 0.4`, `bytemuck 1`
+
+The binary path moved from `src/bin/voxtype_osd_native.rs` to
+`src/bin/voxtype_osd_native/main.rs` so we can split modules cleanly.
+
+### Validation
+
+- `cargo check --features osd-native --bin voxtype-osd-native` clean.
+- `cargo build --features osd-native --bin voxtype-osd-native --release`
+  clean.
+- `cargo test --features osd-native,osd-gtk4 --lib` 566 passed.
+- `cargo clippy --features osd-native --bin voxtype-osd-native` clean on
+  the OSD files (preexisting warnings on unmodified files left alone per
+  brief).
+- `rustfmt` clean on touched files (pre-existing diffs in unrelated
+  files left alone per brief).
+- Runtime smoke test (does the surface appear, does it look right, idle
+  CPU < 0.1 %) is Pete's call; the agent environment can't run a Wayland
+  client.
+
+### Notes / things to review
+
+- The `OsdConfig` consumed here is built from defaults plus a few CLI
+  overrides (`--width-px`, `--height-px`, `--opacity`). Wiring the full
+  `[osd]` config block + env-var layering is Commit 6, as planned.
+- `IDLE_TEARDOWN_SECS = 5.0` is a literal in `app.rs`; if Pete wants it
+  user-tunable, lift it onto `OsdConfig` in Commit 6.
+- The wgpu swapchain uses `CompositeAlphaMode::PreMultiplied` so the
+  background alpha (`palette.background.a = 0.85`) actually goes through
+  the compositor as transparency.
+
 ## Next
 
-Commit 4a: SCTK + wgpu + egui-wgpu rendering for `voxtype-osd-native`.
 Commit 4b: GTK4 + gtk4-layer-shell rendering for `voxtype-osd-gtk4`.
-Both consume the shared `osd::*` types unchanged.
+Commits 5/6: Omarchy theme parsing + watcher; `[osd]` config wiring.
