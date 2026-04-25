@@ -659,13 +659,14 @@ mod tests {
     }
 
     #[test]
-    fn test_filler_filter_disabled_by_default() {
-        // Default config must not change behavior for existing users.
+    fn test_filler_filter_enabled_by_default() {
+        // Filler-word filtering ships on by default. Existing users who want
+        // the old behavior must opt out via `filter_filler_words = false`.
         let config = TextConfig::default();
-        assert!(!config.filter_filler_words);
+        assert!(config.filter_filler_words);
 
         let processor = TextProcessor::new(&config);
-        assert_eq!(processor.process("um hello"), "um hello");
+        assert_eq!(processor.process("um hello"), "hello");
     }
 
     #[test]

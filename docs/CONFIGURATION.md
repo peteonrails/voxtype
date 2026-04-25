@@ -1994,10 +1994,10 @@ VOXTYPE_SMART_AUTO_SUBMIT=true voxtype
 ### filter_filler_words
 
 **Type:** Boolean
-**Default:** `false`
+**Default:** `true`
 **Required:** No
 
-When `true`, strips common filler words ("uh", "um", "er", ...) from each transcription before output. Matching is case-insensitive and respects word boundaries, so words like "umbrella" or "summer" are not affected. Surrounding commas, semicolons, and double spaces are cleaned up so the result reads naturally.
+When `true` (the default), strips common filler words ("uh", "um", "er", ...) from each transcription before output. Matching is case-insensitive and respects word boundaries, so words like "umbrella" or "summer" are not affected. Surrounding commas, semicolons, and double spaces are cleaned up so the result reads naturally. Set to `false` to disable.
 
 **Example:**
 

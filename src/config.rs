@@ -253,8 +253,9 @@ on_transcription = true
 # smart_auto_submit = false
 #
 # Remove filler words like "uh" and "um" from transcribed text.
-# Set filter_filler_words = true to enable; override the list via filler_words.
-# filter_filler_words = false
+# Enabled by default. Set filter_filler_words = false to disable, or override
+# the word list via filler_words.
+# filter_filler_words = true
 # filler_words = ["uh", "um", "er", "ah", "eh", "hmm", "hm", "mm", "mhm"]
 
 # [vad]
@@ -1297,7 +1298,7 @@ impl Default for TextConfig {
             spoken_punctuation: false,
             replacements: HashMap::new(),
             smart_auto_submit: false,
-            filter_filler_words: false,
+            filter_filler_words: true,
             filler_words: default_filler_words(),
         }
     }

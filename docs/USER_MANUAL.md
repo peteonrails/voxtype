@@ -1524,12 +1524,14 @@ VOXTYPE_SMART_AUTO_SUBMIT=true voxtype
 
 **Filter filler words ("uh", "um", ...):**
 
+Voxtype filters single-syllable filler words by default. To turn it off:
+
 ```toml
 [text]
-filter_filler_words = true
+filter_filler_words = false
 ```
 
-When enabled, Voxtype strips common filler words from each transcription before output and cleans up the surrounding punctuation. Word boundaries are respected, so "umbrella" and "summer" are untouched.
+When enabled (the default), Voxtype strips common filler words from each transcription before output and cleans up the surrounding punctuation. Word boundaries are respected, so "umbrella" and "summer" are untouched.
 
 ```
 # You say:    "Well, um, I think we should ship it"
