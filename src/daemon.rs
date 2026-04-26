@@ -496,6 +496,10 @@ pub struct Daemon {
             std::result::Result<Arc<dyn Transcriber>, crate::error::TranscribeError>,
         >,
     >,
+    // Background task that spawns and prepares the gpu_isolation subprocess
+    // worker. Awaited before transcription so audio capture can start
+    // immediately while the worker loads its model in parallel.
+    whisper_prepare_task: Option<tokio::task::JoinHandle<()>>,
     // Background task for transcription (allows cancel during transcription)
     transcription_task: Option<tokio::task::JoinHandle<TranscriptionResult>>,
     // Background tasks for eager chunk transcriptions (chunk_index, task)
@@ -606,6 +610,7 @@ impl Daemon {
             last_dictation: None,
             model_manager: None,
             model_load_task: None,
+            whisper_prepare_task: None,
             transcription_task: None,
             eager_chunk_tasks: Vec::new(),
             vad,
@@ -703,6 +708,15 @@ impl Daemon {
                     }
                 }
                 crate::config::TranscriptionEngine::Whisper => {
+                    // Wait for the gpu_isolation worker to finish preparing
+                    // (model load) before we hand the transcriber to the
+                    // recording stop path. Otherwise transcribe() would race
+                    // with the in-flight prepare and spawn a second worker.
+                    if let Some(task) = self.whisper_prepare_task.take() {
+                        if let Err(e) = task.await {
+                            tracing::warn!("Whisper prepare task failed: {}", e);
+                        }
+                    }
                     if let Some(ref mut mm) = self.model_manager {
                         match mm.get_prepared_transcriber(model_override) {
                             Ok(t) => Ok(t),
@@ -1783,8 +1797,13 @@ impl Daemon {
                                     match self.config.engine {
                                         crate::config::TranscriptionEngine::Whisper => {
                                             if let Some(ref mut mm) = self.model_manager {
-                                                if let Err(e) = mm.prepare_model(model_override.as_deref()) {
-                                                    tracing::warn!("Failed to prepare model: {}", e);
+                                                match mm.prepare_model(model_override.as_deref()) {
+                                                    Ok(handle) => {
+                                                        self.whisper_prepare_task = handle;
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!("Failed to prepare model: {}", e);
+                                                    }
                                                 }
                                             }
                                         }
@@ -1974,8 +1993,13 @@ impl Daemon {
                                     match self.config.engine {
                                         crate::config::TranscriptionEngine::Whisper => {
                                             if let Some(ref mut mm) = self.model_manager {
-                                                if let Err(e) = mm.prepare_model(model_override.as_deref()) {
-                                                    tracing::warn!("Failed to prepare model: {}", e);
+                                                match mm.prepare_model(model_override.as_deref()) {
+                                                    Ok(handle) => {
+                                                        self.whisper_prepare_task = handle;
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!("Failed to prepare model: {}", e);
+                                                    }
                                                 }
                                             }
                                         }
@@ -2409,8 +2433,13 @@ impl Daemon {
                             match self.config.engine {
                                 crate::config::TranscriptionEngine::Whisper => {
                                     if let Some(ref mut mm) = self.model_manager {
-                                        if let Err(e) = mm.prepare_model(model_override.as_deref()) {
-                                            tracing::warn!("Failed to prepare model: {}", e);
+                                        match mm.prepare_model(model_override.as_deref()) {
+                                            Ok(handle) => {
+                                                self.whisper_prepare_task = handle;
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!("Failed to prepare model: {}", e);
+                                            }
                                         }
                                     }
                                 }

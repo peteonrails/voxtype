@@ -245,8 +245,16 @@ impl ModelManager {
     /// Prepare a model for transcription (called when recording starts)
     ///
     /// For subprocess mode, this spawns the worker early so it can load
-    /// the model while the user is speaking.
-    pub fn prepare_model(&mut self, model: Option<&str>) -> Result<(), TranscribeError> {
+    /// the model while the user is speaking. The actual worker spawn and
+    /// model load happen on a blocking thread, so the async event loop
+    /// (and audio capture) is not blocked. Returns a JoinHandle that the
+    /// caller must await before invoking transcription, so that we don't
+    /// race against the in-flight prepare and end up spawning a second
+    /// worker.
+    pub fn prepare_model(
+        &mut self,
+        model: Option<&str>,
+    ) -> Result<Option<tokio::task::JoinHandle<()>>, TranscribeError> {
         let model_name = model
             .map(|s| s.to_string())
             .unwrap_or_else(|| self.config.model.clone());
@@ -257,26 +265,30 @@ impl ModelManager {
                 "Cannot prepare unavailable model '{}', will use default",
                 model_name
             );
-            return Ok(());
+            return Ok(None);
         }
 
         // For GPU isolation, spawn subprocess early
         if self.config.gpu_isolation && self.config.effective_mode() == WhisperMode::Local {
-            // Create and prepare subprocess transcriber
             let transcriber = self.create_subprocess_transcriber(&model_name)?;
-            transcriber.prepare();
-            // Store it temporarily for the upcoming transcription
+            // Store the Arc immediately so get_prepared_transcriber can retrieve it.
+            // The worker spawn happens on a blocking thread; the prepared_worker
+            // mutex inside SubprocessTranscriber is populated when ready.
             self.loaded_models.insert(
                 format!("_prepared_{}", model_name),
                 LoadedModel {
-                    transcriber,
+                    transcriber: transcriber.clone(),
                     last_used: Instant::now(),
                     is_primary: false,
                 },
             );
+            let handle = tokio::task::spawn_blocking(move || {
+                transcriber.prepare();
+            });
+            return Ok(Some(handle));
         }
 
-        Ok(())
+        Ok(None)
     }
 
     /// Get a prepared transcriber (if available) or create one
