@@ -3,6 +3,7 @@
 use crate::setup::binary::{self, Acceleration, EngineFamily, InstallKind, Inventory, Variant};
 use std::path::Path;
 
+use super::hotkey::HotkeyState;
 use super::section::Section;
 
 /// What the event handler asks the run-loop to do next.
@@ -48,6 +49,9 @@ pub struct App {
     pub sidebar_cursor: usize,
     /// True when keyboard input is steered at the sidebar (Tab toggles).
     pub sidebar_focused: bool,
+    /// Lazily loaded Hotkey section state. None until the user opens Hotkey
+    /// for the first time (or load fails).
+    pub hotkey: Option<HotkeyState>,
 }
 
 /// Build the inventory and, if `force_package_mode` is set, override the
@@ -108,6 +112,14 @@ impl App {
             current_section: Section::General,
             sidebar_cursor: 0,
             sidebar_focused: true,
+            hotkey: None,
+        }
+    }
+
+    /// Ensure section-specific state is loaded the first time a section opens.
+    pub fn ensure_section_loaded(&mut self) {
+        if self.current_section == Section::Hotkey && self.hotkey.is_none() {
+            self.hotkey = HotkeyState::load().ok();
         }
     }
 
@@ -123,6 +135,7 @@ impl App {
     pub fn open_hovered_section(&mut self) {
         if let Some(section) = Section::ALL.get(self.sidebar_cursor).copied() {
             self.current_section = section;
+            self.ensure_section_loaded();
         }
     }
 

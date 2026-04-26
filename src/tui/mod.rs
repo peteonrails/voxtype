@@ -7,6 +7,7 @@
 mod app;
 mod config_editor;
 mod general;
+mod hotkey;
 mod section;
 mod sidebar;
 mod stub;
@@ -173,6 +174,7 @@ fn handle_sidebar_key(app: &mut App, key: KeyEvent) -> Action {
 fn handle_section_key(app: &mut App, key: KeyEvent) -> Action {
     match app.current_section {
         Section::General => general::handle_key(app, key),
+        Section::Hotkey => hotkey::handle_key(app, key),
         // Stub sections accept no input today.
         _ => Action::None,
     }
@@ -229,6 +231,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
 fn render_section(f: &mut Frame, area: Rect, app: &App) {
     match app.current_section {
         Section::General => general::render(f, area, app),
+        Section::Hotkey => hotkey::render(f, area, app),
         other => stub::render(f, area, other),
     }
 }
