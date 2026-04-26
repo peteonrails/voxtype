@@ -389,6 +389,9 @@ pub enum Commands {
         action: InfoAction,
     },
 
+    /// Open the interactive configuration TUI
+    Configure,
+
     /// Show daemon status (for Waybar/polybar integration)
     Status {
         /// Continuously output status changes as JSON (for Waybar exec)
@@ -889,6 +892,14 @@ pub enum SetupAction {
         /// Show current backend status
         #[arg(long)]
         status: bool,
+    },
+
+    /// Switch the active binary variant (used by `voxtype configure` via pkexec)
+    #[command(hide = true)]
+    Variant {
+        /// Variant binary name (e.g., voxtype-avx512, voxtype-onnx-cuda)
+        #[arg(long, value_name = "NAME")]
+        to: String,
     },
 
     /// Switch between Whisper and ONNX transcription engines

@@ -83,6 +83,7 @@ pub mod setup;
 pub mod state;
 pub mod text;
 pub mod transcribe;
+pub mod tui;
 pub mod vad;
 
 pub use cli::{

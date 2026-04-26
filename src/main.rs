@@ -487,6 +487,20 @@ async fn main() -> anyhow::Result<()> {
                         setup::gpu::show_status();
                     }
                 }
+                Some(SetupAction::Variant { to }) => {
+                    let variant = setup::binary::Variant::from_binary_name(&to)
+                        .ok_or_else(|| anyhow::anyhow!(
+                            "Unknown variant '{}'. Expected one of: {}",
+                            to,
+                            setup::binary::Variant::ALL
+                                .iter()
+                                .map(|v| v.binary_name())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ))?;
+                    setup::binary::switch_to(variant)?;
+                    println!("Switched /usr/bin/voxtype to {}.", variant.binary_name());
+                }
                 Some(SetupAction::Onnx {
                     enable,
                     disable,
@@ -536,6 +550,10 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::Info { action } => {
             run_info_command(action)?;
+        }
+
+        Commands::Configure => {
+            voxtype::tui::run()?;
         }
 
         Commands::Status {
