@@ -82,13 +82,14 @@ pub fn dominant_compositor(detected: &[Binding]) -> Compositor {
 }
 
 /// Look at the actions the user has already bound and suggest config snippets
-/// for likely-missing ones (cancel, toggle, meeting start/stop).
+/// for likely-missing ones (cancel, toggle, meeting start/stop). Suggested
+/// keys come from a small candidate list, skipping any combo already bound to
+/// another action in the user's compositor configs.
 pub fn suggest_missing(detected: &[Binding]) -> Vec<Suggestion> {
     let comp = dominant_compositor(detected);
+    let occupied = enumerate_occupied_keys(comp);
     let actions: std::collections::HashSet<&str> =
         detected.iter().map(|b| b.action.as_str()).collect();
-
-    let mut suggestions = Vec::new();
 
     let has_start = actions.contains("record start");
     let has_stop = actions.contains("record stop");
@@ -97,172 +98,636 @@ pub fn suggest_missing(detected: &[Binding]) -> Vec<Suggestion> {
     let has_meeting_start = actions.contains("meeting start");
     let has_meeting_stop = actions.contains("meeting stop");
 
-    // PTT pair: if one half is bound, suggest the other.
+    // Track keys we've already proposed in this batch so two suggestions don't
+    // collide with each other.
+    let mut taken: std::collections::HashSet<String> = occupied.clone();
+
+    let mut suggestions = Vec::new();
+
     if has_start && !has_stop {
-        suggestions.push(Suggestion {
-            label: "Stop (release of your PTT key)".to_string(),
-            purpose: "Without a stop binding, hold-to-record never finishes — \
-                      voxtype will run until max_duration_secs hits.",
-            config_lines: render_lines(comp, "record stop", BindShape::PttRelease),
-        });
+        suggestions.push(make_suggestion(
+            comp,
+            &mut taken,
+            "Stop (release of your PTT key)",
+            "Without a stop binding, hold-to-record never finishes — voxtype \
+             will run until max_duration_secs hits.",
+            Role::Stop,
+        ));
     }
     if has_stop && !has_start {
-        suggestions.push(Suggestion {
-            label: "Start (press of your PTT key)".to_string(),
-            purpose: "You have a stop binding but no start — recording can't \
-                      begin from your compositor.",
-            config_lines: render_lines(comp, "record start", BindShape::PttPress),
-        });
+        suggestions.push(make_suggestion(
+            comp,
+            &mut taken,
+            "Start (press of your PTT key)",
+            "You have a stop binding but no start — recording can't begin from \
+             your compositor.",
+            Role::Start,
+        ));
     }
 
-    // No PTT pair at all and no toggle: suggest both flows.
     if !has_start && !has_stop && !has_toggle {
-        suggestions.push(Suggestion {
-            label: "Push-to-talk (start + stop pair)".to_string(),
-            purpose: "Hold the key while you speak; release to transcribe.",
-            config_lines: render_lines(comp, "record start/stop", BindShape::PttPair),
-        });
-        suggestions.push(Suggestion {
-            label: "Toggle (single-key alternative)".to_string(),
-            purpose: "Press once to start, again to stop. Better for long \
-                      dictations.",
-            config_lines: render_lines(comp, "record toggle", BindShape::Single),
-        });
+        suggestions.push(make_suggestion(
+            comp,
+            &mut taken,
+            "Push-to-talk (start + stop pair)",
+            "Hold the key while you speak; release to transcribe.",
+            Role::PttPair,
+        ));
+        suggestions.push(make_suggestion(
+            comp,
+            &mut taken,
+            "Toggle (single-key alternative)",
+            "Press once to start, again to stop. Better for long dictations.",
+            Role::Toggle,
+        ));
     } else if !has_toggle && (has_start || has_stop) {
-        suggestions.push(Suggestion {
-            label: "Toggle (alternative to PTT)".to_string(),
-            purpose: "A single-key toggle bound to a different key gives you \
-                      a long-dictation flow without competing with the PTT \
-                      key.",
-            config_lines: render_lines(comp, "record toggle", BindShape::Single),
-        });
+        suggestions.push(make_suggestion(
+            comp,
+            &mut taken,
+            "Toggle (alternative to PTT)",
+            "A single-key toggle bound to a different key gives you a \
+             long-dictation flow without competing with the PTT key.",
+            Role::Toggle,
+        ));
     }
 
     if !has_cancel {
-        suggestions.push(Suggestion {
-            label: "Cancel (abort in-progress recording)".to_string(),
-            purpose: "Discards audio without transcribing — useful when you \
-                      trip the PTT key by accident or the wrong window has \
-                      focus.",
-            config_lines: render_lines(comp, "record cancel", BindShape::Single),
-        });
+        suggestions.push(make_suggestion(
+            comp,
+            &mut taken,
+            "Cancel (abort in-progress recording)",
+            "Discards audio without transcribing — useful when you trip the \
+             PTT key by accident or the wrong window has focus.",
+            Role::Cancel,
+        ));
     }
 
     if !has_meeting_start && !has_meeting_stop {
-        suggestions.push(Suggestion {
-            label: "Meeting mode (start + stop)".to_string(),
-            purpose: "Long-form recording with chunked transcription. Bind \
-                      separate keys so meeting capture doesn't collide with \
-                      regular dictation.",
-            config_lines: render_lines(comp, "meeting start/stop", BindShape::MeetingPair),
-        });
+        suggestions.push(make_suggestion(
+            comp,
+            &mut taken,
+            "Meeting mode (start + stop)",
+            "Long-form recording with chunked transcription. Bind separate \
+             keys so meeting capture doesn't collide with regular dictation.",
+            Role::MeetingPair,
+        ));
     } else if has_meeting_start && !has_meeting_stop {
-        suggestions.push(Suggestion {
-            label: "Meeting stop".to_string(),
-            purpose: "You have a meeting-start binding but no stop. Without \
-                      it the meeting only ends when you `voxtype meeting stop` \
-                      from the CLI.",
-            config_lines: render_lines(comp, "meeting stop", BindShape::Single),
-        });
+        suggestions.push(make_suggestion(
+            comp,
+            &mut taken,
+            "Meeting stop",
+            "You have a meeting-start binding but no stop. Without it the \
+             meeting only ends when you run `voxtype meeting stop` from the CLI.",
+            Role::MeetingStop,
+        ));
     } else if has_meeting_stop && !has_meeting_start {
-        suggestions.push(Suggestion {
-            label: "Meeting start".to_string(),
-            purpose: "You bound meeting stop but not start.",
-            config_lines: render_lines(comp, "meeting start", BindShape::Single),
-        });
+        suggestions.push(make_suggestion(
+            comp,
+            &mut taken,
+            "Meeting start",
+            "You bound meeting stop but not start.",
+            Role::MeetingStart,
+        ));
     }
 
     suggestions
 }
 
 #[derive(Debug, Clone, Copy)]
-enum BindShape {
-    /// Press-only: action fires when the key goes down.
-    Single,
-    /// Press-only half of a PTT pair (e.g. `record start`).
-    PttPress,
-    /// Release-only half of a PTT pair (e.g. `record stop`).
-    PttRelease,
-    /// Both halves of a PTT pair, rendered together.
+enum Role {
+    Start,
+    Stop,
+    Toggle,
+    Cancel,
     PttPair,
-    /// Two separate single-press bindings for meeting start + stop.
+    MeetingStart,
+    MeetingStop,
     MeetingPair,
 }
 
-fn render_lines(comp: Compositor, action: &str, shape: BindShape) -> Vec<String> {
-    match (comp, shape) {
-        (Compositor::Hyprland, BindShape::Single) => vec![format!(
-            "bind = SUPER, SPACE, voxtype {}, exec, voxtype {}",
-            action.replace(' ', " "),
-            action
-        )],
-        (Compositor::Hyprland, BindShape::PttPress) => vec![format!(
-            "bindd  = , F13, Voxtype PTT (start), exec, voxtype record start"
-        )],
-        (Compositor::Hyprland, BindShape::PttRelease) => vec![format!(
-            "bindrd = , F13, Voxtype PTT (stop),  exec, voxtype record stop"
-        )],
-        (Compositor::Hyprland, BindShape::PttPair) => vec![
-            "bindd  = , F13, Voxtype PTT (start), exec, voxtype record start"
-                .to_string(),
-            "bindrd = , F13, Voxtype PTT (stop),  exec, voxtype record stop"
-                .to_string(),
+/// Candidate key combos in canonical form (uppercase, alphabetically sorted
+/// modifiers, joined by '+'). Picked from in order; first non-occupied wins.
+fn candidates_for(role: Role) -> &'static [&'static str] {
+    match role {
+        // PTT keys: typically modifier-free function/utility keys.
+        Role::Start | Role::Stop | Role::PttPair => &[
+            "F13", "F14", "F15", "F16", "HOME", "PAUSE", "SCROLLLOCK", "INSERT", "MENU",
         ],
-        (Compositor::Hyprland, BindShape::MeetingPair) => vec![
-            "bind = SUPER, M,        Meeting start, exec, voxtype meeting start"
-                .to_string(),
-            "bind = SUPER SHIFT, M,  Meeting stop,  exec, voxtype meeting stop"
-                .to_string(),
+        Role::Toggle => &[
+            "SUPER+SPACE",
+            "SUPER+SLASH",
+            "SUPER+SEMICOLON",
+            "SUPER+APOSTROPHE",
+            "SUPER+BACKSLASH",
+            "SUPER+COMMA",
+            "SUPER+PERIOD",
         ],
-
-        (Compositor::Sway, BindShape::Single) => vec![format!(
-            "bindsym Mod4+space exec voxtype {}",
-            action
-        )],
-        (Compositor::Sway, BindShape::PttPress) => {
-            vec!["bindsym F13 exec voxtype record start".to_string()]
-        }
-        (Compositor::Sway, BindShape::PttRelease) => vec![
-            "bindsym --release F13 exec voxtype record stop".to_string(),
+        Role::Cancel => &[
+            "SUPER+ESCAPE",
+            "SUPER+BACKSPACE",
+            "SUPER+DELETE",
+            "CTRL+SUPER+ESCAPE",
         ],
-        (Compositor::Sway, BindShape::PttPair) => vec![
-            "bindsym F13 exec voxtype record start".to_string(),
-            "bindsym --release F13 exec voxtype record stop".to_string(),
+        Role::MeetingStart => &[
+            "SUPER+M",
+            "CTRL+SUPER+M",
+            "ALT+SUPER+M",
         ],
-        (Compositor::Sway, BindShape::MeetingPair) => vec![
-            "bindsym Mod4+m exec voxtype meeting start".to_string(),
-            "bindsym Mod4+Shift+m exec voxtype meeting stop".to_string(),
+        Role::MeetingStop => &[
+            "SHIFT+SUPER+M",
+            "ALT+SUPER+M",
+            "CTRL+SUPER+M",
         ],
-
-        (Compositor::Niri, BindShape::Single) => vec![format!(
-            "Mod+Space {{ spawn \"voxtype\" {}; }}",
-            quote_words(action)
-        )],
-        (Compositor::Niri, BindShape::PttPress) => vec![
-            "F13 { spawn \"voxtype\" \"record\" \"start\"; }".to_string(),
-        ],
-        (Compositor::Niri, BindShape::PttRelease) => vec![
-            "// Niri does not natively bind on key release; use toggle mode \
-             or fall back to a press-only start binding."
-                .to_string(),
-        ],
-        (Compositor::Niri, BindShape::PttPair) => vec![
-            "F13 { spawn \"voxtype\" \"record\" \"toggle\"; }".to_string(),
-            "// (Niri lacks key-release binds; use toggle in place of PTT.)"
-                .to_string(),
-        ],
-        (Compositor::Niri, BindShape::MeetingPair) => vec![
-            "Mod+M { spawn \"voxtype\" \"meeting\" \"start\"; }".to_string(),
-            "Mod+Shift+M { spawn \"voxtype\" \"meeting\" \"stop\"; }".to_string(),
+        Role::MeetingPair => &[
+            "SUPER+M",
+            "CTRL+SUPER+M",
+            "ALT+SUPER+M",
         ],
     }
 }
 
-fn quote_words(s: &str) -> String {
-    s.split_whitespace()
-        .map(|w| format!("\"{}\"", w))
+fn make_suggestion(
+    comp: Compositor,
+    taken: &mut std::collections::HashSet<String>,
+    label: &str,
+    purpose: &'static str,
+    role: Role,
+) -> Suggestion {
+    let candidates = candidates_for(role);
+    let mut chosen: Option<&'static str> = None;
+    for cand in candidates {
+        if !taken.contains(*cand) {
+            chosen = Some(cand);
+            break;
+        }
+    }
+    let key = chosen.unwrap_or(candidates[0]);
+    let collision = chosen.is_none();
+    if !collision {
+        taken.insert(key.to_string());
+    }
+    let stop_key = if matches!(role, Role::MeetingPair) {
+        // Pick a second key that doesn't collide with the start key just chosen.
+        let stop_candidates = candidates_for(Role::MeetingStop);
+        let mut second = None;
+        for cand in stop_candidates {
+            if !taken.contains(*cand) {
+                second = Some(*cand);
+                break;
+            }
+        }
+        let chosen_stop = second.unwrap_or(stop_candidates[0]);
+        if second.is_some() {
+            taken.insert(chosen_stop.to_string());
+        }
+        Some(chosen_stop)
+    } else {
+        None
+    };
+
+    let mut config_lines = render_role(comp, role, key, stop_key.as_deref());
+    if collision {
+        config_lines.insert(
+            0,
+            "// All preferred candidates are already bound; pick a key that's free."
+                .to_string(),
+        );
+    }
+
+    Suggestion {
+        label: label.to_string(),
+        purpose,
+        config_lines,
+    }
+}
+
+/// Render one role into compositor-formatted binding lines, parameterized by
+/// the chosen canonical key (and optional second key for paired roles).
+fn render_role(
+    comp: Compositor,
+    role: Role,
+    key: &str,
+    second_key: Option<&str>,
+) -> Vec<String> {
+    match (comp, role) {
+        (Compositor::Hyprland, Role::Start) => {
+            vec![hyprland_bind("bindd", key, "Voxtype PTT (start)", "voxtype record start")]
+        }
+        (Compositor::Hyprland, Role::Stop) => {
+            vec![hyprland_bind("bindrd", key, "Voxtype PTT (stop)", "voxtype record stop")]
+        }
+        (Compositor::Hyprland, Role::PttPair) => vec![
+            hyprland_bind("bindd", key, "Voxtype PTT (start)", "voxtype record start"),
+            hyprland_bind("bindrd", key, "Voxtype PTT (stop)", "voxtype record stop"),
+        ],
+        (Compositor::Hyprland, Role::Toggle) => {
+            vec![hyprland_bind("bind", key, "Voxtype toggle", "voxtype record toggle")]
+        }
+        (Compositor::Hyprland, Role::Cancel) => {
+            vec![hyprland_bind("bind", key, "Voxtype cancel", "voxtype record cancel")]
+        }
+        (Compositor::Hyprland, Role::MeetingStart) => {
+            vec![hyprland_bind("bind", key, "Voxtype meeting start", "voxtype meeting start")]
+        }
+        (Compositor::Hyprland, Role::MeetingStop) => {
+            vec![hyprland_bind("bind", key, "Voxtype meeting stop", "voxtype meeting stop")]
+        }
+        (Compositor::Hyprland, Role::MeetingPair) => vec![
+            hyprland_bind("bind", key, "Voxtype meeting start", "voxtype meeting start"),
+            hyprland_bind(
+                "bind",
+                second_key.unwrap_or("SHIFT+SUPER+M"),
+                "Voxtype meeting stop",
+                "voxtype meeting stop",
+            ),
+        ],
+
+        (Compositor::Sway, Role::Start) => {
+            vec![format!("bindsym {} exec voxtype record start", canonical_to_sway(key))]
+        }
+        (Compositor::Sway, Role::Stop) => vec![format!(
+            "bindsym --release {} exec voxtype record stop",
+            canonical_to_sway(key)
+        )],
+        (Compositor::Sway, Role::PttPair) => vec![
+            format!("bindsym {} exec voxtype record start", canonical_to_sway(key)),
+            format!(
+                "bindsym --release {} exec voxtype record stop",
+                canonical_to_sway(key)
+            ),
+        ],
+        (Compositor::Sway, Role::Toggle) => vec![format!(
+            "bindsym {} exec voxtype record toggle",
+            canonical_to_sway(key)
+        )],
+        (Compositor::Sway, Role::Cancel) => vec![format!(
+            "bindsym {} exec voxtype record cancel",
+            canonical_to_sway(key)
+        )],
+        (Compositor::Sway, Role::MeetingStart) => vec![format!(
+            "bindsym {} exec voxtype meeting start",
+            canonical_to_sway(key)
+        )],
+        (Compositor::Sway, Role::MeetingStop) => vec![format!(
+            "bindsym {} exec voxtype meeting stop",
+            canonical_to_sway(key)
+        )],
+        (Compositor::Sway, Role::MeetingPair) => vec![
+            format!(
+                "bindsym {} exec voxtype meeting start",
+                canonical_to_sway(key)
+            ),
+            format!(
+                "bindsym {} exec voxtype meeting stop",
+                canonical_to_sway(second_key.unwrap_or("SHIFT+SUPER+M"))
+            ),
+        ],
+
+        (Compositor::Niri, Role::Start) => vec![format!(
+            "{} {{ spawn \"voxtype\" \"record\" \"start\"; }}",
+            canonical_to_niri(key)
+        )],
+        (Compositor::Niri, Role::Stop) => vec![format!(
+            "// Niri does not bind on key release; consider Role::Toggle instead."
+        )],
+        (Compositor::Niri, Role::PttPair) => vec![
+            format!(
+                "{} {{ spawn \"voxtype\" \"record\" \"toggle\"; }}",
+                canonical_to_niri(key)
+            ),
+            "// (Niri lacks key-release binds; use toggle in place of PTT.)"
+                .to_string(),
+        ],
+        (Compositor::Niri, Role::Toggle) => vec![format!(
+            "{} {{ spawn \"voxtype\" \"record\" \"toggle\"; }}",
+            canonical_to_niri(key)
+        )],
+        (Compositor::Niri, Role::Cancel) => vec![format!(
+            "{} {{ spawn \"voxtype\" \"record\" \"cancel\"; }}",
+            canonical_to_niri(key)
+        )],
+        (Compositor::Niri, Role::MeetingStart) => vec![format!(
+            "{} {{ spawn \"voxtype\" \"meeting\" \"start\"; }}",
+            canonical_to_niri(key)
+        )],
+        (Compositor::Niri, Role::MeetingStop) => vec![format!(
+            "{} {{ spawn \"voxtype\" \"meeting\" \"stop\"; }}",
+            canonical_to_niri(key)
+        )],
+        (Compositor::Niri, Role::MeetingPair) => vec![
+            format!(
+                "{} {{ spawn \"voxtype\" \"meeting\" \"start\"; }}",
+                canonical_to_niri(key)
+            ),
+            format!(
+                "{} {{ spawn \"voxtype\" \"meeting\" \"stop\"; }}",
+                canonical_to_niri(second_key.unwrap_or("SHIFT+SUPER+M"))
+            ),
+        ],
+    }
+}
+
+fn hyprland_bind(directive: &str, canonical_key: &str, label: &str, cmd: &str) -> String {
+    let (mods, key) = canonical_split(canonical_key);
+    let mods_hypr = mods.replace('+', " ");
+    if mods_hypr.is_empty() {
+        format!("{} = , {}, {}, exec, {}", directive, key, label, cmd)
+    } else {
+        format!("{} = {}, {}, {}, exec, {}", directive, mods_hypr, key, label, cmd)
+    }
+}
+
+/// Split "MODS+KEY" into ("MODS+SORTED", "KEY"). Modifiers come back '+'-joined.
+fn canonical_split(canonical: &str) -> (String, String) {
+    let parts: Vec<&str> = canonical.split('+').collect();
+    if parts.len() == 1 {
+        return (String::new(), parts[0].to_string());
+    }
+    let key = parts.last().copied().unwrap_or("").to_string();
+    let mut mods: Vec<&str> = parts[..parts.len() - 1].to_vec();
+    mods.sort();
+    (mods.join("+"), key)
+}
+
+fn canonical_to_sway(canonical: &str) -> String {
+    // Sway uses Mod4 for SUPER. Lowercase the key and capitalize modifiers.
+    let (mods, key) = canonical_split(canonical);
+    let mods = mods
+        .split('+')
+        .filter(|s| !s.is_empty())
+        .map(|m| match m {
+            "SUPER" => "Mod4",
+            "ALT" => "Mod1",
+            "CTRL" => "Ctrl",
+            "SHIFT" => "Shift",
+            other => other,
+        })
         .collect::<Vec<_>>()
-        .join(" ")
+        .join("+");
+    let sway_key = sway_key_name(&key);
+    if mods.is_empty() {
+        sway_key
+    } else {
+        format!("{}+{}", mods, sway_key)
+    }
+}
+
+fn sway_key_name(canonical_key: &str) -> String {
+    // Sway keysym names are lowercase and use specific words for some keys.
+    match canonical_key {
+        "SPACE" => "space".into(),
+        "ESCAPE" => "Escape".into(),
+        "BACKSPACE" => "BackSpace".into(),
+        "DELETE" => "Delete".into(),
+        "RETURN" | "ENTER" => "Return".into(),
+        "PRINT" => "Print".into(),
+        "PAUSE" => "Pause".into(),
+        "INSERT" => "Insert".into(),
+        "HOME" => "Home".into(),
+        "END" => "End".into(),
+        "MENU" => "Menu".into(),
+        "SCROLLLOCK" => "Scroll_Lock".into(),
+        "APOSTROPHE" => "apostrophe".into(),
+        "SEMICOLON" => "semicolon".into(),
+        "SLASH" => "slash".into(),
+        "BACKSLASH" => "backslash".into(),
+        "COMMA" => "comma".into(),
+        "PERIOD" => "period".into(),
+        // F1-F24 keep their casing.
+        s if s.starts_with('F') && s[1..].chars().all(|c| c.is_ascii_digit()) => s.into(),
+        // Single letters: lowercase.
+        s if s.len() == 1 => s.to_lowercase(),
+        s => s.into(),
+    }
+}
+
+fn canonical_to_niri(canonical: &str) -> String {
+    // Niri uses "Mod" for SUPER, capitalized modifiers separated by '+',
+    // and human-cased key names.
+    let (mods, key) = canonical_split(canonical);
+    let mods = mods
+        .split('+')
+        .filter(|s| !s.is_empty())
+        .map(|m| match m {
+            "SUPER" => "Mod",
+            "CTRL" => "Ctrl",
+            "ALT" => "Alt",
+            "SHIFT" => "Shift",
+            other => other,
+        })
+        .collect::<Vec<_>>()
+        .join("+");
+    let niri_key = niri_key_name(&key);
+    if mods.is_empty() {
+        niri_key
+    } else {
+        format!("{}+{}", mods, niri_key)
+    }
+}
+
+fn niri_key_name(canonical_key: &str) -> String {
+    match canonical_key {
+        "SPACE" => "Space".into(),
+        "ESCAPE" => "Escape".into(),
+        "BACKSPACE" => "BackSpace".into(),
+        "DELETE" => "Delete".into(),
+        "RETURN" | "ENTER" => "Return".into(),
+        "INSERT" => "Insert".into(),
+        "HOME" => "Home".into(),
+        "END" => "End".into(),
+        "PAUSE" => "Pause".into(),
+        "MENU" => "Menu".into(),
+        "SCROLLLOCK" => "Scroll_Lock".into(),
+        "APOSTROPHE" => "Apostrophe".into(),
+        "SEMICOLON" => "Semicolon".into(),
+        "SLASH" => "Slash".into(),
+        "BACKSLASH" => "Backslash".into(),
+        "COMMA" => "Comma".into(),
+        "PERIOD" => "Period".into(),
+        s if s.starts_with('F') && s[1..].chars().all(|c| c.is_ascii_digit()) => s.into(),
+        s => s.into(),
+    }
+}
+
+/// Walk all compositor configs and return the canonical-form set of every
+/// key combo bound to anything, regardless of action. Used to make
+/// suggestions skip combos already in use.
+fn enumerate_occupied_keys(_comp: Compositor) -> std::collections::HashSet<String> {
+    // We collect keys from every compositor we can find — better to over-skip
+    // candidates than to clash with a user's existing binding because we
+    // assumed the wrong compositor.
+    let mut out = std::collections::HashSet::new();
+    let home = match std::env::var("HOME") {
+        Ok(h) => PathBuf::from(h),
+        Err(_) => return out,
+    };
+    enumerate_hyprland_keys(&home, &mut out);
+    enumerate_sway_keys(&home, &mut out);
+    enumerate_niri_keys(&home, &mut out);
+    out
+}
+
+fn enumerate_hyprland_keys(home: &Path, out: &mut std::collections::HashSet<String>) {
+    let dir = home.join(".config/hypr");
+    let Ok(entries) = fs::read_dir(&dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("conf") {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else { continue };
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            let Some((lhs, rhs)) = trimmed.split_once('=') else { continue };
+            if !lhs.trim().starts_with("bind") {
+                continue;
+            }
+            let parts: Vec<&str> = rhs.split(',').map(str::trim).collect();
+            if parts.len() < 2 {
+                continue;
+            }
+            let mods = parts[0];
+            let key = parts[1];
+            if key.is_empty() {
+                continue;
+            }
+            out.insert(canonicalize_hyprland(mods, key));
+        }
+    }
+}
+
+fn enumerate_sway_keys(home: &Path, out: &mut std::collections::HashSet<String>) {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let main = home.join(".config/sway/config");
+    if main.exists() {
+        paths.push(main);
+    }
+    if let Ok(entries) = fs::read_dir(home.join(".config/sway/config.d")) {
+        for entry in entries.flatten() {
+            paths.push(entry.path());
+        }
+    }
+    for path in paths {
+        let Ok(text) = fs::read_to_string(&path) else { continue };
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            let mut parts = trimmed.split_whitespace();
+            let Some(head) = parts.next() else { continue };
+            if head != "bindsym" && head != "bindcode" {
+                continue;
+            }
+            let mut rest: Vec<&str> = parts.collect();
+            while let Some(first) = rest.first() {
+                if first.starts_with("--") {
+                    rest.remove(0);
+                } else {
+                    break;
+                }
+            }
+            let Some(combo) = rest.first() else { continue };
+            out.insert(canonicalize_sway(combo));
+        }
+    }
+}
+
+fn enumerate_niri_keys(home: &Path, out: &mut std::collections::HashSet<String>) {
+    let path = home.join(".config/niri/config.kdl");
+    let Ok(text) = fs::read_to_string(&path) else { return };
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        let Some((keys, _)) = trimmed.split_once('{') else { continue };
+        let keys = keys.trim();
+        if keys.is_empty() {
+            continue;
+        }
+        if !keys
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '_')
+        {
+            continue;
+        }
+        out.insert(canonicalize_niri(keys));
+    }
+}
+
+fn canonicalize_hyprland(mods: &str, key: &str) -> String {
+    let mut parts: Vec<String> = mods
+        .split_whitespace()
+        .map(|m| m.to_uppercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    parts.sort();
+    parts.push(key.to_uppercase());
+    parts.join("+")
+}
+
+fn canonicalize_sway(combo: &str) -> String {
+    let mut parts: Vec<String> = combo
+        .split('+')
+        .map(|m| match m.to_lowercase().as_str() {
+            "mod4" => "SUPER".to_string(),
+            "mod1" => "ALT".to_string(),
+            "ctrl" | "control" => "CTRL".to_string(),
+            "shift" => "SHIFT".to_string(),
+            other => other.to_uppercase(),
+        })
+        .collect();
+    if parts.is_empty() {
+        return String::new();
+    }
+    let key = parts.pop().unwrap_or_default();
+    let key = sway_key_canon(&key);
+    parts.sort();
+    parts.push(key);
+    parts.join("+")
+}
+
+fn sway_key_canon(s: &str) -> String {
+    // Map sway key names back to canonical (uppercase) form.
+    match s.to_lowercase().as_str() {
+        "space" => "SPACE".into(),
+        "escape" => "ESCAPE".into(),
+        "backspace" => "BACKSPACE".into(),
+        "return" | "enter" => "RETURN".into(),
+        "delete" => "DELETE".into(),
+        "scroll_lock" => "SCROLLLOCK".into(),
+        "apostrophe" => "APOSTROPHE".into(),
+        "semicolon" => "SEMICOLON".into(),
+        "slash" => "SLASH".into(),
+        "backslash" => "BACKSLASH".into(),
+        "comma" => "COMMA".into(),
+        "period" => "PERIOD".into(),
+        other => other.to_uppercase(),
+    }
+}
+
+fn canonicalize_niri(combo: &str) -> String {
+    let mut parts: Vec<String> = combo
+        .split('+')
+        .map(|m| match m.to_lowercase().as_str() {
+            "mod" => "SUPER".to_string(),
+            "ctrl" => "CTRL".to_string(),
+            "alt" => "ALT".to_string(),
+            "shift" => "SHIFT".to_string(),
+            other => other.to_uppercase(),
+        })
+        .collect();
+    if parts.is_empty() {
+        return String::new();
+    }
+    let key = parts.pop().unwrap_or_default();
+    parts.sort();
+    parts.push(key);
+    parts.join("+")
 }
 
 pub fn detect() -> Vec<Binding> {
@@ -620,6 +1085,96 @@ mod tests {
     #[test]
     fn dominant_compositor_empty_defaults_to_hyprland() {
         assert_eq!(dominant_compositor(&[]), Compositor::Hyprland);
+    }
+
+    #[test]
+    fn canonicalize_hyprland_sorts_modifiers() {
+        assert_eq!(canonicalize_hyprland("SUPER SHIFT", "M"), "SHIFT+SUPER+M");
+        assert_eq!(canonicalize_hyprland("", "HOME"), "HOME");
+        assert_eq!(canonicalize_hyprland("super", "f13"), "SUPER+F13");
+    }
+
+    #[test]
+    fn canonicalize_sway_normalizes_mod4_and_keys() {
+        assert_eq!(canonicalize_sway("Mod4+space"), "SUPER+SPACE");
+        assert_eq!(canonicalize_sway("Mod4+Shift+m"), "SHIFT+SUPER+M");
+        assert_eq!(canonicalize_sway("Escape"), "ESCAPE");
+    }
+
+    #[test]
+    fn canonicalize_niri_normalizes_mod_word() {
+        assert_eq!(canonicalize_niri("Mod+Shift+M"), "SHIFT+SUPER+M");
+    }
+
+    #[test]
+    fn make_suggestion_skips_first_candidate_if_taken() {
+        let mut taken: std::collections::HashSet<String> =
+            ["F13", "F14"].iter().map(|s| s.to_string()).collect();
+        let s = make_suggestion(
+            Compositor::Hyprland,
+            &mut taken,
+            "PTT",
+            "test",
+            Role::PttPair,
+        );
+        assert!(
+            s.config_lines.iter().any(|l| l.contains("F15")),
+            "expected F15 in lines: {:?}",
+            s.config_lines
+        );
+        assert!(
+            !s.config_lines.iter().any(|l| l.contains(" F13 ") || l.contains(" F14 ")),
+            "lines should not include F13/F14: {:?}",
+            s.config_lines
+        );
+    }
+
+    #[test]
+    fn make_suggestion_warns_when_all_candidates_taken() {
+        let mut taken: std::collections::HashSet<String> = candidates_for(Role::Cancel)
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let s = make_suggestion(
+            Compositor::Hyprland,
+            &mut taken,
+            "Cancel",
+            "test",
+            Role::Cancel,
+        );
+        assert!(
+            s.config_lines
+                .iter()
+                .any(|l| l.contains("preferred candidates are already bound")),
+            "expected collision warning, got: {:?}",
+            s.config_lines
+        );
+    }
+
+    #[test]
+    fn sway_render_uses_release_for_stop() {
+        let mut taken = std::collections::HashSet::new();
+        let s = make_suggestion(
+            Compositor::Sway,
+            &mut taken,
+            "Stop",
+            "test",
+            Role::Stop,
+        );
+        assert!(s.config_lines.iter().any(|l| l.contains("--release")));
+    }
+
+    #[test]
+    fn niri_pttpair_falls_back_to_toggle() {
+        let mut taken = std::collections::HashSet::new();
+        let s = make_suggestion(
+            Compositor::Niri,
+            &mut taken,
+            "PTT",
+            "test",
+            Role::PttPair,
+        );
+        assert!(s.config_lines.iter().any(|l| l.contains("\"toggle\"")));
     }
 
     #[test]
