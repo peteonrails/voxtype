@@ -217,6 +217,9 @@ impl App {
     pub fn is_editing(&self) -> bool {
         match self.current_section {
             Section::Engine => self.engine.as_ref().is_some_and(|s| s.editing.is_some()),
+            Section::Output => self.output.as_ref().is_some_and(|s| s.editing.is_some()),
+            Section::Hotkey => self.hotkey.as_ref().is_some_and(|s| s.editing.is_some()),
+            Section::Audio => self.audio.as_ref().is_some_and(|s| s.editing.is_some()),
             _ => false,
         }
     }

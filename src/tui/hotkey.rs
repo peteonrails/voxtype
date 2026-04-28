@@ -10,7 +10,9 @@ use ratatui::{
 };
 
 use super::app::{Action, App};
-use super::common::{self, FeedbackLevel as CommonFeedback, FormRowSpec};
+use super::common::{
+    self, FeedbackLevel as CommonFeedback, FormRowSpec, TextInput, TextInputResult,
+};
 use super::compositor_bindings;
 use super::config_editor::{ConfigEditor, EditorError};
 
@@ -27,6 +29,13 @@ pub struct HotkeyState {
     pub feedback: Option<Feedback>,
     pub dirty_since_load: bool,
     pub field: Field,
+    pub editing: Option<TextEdit>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TextEdit {
+    pub field: Field,
+    pub input: TextInput,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +128,7 @@ impl HotkeyState {
             feedback: None,
             dirty_since_load: false,
             field: Field::Enabled,
+            editing: None,
         })
     }
 
@@ -198,6 +208,59 @@ impl HotkeyState {
     }
 
     /// Cycle the value of the focused field by `delta` (-1 for ← / +1 for →).
+    fn is_text_field(field: Field) -> bool {
+        // Free-text on Key / CancelKey / Modifier so users can type custom
+        // KEY_* names that aren't in the curated cycle list.
+        matches!(field, Field::Key | Field::CancelKey | Field::Modifier)
+    }
+
+    fn start_edit_if_text_field(&mut self) -> bool {
+        // Edit only makes sense when the listener is enabled — otherwise
+        // these fields are dimmed/inert.
+        if !self.enabled || !Self::is_text_field(self.field) {
+            return false;
+        }
+        let initial = match self.field {
+            Field::Key => self.key.clone(),
+            Field::CancelKey => self.cancel_key.clone().unwrap_or_default(),
+            Field::Modifier => self.modifier.clone().unwrap_or_default(),
+            _ => String::new(),
+        };
+        self.editing = Some(TextEdit {
+            field: self.field,
+            input: TextInput::new(initial),
+        });
+        true
+    }
+
+    fn commit_text_edit(&mut self, field: Field, buffer: String) {
+        let trimmed = buffer.trim();
+        match field {
+            Field::Key => {
+                if !trimmed.is_empty() {
+                    self.key = trimmed.to_uppercase();
+                }
+            }
+            Field::CancelKey => {
+                self.cancel_key = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_uppercase())
+                };
+            }
+            Field::Modifier => {
+                self.modifier = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_uppercase())
+                };
+            }
+            _ => {}
+        }
+        self.dirty_since_load = true;
+        self.feedback = None;
+    }
+
     fn cycle(&mut self, delta: i32) {
         // When the evdev listener is off, only the Enabled toggle responds —
         // the rest of the form is greyed out and inert.
@@ -288,7 +351,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         FormRowSpec::new(
             state.field == Field::Key,
             "Push-to-talk key",
-            display_key(&state.key),
+            match state.editing.as_ref() {
+                Some(e) if e.field == Field::Key => e.input.caret_string(),
+                _ => display_key(&state.key),
+            },
         )
         .dimmed(greyout),
         FormRowSpec::new(
@@ -303,16 +369,27 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         FormRowSpec::new(
             state.field == Field::CancelKey,
             "Cancel key",
-            state
-                .cancel_key
-                .as_deref()
-                .unwrap_or("(none)"),
+            match state.editing.as_ref() {
+                Some(e) if e.field == Field::CancelKey => e.input.caret_string(),
+                _ => state
+                    .cancel_key
+                    .as_deref()
+                    .unwrap_or("(none)")
+                    .to_string(),
+            },
         )
         .dimmed(greyout),
         FormRowSpec::new(
             state.field == Field::Modifier,
             "Modifier (secondary model)",
-            state.modifier.as_deref().unwrap_or("(none)"),
+            match state.editing.as_ref() {
+                Some(e) if e.field == Field::Modifier => e.input.caret_string(),
+                _ => state
+                    .modifier
+                    .as_deref()
+                    .unwrap_or("(none)")
+                    .to_string(),
+            },
         )
         .dimmed(greyout),
     ];
@@ -583,6 +660,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         Some(s) => s,
         None => return Action::None,
     };
+
+    if state.editing.is_some() {
+        return handle_edit_key(state, key);
+    }
+
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => {
             state.move_field(-1);
@@ -600,11 +682,35 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
             state.cycle(1);
             Action::None
         }
+        KeyCode::Enter | KeyCode::Char('i') => {
+            state.start_edit_if_text_field();
+            Action::None
+        }
         KeyCode::Char('s') => state.save(),
         KeyCode::Char('r') => {
             state.reset();
             Action::None
         }
         _ => Action::None,
+    }
+}
+
+fn handle_edit_key(state: &mut HotkeyState, key: KeyEvent) -> Action {
+    let Some(editing) = state.editing.as_mut() else {
+        return Action::None;
+    };
+    match editing.input.handle_key(key) {
+        TextInputResult::Continue => Action::None,
+        TextInputResult::Commit => {
+            let buf = editing.input.buffer().to_string();
+            let field = editing.field;
+            state.editing = None;
+            state.commit_text_edit(field, buf);
+            Action::None
+        }
+        TextInputResult::Cancel => {
+            state.editing = None;
+            Action::None
+        }
     }
 }

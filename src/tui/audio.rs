@@ -11,7 +11,9 @@ use ratatui::{
 };
 
 use super::app::{Action, App};
-use super::common::{self, FeedbackLevel as CommonFeedback, FormRowSpec};
+use super::common::{
+    self, FeedbackLevel as CommonFeedback, FormRowSpec, TextInput, TextInputResult,
+};
 use super::config_editor::{ConfigEditor, EditorError};
 
 #[derive(Debug, Clone)]
@@ -28,6 +30,13 @@ pub struct AudioState {
     pub dirty_since_load: bool,
     /// Cached device list (default + everything cpal finds). Loaded once.
     pub device_choices: Vec<String>,
+    pub editing: Option<TextEdit>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TextEdit {
+    pub field: Field,
+    pub input: TextInput,
 }
 
 #[derive(Debug, Clone)]
@@ -100,7 +109,36 @@ impl AudioState {
             feedback: None,
             dirty_since_load: false,
             device_choices: enumerate_input_devices(),
+            editing: None,
         })
+    }
+
+    fn is_text_field(field: Field) -> bool {
+        matches!(field, Field::Device)
+    }
+
+    fn start_edit_if_text_field(&mut self) -> bool {
+        if !Self::is_text_field(self.field) {
+            return false;
+        }
+        self.editing = Some(TextEdit {
+            field: self.field,
+            input: TextInput::new(self.device.clone()),
+        });
+        true
+    }
+
+    fn commit_text_edit(&mut self, field: Field, buffer: String) {
+        if let Field::Device = field {
+            let trimmed = buffer.trim();
+            self.device = if trimmed.is_empty() {
+                "default".to_string()
+            } else {
+                trimmed.to_string()
+            };
+        }
+        self.dirty_since_load = true;
+        self.feedback = None;
     }
 
     pub fn save(&mut self) -> Action {
@@ -252,7 +290,14 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let rows = vec![
-        FormRowSpec::new(state.field == Field::Device, "Input device", &state.device),
+        FormRowSpec::new(
+            state.field == Field::Device,
+            "Input device",
+            match state.editing.as_ref() {
+                Some(e) if e.field == Field::Device => e.input.caret_string(),
+                _ => state.device.clone(),
+            },
+        ),
         FormRowSpec::new(
             state.field == Field::MaxDuration,
             "Max recording (seconds)",
@@ -442,6 +487,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         Some(s) => s,
         None => return Action::None,
     };
+
+    if state.editing.is_some() {
+        return handle_edit_key(state, key);
+    }
+
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => {
             state.move_field(-1);
@@ -459,11 +509,35 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
             state.cycle(1);
             Action::None
         }
+        KeyCode::Enter | KeyCode::Char('i') => {
+            state.start_edit_if_text_field();
+            Action::None
+        }
         KeyCode::Char('s') => state.save(),
         KeyCode::Char('r') => {
             state.reset();
             Action::None
         }
         _ => Action::None,
+    }
+}
+
+fn handle_edit_key(state: &mut AudioState, key: KeyEvent) -> Action {
+    let Some(editing) = state.editing.as_mut() else {
+        return Action::None;
+    };
+    match editing.input.handle_key(key) {
+        TextInputResult::Continue => Action::None,
+        TextInputResult::Commit => {
+            let buf = editing.input.buffer().to_string();
+            let field = editing.field;
+            state.editing = None;
+            state.commit_text_edit(field, buf);
+            Action::None
+        }
+        TextInputResult::Cancel => {
+            state.editing = None;
+            Action::None
+        }
     }
 }
