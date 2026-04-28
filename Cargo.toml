@@ -126,10 +126,13 @@ dolphin-tensorrt = ["dolphin", "ort/tensorrt"]
 omnilingual = ["onnx-common"]
 omnilingual-cuda = ["omnilingual", "ort/cuda"]
 omnilingual-tensorrt = ["omnilingual", "ort/tensorrt"]
-# Cohere Transcribe backend (proof-of-concept, ONNX-based encoder-decoder).
-# Not wired into CLI/config/factory or release builds; gated behind this feature
-# for opt-in compilation and a feature-gated integration test.
+# Cohere Transcribe backend (ONNX-based encoder-decoder, Whisper-style task tokens).
+# Top of the Open ASR Leaderboard. Wired into CLI/config/factory; users opt in
+# via `cargo build --features cohere` and the model files are downloaded into
+# the standard models directory like other ONNX engines.
 cohere = ["onnx-common"]
+cohere-cuda = ["cohere", "ort/cuda"]
+cohere-tensorrt = ["cohere", "ort/tensorrt"]
 
 [build-dependencies]
 clap = { version = "4", features = ["derive"] }

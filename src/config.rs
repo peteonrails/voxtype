@@ -346,6 +346,10 @@ pub struct Config {
     #[serde(default)]
     pub omnilingual: Option<OmnilingualConfig>,
 
+    /// Cohere Transcribe configuration (optional, only used when engine = "cohere")
+    #[serde(default)]
+    pub cohere: Option<CohereConfig>,
+
     /// Text processing configuration (replacements, spoken punctuation)
     #[serde(default)]
     pub text: TextConfig,
@@ -1035,6 +1039,46 @@ impl Default for MoonshineConfig {
     }
 }
 
+/// Cohere Transcribe speech-to-text configuration (ONNX-based, encoder-decoder).
+/// Requires: cargo build --features cohere
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CohereConfig {
+    /// Model name or directory containing the Cohere ONNX files.
+    /// Expects: cohere-encoder.int8.onnx (+ .data),
+    ///          cohere-decoder.int8.onnx (+ .data),
+    ///          tokens.txt
+    /// Short name: "cohere-transcribe-int8" (default)
+    pub model: String,
+
+    /// Language for transcription. Two-letter ISO 639-1 codes
+    /// (e.g. "en", "fr", "de"). Cohere supports 14 languages.
+    #[serde(default = "default_cohere_language")]
+    pub language: String,
+
+    /// Number of CPU threads for ONNX Runtime inference
+    #[serde(default)]
+    pub threads: Option<usize>,
+
+    /// Load model on-demand when recording starts (true) or keep loaded (false)
+    #[serde(default = "default_on_demand_loading")]
+    pub on_demand_loading: bool,
+}
+
+fn default_cohere_language() -> String {
+    "en".to_string()
+}
+
+impl Default for CohereConfig {
+    fn default() -> Self {
+        Self {
+            model: "cohere-transcribe-int8".to_string(),
+            language: default_cohere_language(),
+            threads: None,
+            on_demand_loading: false,
+        }
+    }
+}
+
 /// SenseVoice speech-to-text configuration (ONNX-based, CTC encoder-only ASR)
 /// Requires: cargo build --features sensevoice
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1181,6 +1225,10 @@ pub enum TranscriptionEngine {
     /// Use Omnilingual (FunASR 50+ language CTC encoder via ONNX Runtime)
     /// Requires: cargo build --features omnilingual
     Omnilingual,
+    /// Use Cohere Transcribe (encoder-decoder via ONNX Runtime, Whisper-style
+    /// task tokens). Top of the Open ASR Leaderboard.
+    /// Requires: cargo build --features cohere
+    Cohere,
 }
 
 /// VAD backend selection
@@ -1873,6 +1921,7 @@ impl Default for Config {
             paraformer: None,
             dolphin: None,
             omnilingual: None,
+            cohere: None,
             text: TextConfig::default(),
             vad: VadConfig::default(),
             status: StatusConfig::default(),
@@ -1981,6 +2030,11 @@ impl Config {
                 .as_ref()
                 .map(|o| o.on_demand_loading)
                 .unwrap_or(false),
+            TranscriptionEngine::Cohere => self
+                .cohere
+                .as_ref()
+                .map(|c| c.on_demand_loading)
+                .unwrap_or(false),
         }
     }
 
@@ -2018,6 +2072,11 @@ impl Config {
                 .as_ref()
                 .map(|o| o.model.as_str())
                 .unwrap_or("omnilingual (not configured)"),
+            TranscriptionEngine::Cohere => self
+                .cohere
+                .as_ref()
+                .map(|c| c.model.as_str())
+                .unwrap_or("cohere (not configured)"),
         }
     }
 
@@ -2086,6 +2145,7 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             "paraformer" => config.engine = TranscriptionEngine::Paraformer,
             "dolphin" => config.engine = TranscriptionEngine::Dolphin,
             "omnilingual" => config.engine = TranscriptionEngine::Omnilingual,
+            "cohere" => config.engine = TranscriptionEngine::Cohere,
             _ => tracing::warn!("Unknown VOXTYPE_ENGINE value: {}", engine),
         }
     }

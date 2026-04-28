@@ -82,6 +82,7 @@
 //! ```
 
 use super::Transcriber;
+use crate::config::CohereConfig;
 use crate::error::TranscribeError;
 use ort::session::Session;
 use ort::value::Tensor;
@@ -101,26 +102,17 @@ const SELF_KV_CACHE_LEN: usize = 1024;
 const VOCAB_SIZE: usize = 16384;
 const SAMPLE_RATE: usize = 16_000;
 
-// Special token IDs (verified against tokens.txt of cstr/cohere-transcribe-onnx-int8)
-const TOK_PAD: i64 = 2;
-const TOK_EOS: i64 = 3; // <|endoftext|>
-const TOK_SOT: i64 = 4; // <|startoftranscript|>
-const TOK_PNC: i64 = 5; // <|pnc|>          punctuation/numbers/capitalization on
-const TOK_ITN: i64 = 8; // <|itn|>          inverse text normalization on
-const TOK_NOTIMESTAMP: i64 = 11; // <|notimestamp|>
-const TOK_NODIARIZE: i64 = 13; // <|nodiarize|>
-const TOK_EN: i64 = 62; // <|en|>           English
+/// `<|endoftext|>` token ID. Verified against the cstr export's tokens.txt
+/// in `build_prefix_against_real_tokens_txt`. The decoder prefix and other
+/// task tokens are looked up by name at runtime in `build_prefix`, so they
+/// don't need const declarations here.
+const TOK_EOS: i64 = 3;
 
-/// Decoder prefix for English transcription with punctuation, ITN, no
-/// timestamps, no diarization. Fed in a single decoder call to populate
-/// the self-attention KV cache before greedy generation begins.
-const ENGLISH_PREFIX: &[i64] = &[
-    TOK_SOT,
-    TOK_EN,
-    TOK_PNC,
-    TOK_ITN,
-    TOK_NOTIMESTAMP,
-    TOK_NODIARIZE,
+/// Cohere Transcribe officially supports 14 languages. The language tokens
+/// live in `tokens.txt` as `<|<iso>|>` entries; we look them up by name at
+/// `new()` time so future model versions that change the IDs still work.
+const SUPPORTED_LANGUAGES: &[&str] = &[
+    "ar", "de", "en", "es", "fr", "hi", "it", "ja", "ko", "nl", "pt", "ru", "tr", "zh",
 ];
 
 /// Generation safety limits.
@@ -137,9 +129,20 @@ pub struct CohereTranscriber {
     decoder: Mutex<Session>,
     /// SentencePiece tokens loaded from `tokens.txt` (id -> piece string).
     tokens: HashMap<u32, String>,
+    /// Resolved decoder prefix (`<|sot|>` + language + task tokens). Fed in
+    /// the first decoder call to populate the self-attention KV cache.
+    prefix: Vec<i64>,
 }
 
 impl CohereTranscriber {
+    /// Construct from `[cohere]` config: resolves model name → path, applies
+    /// thread count, builds the language-specific decoder prefix.
+    pub fn new(config: &CohereConfig) -> Result<Self, TranscribeError> {
+        let model_dir = resolve_model_path(&config.model)?;
+        let threads = config.threads.unwrap_or_else(|| num_cpus::get().min(4));
+        Self::with_threads_and_lang(&model_dir, threads, &config.language)
+    }
+
     /// Load the Cohere encoder + decoder + tokens from a model directory.
     ///
     /// Expects the cstr/cohere-transcribe-onnx-int8 layout:
@@ -147,11 +150,20 @@ impl CohereTranscriber {
     /// - `cohere-decoder.int8.onnx` (+ `.onnx.data` sidecar)
     /// - `tokens.txt`
     pub fn from_dir(model_dir: &Path) -> Result<Self, TranscribeError> {
-        Self::with_threads(model_dir, num_cpus::get().min(4))
+        Self::with_threads_and_lang(model_dir, num_cpus::get().min(4), "en")
     }
 
     /// Load with an explicit thread count for ONNX intra-op parallelism.
     pub fn with_threads(model_dir: &Path, threads: usize) -> Result<Self, TranscribeError> {
+        Self::with_threads_and_lang(model_dir, threads, "en")
+    }
+
+    /// Full constructor with thread count and language code.
+    pub fn with_threads_and_lang(
+        model_dir: &Path,
+        threads: usize,
+        language: &str,
+    ) -> Result<Self, TranscribeError> {
         tracing::info!("Loading Cohere Transcribe model from {:?}", model_dir);
         let start = std::time::Instant::now();
 
@@ -208,16 +220,21 @@ impl CohereTranscriber {
                 ))
             })?;
 
+        let prefix = build_prefix(&tokens, language)?;
+
         tracing::info!(
-            "Cohere model loaded in {:.2}s ({} tokens)",
+            "Cohere model loaded in {:.2}s ({} tokens, language='{}', prefix={:?})",
             start.elapsed().as_secs_f32(),
             tokens.len(),
+            language,
+            prefix,
         );
 
         Ok(Self {
             encoder: Mutex::new(encoder),
             decoder: Mutex::new(decoder),
             tokens,
+            prefix,
         })
     }
 
@@ -280,7 +297,7 @@ impl CohereTranscriber {
         // a single call. After this, offset = prefix.len().
         let mut offset: i64 = 0;
         let next_after_prefix = self.decoder_step(
-            ENGLISH_PREFIX,
+            &self.prefix,
             offset,
             &mut self_k_data,
             &mut self_v_data,
@@ -290,7 +307,7 @@ impl CohereTranscriber {
             &cross_v_shape,
             &cross_v_data,
         )?;
-        offset += ENGLISH_PREFIX.len() as i64;
+        offset += self.prefix.len() as i64;
 
         let mut generated: Vec<i64> = Vec::new();
         if next_after_prefix == TOK_EOS {
@@ -514,6 +531,44 @@ fn load_tokens(path: &Path) -> Result<HashMap<u32, String>, TranscribeError> {
     Ok(map)
 }
 
+/// Build the decoder prefix sequence for a given language code.
+///
+/// The prefix is `[<|sot|>, <|<lang>|>, <|pnc|>, <|itn|>, <|notimestamp|>,
+/// <|nodiarize|>]`. We resolve the language and task tokens by name from
+/// `tokens.txt` rather than hard-coding IDs so the wiring survives a
+/// future export that renumbers tokens.
+fn build_prefix(
+    tokens: &HashMap<u32, String>,
+    language: &str,
+) -> Result<Vec<i64>, TranscribeError> {
+    let lang = language.trim().to_ascii_lowercase();
+    if !SUPPORTED_LANGUAGES.contains(&lang.as_str()) {
+        return Err(TranscribeError::InitFailed(format!(
+            "Cohere does not officially support language '{language}'. \
+             Supported languages: {SUPPORTED_LANGUAGES:?}",
+        )));
+    }
+    let lang_tag = format!("<|{lang}|>");
+    let lookup = |name: &str| -> Result<i64, TranscribeError> {
+        tokens
+            .iter()
+            .find_map(|(id, piece)| (piece == name).then_some(*id as i64))
+            .ok_or_else(|| {
+                TranscribeError::InitFailed(format!(
+                    "Cohere tokens.txt missing required special token {name:?}"
+                ))
+            })
+    };
+    Ok(vec![
+        lookup("<|startoftranscript|>")?,
+        lookup(&lang_tag)?,
+        lookup("<|pnc|>")?,
+        lookup("<|itn|>")?,
+        lookup("<|notimestamp|>")?,
+        lookup("<|nodiarize|>")?,
+    ])
+}
+
 /// True for Cohere control / language / task tokens. These are stripped
 /// from the decoded output so users don't see literal `<|en|>` strings.
 fn is_special_token(piece: &str) -> bool {
@@ -537,7 +592,6 @@ fn argmax(logits: &[f32]) -> usize {
 }
 
 /// Resolve a model name or path to a directory containing the Cohere ONNX files.
-#[allow(dead_code)]
 fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
     let path = PathBuf::from(model);
     if path.is_absolute() && path.exists() {
@@ -648,6 +702,54 @@ mod tests {
     }
 
     #[test]
+    fn build_prefix_rejects_unsupported_language() {
+        let tokens = HashMap::new();
+        let err = build_prefix(&tokens, "klingon").unwrap_err();
+        assert!(matches!(err, TranscribeError::InitFailed(_)));
+    }
+
+    #[test]
+    fn build_prefix_against_real_tokens_txt() {
+        // Sanity check: build_prefix yields the documented IDs when the real
+        // tokens.txt is available. Skipped when the model isn't downloaded.
+        let Ok(dir) = std::env::var("VOXTYPE_COHERE_MODEL_DIR").map(PathBuf::from) else {
+            return;
+        };
+        let tokens_path = dir.join("tokens.txt");
+        if !tokens_path.exists() {
+            return;
+        }
+        let tokens = load_tokens(&tokens_path).expect("tokens.txt should load");
+        let prefix = build_prefix(&tokens, "en").expect("build_prefix English");
+        assert_eq!(prefix, vec![4, 62, 5, 8, 11, 13]);
+        assert_eq!(
+            tokens.get(&3).map(String::as_str),
+            Some("<|endoftext|>"),
+            "EOS token id 3 should map to <|endoftext|>"
+        );
+    }
+
+    #[test]
+    fn build_prefix_lookup_uses_named_tokens() {
+        // Synthesize a minimal tokens.txt-equivalent map and check that
+        // build_prefix resolves names correctly (no hard-coded IDs).
+        let mut tokens = HashMap::new();
+        tokens.insert(4, "<|startoftranscript|>".to_string());
+        tokens.insert(5, "<|pnc|>".to_string());
+        tokens.insert(8, "<|itn|>".to_string());
+        tokens.insert(11, "<|notimestamp|>".to_string());
+        tokens.insert(13, "<|nodiarize|>".to_string());
+        tokens.insert(62, "<|en|>".to_string());
+        let prefix = build_prefix(&tokens, "en").unwrap();
+        assert_eq!(prefix, vec![4, 62, 5, 8, 11, 13]);
+
+        // If the language token is missing, error rather than panic.
+        let mut partial = tokens.clone();
+        partial.remove(&62);
+        assert!(build_prefix(&partial, "en").is_err());
+    }
+
+    #[test]
     fn special_token_filter() {
         assert!(is_special_token("<|en|>"));
         assert!(is_special_token("<|startoftranscript|>"));
@@ -657,51 +759,11 @@ mod tests {
         assert!(!is_special_token("hello"));
         assert!(!is_special_token("\u{2581}world"));
     }
-
-    #[test]
-    fn english_prefix_matches_token_layout() {
-        // Hard-coded prefix should match the canonical Whisper-style sequence.
-        assert_eq!(
-            ENGLISH_PREFIX,
-            &[
-                TOK_SOT,
-                TOK_EN,
-                TOK_PNC,
-                TOK_ITN,
-                TOK_NOTIMESTAMP,
-                TOK_NODIARIZE
-            ]
-        );
-        // Sanity check: our hard-coded IDs match the cstr export's tokens.txt
-        // (only verifiable when the model is available; gated like cohere_poc).
-        let model_dir = std::env::var("VOXTYPE_COHERE_MODEL_DIR").map(PathBuf::from);
-        if let Ok(dir) = model_dir {
-            let tokens = load_tokens(&dir.join("tokens.txt"))
-                .expect("tokens.txt should load when VOXTYPE_COHERE_MODEL_DIR is set");
-            assert_eq!(
-                tokens.get(&(TOK_SOT as u32)).map(String::as_str),
-                Some("<|startoftranscript|>")
-            );
-            assert_eq!(
-                tokens.get(&(TOK_EN as u32)).map(String::as_str),
-                Some("<|en|>")
-            );
-            assert_eq!(
-                tokens.get(&(TOK_EOS as u32)).map(String::as_str),
-                Some("<|endoftext|>")
-            );
-        }
-    }
 }
 
-// Trip-wire: keep D_MODEL aligned with N_HEADS * HEAD_DIM. The const block
-// at the top assumes 1024; surface a compile error if anyone edits one
-// constant without the others.
+// Trip-wire: keep D_MODEL aligned with N_HEADS * HEAD_DIM.
 const _: () = {
     if D_MODEL != N_HEADS * HEAD_DIM {
         panic!("D_MODEL must equal N_HEADS * HEAD_DIM");
-    }
-    if TOK_PAD != 2 || TOK_EOS != 3 || TOK_SOT != 4 {
-        panic!("Cohere special token IDs drifted; verify against tokens.txt");
     }
 };
