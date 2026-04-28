@@ -16,7 +16,10 @@ const VOXTYPE_BIN: &str = "/usr/bin/voxtype";
 pub enum ParakeetBackend {
     Avx2,
     Avx512,
-    Cuda,
+    /// CUDA 12.x (NVIDIA, ort built against libcudart.so.12)
+    Cuda12,
+    /// CUDA 13.x (NVIDIA, ort built against libcudart.so.13, requires driver 580+)
+    Cuda13,
     Migraphx,
     /// Custom binary (source-compiled without specific suffix)
     Custom,
@@ -27,7 +30,8 @@ impl ParakeetBackend {
         match self {
             ParakeetBackend::Avx2 => "voxtype-onnx-avx2",
             ParakeetBackend::Avx512 => "voxtype-onnx-avx512",
-            ParakeetBackend::Cuda => "voxtype-onnx-cuda",
+            ParakeetBackend::Cuda12 => "voxtype-onnx-cuda-12",
+            ParakeetBackend::Cuda13 => "voxtype-onnx-cuda-13",
             ParakeetBackend::Migraphx => "voxtype-onnx-migraphx",
             ParakeetBackend::Custom => "voxtype-onnx",
         }
@@ -37,7 +41,8 @@ impl ParakeetBackend {
         match self {
             ParakeetBackend::Avx2 => "ONNX (AVX2)",
             ParakeetBackend::Avx512 => "ONNX (AVX-512)",
-            ParakeetBackend::Cuda => "ONNX (CUDA)",
+            ParakeetBackend::Cuda12 => "ONNX (CUDA 12)",
+            ParakeetBackend::Cuda13 => "ONNX (CUDA 13)",
             ParakeetBackend::Migraphx => "ONNX (MIGraphX)",
             ParakeetBackend::Custom => "ONNX (Custom)",
         }
@@ -47,9 +52,11 @@ impl ParakeetBackend {
         match self {
             ParakeetBackend::Avx2 => "voxtype-avx2",
             ParakeetBackend::Avx512 => "voxtype-avx512",
-            ParakeetBackend::Cuda => "voxtype-vulkan", // CUDA users likely have GPU, fall back to vulkan
-            ParakeetBackend::Migraphx => "voxtype-vulkan", // AMD GPU users fall back to vulkan
-            ParakeetBackend::Custom => "voxtype-native", // Source builds: natively compiled, no CPU tier
+            // CUDA users likely have GPU; fall back to vulkan when switching off Parakeet
+            ParakeetBackend::Cuda12 => "voxtype-vulkan",
+            ParakeetBackend::Cuda13 => "voxtype-vulkan",
+            ParakeetBackend::Migraphx => "voxtype-vulkan",
+            ParakeetBackend::Custom => "voxtype-native",
         }
     }
 }
@@ -74,14 +81,20 @@ pub fn detect_current_parakeet_backend() -> Option<ParakeetBackend> {
             // New ONNX names
             "voxtype-onnx-avx2" => Some(ParakeetBackend::Avx2),
             "voxtype-onnx-avx512" => Some(ParakeetBackend::Avx512),
-            "voxtype-onnx-cuda" => Some(ParakeetBackend::Cuda),
+            "voxtype-onnx-cuda-12" => Some(ParakeetBackend::Cuda12),
+            "voxtype-onnx-cuda-13" => Some(ParakeetBackend::Cuda13),
             "voxtype-onnx-migraphx" => Some(ParakeetBackend::Migraphx),
             "voxtype-onnx" => Some(ParakeetBackend::Custom),
             // Legacy parakeet names (backward compat)
             "voxtype-parakeet-avx2" => Some(ParakeetBackend::Avx2),
             "voxtype-parakeet-avx512" => Some(ParakeetBackend::Avx512),
-            "voxtype-parakeet-cuda" => Some(ParakeetBackend::Cuda),
             "voxtype-parakeet" => Some(ParakeetBackend::Custom),
+            // Legacy unversioned CUDA name (resolved to whichever -12/-13 the
+            // symlink points at; we can't tell which from the name alone, so
+            // assume CUDA 12 since that's what 0.6.x shipped). Users on CUDA 13
+            // should re-run `voxtype setup gpu --enable` after upgrading.
+            "voxtype-onnx-cuda" => Some(ParakeetBackend::Cuda12),
+            "voxtype-parakeet-cuda" => Some(ParakeetBackend::Cuda12),
             // Legacy ROCm names (renamed to MIGraphX in v0.7.0; symlink shipped one release for compat)
             "voxtype-onnx-rocm" => Some(ParakeetBackend::Migraphx),
             "voxtype-parakeet-rocm" => Some(ParakeetBackend::Migraphx),
@@ -113,7 +126,8 @@ pub fn detect_available_backends() -> Vec<ParakeetBackend> {
     for backend in [
         ParakeetBackend::Avx2,
         ParakeetBackend::Avx512,
-        ParakeetBackend::Cuda,
+        ParakeetBackend::Cuda12,
+        ParakeetBackend::Cuda13,
         ParakeetBackend::Migraphx,
         ParakeetBackend::Custom,
     ] {
@@ -124,6 +138,42 @@ pub fn detect_available_backends() -> Vec<ParakeetBackend> {
     }
 
     available
+}
+
+/// Detect the host's CUDA runtime major version by dlopen'ing libcudart.
+/// Returns Some(12), Some(13), or None if CUDA isn't installed or the probe
+/// fails. Used by detect_best_parakeet_backend to pick between voxtype-onnx-cuda-12
+/// and voxtype-onnx-cuda-13 based on what the host can actually run.
+pub fn detect_cuda_runtime_major() -> Option<i32> {
+    use std::ffi::CString;
+    let candidates = ["libcudart.so", "libcudart.so.13", "libcudart.so.12"];
+    let handle = candidates.iter().find_map(|name| {
+        let cstr = CString::new(*name).ok()?;
+        let h = unsafe { libc::dlopen(cstr.as_ptr(), libc::RTLD_LAZY) };
+        if h.is_null() {
+            None
+        } else {
+            Some(h)
+        }
+    })?;
+
+    let sym_name = CString::new("cudaRuntimeGetVersion").ok()?;
+    let sym = unsafe { libc::dlsym(handle, sym_name.as_ptr()) };
+    if sym.is_null() {
+        unsafe { libc::dlclose(handle) };
+        return None;
+    }
+
+    type CudaRuntimeGetVersion = unsafe extern "C" fn(*mut i32) -> i32;
+    let get_version: CudaRuntimeGetVersion = unsafe { std::mem::transmute(sym) };
+    let mut version: i32 = 0;
+    let result = unsafe { get_version(&mut version) };
+    unsafe { libc::dlclose(handle) };
+
+    if result != 0 {
+        return None;
+    }
+    Some(version / 1000)
 }
 
 /// Detect the best Parakeet backend for this system
@@ -139,10 +189,31 @@ fn detect_best_parakeet_backend() -> Option<ParakeetBackend> {
         .unwrap_or(false);
 
     // Prefer CUDA if available and NVIDIA GPU detected.
-    // The CUDA binary bundles ONNX Runtime which may contain AVX-512 instructions,
-    // so only select it if the CPU supports AVX-512.
-    if available.contains(&ParakeetBackend::Cuda) && detect_nvidia_gpu() && has_avx512 {
-        return Some(ParakeetBackend::Cuda);
+    // Pick the variant matching the host's CUDA runtime: cu12 binary needs
+    // libcudart.so.12 at runtime, cu13 needs libcudart.so.13. Mismatched
+    // pairings register the EP, then fail at first dlopen — silent CPU fallback.
+    // The CUDA binaries bundle ONNX Runtime that contains AVX-512 instructions,
+    // so only select if the CPU supports AVX-512.
+    if detect_nvidia_gpu() && has_avx512 {
+        let host_cuda_major = detect_cuda_runtime_major();
+        match host_cuda_major {
+            Some(13) if available.contains(&ParakeetBackend::Cuda13) => {
+                return Some(ParakeetBackend::Cuda13);
+            }
+            Some(12) if available.contains(&ParakeetBackend::Cuda12) => {
+                return Some(ParakeetBackend::Cuda12);
+            }
+            // Host CUDA detection failed but binaries are available — prefer
+            // cu13 since CUDA 13 is the rolling-distro default; users on cu12
+            // can override by symlinking voxtype-onnx-cuda manually.
+            None if available.contains(&ParakeetBackend::Cuda13) => {
+                return Some(ParakeetBackend::Cuda13);
+            }
+            None if available.contains(&ParakeetBackend::Cuda12) => {
+                return Some(ParakeetBackend::Cuda12);
+            }
+            _ => {}
+        }
     }
 
     // Prefer MIGraphX if available and AMD GPU detected.
@@ -299,7 +370,8 @@ pub fn show_status() {
         for backend in [
             ParakeetBackend::Avx2,
             ParakeetBackend::Avx512,
-            ParakeetBackend::Cuda,
+            ParakeetBackend::Cuda12,
+            ParakeetBackend::Cuda13,
             ParakeetBackend::Migraphx,
             ParakeetBackend::Custom,
         ] {
@@ -463,7 +535,14 @@ mod tests {
     fn test_parakeet_backend_binary_names() {
         assert_eq!(ParakeetBackend::Avx2.binary_name(), "voxtype-onnx-avx2");
         assert_eq!(ParakeetBackend::Avx512.binary_name(), "voxtype-onnx-avx512");
-        assert_eq!(ParakeetBackend::Cuda.binary_name(), "voxtype-onnx-cuda");
+        assert_eq!(
+            ParakeetBackend::Cuda12.binary_name(),
+            "voxtype-onnx-cuda-12"
+        );
+        assert_eq!(
+            ParakeetBackend::Cuda13.binary_name(),
+            "voxtype-onnx-cuda-13"
+        );
         assert_eq!(
             ParakeetBackend::Migraphx.binary_name(),
             "voxtype-onnx-migraphx"
@@ -475,7 +554,8 @@ mod tests {
     fn test_parakeet_backend_display_names() {
         assert_eq!(ParakeetBackend::Avx2.display_name(), "ONNX (AVX2)");
         assert_eq!(ParakeetBackend::Avx512.display_name(), "ONNX (AVX-512)");
-        assert_eq!(ParakeetBackend::Cuda.display_name(), "ONNX (CUDA)");
+        assert_eq!(ParakeetBackend::Cuda12.display_name(), "ONNX (CUDA 12)");
+        assert_eq!(ParakeetBackend::Cuda13.display_name(), "ONNX (CUDA 13)");
         assert_eq!(ParakeetBackend::Migraphx.display_name(), "ONNX (MIGraphX)");
         assert_eq!(ParakeetBackend::Custom.display_name(), "ONNX (Custom)");
     }
@@ -487,7 +567,14 @@ mod tests {
             ParakeetBackend::Avx512.whisper_equivalent(),
             "voxtype-avx512"
         );
-        assert_eq!(ParakeetBackend::Cuda.whisper_equivalent(), "voxtype-vulkan");
+        assert_eq!(
+            ParakeetBackend::Cuda12.whisper_equivalent(),
+            "voxtype-vulkan"
+        );
+        assert_eq!(
+            ParakeetBackend::Cuda13.whisper_equivalent(),
+            "voxtype-vulkan"
+        );
         assert_eq!(
             ParakeetBackend::Migraphx.whisper_equivalent(),
             "voxtype-vulkan"
@@ -518,12 +605,13 @@ mod tests {
     fn test_backend_enum_equality() {
         assert_eq!(ParakeetBackend::Avx2, ParakeetBackend::Avx2);
         assert_ne!(ParakeetBackend::Avx2, ParakeetBackend::Avx512);
-        assert_ne!(ParakeetBackend::Avx512, ParakeetBackend::Cuda);
+        assert_ne!(ParakeetBackend::Avx512, ParakeetBackend::Cuda12);
+        assert_ne!(ParakeetBackend::Cuda12, ParakeetBackend::Cuda13);
     }
 
     #[test]
     fn test_backend_clone() {
-        let backend = ParakeetBackend::Cuda;
+        let backend = ParakeetBackend::Cuda12;
         let cloned = backend;
         assert_eq!(backend, cloned);
     }

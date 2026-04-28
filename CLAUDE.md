@@ -439,8 +439,21 @@ Building on hosts with newer glibc (e.g. 2.43 on CachyOS/Arch) can produce binar
 |--------|-----------|----------------|------------|-----------|
 | onnx-avx2 | `Dockerfile.onnx` | Remote (pre-AVX-512) | Ubuntu 24.04 | 2.39 |
 | onnx-avx512 | `Dockerfile.onnx-avx512` | Local (AVX-512 host) | Ubuntu 24.04 | 2.39 |
-| onnx-cuda | `Dockerfile.onnx-cuda` | Remote (NVIDIA GPU) | Ubuntu 24.04 | 2.39 |
+| onnx-cuda-12 | `Dockerfile.onnx-cuda-12` | Remote (NVIDIA GPU) | nvidia/cuda:12.6.1-cudnn-devel-ubuntu24.04 | 2.39 |
+| onnx-cuda-13 | `Dockerfile.onnx-cuda-13` | Remote (NVIDIA GPU) | nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04 | 2.39 |
 | onnx-migraphx | `Dockerfile.onnx-migraphx` | Local (AMD GPU host) | Ubuntu 24.04 | 2.39 |
+
+Note: ort 2.0.0-rc.12's CUDA prebuilt is selected at build time (cu12 vs cu13)
+based on the ORT_CUDA_VERSION env var or build host's CUDA install. A single
+binary is locked to one CUDA major version. v0.7.0 ships both onnx-cuda-12
+and onnx-cuda-13; the AUR PKGBUILD or `voxtype setup gpu --enable` symlinks
+voxtype-onnx-cuda to whichever variant matches the host's runtime CUDA.
+
+Each GPU-using ONNX binary ships with its companion shared libraries
+(libonnxruntime_providers_*.so) which the EP dlopens at runtime via
+/proc/self/exe. scripts/package.sh installs each variant into its own
+subdirectory under /usr/lib/voxtype/ (cuda-12/, cuda-13/, migraphx/) so
+the .so files sit alongside the binary.
 
 Note: ONNX binaries include bundled ONNX Runtime which contains AVX-512 instructions, but ONNX Runtime uses runtime CPU detection and falls back gracefully on older CPUs.
 
@@ -499,8 +512,8 @@ docker compose -f docker-compose.build.yml build --no-cache avx2 vulkan onnx-avx
 docker compose -f docker-compose.build.yml up avx2 vulkan onnx-avx2
 
 # 2. Build ONNX CUDA on remote server (has NVIDIA GPU)
-docker compose -f docker-compose.build.yml build --no-cache onnx-cuda
-docker compose -f docker-compose.build.yml up onnx-cuda
+docker compose -f docker-compose.build.yml build --no-cache onnx-cuda-12 onnx-cuda-13
+docker compose -f docker-compose.build.yml up onnx-cuda-12 onnx-cuda-13
 
 # 3. Copy binaries from remote Docker volumes to local
 mkdir -p releases/${VERSION}
@@ -541,7 +554,8 @@ releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-vulkan --version
 # ONNX binaries
 releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-onnx-avx2 --version
 releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-onnx-avx512 --version
-releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-onnx-cuda --version
+releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-onnx-cuda-12 --version
+releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-onnx-cuda-13 --version
 releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-onnx-migraphx --version
 ```
 
@@ -595,7 +609,8 @@ done
 | vulkan | Ubuntu 24.04 | 2.39 |
 | onnx-avx2 | Ubuntu 24.04 | 2.39 |
 | onnx-avx512 | Ubuntu 24.04 | 2.39 |
-| onnx-cuda | Ubuntu 24.04 | 2.39 |
+| onnx-cuda-12 | Ubuntu 24.04 | 2.39 |
+| onnx-cuda-13 | Ubuntu 24.04 | 2.39 |
 | onnx-migraphx | Ubuntu 24.04 | 2.39 |
 
 If any binary exceeds its expected glibc version, it was likely built outside Docker. Rebuild it in the appropriate Docker container.

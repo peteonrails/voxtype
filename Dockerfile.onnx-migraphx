@@ -58,9 +58,10 @@ RUN cargo build --release --features parakeet-migraphx,moonshine,sensevoice,para
 # installed alongside the binary or the EP fails to register and ort
 # silently falls back to CPU.
 RUN mkdir -p /tmp/onnx-migraphx-libs \
-    && cp /build/target/release/libonnxruntime_providers_migraphx.so /tmp/onnx-migraphx-libs/ 2>/dev/null \
-        || cp /build/target/release/examples/libonnxruntime_providers_migraphx.so /tmp/onnx-migraphx-libs/ \
-    && cp /build/target/release/examples/libonnxruntime_providers_shared.so /tmp/onnx-migraphx-libs/
+    && find /build/target/release -maxdepth 2 -name 'libonnxruntime_providers_migraphx.so' -exec cp -L {} /tmp/onnx-migraphx-libs/ \; \
+    && find /build/target/release -maxdepth 2 -name 'libonnxruntime_providers_shared.so' -exec cp -L {} /tmp/onnx-migraphx-libs/ \; \
+    && test -f /tmp/onnx-migraphx-libs/libonnxruntime_providers_migraphx.so \
+    && test -f /tmp/onnx-migraphx-libs/libonnxruntime_providers_shared.so
 
 # Verify binary
 RUN echo "=== Verifying ONNX MIGraphX binary ===" \

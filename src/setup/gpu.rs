@@ -522,7 +522,9 @@ pub fn show_status() {
             let display_name = match target.as_str() {
                 "voxtype-onnx-avx2" | "voxtype-parakeet-avx2" => "ONNX CPU (AVX2)",
                 "voxtype-onnx-avx512" | "voxtype-parakeet-avx512" => "ONNX CPU (AVX-512)",
-                "voxtype-onnx-cuda" | "voxtype-parakeet-cuda" => "ONNX GPU (CUDA)",
+                "voxtype-onnx-cuda-12" => "ONNX GPU (CUDA 12)",
+                "voxtype-onnx-cuda-13" => "ONNX GPU (CUDA 13)",
+                "voxtype-onnx-cuda" | "voxtype-parakeet-cuda" => "ONNX GPU (CUDA, unversioned)",
                 "voxtype-onnx-migraphx" => "ONNX GPU (MIGraphX)",
                 "voxtype-onnx-rocm" | "voxtype-parakeet-rocm" => "ONNX GPU (MIGraphX, legacy name)",
                 _ => "ONNX (unknown variant)",
@@ -576,7 +578,8 @@ pub fn show_status() {
         let onnx_backends = [
             ("voxtype-onnx-avx2", "voxtype-parakeet-avx2", "ONNX CPU (AVX2)"),
             ("voxtype-onnx-avx512", "voxtype-parakeet-avx512", "ONNX CPU (AVX-512)"),
-            ("voxtype-onnx-cuda", "voxtype-parakeet-cuda", "ONNX GPU (CUDA)"),
+            ("voxtype-onnx-cuda-12", "voxtype-onnx-cuda", "ONNX GPU (CUDA 12)"),
+            ("voxtype-onnx-cuda-13", "voxtype-onnx-cuda-13", "ONNX GPU (CUDA 13)"),
             ("voxtype-onnx-migraphx", "voxtype-onnx-rocm", "ONNX GPU (MIGraphX)"),
         ];
 
@@ -740,11 +743,29 @@ fn detect_best_parakeet_gpu_backend() -> Option<(&'static str, &'static str)> {
         }
     }
 
-    // Check for NVIDIA GPU and CUDA binary
+    // Check for NVIDIA GPU and CUDA binary. v0.7.0 splits cuda into -12 and
+    // -13 variants; pick the one matching the host's CUDA runtime so ort's
+    // bundled libonnxruntime_providers_cuda.so (built against a fixed CUDA
+    // ABI) doesn't fail to register at runtime. Mismatched pairings would
+    // silently fall back to CPU.
     let has_nvidia = gpus.iter().any(|g| g.vendor == GpuVendor::Nvidia);
-    if let Some(binary) = find_binary("voxtype-onnx-cuda", "voxtype-parakeet-cuda") {
-        if has_nvidia {
-            return Some((binary, "CUDA"));
+    if has_nvidia {
+        let host_cuda_major = crate::setup::parakeet::detect_cuda_runtime_major();
+        let cuda_pref: &[&str] = match host_cuda_major {
+            Some(13) => &["voxtype-onnx-cuda-13", "voxtype-onnx-cuda"],
+            Some(12) => &["voxtype-onnx-cuda-12", "voxtype-onnx-cuda"],
+            // No detection — try cu13 first (rolling-distro default), then cu12
+            _ => &["voxtype-onnx-cuda-13", "voxtype-onnx-cuda-12", "voxtype-onnx-cuda"],
+        };
+        for name in cuda_pref {
+            if Path::new(VOXTYPE_LIB_DIR).join(name).exists() {
+                let label = match host_cuda_major {
+                    Some(13) => "CUDA 13",
+                    Some(12) => "CUDA 12",
+                    _ => "CUDA",
+                };
+                return Some((*name, label));
+            }
         }
     }
 
@@ -752,8 +773,10 @@ fn detect_best_parakeet_gpu_backend() -> Option<(&'static str, &'static str)> {
     if let Some(binary) = find_binary("voxtype-onnx-migraphx", "voxtype-onnx-rocm") {
         return Some((binary, "MIGraphX"));
     }
-    if let Some(binary) = find_binary("voxtype-onnx-cuda", "voxtype-parakeet-cuda") {
-        return Some((binary, "CUDA"));
+    for name in ["voxtype-onnx-cuda-13", "voxtype-onnx-cuda-12", "voxtype-onnx-cuda"] {
+        if Path::new(VOXTYPE_LIB_DIR).join(name).exists() {
+            return Some((name, "CUDA"));
+        }
     }
 
     None
@@ -784,7 +807,8 @@ pub fn enable() -> anyhow::Result<()> {
             } else if has_amd {
                 "You have an AMD GPU. Install voxtype-onnx-migraphx for GPU acceleration."
             } else if has_nvidia {
-                "You have an NVIDIA GPU. Install voxtype-onnx-cuda for GPU acceleration."
+                "You have an NVIDIA GPU. Install voxtype-onnx-cuda-12 (for CUDA 12.x) or \
+                 voxtype-onnx-cuda-13 (for CUDA 13.x) for GPU acceleration."
             } else {
                 "No supported GPU detected. ONNX GPU acceleration requires NVIDIA (CUDA) or AMD (MIGraphX)."
             };

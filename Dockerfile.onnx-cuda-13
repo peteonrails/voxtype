@@ -64,8 +64,10 @@ RUN cargo build --release --features parakeet-cuda,moonshine-cuda,sensevoice-cud
 
 # Bundle the CUDA EP companion shared libs (see Dockerfile.onnx-cuda-12 for rationale)
 RUN mkdir -p /tmp/onnx-cuda-13-libs \
-    && cp /build/target/release/libonnxruntime_providers_cuda.so /tmp/onnx-cuda-13-libs/ \
-    && cp /build/target/release/examples/libonnxruntime_providers_shared.so /tmp/onnx-cuda-13-libs/
+    && find /build/target/release -maxdepth 2 -name 'libonnxruntime_providers_cuda.so' -exec cp -L {} /tmp/onnx-cuda-13-libs/ \; \
+    && find /build/target/release -maxdepth 2 -name 'libonnxruntime_providers_shared.so' -exec cp -L {} /tmp/onnx-cuda-13-libs/ \; \
+    && test -f /tmp/onnx-cuda-13-libs/libonnxruntime_providers_cuda.so \
+    && test -f /tmp/onnx-cuda-13-libs/libonnxruntime_providers_shared.so
 
 # Verify binary
 RUN echo "=== Verifying ONNX CUDA 13 binary ===" \
