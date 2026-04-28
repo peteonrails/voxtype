@@ -2,32 +2,69 @@
 //!
 //! Uses Cohere Labs' Cohere Transcribe model via ONNX Runtime. This is a
 //! feature-gated proof-of-concept: the module is opt-in via `--features cohere`
-//! and is NOT wired into the CLI, config, factory, or release builds. See the
-//! `cohere_poc` test below for usage.
+//! and is NOT wired into the CLI, config, factory, or release builds.
 //!
-//! Model architecture (per Cohere's release blog):
-//! - Encoder: Fast-Conformer over log-mel spectrogram (~90% of 2B params)
-//! - Decoder: lightweight autoregressive Transformer with KV cache
-//! - Tokenizer: SentencePiece, distributed as `tokens.txt` in the cstr/ONNX export
+//! ## Model architecture (verified against `cstr/cohere-transcribe-onnx-int8`)
 //!
-//! Reference exports surveyed during research:
-//! - `cstr/cohere-transcribe-onnx-int8` (used by this PoC, ~2.4 GB)
-//!     Layout: `cohere-encoder.int8.onnx` (+ `.onnx.data`),
-//!             `cohere-decoder.int8.onnx` (+ `.onnx.data`),
-//!             `tokens.txt`
-//! - `cstr/cohere-transcribe-onnx-int4` (~1.2 GB, English-friendly)
-//! - `onnx-community/cohere-transcribe-03-2026-ONNX` (multiple quantizations,
-//!   different file layout)
+//! Encoder (`cohere-encoder.int8.onnx`):
+//! ```text
+//! inputs:
+//!   audio            : F32 [1, n_samples]    # raw 16 kHz PCM
+//! outputs:
+//!   n_layer_cross_k  : F32 [8, 1, T_enc, 1024]   # precomputed cross-attn K
+//!   n_layer_cross_v  : F32 [8, 1, T_enc, 1024]   # precomputed cross-attn V
+//! ```
+//!
+//! `T_enc = (n_samples / 1280) + 1`. The encoder bakes log-mel preprocessing
+//! and the cross-attention projection into a single graph: feed raw PCM,
+//! get cross-K/V tensors back ready to plug into the decoder.
+//!
+//! Decoder (`cohere-decoder.int8.onnx`):
+//! ```text
+//! inputs:
+//!   tokens                   : I64 [1, n_tokens]
+//!   in_n_layer_self_k_cache  : F32 [8, 1, 8, 1024, 128]   # rolling self-K cache
+//!   in_n_layer_self_v_cache  : F32 [8, 1, 8, 1024, 128]
+//!   n_layer_cross_k          : F32 [8, 1, T_enc, 1024]    # from encoder
+//!   n_layer_cross_v          : F32 [8, 1, T_enc, 1024]
+//!   offset                   : I64 []                     # write position
+//! outputs:
+//!   logits                   : F32 [1, n_tokens, 16384]
+//!   out_n_layer_self_k_cache : F32 [8, 1, 8, 1024, 128]
+//!   out_n_layer_self_v_cache : F32 [8, 1, 8, 1024, 128]
+//! ```
+//!
+//! Architecture constants (all fixed for this export):
+//! - 8 layers, 8 heads, head dim 128, d_model 1024
+//! - Self-attention rolling cache: 1024 token capacity
+//! - Vocab: 16384 (matches `tokens.txt` line count)
+//!
+//! Cross-attention K/V are computed once by the encoder per utterance and
+//! reused at every decoder step. The self-attention cache is a fixed-size
+//! ring with the `offset` scalar tracking where the next K/V slice goes.
+//!
+//! ## Decoder prefix
+//!
+//! Cohere Transcribe uses a Whisper-style multi-token decoder prefix. For
+//! English transcription with punctuation/capitalization on, no timestamps,
+//! no diarization, the prefix is:
+//!
+//! ```text
+//! [<|startoftranscript|>=4, <|en|>=62, <|pnc|>=5, <|itn|>=8,
+//!  <|notimestamp|>=11, <|nodiarize|>=13]
+//! ```
+//!
+//! Generation continues until `<|endoftext|>=3`.
 //!
 //! ## Downloading the int8 model for the PoC test
 //!
 //! The original `CohereLabs/cohere-transcribe-03-2026` weights are gated on
 //! HuggingFace (Apache 2.0 licensed but require accepting the model card).
-//! The community ONNX export is typically not gated:
+//! The community ONNX export at `cstr/cohere-transcribe-onnx-int8` is not gated:
 //!
 //! ```bash
-//! mkdir -p models/cohere-transcribe-int8
-//! cd models/cohere-transcribe-int8
+//! mkdir -p ~/.cache/voxtype-models/cohere-transcribe-int8
+//! cd ~/.cache/voxtype-models/cohere-transcribe-int8
 //! BASE=https://huggingface.co/cstr/cohere-transcribe-onnx-int8/resolve/main
 //! for f in cohere-encoder.int8.onnx cohere-encoder.int8.onnx.data \
 //!          cohere-decoder.int8.onnx cohere-decoder.int8.onnx.data \
@@ -39,27 +76,11 @@
 //! ## Running the PoC test
 //!
 //! ```bash
-//! cargo test --features cohere transcribe::cohere -- --ignored --nocapture
+//! VOXTYPE_COHERE_MODEL_DIR=~/.cache/voxtype-models/cohere-transcribe-int8 \
+//!     cargo test --features cohere transcribe::cohere::tests::cohere_poc \
+//!                -- --ignored --nocapture
 //! ```
-//!
-//! The test is `#[ignore]`d so it doesn't run in CI without the model present.
-//!
-//! ## What's missing before this can ship
-//!
-//! - Verified ONNX input/output names (this PoC uses Moonshine-style names as a
-//!   starting point: `input_features`, `encoder_hidden_states`, `input_ids`,
-//!   `past_key_values.*`, `present.*`, `logits`, `use_cache_branch`). Actual
-//!   names should be confirmed via `session.inputs()`/`outputs()` once the
-//!   model is loaded for the first time.
-//! - Confirmed mel feature settings (n_mels, hop, window, sample rate). Cohere's
-//!   blog implies a standard 80-dim 16 kHz log-mel front end, but the exact
-//!   constants may differ from `FbankExtractor::new_default()`.
-//! - Decoder start/EOS token IDs (this PoC reuses Moonshine's `1` / `2` as a
-//!   placeholder; the SentencePiece tokens.txt should be inspected to confirm).
-//! - Config struct + CLI flags + factory wiring + setup/model.rs download flow.
 
-use super::ctc;
-use super::fbank::FbankExtractor;
 use super::Transcriber;
 use crate::error::TranscribeError;
 use ort::session::Session;
@@ -68,43 +89,54 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// Placeholder special token IDs for the Cohere decoder.
-///
-/// These match the Moonshine convention as a starting point. They MUST be
-/// confirmed against the actual SentencePiece `tokens.txt` before this PoC
-/// is promoted to a shippable backend.
-const DECODER_START_TOKEN_ID: i64 = 1;
-const EOS_TOKEN_ID: i64 = 2;
+// ---------------------------------------------------------------------------
+// Architecture constants (fixed for the cstr/cohere-transcribe-onnx-int8 export)
+// ---------------------------------------------------------------------------
 
-/// Maximum tokens to generate (safety limit). Cohere's decoder is lightweight
-/// so this is mainly a runaway-loop guard.
+const N_LAYERS: usize = 8;
+const N_HEADS: usize = 8;
+const HEAD_DIM: usize = 128;
+const D_MODEL: usize = N_HEADS * HEAD_DIM; // 1024
+const SELF_KV_CACHE_LEN: usize = 1024;
+const VOCAB_SIZE: usize = 16384;
+const SAMPLE_RATE: usize = 16_000;
+
+// Special token IDs (verified against tokens.txt of cstr/cohere-transcribe-onnx-int8)
+const TOK_PAD: i64 = 2;
+const TOK_EOS: i64 = 3; // <|endoftext|>
+const TOK_SOT: i64 = 4; // <|startoftranscript|>
+const TOK_PNC: i64 = 5; // <|pnc|>          punctuation/numbers/capitalization on
+const TOK_ITN: i64 = 8; // <|itn|>          inverse text normalization on
+const TOK_NOTIMESTAMP: i64 = 11; // <|notimestamp|>
+const TOK_NODIARIZE: i64 = 13; // <|nodiarize|>
+const TOK_EN: i64 = 62; // <|en|>           English
+
+/// Decoder prefix for English transcription with punctuation, ITN, no
+/// timestamps, no diarization. Fed in a single decoder call to populate
+/// the self-attention KV cache before greedy generation begins.
+const ENGLISH_PREFIX: &[i64] = &[
+    TOK_SOT,
+    TOK_EN,
+    TOK_PNC,
+    TOK_ITN,
+    TOK_NOTIMESTAMP,
+    TOK_NODIARIZE,
+];
+
+/// Generation safety limits.
 const MAX_TOKENS_PER_SECOND: f32 = 8.0;
 const ABSOLUTE_MAX_TOKENS: usize = 1024;
 
-/// Sample rate expected by the log-mel front end.
-const SAMPLE_RATE: usize = 16_000;
+// ---------------------------------------------------------------------------
+// Transcriber
+// ---------------------------------------------------------------------------
 
 /// Cohere Transcribe transcriber using ONNX Runtime.
-///
-/// This struct intentionally mirrors `MoonshineTranscriber`: the decoder loop
-/// is identical (autoregressive with KV cache, dummy KV on step 0, encoder KV
-/// reused after step 0). The only structural change is that the encoder
-/// consumes log-mel features (via `FbankExtractor`) rather than raw audio.
 pub struct CohereTranscriber {
     encoder: Mutex<Session>,
     decoder: Mutex<Session>,
     /// SentencePiece tokens loaded from `tokens.txt` (id -> piece string).
     tokens: HashMap<u32, String>,
-    /// Cached decoder input names, used to discover KV cache slot names.
-    decoder_input_names: Vec<String>,
-    /// Cached decoder output names.
-    decoder_output_names: Vec<String>,
-    /// KV cache num_heads, detected from model metadata.
-    num_heads: usize,
-    /// KV cache head_dim, detected from model metadata.
-    head_dim: usize,
-    /// Log-mel feature extractor (shared with SenseVoice/Paraformer/Dolphin).
-    fbank_extractor: FbankExtractor,
 }
 
 impl CohereTranscriber {
@@ -127,451 +159,296 @@ impl CohereTranscriber {
         let decoder_file = model_dir.join("cohere-decoder.int8.onnx");
         let tokens_file = model_dir.join("tokens.txt");
 
-        if !encoder_file.exists() {
-            return Err(TranscribeError::ModelNotFound(format!(
-                "Cohere encoder not found: {}\n  \
-                 Download from https://huggingface.co/cstr/cohere-transcribe-onnx-int8",
-                encoder_file.display()
-            )));
-        }
-        if !decoder_file.exists() {
-            return Err(TranscribeError::ModelNotFound(format!(
-                "Cohere decoder not found: {}\n  \
-                 Download from https://huggingface.co/cstr/cohere-transcribe-onnx-int8",
-                decoder_file.display()
-            )));
-        }
-        if !tokens_file.exists() {
-            return Err(TranscribeError::ModelNotFound(format!(
-                "Cohere tokens.txt not found: {}",
-                tokens_file.display()
-            )));
+        for (label, path) in [
+            ("encoder", &encoder_file),
+            ("decoder", &decoder_file),
+            ("tokens.txt", &tokens_file),
+        ] {
+            if !path.exists() {
+                return Err(TranscribeError::ModelNotFound(format!(
+                    "Cohere {label} not found: {}\n  \
+                     Download from https://huggingface.co/cstr/cohere-transcribe-onnx-int8",
+                    path.display(),
+                )));
+            }
         }
 
-        let tokens = ctc::load_tokens(&tokens_file)?;
-        tracing::debug!("Loaded {} Cohere SentencePiece tokens", tokens.len());
+        let tokens = load_tokens(&tokens_file)?;
+        if tokens.len() != VOCAB_SIZE {
+            tracing::warn!(
+                "tokens.txt has {} entries; expected {}. Decoder logits dim ({}) \
+                 may not align with this tokens file.",
+                tokens.len(),
+                VOCAB_SIZE,
+                VOCAB_SIZE,
+            );
+        }
 
         let encoder = Session::builder()
-            .map_err(|e| {
-                TranscribeError::InitFailed(format!("ONNX encoder session builder failed: {}", e))
-            })?
+            .map_err(|e| TranscribeError::InitFailed(format!("encoder builder: {e}")))?
             .with_intra_threads(threads)
-            .map_err(|e| {
-                TranscribeError::InitFailed(format!("Failed to set encoder threads: {}", e))
-            })?
+            .map_err(|e| TranscribeError::InitFailed(format!("encoder threads: {e}")))?
             .commit_from_file(&encoder_file)
             .map_err(|e| {
                 TranscribeError::InitFailed(format!(
-                    "Failed to load Cohere encoder from {:?}: {}",
-                    encoder_file, e
+                    "Failed to load Cohere encoder from {:?}: {e}",
+                    encoder_file
                 ))
             })?;
 
         let decoder = Session::builder()
-            .map_err(|e| {
-                TranscribeError::InitFailed(format!("ONNX decoder session builder failed: {}", e))
-            })?
+            .map_err(|e| TranscribeError::InitFailed(format!("decoder builder: {e}")))?
             .with_intra_threads(threads)
-            .map_err(|e| {
-                TranscribeError::InitFailed(format!("Failed to set decoder threads: {}", e))
-            })?
+            .map_err(|e| TranscribeError::InitFailed(format!("decoder threads: {e}")))?
             .commit_from_file(&decoder_file)
             .map_err(|e| {
                 TranscribeError::InitFailed(format!(
-                    "Failed to load Cohere decoder from {:?}: {}",
-                    decoder_file, e
+                    "Failed to load Cohere decoder from {:?}: {e}",
+                    decoder_file
                 ))
             })?;
 
-        let decoder_input_names: Vec<String> = decoder
-            .inputs()
-            .iter()
-            .map(|i| i.name().to_string())
-            .collect();
-        let decoder_output_names: Vec<String> = decoder
-            .outputs()
-            .iter()
-            .map(|o| o.name().to_string())
-            .collect();
-
-        tracing::debug!(
-            "Cohere encoder inputs:  {:?}",
-            encoder
-                .inputs()
-                .iter()
-                .map(|i| i.name())
-                .collect::<Vec<_>>()
-        );
-        tracing::debug!(
-            "Cohere encoder outputs: {:?}",
-            encoder
-                .outputs()
-                .iter()
-                .map(|o| o.name())
-                .collect::<Vec<_>>()
-        );
-        tracing::debug!("Cohere decoder inputs:  {:?}", decoder_input_names);
-        tracing::debug!("Cohere decoder outputs: {:?}", decoder_output_names);
-
-        // Detect num_heads/head_dim from the first KV cache input's [B, H, T, D]
-        // shape, same trick Moonshine uses to stay agnostic across quantizations.
-        let (num_heads, head_dim) = decoder
-            .inputs()
-            .iter()
-            .find(|i| i.name().starts_with("past_key_values"))
-            .and_then(|input| {
-                if let ort::value::ValueType::Tensor { ref shape, .. } = *input.dtype() {
-                    let dims: &[i64] = shape;
-                    if dims.len() == 4 && dims[1] > 0 && dims[3] > 0 {
-                        Some((dims[1] as usize, dims[3] as usize))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| {
-                tracing::warn!(
-                    "Could not detect KV cache dimensions from Cohere decoder metadata, \
-                     falling back to (num_heads=16, head_dim=64). Verify against the \
-                     actual model before relying on this."
-                );
-                (16, 64)
-            });
-
-        let fbank_extractor = FbankExtractor::new_default();
-
         tracing::info!(
-            "Cohere model loaded in {:.2}s (num_heads={}, head_dim={})",
+            "Cohere model loaded in {:.2}s ({} tokens)",
             start.elapsed().as_secs_f32(),
-            num_heads,
-            head_dim,
+            tokens.len(),
         );
 
         Ok(Self {
             encoder: Mutex::new(encoder),
             decoder: Mutex::new(decoder),
             tokens,
-            decoder_input_names,
-            decoder_output_names,
-            num_heads,
-            head_dim,
-            fbank_extractor,
         })
     }
 
-    /// Run encoder + autoregressive decoder, return generated token ids.
+    /// Run encoder + autoregressive decoder, return generated token ids
+    /// (excluding the prefix and EOS).
     fn run_inference(&self, samples: &[f32]) -> Result<Vec<u32>, TranscribeError> {
         let duration_secs = samples.len() as f32 / SAMPLE_RATE as f32;
 
-        // --- Encoder ---
+        // ---- Encoder ----
         let encoder_start = std::time::Instant::now();
+        let n_samples = samples.len();
+        let audio_tensor = Tensor::<f32>::from_array(([1usize, n_samples], samples.to_vec()))
+            .map_err(|e| TranscribeError::InferenceFailed(format!("audio tensor: {e}")))?;
 
-        // Log-mel features: shape [num_frames, n_mels]. Cohere ingests log-mel
-        // rather than raw audio, which is the main structural difference vs.
-        // Moonshine.
-        let fbank = self.fbank_extractor.extract(samples);
-        if fbank.nrows() == 0 {
-            return Err(TranscribeError::AudioFormat(
-                "Audio too short for log-mel feature extraction".to_string(),
-            ));
-        }
+        let (cross_k_shape, cross_k_data, cross_v_shape, cross_v_data) = {
+            let mut encoder = self
+                .encoder
+                .lock()
+                .map_err(|e| TranscribeError::InferenceFailed(format!("encoder lock: {e}")))?;
+            let mut outputs = encoder
+                .run(ort::inputs!["audio" => audio_tensor])
+                .map_err(|e| TranscribeError::InferenceFailed(format!("encoder run: {e}")))?;
 
-        let num_frames = fbank.nrows();
-        let n_mels = fbank.ncols();
-        let (mel_data, _offset) = fbank.into_raw_vec_and_offset();
-
-        // Encoder input shape [1, num_frames, n_mels]. The actual Cohere export
-        // may expect [1, n_mels, num_frames] (transposed); confirm at integration
-        // time and transpose here if needed.
-        let input_tensor = Tensor::<f32>::from_array(([1usize, num_frames, n_mels], mel_data))
-            .map_err(|e| {
-                TranscribeError::InferenceFailed(format!(
-                    "Failed to create encoder input tensor: {}",
-                    e
-                ))
+            let cross_k_val = outputs.remove("n_layer_cross_k").ok_or_else(|| {
+                TranscribeError::InferenceFailed("encoder missing n_layer_cross_k".into())
             })?;
-
-        let mut encoder = self.encoder.lock().map_err(|e| {
-            TranscribeError::InferenceFailed(format!("Failed to lock encoder: {}", e))
-        })?;
-
-        let encoder_input_name = encoder
-            .inputs()
-            .first()
-            .map(|i| i.name().to_string())
-            .unwrap_or_else(|| "input_features".to_string());
-        let encoder_output_name = encoder
-            .outputs()
-            .first()
-            .map(|o| o.name().to_string())
-            .unwrap_or_else(|| "last_hidden_state".to_string());
-
-        let encoder_inputs: Vec<(std::borrow::Cow<str>, ort::session::SessionInputValue)> = vec![(
-            std::borrow::Cow::Owned(encoder_input_name),
-            input_tensor.into(),
-        )];
-
-        let mut encoder_outputs = encoder.run(encoder_inputs).map_err(|e| {
-            TranscribeError::InferenceFailed(format!("Cohere encoder inference failed: {}", e))
-        })?;
-
+            let cross_v_val = outputs.remove("n_layer_cross_v").ok_or_else(|| {
+                TranscribeError::InferenceFailed("encoder missing n_layer_cross_v".into())
+            })?;
+            let (k_shape, k_data) = cross_k_val
+                .try_extract_tensor::<f32>()
+                .map_err(|e| TranscribeError::InferenceFailed(format!("extract cross_k: {e}")))?;
+            let (v_shape, v_data) = cross_v_val
+                .try_extract_tensor::<f32>()
+                .map_err(|e| TranscribeError::InferenceFailed(format!("extract cross_v: {e}")))?;
+            (
+                k_shape.to_vec(),
+                k_data.to_vec(),
+                v_shape.to_vec(),
+                v_data.to_vec(),
+            )
+        };
         tracing::debug!(
-            "Cohere encoder completed in {:.2}s",
-            encoder_start.elapsed().as_secs_f32()
+            "Cohere encoder ran in {:.2}s, T_enc={:?}",
+            encoder_start.elapsed().as_secs_f32(),
+            cross_k_shape,
         );
 
-        let encoder_hidden = encoder_outputs
-            .remove(&encoder_output_name)
-            .ok_or_else(|| {
-                TranscribeError::InferenceFailed(format!(
-                    "Cohere encoder produced no output named '{}'",
-                    encoder_output_name
-                ))
-            })?;
-        drop(encoder_outputs);
-        drop(encoder);
-
-        // --- Decoder (autoregressive loop) ---
+        // ---- Decoder ----
         let decoder_start = std::time::Instant::now();
+
+        // Self-attention cache: zero-initialized rolling buffer.
+        // Cache shape is [N_LAYERS, batch=1, N_HEADS, SELF_KV_CACHE_LEN, HEAD_DIM].
+        let cache_elems = N_LAYERS * N_HEADS * SELF_KV_CACHE_LEN * HEAD_DIM;
+        let mut self_k_data: Vec<f32> = vec![0.0; cache_elems];
+        let mut self_v_data: Vec<f32> = vec![0.0; cache_elems];
+        let cache_shape: [usize; 5] = [N_LAYERS, 1, N_HEADS, SELF_KV_CACHE_LEN, HEAD_DIM];
+
+        // Step 1: feed the prefix tokens together so the cache populates in
+        // a single call. After this, offset = prefix.len().
+        let mut offset: i64 = 0;
+        let next_after_prefix = self.decoder_step(
+            ENGLISH_PREFIX,
+            offset,
+            &mut self_k_data,
+            &mut self_v_data,
+            cache_shape,
+            &cross_k_shape,
+            &cross_k_data,
+            &cross_v_shape,
+            &cross_v_data,
+        )?;
+        offset += ENGLISH_PREFIX.len() as i64;
+
+        let mut generated: Vec<i64> = Vec::new();
+        if next_after_prefix == TOK_EOS {
+            return Ok(Vec::new());
+        }
+        generated.push(next_after_prefix);
+
+        // Steps 2..N: feed one token per step.
         let max_tokens =
             ((duration_secs * MAX_TOKENS_PER_SECOND) as usize).clamp(16, ABSOLUTE_MAX_TOKENS);
+        for _ in 0..max_tokens {
+            let last = *generated.last().unwrap();
+            let next = self.decoder_step(
+                &[last],
+                offset,
+                &mut self_k_data,
+                &mut self_v_data,
+                cache_shape,
+                &cross_k_shape,
+                &cross_k_data,
+                &cross_v_shape,
+                &cross_v_data,
+            )?;
+            offset += 1;
 
-        let mut generated_tokens: Vec<i64> = vec![DECODER_START_TOKEN_ID];
-
-        let mut decoder = self.decoder.lock().map_err(|e| {
-            TranscribeError::InferenceFailed(format!("Failed to lock decoder: {}", e))
-        })?;
-
-        let mut kv_input_names: Vec<&str> = self
-            .decoder_input_names
-            .iter()
-            .filter(|n| n.starts_with("past_key_values"))
-            .map(|n| n.as_str())
-            .collect();
-        kv_input_names.sort();
-
-        let mut kv_output_names: Vec<&str> = self
-            .decoder_output_names
-            .iter()
-            .filter(|n| n.starts_with("present"))
-            .map(|n| n.as_str())
-            .collect();
-        kv_output_names.sort();
-
-        let mut decoder_kv_input_names: Vec<&str> = kv_input_names
-            .iter()
-            .filter(|n| n.contains(".decoder."))
-            .copied()
-            .collect();
-        decoder_kv_input_names.sort();
-
-        let mut encoder_kv_input_names: Vec<&str> = kv_input_names
-            .iter()
-            .filter(|n| n.contains(".encoder."))
-            .copied()
-            .collect();
-        encoder_kv_input_names.sort();
-
-        let mut decoder_kv_output_names: Vec<&str> = kv_output_names
-            .iter()
-            .filter(|n| n.contains(".decoder."))
-            .copied()
-            .collect();
-        decoder_kv_output_names.sort();
-
-        let mut encoder_kv_output_names: Vec<&str> = kv_output_names
-            .iter()
-            .filter(|n| n.contains(".encoder."))
-            .copied()
-            .collect();
-        encoder_kv_output_names.sort();
-
-        let num_heads = self.num_heads;
-        let head_dim = self.head_dim;
-
-        let mut decoder_kv_cache: Vec<ort::value::DynValue> = Vec::new();
-        let mut encoder_kv_cache: Vec<ort::value::DynValue> = Vec::new();
-
-        for step in 0..max_tokens {
-            let input_ids = if step == 0 {
-                Tensor::<i64>::from_array((
-                    [1usize, generated_tokens.len()],
-                    generated_tokens.clone(),
-                ))
-            } else {
-                Tensor::<i64>::from_array((
-                    [1usize, 1usize],
-                    vec![*generated_tokens.last().unwrap()],
-                ))
-            }
-            .map_err(|e| {
-                TranscribeError::InferenceFailed(format!(
-                    "Failed to create input_ids tensor: {}",
-                    e
-                ))
-            })?;
-
-            let mut inputs: Vec<(std::borrow::Cow<str>, ort::session::SessionInputValue)> =
-                Vec::new();
-
-            inputs.push((std::borrow::Cow::Borrowed("input_ids"), input_ids.into()));
-            inputs.push((
-                std::borrow::Cow::Borrowed("encoder_hidden_states"),
-                ort::session::SessionInputValue::from(&encoder_hidden),
-            ));
-
-            if step == 0 {
-                let dummy_size = num_heads * head_dim;
-                for kv_name in &decoder_kv_input_names {
-                    let dummy_kv = Tensor::<f32>::from_array((
-                        [1usize, num_heads, 1usize, head_dim],
-                        vec![0.0f32; dummy_size],
-                    ))
-                    .map_err(|e| {
-                        TranscribeError::InferenceFailed(format!(
-                            "Failed to create dummy decoder KV tensor: {}",
-                            e
-                        ))
-                    })?;
-                    inputs.push((std::borrow::Cow::Borrowed(kv_name), dummy_kv.into()));
-                }
-            } else {
-                for (i, kv_name) in decoder_kv_input_names.iter().enumerate() {
-                    inputs.push((
-                        std::borrow::Cow::Borrowed(kv_name),
-                        ort::session::SessionInputValue::from(&decoder_kv_cache[i]),
-                    ));
-                }
-            }
-
-            if step == 0 {
-                let dummy_size = num_heads * head_dim;
-                for kv_name in &encoder_kv_input_names {
-                    let dummy_kv = Tensor::<f32>::from_array((
-                        [1usize, num_heads, 1usize, head_dim],
-                        vec![0.0f32; dummy_size],
-                    ))
-                    .map_err(|e| {
-                        TranscribeError::InferenceFailed(format!(
-                            "Failed to create dummy encoder KV tensor: {}",
-                            e
-                        ))
-                    })?;
-                    inputs.push((std::borrow::Cow::Borrowed(kv_name), dummy_kv.into()));
-                }
-            } else {
-                for (i, kv_name) in encoder_kv_input_names.iter().enumerate() {
-                    inputs.push((
-                        std::borrow::Cow::Borrowed(kv_name),
-                        ort::session::SessionInputValue::from(&encoder_kv_cache[i]),
-                    ));
-                }
-            }
-
-            let use_cache = Tensor::<bool>::from_array(([1], vec![step > 0])).map_err(|e| {
-                TranscribeError::InferenceFailed(format!(
-                    "Failed to create use_cache tensor: {}",
-                    e
-                ))
-            })?;
-            inputs.push((
-                std::borrow::Cow::Borrowed("use_cache_branch"),
-                use_cache.into(),
-            ));
-
-            let mut outputs = decoder.run(inputs).map_err(|e| {
-                TranscribeError::InferenceFailed(format!(
-                    "Cohere decoder inference failed at step {}: {}",
-                    step, e
-                ))
-            })?;
-
-            let logits_val = &outputs["logits"];
-            let (shape, logits_data) = logits_val.try_extract_tensor::<f32>().map_err(|e| {
-                TranscribeError::InferenceFailed(format!("Failed to extract logits: {}", e))
-            })?;
-
-            let shape_dims: &[i64] = shape;
-            let vocab_logits: &[f32] = if shape_dims.len() == 3 {
-                let vocab_size = shape_dims[2] as usize;
-                let seq_len = shape_dims[1] as usize;
-                let offset = (seq_len - 1) * vocab_size;
-                &logits_data[offset..offset + vocab_size]
-            } else if shape_dims.len() == 2 {
-                let vocab_size = shape_dims[1] as usize;
-                &logits_data[..vocab_size]
-            } else {
-                return Err(TranscribeError::InferenceFailed(format!(
-                    "Unexpected Cohere logits shape: {:?}",
-                    shape_dims
-                )));
-            };
-
-            let next_token = vocab_logits
-                .iter()
-                .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(idx, _)| idx as i64)
-                .ok_or_else(|| {
-                    TranscribeError::InferenceFailed("Empty Cohere logits vector".to_string())
-                })?;
-
-            if next_token == EOS_TOKEN_ID {
-                tracing::debug!("Cohere decoder reached EOS at step {}", step);
+            if next == TOK_EOS {
                 break;
             }
-
-            generated_tokens.push(next_token);
-
-            let mut new_decoder_cache = Vec::new();
-            for kv_out_name in &decoder_kv_output_names {
-                if let Some(value) = outputs.remove(kv_out_name) {
-                    new_decoder_cache.push(value);
-                }
+            if offset as usize >= SELF_KV_CACHE_LEN {
+                tracing::warn!("Cohere: self-attention cache full ({}); truncating", offset);
+                break;
             }
-            decoder_kv_cache = new_decoder_cache;
-
-            if step == 0 {
-                for kv_out_name in &encoder_kv_output_names {
-                    if let Some(value) = outputs.remove(kv_out_name) {
-                        encoder_kv_cache.push(value);
-                    }
-                }
-            }
+            generated.push(next);
         }
 
         tracing::debug!(
-            "Cohere decoder completed in {:.2}s ({} tokens)",
+            "Cohere decoder produced {} tokens in {:.2}s",
+            generated.len(),
             decoder_start.elapsed().as_secs_f32(),
-            generated_tokens.len() - 1
         );
 
-        let token_ids: Vec<u32> = generated_tokens.iter().skip(1).map(|&t| t as u32).collect();
-        Ok(token_ids)
+        Ok(generated.into_iter().map(|t| t as u32).collect())
     }
 
-    /// Decode token ids to text. The Cohere tokenizer is SentencePiece, so we
-    /// concatenate pieces and convert the U+2581 word-boundary marker to a
-    /// regular space.
-    fn decode_tokens(&self, token_ids: &[u32]) -> String {
-        let mut result = String::new();
-        for &id in token_ids {
-            if let Some(piece) = self.tokens.get(&id) {
-                result.push_str(&piece.replace('\u{2581}', " "));
-            }
+    /// Single decoder forward pass.
+    ///
+    /// Updates `self_k_data` and `self_v_data` in place from the decoder's
+    /// output cache, and returns the predicted next-token id (greedy argmax
+    /// over the LAST timestep's logits).
+    #[allow(clippy::too_many_arguments)]
+    fn decoder_step(
+        &self,
+        new_tokens: &[i64],
+        offset: i64,
+        self_k_data: &mut Vec<f32>,
+        self_v_data: &mut Vec<f32>,
+        cache_shape: [usize; 5],
+        cross_k_shape: &[i64],
+        cross_k_data: &[f32],
+        cross_v_shape: &[i64],
+        cross_v_data: &[f32],
+    ) -> Result<i64, TranscribeError> {
+        let cross_k_shape_us: Vec<usize> = cross_k_shape.iter().map(|&d| d as usize).collect();
+        let cross_v_shape_us: Vec<usize> = cross_v_shape.iter().map(|&d| d as usize).collect();
+        let n = new_tokens.len();
+
+        let tokens_tensor = Tensor::<i64>::from_array(([1usize, n], new_tokens.to_vec()))
+            .map_err(|e| TranscribeError::InferenceFailed(format!("tokens tensor: {e}")))?;
+        let self_k_tensor =
+            Tensor::<f32>::from_array((cache_shape, std::mem::take(self_k_data)))
+                .map_err(|e| TranscribeError::InferenceFailed(format!("self_k tensor: {e}")))?;
+        let self_v_tensor =
+            Tensor::<f32>::from_array((cache_shape, std::mem::take(self_v_data)))
+                .map_err(|e| TranscribeError::InferenceFailed(format!("self_v tensor: {e}")))?;
+        let cross_k_tensor =
+            Tensor::<f32>::from_array((cross_k_shape_us.clone(), cross_k_data.to_vec()))
+                .map_err(|e| TranscribeError::InferenceFailed(format!("cross_k tensor: {e}")))?;
+        let cross_v_tensor =
+            Tensor::<f32>::from_array((cross_v_shape_us, cross_v_data.to_vec()))
+                .map_err(|e| TranscribeError::InferenceFailed(format!("cross_v tensor: {e}")))?;
+        let offset_tensor = Tensor::<i64>::from_array(([] as [usize; 0], vec![offset]))
+            .map_err(|e| TranscribeError::InferenceFailed(format!("offset tensor: {e}")))?;
+
+        let mut decoder = self
+            .decoder
+            .lock()
+            .map_err(|e| TranscribeError::InferenceFailed(format!("decoder lock: {e}")))?;
+
+        let mut outputs = decoder
+            .run(ort::inputs![
+                "tokens" => tokens_tensor,
+                "in_n_layer_self_k_cache" => self_k_tensor,
+                "in_n_layer_self_v_cache" => self_v_tensor,
+                "n_layer_cross_k" => cross_k_tensor,
+                "n_layer_cross_v" => cross_v_tensor,
+                "offset" => offset_tensor,
+            ])
+            .map_err(|e| TranscribeError::InferenceFailed(format!("decoder run: {e}")))?;
+
+        // Logits: pick the last timestep's argmax.
+        let logits_val = outputs
+            .remove("logits")
+            .ok_or_else(|| TranscribeError::InferenceFailed("decoder missing logits".into()))?;
+        let (logits_shape, logits_data) = logits_val
+            .try_extract_tensor::<f32>()
+            .map_err(|e| TranscribeError::InferenceFailed(format!("extract logits: {e}")))?;
+        if logits_shape.len() != 3 || logits_shape[2] as usize != VOCAB_SIZE {
+            return Err(TranscribeError::InferenceFailed(format!(
+                "unexpected logits shape: {logits_shape:?}, expected [B, T, {VOCAB_SIZE}]"
+            )));
         }
-        result.trim().to_string()
+        let n_steps = logits_shape[1] as usize;
+        let last_offset = (n_steps - 1) * VOCAB_SIZE;
+        let last_logits = &logits_data[last_offset..last_offset + VOCAB_SIZE];
+        let next_id = argmax(last_logits) as i64;
+
+        // Pull updated cache out and refill our owned buffers.
+        let new_k = outputs.remove("out_n_layer_self_k_cache").ok_or_else(|| {
+            TranscribeError::InferenceFailed("decoder missing out_n_layer_self_k_cache".into())
+        })?;
+        let new_v = outputs.remove("out_n_layer_self_v_cache").ok_or_else(|| {
+            TranscribeError::InferenceFailed("decoder missing out_n_layer_self_v_cache".into())
+        })?;
+        let (_, k_data) = new_k
+            .try_extract_tensor::<f32>()
+            .map_err(|e| TranscribeError::InferenceFailed(format!("extract self_k: {e}")))?;
+        let (_, v_data) = new_v
+            .try_extract_tensor::<f32>()
+            .map_err(|e| TranscribeError::InferenceFailed(format!("extract self_v: {e}")))?;
+        *self_k_data = k_data.to_vec();
+        *self_v_data = v_data.to_vec();
+
+        Ok(next_id)
+    }
+
+    /// Convert generated token ids into text. Filters control / language /
+    /// task tokens (anything in the form `<|...|>`, plus `<unk>`/`<pad>`)
+    /// and reconstructs SentencePiece word boundaries (U+2581 → space).
+    fn decode_tokens(&self, token_ids: &[u32]) -> String {
+        let mut out = String::new();
+        for &id in token_ids {
+            let Some(piece) = self.tokens.get(&id) else {
+                continue;
+            };
+            if is_special_token(piece) {
+                continue;
+            }
+            // Replace the SentencePiece word-boundary marker with a space.
+            out.push_str(&piece.replace('\u{2581}', " "));
+        }
+        out.trim().to_string()
     }
 }
 
 impl Transcriber for CohereTranscriber {
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         if samples.is_empty() {
-            return Err(TranscribeError::AudioFormat(
-                "Empty audio buffer".to_string(),
-            ));
+            return Err(TranscribeError::AudioFormat("Empty audio buffer".into()));
         }
 
         let duration_secs = samples.len() as f32 / SAMPLE_RATE as f32;
@@ -584,7 +461,6 @@ impl Transcriber for CohereTranscriber {
         let start = std::time::Instant::now();
         let token_ids = self.run_inference(samples)?;
         let text = self.decode_tokens(&token_ids).trim().to_string();
-
         tracing::info!(
             "Cohere transcription completed in {:.2}s: {:?}",
             start.elapsed().as_secs_f32(),
@@ -594,9 +470,70 @@ impl Transcriber for CohereTranscriber {
                 text.clone()
             }
         );
-
         Ok(text)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Load `tokens.txt` (one `<piece> <id>\n` line per token). The cstr/Cohere
+/// export uses the same NeMo-style layout that other ONNX-engine downloads
+/// already use; tolerant of trailing whitespace or CRLF endings.
+fn load_tokens(path: &Path) -> Result<HashMap<u32, String>, TranscribeError> {
+    let content = std::fs::read_to_string(path).map_err(|e| {
+        TranscribeError::ModelNotFound(format!("Failed to read {}: {e}", path.display()))
+    })?;
+    let mut map = HashMap::new();
+    for (line_no, raw) in content.lines().enumerate() {
+        let line = raw.trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
+            continue;
+        }
+        // Format is `<piece><space><id>`. Piece may itself contain spaces
+        // for some special tokens, but in this export the last whitespace
+        // separator is unambiguous because IDs are integers.
+        let last_space = line.rfind(char::is_whitespace).ok_or_else(|| {
+            TranscribeError::ModelNotFound(format!(
+                "{}:{}: malformed token line: {line:?}",
+                path.display(),
+                line_no + 1,
+            ))
+        })?;
+        let (piece, id_str) = line.split_at(last_space);
+        let id: u32 = id_str.trim().parse().map_err(|_| {
+            TranscribeError::ModelNotFound(format!(
+                "{}:{}: non-integer token id in {line:?}",
+                path.display(),
+                line_no + 1,
+            ))
+        })?;
+        map.insert(id, piece.to_string());
+    }
+    Ok(map)
+}
+
+/// True for Cohere control / language / task tokens. These are stripped
+/// from the decoded output so users don't see literal `<|en|>` strings.
+fn is_special_token(piece: &str) -> bool {
+    if piece.starts_with("<|") && piece.ends_with("|>") {
+        return true;
+    }
+    matches!(piece, "<unk>" | "<pad>" | "<s>" | "</s>")
+}
+
+/// Greedy argmax over a 1-D logits slice.
+fn argmax(logits: &[f32]) -> usize {
+    let mut best = 0usize;
+    let mut best_v = f32::NEG_INFINITY;
+    for (i, &v) in logits.iter().enumerate() {
+        if v > best_v {
+            best_v = v;
+            best = i;
+        }
+    }
+    best
 }
 
 /// Resolve a model name or path to a directory containing the Cohere ONNX files.
@@ -631,7 +568,6 @@ fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
 mod tests {
     use super::*;
 
-    /// Resolve fixtures dir (matches the convention used by other integration tests).
     fn fixtures_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
     }
@@ -654,21 +590,15 @@ mod tests {
 
     /// End-to-end PoC: load the int8 Cohere model and transcribe a fixture WAV.
     ///
-    /// This test is `#[ignore]`d by default because it requires a ~2.4 GB model
-    /// download. To run it:
-    ///
-    /// 1. Download the model into `models/cohere-transcribe-int8/` (see the
-    ///    module-level docs at the top of this file for `curl` commands).
-    /// 2. `cargo test --features cohere transcribe::cohere::tests::cohere_poc \
-    ///                -- --ignored --nocapture`
-    ///
-    /// The test passes if loading + inference completes without panicking. The
-    /// transcribed text is printed for manual inspection; assertion of exact
-    /// content is left for a future, model-verified shippable PR.
+    /// Run with:
+    /// ```bash
+    /// VOXTYPE_COHERE_MODEL_DIR=~/.cache/voxtype-models/cohere-transcribe-int8 \
+    ///     cargo test --features cohere transcribe::cohere::tests::cohere_poc \
+    ///                -- --ignored --nocapture
+    /// ```
     #[test]
     #[ignore]
     fn cohere_poc() {
-        // Honor a env override so devs can point at a local checkout.
         let model_dir = std::env::var("VOXTYPE_COHERE_MODEL_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| {
@@ -709,4 +639,69 @@ mod tests {
             TranscribeError::ModelNotFound(_)
         ));
     }
+
+    #[test]
+    fn argmax_picks_highest() {
+        assert_eq!(argmax(&[0.1, 0.5, 0.3, 0.4]), 1);
+        assert_eq!(argmax(&[1.0]), 0);
+        assert_eq!(argmax(&[-1.0, -0.5, -0.9]), 1);
+    }
+
+    #[test]
+    fn special_token_filter() {
+        assert!(is_special_token("<|en|>"));
+        assert!(is_special_token("<|startoftranscript|>"));
+        assert!(is_special_token("<|endoftext|>"));
+        assert!(is_special_token("<unk>"));
+        assert!(is_special_token("<pad>"));
+        assert!(!is_special_token("hello"));
+        assert!(!is_special_token("\u{2581}world"));
+    }
+
+    #[test]
+    fn english_prefix_matches_token_layout() {
+        // Hard-coded prefix should match the canonical Whisper-style sequence.
+        assert_eq!(
+            ENGLISH_PREFIX,
+            &[
+                TOK_SOT,
+                TOK_EN,
+                TOK_PNC,
+                TOK_ITN,
+                TOK_NOTIMESTAMP,
+                TOK_NODIARIZE
+            ]
+        );
+        // Sanity check: our hard-coded IDs match the cstr export's tokens.txt
+        // (only verifiable when the model is available; gated like cohere_poc).
+        let model_dir = std::env::var("VOXTYPE_COHERE_MODEL_DIR").map(PathBuf::from);
+        if let Ok(dir) = model_dir {
+            let tokens = load_tokens(&dir.join("tokens.txt"))
+                .expect("tokens.txt should load when VOXTYPE_COHERE_MODEL_DIR is set");
+            assert_eq!(
+                tokens.get(&(TOK_SOT as u32)).map(String::as_str),
+                Some("<|startoftranscript|>")
+            );
+            assert_eq!(
+                tokens.get(&(TOK_EN as u32)).map(String::as_str),
+                Some("<|en|>")
+            );
+            assert_eq!(
+                tokens.get(&(TOK_EOS as u32)).map(String::as_str),
+                Some("<|endoftext|>")
+            );
+        }
+    }
 }
+
+// Trip-wire: keep D_MODEL aligned with N_HEADS * HEAD_DIM. The const block
+// at the top assumes 1024; surface a compile error if anyone edits one
+// constant without the others.
+const _: () = {
+    if D_MODEL != N_HEADS * HEAD_DIM {
+        panic!("D_MODEL must equal N_HEADS * HEAD_DIM");
+    }
+    if TOK_PAD != 2 || TOK_EOS != 3 || TOK_SOT != 4 {
+        panic!("Cohere special token IDs drifted; verify against tokens.txt");
+    }
+};
