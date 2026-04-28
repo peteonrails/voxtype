@@ -73,11 +73,22 @@ fn leave_terminal(terminal: &mut Tui) -> anyhow::Result<()> {
 
 fn event_loop(terminal: &mut Tui, force_package_mode: bool) -> anyhow::Result<()> {
     let mut app = App::new(force_package_mode);
+    let mut last_general_refresh = std::time::Instant::now();
+    let general_refresh_interval = Duration::from_secs(2);
 
     loop {
         terminal.draw(|f| draw(f, &app))?;
 
         if !event::poll(Duration::from_millis(250))? {
+            // Idle tick. Refresh the General-screen state (daemon status,
+            // active variant, inventory) so the green/red dot stays current
+            // without the user pressing `r`.
+            if app.current_section == Section::General
+                && last_general_refresh.elapsed() >= general_refresh_interval
+            {
+                app.refresh_inventory();
+                last_general_refresh = std::time::Instant::now();
+            }
             continue;
         }
         if let Event::Key(key) = event::read()? {
