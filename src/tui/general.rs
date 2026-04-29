@@ -40,8 +40,9 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn banner_height(app: &App) -> u16 {
-    if app.last_switch.is_some() || app.restart_needed {
-        3
+    let any = app.last_switch.is_some() || app.restart_needed || app.missing_model.is_some();
+    if any {
+        4
     } else {
         0
     }
@@ -70,6 +71,22 @@ fn render_banner(f: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(Span::styled(
             "  Daemon restart required: systemctl --user restart voxtype",
             Style::default().fg(Color::Yellow),
+        )));
+    }
+
+    if let Some(missing) = &app.missing_model {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "⚠ Active {} model not downloaded: {}",
+                missing.engine, missing.model
+            ),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("  Run `{}` to fetch it.", missing.setup_command),
+            Style::default().fg(Color::Gray),
         )));
     }
 

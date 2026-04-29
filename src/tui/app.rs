@@ -60,6 +60,10 @@ pub struct App {
     pub sidebar_focused: bool,
     /// `?` toggles a centered help overlay listing every keybinding.
     pub help_open: bool,
+    /// If the configured engine's model isn't downloaded, this holds the
+    /// model name so the General banner can prompt the user to fetch it.
+    /// Computed at load time and on `refresh_inventory()`.
+    pub missing_model: Option<MissingModel>,
     /// Lazily loaded Hotkey section state. None until the user opens Hotkey
     /// for the first time (or load fails).
     pub hotkey: Option<HotkeyState>,
@@ -72,6 +76,13 @@ pub struct App {
     pub notifications: Option<NotificationsState>,
     pub waybar: Option<WaybarState>,
     pub advanced: Option<AdvancedState>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MissingModel {
+    pub engine: String,
+    pub model: String,
+    pub setup_command: &'static str,
 }
 
 /// Build the inventory and, if `force_package_mode` is set, override the
@@ -133,6 +144,7 @@ impl App {
             sidebar_cursor: 0,
             sidebar_focused: true,
             help_open: false,
+            missing_model: detect_missing_model(),
             hotkey: None,
             audio: None,
             engine: None,
@@ -231,6 +243,7 @@ impl App {
     pub fn refresh_inventory(&mut self) {
         self.inventory = build_inventory(self.force_package_mode);
         self.daemon_running = is_daemon_running();
+        self.missing_model = detect_missing_model();
     }
 
     /// Map a (row, col) cell to a Variant if one exists for that combination.
@@ -282,6 +295,93 @@ fn initial_cursor(inv: &Inventory) -> (usize, usize) {
         (row, col)
     } else {
         (0, 0)
+    }
+}
+
+/// Detect whether the configured engine's active model file is on disk.
+/// Returns the engine + model name + a setup command hint when it's missing,
+/// or None when the model is present (or we can't determine it).
+fn detect_missing_model() -> Option<MissingModel> {
+    use crate::config;
+    let cfg = config::load_config(None).ok()?;
+    let dir = config::Config::models_dir();
+    let (engine_name, model, setup_command) = match cfg.engine {
+        config::TranscriptionEngine::Whisper => (
+            "whisper",
+            cfg.whisper.model.clone(),
+            "voxtype setup model",
+        ),
+        config::TranscriptionEngine::Parakeet => (
+            "parakeet",
+            cfg.parakeet
+                .as_ref()
+                .map(|c| c.model.clone())
+                .unwrap_or_default(),
+            "voxtype setup model",
+        ),
+        config::TranscriptionEngine::Moonshine => (
+            "moonshine",
+            cfg.moonshine
+                .as_ref()
+                .map(|c| c.model.clone())
+                .unwrap_or_default(),
+            "voxtype setup model",
+        ),
+        config::TranscriptionEngine::SenseVoice => (
+            "sensevoice",
+            cfg.sensevoice
+                .as_ref()
+                .map(|c| c.model.clone())
+                .unwrap_or_default(),
+            "voxtype setup model",
+        ),
+        config::TranscriptionEngine::Paraformer => (
+            "paraformer",
+            cfg.paraformer
+                .as_ref()
+                .map(|c| c.model.clone())
+                .unwrap_or_default(),
+            "voxtype setup model",
+        ),
+        config::TranscriptionEngine::Dolphin => (
+            "dolphin",
+            cfg.dolphin
+                .as_ref()
+                .map(|c| c.model.clone())
+                .unwrap_or_default(),
+            "voxtype setup model",
+        ),
+        config::TranscriptionEngine::Omnilingual => (
+            "omnilingual",
+            cfg.omnilingual
+                .as_ref()
+                .map(|c| c.model.clone())
+                .unwrap_or_default(),
+            "voxtype setup model",
+        ),
+        // Cohere — checked but model layout differs by rc/0.7.0; skip the
+        // disk probe rather than emit a false-positive missing warning.
+        config::TranscriptionEngine::Cohere => return None,
+    };
+
+    if model.is_empty() {
+        return None;
+    }
+
+    let installed = if engine_name == "whisper" {
+        dir.join(format!("ggml-{}.bin", model)).exists()
+    } else {
+        let p = dir.join(&model);
+        p.exists()
+    };
+    if installed {
+        None
+    } else {
+        Some(MissingModel {
+            engine: engine_name.to_string(),
+            model,
+            setup_command,
+        })
     }
 }
 
