@@ -431,17 +431,14 @@ cargo build --release --features gpu-hipblas
 
 ### Intel NPU (Lunar Lake, Arrow Lake, Meteor Lake)
 
-Intel NPU acceleration uses OpenVINO Runtime with Whisper models exported in OpenVINO IR format:
+Intel NPU acceleration uses OpenVINO GenAI with Whisper models exported in OpenVINO IR format:
 
 ```bash
 # Build with OpenVINO support
 cargo build --release --features openvino-whisper
 
-# Install OpenVINO Runtime (required at runtime)
-# Arch:
-pip install openvino
-# Ubuntu:
-sudo apt install openvino
+# Install OpenVINO GenAI runtime libraries (required at runtime)
+pip install openvino-genai
 
 # Download a model
 voxtype setup model  # Select an OpenVINO model

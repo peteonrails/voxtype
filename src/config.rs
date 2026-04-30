@@ -1286,7 +1286,7 @@ pub struct OpenVinoConfig {
     #[serde(default = "default_on_demand_loading")]
     pub on_demand_loading: bool,
 
-    /// Path to the OpenVINO installation directory containing shared libraries.
+    /// Path to the OpenVINO GenAI installation directory containing shared libraries.
     /// When set, loads libopenvino_genai_c.so from this path instead of relying
     /// on automatic discovery (LD_LIBRARY_PATH, OPENVINO_INSTALL_DIR, etc.).
     /// Also settable via VOXTYPE_OPENVINO_DIR environment variable.
