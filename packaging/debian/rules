@@ -33,6 +33,11 @@ override_dh_auto_install:
 		debian/voxtype/usr/share/zsh/vendor-completions/_voxtype
 	install -D -m 644 packaging/completions/voxtype.fish \
 		debian/voxtype/usr/share/fish/vendor_completions.d/voxtype.fish
+	# Install configuration TUI launcher (.desktop entry + terminal-picker script)
+	install -D -m 644 packaging/voxtype-configure.desktop \
+		debian/voxtype/usr/share/applications/voxtype-configure.desktop
+	install -D -m 755 packaging/scripts/voxtype-configure-launcher \
+		debian/voxtype/usr/bin/voxtype-configure-launcher
 
 override_dh_auto_test:
 	# Only test with AVX2 build to avoid SIGILL in build environments

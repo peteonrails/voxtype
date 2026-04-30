@@ -9,6 +9,7 @@
 //! - Parakeet backend management
 //! - Compositor integration (modifier key fix)
 
+pub mod binary;
 pub mod compositor;
 pub mod dms;
 pub mod gpu;

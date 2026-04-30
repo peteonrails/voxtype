@@ -128,6 +128,77 @@ Display the current configuration.
 voxtype config
 ```
 
+### `voxtype configure`
+
+Open an interactive terminal UI for editing every voxtype option. The TUI
+edits `~/.config/voxtype/config.toml` directly, preserves comments and
+unknown fields, and validates the file before swapping it in. Saving a
+change that would break the daemon's parser leaves the on-disk file
+untouched and reports the parse error.
+
+```bash
+voxtype configure
+```
+
+The TUI is also surfaced as a `.desktop` entry, so it shows up in Walker,
+fuzzel, rofi, KRunner, and GNOME Activities as **"Voxtype Configuration"**.
+The launcher script picks the first available terminal emulator (`$TERMINAL`,
+then ghostty / alacritty / kitty / foot / wezterm / konsole / xterm) and
+sets the window class to `voxtype` so compositors can float it.
+
+#### Sections
+
+| Section | What it covers |
+|---|---|
+| General | Active engine, variant binary, daemon status, hardware-aware variant recommendation |
+| Engine | Per-engine tuning for Whisper / Parakeet / Moonshine / SenseVoice / Paraformer / Dolphin / Omnilingual / Cohere |
+| Hotkey | PTT key, mode (PTT vs toggle), cancel key, modifier key, evdev-listener toggle |
+| Audio | Input device, max recording length, MPRIS-pause, audio feedback theme/volume |
+| Output | Mode (type/clipboard/paste/file), driver order, auto-submit, post-process command |
+| Text | Spoken-punctuation toggle, smart-auto-submit, custom replacements list editor |
+| VAD | Silero VAD enable, backend (auto/energy/whisper), threshold |
+| Meeting | Meeting mode enable, speaker diarization, audio source (mic/system/both) |
+| Notifications | Desktop notifications for recording start/stop and transcription |
+| Waybar | Status integration: icon theme + per-state icon overrides |
+| Advanced | GPU isolation, on-demand model loading, flash attention, eager processing, GPU device |
+
+#### Keyboard
+
+```
+Global         Tab / Esc focus toggle    ?  help overlay   q quit
+Sidebar        ↑↓ / jk navigate          Enter / → / l open section
+Section form   ↑↓ navigate fields        ←→ / hl cycle value
+               Space toggle              Enter / i edit text field
+               s save                    r revert
+Text editor    type insert               ←→ / Home / End / Ctrl-A/E
+               Backspace / Delete        Ctrl-W delete word
+               Ctrl-U clear              Enter commit / Esc cancel
+```
+
+Press `?` from anywhere in the TUI for the same reference as a popup.
+
+#### Hardware-aware recommendations
+
+The General section detects your CPU (AVX2 / AVX-512) and GPU (NVIDIA /
+AMD), then marks the recommended variant for each engine family with `★`.
+The About pane explains the choice (`"AMD GPU detected. The MIGraphX
+execution provider is new… ONNX (AVX-512) on CPU is the safe default."`).
+
+When you switch the engine on the Engine page, the TUI also picks the
+matching binary variant if one is needed (e.g. moving from Whisper to
+Parakeet swaps the symlink at `/usr/bin/voxtype` from a Whisper variant to
+an ONNX variant). The actual symlink change runs through `pkexec` so you
+get the standard polkit prompt.
+
+#### Compositor binding awareness
+
+If you have the evdev listener disabled and rely on compositor bindings,
+the Hotkey screen scans `~/.config/hypr/*.conf`, `~/.config/sway/config*`,
+and `~/.config/niri/config.kdl` for any `voxtype record` / `voxtype meeting`
+bindings, lists them in the About pane, and suggests config-format-specific
+snippets for any standard role you haven't bound (cancel, toggle, meeting
+start/stop). Suggestions skip key combos already in use by other actions.
+
 ### `voxtype status`
 
 Query the daemon's current state (for Waybar/Polybar integration).

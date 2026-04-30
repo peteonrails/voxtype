@@ -2,6 +2,14 @@
 
 Complete reference for all configuration options in Voxtype.
 
+> **Tip**: For interactive editing, run `voxtype configure` — it edits the
+> same `config.toml` this document describes, preserves comments and unknown
+> fields, and validates each save before swapping the file in. The reference
+> below stays useful for scripted setups, advanced fields the TUI doesn't
+> surface yet, and understanding each section end-to-end. See the
+> [TUI section in the user manual](USER_MANUAL.md#voxtype-configure) for
+> keybindings.
+
 ## Configuration File Location
 
 Voxtype looks for configuration in the following locations (in order):

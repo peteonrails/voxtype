@@ -1,0 +1,65 @@
+#!/bin/sh
+# voxtype-configure-launcher
+#
+# Launch `voxtype configure` in a terminal window, discovering whichever
+# terminal emulator the user has installed. Window class is set to
+# `voxtype` so compositor rules (Hyprland windowrulev2,
+# Sway for_window, …) can float and size the window.
+#
+# Picked up by /usr/share/applications/voxtype-configure.desktop, which is
+# in turn surfaced in Walker, fuzzel, rofi, dmenu, KRunner, GNOME Activities.
+
+set -eu
+
+# Order of preference. $TERMINAL wins if it's set and resolvable.
+candidates="${TERMINAL:-} ghostty alacritty kitty foot wezterm konsole gnome-terminal xterm"
+
+term=""
+for c in $candidates; do
+    [ -z "$c" ] && continue
+    if command -v "$c" >/dev/null 2>&1; then
+        term="$c"
+        break
+    fi
+done
+
+if [ -z "$term" ]; then
+    notify-send -a Voxtype "Voxtype Configuration" \
+        "No terminal emulator found. Install ghostty, alacritty, kitty, foot, wezterm, or xterm." \
+        2>/dev/null || true
+    echo "voxtype-configure-launcher: no terminal emulator found" >&2
+    exit 1
+fi
+
+# Each terminal flags the window class differently. Set class=voxtype
+# so the compositor rule we ship can match it.
+case "$term" in
+    ghostty)
+        exec "$term" --class=voxtype --command="voxtype configure"
+        ;;
+    alacritty)
+        exec "$term" --class voxtype -e voxtype configure
+        ;;
+    kitty)
+        exec "$term" --class voxtype voxtype configure
+        ;;
+    wezterm)
+        exec "$term" start --class voxtype -- voxtype configure
+        ;;
+    foot)
+        exec "$term" --app-id voxtype voxtype configure
+        ;;
+    xterm)
+        exec "$term" -class voxtype -e voxtype configure
+        ;;
+    konsole)
+        exec "$term" -e voxtype configure
+        ;;
+    gnome-terminal)
+        exec "$term" -- voxtype configure
+        ;;
+    *)
+        # Unknown but available terminal — fall through with -e.
+        exec "$term" -e voxtype configure
+        ;;
+esac

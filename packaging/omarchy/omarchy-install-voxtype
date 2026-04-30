@@ -80,6 +80,23 @@ if [ -f "$HYPR_CONF" ] && ! grep -q "conf.d/voxtype.conf" "$HYPR_CONF"; then
     echo "source = ~/.config/hypr/conf.d/voxtype.conf" >> "$HYPR_CONF"
 fi
 
+# Drop window rules for the configuration TUI so `voxtype configure` (and the
+# Walker/dmenu launcher entry) opens as a centered floating window instead of
+# tiling like a regular terminal.
+mkdir -p ~/.config/hypr/conf.d
+cat > ~/.config/hypr/conf.d/voxtype-tui.conf << 'EOF'
+# Voxtype configuration TUI window rules
+# voxtype-configure-launcher sets the window class to "voxtype" regardless of
+# which terminal emulator runs the TUI.
+windowrulev2 = float,           class:^(voxtype)$
+windowrulev2 = size 1100 750,   class:^(voxtype)$
+windowrulev2 = center,          class:^(voxtype)$
+windowrulev2 = bordersize 2,    class:^(voxtype)$
+EOF
+if [ -f "$HYPR_CONF" ] && ! grep -q "conf.d/voxtype-tui.conf" "$HYPR_CONF"; then
+    echo "source = ~/.config/hypr/conf.d/voxtype-tui.conf" >> "$HYPR_CONF"
+fi
+
 # Enable systemd user service
 echo ""
 echo "Enabling voxtype service..."
@@ -101,4 +118,8 @@ echo "  3. Hold HOME key to record, release to transcribe"
 echo ""
 echo "Keybindings are in: ~/.config/hypr/conf.d/voxtype.conf"
 echo "Voxtype config in:  ~/.config/voxtype/config.toml"
+echo ""
+echo "To tune voxtype settings interactively:"
+echo "  • Open Walker / fuzzel and search for 'Voxtype Configuration'"
+echo "  • Or run: voxtype configure"
 echo ""

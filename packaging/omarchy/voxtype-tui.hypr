@@ -1,0 +1,14 @@
+# Hyprland window rules for the voxtype configuration TUI.
+#
+# Source this from your hyprland.conf (or the file Omarchy uses for window
+# rules) to make `voxtype configure` open as a centered floating window
+# rather than tiling like a regular terminal.
+#
+#   source = ~/.config/hypr/voxtype-tui.hypr
+
+# The voxtype-configure-launcher script sets the window class to "voxtype"
+# regardless of which terminal emulator runs the TUI.
+windowrulev2 = float,           class:^(voxtype)$
+windowrulev2 = size 1100 750,   class:^(voxtype)$
+windowrulev2 = center,          class:^(voxtype)$
+windowrulev2 = bordersize 2,    class:^(voxtype)$

@@ -334,6 +334,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_no_trim_no_fallback_combination() {
+        // Both options off: whatever the command emits is returned verbatim,
+        // empty included.
+        let config = PostProcessConfig {
+            command: "echo -n ''".to_string(),
+            timeout_ms: 5000,
+            trim: false,
+            fallback_on_empty: false,
+        };
+        let processor = PostProcessor::new(&config);
+        let result = processor.process("original text").await;
+        assert_eq!(result, "");
+    }
+
+    #[tokio::test]
+    async fn test_trim_then_empty_triggers_fallback() {
+        // Whitespace-only output should be considered empty after trimming,
+        // and trigger the fallback when fallback_on_empty is on.
+        let config = PostProcessConfig {
+            command: "printf '   \\n  '".to_string(),
+            timeout_ms: 5000,
+            trim: true,
+            fallback_on_empty: true,
+        };
+        let processor = PostProcessor::new(&config);
+        let result = processor.process("original text").await;
+        assert_eq!(result, "original text");
+    }
+
+    #[tokio::test]
+    async fn test_trim_then_empty_no_fallback_returns_empty() {
+        // Same scenario but fallback off: empty string surfaces.
+        let config = PostProcessConfig {
+            command: "printf '   \\n  '".to_string(),
+            timeout_ms: 5000,
+            trim: true,
+            fallback_on_empty: false,
+        };
+        let processor = PostProcessor::new(&config);
+        let result = processor.process("original text").await;
+        assert_eq!(result, "");
+    }
+
+    #[tokio::test]
     async fn test_context_passed_via_env_var() {
         // Command prints VOXTYPE_CONTEXT env var, stdin is current text
         let config = make_config("echo \"context:$VOXTYPE_CONTEXT stdin:$(cat)\"", 5000);

@@ -396,6 +396,19 @@ pub enum Commands {
     /// Show current configuration
     Config,
 
+    /// Inspect runtime/install information
+    Info {
+        #[command(subcommand)]
+        action: InfoAction,
+    },
+
+    /// Open the interactive configuration TUI
+    Configure {
+        /// Render as if installed from a package (for testing source builds).
+        #[arg(long, hide = true)]
+        force_package_mode: bool,
+    },
+
     /// Show daemon status (for Waybar/polybar integration)
     Status {
         /// Continuously output status changes as JSON (for Waybar exec)
@@ -809,6 +822,16 @@ impl RecordAction {
 }
 
 #[derive(Subcommand)]
+pub enum InfoAction {
+    /// Show installed binary variants and which one is active
+    Variants {
+        /// Emit machine-readable JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum SetupAction {
     /// Check system configuration and dependencies
     Check,
@@ -886,6 +909,14 @@ pub enum SetupAction {
         /// Show current backend status
         #[arg(long)]
         status: bool,
+    },
+
+    /// Switch the active binary variant (used by `voxtype configure` via pkexec)
+    #[command(hide = true)]
+    Variant {
+        /// Variant binary name (e.g., voxtype-avx512, voxtype-onnx-cuda)
+        #[arg(long, value_name = "NAME")]
+        to: String,
     },
 
     /// Switch between Whisper and ONNX transcription engines

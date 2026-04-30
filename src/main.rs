@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use tracing_subscriber::EnvFilter;
 use voxtype::{
-    config, cpu, daemon, meeting, setup, transcribe, vad, Cli, Commands, MeetingAction,
+    config, cpu, daemon, meeting, setup, transcribe, vad, Cli, Commands, InfoAction, MeetingAction,
     RecordAction, SetupAction,
 };
 
@@ -135,9 +135,10 @@ async fn main() -> anyhow::Result<()> {
             "paraformer" => config.engine = config::TranscriptionEngine::Paraformer,
             "dolphin" => config.engine = config::TranscriptionEngine::Dolphin,
             "omnilingual" => config.engine = config::TranscriptionEngine::Omnilingual,
+            "cohere" => config.engine = config::TranscriptionEngine::Cohere,
             _ => {
                 eprintln!(
-                    "Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual",
+                    "Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere",
                     engine
                 );
                 std::process::exit(1);
@@ -375,8 +376,9 @@ async fn main() -> anyhow::Result<()> {
                     "paraformer" => config.engine = config::TranscriptionEngine::Paraformer,
                     "dolphin" => config.engine = config::TranscriptionEngine::Dolphin,
                     "omnilingual" => config.engine = config::TranscriptionEngine::Omnilingual,
+                    "cohere" => config.engine = config::TranscriptionEngine::Cohere,
                     _ => {
-                        eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual", engine_name);
+                        eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere", engine_name);
                         std::process::exit(1);
                     }
                 }
@@ -493,6 +495,20 @@ async fn main() -> anyhow::Result<()> {
                         setup::gpu::show_status();
                     }
                 }
+                Some(SetupAction::Variant { to }) => {
+                    let variant = setup::binary::Variant::from_binary_name(&to)
+                        .ok_or_else(|| anyhow::anyhow!(
+                            "Unknown variant '{}'. Expected one of: {}",
+                            to,
+                            setup::binary::Variant::ALL
+                                .iter()
+                                .map(|v| v.binary_name())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ))?;
+                    setup::binary::switch_to(variant)?;
+                    println!("Switched /usr/bin/voxtype to {}.", variant.binary_name());
+                }
                 Some(SetupAction::Onnx {
                     enable,
                     disable,
@@ -538,6 +554,14 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::Config => {
             show_config(&config).await?;
+        }
+
+        Commands::Info { action } => {
+            run_info_command(action)?;
+        }
+
+        Commands::Configure { force_package_mode } => {
+            voxtype::tui::run(force_package_mode)?;
         }
 
         Commands::Status {
@@ -1098,6 +1122,100 @@ fn format_state_json(
                 text, alt, class, base_tooltip
             )
         }
+    }
+}
+
+/// Dispatch `voxtype info <subcommand>`.
+fn run_info_command(action: InfoAction) -> anyhow::Result<()> {
+    match action {
+        InfoAction::Variants { json } => {
+            let inv = setup::binary::inventory();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&inv)?);
+            } else {
+                print_variants_text(&inv);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_variants_text(inv: &setup::binary::Inventory) {
+    use setup::binary::InstallKind;
+
+    println!("Voxtype install");
+    println!("  Binary:        {}", inv.binary_path.display());
+    println!(
+        "  Install kind:  {}",
+        match inv.install_kind {
+            InstallKind::Package => "package",
+            InstallKind::Source => "source",
+        }
+    );
+    if let Some(dir) = &inv.package_lib_dir {
+        println!("  Lib dir:       {}", dir.display());
+    }
+    if !inv.compiled_features.is_empty() {
+        println!("  Features:      {}", inv.compiled_features.join(", "));
+    }
+
+    println!();
+    println!("Hardware");
+    println!(
+        "  CPU:           AVX2={}, AVX-512={}",
+        inv.cpu.avx2, inv.cpu.avx512
+    );
+    println!(
+        "  GPU:           NVIDIA={}, AMD={}",
+        inv.gpus.nvidia, inv.gpus.amd
+    );
+
+    println!();
+    println!("Recommended for this hardware");
+    println!(
+        "  Whisper:       ★ {}  — {}",
+        inv.recommendation.whisper.display(),
+        inv.recommendation.whisper_reason
+    );
+    println!(
+        "  ONNX:          ★ {}  — {}",
+        inv.recommendation.onnx.display(),
+        inv.recommendation.onnx_reason
+    );
+
+    println!();
+    if matches!(inv.install_kind, InstallKind::Source) {
+        println!("Source build: variant switching not applicable.");
+        println!("To enable a different engine, rebuild with the appropriate Cargo features.");
+        return;
+    }
+
+    println!("Variants");
+    if let Some(active) = inv.active_variant {
+        println!(
+            "  Active:        {} ({})",
+            active.display(),
+            active.binary_name()
+        );
+    } else {
+        println!("  Active:        unknown (symlink missing or unrecognized)");
+    }
+
+    println!();
+    println!("  Available:");
+    for status in &inv.variants {
+        let mark = if status.active {
+            "● active"
+        } else if !status.installed {
+            "  not installed"
+        } else if !status.runs_on_this_cpu {
+            "  installed (won't run on this CPU)"
+        } else if !status.gpu_available {
+            "  installed (no compatible GPU detected)"
+        } else {
+            "  installed"
+        };
+        println!("    {:<22} {}", status.variant.display(), mark);
     }
 }
 

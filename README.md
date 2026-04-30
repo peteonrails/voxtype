@@ -19,6 +19,7 @@ Hold a hotkey (default: ScrollLock) while speaking, release to transcribe and ou
 - **Push-to-talk or Toggle mode** - Hold to record, or press once to start/stop
 - **Audio feedback** - Optional sound cues when recording starts/stops
 - **Configurable** - Choose your hotkey, model size, output mode, and more
+- **Interactive TUI** - `voxtype configure` (also surfaces in Walker / fuzzel / rofi as "Voxtype Configuration") edits every option without touching config.toml by hand
 - **Waybar integration** - Optional status indicator shows recording state in your bar
 
 ## Quick Start

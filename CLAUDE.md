@@ -355,7 +355,9 @@ Based on open issues and project direction:
 ### Non-Goals
 
 - Windows/macOS support (Linux-first, Wayland-native)
-- GUI configuration (CLI and config file are the interface)
+- GUI configuration (GTK/Qt/web). A TUI (`voxtype configure`) is supported and
+  surfaced as a desktop-file launcher entry; CLI and config file remain the
+  primary interfaces for scripting and headless setups.
 - Continuous dictation mode (push-to-talk is the paradigm)
 
 ---

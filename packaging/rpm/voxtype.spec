@@ -103,6 +103,12 @@ install -D -m 644 packaging/completions/voxtype.zsh \
 install -D -m 644 packaging/completions/voxtype.fish \
     %{buildroot}%{_datadir}/fish/vendor_completions.d/voxtype.fish
 
+# Install configuration TUI launcher (.desktop entry + terminal-picker script)
+install -D -m 644 packaging/voxtype-configure.desktop \
+    %{buildroot}%{_datadir}/applications/voxtype-configure.desktop
+install -D -m 755 packaging/scripts/voxtype-configure-launcher \
+    %{buildroot}%{_bindir}/voxtype-configure-launcher
+
 %check
 export CARGO_HOME=%{_builddir}/cargo
 # Only test with AVX2 build to avoid SIGILL in build environments
@@ -199,6 +205,8 @@ rm -f %{_bindir}/voxtype
 %{_datadir}/bash-completion/completions/voxtype
 %{_datadir}/zsh/site-functions/_voxtype
 %{_datadir}/fish/vendor_completions.d/voxtype.fish
+%{_datadir}/applications/voxtype-configure.desktop
+%{_bindir}/voxtype-configure-launcher
 
 %changelog
 * Fri Dec 20 2025 Peter Jackson <pete@peteonrails.com> - 0.4.1-1
