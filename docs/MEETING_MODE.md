@@ -254,6 +254,10 @@ mic_device = "default"
 # Loopback device for capturing remote participants' audio
 # "auto" = auto-detect, "disabled" = mic only, or a specific device name
 loopback_device = "auto"
+
+# RMS threshold for meeting voice activity detection (default: 0.01)
+# Lower to 0.001 for quiet mics; set 0.0 to disable this pre-transcription gate
+vad_threshold = 0.01
 ```
 
 Setting `loopback_device = "auto"` lets voxtype capture system audio (the other side of a call). When loopback is active, speaker attribution can distinguish between "You" (from the mic) and "Remote" (from system audio).

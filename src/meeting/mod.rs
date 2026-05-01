@@ -59,6 +59,8 @@ pub struct MeetingConfig {
     pub retain_audio: bool,
     /// Maximum meeting duration in minutes (0 = unlimited)
     pub max_duration_mins: u32,
+    /// RMS threshold for meeting chunk voice activity detection
+    pub vad_threshold: f32,
     /// Diarization configuration (None = disabled)
     pub diarization: Option<diarization::DiarizationConfig>,
 }
@@ -71,6 +73,7 @@ impl Default for MeetingConfig {
             storage: StorageConfig::default(),
             retain_audio: false,
             max_duration_mins: 180,
+            vad_threshold: 0.01,
             diarization: None,
         }
     }
@@ -321,6 +324,7 @@ impl MeetingDaemon {
         let chunk_id = self.state.chunks_processed();
         let chunk_config = ChunkConfig {
             chunk_duration_secs: self.config.chunk_duration_secs,
+            vad_threshold: self.config.vad_threshold,
             ..Default::default()
         };
 
@@ -446,6 +450,7 @@ mod tests {
         assert!(!config.enabled);
         assert_eq!(config.chunk_duration_secs, 30);
         assert_eq!(config.max_duration_mins, 180);
+        assert_eq!(config.vad_threshold, 0.01);
     }
 
     #[test]

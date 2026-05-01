@@ -1995,6 +1995,7 @@ async fn run_meeting_command(config: &config::Config, action: MeetingAction) -> 
         },
         retain_audio: config.meeting.retain_audio,
         max_duration_mins: config.meeting.max_duration_mins,
+        vad_threshold: config.meeting.audio.vad_threshold,
         diarization: None,
     };
 
