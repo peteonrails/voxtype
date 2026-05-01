@@ -1223,7 +1223,18 @@ impl Daemon {
                                 "disabled" | "" => None,
                                 other => Some(other),
                             };
-                        match audio::DualCapture::new(&self.config.audio, loopback_device) {
+                        let mut meeting_audio_config = self.config.audio.clone();
+                        let meeting_mic_device = self.config.meeting.audio.mic_device.as_str();
+                        if !matches!(meeting_mic_device, "default" | "") {
+                            tracing::info!(
+                                "Meeting mic override: {} (dictation uses {})",
+                                meeting_mic_device,
+                                self.config.audio.device
+                            );
+                            meeting_audio_config.device =
+                                self.config.meeting.audio.mic_device.clone();
+                        }
+                        match audio::DualCapture::new(&meeting_audio_config, loopback_device) {
                             Ok(mut capture) => {
                                 if let Err(e) = capture.start().await {
                                     tracing::error!("Failed to start meeting audio: {}", e);
