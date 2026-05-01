@@ -18,7 +18,10 @@
 # and *_shared.so installed alongside the binary (handled by scripts/package.sh),
 # plus AMD's ROCm runtime (rocm-libs / rocm-hip-runtime / migraphx) on the host.
 #
-FROM rocm/dev-ubuntu-24.04:7.0.2-complete
+# ROCm 7.2.2 — older 7.0.x bundles a MIGraphX without `fp4x2` shape type,
+# which ORT 1.24.2's MIGraphX provider unconditionally references and
+# fails to compile against.
+FROM rocm/dev-ubuntu-24.04:7.2.2-complete
 
 ARG VERSION=0.7.0
 ARG ORT_VERSION=1.24.2
@@ -28,7 +31,10 @@ ENV VERSION=${VERSION}
 ENV ROCM_PATH=/opt/rocm
 ENV PATH="/opt/rocm/bin:${PATH}"
 
-# Install build dependencies for both ORT and voxtype
+# Install build dependencies for both ORT and voxtype.
+# migraphx-dev is required so ORT's CMake find_package(migraphx) succeeds;
+# it's not pulled in by the rocm/dev-ubuntu-24.04 base image even though
+# rocm-hip-sdk and the runtime libs are.
 RUN apt-get update && apt-get install -y \
     curl \
     build-essential \
@@ -48,6 +54,7 @@ RUN apt-get update && apt-get install -y \
     python3-sympy \
     python3-flatbuffers \
     python3-packaging \
+    migraphx-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Rust
