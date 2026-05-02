@@ -1055,10 +1055,13 @@ impl Default for MoonshineConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CohereConfig {
     /// Model name or directory containing the Cohere ONNX files.
-    /// Expects: cohere-encoder.int8.onnx (+ .data),
-    ///          cohere-decoder.int8.onnx (+ .data),
-    ///          tokens.txt
-    /// Short name: "cohere-transcribe-int8" (default)
+    /// Expects HuggingFace Optimum layout:
+    ///   encoder_model.onnx (+ .onnx_data),
+    ///   decoder_model_merged.onnx (+ .onnx_data),
+    ///   tokenizer.json
+    /// Short names: "cohere-transcribe-q4f16" (default, ~1.5 GB),
+    ///              "cohere-transcribe-q4", "cohere-transcribe-int8",
+    ///              "cohere-transcribe-fp16"
     pub model: String,
 
     /// Language for transcription. Two-letter ISO 639-1 codes
@@ -1082,7 +1085,7 @@ fn default_cohere_language() -> String {
 impl Default for CohereConfig {
     fn default() -> Self {
         Self {
-            model: "cohere-transcribe-int8".to_string(),
+            model: "cohere-transcribe-q4f16".to_string(),
             language: default_cohere_language(),
             threads: None,
             on_demand_loading: false,

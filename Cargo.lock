@@ -2775,6 +2775,7 @@ version = "2.0.0-rc.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7de3af33d24a745ffb8fab904b13478438d1cd52868e6f17735ef6e1f8bf133"
 dependencies = [
+ "half",
  "libloading 0.9.0",
  "ndarray 0.17.1",
  "ort-sys",
@@ -4369,6 +4370,7 @@ dependencies = [
  "glib",
  "gtk4",
  "gtk4-layer-shell",
+ "half",
  "hound",
  "inotify 0.10.2",
  "libc",

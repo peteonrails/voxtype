@@ -185,8 +185,14 @@ impl CohereTranscriber {
             ))
         })?;
 
-        let encoder = build_session(&encoder_file, threads, "encoder")?;
-        let decoder = build_session(&decoder_file, threads, "decoder")?;
+        let encoder = build_session(&encoder_file, threads, "encoder", true)?;
+        // Decoder pinned to CPU: ORT's CUDA GroupQueryAttention kernel rejects
+        // the `attention_bias` input that the HF Optimum decoder export uses
+        // (validated on GTX 1660 Ti, ORT 1.20 via pyke ort 2.0.0-rc.12). The
+        // encoder still runs on GPU, where the 1.4GB-weight matmuls dominate
+        // wall time; the smaller decoder runs CPU-side until ORT lands the
+        // attention_bias kernel.
+        let decoder = build_session(&decoder_file, threads, "decoder", false)?;
 
         // The HF Optimum exports use mixed precision: `encoder_hidden_states`
         // stays Float32 across every variant (q4/int8/FP32 keep encoder
@@ -555,14 +561,19 @@ fn build_session(
     path: &Path,
     threads: usize,
     label: &str,
+    use_gpu: bool,
 ) -> Result<Session, TranscribeError> {
     let builder = Session::builder()
         .map_err(|e| TranscribeError::InitFailed(format!("{label} builder: {e}")))?
         .with_intra_threads(threads)
         .map_err(|e| TranscribeError::InitFailed(format!("{label} threads: {e}")))?;
 
-    let mut builder = super::onnx_ep::register_gpu_eps(builder, "Cohere", label)
-        .map_err(|e| TranscribeError::InitFailed(format!("{label} EPs: {e}")))?;
+    let mut builder = if use_gpu {
+        super::onnx_ep::register_gpu_eps(builder, "Cohere", label)
+            .map_err(|e| TranscribeError::InitFailed(format!("{label} EPs: {e}")))?
+    } else {
+        builder
+    };
 
     builder.commit_from_file(path).map_err(|e| {
         TranscribeError::InitFailed(format!(

@@ -128,7 +128,12 @@ fn model_catalog(engine: &str) -> Vec<&'static str> {
         "paraformer" => vec!["paraformer-zh", "paraformer-en"],
         "dolphin" => vec!["dolphin-base"],
         "omnilingual" => vec!["omnilingual-300m"],
-        "cohere" => vec!["cohere-transcribe-int8"],
+        "cohere" => vec![
+            "cohere-transcribe-q4f16",
+            "cohere-transcribe-q4",
+            "cohere-transcribe-int8",
+            "cohere-transcribe-fp16",
+        ],
         _ => Vec::new(),
     }
 }
@@ -145,7 +150,7 @@ const fn default_model(engine: &str) -> &'static str {
         b"paraformer" => "paraformer-zh",
         b"dolphin" => "dolphin-base",
         b"omnilingual" => "omnilingual-300m",
-        b"cohere" => "cohere-transcribe-int8",
+        b"cohere" => "cohere-transcribe-q4f16",
         _ => "",
     }
 }

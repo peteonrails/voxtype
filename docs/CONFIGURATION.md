@@ -1220,9 +1220,32 @@ The Cohere model to use. Can be a model name (looked up in `~/.local/share/voxty
 
 | Model | Quantization | Size | Notes |
 |-------|--------------|------|-------|
-| `cohere-transcribe-int8` | int8 | ~3.1 GB | Default; runs on CPU or GPU |
+| `cohere-transcribe-q4f16` | int4 weights, FP16 KV | ~1.5 GB | Recommended; smallest download, fastest CPU |
+| `cohere-transcribe-q4` | int4 weights, FP32 KV | ~2.0 GB | Same accuracy as q4f16, larger memory |
+| `cohere-transcribe-int8` | int8 | ~2.9 GB | Quality reference for quantized models |
+| `cohere-transcribe-fp16` | FP16 | ~3.9 GB | Highest accuracy, largest download |
 
-Download via `voxtype setup model` (interactive) — pick the Cohere section and confirm the size warning.
+All variants are HuggingFace Optimum exports of Cohere Transcribe (16384 vocab, 14 languages). Download via `voxtype setup model` (interactive) — pick the Cohere section and confirm the size warning.
+
+**Performance (warm CPU, voxtype 0.7.0, dictation-length audio):**
+
+| Variant | Realtime factor | Notes |
+|---------|-----------------|-------|
+| q4f16 | 9-11× | Best CPU throughput |
+| q4 | 9-11× | Same speed as q4f16 |
+| int8 | 2-3× | Slowest CPU path |
+| fp16 | 7-8× | |
+
+**GPU acceleration (CUDA):** The `voxtype-onnx-cuda-12` and `voxtype-onnx-cuda-13` binaries register the CUDA execution provider on the encoder. The decoder is pinned to CPU because ORT's CUDA `GroupQueryAttention` kernel does not yet accept the `attention_bias` input that the HF Optimum decoder export uses. Encoder-on-GPU is where weight matmuls dominate, so this hybrid is most of the win.
+
+GPU speedup is hardware- and length-dependent. On a GTX 1660 Ti + i9-9900KF with q4f16:
+
+| Audio length | CPU only | Encoder GPU + Decoder CPU |
+|--------------|----------|---------------------------|
+| 4.75s | 5.0× realtime | 4.6× realtime |
+| 28.5s | 5.9× realtime | 8.2× realtime (~28% faster) |
+
+The fixed CUDA setup cost dominates short clips; longer utterances and faster GPUs (RTX 30/40 series) pull further ahead. Once ORT lands the missing GQA kernel, the decoder will move to the GPU automatically without a config change.
 
 **Example:**
 ```toml
@@ -1280,7 +1303,7 @@ on_demand_loading = true
 
 | Option | CLI Flag | Environment Variable | Default | Description |
 |--------|----------|---------------------|---------|-------------|
-| `model` | `--model` | `VOXTYPE_MODEL` | `"cohere-transcribe-int8"` | Cohere model name or path |
+| `model` | `--model` | `VOXTYPE_MODEL` | `"cohere-transcribe-q4f16"` | Cohere model name or path |
 | `language` | `--language` | `VOXTYPE_LANGUAGE` | `"en"` | One of the 14 supported language codes |
 | `threads` | - | - | auto | ONNX intra-op thread count |
 | `on_demand_loading` | - | - | `false` | Load model only when recording starts |
@@ -1291,7 +1314,7 @@ on_demand_loading = true
 engine = "cohere"
 
 [cohere]
-model = "cohere-transcribe-int8"
+model = "cohere-transcribe-q4f16"
 language = "en"
 on_demand_loading = false
 ```

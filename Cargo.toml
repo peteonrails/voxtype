@@ -196,7 +196,7 @@ omnilingual-tensorrt = ["omnilingual", "onnx-tensorrt-enabled"]
 # Top of the Open ASR Leaderboard. Wired into CLI/config/factory; users opt in
 # via `cargo build --features cohere` and the model files are downloaded into
 # the standard models directory like other ONNX engines.
-cohere = ["onnx-common", "dep:half"]
+cohere = ["onnx-common", "dep:half", "dep:tokenizers"]
 cohere-cuda = ["cohere", "onnx-cuda-enabled"]
 cohere-tensorrt = ["cohere", "onnx-tensorrt-enabled"]
 # No cohere-migraphx feature: MIGraphX 7.2 still fails on the
