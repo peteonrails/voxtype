@@ -92,11 +92,11 @@ impl ParakeetStreamingTranscriber {
 
         let batch = ParakeetUnified::from_shared_with_streaming_config(&handle, streaming_config)
             .map_err(|e| {
-                TranscribeError::InitFailed(format!(
-                    "Failed to spawn batch ParakeetUnified instance: {}",
-                    e
-                ))
-            })?;
+            TranscribeError::InitFailed(format!(
+                "Failed to spawn batch ParakeetUnified instance: {}",
+                e
+            ))
+        })?;
 
         tracing::info!(
             "Parakeet streaming model loaded in {:.2}s (chunk={:.2}s, \
@@ -131,9 +131,11 @@ impl Transcriber for ParakeetStreamingTranscriber {
         // streaming or batch invocation doesn't bleed in.
         batch.reset();
 
-        let result = batch.transcribe_audio(samples.to_vec(), 16000, 1).map_err(|e| {
-            TranscribeError::InferenceFailed(format!("ParakeetUnified inference failed: {}", e))
-        })?;
+        let result = batch
+            .transcribe_audio(samples.to_vec(), 16000, 1)
+            .map_err(|e| {
+                TranscribeError::InferenceFailed(format!("ParakeetUnified inference failed: {}", e))
+            })?;
 
         Ok(result.trim().to_string())
     }
@@ -215,10 +217,8 @@ impl StreamingTranscriber for ParakeetStreamingTranscriber {
 
                 if text != last_text {
                     last_text = text.clone();
-                    let _ = runtime.block_on(events_tx.send(StreamingEvent::Partial {
-                        text,
-                        segment_id,
-                    }));
+                    let _ = runtime
+                        .block_on(events_tx.send(StreamingEvent::Partial { text, segment_id }));
                 }
             }
 
