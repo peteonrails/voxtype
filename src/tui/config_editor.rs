@@ -64,14 +64,28 @@ impl ConfigEditor {
                 })
             }
         };
-        let document: DocumentMut = text.parse().map_err(|e| EditorError::Parse {
+        let mut document: DocumentMut = text.parse().map_err(|e| EditorError::Parse {
             path: path.clone(),
             source: e,
         })?;
+
+        // Migration: earlier rc/0.7.0 builds had a bug where `set_string("",
+        // "engine", ...)` created a literal `[""]` table at the document root
+        // and stored `engine` inside it. The runtime config loader rejected
+        // anything in there (so behavior wasn't broken), but the corrupt
+        // section persisted across saves. Strip it on load — the corrected
+        // set_string now writes to the root, so dropping the empty-name
+        // table loses no settings.
+        let mut dirty = false;
+        if document.as_table().contains_key("") {
+            document.as_table_mut().remove("");
+            dirty = true;
+        }
+
         Ok(Self {
             path,
             document,
-            dirty: false,
+            dirty,
         })
     }
 
@@ -84,20 +98,32 @@ impl ConfigEditor {
     }
 
     pub fn set_string(&mut self, table: &str, key: &str, value: &str) {
-        let item = self.ensure_table(table);
-        item[key] = toml_edit::value(value);
+        if table.is_empty() {
+            self.document.as_table_mut()[key] = toml_edit::value(value);
+        } else {
+            let item = self.ensure_table(table);
+            item[key] = toml_edit::value(value);
+        }
         self.dirty = true;
     }
 
     pub fn set_bool(&mut self, table: &str, key: &str, value: bool) {
-        let item = self.ensure_table(table);
-        item[key] = toml_edit::value(value);
+        if table.is_empty() {
+            self.document.as_table_mut()[key] = toml_edit::value(value);
+        } else {
+            let item = self.ensure_table(table);
+            item[key] = toml_edit::value(value);
+        }
         self.dirty = true;
     }
 
     pub fn set_int(&mut self, table: &str, key: &str, value: i64) {
-        let item = self.ensure_table(table);
-        item[key] = toml_edit::value(value);
+        if table.is_empty() {
+            self.document.as_table_mut()[key] = toml_edit::value(value);
+        } else {
+            let item = self.ensure_table(table);
+            item[key] = toml_edit::value(value);
+        }
         self.dirty = true;
     }
 

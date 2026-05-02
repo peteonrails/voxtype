@@ -18,7 +18,13 @@ use super::waybar_section::WaybarState;
 /// What the event handler asks the run-loop to do next.
 pub enum Action {
     None,
+    /// User pressed q / Ctrl-C / Esc-from-sidebar. The run-loop checks
+    /// whether any section was visited and routes through the save-on-exit
+    /// prompt before terminating.
     Quit,
+    /// User has already answered the save-on-exit prompt (Save or Discard);
+    /// terminate immediately without re-prompting.
+    ForceQuit,
     SwitchVariant(Variant),
 }
 

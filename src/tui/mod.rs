@@ -152,6 +152,10 @@ fn dispatch_action(
                 Ok(LoopControl::Quit)
             }
         }
+        // ForceQuit is the prompt's resolved-decision exit: the user already
+        // chose Save or Discard, so skip the any_section_loaded re-check that
+        // would otherwise re-open the prompt and loop forever.
+        Action::ForceQuit => Ok(LoopControl::Quit),
         Action::SwitchVariant(variant) => {
             // Drop out of the alternate screen so pkexec can prompt.
             leave_terminal(terminal)?;
@@ -176,11 +180,11 @@ fn handle_quit_prompt_key(app: &mut App, key: KeyEvent) -> Action {
         KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Enter => {
             app.save_all_loaded_sections();
             app.quit_pending = false;
-            Action::Quit
+            Action::ForceQuit
         }
         KeyCode::Char('d') | KeyCode::Char('D') => {
             app.quit_pending = false;
-            Action::Quit
+            Action::ForceQuit
         }
         KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
             app.quit_pending = false;
