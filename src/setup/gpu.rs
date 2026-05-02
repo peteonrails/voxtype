@@ -17,6 +17,7 @@
 //!
 //! This sets VK_LOADER_DRIVERS_SELECT internally to filter Vulkan ICDs.
 
+use super::binary::install_active_binary;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
@@ -27,6 +28,7 @@ const VOXTYPE_BIN: &str = "/usr/bin/voxtype";
 const VOXTYPE_BIN_LOCAL: &str = "/usr/local/bin/voxtype";
 const VOXTYPE_CPU_BACKUP: &str = "/usr/lib/voxtype/voxtype-cpu";
 const VOXTYPE_NATIVE: &str = "/usr/lib/voxtype/voxtype-native";
+
 
 /// Get the active voxtype binary path (prefers /usr/bin, falls back to /usr/local/bin)
 fn get_active_binary_path() -> &'static str {
@@ -351,30 +353,7 @@ fn switch_backend_tiered(backend: Backend) -> anyhow::Result<()> {
         );
     }
 
-    // Remove existing symlink
-    if Path::new(active_bin).exists() || fs::symlink_metadata(active_bin).is_ok() {
-        fs::remove_file(active_bin).map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to remove existing symlink (need sudo?): {}\n\
-                 Try: sudo voxtype setup gpu --enable",
-                e
-            )
-        })?;
-    }
-
-    // Create new symlink
-    symlink(&binary_path, active_bin).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to create symlink (need sudo?): {}\n\
-             Try: sudo voxtype setup gpu --enable",
-            e
-        )
-    })?;
-
-    // Restore SELinux context if available
-    let _ = Command::new("restorecon").arg(active_bin).status();
-
-    Ok(())
+    install_active_binary(active_bin, &binary_path)
 }
 
 /// Enable GPU in simple mode (switch symlink from native to vulkan)
@@ -984,28 +963,5 @@ fn switch_backend_tiered_parakeet(binary_name: &str) -> anyhow::Result<()> {
         );
     }
 
-    // Remove existing symlink
-    if Path::new(active_bin).exists() || fs::symlink_metadata(active_bin).is_ok() {
-        fs::remove_file(active_bin).map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to remove existing symlink (need sudo?): {}\n\
-                 Try: sudo voxtype setup gpu --enable",
-                e
-            )
-        })?;
-    }
-
-    // Create new symlink
-    symlink(&binary_path, active_bin).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to create symlink (need sudo?): {}\n\
-             Try: sudo voxtype setup gpu --enable",
-            e
-        )
-    })?;
-
-    // Restore SELinux context if available
-    let _ = Command::new("restorecon").arg(active_bin).status();
-
-    Ok(())
+    install_active_binary(active_bin, &binary_path)
 }

@@ -7,6 +7,16 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
 
+/// Section-header tag rendered next to the engines whose ONNX graphs the
+/// MIGraphX 7.2 EP can't compile (Moonshine/SenseVoice/Paraformer/Dolphin/
+/// Omnilingual). Only shown on the AMD-targeted binary so users picking a
+/// model see at a glance which engines stay on CPU even with their GPU
+/// installed. NVIDIA/CPU binaries don't print this.
+#[cfg(feature = "onnx-migraphx-enabled")]
+const AMD_CPU_ONLY_TAG: &str = " \x1b[33m[CPU on AMD GPU]\x1b[0m";
+#[cfg(not(feature = "onnx-migraphx-enabled"))]
+const AMD_CPU_ONLY_TAG: &str = "";
+
 /// Model information for display
 struct ModelInfo {
     name: &'static str,
@@ -622,7 +632,10 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         } else {
             0
         };
-    println!("\n--- Moonshine (Moonshine AI, encoder-decoder ASR) ---\n");
+    println!(
+        "\n--- Moonshine (Moonshine AI, encoder-decoder ASR){} ---\n",
+        AMD_CPU_ONLY_TAG
+    );
 
     if moonshine_available {
         for (i, model) in MOONSHINE_MODELS.iter().enumerate() {
@@ -667,7 +680,10 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         } else {
             0
         };
-    println!("\n--- SenseVoice (Alibaba FunAudioLLM, CJK + English) ---\n");
+    println!(
+        "\n--- SenseVoice (Alibaba FunAudioLLM, CJK + English){} ---\n",
+        AMD_CPU_ONLY_TAG
+    );
 
     if sensevoice_available {
         for (i, model) in SENSEVOICE_MODELS.iter().enumerate() {
@@ -701,7 +717,10 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     // --- Paraformer Section ---
     let paraformer_offset =
         sensevoice_offset + available_count(sensevoice_available, sensevoice_count);
-    println!("\n--- Paraformer (FunASR, Chinese + English) ---\n");
+    println!(
+        "\n--- Paraformer (FunASR, Chinese + English){} ---\n",
+        AMD_CPU_ONLY_TAG
+    );
 
     if paraformer_available {
         for (i, model) in PARAFORMER_MODELS.iter().enumerate() {
@@ -735,7 +754,10 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     // --- Dolphin Section ---
     let dolphin_offset =
         paraformer_offset + available_count(paraformer_available, paraformer_count);
-    println!("\n--- Dolphin (dictation-optimized CTC) ---\n");
+    println!(
+        "\n--- Dolphin (dictation-optimized CTC){} ---\n",
+        AMD_CPU_ONLY_TAG
+    );
 
     if dolphin_available {
         for (i, model) in DOLPHIN_MODELS.iter().enumerate() {
@@ -768,7 +790,10 @@ pub async fn interactive_select() -> anyhow::Result<()> {
 
     // --- Omnilingual Section ---
     let omnilingual_offset = dolphin_offset + available_count(dolphin_available, dolphin_count);
-    println!("\n--- Omnilingual (FunASR, 50+ languages) ---\n");
+    println!(
+        "\n--- Omnilingual (FunASR, 50+ languages){} ---\n",
+        AMD_CPU_ONLY_TAG
+    );
 
     if omnilingual_available {
         for (i, model) in OMNILINGUAL_MODELS.iter().enumerate() {
@@ -802,7 +827,10 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     // --- Cohere Section ---
     let cohere_offset =
         omnilingual_offset + available_count(omnilingual_available, omnilingual_count);
-    println!("\n--- Cohere Transcribe (Cohere Labs, #1 Open ASR Leaderboard) ---\n");
+    println!(
+        "\n--- Cohere Transcribe (Cohere Labs, #1 Open ASR Leaderboard){} ---\n",
+        AMD_CPU_ONLY_TAG
+    );
 
     if cohere_available {
         for (i, model) in COHERE_MODELS.iter().enumerate() {

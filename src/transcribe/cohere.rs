@@ -488,31 +488,24 @@ impl Transcriber for CohereTranscriber {
 // ---------------------------------------------------------------------------
 
 /// Build an ONNX Runtime session for the encoder or decoder, registering
-/// any GPU execution providers that were compiled in.
+/// any GPU execution providers that were compiled in via
+/// [`super::onnx_ep::register_gpu_eps`].
 ///
-/// Order matters: ort tries EPs in sequence and falls back to the next on
-/// registration failure. Specialized EPs (TensorRT, MIGraphX) come before
-/// their generic siblings (CUDA, ROCm). CPU is implicit at the bottom of
-/// the list.
+/// Note: there's no `cohere-migraphx` feature today because the int8
+/// model uses MatMulNBits(bits=8) which MIGraphX 7.2 can't compile.
+/// On the AMD-targeted binary, Cohere runs on the CPU EP only.
 fn build_session(
     path: &Path,
     threads: usize,
     label: &str,
 ) -> Result<Session, TranscribeError> {
-    let mut builder = Session::builder()
+    let builder = Session::builder()
         .map_err(|e| TranscribeError::InitFailed(format!("{label} builder: {e}")))?
         .with_intra_threads(threads)
         .map_err(|e| TranscribeError::InitFailed(format!("{label} threads: {e}")))?;
 
-    let providers = build_execution_providers();
-    if !providers.is_empty() {
-        let names: Vec<&'static str> = providers.iter().map(|(n, _)| *n).collect();
-        tracing::info!("Cohere {label}: registering execution providers {names:?}");
-        let dispatches: Vec<_> = providers.into_iter().map(|(_, ep)| ep).collect();
-        builder = builder
-            .with_execution_providers(dispatches)
-            .map_err(|e| TranscribeError::InitFailed(format!("{label} EPs: {e}")))?;
-    }
+    let mut builder = super::onnx_ep::register_gpu_eps(builder, "Cohere", label)
+        .map_err(|e| TranscribeError::InitFailed(format!("{label} EPs: {e}")))?;
 
     builder.commit_from_file(path).map_err(|e| {
         TranscribeError::InitFailed(format!(
@@ -520,36 +513,6 @@ fn build_session(
             path
         ))
     })
-}
-
-/// Build the list of execution providers based on compile-time feature
-/// flags. Returns `(name, dispatch)` pairs for logging.
-///
-/// Each `*-cuda`/`*-tensorrt`/`*-migraphx`/`*-rocm` feature adds the
-/// matching EP. ort's `with_execution_providers` is non-fatal — if the
-/// runtime can't register the EP (driver missing, library not found),
-/// it logs a warning and falls through to the next.
-fn build_execution_providers() -> Vec<(&'static str, ort::execution_providers::ExecutionProviderDispatch)> {
-    #[allow(unused_mut)]
-    let mut providers = Vec::new();
-
-    #[cfg(feature = "cohere-tensorrt")]
-    {
-        use ort::execution_providers::{ExecutionProvider, TensorRTExecutionProvider};
-        providers.push(("TensorRT", TensorRTExecutionProvider::default().build()));
-    }
-    #[cfg(feature = "cohere-cuda")]
-    {
-        use ort::execution_providers::{CUDAExecutionProvider, ExecutionProvider};
-        providers.push(("CUDA", CUDAExecutionProvider::default().build()));
-    }
-    #[cfg(feature = "cohere-migraphx")]
-    {
-        use ort::execution_providers::{ExecutionProvider, MIGraphXExecutionProvider};
-        providers.push(("MIGraphX", MIGraphXExecutionProvider::default().build()));
-    }
-
-    providers
 }
 
 /// Load `tokens.txt` (one `<piece> <id>\n` line per token). The cstr/Cohere

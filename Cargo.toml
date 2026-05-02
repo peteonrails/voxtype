@@ -171,34 +171,56 @@ parakeet-coreml = ["parakeet", "parakeet-rs/coreml"]
 parakeet-load-dynamic = ["parakeet", "parakeet-rs/load-dynamic"]
 # Shared ONNX dependencies for engines using fbank/CTC preprocessing
 onnx-common = ["dep:ort", "dep:ndarray", "dep:rustfft"]
-# Moonshine backend (ONNX-based, encoder-decoder ASR)
+# Marker features that aggregate per-engine GPU EP flags. Each engine's
+# session builder calls a shared helper (src/transcribe/onnx_ep.rs) that
+# checks these markers to decide which EPs to register at runtime.
+# Enabling any *-cuda feature pulls onnx-cuda-enabled in transitively;
+# same for *-migraphx and *-tensorrt.
+onnx-cuda-enabled = ["ort/cuda"]
+onnx-migraphx-enabled = ["ort/migraphx"]
+onnx-tensorrt-enabled = ["ort/tensorrt"]
+# Moonshine backend (ONNX-based, encoder-decoder ASR).
+# No migraphx feature — MIGraphX 7.2 can't compile Moonshine's
+# encoder-decoder `If` op (different output shapes between branches).
+# AMD users run Moonshine on CPU.
 moonshine = ["onnx-common", "dep:tokenizers"]
-moonshine-cuda = ["moonshine", "ort/cuda"]
-moonshine-tensorrt = ["moonshine", "ort/tensorrt"]
-# SenseVoice backend (ONNX-based, CTC encoder-only ASR)
+moonshine-cuda = ["moonshine", "onnx-cuda-enabled"]
+moonshine-tensorrt = ["moonshine", "onnx-tensorrt-enabled"]
+# SenseVoice backend (ONNX-based, CTC encoder-only ASR).
+# No migraphx feature — MIGraphX rejects the encoder's Where-op
+# broadcast pattern (axis mismatch). AMD users run SenseVoice on CPU.
 sensevoice = ["onnx-common"]
-sensevoice-cuda = ["sensevoice", "ort/cuda"]
-sensevoice-tensorrt = ["sensevoice", "ort/tensorrt"]
-# Paraformer backend (FunASR ONNX-based CTC encoder)
+sensevoice-cuda = ["sensevoice", "onnx-cuda-enabled"]
+sensevoice-tensorrt = ["sensevoice", "onnx-tensorrt-enabled"]
+# Paraformer backend (FunASR ONNX-based CTC encoder).
+# No migraphx feature — MIGraphX EP segfaults during model load.
+# AMD users run Paraformer on CPU.
 paraformer = ["onnx-common"]
-paraformer-cuda = ["paraformer", "ort/cuda"]
-paraformer-tensorrt = ["paraformer", "ort/tensorrt"]
-# Dolphin backend (ONNX-based CTC encoder, dictation-optimized)
+paraformer-cuda = ["paraformer", "onnx-cuda-enabled"]
+paraformer-tensorrt = ["paraformer", "onnx-tensorrt-enabled"]
+# Dolphin backend (ONNX-based CTC encoder, dictation-optimized).
+# No migraphx feature — MIGraphX rejects the encoder's Slice op shape.
+# AMD users run Dolphin on CPU.
 dolphin = ["onnx-common"]
-dolphin-cuda = ["dolphin", "ort/cuda"]
-dolphin-tensorrt = ["dolphin", "ort/tensorrt"]
-# Omnilingual backend (FunASR ONNX-based, 50+ languages)
+dolphin-cuda = ["dolphin", "onnx-cuda-enabled"]
+dolphin-tensorrt = ["dolphin", "onnx-tensorrt-enabled"]
+# Omnilingual backend (FunASR ONNX-based, 50+ languages).
+# No migraphx feature — graph compiles but produces garbled output and
+# pays a 65s+ compile penalty per first inference. AMD users run on CPU.
 omnilingual = ["onnx-common"]
-omnilingual-cuda = ["omnilingual", "ort/cuda"]
-omnilingual-tensorrt = ["omnilingual", "ort/tensorrt"]
+omnilingual-cuda = ["omnilingual", "onnx-cuda-enabled"]
+omnilingual-tensorrt = ["omnilingual", "onnx-tensorrt-enabled"]
 # Cohere Transcribe backend (ONNX-based encoder-decoder, Whisper-style task tokens).
 # Top of the Open ASR Leaderboard. Wired into CLI/config/factory; users opt in
 # via `cargo build --features cohere` and the model files are downloaded into
 # the standard models directory like other ONNX engines.
 cohere = ["onnx-common"]
-cohere-cuda = ["cohere", "ort/cuda"]
-cohere-tensorrt = ["cohere", "ort/tensorrt"]
-cohere-migraphx = ["cohere", "ort/migraphx"]
+cohere-cuda = ["cohere", "onnx-cuda-enabled"]
+cohere-tensorrt = ["cohere", "onnx-tensorrt-enabled"]
+# No cohere-migraphx feature: the cstr/cohere-transcribe-onnx-int8 export
+# uses MatMulNBits with bits=8, which MIGraphX 7.2 doesn't support (only
+# bits=4). The graph compile fails and inference crashes. AMD users run
+# Cohere on CPU until we ship int4/FP16 model variants (see issue #?).
 # Dynamic loading for system ONNX Runtime. Used by Nix builds and the
 # AMD/MIGraphX binary, which pairs with the system `onnxruntime-rocm`
 # package (no upstream pyke prebuilt ships the MIGraphX provider .so).

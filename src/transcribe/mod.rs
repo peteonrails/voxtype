@@ -28,6 +28,10 @@ pub mod worker;
 ))]
 pub mod fbank;
 
+/// Shared GPU execution-provider registration for ONNX-based engines.
+#[cfg(feature = "onnx-common")]
+pub mod onnx_ep;
+
 /// Shared CTC greedy decoder for CTC-based ASR engines
 #[cfg(any(
     feature = "sensevoice",

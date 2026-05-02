@@ -1602,6 +1602,24 @@ on_recording_stop = true    # Notify when transcribing
 on_transcription = true     # Show transcribed text
 ```
 
+### urgency
+
+**Type:** String (`"low"`, `"normal"`, or `"critical"`)
+**Default:** `"normal"`
+**Required:** No
+
+Sets the urgency level passed to `notify-send` for all voxtype notifications.
+
+On GNOME, notifications with `"low"` urgency are delivered to the notification drawer without showing as a popup banner. Use `"normal"` (the default) if you want notifications to pop up on screen. Use `"critical"` if you want notifications that persist until dismissed.
+
+Unknown values fall back to `"normal"`.
+
+**Example:**
+```toml
+[output.notification]
+urgency = "normal"  # "low" | "normal" | "critical"
+```
+
 ### type_delay_ms
 
 **Type:** Integer

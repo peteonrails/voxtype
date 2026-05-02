@@ -931,10 +931,33 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// Engines whose ONNX graphs MIGraphX 7.2 can't compile cleanly. On the
+/// AMD-targeted binary they fall back to CPU even though the GPU is
+/// registered for Parakeet. Surfaces a small `(CPU on AMD GPU)` tag in
+/// the picker. Cohere is on this list because the int8 community export
+/// uses MatMulNBits(bits=8) which MIGraphX 7.2 rejects; will move off
+/// once an int4 / FP16 export ships.
+const AMD_CPU_ONLY_ENGINES: &[&str] = &[
+    "moonshine",
+    "sensevoice",
+    "paraformer",
+    "dolphin",
+    "omnilingual",
+    "cohere",
+];
+
+fn engine_value_for_display(engine: &str) -> String {
+    if cfg!(feature = "onnx-migraphx-enabled") && AMD_CPU_ONLY_ENGINES.contains(&engine) {
+        format!("{}  (CPU on AMD GPU)", engine)
+    } else {
+        engine.to_string()
+    }
+}
+
 fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String) {
     let f = &state.fields;
     match fid {
-        FieldId::Engine => ("Engine", state.engine.clone()),
+        FieldId::Engine => ("Engine", engine_value_for_display(&state.engine)),
 
         FieldId::WModel => ("Whisper · model", f.w_model.clone()),
         FieldId::WMode => ("Whisper · execution mode", f.w_mode.clone()),

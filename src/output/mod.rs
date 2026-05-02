@@ -174,11 +174,22 @@ pub fn engine_icon(engine: crate::config::TranscriptionEngine) -> &'static str {
     }
 }
 
+/// Validate notification urgency, falling back to "normal" for unknown values.
+///
+/// notify-send only accepts "low", "normal", or "critical".
+pub fn sanitize_urgency(urgency: &str) -> &str {
+    match urgency {
+        "low" | "normal" | "critical" => urgency,
+        _ => "normal",
+    }
+}
+
 /// Send a transcription notification with optional engine icon
 pub async fn send_transcription_notification(
     text: &str,
     show_engine_icon: bool,
     engine: crate::config::TranscriptionEngine,
+    urgency: &str,
 ) {
     // Truncate preview for notification (use chars() to handle multi-byte UTF-8)
     let preview = if text.chars().count() > 80 {
@@ -193,10 +204,11 @@ pub async fn send_transcription_notification(
         "Transcribed".to_string()
     };
 
+    let urgency_arg = format!("--urgency={}", sanitize_urgency(urgency));
     let _ = Command::new("notify-send")
         .args([
             "--app-name=Voxtype",
-            "--urgency=low",
+            &urgency_arg,
             "--expire-time=3000",
             &title,
             &preview,
@@ -551,5 +563,20 @@ mod tests {
         std::env::remove_var("YDOTOOL_SOCKET");
 
         assert_eq!(result, Some(sock_path));
+    }
+
+    #[test]
+    fn test_sanitize_urgency_valid() {
+        assert_eq!(sanitize_urgency("low"), "low");
+        assert_eq!(sanitize_urgency("normal"), "normal");
+        assert_eq!(sanitize_urgency("critical"), "critical");
+    }
+
+    #[test]
+    fn test_sanitize_urgency_invalid_falls_back_to_normal() {
+        assert_eq!(sanitize_urgency(""), "normal");
+        assert_eq!(sanitize_urgency("LOW"), "normal");
+        assert_eq!(sanitize_urgency("urgent"), "normal");
+        assert_eq!(sanitize_urgency("--rm -rf /"), "normal");
     }
 }

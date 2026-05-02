@@ -76,7 +76,10 @@ impl ParaformerTranscriber {
         let tokens = ctc::load_tokens(&tokens_path)?;
         tracing::debug!("Loaded {} tokens", tokens.len());
 
-        // Create ONNX session
+        // Create ONNX session.
+        // No GPU EP registration: Paraformer runs on the CPU EP only.
+        // MIGraphX 7.2 segfaults during model load on this graph; we
+        // keep the engine on CPU on the AMD-targeted binary.
         let session = Session::builder()
             .map_err(|e| {
                 TranscribeError::InitFailed(format!("ONNX session builder failed: {}", e))

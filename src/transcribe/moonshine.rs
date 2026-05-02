@@ -117,7 +117,11 @@ impl MoonshineTranscriber {
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| TranscribeError::InitFailed(format!("Failed to load tokenizer: {}", e)))?;
 
-        // Create ONNX sessions
+        // Create ONNX sessions.
+        // No GPU EP registration: Moonshine runs on the CPU EP only.
+        // MIGraphX 7.2 can't compile the encoder-decoder `If` op (then/else
+        // sub-graphs have different output shapes), so we keep the engine
+        // on CPU on the AMD-targeted binary.
         let encoder = Session::builder()
             .map_err(|e| {
                 TranscribeError::InitFailed(format!("ONNX encoder session builder failed: {}", e))

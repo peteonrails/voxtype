@@ -70,7 +70,11 @@ impl OmnilingualTranscriber {
         let tokens = ctc::load_tokens(&tokens_path)?;
         tracing::debug!("Loaded {} tokens", tokens.len());
 
-        // Create ONNX session
+        // Create ONNX session.
+        // No GPU EP registration: Omnilingual runs on the CPU EP only.
+        // MIGraphX 7.2 produces garbled output and pays a 65s+ first-call
+        // compile penalty on this graph, so we keep the engine on CPU on
+        // the AMD-targeted binary.
         let session = Session::builder()
             .map_err(|e| {
                 TranscribeError::InitFailed(format!("ONNX session builder failed: {}", e))

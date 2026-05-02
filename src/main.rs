@@ -89,8 +89,13 @@ async fn main() -> anyhow::Result<()> {
             .init();
     }
 
-    // Load configuration
-    let config_path = cli.config.clone().or_else(config::Config::default_path);
+    // Load configuration. config_path tracks the file we actually loaded (or
+    // would load), so subprocess transcribers can reuse the same source.
+    let config_path = cli
+        .config
+        .clone()
+        .or_else(config::Config::resolve_existing_path)
+        .or_else(config::Config::default_path);
     let mut config = config::load_config(cli.config.as_deref())?;
 
     // Apply CLI overrides
@@ -1697,6 +1702,7 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
         "  on_transcription = {}",
         config.output.notification.on_transcription
     );
+    println!("  urgency = {:?}", config.output.notification.urgency);
 
     println!("\n[status]");
     println!("  icon_theme = {:?}", config.status.icon_theme);
@@ -1719,10 +1725,14 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
     setup::print_output_chain_status(&output_status);
 
     println!("\n---");
-    println!(
-        "Config file: {:?}",
-        config::Config::default_path().unwrap_or_else(|| PathBuf::from("(not found)"))
-    );
+    match config::Config::resolve_existing_path() {
+        Some(path) => println!("Config file: {:?} (loaded)", path),
+        None => println!(
+            "Config file: {:?} (not found, using defaults; system fallback {:?} also missing)",
+            config::Config::default_path().unwrap_or_else(|| PathBuf::from("(unknown)")),
+            config::Config::system_path()
+        ),
+    }
     println!("Models dir: {:?}", config::Config::models_dir());
 
     Ok(())

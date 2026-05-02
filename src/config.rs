@@ -239,6 +239,11 @@ on_recording_stop = false
 # Show notification with transcribed text after transcription completes
 on_transcription = true
 
+# Notification urgency level: "low", "normal", or "critical".
+# On GNOME, "low" notifications are delivered to the drawer without a popup banner.
+# Use "normal" (default) to ensure notifications appear as banners.
+# urgency = "normal"
+
 # [text]
 # Text processing options (word replacements, spoken punctuation)
 #
@@ -1635,6 +1640,15 @@ pub struct NotificationConfig {
     /// Show engine icon in notification title (🦜 for Parakeet, 🗣️ for Whisper)
     #[serde(default)]
     pub show_engine_icon: bool,
+
+    /// Notification urgency level: "low", "normal", or "critical".
+    /// On GNOME, "low" notifications go straight to the drawer without a popup banner.
+    #[serde(default = "default_notification_urgency")]
+    pub urgency: String,
+}
+
+fn default_notification_urgency() -> String {
+    "normal".to_string()
 }
 
 impl Default for NotificationConfig {
@@ -1644,6 +1658,7 @@ impl Default for NotificationConfig {
             on_recording_stop: false,
             on_transcription: true,
             show_engine_icon: false,
+            urgency: default_notification_urgency(),
         }
     }
 }
@@ -2016,10 +2031,38 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Get the default config file path
+    /// System-wide config path used as a fallback when no user config exists.
+    pub const SYSTEM_PATH: &'static str = "/etc/voxtype/config.toml";
+
+    /// Get the default user config file path (XDG)
     pub fn default_path() -> Option<PathBuf> {
         directories::ProjectDirs::from("", "", "voxtype")
             .map(|dirs| dirs.config_dir().join("config.toml"))
+    }
+
+    /// Get the system-wide config file path.
+    pub fn system_path() -> PathBuf {
+        PathBuf::from(Self::SYSTEM_PATH)
+    }
+
+    /// Resolve which config file should actually be loaded, in priority order:
+    /// 1. User config (`~/.config/voxtype/config.toml`)
+    /// 2. System-wide config (`/etc/voxtype/config.toml`)
+    ///
+    /// Returns `None` if neither exists, in which case the caller should fall
+    /// back to built-in defaults. This does not consider the `--config` CLI
+    /// flag; callers handle that explicitly.
+    pub fn resolve_existing_path() -> Option<PathBuf> {
+        if let Some(user) = Self::default_path() {
+            if user.exists() {
+                return Some(user);
+            }
+        }
+        let system = Self::system_path();
+        if system.exists() {
+            return Some(system);
+        }
+        None
     }
 
     /// Get the runtime directory for ephemeral files (state, sockets)
@@ -2186,8 +2229,12 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     // Start with defaults
     let mut config = Config::default();
 
-    // Determine config file path
-    let config_path = path.map(PathBuf::from).or_else(Config::default_path);
+    // Determine config file path. If --config wasn't passed, walk the
+    // documented lookup chain: user config -> /etc/voxtype/config.toml.
+    let config_path = match path {
+        Some(p) => Some(PathBuf::from(p)),
+        None => Config::resolve_existing_path(),
+    };
 
     // Load from file if it exists
     if let Some(ref path) = config_path {
@@ -2201,6 +2248,10 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
         } else {
             tracing::debug!("Config file not found at {:?}, using defaults", path);
         }
+    } else {
+        tracing::debug!(
+            "No config file found at user or system path, using built-in defaults"
+        );
     }
 
     // Override from environment variables
@@ -3921,5 +3972,43 @@ mod tests {
 
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.hotkey.profile_modifiers.is_empty());
+    }
+
+    #[test]
+    fn test_system_path_constant() {
+        assert_eq!(Config::system_path(), PathBuf::from("/etc/voxtype/config.toml"));
+        assert_eq!(Config::SYSTEM_PATH, "/etc/voxtype/config.toml");
+    }
+
+    #[test]
+    fn test_load_config_explicit_path() {
+        // Explicit --config should always be used regardless of fallback.
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+                [hotkey]
+                key = "F12"
+
+                [audio]
+                device = "default"
+                sample_rate = 16000
+                max_duration_secs = 30
+
+                [whisper]
+                model = "tiny.en"
+                language = "en"
+
+                [output]
+                mode = "clipboard"
+            "#,
+        )
+        .unwrap();
+
+        let config = load_config(Some(&config_path)).unwrap();
+        assert_eq!(config.hotkey.key, "F12");
+        assert_eq!(config.whisper.model, "tiny.en");
+        assert_eq!(config.output.mode, OutputMode::Clipboard);
     }
 }

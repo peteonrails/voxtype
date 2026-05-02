@@ -12,12 +12,128 @@
 
 use serde::Serialize;
 use std::fs;
-use std::os::unix::fs::symlink;
+use std::io::Write;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const LIB_DIR: &str = "/usr/lib/voxtype";
 pub const SYSTEM_BIN: &str = "/usr/bin/voxtype";
+
+/// Install `/usr/bin/voxtype` so it dispatches to `binary_path`. CPU-only
+/// variants get a plain symlink; GPU/ONNX variants whose binary lives in
+/// a /usr/lib/voxtype/<variant>/ subdirectory next to companion ONNX
+/// Runtime provider .so files get a thin shell wrapper that `exec`s the
+/// canonical real binary path.
+///
+/// Why the wrapper: ORT's CUDA/MIGraphX EPs resolve their provider .so
+/// files from `argv[0]`'s dirname (not /proc/self/exe). A plain symlink
+/// at /usr/bin/voxtype leaves argv[0] = "/usr/bin/voxtype", so ORT
+/// searches /usr/bin/ for libonnxruntime_providers_*.so, doesn't find
+/// them, and silently falls back to CPU. `exec`ing the real binary path
+/// replaces argv[0] with that path, so ORT searches the right subdir.
+///
+/// `binary_path` may be the top-level convenience symlink (e.g.
+/// /usr/lib/voxtype/voxtype-onnx-migraphx) or the canonical real path;
+/// this function canonicalizes before deciding wrapper vs symlink.
+pub fn install_active_binary(active_bin: &str, binary_path: &Path) -> anyhow::Result<()> {
+    let canonical = fs::canonicalize(binary_path).unwrap_or_else(|_| binary_path.to_path_buf());
+
+    let needs_wrapper = canonical
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        .map(|name| name.starts_with("cuda-") || name == "migraphx")
+        .unwrap_or(false);
+
+    if fs::symlink_metadata(active_bin).is_ok() {
+        fs::remove_file(active_bin).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to remove existing {} (need sudo?): {}\n\
+                 Try: sudo voxtype setup onnx --enable",
+                active_bin,
+                e
+            )
+        })?;
+    }
+
+    if needs_wrapper {
+        // MIGraphX needs a writeable model-cache directory or its runtime
+        // fails to save compiled graphs and inference errors out (silent
+        // CPU fallback isn't available — the EP fails the call). Default
+        // to $XDG_CACHE_HOME/voxtype/migraphx, honoring any user override.
+        let is_migraphx = canonical
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            == Some("migraphx");
+        let migraphx_env = if is_migraphx {
+            "\
+             : \"${ORT_MIGRAPHX_MODEL_CACHE_PATH:=${XDG_CACHE_HOME:-$HOME/.cache}/voxtype/migraphx}\"\n\
+             mkdir -p \"$ORT_MIGRAPHX_MODEL_CACHE_PATH\"\n\
+             export ORT_MIGRAPHX_MODEL_CACHE_PATH\n"
+        } else {
+            ""
+        };
+        let wrapper = format!(
+            "#!/bin/sh\n\
+             # voxtype dispatch wrapper.\n\
+             # Execs the GPU/ONNX binary by canonical path so ORT's argv[0]\n\
+             # based provider .so lookup resolves to the right subdirectory.\n\
+             # Managed by `voxtype setup onnx --enable` and the AUR package's\n\
+             # post_install / post_upgrade hooks; do not edit by hand.\n\
+             {}\
+             exec {} \"$@\"\n",
+            migraphx_env,
+            canonical.display()
+        );
+        let mut f = fs::File::create(active_bin).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to create {} (need sudo?): {}\n\
+                 Try: sudo voxtype setup onnx --enable",
+                active_bin,
+                e
+            )
+        })?;
+        f.write_all(wrapper.as_bytes())?;
+        f.sync_all()?;
+        let mut perms = fs::metadata(active_bin)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(active_bin, perms)?;
+    } else {
+        symlink(binary_path, active_bin).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to create symlink (need sudo?): {}\n\
+                 Try: sudo voxtype setup onnx --enable",
+                e
+            )
+        })?;
+    }
+
+    let _ = Command::new("restorecon").arg(active_bin).status();
+    Ok(())
+}
+
+/// Read /usr/bin/voxtype and return the canonical real binary it dispatches
+/// to, regardless of whether it's a symlink or a wrapper script. Used by
+/// the AUR pre-upgrade flow (and equivalent) to preserve the user's chosen
+/// backend across package upgrades.
+pub fn resolve_active_binary(active_bin: &str) -> Option<PathBuf> {
+    let meta = fs::symlink_metadata(active_bin).ok()?;
+    if meta.file_type().is_symlink() {
+        fs::canonicalize(active_bin).ok()
+    } else if meta.file_type().is_file() {
+        let content = fs::read_to_string(active_bin).ok()?;
+        for line in content.lines() {
+            if let Some(rest) = line.trim().strip_prefix("exec ") {
+                return rest.split_whitespace().next().map(PathBuf::from);
+            }
+        }
+        None
+    } else {
+        None
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -365,7 +481,15 @@ pub fn detect_install_kind(binary_path: &Path) -> InstallKind {
 /// active. Returns `None` for source installs, missing symlinks, or unknown
 /// targets.
 pub fn active_variant() -> Option<Variant> {
-    let target = fs::read_link(SYSTEM_BIN).ok()?;
+    // Handle both shapes /usr/bin/voxtype can take: a symlink (CPU
+    // variants) or a wrapper script (GPU/ONNX variants whose binary
+    // lives in a /usr/lib/voxtype/<variant>/ subdir alongside companion
+    // .so files). resolve_active_binary returns the canonical real
+    // binary path in both cases; we look up the variant from its
+    // filename. Falls back to the legacy fs::read_link path for
+    // robustness on edge cases.
+    let target = resolve_active_binary(SYSTEM_BIN)
+        .or_else(|| fs::read_link(SYSTEM_BIN).ok())?;
     let name = target.file_name()?.to_str()?;
     Variant::from_binary_name(name)
 }
@@ -475,25 +599,7 @@ pub fn switch_to(variant: Variant) -> anyhow::Result<()> {
         );
     }
 
-    if Path::new(SYSTEM_BIN).exists() || fs::symlink_metadata(SYSTEM_BIN).is_ok() {
-        fs::remove_file(SYSTEM_BIN).map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to remove existing symlink (need sudo?): {}\n\
-                 Try: sudo voxtype setup onnx --enable",
-                e
-            )
-        })?;
-    }
-
-    symlink(&binary_path, SYSTEM_BIN).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to create symlink (need sudo?): {}\n\
-             Try: sudo voxtype setup onnx --enable",
-            e
-        )
-    })?;
-
-    let _ = Command::new("restorecon").arg(SYSTEM_BIN).status();
+    install_active_binary(SYSTEM_BIN, &binary_path)?;
 
     Ok(())
 }
