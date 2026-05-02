@@ -475,6 +475,7 @@ mod tests {
         // Speech covers the entire buffer
         let (start, end) = segments[0];
         assert_eq!(start, 0);
+        assert_eq!(end, speech.len());
     }
 
     #[test]

@@ -308,6 +308,30 @@ on_transcription = true
 # output_mode = "clipboard"
 "#;
 
+/// Return the default config content with platform-appropriate hotkey
+pub fn default_config_content() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        DEFAULT_CONFIG
+            .replace(
+                "key = \"SCROLLLOCK\"",
+                "key = \"FN\"",
+            )
+            .replace(
+                "# Common choices: SCROLLLOCK, PAUSE, RIGHTALT, F13-F24",
+                "# Common choices: FN, RIGHTALT, F13-F24",
+            )
+            .replace(
+                "# Use `evtest` to find key names for your keyboard",
+                "# FN (Globe key) is recommended on macOS",
+            )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        DEFAULT_CONFIG.to_string()
+    }
+}
+
 /// Hotkey activation mode
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -472,7 +496,14 @@ pub struct AudioFeedbackConfig {
 }
 
 fn default_hotkey_key() -> String {
-    "SCROLLLOCK".to_string()
+    #[cfg(target_os = "macos")]
+    {
+        "FN".to_string()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "SCROLLLOCK".to_string()
+    }
 }
 
 fn default_sound_theme() -> String {
@@ -1215,11 +1246,10 @@ impl Default for OmnilingualConfig {
 }
 
 /// Transcription engine selection (which ASR technology to use)
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TranscriptionEngine {
-    /// Use Whisper (whisper.cpp via whisper-rs) - default
-    #[default]
+    /// Use Whisper (whisper.cpp via whisper-rs)
     Whisper,
     /// Use Parakeet (NVIDIA's FastConformer via ONNX Runtime)
     /// Requires: cargo build --features parakeet
@@ -1315,6 +1345,12 @@ impl Default for VadConfig {
             min_speech_duration_ms: default_min_speech_duration_ms(),
             model: None,
         }
+    }
+}
+
+impl Default for TranscriptionEngine {
+    fn default() -> Self {
+        TranscriptionEngine::Whisper
     }
 }
 
@@ -1914,7 +1950,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             hotkey: HotkeyConfig {
-                key: "SCROLLLOCK".to_string(),
+                key: default_hotkey_key(),
                 modifiers: vec![],
                 mode: ActivationMode::default(),
                 enabled: true,
@@ -2389,7 +2425,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.hotkey.key, "SCROLLLOCK");
+        assert_eq!(config.hotkey.key, default_hotkey_key());
         assert_eq!(config.hotkey.mode, ActivationMode::PushToTalk);
         assert_eq!(config.audio.sample_rate, 16000);
         assert!(!config.audio.feedback.enabled);
@@ -2457,7 +2493,7 @@ mod tests {
 
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(!config.hotkey.enabled);
-        assert_eq!(config.hotkey.key, "SCROLLLOCK"); // defaults to SCROLLLOCK
+        assert_eq!(config.hotkey.key, default_hotkey_key()); // platform default
     }
 
     #[test]

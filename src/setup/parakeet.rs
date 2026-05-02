@@ -352,6 +352,7 @@ pub fn disable() -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
     fn parakeet_backend_round_trip() {
         for b in [
             ParakeetBackend::Avx2,

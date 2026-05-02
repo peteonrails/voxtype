@@ -135,9 +135,8 @@ fn tokens_to_string(
 /// Format: each line is "token_string token_id" (space-separated).
 /// The token string may contain spaces, so we split from the right.
 pub fn load_tokens(path: &Path) -> Result<HashMap<u32, String>, TranscribeError> {
-    let content = std::fs::read_to_string(path).map_err(|e| {
-        TranscribeError::InitFailed(format!("Failed to read tokens.txt: {}", e))
-    })?;
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| TranscribeError::InitFailed(format!("Failed to read tokens.txt: {}", e)))?;
 
     let mut tokens = HashMap::new();
     for line in content.lines() {
@@ -174,11 +173,7 @@ mod tests {
     fn test_load_tokens() {
         let temp_dir = TempDir::new().unwrap();
         let tokens_path = temp_dir.path().join("tokens.txt");
-        fs::write(
-            &tokens_path,
-            "<blank> 0\n<sos/eos> 1\nhello 2\nworld 3\n",
-        )
-        .unwrap();
+        fs::write(&tokens_path, "<blank> 0\n<sos/eos> 1\nhello 2\nworld 3\n").unwrap();
 
         let tokens = load_tokens(&tokens_path).unwrap();
         assert_eq!(tokens.get(&0), Some(&"<blank>".to_string()));

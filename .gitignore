@@ -2,6 +2,9 @@
 /target
 /dist
 
+# Cached prebuilt downloads (e.g. Microsoft ONNX Runtime for macOS builds)
+/.cache/
+
 # AUR repos (nested git repos)
 /packaging/arch/
 /packaging/arch-bin/

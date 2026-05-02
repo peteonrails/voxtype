@@ -108,7 +108,7 @@ fn wrap_text(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::meeting::data::{MeetingMetadata, Transcript, TranscriptSegment};
+    use crate::meeting::data::TranscriptSegment;
 
     fn create_test_meeting() -> MeetingData {
         let mut meeting = MeetingData::new(Some("Test Meeting".to_string()));

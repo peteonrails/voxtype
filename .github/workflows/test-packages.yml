@@ -43,7 +43,12 @@ jobs:
             cmake \
             ruby \
             ruby-dev \
-            build-essential
+            build-essential \
+            libgtk-3-dev \
+            libglib2.0-dev \
+            libx11-dev \
+            libxi-dev \
+            libxtst-dev
           sudo gem install fpm
 
       - name: Cache cargo registry

@@ -23,6 +23,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 ENV VERSION=${VERSION}
 
 # Install build dependencies (no Vulkan - see header comment)
+# X11 and GTK deps required for rdev (hotkeys) and tray-icon crates
 RUN apt-get update && apt-get install -y \
     curl \
     build-essential \
@@ -30,6 +31,12 @@ RUN apt-get update && apt-get install -y \
     cmake \
     pkg-config \
     libasound2-dev \
+    libx11-dev \
+    libxi-dev \
+    libxtst-dev \
+    libgtk-3-dev \
+    libglib2.0-dev \
+    libappindicator3-dev \
     git \
     binutils \
     && rm -rf /var/lib/apt/lists/*
@@ -73,5 +80,6 @@ RUN echo "=== Verifying AVX2 binary ===" \
 # Output stage - copy binary to /output volume
 CMD mkdir -p /output \
     && cp /tmp/voxtype-avx2 /output/voxtype-${VERSION}-linux-x86_64-avx2 \
+    && chmod 755 /output/voxtype-${VERSION}-linux-x86_64-avx2 \
     && echo "Binary copied to /output:" \
     && ls -la /output/voxtype-*

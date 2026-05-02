@@ -703,16 +703,15 @@ fn detect_best_parakeet_gpu_backend() -> Option<(&'static str, &'static str)> {
     }
 
     // Helper to find installed binary, preferring new name over legacy
-    let find_binary =
-        |new_name: &'static str, legacy_name: &'static str| -> Option<&'static str> {
-            if Path::new(VOXTYPE_LIB_DIR).join(new_name).exists() {
-                Some(new_name)
-            } else if Path::new(VOXTYPE_LIB_DIR).join(legacy_name).exists() {
-                Some(legacy_name)
-            } else {
-                None
-            }
-        };
+    let find_binary = |new_name: &'static str, legacy_name: &'static str| -> Option<&'static str> {
+        if Path::new(VOXTYPE_LIB_DIR).join(new_name).exists() {
+            Some(new_name)
+        } else if Path::new(VOXTYPE_LIB_DIR).join(legacy_name).exists() {
+            Some(legacy_name)
+        } else {
+            None
+        }
+    };
 
     // Check for AMD GPU and MIGraphX binary (legacy "rocm" name accepted via symlink)
     let has_amd = gpus.iter().any(|g| g.vendor == GpuVendor::Amd);
@@ -928,23 +927,20 @@ fn detect_best_cpu_backend() -> Backend {
 /// Detect the best ONNX CPU backend for this system
 fn detect_best_parakeet_cpu_backend() -> Option<&'static str> {
     // Helper to find installed binary, preferring new name over legacy
-    let find_binary =
-        |new_name: &'static str, legacy_name: &'static str| -> Option<&'static str> {
-            if Path::new(VOXTYPE_LIB_DIR).join(new_name).exists() {
-                Some(new_name)
-            } else if Path::new(VOXTYPE_LIB_DIR).join(legacy_name).exists() {
-                Some(legacy_name)
-            } else {
-                None
-            }
-        };
+    let find_binary = |new_name: &'static str, legacy_name: &'static str| -> Option<&'static str> {
+        if Path::new(VOXTYPE_LIB_DIR).join(new_name).exists() {
+            Some(new_name)
+        } else if Path::new(VOXTYPE_LIB_DIR).join(legacy_name).exists() {
+            Some(legacy_name)
+        } else {
+            None
+        }
+    };
 
     // Check for AVX-512 support
     if let Ok(cpuinfo) = fs::read_to_string("/proc/cpuinfo") {
         if cpuinfo.contains("avx512f") {
-            if let Some(binary) =
-                find_binary("voxtype-onnx-avx512", "voxtype-parakeet-avx512")
-            {
+            if let Some(binary) = find_binary("voxtype-onnx-avx512", "voxtype-parakeet-avx512") {
                 return Some(binary);
             }
         }

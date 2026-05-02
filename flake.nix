@@ -120,6 +120,7 @@
         onnxruntimeCuda = pkgsUnfree.onnxruntime.override { cudaSupport = true; };
         onnxruntimeRocm = pkgs.onnxruntime.override { rocmSupport = true; };
 
+
         # Base derivation for voxtype (unwrapped)
         mkVoxtypeUnwrapped = { pname ? "voxtype", features ? [], extraNativeBuildInputs ? [], extraBuildInputs ? [] }:
           pkgs.rustPlatform.buildRustPackage {
@@ -282,6 +283,7 @@
           ORT_LIB_LOCATION = "${onnxruntimeRocm}/lib";
         });
 
+
       in {
         packages = {
           # Wrapped packages (ready to use, runtime deps in PATH)
@@ -303,6 +305,7 @@
           # Legacy: rocm → migraphx (drop in v0.8.0)
           onnx-rocm = wrapOnnx { onnxruntime = onnxruntimeRocm; pkg = onnxMigraphxUnwrapped; extraWrapperArgs = migraphxWrapperArgs; };
           parakeet-rocm = wrapOnnx { onnxruntime = onnxruntimeRocm; pkg = onnxMigraphxUnwrapped; extraWrapperArgs = migraphxWrapperArgs; };
+
 
           # Unwrapped packages (for custom wrapping scenarios)
           voxtype-unwrapped = mkVoxtypeUnwrapped {};

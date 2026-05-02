@@ -94,6 +94,9 @@ pub enum TranscribeError {
 
     #[error("Remote server error: {0}")]
     RemoteError(String),
+
+    #[error("{0}")]
+    LicenseRequired(String),
 }
 
 /// Errors related to Voice Activity Detection
@@ -173,6 +176,7 @@ pub enum MeetingError {
 /// Result type alias using VoxtypeError
 pub type Result<T> = std::result::Result<T, VoxtypeError>;
 
+#[cfg(target_os = "linux")]
 impl From<evdev::Error> for HotkeyError {
     fn from(e: evdev::Error) -> Self {
         HotkeyError::Evdev(e.to_string())
