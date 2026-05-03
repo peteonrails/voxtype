@@ -255,6 +255,25 @@ impl Variant {
         }
     }
 
+    /// True if this variant's binary was compiled with the feature for the
+    /// given engine. Whisper variants only support `whisper`; ONNX variants
+    /// support every ONNX-based engine the project ships (parakeet,
+    /// moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere).
+    pub const fn supports_engine(self, engine: &str) -> bool {
+        match self.family() {
+            EngineFamily::Whisper => matches_str(engine, "whisper"),
+            EngineFamily::Onnx => {
+                matches_str(engine, "parakeet")
+                    || matches_str(engine, "moonshine")
+                    || matches_str(engine, "sensevoice")
+                    || matches_str(engine, "paraformer")
+                    || matches_str(engine, "dolphin")
+                    || matches_str(engine, "omnilingual")
+                    || matches_str(engine, "cohere")
+            }
+        }
+    }
+
     /// Reverse lookup. Accepts current names plus legacy `voxtype-parakeet*`
     /// names from before the ONNX rename.
     pub fn from_binary_name(name: &str) -> Option<Self> {
@@ -278,6 +297,91 @@ impl Variant {
             _ => None,
         }
     }
+}
+
+/// `const fn` doesn't allow `&str == &str` directly, but byte comparison works.
+const fn matches_str(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Engines that at least one installed variant in the inventory can run.
+/// Used by the TUI to filter the engine cycle list so users can't pick an
+/// engine the active binary won't be able to load.
+pub fn installed_engines(inv: &Inventory) -> std::collections::HashSet<&'static str> {
+    const ALL_ENGINES: &[&str] = &[
+        "whisper",
+        "parakeet",
+        "moonshine",
+        "sensevoice",
+        "paraformer",
+        "dolphin",
+        "omnilingual",
+        "cohere",
+    ];
+    let mut out = std::collections::HashSet::new();
+    for status in &inv.variants {
+        if !status.installed {
+            continue;
+        }
+        for &engine in ALL_ENGINES {
+            if status.variant.supports_engine(engine) {
+                out.insert(engine);
+            }
+        }
+    }
+    out
+}
+
+/// Pick the best installed variant capable of running `engine`. Preference
+/// order:
+///   1. The currently active variant if it already supports the engine
+///      (avoids unnecessary symlink swaps).
+///   2. A GPU variant matching detected hardware (CUDA on NVIDIA, MIGraphX
+///      on AMD, Vulkan as cross-vendor fallback for Whisper).
+///   3. AVX-512 if the host supports it.
+///   4. AVX2 (universal x86_64 fallback).
+/// Returns None when no installed variant supports the engine.
+pub fn best_variant_for_engine(inv: &Inventory, engine: &str) -> Option<Variant> {
+    let candidates: Vec<&VariantStatus> = inv
+        .variants
+        .iter()
+        .filter(|s| s.installed && s.variant.supports_engine(engine))
+        .collect();
+
+    if let Some(active) = inv.active_variant {
+        if candidates.iter().any(|s| s.variant == active) {
+            return Some(active);
+        }
+    }
+
+    let gpu_priority = |a: Acceleration| -> Option<u8> {
+        match a {
+            Acceleration::Cuda if inv.gpus.nvidia => Some(0),
+            Acceleration::Migraphx if inv.gpus.amd => Some(1),
+            Acceleration::Vulkan => Some(2),
+            Acceleration::Avx512 if inv.cpu.avx512 => Some(3),
+            Acceleration::Avx2 if inv.cpu.avx2 => Some(4),
+            _ => None,
+        }
+    };
+
+    candidates
+        .into_iter()
+        .filter_map(|s| gpu_priority(s.variant.acceleration()).map(|p| (p, s.variant)))
+        .min_by_key(|(p, _)| *p)
+        .map(|(_, v)| v)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

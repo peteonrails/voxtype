@@ -643,20 +643,47 @@ impl EngineState {
         match ed.save() {
             Ok(()) => {
                 self.dirty_since_load = false;
-                let pending = self.pending_variant_switch.take();
+                let pending_switch = self.pending_variant_switch.take();
+                let active_model = active_model_for_engine(&self.engine, &self.fields);
+                let download_needed = active_model
+                    .as_deref()
+                    .map(|m| !model_present_on_disk(m))
+                    .unwrap_or(false);
+
+                let next_action = match (pending_switch, download_needed, active_model.clone()) {
+                    (Some(v), true, Some(model)) => Action::SwitchVariantAndDownload {
+                        variant: v,
+                        engine: self.engine.clone(),
+                        model,
+                    },
+                    (Some(v), false, _) => Action::SwitchVariant(v),
+                    (None, true, Some(model)) => Action::DownloadModel {
+                        engine: self.engine.clone(),
+                        model,
+                    },
+                    _ => Action::None,
+                };
+
                 self.feedback = Some(Feedback {
                     level: FeedbackLevel::Ok,
-                    message: match pending {
-                        Some(v) => format!(
+                    message: match &next_action {
+                        Action::SwitchVariantAndDownload { variant, model, .. } => format!(
+                            "Saved. Switching to {} (sudo) and downloading `{}`…",
+                            variant.display(),
+                            model
+                        ),
+                        Action::SwitchVariant(v) => format!(
                             "Saved. Switching binary to {} (will prompt for sudo)…",
                             v.display()
                         ),
-                        None => format!("Saved to {}", ed.path().display()),
+                        Action::DownloadModel { model, .. } => {
+                            format!("Saved. Downloading model `{}`…", model)
+                        }
+                        _ => format!("Saved to {}", ed.path().display()),
                     },
                 });
-                if let Some(v) = pending {
-                    return Action::SwitchVariant(v);
-                }
+
+                return next_action;
             }
             Err(e) => {
                 self.feedback = Some(Feedback {
@@ -764,16 +791,28 @@ impl EngineState {
         let f = &mut self.fields;
         match field {
             FieldId::Engine => {
-                let idx = ENGINE_CHOICES
+                // Filter to engines for which at least one installed binary
+                // can be the active variant. On a tiered install this means
+                // /usr/bin/voxtype can be symlinked to a binary that has the
+                // matching feature; on a source build it means the running
+                // binary was compiled with that feature flag.
+                let installed = installed_engine_choices();
+                let filtered: Vec<&'static str> = ENGINE_CHOICES
+                    .iter()
+                    .copied()
+                    .filter(|e| installed.contains(e))
+                    .collect();
+                if filtered.is_empty() {
+                    // Nothing to cycle through; leave the engine unchanged.
+                    return;
+                }
+                let idx = filtered
                     .iter()
                     .position(|c| *c == self.engine)
                     .map(|i| i as i32)
                     .unwrap_or(0);
-                let n = (idx + delta).rem_euclid(ENGINE_CHOICES.len() as i32);
-                self.engine = ENGINE_CHOICES[n as usize].to_string();
-                // Clamp cursor into the new engine's row range; keep it at row 1
-                // when present so the user lands on the first engine-specific
-                // field.
+                let n = (idx + delta).rem_euclid(filtered.len() as i32);
+                self.engine = filtered[n as usize].to_string();
                 let max = self.rows().len().saturating_sub(1);
                 self.cursor = self.cursor.min(max);
                 self.refresh_binary_match();
@@ -850,6 +889,82 @@ impl EngineState {
         }
         self.dirty_since_load = true;
         self.feedback = None;
+    }
+}
+
+/// The model name for the active engine — what the daemon will try to load
+/// at startup. Used to decide whether the engine save needs to trigger a
+/// model download alongside (or instead of) a binary swap. Whisper is
+/// special-cased: the daemon resolves shorthand model names like `tiny.en`
+/// against built-in download URLs rather than a directory on disk, so we
+/// skip the on-disk check for Whisper. Returns None for unknown engines.
+fn active_model_for_engine(engine: &str, f: &AllFields) -> Option<String> {
+    match engine {
+        "whisper" => None,
+        "parakeet" => Some(f.pk_model.clone()),
+        "moonshine" => Some(f.mn_model.clone()),
+        "sensevoice" => Some(f.sv_model.clone()),
+        "paraformer" => Some(f.pf_model.clone()),
+        "dolphin" => Some(f.dol_model.clone()),
+        "omnilingual" => Some(f.om_model.clone()),
+        "cohere" => Some(f.co_model.clone()),
+        _ => None,
+    }
+}
+
+/// Engines (by name) the user can land on in the Engine cycle. Engines whose
+/// binary is not installed are excluded so users can't pick one and then have
+/// the daemon refuse to start. On a source build the compiled-in features
+/// govern instead.
+fn installed_engine_choices() -> std::collections::HashSet<&'static str> {
+    use crate::setup::binary::installed_engines;
+    let inv = binary::inventory();
+    if inv.install_kind == InstallKind::Source {
+        // Source: trust whatever Cargo features were compiled in. Whisper is
+        // always available because the no-features default still builds it.
+        let mut out = std::collections::HashSet::new();
+        out.insert("whisper");
+        for f in &inv.compiled_features {
+            // The Cargo feature names match the engine names exactly for the
+            // ONNX engines.
+            for engine in [
+                "parakeet",
+                "moonshine",
+                "sensevoice",
+                "paraformer",
+                "dolphin",
+                "omnilingual",
+                "cohere",
+            ] {
+                if *f == engine {
+                    out.insert(engine);
+                }
+            }
+        }
+        return out;
+    }
+    installed_engines(&inv)
+}
+
+/// Resolve where on disk a model directory lives. Mirrors the daemon's
+/// resolution path so the TUI's "is this downloaded?" check matches what
+/// the daemon will look for at load time.
+fn model_dir_on_disk(name: &str) -> std::path::PathBuf {
+    if let Some(dirs) = directories::ProjectDirs::from("io", "voxtype", "voxtype") {
+        return dirs.data_dir().join("models").join(name);
+    }
+    std::path::PathBuf::from(name)
+}
+
+/// True when the model directory exists with at least one file in it. We
+/// don't validate the file list — the daemon will surface specific missing
+/// pieces — but a fully empty or missing directory definitely needs a
+/// download before save.
+fn model_present_on_disk(name: &str) -> bool {
+    let dir = model_dir_on_disk(name);
+    match std::fs::read_dir(&dir) {
+        Ok(mut iter) => iter.next().is_some(),
+        Err(_) => false,
     }
 }
 

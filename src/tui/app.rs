@@ -25,7 +25,19 @@ pub enum Action {
     /// User has already answered the save-on-exit prompt (Save or Discard);
     /// terminate immediately without re-prompting.
     ForceQuit,
+    /// Move /usr/bin/voxtype to the named variant via pkexec.
     SwitchVariant(Variant),
+    /// Run `voxtype setup model <model>` to download a missing model. The
+    /// engine name is included only for human-readable feedback.
+    DownloadModel { engine: String, model: String },
+    /// Engine save needed BOTH a binary swap and a model download. Run them
+    /// in order — the symlink swap first so the post-download daemon
+    /// restart picks the right binary.
+    SwitchVariantAndDownload {
+        variant: Variant,
+        engine: String,
+        model: String,
+    },
 }
 
 /// Result of the most recent variant-switch attempt, displayed as a banner.
@@ -352,6 +364,26 @@ impl App {
         }
         self.last_switch = Some(SwitchOutcome { success, message });
         let _ = variant;
+        self.refresh_inventory();
+    }
+
+    /// Record the outcome of a `voxtype setup model` invocation onto the
+    /// same banner the variant-switch reuses, so the user sees it on the
+    /// General screen the next time they focus it.
+    pub fn record_download_attempt(
+        &mut self,
+        engine: &str,
+        model: &str,
+        result: Result<(), String>,
+    ) {
+        let (success, message) = match result {
+            Ok(()) => (
+                true,
+                format!("Downloaded {} model `{}`.", engine, model),
+            ),
+            Err(e) => (false, format!("Download `{}`: {}", model, e)),
+        };
+        self.last_switch = Some(SwitchOutcome { success, message });
         self.refresh_inventory();
     }
 }

@@ -163,10 +163,61 @@ fn dispatch_action(
             *terminal = enter_terminal()?;
             terminal.clear()?;
             app.record_switch_attempt(variant, outcome);
+            restart_voxtype_daemon(app);
+            Ok(LoopControl::Continue)
+        }
+        Action::DownloadModel { engine, model } => {
+            leave_terminal(terminal)?;
+            let outcome = run_setup_model(&engine, &model);
+            *terminal = enter_terminal()?;
+            terminal.clear()?;
+            app.record_download_attempt(&engine, &model, outcome);
+            restart_voxtype_daemon(app);
+            Ok(LoopControl::Continue)
+        }
+        Action::SwitchVariantAndDownload { variant, engine, model } => {
+            leave_terminal(terminal)?;
+            let switch_outcome = run_pkexec_switch(variant);
+            // Always attempt the download even if the switch failed: the
+            // download writes to ~/.local/share/voxtype/models, no symlink
+            // needed. The user can retry the switch from General afterwards.
+            let download_outcome = run_setup_model(&engine, &model);
+            *terminal = enter_terminal()?;
+            terminal.clear()?;
+            app.record_switch_attempt(variant, switch_outcome);
+            app.record_download_attempt(&engine, &model, download_outcome);
+            restart_voxtype_daemon(app);
             Ok(LoopControl::Continue)
         }
         Action::None => Ok(LoopControl::Continue),
     }
+}
+
+/// Run `voxtype setup model <name>` in the parent shell so the user sees the
+/// download progress. We invoke whichever voxtype is on PATH because that's
+/// the user's installed binary; the TUI's own image might be an
+/// uninstalled host build that doesn't have the engine feature flags.
+fn run_setup_model(engine: &str, model: &str) -> Result<(), String> {
+    let _ = engine;
+    let status = std::process::Command::new("voxtype")
+        .args(["setup", "model", model])
+        .status()
+        .map_err(|e| format!("could not invoke `voxtype setup model`: {}", e))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("voxtype setup model exited with {}", status))
+    }
+}
+
+/// Best-effort `systemctl --user restart voxtype` after a binary swap or
+/// model download so the changes take effect immediately. Logs the outcome
+/// to the General switch-outcome banner so the user sees it on next focus.
+fn restart_voxtype_daemon(app: &mut App) {
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "restart", "voxtype"])
+        .status();
+    app.refresh_inventory();
 }
 
 /// Routes keypresses while the save-on-exit prompt is showing.
