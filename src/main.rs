@@ -1186,8 +1186,18 @@ struct ExtendedStatusInfo {
 
 impl ExtendedStatusInfo {
     fn from_config(config: &config::Config) -> Self {
-        // Try Whisper backend detection first, then fall back to ONNX backend detection
-        let backend = if let Some(b) = setup::gpu::detect_current_backend() {
+        // Resolve the actual backend through the inventory machinery — this is
+        // wrapper-script aware (see setup::binary::active_variant) so it
+        // reports correctly whether /usr/bin/voxtype is a plain symlink or the
+        // exec-wrapper used by GPU/ONNX variants. The legacy
+        // setup::gpu::detect_current_backend() path was Whisper-focused: it
+        // would treat any wrapper script as Backend::Native, which is why
+        // waybar previously showed "CPU (native)" while MIGraphX or CUDA was
+        // actually doing the work.
+        let inv = setup::binary::inventory();
+        let backend = if let Some(v) = inv.active_variant {
+            backend_display_for_variant(v).to_string()
+        } else if let Some(b) = setup::gpu::detect_current_backend() {
             match b {
                 setup::gpu::Backend::Cpu => "CPU (legacy)",
                 setup::gpu::Backend::Native => "CPU (native)",
@@ -1207,6 +1217,28 @@ impl ExtendedStatusInfo {
             device: config.audio.device.clone(),
             backend,
         }
+    }
+}
+
+/// User-facing backend label for an active variant. Combines engine family
+/// (Whisper vs ONNX) with the EP/acceleration so both pieces of info land in
+/// waybar tooltips and `voxtype info` output. Whisper variants get a "CPU"/"GPU"
+/// prefix that matches the legacy display strings; ONNX variants spell out the
+/// EP name explicitly so users can tell a CUDA-12 install apart from CUDA-13.
+fn backend_display_for_variant(v: setup::binary::Variant) -> &'static str {
+    use setup::binary::Variant;
+    match v {
+        Variant::WhisperAvx2 => "CPU (AVX2)",
+        Variant::WhisperAvx512 => "CPU (AVX-512)",
+        Variant::WhisperVulkan => "GPU (Vulkan)",
+        Variant::WhisperNative => "CPU (native)",
+        Variant::OnnxAvx2 => "ONNX CPU (AVX2)",
+        Variant::OnnxAvx512 => "ONNX CPU (AVX-512)",
+        Variant::OnnxCuda12 => "ONNX GPU (CUDA 12)",
+        Variant::OnnxCuda13 => "ONNX GPU (CUDA 13)",
+        Variant::OnnxCuda => "ONNX GPU (CUDA)",
+        Variant::OnnxMigraphx => "ONNX GPU (MIGraphX)",
+        Variant::OnnxNative => "ONNX CPU (native)",
     }
 }
 
