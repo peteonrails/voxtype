@@ -287,6 +287,35 @@ fn spawn_ipc_worker(
         .expect("spawn ipc worker thread");
 }
 
+/// Best-effort monitor height in physical pixels for translating the
+/// fractional `top_margin` config into a layer-shell pixel offset.
+///
+/// Tries the GDK display's currently-focused monitor first (which is the
+/// monitor the user is most likely looking at, and the one swayosd targets
+/// via `--monitor`). If that fails — display unavailable, no monitors
+/// enumerated — returns None and the caller falls back to a conservative
+/// default.
+fn focused_monitor_height_px() -> Option<i32> {
+    use gtk4::gdk;
+    let display = gdk::Display::default()?;
+    let monitors = display.monitors();
+    // `monitors` is a GListModel; pull the first item with a non-zero
+    // height. On multi-monitor setups this picks whichever the compositor
+    // ordered first, which lines up with the layer-shell default in
+    // practice.
+    for i in 0..monitors.n_items() {
+        if let Some(obj) = monitors.item(i) {
+            if let Ok(monitor) = obj.downcast::<gdk::Monitor>() {
+                let h = monitor.geometry().height();
+                if h > 0 {
+                    return Some(h);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Build the GTK window, attach layer-shell config, mount the DrawingArea,
 /// and start the redraw tick.
 fn build_window(app: &Application, cfg: &OsdConfig, palette: Palette, state: Arc<SharedState>) {
@@ -304,33 +333,61 @@ fn build_window(app: &Application, cfg: &OsdConfig, palette: Palette, state: Arc
     window.set_keyboard_mode(KeyboardMode::None);
     window.set_namespace(Some("voxtype-osd"));
 
-    // Anchor edges from the configured position. Margin is applied to
-    // every anchored edge for the simple cases.
-    let (anchor_top, anchor_bottom, anchor_left, anchor_right) = match cfg.position {
-        OsdPosition::BottomCenter => (false, true, false, false),
-        OsdPosition::TopCenter => (true, false, false, false),
-        OsdPosition::BottomLeft => (false, true, true, false),
-        OsdPosition::BottomRight => (false, true, false, true),
-        OsdPosition::TopLeft => (true, false, true, false),
-        OsdPosition::TopRight => (true, false, false, true),
-    };
-    window.set_anchor(Edge::Top, anchor_top);
-    window.set_anchor(Edge::Bottom, anchor_bottom);
-    window.set_anchor(Edge::Left, anchor_left);
-    window.set_anchor(Edge::Right, anchor_right);
+    // Centered positions use swayosd-style fractional placement:
+    // anchor only to Edge::Top with a margin of `top_margin × monitor_height`
+    // and let the layer shell center horizontally. Matches what users
+    // already see for volume/brightness/media-key feedback so the voxtype
+    // OSD lands in the familiar band.
+    //
+    // Corner positions still use the absolute `margin_px` model — fractional
+    // doesn't make sense there.
+    let centered = matches!(
+        cfg.position,
+        OsdPosition::BottomCenter | OsdPosition::TopCenter
+    );
 
-    let m = cfg.margin_px as i32;
-    if anchor_top {
-        window.set_margin(Edge::Top, m);
-    }
-    if anchor_bottom {
-        window.set_margin(Edge::Bottom, m);
-    }
-    if anchor_left {
-        window.set_margin(Edge::Left, m);
-    }
-    if anchor_right {
-        window.set_margin(Edge::Right, m);
+    if centered {
+        // Resolve monitor height to translate the fractional offset into
+        // pixels. Falls back to a conservative 1080 if the display can't be
+        // queried (extremely rare on Wayland-only systems where layer-shell
+        // is supported at all).
+        let monitor_height = focused_monitor_height_px().unwrap_or(1080);
+        let top_px = (cfg.top_margin.clamp(0.0, 1.0) * monitor_height as f32) as i32;
+
+        window.set_anchor(Edge::Top, true);
+        window.set_anchor(Edge::Bottom, false);
+        // Don't anchor Left/Right -> layer shell auto-centers horizontally.
+        window.set_anchor(Edge::Left, false);
+        window.set_anchor(Edge::Right, false);
+        window.set_margin(Edge::Top, top_px);
+    } else {
+        // Corner positions: legacy anchor + uniform pixel margin behavior.
+        let (anchor_top, anchor_bottom, anchor_left, anchor_right) = match cfg.position {
+            OsdPosition::BottomLeft => (false, true, true, false),
+            OsdPosition::BottomRight => (false, true, false, true),
+            OsdPosition::TopLeft => (true, false, true, false),
+            OsdPosition::TopRight => (true, false, false, true),
+            // Centered branch is handled above; unreachable here.
+            OsdPosition::BottomCenter | OsdPosition::TopCenter => unreachable!(),
+        };
+        window.set_anchor(Edge::Top, anchor_top);
+        window.set_anchor(Edge::Bottom, anchor_bottom);
+        window.set_anchor(Edge::Left, anchor_left);
+        window.set_anchor(Edge::Right, anchor_right);
+
+        let m = cfg.margin_px as i32;
+        if anchor_top {
+            window.set_margin(Edge::Top, m);
+        }
+        if anchor_bottom {
+            window.set_margin(Edge::Bottom, m);
+        }
+        if anchor_left {
+            window.set_margin(Edge::Left, m);
+        }
+        if anchor_right {
+            window.set_margin(Edge::Right, m);
+        }
     }
 
     // Don't reserve space on the output: the OSD floats over windows.

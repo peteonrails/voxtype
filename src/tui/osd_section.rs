@@ -27,6 +27,7 @@ pub struct OsdState {
     pub width_px: i64,
     pub height_px: i64,
     pub margin_px: i64,
+    pub top_margin: f64,
     pub opacity: f64,
     pub waveform_window_secs: f64,
     pub peak_decay_db_per_sec: f64,
@@ -44,6 +45,7 @@ pub enum Field {
     WidthPx,
     HeightPx,
     MarginPx,
+    TopMargin,
     Opacity,
     WaveformWindowSecs,
     PeakDecayDbPerSec,
@@ -58,6 +60,7 @@ impl Field {
         Field::WidthPx,
         Field::HeightPx,
         Field::MarginPx,
+        Field::TopMargin,
         Field::Opacity,
         Field::WaveformWindowSecs,
         Field::PeakDecayDbPerSec,
@@ -83,6 +86,9 @@ const POSITION_CHOICES: &[&str] = &[
 const WIDTH_CHOICES: &[i64] = &[200, 300, 400, 500, 600, 800, 1000];
 const HEIGHT_CHOICES: &[i64] = &[32, 40, 48, 56, 64, 80, 96];
 const MARGIN_CHOICES: &[i64] = &[0, 8, 16, 24, 32, 48, 64];
+// Mirrors swayosd's `--top-margin` semantics. Default 0.85 matches the
+// position users already see for volume/brightness panels.
+const TOP_MARGIN_CHOICES: &[f64] = &[0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95];
 const OPACITY_CHOICES: &[f64] = &[0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 1.0];
 const WAVEFORM_SECS_CHOICES: &[f64] = &[1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0];
 const PEAK_DECAY_CHOICES: &[f64] = &[1.0, 2.0, 4.0, 6.0, 8.0, 12.0, 20.0];
@@ -102,6 +108,7 @@ impl OsdState {
             width_px: ed.get_int(TABLE, "width_px").unwrap_or(400),
             height_px: ed.get_int(TABLE, "height_px").unwrap_or(48),
             margin_px: ed.get_int(TABLE, "margin_px").unwrap_or(24),
+            top_margin: ed.get_float(TABLE, "top_margin").unwrap_or(0.85),
             opacity: ed.get_float(TABLE, "opacity").unwrap_or(0.95),
             waveform_window_secs: ed
                 .get_float(TABLE, "waveform_window_secs")
@@ -130,6 +137,7 @@ impl OsdState {
         ed.set_int(TABLE, "width_px", self.width_px);
         ed.set_int(TABLE, "height_px", self.height_px);
         ed.set_int(TABLE, "margin_px", self.margin_px);
+        ed.set_float(TABLE, "top_margin", self.top_margin);
         ed.set_float(TABLE, "opacity", self.opacity);
         ed.set_float(TABLE, "waveform_window_secs", self.waveform_window_secs);
         ed.set_float(TABLE, "peak_decay_db_per_sec", self.peak_decay_db_per_sec);
@@ -174,6 +182,9 @@ impl OsdState {
             Field::WidthPx => self.width_px = cycle_int(WIDTH_CHOICES, self.width_px, delta),
             Field::HeightPx => self.height_px = cycle_int(HEIGHT_CHOICES, self.height_px, delta),
             Field::MarginPx => self.margin_px = cycle_int(MARGIN_CHOICES, self.margin_px, delta),
+            Field::TopMargin => {
+                self.top_margin = cycle_float(TOP_MARGIN_CHOICES, self.top_margin, delta)
+            }
             Field::Opacity => self.opacity = cycle_float(OPACITY_CHOICES, self.opacity, delta),
             Field::WaveformWindowSecs => {
                 self.waveform_window_secs =
@@ -257,6 +268,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             state.field == Field::MarginPx,
             "Margin (px)",
             state.margin_px.to_string(),
+        ),
+        FormRowSpec::new(
+            state.field == Field::TopMargin,
+            "Top margin (fraction)",
+            format!("{:.2}", state.top_margin),
         ),
         FormRowSpec::new(
             state.field == Field::Opacity,
@@ -379,11 +395,30 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
             heading("Margin (px)"),
             Line::from(""),
             Line::from(
-                "Distance from the screen edge for edge-anchored positions. \
-                 Ignored for *-center anchors.",
+                "Distance from the screen edge for corner anchors \
+                 (top-left, bottom-right, etc.). Ignored for centered \
+                 positions — those use Top margin (fraction) instead, so \
+                 the OSD lands in the same band as swayosd.",
             ),
             Line::from(""),
             dim("Default: 24."),
+        ],
+        Field::TopMargin => vec![
+            heading("Top margin (fraction)"),
+            Line::from(""),
+            Line::from(
+                "Vertical position of the OSD's top edge as a fraction of \
+                 the monitor's height. Mirrors swayosd-server's --top-margin \
+                 so voxtype lands in the same band as the volume / brightness \
+                 / media-key panels you already see.",
+            ),
+            Line::from(""),
+            Line::from(
+                "Only used when Position is bottom-center or top-center. \
+                 Corner anchors keep using Margin (px).",
+            ),
+            Line::from(""),
+            dim("Default: 0.85 (matches swayosd). 0.0 = top of screen, 1.0 = bottom."),
         ],
         Field::Opacity => vec![
             heading("Opacity"),
