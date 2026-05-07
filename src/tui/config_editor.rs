@@ -259,6 +259,26 @@ impl ConfigEditor {
             source: e,
         })?;
 
+        // Back up the existing on-disk config the first time the TUI saves.
+        // toml_edit reformats whitespace, comment placement, and key
+        // ordering on round-trip, so even a no-op save can produce a
+        // different-looking file. The backup gives users a fast undo if
+        // they ran the TUI on a hand-rolled config they liked the shape
+        // of. One-shot: existing .bak survives and is never overwritten,
+        // so we capture the user's actual original, not the prior TUI run.
+        if self.path.exists() {
+            let mut bak = self.path.clone();
+            let mut name = bak
+                .file_name()
+                .map(|n| n.to_os_string())
+                .unwrap_or_default();
+            name.push(".bak");
+            bak.set_file_name(name);
+            if !bak.exists() {
+                let _ = fs::copy(&self.path, &bak);
+            }
+        }
+
         let mut tmp = self.path.clone();
         let mut file_name = tmp
             .file_name()

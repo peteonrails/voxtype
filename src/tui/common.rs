@@ -288,16 +288,19 @@ fn split_at_cursor(s: &str, idx: usize) -> (String, String, String) {
 pub enum FeedbackLevel {
     Ok,
     Err,
+    Warn,
 }
 
 pub fn render_feedback(f: &mut Frame, area: Rect, level: FeedbackLevel, message: &str) {
     let style = match level {
         FeedbackLevel::Ok => Style::default().fg(Color::Green),
         FeedbackLevel::Err => Style::default().fg(Color::Red),
+        FeedbackLevel::Warn => Style::default().fg(Color::Yellow),
     };
     let prefix = match level {
         FeedbackLevel::Ok => "✓ ",
         FeedbackLevel::Err => "✗ ",
+        FeedbackLevel::Warn => "⚠ ",
     };
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(

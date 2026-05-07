@@ -24,7 +24,7 @@ Hold a hotkey (default: ScrollLock) while speaking, release to transcribe and ou
 - **Hyprland, Niri, Sway, River, GNOME, KDE.** Compositor keybindings everywhere, evdev fallback for X11, Wayland-first typing via wtype with full CJK support. Falls back through dotool → ydotool → clipboard if any layer is unavailable.
 - **Pauses your music.** Auto-pauses Spotify, Plasma media players, anything that speaks MPRIS the moment you start dictating. Resumes on release.
 - **Floating waveform OSD.** Matches your swayosd band by default — same vertical position as volume and brightness — so the level meter sits where you already look for system feedback.
-- **Interactive TUI configure.** `voxtype configure` (also surfaces in Walker / fuzzel / rofi) edits every option without touching config.toml. Auto-downloads missing models, swaps GPU binaries via pkexec, restarts the daemon for you.
+- **Interactive TUI configure.** `voxtype configure` (also surfaces in Walker / fuzzel / rofi) edits every option in `~/.config/voxtype/config.toml` for you — no hand-editing TOML. Auto-downloads missing models, swaps GPU binaries via pkexec, restarts the daemon when needed.
 - **Push-to-talk or toggle.** Hold to record, or press once to start/stop. Optional audio cues when recording starts/stops.
 
 ### Trust

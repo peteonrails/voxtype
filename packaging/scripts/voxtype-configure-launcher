@@ -31,6 +31,17 @@ if [ -z "$term" ]; then
     exit 1
 fi
 
+# On Hyprland, register windowrules for our class so the configure
+# terminal opens as a centered floating window instead of tiling. The
+# rules are keyed by class:^(voxtype)$ so they only match the launcher
+# window, not other terminal sessions. hyprctl returns non-zero on
+# non-Hyprland compositors and we silently ignore that.
+if command -v hyprctl >/dev/null 2>&1; then
+    hyprctl keyword windowrulev2 'float, class:^(voxtype)$' >/dev/null 2>&1 || true
+    hyprctl keyword windowrulev2 'size 1200 800, class:^(voxtype)$' >/dev/null 2>&1 || true
+    hyprctl keyword windowrulev2 'center, class:^(voxtype)$' >/dev/null 2>&1 || true
+fi
+
 # Each terminal flags the window class differently. Set class=voxtype
 # so the compositor rule we ship can match it.
 case "$term" in

@@ -35,6 +35,11 @@ pub struct OsdState {
     pub field: Field,
     pub feedback: Option<(FeedbackLevel, String)>,
     pub dirty_since_load: bool,
+    /// True when neither voxtype-osd-gtk4 nor voxtype-osd-native is on
+    /// PATH. The config-form still works (you can edit the table), but the
+    /// daemon has nothing to launch and the OSD won't render. Surfaced as
+    /// a yellow banner above the form so users don't save in vain.
+    pub binary_missing: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +125,7 @@ impl OsdState {
             field: Field::Enabled,
             feedback: None,
             dirty_since_load: false,
+            binary_missing: !osd_binary_available(),
         })
     }
 
@@ -201,6 +207,43 @@ impl OsdState {
         self.dirty_since_load = true;
         self.feedback = None;
     }
+}
+
+/// True when at least one OSD frontend binary is on PATH or in the
+/// canonical install directories. Either is enough &mdash; the
+/// `voxtype-osd` launcher resolves the configured frontend by binary
+/// name. Returns false when the user has the configure TUI installed
+/// (typically via `voxtype-bin` or a source build) but doesn't have the
+/// optional OSD frontends, so the section can flag that saving the OSD
+/// config won't actually produce on-screen feedback.
+fn osd_binary_available() -> bool {
+    use std::path::Path;
+    const CANDIDATES: &[&str] = &[
+        "/usr/bin/voxtype-osd-gtk4",
+        "/usr/bin/voxtype-osd-native",
+        "/usr/lib/voxtype/voxtype-osd-gtk4",
+        "/usr/lib/voxtype/voxtype-osd-native",
+        "/usr/local/bin/voxtype-osd-gtk4",
+        "/usr/local/bin/voxtype-osd-native",
+    ];
+    if CANDIDATES.iter().any(|p| Path::new(p).exists()) {
+        return true;
+    }
+    // Fall back to a PATH search for environments that install the
+    // launchers somewhere unusual (Nix, Homebrew on macOS, dev shells).
+    if let Ok(path) = std::env::var("PATH") {
+        for dir in path.split(':') {
+            if dir.is_empty() {
+                continue;
+            }
+            if Path::new(dir).join("voxtype-osd-gtk4").exists()
+                || Path::new(dir).join("voxtype-osd-native").exists()
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn cycle_str(choices: &[&'static str], current: &str, delta: i32) -> String {
@@ -296,10 +339,18 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         ),
     ];
 
-    let feedback_pair = state
-        .feedback
-        .as_ref()
-        .map(|(lvl, msg)| (*lvl, msg.as_str()));
+    // When the OSD frontend binaries aren't installed, hijack the feedback
+    // slot with a warning so the user sees it before they save. Real
+    // save/error feedback wins if the user has interacted, so this only
+    // shows on first render of an unconfigured install.
+    let missing_msg = "OSD binaries not installed. Saving the config will work but \
+                       nothing will render until voxtype-osd-gtk4 (Arch: gtk4-layer-shell) \
+                       or voxtype-osd-native is installed.";
+    let feedback_pair = match state.feedback.as_ref() {
+        Some((lvl, msg)) => Some((*lvl, msg.as_str())),
+        None if state.binary_missing => Some((FeedbackLevel::Warn, missing_msg)),
+        None => None,
+    };
 
     common::render_form_with_guidance(
         f,
