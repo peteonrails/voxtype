@@ -398,6 +398,11 @@ pub struct Config {
     #[serde(default)]
     pub status: StatusConfig,
 
+    /// On-screen display visualizer configuration. Controls whether the
+    /// daemon spawns the `voxtype-osd` child and how it renders.
+    #[serde(default)]
+    pub osd: crate::osd::config::OsdConfig,
+
     /// Meeting transcription configuration
     #[serde(default)]
     pub meeting: MeetingConfig,
@@ -2026,6 +2031,7 @@ impl Default for Config {
             text: TextConfig::default(),
             vad: VadConfig::default(),
             status: StatusConfig::default(),
+            osd: crate::osd::config::OsdConfig::default(),
             meeting: MeetingConfig::default(),
             state_file: Some("auto".to_string()),
             profiles: HashMap::new(),

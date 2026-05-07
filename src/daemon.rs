@@ -553,6 +553,9 @@ pub struct Daemon {
     level_hub: Option<audio::levels::LevelHub>,
     /// Active per-recording level emitter task; aborted when recording stops
     level_emitter_task: Option<tokio::task::JoinHandle<()>>,
+    /// OSD child supervisor task. Holds the JoinHandle so dropping it (on
+    /// daemon shutdown) kill_on_drop's the spawned voxtype-osd process.
+    osd_supervisor_task: Option<tokio::task::JoinHandle<()>>,
     // Model manager for multi-model support
     model_manager: Option<ModelManager>,
     // Background task for loading model on-demand
@@ -675,6 +678,7 @@ impl Daemon {
             last_dictation: None,
             level_hub: None,
             level_emitter_task: None,
+            osd_supervisor_task: None,
             model_manager: None,
             model_load_task: None,
             whisper_prepare_task: None,
@@ -1751,6 +1755,13 @@ impl Daemon {
                     e
                 );
             }
+        }
+
+        // Spawn the OSD child if enabled and the level socket bound. Without
+        // the socket the frontend has nothing to render, so skip the spawn
+        // rather than burning a slot in the launcher's restart logic.
+        if self.config.osd.enabled && self.level_hub.is_some() {
+            self.osd_supervisor_task = Some(crate::osd::supervisor::spawn());
         }
 
         // Check if another instance is already running (single-instance safeguard)
