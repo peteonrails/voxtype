@@ -31,7 +31,15 @@
 
         commonBuildInputs = with pkgs; [
           alsa-lib
+          atk
+          gdk-pixbuf
+          glib
+          gtk3
+          libx11
+          libxi
+          libxtst
           openssl
+          pango
         ];
 
         # Runtime dependencies wrapped into PATH
