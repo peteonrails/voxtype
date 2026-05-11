@@ -291,6 +291,73 @@
           ORT_LIB_LOCATION = "${onnxruntimeRocm}/lib";
         });
 
+        # OSD frontend packages. The launcher binary (`voxtype-osd`) ships
+        # with every main voxtype package, these provide the GUI frontend
+        # the launcher execs into.
+        osdNative = pkgs.rustPlatform.buildRustPackage {
+          pname = "voxtype-osd-native";
+          version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
+
+          src = ./.;
+          cargoLock.lockFile = ./Cargo.lock;
+
+          nativeBuildInputs = commonNativeBuildInputs ++ [ pkgs.makeWrapper ];
+          buildInputs = commonBuildInputs ++ [ pkgs.libxkbcommon ];
+
+          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+
+          buildFeatures = [ "osd-native" ];
+          cargoBuildFlags = [ "--bin" "voxtype-osd-native" ];
+
+          # Skip running the full lib test suite, this package only ships the OSD bin.
+          doCheck = false;
+
+          # wgpu dlopens libvulkan / libwayland-client at runtime.
+          postFixup = ''
+            wrapProgram $out/bin/voxtype-osd-native \
+              --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath (with pkgs; [
+                vulkan-loader
+                wayland
+              ])}"
+          '';
+
+          meta = with pkgs.lib; {
+            description = "Native (Wayland + wgpu + egui) on-screen display frontend for voxtype";
+            homepage = "https://voxtype.io";
+            license = licenses.mit;
+            maintainers = [];
+            platforms = [ "x86_64-linux" "aarch64-linux" ];
+            mainProgram = "voxtype-osd-native";
+          };
+        };
+
+        osdGtk4 = pkgs.rustPlatform.buildRustPackage {
+          pname = "voxtype-osd-gtk4";
+          version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
+
+          src = ./.;
+          cargoLock.lockFile = ./Cargo.lock;
+
+          nativeBuildInputs = commonNativeBuildInputs ++ [ pkgs.wrapGAppsHook4 ];
+          buildInputs = commonBuildInputs ++ [ pkgs.gtk4-layer-shell ];
+
+          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+
+          buildFeatures = [ "osd-gtk4" ];
+          cargoBuildFlags = [ "--bin" "voxtype-osd-gtk4" ];
+
+          # Skip running the full lib test suite, this package only ships the OSD bin.
+          doCheck = false;
+
+          meta = with pkgs.lib; {
+            description = "GTK4 on-screen display frontend for voxtype";
+            homepage = "https://voxtype.io";
+            license = licenses.mit;
+            maintainers = [];
+            platforms = [ "x86_64-linux" "aarch64-linux" ];
+            mainProgram = "voxtype-osd-gtk4";
+          };
+        };
 
       in {
         packages = {
@@ -314,6 +381,9 @@
           onnx-rocm = wrapOnnx { onnxruntime = onnxruntimeRocm; pkg = onnxMigraphxUnwrapped; extraWrapperArgs = migraphxWrapperArgs; };
           parakeet-rocm = wrapOnnx { onnxruntime = onnxruntimeRocm; pkg = onnxMigraphxUnwrapped; extraWrapperArgs = migraphxWrapperArgs; };
 
+          # OSD frontends (installable alongside any voxtype package)
+          osd-native = osdNative;
+          osd-gtk4 = osdGtk4;
 
           # Unwrapped packages (for custom wrapping scenarios)
           voxtype-unwrapped = mkVoxtypeUnwrapped {};
