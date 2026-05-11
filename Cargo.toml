@@ -3,7 +3,7 @@ members = ["xtask"]
 
 [package]
 name = "voxtype"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 authors = ["Peter Jackson", "Jean-Paul van Tillo", "Máté Rémiás", "Rob Zolkos", "Dan Heuckeroth", "Igor Warzocha", "Julian Kaiser", "Kevin Miller", "konnsim", "reisset", "Zubair", "Loki Coyote", "Umesh", "Barrett Ruth", "André Silva", "Chmouel Boudjnah", "Christopher Albert", "Phuoc Thinh Vu", "Alexander Bosu-Kellett", "ayoahha", "Toizi", "kakapt", "Rinor Maloku", "Sami Jawhar", "jan Lemata", "Kai Stark", "graysky"]
 description = "Push-to-talk voice-to-text for Wayland"
@@ -41,10 +41,6 @@ async-trait = "0.1"
 
 # Common dependencies
 libc = "0.2"
-
-# Menu bar and global hotkeys (cross-platform)
-rdev = "0.5.3"
-tray-icon = "0.21.3"
 
 # Audio capture
 cpal = "0.15"
@@ -128,6 +124,15 @@ core-graphics = "0.24"
 core-foundation = "0.10"
 dirs = "5"
 mac-notification-sys = "0.6"  # Native macOS notifications
+# Global hotkey + menubar icon. Both are macOS-only:
+#   rdev is consumed by src/hotkey_macos.rs
+#   tray-icon is consumed by src/menubar.rs
+# Declaring them at the top level pulled in libappindicator → GTK3 system
+# dev deps (glib-sys, gdk-pixbuf-sys, atk-sys, …) on every Linux build,
+# breaking NixOS source builds that didn't list those in the derivation
+# (Issue #352). Linux daemon doesn't use either, so they live here.
+rdev = "0.5.3"
+tray-icon = "0.21.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Input handling (evdev for kernel-level key events)
