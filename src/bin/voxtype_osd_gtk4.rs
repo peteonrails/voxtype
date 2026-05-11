@@ -419,7 +419,9 @@ fn build_window(app: &Application, cfg: &OsdConfig, palette: Palette, state: Arc
     let redraw_area = drawing_area.clone();
     let redraw_window = window.clone();
     let last_drawn_seq = Cell::new(0u64);
-    let visible = Cell::new(false);
+    // Tracks GTK visibility. Starts true because `window.present()` below maps
+    // the surface, the first tick's idle check then hides it.
+    let visible = Cell::new(true);
 
     glib::timeout_add_local(Duration::from_millis(RENDER_TICK_MS as u64), move || {
         let cur_seq = redraw_state.last_seq.lock().map(|s| *s).unwrap_or(0);
