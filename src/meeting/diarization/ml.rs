@@ -10,6 +10,7 @@ use crate::meeting::data::AudioSource;
 use crate::meeting::TranscriptSegment;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 #[cfg(feature = "ml-diarization")]
 use ort::session::Session;
@@ -294,7 +295,7 @@ impl Diarizer for MlDiarizer {
         // If model is not loaded or feature is disabled, fall back to simple attribution
         #[cfg(not(feature = "ml-diarization"))]
         {
-            let _ = samples;
+            let _ = _samples;
             transcript_segments
                 .iter()
                 .map(|seg| DiarizedSegment {

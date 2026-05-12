@@ -11,6 +11,7 @@ use super::Transcriber;
 use crate::config::OpenVinoConfig;
 use crate::error::TranscribeError;
 use openvino_genai::WhisperPipeline;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -307,15 +308,10 @@ fn find_genai_library(dir: &str) -> Result<PathBuf, TranscribeError> {
         std::env::consts::DLL_PREFIX,
         std::env::consts::DLL_SUFFIX
     );
-    let direct = dir_path.join(&lib_name);
-    if direct.is_file() {
-        return Ok(direct);
-    }
-
-    // Search known subdirectories
+    // Search known subdirectories, accepting both unversioned and versioned sonames.
     for subdir in &["runtime/lib/intel64", "runtime/lib/intel64/Release", "."] {
-        let path = dir_path.join(subdir).join(&lib_name);
-        if path.is_file() {
+        let base_dir = dir_path.join(subdir);
+        if let Some(path) = find_library_file(&base_dir, &lib_name) {
             return Ok(path);
         }
     }
@@ -340,10 +336,9 @@ fn preload_openvino_deps(lib_dir: &std::path::Path) {
     let deps = ["libopenvino.so", "libopenvino_c.so", "libopenvino_genai.so"];
 
     for name in &deps {
-        let path = lib_dir.join(name);
-        if !path.exists() {
+        let Some(path) = find_library_file(lib_dir, name) else {
             continue;
-        }
+        };
         let Some(c_path) = path.to_str().and_then(|s| CString::new(s).ok()) else {
             continue;
         };
@@ -355,6 +350,25 @@ fn preload_openvino_deps(lib_dir: &std::path::Path) {
             // Intentionally not calling dlclose — keep symbols available.
         }
     }
+}
+
+fn find_library_file(dir: &std::path::Path, lib_name: &str) -> Option<PathBuf> {
+    let direct = dir.join(lib_name);
+    if direct.is_file() {
+        return Some(direct);
+    }
+
+    let prefix = format!("{}.", lib_name);
+    fs::read_dir(dir)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.starts_with(&prefix))
+                .unwrap_or(false)
+        })
 }
 
 /// Check if a model name already includes a quantization suffix (-int4, -int8, -fp16)
