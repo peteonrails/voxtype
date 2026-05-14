@@ -17,7 +17,7 @@ Fixes #(issue number)
 
 - [ ] I have tested these changes locally
 - [ ] I have run `cargo test` and all tests pass
-- [ ] I have run `cargo clippy` with no warnings
+- [ ] I have run `cargo clippy -- -D warnings` with no warnings
 - [ ] I have run `cargo fmt`
 
 ## Documentation

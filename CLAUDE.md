@@ -174,7 +174,7 @@ This allows overriding any setting at any level without modifying config files.
 ### Rust Conventions
 
 - Run `cargo fmt` before committing
-- Run `cargo clippy` and address warnings
+- Run `cargo clippy -- -D warnings` and fix all warnings
 - Use `cargo test` to verify changes
 
 ### Naming
