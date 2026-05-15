@@ -68,7 +68,6 @@ use tokenizers::Tokenizer;
 const N_LAYERS: usize = 8;
 const N_HEADS: usize = 8;
 const HEAD_DIM: usize = 128;
-const D_MODEL: usize = N_HEADS * HEAD_DIM; // 1024
 const N_MELS: usize = 128;
 const VOCAB_SIZE: usize = 16384;
 const SAMPLE_RATE: usize = 16_000;
