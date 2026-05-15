@@ -2127,6 +2127,8 @@ impl Config {
         let models_dir = Self::models_dir();
         std::fs::create_dir_all(&models_dir)?;
         tracing::debug!("Ensured models directory exists: {:?}", models_dir);
+        cachedir::ensure_tag(&models_dir)
+            .unwrap_or_else(|e| tracing::warn!("could not tag models dir: {e}"));
 
         Ok(())
     }
