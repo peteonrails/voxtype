@@ -77,7 +77,7 @@ pub enum TranscribeError {
     #[error("Model not found: {0}\n  Run 'voxtype setup' to download models.")]
     ModelNotFound(String),
 
-    #[error("Whisper initialization failed: {0}")]
+    #[error("Transcriber initialization failed: {0}")]
     InitFailed(String),
 
     #[error("Transcription failed: {0}")]
