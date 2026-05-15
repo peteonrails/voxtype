@@ -496,17 +496,17 @@ const COHERE_MODELS: &[CohereModelInfo] = &[
         description: "Encoder-decoder ASR, q4 weights + fp16 activations (smallest, GPU-friendly)",
         languages: "ar,de,el,en,es,fr,it,ja,ko,nl,pl,pt,vi,zh",
         files: &[
-            ("encoder_model_q4f16.onnx", "encoder_model.onnx"),
+            ("onnx/encoder_model_q4f16.onnx", "encoder_model.onnx"),
             (
-                "encoder_model_q4f16.onnx_data",
+                "onnx/encoder_model_q4f16.onnx_data",
                 "encoder_model_q4f16.onnx_data",
             ),
             (
-                "decoder_model_merged_q4f16.onnx",
+                "onnx/decoder_model_merged_q4f16.onnx",
                 "decoder_model_merged.onnx",
             ),
             (
-                "decoder_model_merged_q4f16.onnx_data",
+                "onnx/decoder_model_merged_q4f16.onnx_data",
                 "decoder_model_merged_q4f16.onnx_data",
             ),
             ("tokenizer.json", "tokenizer.json"),
@@ -524,11 +524,17 @@ const COHERE_MODELS: &[CohereModelInfo] = &[
         description: "Encoder-decoder ASR, 4-bit weights (MIGraphX-compatible on AMD GPU)",
         languages: "ar,de,el,en,es,fr,it,ja,ko,nl,pl,pt,vi,zh",
         files: &[
-            ("encoder_model_q4.onnx", "encoder_model.onnx"),
-            ("encoder_model_q4.onnx_data", "encoder_model_q4.onnx_data"),
-            ("decoder_model_merged_q4.onnx", "decoder_model_merged.onnx"),
+            ("onnx/encoder_model_q4.onnx", "encoder_model.onnx"),
             (
-                "decoder_model_merged_q4.onnx_data",
+                "onnx/encoder_model_q4.onnx_data",
+                "encoder_model_q4.onnx_data",
+            ),
+            (
+                "onnx/decoder_model_merged_q4.onnx",
+                "decoder_model_merged.onnx",
+            ),
+            (
+                "onnx/decoder_model_merged_q4.onnx_data",
                 "decoder_model_merged_q4.onnx_data",
             ),
             ("tokenizer.json", "tokenizer.json"),
@@ -546,21 +552,21 @@ const COHERE_MODELS: &[CohereModelInfo] = &[
         description: "Encoder-decoder ASR, 8-bit weights",
         languages: "ar,de,el,en,es,fr,it,ja,ko,nl,pl,pt,vi,zh",
         files: &[
-            ("encoder_model_quantized.onnx", "encoder_model.onnx"),
+            ("onnx/encoder_model_quantized.onnx", "encoder_model.onnx"),
             (
-                "encoder_model_quantized.onnx_data",
+                "onnx/encoder_model_quantized.onnx_data",
                 "encoder_model_quantized.onnx_data",
             ),
             (
-                "encoder_model_quantized.onnx_data_1",
+                "onnx/encoder_model_quantized.onnx_data_1",
                 "encoder_model_quantized.onnx_data_1",
             ),
             (
-                "decoder_model_merged_quantized.onnx",
+                "onnx/decoder_model_merged_quantized.onnx",
                 "decoder_model_merged.onnx",
             ),
             (
-                "decoder_model_merged_quantized.onnx_data",
+                "onnx/decoder_model_merged_quantized.onnx_data",
                 "decoder_model_merged_quantized.onnx_data",
             ),
             ("tokenizer.json", "tokenizer.json"),
@@ -578,21 +584,21 @@ const COHERE_MODELS: &[CohereModelInfo] = &[
         description: "Encoder-decoder ASR, FP16 weights (highest accuracy, GPU-friendly)",
         languages: "ar,de,el,en,es,fr,it,ja,ko,nl,pl,pt,vi,zh",
         files: &[
-            ("encoder_model_fp16.onnx", "encoder_model.onnx"),
+            ("onnx/encoder_model_fp16.onnx", "encoder_model.onnx"),
             (
-                "encoder_model_fp16.onnx_data",
+                "onnx/encoder_model_fp16.onnx_data",
                 "encoder_model_fp16.onnx_data",
             ),
             (
-                "encoder_model_fp16.onnx_data_1",
+                "onnx/encoder_model_fp16.onnx_data_1",
                 "encoder_model_fp16.onnx_data_1",
             ),
             (
-                "decoder_model_merged_fp16.onnx",
+                "onnx/decoder_model_merged_fp16.onnx",
                 "decoder_model_merged.onnx",
             ),
             (
-                "decoder_model_merged_fp16.onnx_data",
+                "onnx/decoder_model_merged_fp16.onnx_data",
                 "decoder_model_merged_fp16.onnx_data",
             ),
             ("tokenizer.json", "tokenizer.json"),
