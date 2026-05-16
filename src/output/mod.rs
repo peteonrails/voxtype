@@ -209,11 +209,17 @@ pub async fn send_transcription_notification(
     };
 
     let urgency_arg = format!("--urgency={}", sanitize_urgency(urgency));
+    // Synchronous + transient hints ([#345]): single Voxtype notification slot
+    // that the compositor overwrites in place, and no stacking in the history.
     let _ = Command::new("notify-send")
         .args([
             "--app-name=Voxtype",
             &urgency_arg,
             "--expire-time=3000",
+            "-h",
+            "string:x-canonical-private-synchronous:voxtype",
+            "-h",
+            "int:transient:1",
             &title,
             &preview,
         ])

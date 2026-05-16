@@ -95,6 +95,21 @@ emoji, minimal, dots, arrows, text) each ship a sensible streaming
 glyph. The Waybar `format-icons` map has a new `"streaming"` key. The
 omarchy-voxtype-status script reports the new state.
 
+## Notification Stacking ([#345](https://github.com/peteonrails/voxtype/issues/345))
+
+Voxtype's status notifications ("Recording...", "Transcribing...",
+"Transcribed", "Modifier key held...") now use the
+`x-canonical-private-synchronous` and `transient` libnotify hints, so a
+compositor with a notification daemon (mako, dunst, GNOME Shell, KDE)
+overwrites the previous Voxtype notification in place instead of
+stacking them in the notification history.
+
+**Why use it:** The notification panel stays clean on GNOME/Ubuntu and
+similar setups instead of accumulating a long trail of "Recording..."
+/ "Transcribing..." / "Transcribed" entries every time you dictate.
+
+Patch contributed by Stephan Schuster.
+
 ## Bug Fixes
 
 - **Streaming cursor protection:** the parakeet backend used to emit
@@ -130,6 +145,8 @@ omarchy-voxtype-status script reports the new state.
 
 - **André Silva** for the OSD startup-visibility fix and the Nix flake
   OSD packaging.
+- **Stephan Schuster** for the notification-stacking patch (#345),
+  including the libnotify hint research and a working diff.
 - **Jean-Paul van Tillo** for early streaming feedback that informed
   the partial-typing implementation.
 

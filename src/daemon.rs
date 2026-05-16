@@ -55,11 +55,18 @@ async fn send_notification(
     #[cfg(target_os = "linux")]
     {
         let urgency_arg = format!("--urgency={}", crate::output::sanitize_urgency(urgency));
+        // Synchronous + transient hints ([#345]): force a single Voxtype
+        // notification slot the compositor overwrites in place, and prevent
+        // status updates from accumulating in the notification history.
         let _ = Command::new("notify-send")
             .args([
                 "--app-name=Voxtype",
                 &urgency_arg,
                 "--expire-time=2000",
+                "-h",
+                "string:x-canonical-private-synchronous:voxtype",
+                "-h",
+                "int:transient:1",
                 &title,
                 body,
             ])
