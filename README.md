@@ -30,7 +30,7 @@ Hold a hotkey (default: ScrollLock) while speaking, release to transcribe and ou
 ### Trust
 
 - **Local by default. No cloud. No subscription. No telemetry.** Optional remote Whisper servers when you want them. Your audio stays on your machine until you choose otherwise.
-- **MIT licensed.** AUR (`voxtype`, `voxtype-bin`), `.deb`, `.rpm`, Homebrew on macOS. Signed release binaries from a reproducible Docker pipeline.
+- **MIT licensed.** AUR (`voxtype`, `voxtype-bin`, plus `voxtype-bin-rc` for testers who want pre-release builds — see [docs/INSTALL.md](docs/INSTALL.md#arch-linux)), `.deb`, `.rpm`, Homebrew on macOS. Signed release binaries from a reproducible Docker pipeline.
 
 ## Quick Start
 
