@@ -139,6 +139,15 @@ pub enum OutputError {
     #[error("xclip not found in PATH. Install xclip via your package manager.")]
     XclipNotFound,
 
+    #[error(
+        "Neither xclip nor xsel is available for X11 clipboard access.\n  \
+         Install one via your package manager:\n    \
+         sudo pacman -S xclip   # Arch / Manjaro\n    \
+         sudo apt install xclip # Debian / Ubuntu\n    \
+         sudo dnf install xclip # Fedora"
+    )]
+    X11ClipboardToolMissing,
+
     #[error("Text injection failed: {0}")]
     InjectionFailed(String),
 

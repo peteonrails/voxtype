@@ -33,6 +33,7 @@ pub mod paste;
 #[cfg(target_os = "macos")]
 pub mod pbcopy;
 pub mod post_process;
+pub mod session;
 pub mod streaming;
 pub mod wtype;
 pub mod xclip;
@@ -617,7 +618,7 @@ mod tests {
         assert!(is_keystroke_method("ydotool"));
         assert!(is_keystroke_method("paste (clipboard + keystroke)"));
         assert!(!is_keystroke_method("clipboard (wl-copy)"));
-        assert!(!is_keystroke_method("clipboard (xclip)"));
+        assert!(!is_keystroke_method("clipboard (xclip/xsel)"));
     }
 
     #[test]
