@@ -53,6 +53,13 @@ impl ConfigEditor {
         Self::load_from(path)
     }
 
+    /// Load from an arbitrary path (creating an empty document if the file
+    /// is missing). Used by the CLI `voxtype config set` command, which has
+    /// to honor `--config <FILE>` and the resolution chain in main.rs.
+    pub fn load_from_path(path: PathBuf) -> Result<Self, EditorError> {
+        Self::load_from(path)
+    }
+
     fn load_from(path: PathBuf) -> Result<Self, EditorError> {
         let text = match fs::read_to_string(&path) {
             Ok(s) => s,

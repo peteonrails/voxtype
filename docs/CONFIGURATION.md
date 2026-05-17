@@ -51,6 +51,24 @@ engine = "whisper"
 voxtype --engine parakeet daemon
 ```
 
+**Persistent change via CLI:**
+
+To change the engine in your config file (preserving comments and other
+settings), use:
+
+```bash
+voxtype config set engine whisper
+voxtype config set engine parakeet
+```
+
+This is non-interactive equivalent of the `voxtype configure` TUI's engine
+picker. It validates that the requested engine is compiled into your binary
+(rebuild with `cargo build --features <engine>` or install a matching
+prebuilt variant if it isn't), updates `~/.config/voxtype/config.toml`
+atomically, and prints the restart hint. The daemon does not hot-reload
+config changes; restart it with `systemctl --user restart voxtype` for the
+new engine to take effect.
+
 **Notes:**
 - All engines except Whisper require an ONNX-enabled binary (`voxtype-*-onnx-*`)
 - Each ONNX engine reads its own `[<engine>]` section (e.g. `[parakeet]`, `[cohere]`)
