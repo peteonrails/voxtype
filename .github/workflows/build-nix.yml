@@ -1,0 +1,63 @@
+name: Build (Nix)
+
+# Validates that the flake.nix produces working derivations before release.
+# Voxtype is maintained on non-NixOS hosts, so this CI is the only check that
+# catches flake regressions (e.g. missing `ort` example dep that broke
+# `nix switch` in v0.7.1, see #352). Targets `.#default` (CPU Whisper) and
+# `.#onnx` (CPU ONNX engines) — these cover the two most common install paths
+# for NixOS users. GPU variants (cuda/migraphx) are excluded because they
+# require unfree allowlists and/or hardware-specific runtime deps that
+# GitHub-hosted runners don't expose.
+
+on:
+  push:
+    branches: [main, dev, 'rc/*']
+    tags:
+      - 'v*.*.*'
+      - 'v*.*.*-rc*'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: cpu
+            package: default
+          - label: onnx
+            package: onnx
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: nix build .#${{ matrix.package }}
+        run: nix build .#${{ matrix.package }} --print-build-logs --no-link
+
+  # Aggregator job — branch protection only needs to require `nix-success`.
+  # The matrix job is named `build` so `needs: [build]` covers every matrix
+  # entry automatically; adding a new entry doesn't require touching the
+  # protection rule.
+  nix-success:
+    name: nix-success
+    needs: [build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all required jobs succeeded
+        run: |
+          set -e
+          build='${{ needs.build.result }}'
+          echo "build: $build"
+          if [[ "$build" != success ]]; then
+            echo "::error::One or more required jobs failed"
+            exit 1
+          fi
+          echo "All required jobs succeeded."
