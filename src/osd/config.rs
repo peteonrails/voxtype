@@ -23,16 +23,18 @@ pub enum OsdPosition {
 ///
 /// The wrapper treats this as a *preference*: if the chosen frontend's
 /// binary isn't on PATH (e.g. the user built voxtype with only one of
-/// `osd-gtk4`/`osd-native`), the wrapper falls back to whichever it can
-/// find and logs a warning. Default is `Gtk4` because GTK4 ships with
-/// most Hyprland setups already (Omarchy pulls it in via swayosd, walker,
-/// etc.) so there's no extra runtime cost for the typical user.
+/// `osd-gtk4`/`osd-native`/`osd-quickshell`), the wrapper falls back to
+/// whichever it can find and logs a warning. Default is `Gtk4` because
+/// GTK4 ships with most Hyprland setups already (Omarchy pulls it in via
+/// swayosd, walker, etc.) so there's no extra runtime cost for the
+/// typical user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OsdFrontend {
     #[default]
     Gtk4,
     Native,
+    Quickshell,
 }
 
 impl OsdFrontend {
@@ -42,6 +44,7 @@ impl OsdFrontend {
         match self {
             OsdFrontend::Gtk4 => "voxtype-osd-gtk4",
             OsdFrontend::Native => "voxtype-osd-native",
+            OsdFrontend::Quickshell => "voxtype-osd-quickshell",
         }
     }
 
@@ -49,6 +52,7 @@ impl OsdFrontend {
         match s.trim().to_ascii_lowercase().as_str() {
             "gtk4" | "gtk" => Some(OsdFrontend::Gtk4),
             "native" | "wgpu" | "egui" => Some(OsdFrontend::Native),
+            "quickshell" | "qml" | "qs" => Some(OsdFrontend::Quickshell),
             _ => None,
         }
     }
@@ -151,6 +155,10 @@ mod tests {
     fn frontend_binary_names() {
         assert_eq!(OsdFrontend::Gtk4.binary_name(), "voxtype-osd-gtk4");
         assert_eq!(OsdFrontend::Native.binary_name(), "voxtype-osd-native");
+        assert_eq!(
+            OsdFrontend::Quickshell.binary_name(),
+            "voxtype-osd-quickshell"
+        );
     }
 
     #[test]
@@ -160,6 +168,12 @@ mod tests {
         assert_eq!(OsdFrontend::parse_str("native"), Some(OsdFrontend::Native));
         assert_eq!(OsdFrontend::parse_str("wgpu"), Some(OsdFrontend::Native));
         assert_eq!(OsdFrontend::parse_str("egui"), Some(OsdFrontend::Native));
+        assert_eq!(
+            OsdFrontend::parse_str("quickshell"),
+            Some(OsdFrontend::Quickshell)
+        );
+        assert_eq!(OsdFrontend::parse_str("qml"), Some(OsdFrontend::Quickshell));
+        assert_eq!(OsdFrontend::parse_str("QS"), Some(OsdFrontend::Quickshell));
         assert_eq!(OsdFrontend::parse_str("nope"), None);
     }
 
@@ -169,6 +183,8 @@ mod tests {
         assert_eq!(v, OsdFrontend::Gtk4);
         let v: OsdFrontend = serde_json::from_str("\"native\"").unwrap();
         assert_eq!(v, OsdFrontend::Native);
+        let v: OsdFrontend = serde_json::from_str("\"quickshell\"").unwrap();
+        assert_eq!(v, OsdFrontend::Quickshell);
     }
 
     #[test]

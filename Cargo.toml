@@ -266,10 +266,10 @@ name = "voxtype-osd-gtk4"
 path = "src/bin/voxtype_osd_gtk4.rs"
 required-features = ["osd-gtk4"]
 
-# Tiny launcher that picks between voxtype-osd-gtk4 and voxtype-osd-native
-# at runtime based on config/env/CLI. Always built, no GUI deps; falls back
-# to whichever frontend binary it finds on PATH if the preferred one isn't
-# installed.
+# Tiny launcher that picks between voxtype-osd-gtk4, voxtype-osd-native,
+# and voxtype-osd-quickshell at runtime based on config/env/CLI. Always
+# built, no GUI deps; falls back to whichever frontend binary it finds on
+# PATH if the preferred one isn't installed.
 [[bin]]
 name = "voxtype-osd"
 path = "src/bin/voxtype_osd.rs"
@@ -280,6 +280,14 @@ path = "src/bin/voxtype_osd.rs"
 [[bin]]
 name = "voxtype-audio-bridge"
 path = "src/bin/voxtype_audio_bridge.rs"
+
+# Quickshell launcher: finds voxtype's shell.qml and execs `qs -p <path>`.
+# Always built, no GUI deps. Runtime dependency on the system `quickshell`
+# package; the launcher prints a clear remediation message if `qs` is
+# missing.
+[[bin]]
+name = "voxtype-osd-quickshell"
+path = "src/bin/voxtype_osd_quickshell.rs"
 
 [[example]]
 name = "inspect_cohere_onnx"
