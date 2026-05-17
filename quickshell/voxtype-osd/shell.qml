@@ -10,38 +10,38 @@
 //
 // Reads the daemon's state file at $XDG_RUNTIME_DIR/voxtype/state, which
 // contains exactly one of: idle, recording, streaming, transcribing.
+//
+// Shared theme, state-file reader, and audio bridge wrapper live under
+// `quickshell/voxtype-shared/`; this file is intentionally thin so that
+// it stays readable as the entry point for the Wave 2 waveform work.
 
 import QtQuick
 import Quickshell
-import Quickshell.Io
 import Quickshell.Wayland
+import "../voxtype-shared" as VT
 
 ShellRoot {
     id: shell
 
-    property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR")
-                                  || "/run/user/" + Quickshell.env("UID")
-    property string statePath: runtimeDir + "/voxtype/state"
-    property string state: "idle"
+    // State is sourced from the shared StateReader so the engine picker
+    // and meeting-controls frontends can subscribe to the same source.
+    VT.StateReader {
+        id: stateReader
+    }
 
-    // Watch the daemon's state file. Quickshell's FileView reads the
-    // contents into `text()` on demand; we trigger re-reads via reload()
-    // whenever the underlying file changes so the OSD follows the daemon's
-    // state machine transitions (idle → recording → transcribing → idle).
-    FileView {
-        id: stateFile
-        path: shell.statePath
-        watchChanges: true
-        printErrors: false
-        onLoaded: shell.state = (text() || "idle").trim()
-        onLoadFailed: shell.state = "idle"
-        onFileChanged: reload()
+    // Wire the audio bridge even though the POC doesn't render a
+    // waveform yet — letting the indicator pulse on VAD makes
+    // "recording but silent" visually distinct from "recording with
+    // voice", which is a nice quality-of-life cue before the full
+    // waveform lands in Wave 2.
+    VT.AudioBridge {
+        id: audio
     }
 
     // The OSD surface itself. Hidden when state is idle; visible otherwise.
     PanelWindow {
         id: panel
-        visible: shell.state !== "idle" && shell.state !== ""
+        visible: stateReader.state !== "idle" && stateReader.state !== ""
         anchors { top: true; bottom: true; left: true; right: true }
         color: "transparent"
 
@@ -57,32 +57,39 @@ ShellRoot {
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.bottom: parent.bottom
             anchors.bottomMargin: 72
-            radius: 8
-            color: Qt.rgba(0.08, 0.08, 0.10, 0.95)
+            radius: VT.Theme.cornerRadius
+            color: VT.Theme.bgColor
             border.width: 2
 
             // Per-state border tint so a Hyprland user can glance at the
             // edge of a screen and know whether voxtype is recording vs
             // streaming vs transcribing without reading the label.
-            border.color: shell.state === "recording"    ? "#e06c75"
-                       : shell.state === "streaming"     ? "#61afef"
-                       : shell.state === "transcribing"  ? "#e5c07b"
-                       :                                   "#abb2bf"
+            border.color: stateReader.state === "recording"    ? VT.Theme.recordingColor
+                       : stateReader.state === "streaming"     ? VT.Theme.streamingColor
+                       : stateReader.state === "transcribing"  ? VT.Theme.transcribingColor
+                       :                                         VT.Theme.idleColor
+
+            // Subtle opacity pulse on VAD=1 while recording. When the
+            // bridge isn't running yet (or the daemon hasn't opened
+            // the audio socket) we fall back to full opacity so the
+            // indicator never disappears unexpectedly.
+            opacity: (stateReader.state === "recording" && audio.running && !audio.vad) ? 0.78 : 1.0
+            Behavior on opacity { NumberAnimation { duration: 120 } }
 
             Row {
                 anchors.fill: parent
-                anchors.leftMargin: 14
-                anchors.rightMargin: 14
+                anchors.leftMargin: VT.Theme.padding
+                anchors.rightMargin: VT.Theme.padding
                 spacing: 12
 
                 Text {
                     width: 28
                     anchors.verticalCenter: parent.verticalCenter
                     horizontalAlignment: Text.AlignHCenter
-                    text: shell.state === "recording"    ? "󰍬"
-                       : shell.state === "streaming"     ? "󰜟"
-                       : shell.state === "transcribing"  ? "󰔟"
-                       :                                   "󰍬"
+                    text: stateReader.state === "recording"    ? "󰍬"
+                       : stateReader.state === "streaming"     ? "󰜟"
+                       : stateReader.state === "transcribing"  ? "󰔟"
+                       :                                          "󰍬"
                     font.family: "JetBrainsMono Nerd Font"
                     font.pixelSize: 26
                     color: card.border.color
@@ -90,14 +97,14 @@ ShellRoot {
 
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
-                    text: shell.state === "recording"    ? "Recording"
-                       : shell.state === "streaming"     ? "Streaming live"
-                       : shell.state === "transcribing"  ? "Transcribing"
-                       :                                   shell.state
+                    text: stateReader.state === "recording"    ? "Recording"
+                       : stateReader.state === "streaming"     ? "Streaming live"
+                       : stateReader.state === "transcribing"  ? "Transcribing"
+                       :                                         stateReader.state
                     font.family: "JetBrainsMono Nerd Font"
                     font.bold: true
                     font.pixelSize: 14
-                    color: "#dcdfe4"
+                    color: VT.Theme.textColor
                 }
             }
         }
