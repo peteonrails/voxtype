@@ -453,6 +453,28 @@ cp packaging/systemd/voxtype.service "$STAGING/usr/lib/systemd/user/"
 cp README.md "$STAGING/usr/share/doc/voxtype/"
 cp LICENSE "$STAGING/usr/share/doc/voxtype/"
 
+# Quickshell QML tree. The voxtype-osd-quickshell launcher probes this
+# location after the user/runtime paths, so users can opt in via
+# [osd] frontend = "quickshell" without installing the QML files
+# themselves. Only checked-in tree files are copied (no .git, no dotfiles,
+# no editor temp files).
+if [[ -d quickshell ]]; then
+    mkdir -p "$STAGING/usr/share/voxtype/quickshell"
+    # Use tar with --exclude to mirror the existing copy style while
+    # filtering out repo cruft. Note: -C from the source dir keeps the
+    # tar paths relative.
+    tar -cf - \
+        --exclude='.git' \
+        --exclude='.gitignore' \
+        --exclude='.*.swp' \
+        --exclude='*~' \
+        --exclude='.DS_Store' \
+        -C quickshell . | tar -xf - -C "$STAGING/usr/share/voxtype/quickshell"
+    # Ensure world-readable; QML files don't need execute bits.
+    find "$STAGING/usr/share/voxtype/quickshell" -type f -exec chmod 644 {} \;
+    find "$STAGING/usr/share/voxtype/quickshell" -type d -exec chmod 755 {} \;
+fi
+
 # Shell completions (must be world-readable for non-root users)
 cp packaging/completions/voxtype.bash "$STAGING/usr/share/bash-completion/completions/voxtype"
 cp packaging/completions/voxtype.zsh "$STAGING/usr/share/zsh/site-functions/_voxtype"
