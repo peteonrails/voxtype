@@ -71,6 +71,7 @@
 pub mod audio;
 pub mod cli;
 pub mod config;
+pub mod config_set;
 pub mod cpu;
 pub mod daemon;
 pub mod eager;
@@ -94,8 +95,8 @@ pub mod tui;
 pub mod vad;
 
 pub use cli::{
-    Cli, Commands, CompositorType, InfoAction, MeetingAction, OutputModeOverride, RecordAction,
-    SetupAction,
+    Cli, Commands, CompositorType, ConfigAction, ConfigSetKey, InfoAction, MeetingAction,
+    OutputModeOverride, RecordAction, SetupAction,
 };
 pub use config::Config;
 pub use daemon::Daemon;
