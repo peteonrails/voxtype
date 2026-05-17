@@ -24,6 +24,8 @@ pub mod cgevent;
 pub mod clipboard;
 pub mod dotool;
 pub mod eitype;
+// modifier_guard is evdev-based; macOS has its own osascript modifier handling.
+#[cfg(target_os = "linux")]
 pub mod modifier_guard;
 #[cfg(target_os = "macos")]
 pub mod osascript;
@@ -476,6 +478,10 @@ pub async fn output_with_fallback(
     // application keybindings. Disabled and timed-out cases both leave the
     // chain runnable; only the latter skips keystroke-synthesizing methods.
     let mut skip_keystroke_methods = false;
+    // The evdev-based modifier_guard is Linux-only. macOS uses its own
+    // wait_for_modifiers_release in osascript.rs and gets called separately
+    // from the osascript output path.
+    #[cfg(target_os = "linux")]
     if options.wait_for_modifier_release {
         let mut guard = modifier_guard::ModifierGuard::new();
         if guard
