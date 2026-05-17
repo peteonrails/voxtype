@@ -274,6 +274,13 @@ required-features = ["osd-gtk4"]
 name = "voxtype-osd"
 path = "src/bin/voxtype_osd.rs"
 
+# Sidecar that exposes the daemon's audio frame socket as NDJSON on stdout
+# for clients (e.g. Quickshell QML's Process element) that can't read Unix
+# sockets directly. No GUI deps; always built.
+[[bin]]
+name = "voxtype-audio-bridge"
+path = "src/bin/voxtype_audio_bridge.rs"
+
 [[example]]
 name = "inspect_cohere_onnx"
 required-features = ["cohere"]
