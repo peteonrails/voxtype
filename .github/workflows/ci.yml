@@ -5,8 +5,15 @@ on:
     branches: [main, dev]
   pull_request:
 
+# Three parallel jobs (fmt, clippy, test) instead of a single sequential `check`.
+# Each runs on its own runner so a 4 min clippy run doesn't block a 30 s fmt
+# check, and PR failures attribute to the specific gate that broke. Required
+# status checks on dev (PR-time) and main (release-time) reference all three
+# job names; if you rename or remove one here, update branch protection.
+
 jobs:
-  check:
+  fmt:
+    name: fmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -14,7 +21,21 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: rustfmt
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Install dependencies
         run: |
@@ -22,11 +43,23 @@ jobs:
           sudo apt-get install -y libasound2-dev libclang-dev cmake \
             libgtk-3-dev libglib2.0-dev libx11-dev libxi-dev libxtst-dev
 
-      - name: Check formatting
-        run: cargo fmt --check
+      - name: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets --no-deps -- -D warnings
 
-      - name: Clippy
-        run: cargo clippy -- -D warnings
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Tests
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libclang-dev cmake \
+            libgtk-3-dev libglib2.0-dev libx11-dev libxi-dev libxtst-dev
+
+      - name: cargo test
         run: cargo test
