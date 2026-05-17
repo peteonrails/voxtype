@@ -139,6 +139,16 @@ fn per_feature_normalize(features: &mut Array2<f32>) {
     }
     let n = num_frames as f32;
     for mel in 0..num_mels {
+        // Constant mel bins can acquire tiny nonzero variance from f32 rounding
+        // during two-pass CMVN, which amplifies normalization artifacts.
+        // Detect identical columns early and emit zeros directly.
+        let first = features[[0, mel]];
+        if (1..num_frames).all(|f| features[[f, mel]] == first) {
+            for frame in 0..num_frames {
+                features[[frame, mel]] = 0.0;
+            }
+            continue;
+        }
         let mut sum = 0.0_f32;
         for frame in 0..num_frames {
             sum += features[[frame, mel]];
