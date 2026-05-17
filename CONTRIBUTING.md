@@ -48,25 +48,57 @@ cargo run -- -vv
 - Add tests for new functionality
 - Update documentation as needed
 
+### Local pre-push smoke
+
+Run this before pushing a branch. It mirrors the parallel jobs that feed the
+`ci-success` aggregator and catches the common failures locally:
+
+```bash
+cargo fmt && cargo clippy --all-targets --no-deps -- -D warnings && cargo test
+```
+
+If any step fails, fix it before pushing. CI runs the same checks and will
+block the merge otherwise.
+
+## Branching
+
+Voxtype uses a three-branch flow:
+
+1. `dev` is the default branch and the base for all PRs. Day-to-day work
+   merges here once `ci-success` passes.
+2. `rc/x.y.z` branches are cut from `dev` for release candidates. Pushing to
+   an `rc/*` branch triggers the full build matrix (Linux variants and macOS).
+3. `main` only receives merges from a green `rc/x.y.z` branch and is tagged
+   `vX.Y.Z` at release time.
+
+Branch protection requires:
+
+- `dev`: the `ci-success` aggregator check (which depends on the parallel
+  `fmt`, `clippy`, and `test` jobs).
+- `main`: `ci-success`, `linux-ci-success`, and `macos-ci-success`.
+
+Open PRs against `dev`. Draft PRs are encouraged while CI is red; mark Ready
+for Review once `ci-success` is green.
+
 ## Submitting Changes
 
 ### For Bug Fixes
 
 1. Create an issue describing the bug
 2. Fork the repository
-3. Create a branch: `git checkout -b fix/description`
+3. Create a branch from `dev`: `git checkout -b fix/description origin/dev`
 4. Make your fix
-5. Test thoroughly
-6. Submit a pull request referencing the issue
+5. Test thoroughly (run the local pre-push smoke above)
+6. Submit a pull request against `dev` referencing the issue
 
 ### For Features
 
 1. Open an issue to discuss the feature first
 2. Wait for feedback before investing significant time
-3. Fork and create a branch: `git checkout -b feature/description`
+3. Fork and create a branch from `dev`: `git checkout -b feature/description origin/dev`
 4. Implement the feature
 5. Add tests and documentation
-6. Submit a pull request
+6. Submit a pull request against `dev`
 
 ### Commit Messages
 
