@@ -1,24 +1,25 @@
-// Voxtype Quickshell OSD — proof of concept
+// Voxtype Quickshell shell entry point.
 //
 // Run standalone for testing:
-//   qs -p quickshell/voxtype-osd/shell.qml
+//   qs -p quickshell
 //
-// Or drop into Omarchy's quickshell plugin tree as a peer of the existing
-// `plugins/osd/Osd.qml`. The Omarchy OSD uses Quickshell IPC for one-shot
-// volume/brightness toasts; this one watches voxtype's state file so the
-// indicator follows the daemon's actual state without poking from outside.
+// Quickshell treats this file as the entry of a config directory. The
+// shared theme/state/audio modules live at `voxtype-shared/` (sibling
+// dir) so the relative import below resolves inside Quickshell's qrc
+// virtual fs; an earlier layout placed shell.qml in a subdirectory and
+// the `../voxtype-shared` traversal landed in `qrc:/qs-blackhole`.
+//
+// Wave 2 components (engine picker, meeting controls) will be added as
+// additional .qml files in this same directory and composed into
+// `ShellRoot` below.
 //
 // Reads the daemon's state file at $XDG_RUNTIME_DIR/voxtype/state, which
 // contains exactly one of: idle, recording, streaming, transcribing.
-//
-// Shared theme, state-file reader, and audio bridge wrapper live under
-// `quickshell/voxtype-shared/`; this file is intentionally thin so that
-// it stays readable as the entry point for the Wave 2 waveform work.
 
 import QtQuick
 import Quickshell
 import Quickshell.Wayland
-import "../voxtype-shared" as VT
+import "voxtype-shared" as VT
 
 ShellRoot {
     id: shell

@@ -1,23 +1,29 @@
 //! `voxtype-osd-quickshell` — a tiny launcher that finds voxtype's Quickshell
-//! OSD entry point (`shell.qml`) and execs `qs -p <path>`.
+//! shell directory (containing `shell.qml`) and execs `qs -p <dir>`.
 //!
-//! Quickshell (`qs`) is the runtime; voxtype ships its QML shell tree
-//! under one of the standard data directories. The launcher resolves
-//! the shell path in this order:
+//! Quickshell (`qs`) treats the directory as a config root and loads
+//! `shell.qml` from it. We pass the directory rather than the file so that
+//! sibling QML imports (`import "voxtype-shared" as VT`) resolve through
+//! Quickshell's virtual filesystem; passing the file directly traps `..`
+//! traversals in `qrc:/qs-blackhole`.
 //!
-//! 1. `--qml-path <PATH>` on the command line
-//! 2. `VOXTYPE_OSD_QML_PATH` env var
-//! 3. `$XDG_DATA_HOME/voxtype/quickshell/voxtype-osd/shell.qml`
-//! 4. `~/.local/share/voxtype/quickshell/voxtype-osd/shell.qml`
-//! 5. `/usr/share/voxtype/quickshell/voxtype-osd/shell.qml`
-//! 6. `quickshell/voxtype-osd/shell.qml` relative to the current directory
-//!    (development convenience when running from the repo root)
+//! The launcher resolves the shell directory in this order:
+//!
+//! 1. `--qml-path <PATH>` on the command line (accepts either the
+//!    directory containing `shell.qml` or the `shell.qml` file itself —
+//!    we resolve a file argument to its parent directory)
+//! 2. `VOXTYPE_OSD_QML_PATH` env var (same accept-either rules)
+//! 3. `$XDG_DATA_HOME/voxtype/quickshell/`
+//! 4. `~/.local/share/voxtype/quickshell/`
+//! 5. `/usr/share/voxtype/quickshell/`
+//! 6. `quickshell/` relative to the current directory (development
+//!    convenience when running from the repo root)
 //!
 //! All other CLI arguments pass through to `qs` unchanged.
 //!
 //! Exit codes:
 //! - 2: Quickshell (`qs`) not found on PATH.
-//! - 3: No shell.qml found at any of the resolved paths.
+//! - 3: No `shell.qml` found in any of the resolved directories.
 //! - 1: exec of `qs` failed for some other reason.
 
 use std::env;
@@ -27,7 +33,7 @@ use std::process::{Command, ExitCode};
 
 const QS_BIN: &str = "qs";
 const SHELL_FILE: &str = "shell.qml";
-const SHELL_SUBPATH: &str = "voxtype/quickshell/voxtype-osd/shell.qml";
+const SHELL_SUBDIR: &str = "voxtype/quickshell";
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -49,7 +55,7 @@ fn main() -> ExitCode {
 
     let (cli_qml_path, rest) = parse_qml_path(&raw_args);
 
-    let qml_path = match resolve_qml_path(cli_qml_path) {
+    let shell_dir = match resolve_shell_dir(cli_qml_path) {
         Some(p) => p,
         None => {
             eprintln!(
@@ -58,13 +64,13 @@ fn main() -> ExitCode {
                  Searched:\n    \
                      --qml-path <PATH>\n    \
                      $VOXTYPE_OSD_QML_PATH\n    \
-                     $XDG_DATA_HOME/{SHELL_SUBPATH}\n    \
-                     ~/.local/share/{SHELL_SUBPATH}\n    \
-                     /usr/share/{SHELL_SUBPATH}\n    \
-                     ./quickshell/voxtype-osd/{SHELL_FILE}\n\
+                     $XDG_DATA_HOME/{SHELL_SUBDIR}/\n    \
+                     ~/.local/share/{SHELL_SUBDIR}/\n    \
+                     /usr/share/{SHELL_SUBDIR}/\n    \
+                     ./quickshell/\n\
                  \n\
                  Install voxtype's Quickshell files (e.g. `voxtype setup quickshell`)\n\
-                 or pass `--qml-path /path/to/shell.qml` explicitly."
+                 or pass `--qml-path /path/to/quickshell/` explicitly."
             );
             return ExitCode::from(3);
         }
@@ -85,16 +91,16 @@ fn main() -> ExitCode {
     }
 
     tracing::info!(
-        qml = %qml_path.display(),
+        shell_dir = %shell_dir.display(),
         "launching Quickshell OSD"
     );
 
     let mut cmd = Command::new(QS_BIN);
-    cmd.arg("-p").arg(&qml_path).args(&rest);
+    cmd.arg("-p").arg(&shell_dir).args(&rest);
     let err = cmd.exec();
     eprintln!(
-        "voxtype-osd-quickshell: failed to exec '{QS_BIN}' with shell '{}': {err}",
-        qml_path.display()
+        "voxtype-osd-quickshell: failed to exec '{QS_BIN}' with shell dir '{}': {err}",
+        shell_dir.display()
     );
     ExitCode::from(1)
 }
@@ -107,12 +113,13 @@ fn print_help() {
              voxtype-osd-quickshell [--qml-path PATH] [QUICKSHELL ARGS...]\n\
          \n\
          OPTIONS:\n    \
-             --qml-path <PATH>    Override the shell.qml path. Default is to\n\
-                                  search standard data dirs.\n    \
+             --qml-path <PATH>    Override the Quickshell config directory.\n\
+                                  Accepts either the directory containing\n\
+                                  shell.qml or the shell.qml file itself.\n    \
              -h, --help           Show this message.\n    \
              -V, --version        Show version.\n\
          \n\
-         All other arguments are forwarded to `qs` after `-p <shell.qml>`.\n\
+         All other arguments are forwarded to `qs` after `-p <dir>`.\n\
          \n\
          ENV:\n    \
              VOXTYPE_OSD_QML_PATH   Same as --qml-path.\n",
@@ -147,27 +154,47 @@ fn parse_qml_path(args: &[String]) -> (Option<PathBuf>, Vec<String>) {
     (qml, rest)
 }
 
-fn resolve_qml_path(cli: Option<PathBuf>) -> Option<PathBuf> {
-    if let Some(p) = cli.filter(|p| p.is_file()) {
-        return Some(p);
+/// Normalize a user-supplied path into the directory containing
+/// `shell.qml`, validating that the file exists. Accepts either the
+/// directory itself or the `shell.qml` file inside it (in which case we
+/// return its parent). Returns `None` if neither resolves to a real
+/// `shell.qml`.
+fn dir_with_shell(p: &Path) -> Option<PathBuf> {
+    if p.is_dir() && p.join(SHELL_FILE).is_file() {
+        return Some(p.to_path_buf());
+    }
+    if p.is_file() && p.file_name().map(|n| n == SHELL_FILE).unwrap_or(false) {
+        if let Some(parent) = p.parent() {
+            if parent.join(SHELL_FILE).is_file() {
+                return Some(parent.to_path_buf());
+            }
+        }
+    }
+    None
+}
+
+fn resolve_shell_dir(cli: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(p) = cli {
+        if let Some(dir) = dir_with_shell(&p) {
+            return Some(dir);
+        }
     }
     if let Ok(env_path) = env::var("VOXTYPE_OSD_QML_PATH") {
-        let p = PathBuf::from(env_path);
-        if p.is_file() {
-            return Some(p);
+        if let Some(dir) = dir_with_shell(Path::new(&env_path)) {
+            return Some(dir);
         }
     }
     for base in candidate_data_dirs() {
-        let candidate = base.join(SHELL_SUBPATH);
-        if candidate.is_file() {
-            return Some(candidate);
+        let candidate = base.join(SHELL_SUBDIR);
+        if let Some(dir) = dir_with_shell(&candidate) {
+            return Some(dir);
         }
     }
     // Development convenience: running `cargo run --bin voxtype-osd-quickshell`
     // from the repo root should find the QML tree without installing.
-    let dev_candidate = Path::new("quickshell/voxtype-osd").join(SHELL_FILE);
-    if dev_candidate.is_file() {
-        return Some(dev_candidate);
+    let dev_candidate = Path::new("quickshell");
+    if let Some(dir) = dir_with_shell(dev_candidate) {
+        return Some(dir);
     }
     None
 }
@@ -189,20 +216,22 @@ fn candidate_data_dirs() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     fn parse_qml_path_space_form() {
-        let args = vec!["--qml-path".into(), "/tmp/x.qml".into(), "extra".into()];
+        let args = vec!["--qml-path".into(), "/tmp/x".into(), "extra".into()];
         let (q, rest) = parse_qml_path(&args);
-        assert_eq!(q.as_deref(), Some(Path::new("/tmp/x.qml")));
+        assert_eq!(q.as_deref(), Some(Path::new("/tmp/x")));
         assert_eq!(rest, vec!["extra".to_string()]);
     }
 
     #[test]
     fn parse_qml_path_equals_form() {
-        let args = vec!["--qml-path=/tmp/y.qml".into(), "extra".into()];
+        let args = vec!["--qml-path=/tmp/y".into(), "extra".into()];
         let (q, rest) = parse_qml_path(&args);
-        assert_eq!(q.as_deref(), Some(Path::new("/tmp/y.qml")));
+        assert_eq!(q.as_deref(), Some(Path::new("/tmp/y")));
         assert_eq!(rest, vec!["extra".to_string()]);
     }
 
@@ -223,5 +252,36 @@ mod tests {
         // being silently dropped.
         assert!(q.is_none());
         assert_eq!(rest, vec!["--qml-path".to_string()]);
+    }
+
+    #[test]
+    fn dir_with_shell_accepts_directory() {
+        let tmp = tempdir().unwrap();
+        fs::write(tmp.path().join(SHELL_FILE), "").unwrap();
+        let resolved = dir_with_shell(tmp.path()).unwrap();
+        assert_eq!(resolved, tmp.path());
+    }
+
+    #[test]
+    fn dir_with_shell_accepts_file_and_returns_parent() {
+        let tmp = tempdir().unwrap();
+        let shell = tmp.path().join(SHELL_FILE);
+        fs::write(&shell, "").unwrap();
+        let resolved = dir_with_shell(&shell).unwrap();
+        assert_eq!(resolved, tmp.path());
+    }
+
+    #[test]
+    fn dir_with_shell_rejects_missing() {
+        let tmp = tempdir().unwrap();
+        assert!(dir_with_shell(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn dir_with_shell_rejects_non_shell_qml_file() {
+        let tmp = tempdir().unwrap();
+        let other = tmp.path().join("other.qml");
+        fs::write(&other, "").unwrap();
+        assert!(dir_with_shell(&other).is_none());
     }
 }

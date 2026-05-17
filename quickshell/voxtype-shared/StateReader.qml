@@ -24,7 +24,10 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 
-Item {
+// Use QtObject as the root rather than Item so we don't collide with
+// Item's built-in `state` property (and its auto-generated `stateChanged`
+// signal, which Quickshell rejects as a duplicate when redeclared).
+QtObject {
     id: root
 
     /// Filesystem path to the daemon state file. Defaults to
@@ -47,19 +50,15 @@ Item {
     /// Current daemon state. One of: idle, recording, streaming,
     /// transcribing. Defaults to "idle" when the file is missing or
     /// unreadable so consumers can always render a sensible default.
+    /// QML auto-generates a `stateChanged()` signal for property
+    /// changes; consumers read the current value off the property.
     property string state: "idle"
 
-    /// Emitted whenever the daemon writes a new state to disk.
-    /// `newState` is the freshly read value with surrounding whitespace
-    /// trimmed.
-    signal stateChanged(string newState)
-
-    // FileView re-reads on file changes when watchChanges is true.
-    // We re-set the `state` property inside onLoaded so the binding-
-    // based consumers also update, then fire the signal for imperative
-    // consumers (e.g. animation triggers).
-    FileView {
-        id: stateFile
+    // FileView re-reads on file changes when watchChanges is true. We
+    // update the `state` property inside onLoaded; QML's property change
+    // signal fires automatically for binding-based and imperative
+    // consumers.
+    property FileView _fileView: FileView {
         path: root.statePath
         watchChanges: true
         printErrors: false
@@ -68,14 +67,12 @@ Item {
             const next = (text() || "idle").trim();
             if (next !== root.state) {
                 root.state = next;
-                root.stateChanged(next);
             }
         }
 
         onLoadFailed: {
             if (root.state !== "idle") {
                 root.state = "idle";
-                root.stateChanged("idle");
             }
         }
 
