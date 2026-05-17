@@ -10,8 +10,20 @@
 // This file is intentionally thin: each Wave 2 feature is its own QML
 // component (OsdSurface, EnginePicker, MeetingControls) and `ShellRoot`
 // is just the composition root that wires the shared state and audio
-// bridges into each one. Adding a new widget = drop a new .qml file in
-// this directory and instantiate it below.
+// bridges into each widget that needs them.
+//
+// All three Wave 2 widgets now live in the ShellRoot:
+//   - OsdSurface: state-driven recording HUD. Reads daemonState +
+//     audio bridge to render the waveform.
+//   - EnginePicker: floating engine switcher, toggled via the
+//     `$XDG_RUNTIME_DIR/voxtype/engine-picker.flag` file. Self-sources
+//     its state from config.toml; doesn't need the daemon state or
+//     audio bridge.
+//   - MeetingControls: meeting status + start/stop/pause/resume,
+//     toggled via the `$XDG_RUNTIME_DIR/voxtype/meeting-controls.flag`
+//     file. Self-sources state from
+//     `$XDG_RUNTIME_DIR/voxtype/meeting_state` and `voxtype meeting
+//     show`; doesn't need the daemon state or audio bridge either.
 //
 // State is sourced from the daemon's state file at
 // $XDG_RUNTIME_DIR/voxtype/state. Audio frames are sourced from the
@@ -37,5 +49,13 @@ ShellRoot {
         id: osd
         daemonState: stateReader.state
         audio: audio
+    }
+
+    EnginePicker {
+        id: enginePicker
+    }
+
+    MeetingControls {
+        id: meetingControls
     }
 }
