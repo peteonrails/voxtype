@@ -54,6 +54,16 @@ QtObject {
     /// instantaneous peak is visible against the envelope.
     property color waveformPeakColor: "#FCFBF8"
 
+    /// Peak meter "safe" zone (-inf..-12 dBFS). Mirrors the GTK4/native
+    /// OSD's MeterZone::Low.
+    property color meterLowColor: Qt.rgba(0.30, 0.85, 0.45, 1.0)
+
+    /// Peak meter "warning" zone (-12..-3 dBFS). Mirrors MeterZone::Mid.
+    property color meterMidColor: Qt.rgba(0.95, 0.80, 0.30, 1.0)
+
+    /// Peak meter "danger" zone (-3..0 dBFS). Mirrors MeterZone::High.
+    property color meterHighColor: Qt.rgba(0.95, 0.35, 0.30, 1.0)
+
     /// Corner radius for cards/panels. 12px matches the radius used by
     /// swayosd so voxtype's OSD blends with the rest of an Omarchy
     /// user's notification stack.
@@ -78,4 +88,20 @@ QtObject {
     /// Visible waveform window in seconds. Mirrors
     /// OsdConfig::waveform_window_secs.
     property real waveformWindowSecs: 3.0
+
+    /// Held-peak decay rate (dB/sec). Mirrors
+    /// OsdConfig::peak_decay_db_per_sec; the held tick on the peak
+    /// meter snaps up to the current peak then linearly decays at this
+    /// rate while the signal sits below it.
+    property real peakDecayDbPerSec: 6.0
+
+    /// Visual gain applied to per-frame peak before drawing the
+    /// waveform envelope. Mic-level voice peaks around 0.1..0.3 of
+    /// full-scale, so the gain scales the envelope up to fill the
+    /// available canvas height. Mirrors OsdConfig::waveform_gain.
+    property real waveformGain: 10.0
+
+    /// dBFS floor for the peak meter. Anything quieter renders as an
+    /// empty bar. -60 dB matches the GTK4/native frontends.
+    property real meterFloorDbfs: -60.0
 }
