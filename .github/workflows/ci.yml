@@ -63,3 +63,27 @@ jobs:
 
       - name: cargo test
         run: cargo test
+
+  # Aggregator job — branch protection only needs to require `ci-success`.
+  # Adding/removing parallel checks above just updates the `needs:` list;
+  # the protection rule never needs to be touched.
+  ci-success:
+    name: ci-success
+    needs: [fmt, clippy, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all required jobs succeeded
+        run: |
+          set -e
+          fmt='${{ needs.fmt.result }}'
+          clippy='${{ needs.clippy.result }}'
+          test='${{ needs.test.result }}'
+          echo "fmt:    $fmt"
+          echo "clippy: $clippy"
+          echo "test:   $test"
+          if [[ "$fmt" != success || "$clippy" != success || "$test" != success ]]; then
+            echo "::error::One or more required jobs failed"
+            exit 1
+          fi
+          echo "All required jobs succeeded."

@@ -355,3 +355,25 @@ jobs:
           files: |
             releases/${{ steps.version.outputs.version }}/voxtype-*
             releases/${{ steps.version.outputs.version }}/SHA256SUMS.txt
+
+  # Aggregator job — branch protection only needs to require `linux-ci-success`.
+  # Adding/removing matrix variants above just updates the matrix list and this
+  # job follows automatically; the protection rule never needs to be touched.
+  linux-ci-success:
+    name: linux-ci-success
+    needs: [build, release]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all required jobs succeeded
+        run: |
+          set -e
+          build='${{ needs.build.result }}'
+          release='${{ needs.release.result }}'
+          echo "build:   $build"
+          echo "release: $release"
+          if [[ "$build" != success || "$release" != success ]]; then
+            echo "::error::One or more required Linux jobs failed"
+            exit 1
+          fi
+          echo "All required Linux jobs succeeded."
