@@ -131,6 +131,22 @@ pub trait Transcriber: Send + Sync {
     fn as_streaming(&self) -> Option<&dyn StreamingTranscriber> {
         None
     }
+
+    /// Two-letter language code detected (or selected) for the most recent
+    /// transcription, if the backend tracks it.
+    ///
+    /// This is used by output methods that benefit from a layout hint
+    /// (notably [`crate::output::eitype::EitypeOutput`] and
+    /// [`crate::output::dotool::DotoolOutput`]). It is set by backends with
+    /// language auto-detection or explicit single-language mode; backends
+    /// without language awareness return `None`.
+    ///
+    /// The default implementation returns `None`. Backends override this when
+    /// they track the language used for the previous call to
+    /// [`Self::transcribe`].
+    fn last_detected_language(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Factory function to create transcriber based on configured engine

@@ -1892,6 +1892,34 @@ pub struct OutputConfig {
     #[serde(default)]
     pub dotool_xkb_variant: Option<String>,
 
+    /// Keyboard layout for eitype (e.g., "de" for German, "ru" for Russian).
+    /// Passed to eitype as `-l <layout>`. Overrides the system XKB layout
+    /// while eitype is typing, then restores it when eitype exits.
+    /// Required when the transcribed language does not match the active
+    /// system layout (see issue #180).
+    #[serde(default)]
+    pub eitype_xkb_layout: Option<String>,
+
+    /// Keyboard layout variant for eitype (e.g., "dvorak", "colemak").
+    /// Passed to eitype as `--variant <variant>`.
+    #[serde(default)]
+    pub eitype_xkb_variant: Option<String>,
+
+    /// Mapping from detected language code (two-letter ISO 639-1) to XKB
+    /// keyboard layout. When voxtype's transcriber reports a language for the
+    /// current transcription and no explicit `eitype_xkb_layout` /
+    /// `dotool_xkb_layout` is set, the layout is looked up here.
+    ///
+    /// Built-in defaults cover the common cases (en→us, ru→ru, de→de, ...);
+    /// see [`default_language_to_layout`]. Users can override or extend the
+    /// map in config to handle layouts that differ from the language code
+    /// (e.g. `pt = "br"` for Brazilian Portuguese).
+    ///
+    /// Set to an empty map (or remove all entries) to disable automatic
+    /// layout selection from the detected language.
+    #[serde(default = "default_language_to_layout")]
+    pub language_to_layout: std::collections::HashMap<String, String>,
+
     /// File path for file output mode (required when mode = "file")
     /// Also used as default path for --output-file CLI flag
     #[serde(default)]
@@ -1932,6 +1960,34 @@ pub struct OutputConfig {
 
 fn default_modifier_release_timeout_ms() -> u64 {
     750
+}
+
+/// Built-in mapping from two-letter ISO 639-1 language codes to XKB layout
+/// codes. Used when the transcriber reports a detected language and the user
+/// has not set an explicit `eitype_xkb_layout` / `dotool_xkb_layout`.
+///
+/// Covers the most common cases where layout code matches language code
+/// (en→us is the notable exception). Users can extend or override this map
+/// in config under `[output] language_to_layout`. To disable automatic
+/// layout selection entirely, set `language_to_layout = {}` in config.
+pub fn default_language_to_layout() -> std::collections::HashMap<String, String> {
+    let mut m = std::collections::HashMap::new();
+    // English uses "us" by convention, not "en".
+    m.insert("en".to_string(), "us".to_string());
+    // Other common languages where layout name matches ISO 639-1.
+    for code in [
+        "ru", "de", "fr", "es", "it", "pl", "uk", "cs", "sk", "sv", "no", "fi", "da", "nl", "pt",
+        "tr", "gr", "hu", "ro", "bg", "hr", "sr", "sl", "lt", "lv", "et", "is", "ca", "eu",
+    ] {
+        m.insert(code.to_string(), code.to_string());
+    }
+    // Greek uses "gr" not "el".
+    m.insert("el".to_string(), "gr".to_string());
+    // Japanese, Korean, Chinese typically need IMEs rather than XKB layouts,
+    // but voxtype passes the hint through so users can map them as they wish.
+    m.insert("ja".to_string(), "jp".to_string());
+    m.insert("ko".to_string(), "kr".to_string());
+    m
 }
 
 impl OutputConfig {
@@ -2101,6 +2157,9 @@ impl Default for Config {
                 paste_keys: None,
                 dotool_xkb_layout: None,
                 dotool_xkb_variant: None,
+                eitype_xkb_layout: None,
+                eitype_xkb_variant: None,
+                language_to_layout: default_language_to_layout(),
                 file_path: None,
                 file_mode: FileMode::default(),
                 restore_clipboard: false,
@@ -2467,6 +2526,15 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     }
     if let Ok(layout) = std::env::var("VOXTYPE_DOTOOL_XKB_LAYOUT") {
         config.output.dotool_xkb_layout = Some(layout);
+    }
+    if let Ok(variant) = std::env::var("VOXTYPE_DOTOOL_XKB_VARIANT") {
+        config.output.dotool_xkb_variant = Some(variant);
+    }
+    if let Ok(layout) = std::env::var("VOXTYPE_EITYPE_XKB_LAYOUT") {
+        config.output.eitype_xkb_layout = Some(layout);
+    }
+    if let Ok(variant) = std::env::var("VOXTYPE_EITYPE_XKB_VARIANT") {
+        config.output.eitype_xkb_variant = Some(variant);
     }
 
     // Remote whisper
@@ -4111,5 +4179,102 @@ mod tests {
         assert_eq!(config.hotkey.key, "F12");
         assert_eq!(config.whisper.model, "tiny.en");
         assert_eq!(config.output.mode, OutputMode::Clipboard);
+    }
+
+    #[test]
+    fn test_default_language_to_layout_common_cases() {
+        let map = default_language_to_layout();
+        // English maps to "us", the XKB convention.
+        assert_eq!(map.get("en"), Some(&"us".to_string()));
+        // Russian, German, French, Spanish are direct passthroughs.
+        assert_eq!(map.get("ru"), Some(&"ru".to_string()));
+        assert_eq!(map.get("de"), Some(&"de".to_string()));
+        assert_eq!(map.get("fr"), Some(&"fr".to_string()));
+        assert_eq!(map.get("es"), Some(&"es".to_string()));
+        // Greek uses "gr", not "el".
+        assert_eq!(map.get("el"), Some(&"gr".to_string()));
+        // Japanese / Korean map to common XKB names.
+        assert_eq!(map.get("ja"), Some(&"jp".to_string()));
+        assert_eq!(map.get("ko"), Some(&"kr".to_string()));
+    }
+
+    #[test]
+    fn test_output_config_default_includes_language_layout_map() {
+        let cfg = Config::default();
+        assert!(!cfg.output.language_to_layout.is_empty());
+        assert_eq!(
+            cfg.output.language_to_layout.get("en"),
+            Some(&"us".to_string())
+        );
+        // New eitype layout fields are unset by default; the layout is
+        // inferred from the detected language only when both fields are
+        // empty (see daemon::handle_transcription_result).
+        assert!(cfg.output.eitype_xkb_layout.is_none());
+        assert!(cfg.output.eitype_xkb_variant.is_none());
+    }
+
+    #[test]
+    fn test_parse_eitype_layout_from_toml() {
+        let toml_str = r#"
+            [hotkey]
+            key = "PAUSE"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+            eitype_xkb_layout = "ru"
+            eitype_xkb_variant = "phonetic"
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.output.eitype_xkb_layout, Some("ru".to_string()));
+        assert_eq!(
+            config.output.eitype_xkb_variant,
+            Some("phonetic".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_language_to_layout_override() {
+        // User can override individual mappings (e.g. Brazilian Portuguese
+        // typically needs the `br` layout, not `pt`). Providing the field
+        // replaces the built-in defaults; users are expected to copy
+        // entries they want to keep (documented in CONFIGURATION.md).
+        let toml_str = r#"
+            [hotkey]
+            key = "PAUSE"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [output.language_to_layout]
+            pt = "br"
+            en = "dvorak"
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.output.language_to_layout.get("pt"),
+            Some(&"br".to_string())
+        );
+        assert_eq!(
+            config.output.language_to_layout.get("en"),
+            Some(&"dvorak".to_string())
+        );
     }
 }

@@ -356,6 +356,25 @@ pub struct Cli {
     )]
     pub dotool_xkb_variant: Option<String>,
 
+    /// Keyboard layout for eitype (e.g., de, ru, us). Passed as `-l <LAYOUT>`.
+    /// Overrides any layout derived from the transcribed language.
+    #[arg(
+        long,
+        value_name = "LAYOUT",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
+    pub eitype_xkb_layout: Option<String>,
+
+    /// Keyboard layout variant for eitype (e.g., dvorak, colemak)
+    #[arg(
+        long,
+        value_name = "VARIANT",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
+    pub eitype_xkb_variant: Option<String>,
+
     /// Command to run before typing output (e.g., compositor submap switch)
     #[arg(
         long,

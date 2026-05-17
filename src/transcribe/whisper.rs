@@ -11,6 +11,7 @@ use super::Transcriber;
 use crate::config::{Config, LanguageConfig, WhisperConfig};
 use crate::error::TranscribeError;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 /// Whisper-based transcriber
@@ -27,6 +28,12 @@ pub struct WhisperTranscriber {
     context_window_optimization: bool,
     /// Initial prompt to provide context for transcription
     initial_prompt: Option<String>,
+    /// Two-letter code for the language used during the most recent
+    /// `transcribe()` call. Populated for single-language and constrained
+    /// auto-detection modes; left empty for unconstrained auto-detection
+    /// (since whisper-rs does not currently expose the chosen language
+    /// from the full() pipeline). Read via [`Transcriber::last_detected_language`].
+    last_language: Mutex<Option<String>>,
 }
 
 impl WhisperTranscriber {
@@ -66,6 +73,7 @@ impl WhisperTranscriber {
             threads,
             context_window_optimization: config.context_window_optimization,
             initial_prompt: config.initial_prompt.clone(),
+            last_language: Mutex::new(None),
         })
     }
 
@@ -170,6 +178,15 @@ impl Transcriber for WhisperTranscriber {
             Some(lang)
         };
 
+        // Record the language for output methods that benefit from a layout
+        // hint (e.g. eitype --layout, dotool DOTOOL_XKB_LAYOUT). See
+        // `Transcriber::last_detected_language`. Unconstrained auto-detect
+        // leaves this as `None`; whisper-rs does not expose the language
+        // chosen inside `full()` so we cannot recover it after the fact.
+        if let Ok(mut guard) = self.last_language.lock() {
+            *guard = selected_language.clone();
+        }
+
         // Configure parameters
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
 
@@ -251,6 +268,10 @@ impl Transcriber for WhisperTranscriber {
         );
 
         Ok(result)
+    }
+
+    fn last_detected_language(&self) -> Option<String> {
+        self.last_language.lock().ok().and_then(|g| g.clone())
     }
 }
 

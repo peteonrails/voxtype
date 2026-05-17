@@ -683,6 +683,57 @@ mode = "paste"
 
 ---
 
+### eitype: "Character not found in keymap" or wrong characters when transcribing a second language
+
+**Symptom:** With `language = ["en", "ru"]` and `driver_order = ["eitype"]`,
+transcribing Russian on a US system layout fails with eitype reporting
+`Character not found in keymap`, or prints garbled text. English
+transcriptions work fine.
+
+**Cause:** Before voxtype v0.7.3, the daemon did not pass a layout hint to
+the `eitype` binary. eitype fell back to the system's active XKB layout,
+which lacked the keycodes for Cyrillic (or any non-system language) and so
+either errored or typed the wrong characters. This is issue #180.
+
+**Solution:** Upgrade to voxtype v0.7.3 or later. The daemon now reads the
+language Whisper picked for each transcription and passes it to eitype as
+`-l <layout>`, switching the layout for that call only.
+
+Verify:
+
+```bash
+voxtype daemon -vv  # debug logs
+# After a Russian transcription you should see:
+# DEBUG Auto layout for eitype: language='ru' -> layout='ru'
+```
+
+**Forcing a specific layout.** To pin eitype to a fixed layout regardless of
+the detected language, set it explicitly:
+
+```toml
+[output]
+driver_order = ["eitype"]
+eitype_xkb_layout = "us"          # or "de", "ru", etc.
+# eitype_xkb_variant = "dvorak"   # optional
+```
+
+**Customizing the language-to-layout map.** Voxtype ships built-in defaults
+(`en→us`, `ru→ru`, `de→de`, etc.). Layouts that don't match the language code
+(e.g. Brazilian Portuguese uses `br`, not `pt`) need an override in config:
+
+```toml
+[output.language_to_layout]
+en = "us"
+pt = "br"
+ru = "ru"
+```
+
+See `docs/CONFIGURATION.md` for the full list of built-in defaults and merge
+semantics (the user table replaces the defaults, so copy the entries you
+want to keep).
+
+---
+
 ### "ydotool daemon not running"
 
 **Cause:** ydotool systemd service not started.

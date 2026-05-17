@@ -580,6 +580,11 @@ pub struct Daemon {
     whisper_prepare_task: Option<tokio::task::JoinHandle<()>>,
     // Background task for transcription (allows cancel during transcription)
     transcription_task: Option<tokio::task::JoinHandle<TranscriptionResult>>,
+    // Transcriber Arc used for the in-flight transcription_task. Held so the
+    // result handler can query language metadata (e.g. detected language for
+    // keyboard-layout hints to eitype/dotool, see issue #180) after the task
+    // completes. Cleared when transcription_task is taken.
+    active_transcriber: Option<Arc<dyn Transcriber>>,
     // Background tasks for eager chunk transcriptions (chunk_index, task)
     eager_chunk_tasks: Vec<(
         usize,
@@ -693,6 +698,7 @@ impl Daemon {
             model_load_task: None,
             whisper_prepare_task: None,
             transcription_task: None,
+            active_transcriber: None,
             eager_chunk_tasks: Vec::new(),
             vad,
             meeting_daemon: None,
@@ -1639,6 +1645,11 @@ impl Daemon {
 
                     // Spawn transcription task (non-blocking)
                     if let Some(t) = transcriber {
+                        // Hold an Arc clone so the result handler can query
+                        // post-transcription metadata (e.g. detected language
+                        // for layout hints, issue #180) without re-fetching
+                        // the transcriber.
+                        self.active_transcriber = Some(t.clone());
                         self.transcription_task =
                             Some(tokio::task::spawn_blocking(move || t.transcribe(&samples)));
                         true
@@ -1667,6 +1678,11 @@ impl Daemon {
         state: &mut State,
         result: std::result::Result<TranscriptionResult, tokio::task::JoinError>,
     ) {
+        // Take ownership of the transcriber Arc we cloned at spawn time so it
+        // is dropped on every exit path (success, transcription error, or
+        // task error). The Ok(Ok(_)) branch consults it for the language
+        // layout hint before letting it drop.
+        let active_transcriber = self.active_transcriber.take();
         match result {
             Ok(Ok(text)) => {
                 if text.is_empty() {
@@ -1892,6 +1908,45 @@ impl Daemon {
                     // If smart auto-submit triggered, enable auto_submit for this cycle
                     if smart_submit {
                         output_config.auto_submit = true;
+                    }
+
+                    // Inject a keyboard-layout hint derived from the
+                    // transcriber's detected language (issue #180). Skipped
+                    // when the user has already set an explicit
+                    // `eitype_xkb_layout` / `dotool_xkb_layout`, so static
+                    // configuration wins over auto-detection. Only the
+                    // `language_to_layout` map is consulted; if the language
+                    // isn't mapped, no hint is applied (eitype/dotool fall
+                    // back to the system layout).
+                    if let Some(ref transcriber) = active_transcriber {
+                        if let Some(lang) = transcriber.last_detected_language() {
+                            if let Some(layout) =
+                                self.config.output.language_to_layout.get(&lang).cloned()
+                            {
+                                if output_config.eitype_xkb_layout.is_none() {
+                                    tracing::debug!(
+                                        "Auto layout for eitype: language='{}' -> layout='{}'",
+                                        lang,
+                                        layout
+                                    );
+                                    output_config.eitype_xkb_layout = Some(layout.clone());
+                                }
+                                if output_config.dotool_xkb_layout.is_none() {
+                                    tracing::debug!(
+                                        "Auto layout for dotool: language='{}' -> layout='{}'",
+                                        lang,
+                                        layout
+                                    );
+                                    output_config.dotool_xkb_layout = Some(layout);
+                                }
+                            } else {
+                                tracing::debug!(
+                                    "No layout mapping for detected language '{}'; \
+                                     not setting a layout hint",
+                                    lang
+                                );
+                            }
+                        }
                     }
 
                     let output_chain = output::create_output_chain(&output_config);
@@ -2744,6 +2799,9 @@ impl Daemon {
                                 if let Some(task) = self.transcription_task.take() {
                                     task.abort();
                                 }
+                                // Drop the cloned transcriber Arc so it isn't
+                                // held until the next transcription.
+                                self.active_transcriber = None;
 
                                 cleanup_output_mode_override();
                                 cleanup_model_override();
@@ -3256,6 +3314,9 @@ impl Daemon {
                         if let Some(task) = self.transcription_task.take() {
                             task.abort();
                         }
+                        // Drop the cloned transcriber Arc so it isn't held
+                        // until the next transcription.
+                        self.active_transcriber = None;
 
                         cleanup_output_mode_override();
                         cleanup_model_override();
@@ -3522,6 +3583,7 @@ impl Daemon {
         if let Some(task) = self.transcription_task.take() {
             task.abort();
         }
+        self.active_transcriber = None;
 
         // Abort any pending eager chunk tasks
         for (_, task) in self.eager_chunk_tasks.drain(..) {
