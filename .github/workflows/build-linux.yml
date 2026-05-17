@@ -249,6 +249,20 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # The OSD launcher and GTK4 frontend are engine-agnostic and built once
+      # by Dockerfile.onnx alongside the onnx-avx2 binary (same `cargo build
+      # --bin voxtype-osd --bin voxtype-osd-gtk4` invocation). The onnx-avx2
+      # job is the only place those binaries end up in /output, so upload them
+      # as their own artifacts here. Other matrix variants skip this step.
+      - name: Upload OSD binaries (onnx-avx2 only)
+        if: matrix.variant == 'onnx-avx2'
+        uses: actions/upload-artifact@v4
+        with:
+          name: voxtype-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}-osd
+          path: releases/${{ steps.version.outputs.version }}/voxtype-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}-osd*
+          if-no-files-found: error
+          retention-days: 14
+
   release:
     name: collect-and-release
     needs: build
