@@ -14,6 +14,7 @@ use crate::hotkey::{self, HotkeyEvent};
 use crate::hotkey_macos::{self as hotkey, HotkeyEvent};
 use crate::meeting::{self, MeetingDaemon, MeetingEvent, StorageConfig};
 use crate::model_manager::ModelManager;
+#[cfg(target_os = "macos")]
 use crate::notification;
 use crate::output;
 use crate::output::post_process::PostProcessor;
