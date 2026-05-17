@@ -394,8 +394,24 @@ impl Default for LevelBucketer {
 /// The task ends when the input receiver is closed. This is the correct
 /// signal for "recording stopped".
 pub fn spawn_emitter(
+    chunk_rx: mpsc::Receiver<Vec<f32>>,
+    sink: FrameSink,
+) -> tokio::task::JoinHandle<()> {
+    spawn_emitter_with_streaming_tap(chunk_rx, sink, None)
+}
+
+/// Like [`spawn_emitter`] but also forwards every chunk to an optional
+/// `streaming_tx`, used by the streaming transcription pipeline to feed
+/// audio into a backend without disturbing the OSD level emitter.
+///
+/// When `streaming_tx` is `Some`, each chunk is cloned and `try_send`'d to
+/// it. Failure to send (closed receiver, full bounded channel) is logged at
+/// trace and never blocks the level emitter. When `streaming_tx` is `None`,
+/// behavior is identical to [`spawn_emitter`].
+pub fn spawn_emitter_with_streaming_tap(
     mut chunk_rx: mpsc::Receiver<Vec<f32>>,
     sink: FrameSink,
+    streaming_tx: Option<mpsc::Sender<Vec<f32>>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut bucketer = LevelBucketer::new();
@@ -408,6 +424,12 @@ pub fn spawn_emitter(
             bucketer.push(&chunk, &mut out);
             for frame in out.drain(..) {
                 sink.publish(frame);
+            }
+
+            if let Some(ref tx) = streaming_tx {
+                if let Err(e) = tx.try_send(chunk) {
+                    tracing::trace!("streaming sample tap try_send failed: {}", e);
+                }
             }
         }
         tracing::trace!("Audio level emitter task ended");

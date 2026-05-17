@@ -46,30 +46,38 @@ WORKDIR /build
 # Copy source code
 COPY . .
 
-# Build with native optimizations (will use AVX-512 if available on host)
-ENV RUSTFLAGS="-C target-cpu=native"
+# Cross-compile to the x86-64-v4 microarch level (AVX-512F+BW+CD+DQ+VL).
+# RUSTFLAGS applied globally crashes host-side build scripts and proc macros
+# with SIGILL on a non-AVX-512 builder, so we use the per-target rustflags
+# env var plus `--target` so cargo separates host from target compilation.
+# See Dockerfile.avx512 for the full rationale.
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C target-cpu=x86-64-v4"
+ENV CFLAGS="-march=x86-64-v4"
+ENV CXXFLAGS="-march=x86-64-v4"
 
 # ONNX Runtime will be downloaded during build by the ort crate
 ENV ORT_STRATEGY=download
 
 # Disable LTO for faster builds
 # Build with all ONNX engines
-RUN cargo build --release --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,ml-diarization \
+RUN cargo build --release --target x86_64-unknown-linux-gnu --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,ml-diarization \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
-    && cp target/release/voxtype /tmp/voxtype-onnx-avx512
+    && cp target/x86_64-unknown-linux-gnu/release/voxtype /tmp/voxtype-onnx-avx512
 
-# Verify binary
-RUN echo "=== Verifying ONNX AVX-512 binary ===" \
-    && /tmp/voxtype-onnx-avx512 --version \
-    && echo "=== Checking for AVX-512 instructions ===" \
+# Verify the binary contains AVX-512 instructions. We deliberately do NOT
+# run `--version` here: this Docker build runs on the build host's CPU,
+# which on a GH-hosted runner usually lacks AVX-512 — executing the
+# cross-compiled binary would SIGILL. objdump-based inspection is enough.
+RUN echo "=== Checking for AVX-512 instructions ===" \
     && avx512_count=$(objdump -d /tmp/voxtype-onnx-avx512 | grep -cE 'zmm|vpternlog|vpermt2|\{1to' || echo 0) \
     && echo "  AVX-512 instructions: $avx512_count" \
     && if [ "$avx512_count" -eq 0 ]; then \
-         echo "WARNING: No AVX-512 instructions found. Is the host AVX-512 capable?"; \
-       else \
-         echo "✓ Binary contains $avx512_count AVX-512 instructions"; \
+         echo "ERROR: ONNX AVX-512 binary contains zero AVX-512 instructions." \
+         && echo "  Likely cause: target-cpu and/or march flags reverted to host detection." \
+         && exit 1; \
        fi \
+    && echo "✓ Binary contains $avx512_count AVX-512 instructions" \
     && echo "=== Binary size ===" \
     && ls -lh /tmp/voxtype-onnx-avx512
 

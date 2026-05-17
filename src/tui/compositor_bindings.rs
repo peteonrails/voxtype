@@ -85,7 +85,13 @@ pub fn dominant_compositor(detected: &[Binding]) -> Compositor {
 /// for likely-missing ones (cancel, toggle, meeting start/stop). Suggested
 /// keys come from a small candidate list, skipping any combo already bound to
 /// another action in the user's compositor configs.
-pub fn suggest_missing(detected: &[Binding]) -> Vec<Suggestion> {
+///
+/// `streaming` indicates whether Parakeet streaming dictation is enabled. When
+/// it is, this function only suggests toggle bindings: typing at the cursor
+/// while a PTT key is held breaks libinput's held-key tracker on Hyprland,
+/// Sway, and River, so streaming requires a toggle binding rather than the
+/// usual press/release pair.
+pub fn suggest_missing(detected: &[Binding], streaming: bool) -> Vec<Suggestion> {
     let comp = dominant_compositor(detected);
     let occupied = enumerate_occupied_keys(comp);
     let actions: std::collections::HashSet<&str> =
@@ -104,51 +110,65 @@ pub fn suggest_missing(detected: &[Binding]) -> Vec<Suggestion> {
 
     let mut suggestions = Vec::new();
 
-    if has_start && !has_stop {
-        suggestions.push(make_suggestion(
-            comp,
-            &mut taken,
-            "Stop (release of your PTT key)",
-            "Without a stop binding, hold-to-record never finishes — voxtype \
-             will run until max_duration_secs hits.",
-            Role::Stop,
-        ));
-    }
-    if has_stop && !has_start {
-        suggestions.push(make_suggestion(
-            comp,
-            &mut taken,
-            "Start (press of your PTT key)",
-            "You have a stop binding but no start — recording can't begin from \
-             your compositor.",
-            Role::Start,
-        ));
-    }
+    if streaming {
+        if !has_toggle {
+            suggestions.push(make_suggestion(
+                comp,
+                &mut taken,
+                "Toggle (required for streaming)",
+                "Streaming dictation types characters while you speak. A held \
+                 PTT key would clobber libinput's held-key tracker on \
+                 Hyprland/Sway/River, so streaming needs a single-press toggle.",
+                Role::Toggle,
+            ));
+        }
+    } else {
+        if has_start && !has_stop {
+            suggestions.push(make_suggestion(
+                comp,
+                &mut taken,
+                "Stop (release of your PTT key)",
+                "Without a stop binding, hold-to-record never finishes — voxtype \
+                 will run until max_duration_secs hits.",
+                Role::Stop,
+            ));
+        }
+        if has_stop && !has_start {
+            suggestions.push(make_suggestion(
+                comp,
+                &mut taken,
+                "Start (press of your PTT key)",
+                "You have a stop binding but no start — recording can't begin from \
+                 your compositor.",
+                Role::Start,
+            ));
+        }
 
-    if !has_start && !has_stop && !has_toggle {
-        suggestions.push(make_suggestion(
-            comp,
-            &mut taken,
-            "Push-to-talk (start + stop pair)",
-            "Hold the key while you speak; release to transcribe.",
-            Role::PttPair,
-        ));
-        suggestions.push(make_suggestion(
-            comp,
-            &mut taken,
-            "Toggle (single-key alternative)",
-            "Press once to start, again to stop. Better for long dictations.",
-            Role::Toggle,
-        ));
-    } else if !has_toggle && (has_start || has_stop) {
-        suggestions.push(make_suggestion(
-            comp,
-            &mut taken,
-            "Toggle (alternative to PTT)",
-            "A single-key toggle bound to a different key gives you a \
-             long-dictation flow without competing with the PTT key.",
-            Role::Toggle,
-        ));
+        if !has_start && !has_stop && !has_toggle {
+            suggestions.push(make_suggestion(
+                comp,
+                &mut taken,
+                "Push-to-talk (start + stop pair)",
+                "Hold the key while you speak; release to transcribe.",
+                Role::PttPair,
+            ));
+            suggestions.push(make_suggestion(
+                comp,
+                &mut taken,
+                "Toggle (single-key alternative)",
+                "Press once to start, again to stop. Better for long dictations.",
+                Role::Toggle,
+            ));
+        } else if !has_toggle && (has_start || has_stop) {
+            suggestions.push(make_suggestion(
+                comp,
+                &mut taken,
+                "Toggle (alternative to PTT)",
+                "A single-key toggle bound to a different key gives you a \
+                 long-dictation flow without competing with the PTT key.",
+                Role::Toggle,
+            ));
+        }
     }
 
     if !has_cancel {
@@ -1048,13 +1068,26 @@ mod tests {
             action: "record stop".into(),
             source: PathBuf::from("/dev/null"),
         }];
-        let labels: Vec<_> = suggest_missing(&detected)
+        let labels: Vec<_> = suggest_missing(&detected, false)
             .iter()
             .map(|s| s.label.clone())
             .collect();
         assert!(labels.iter().any(|l| l.contains("Cancel")));
         assert!(labels.iter().any(|l| l.contains("Toggle")));
         assert!(labels.iter().any(|l| l.contains("Meeting")));
+    }
+
+    #[test]
+    fn suggest_missing_streaming_only_offers_toggle() {
+        let detected: Vec<Binding> = vec![];
+        let suggestions = suggest_missing(&detected, true);
+        let labels: Vec<_> = suggestions.iter().map(|s| s.label.clone()).collect();
+        // No PTT pair, no Start, no Stop suggestions when streaming is on.
+        assert!(!labels.iter().any(|l| l.contains("Push-to-talk")));
+        assert!(!labels.iter().any(|l| l == "Start (press of your PTT key)"));
+        assert!(!labels.iter().any(|l| l == "Stop (release of your PTT key)"));
+        // Toggle is the only record-related suggestion offered.
+        assert!(labels.iter().any(|l| l.contains("Toggle")));
     }
 
     #[test]

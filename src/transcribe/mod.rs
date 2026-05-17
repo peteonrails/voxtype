@@ -13,10 +13,15 @@
 //! - Optionally Omnilingual via ONNX Runtime (when `omnilingual` feature is enabled)
 
 pub mod cli;
+#[cfg(feature = "parakeet")]
+pub mod parakeet_streaming;
 pub mod remote;
+pub mod streaming;
 pub mod subprocess;
 pub mod whisper;
 pub mod worker;
+
+pub use streaming::{SegmentId, StreamHandle, StreamingEvent, StreamingTranscriber};
 
 /// Shared log-mel filterbank feature extraction for ONNX-based ASR engines
 #[cfg(any(
@@ -116,6 +121,16 @@ pub trait Transcriber: Send + Sync {
     fn prepare(&self) {
         // Default: no-op
     }
+
+    /// Streaming-capable view of this transcriber, if it supports streaming.
+    ///
+    /// Returns `None` by default. Streaming-capable backends override this to
+    /// return `Some(self)` (or some other implementor of [`StreamingTranscriber`]).
+    /// The daemon consults this when `[transcribe] streaming = true` is set in
+    /// config to decide between batch and streaming pipelines.
+    fn as_streaming(&self) -> Option<&dyn StreamingTranscriber> {
+        None
+    }
 }
 
 /// Factory function to create transcriber based on configured engine
@@ -129,9 +144,15 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
                     "Parakeet engine selected but [parakeet] config section is missing".to_string(),
                 )
             })?;
-            Ok(Box::new(parakeet::ParakeetTranscriber::new(
-                parakeet_config,
-            )?))
+            if parakeet_config.streaming {
+                Ok(Box::new(
+                    parakeet_streaming::ParakeetStreamingTranscriber::new(parakeet_config)?,
+                ))
+            } else {
+                Ok(Box::new(parakeet::ParakeetTranscriber::new(
+                    parakeet_config,
+                )?))
+            }
         }
         #[cfg(not(feature = "parakeet"))]
         TranscriptionEngine::Parakeet => Err(TranscribeError::InitFailed(

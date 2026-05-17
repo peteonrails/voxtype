@@ -336,6 +336,15 @@ async fn main() -> anyhow::Result<()> {
     if let Some(cmd) = cli.pre_recording_command {
         config.output.pre_recording_command = Some(cmd);
     }
+    if cli.wait_for_modifier_release {
+        config.output.wait_for_modifier_release = true;
+    }
+    if cli.no_wait_for_modifier_release {
+        config.output.wait_for_modifier_release = false;
+    }
+    if let Some(ms) = cli.modifier_release_timeout_ms {
+        config.output.modifier_release_timeout_ms = ms;
+    }
 
     // VAD overrides
     if cli.vad {
@@ -870,9 +879,20 @@ async fn check_for_updates() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Path to the daemon PID file (matches the lockfile the daemon writes via Pidlock).
+///
+/// IMPORTANT: This must match the file used by `send_record_command()` and
+/// `is_daemon_running()`. Historically `check_daemon_running()` read from
+/// `"pid"` while `send_record_command()` read from `"voxtype.lock"`, which
+/// caused `voxtype meeting start/stop/pause/resume` to falsely report the
+/// daemon as not running. See test `pid_file_path_matches_send_record_command`.
+fn daemon_pid_file_path() -> std::path::PathBuf {
+    config::Config::runtime_dir().join("voxtype.lock")
+}
+
 /// Check if the daemon is running, exit with error if not
 fn check_daemon_running() -> anyhow::Result<()> {
-    let pid_file = config::Config::runtime_dir().join("pid");
+    let pid_file = daemon_pid_file_path();
 
     if !pid_file.exists() {
         eprintln!("Error: Voxtype daemon is not running.");
@@ -909,7 +929,7 @@ fn send_record_command(
     use voxtype::OutputModeOverride;
 
     // Read PID from the lock file (daemon writes PID to voxtype.lock)
-    let pid_file = config::Config::runtime_dir().join("voxtype.lock");
+    let pid_file = daemon_pid_file_path();
 
     if !pid_file.exists() {
         eprintln!("Error: Voxtype daemon is not running.");
@@ -1047,7 +1067,16 @@ fn send_record_command(
             let current_state =
                 std::fs::read_to_string(&state_file).unwrap_or_else(|_| "idle".to_string());
 
-            if current_state.trim() == "recording" {
+            // "recording" covers the batch and eager paths. "streaming"
+            // covers the Parakeet streaming path. Both are active
+            // capture states whose toggle should send a stop signal,
+            // not start a second session. Without this, toggling
+            // during streaming silently starts a new session while
+            // the original keeps running until the 60s safety
+            // timeout fires — leaking audio into whatever window
+            // has focus.
+            let active = matches!(current_state.trim(), "recording" | "streaming");
+            if active {
                 libc::SIGUSR2 // Stop
             } else {
                 libc::SIGUSR1 // Start
@@ -1244,7 +1273,12 @@ fn backend_display_for_variant(v: setup::binary::Variant) -> &'static str {
 
 /// Check if the daemon is actually running by verifying the PID file
 fn is_daemon_running() -> bool {
-    let pid_path = config::Config::runtime_dir().join("pid");
+    // Use the same lockfile path the daemon writes via Pidlock. Reading from
+    // the legacy `pid` file caused `voxtype status` to report `stopped` even
+    // when the daemon was healthy (the daemon now also writes the lockfile
+    // before write_pid_file is reached). See test
+    // `pid_file_path_matches_send_record_command`.
+    let pid_path = daemon_pid_file_path();
 
     // Read PID from file
     let pid_str = match std::fs::read_to_string(&pid_path) {
@@ -1411,6 +1445,7 @@ fn format_state_json(
 ) -> String {
     let (text, base_tooltip) = match state {
         "recording" => (&icons.recording, "Recording..."),
+        "streaming" => (&icons.streaming, "Streaming live..."),
         "transcribing" => (&icons.transcribing, "Transcribing..."),
         "idle" => (&icons.idle, "Voxtype ready - hold hotkey to record"),
         "stopped" => (&icons.stopped, "Voxtype not running"),
@@ -1538,6 +1573,52 @@ fn print_variants_text(inv: &setup::binary::Inventory) {
 }
 
 /// Show current configuration
+/// Format the `[meeting]` config sections for display in `voxtype config`.
+///
+/// Extracted so the regression test `config_displays_meeting_section`
+/// can assert that the section is present without spawning a process.
+/// The smoke pipeline previously missed that `voxtype config` omitted
+/// the entire `[meeting]` tree even when meeting mode was configured.
+fn format_meeting_config_section(meeting: &config::MeetingConfig) -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
+
+    let _ = writeln!(s, "\n[meeting]");
+    let _ = writeln!(s, "  enabled = {}", meeting.enabled);
+    let _ = writeln!(s, "  chunk_duration_secs = {}", meeting.chunk_duration_secs);
+    let _ = writeln!(s, "  storage_path = {:?}", meeting.storage_path);
+    let _ = writeln!(s, "  retain_audio = {}", meeting.retain_audio);
+    let _ = writeln!(s, "  max_duration_mins = {}", meeting.max_duration_mins);
+
+    let _ = writeln!(s, "\n[meeting.audio]");
+    let _ = writeln!(s, "  mic_device = {:?}", meeting.audio.mic_device);
+    let _ = writeln!(s, "  loopback_device = {:?}", meeting.audio.loopback_device);
+    let _ = writeln!(s, "  echo_cancel = {:?}", meeting.audio.echo_cancel);
+
+    let _ = writeln!(s, "\n[meeting.diarization]");
+    let _ = writeln!(s, "  enabled = {}", meeting.diarization.enabled);
+    let _ = writeln!(s, "  backend = {:?}", meeting.diarization.backend);
+    let _ = writeln!(s, "  max_speakers = {}", meeting.diarization.max_speakers);
+    if let Some(ref path) = meeting.diarization.model_path {
+        let _ = writeln!(s, "  model_path = {:?}", path);
+    }
+    let _ = writeln!(s, "  min_segment_ms = {}", meeting.diarization.min_segment_ms);
+
+    let _ = writeln!(s, "\n[meeting.summary]");
+    let _ = writeln!(s, "  backend = {:?}", meeting.summary.backend);
+    let _ = writeln!(s, "  ollama_url = {:?}", meeting.summary.ollama_url);
+    let _ = writeln!(s, "  ollama_model = {:?}", meeting.summary.ollama_model);
+    if let Some(ref endpoint) = meeting.summary.remote_endpoint {
+        let _ = writeln!(s, "  remote_endpoint = {:?}", endpoint);
+    }
+    if meeting.summary.remote_api_key.is_some() {
+        let _ = writeln!(s, "  remote_api_key = (set)");
+    }
+    let _ = writeln!(s, "  timeout_secs = {}", meeting.summary.timeout_secs);
+
+    s
+}
+
 async fn show_config(config: &config::Config) -> anyhow::Result<()> {
     println!("Current Configuration\n");
     println!("=====================\n");
@@ -1720,6 +1801,14 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
         "  restore_clipboard_delay_ms = {}",
         config.output.restore_clipboard_delay_ms
     );
+    println!(
+        "  wait_for_modifier_release = {}",
+        config.output.wait_for_modifier_release
+    );
+    println!(
+        "  modifier_release_timeout_ms = {}",
+        config.output.modifier_release_timeout_ms
+    );
 
     println!("\n[output.notification]");
     println!(
@@ -1735,6 +1824,11 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
         config.output.notification.on_transcription
     );
     println!("  urgency = {:?}", config.output.notification.urgency);
+
+    // Meeting mode is opt-in. Always show the section so users can see the
+    // resolved defaults — the smoke runner previously missed this entirely
+    // and meeting users had no way to verify their config was loaded.
+    print!("{}", format_meeting_config_section(&config.meeting));
 
     println!("\n[status]");
     println!("  icon_theme = {:?}", config.status.icon_theme);
@@ -2239,4 +2333,90 @@ async fn run_meeting_command(config: &config::Config, action: MeetingAction) -> 
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: `check_daemon_running()` once read `runtime_dir/pid` while
+    /// `send_record_command()` read `runtime_dir/voxtype.lock`. The mismatch
+    /// caused `voxtype meeting start/stop/pause/resume` to falsely report
+    /// "daemon not running" even when the daemon was healthy. Both helpers
+    /// (and `is_daemon_running`) must resolve to the same path.
+    #[test]
+    fn pid_file_path_matches_send_record_command() {
+        let canonical = daemon_pid_file_path();
+
+        // Sanity: the canonical path ends in `voxtype.lock` (the Pidlock file
+        // the daemon actually writes), not the legacy `pid` filename.
+        assert!(
+            canonical.ends_with("voxtype.lock"),
+            "daemon_pid_file_path() must point at voxtype.lock so meeting \
+             and record commands agree with the daemon's Pidlock. Got: {:?}",
+            canonical,
+        );
+
+        // Both helpers must resolve to exactly the same path. If you split
+        // them, `voxtype meeting start` will regress in the same way it did
+        // before this test existed.
+        let from_send = config::Config::runtime_dir().join("voxtype.lock");
+        assert_eq!(canonical, from_send);
+    }
+
+    /// Regression: after `voxtype record cancel` the daemon writes "idle"
+    /// to the state file. `format_state_json` must render "idle" as the
+    /// idle icon, NOT downgrade or alias it to "stopped". "stopped" is
+    /// reserved for "daemon process not running" (state file missing).
+    #[test]
+    fn record_cancel_leaves_idle_not_stopped() {
+        let icons = config::StatusConfig::default().resolve_icons();
+        let json = format_state_json("idle", &icons, None);
+        assert!(
+            json.contains("\"alt\": \"idle\""),
+            "format_state_json('idle') must keep alt=idle so Waybar shows \
+             the idle icon after `record cancel`. Got: {}",
+            json
+        );
+        assert!(
+            !json.contains("\"alt\": \"stopped\""),
+            "format_state_json('idle') must not alias to 'stopped'. Got: {}",
+            json
+        );
+
+        // And stopped should still map distinctly so we don't accidentally
+        // collapse the two states in the other direction.
+        let stopped_json = format_state_json("stopped", &icons, None);
+        assert!(stopped_json.contains("\"alt\": \"stopped\""));
+    }
+
+    /// Regression: `voxtype config` once omitted the entire `[meeting]`
+    /// tree, leaving meeting-mode users with no way to verify their config
+    /// loaded correctly. The helper must emit all four sub-sections so the
+    /// smoke pipeline can grep for them.
+    #[test]
+    fn config_displays_meeting_section() {
+        let meeting = config::MeetingConfig::default();
+        let rendered = format_meeting_config_section(&meeting);
+
+        for header in [
+            "[meeting]",
+            "[meeting.audio]",
+            "[meeting.diarization]",
+            "[meeting.summary]",
+        ] {
+            assert!(
+                rendered.contains(header),
+                "format_meeting_config_section must emit {} header. Got:\n{}",
+                header,
+                rendered
+            );
+        }
+
+        // A couple of representative fields, so renaming a struct member
+        // doesn't silently drop output without breaking the test.
+        assert!(rendered.contains("enabled = false"));
+        assert!(rendered.contains("backend = "));
+        assert!(rendered.contains("ollama_url = "));
+    }
 }

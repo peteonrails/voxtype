@@ -497,7 +497,13 @@ fn guidance_enabled<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
         lines.push(Line::from(""));
     }
 
-    let suggestions = compositor_bindings::suggest_missing(&bindings);
+    // Streaming dictation requires toggle activation; if the user has it
+    // enabled, suppress PTT-pair suggestions in favor of a toggle binding.
+    let streaming = ConfigEditor::load()
+        .ok()
+        .and_then(|ed| ed.get_bool("parakeet", "streaming"))
+        .unwrap_or(false);
+    let suggestions = compositor_bindings::suggest_missing(&bindings, streaming);
     if !suggestions.is_empty() {
         let comp = compositor_bindings::dominant_compositor(&bindings);
         lines.push(Line::from(Span::styled(

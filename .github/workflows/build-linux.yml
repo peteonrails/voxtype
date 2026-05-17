@@ -1,291 +1,357 @@
 name: Build Linux
 
+# `contents: write` is required by softprops/action-gh-release@v1 to create
+# the GH release and upload assets on tag push. Without it, the release job
+# fails with HTTP 403 even though the matrix builds succeed.
+permissions:
+  contents: write
+
+# Builds the full 8-binary x86_64 release matrix using Docker for every variant.
+# Each Dockerfile pins a glibc cap via its base image; the matrix mirrors that
+# with a matching ubuntu host runner as belt-and-suspenders. See CLAUDE.md
+# "Building Release Binaries" for the policy this enforces.
+#
+# TODO: sign binaries with GPG_PRIVATE_KEY secret once the secret is configured
+# in the repo. The release job should detach-sign each voxtype-* artifact and
+# upload the .asc files alongside the binaries and SHA256SUMS.txt.
+
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*.*.*'
+      - 'v*.*.*-rc*'
+    branches:
+      - 'rc/*'
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version (without v prefix)'
-        required: true
-        default: '0.5.0'
+        description: 'Version (without v prefix). Leave blank to read from Cargo.toml.'
+        required: false
+        default: ''
 
 jobs:
-  # AVX2 build - uses Docker for clean toolchain (no AVX-512 contamination)
-  build-avx2:
-    runs-on: ubuntu-latest
+  build:
+    name: build-${{ matrix.variant }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout_minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: avx2
+            arch: x86_64
+            dockerfile: Dockerfile.build
+            runner: ubuntu-22.04
+            glibc_cap: '2.35'
+            check_no_avx512: true
+            companion_libs: ''
+            timeout_minutes: 60
+          - variant: vulkan
+            arch: x86_64
+            dockerfile: Dockerfile.vulkan
+            runner: ubuntu-24.04
+            glibc_cap: '2.39'
+            check_no_avx512: true
+            companion_libs: ''
+            timeout_minutes: 60
+          - variant: avx512
+            arch: x86_64
+            dockerfile: Dockerfile.avx512
+            runner: ubuntu-22.04
+            glibc_cap: '2.35'
+            check_no_avx512: false
+            companion_libs: ''
+            timeout_minutes: 60
+          - variant: onnx-avx2
+            arch: x86_64
+            dockerfile: Dockerfile.onnx
+            runner: ubuntu-24.04
+            glibc_cap: '2.39'
+            check_no_avx512: false
+            companion_libs: ''
+            timeout_minutes: 90
+          - variant: onnx-avx512
+            arch: x86_64
+            dockerfile: Dockerfile.onnx-avx512
+            runner: ubuntu-24.04
+            glibc_cap: '2.39'
+            check_no_avx512: false
+            companion_libs: ''
+            timeout_minutes: 90
+          - variant: onnx-cuda-12
+            arch: x86_64
+            dockerfile: Dockerfile.onnx-cuda-12
+            runner: ubuntu-24.04
+            glibc_cap: '2.39'
+            check_no_avx512: false
+            companion_libs: 'libonnxruntime_providers_cuda.so libonnxruntime_providers_shared.so'
+            timeout_minutes: 120
+          - variant: onnx-cuda-13
+            arch: x86_64
+            dockerfile: Dockerfile.onnx-cuda-13
+            runner: ubuntu-24.04
+            glibc_cap: '2.39'
+            check_no_avx512: false
+            companion_libs: 'libonnxruntime_providers_cuda.so libonnxruntime_providers_shared.so'
+            timeout_minutes: 120
+          - variant: onnx-migraphx
+            arch: x86_64
+            dockerfile: Dockerfile.onnx-migraphx
+            runner: ubuntu-24.04
+            glibc_cap: '2.39'
+            check_no_avx512: false
+            companion_libs: 'libonnxruntime_providers_migraphx.so libonnxruntime_providers_shared.so'
+            timeout_minutes: 180
+          # Experimental aarch64 variants. CPU-only — no GPU EPs on arm64
+          # (Jetson CUDA toolchain is awkward, no mainstream consumer arm64
+          # Vulkan hardware yet). Marked experimental in release notes until
+          # external users validate on Pi/Ampere/Graviton/Snapdragon X.
+          - variant: cpu
+            arch: aarch64
+            dockerfile: Dockerfile.aarch64-cpu
+            runner: ubuntu-22.04-arm
+            glibc_cap: '2.35'
+            check_no_avx512: false
+            companion_libs: ''
+            timeout_minutes: 60
+          - variant: onnx
+            arch: aarch64
+            dockerfile: Dockerfile.aarch64-onnx
+            runner: ubuntu-24.04-arm
+            glibc_cap: '2.39'
+            check_no_avx512: false
+            companion_libs: ''
+            timeout_minutes: 120
     steps:
       - uses: actions/checkout@v4
 
       - name: Determine version
         id: version
         run: |
+          set -euo pipefail
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            INPUT_VERSION="${{ github.event.inputs.version }}"
+            if [[ -n "${INPUT_VERSION}" ]]; then
+              VERSION="${INPUT_VERSION}"
+            else
+              VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+            fi
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
           else
-            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+            # Branch push (e.g. rc/*) — read from Cargo.toml so artifacts get a sensible name.
+            VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved VERSION=${VERSION}"
+
+      - name: Build ${{ matrix.variant }} binary in Docker
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.version.outputs.version }}'
+          docker build \
+            -f '${{ matrix.dockerfile }}' \
+            -t 'voxtype-${{ matrix.variant }}' \
+            --build-arg "VERSION=${VERSION}" \
+            .
+          mkdir -p "releases/${VERSION}"
+          docker run --rm \
+            -e "VERSION=${VERSION}" \
+            -v "${PWD}/releases/${VERSION}:/output" \
+            'voxtype-${{ matrix.variant }}'
+
+      - name: Take ownership of Docker outputs
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.version.outputs.version }}'
+          # Docker writes /output as root via the volume mount. Chown to the
+          # runner user so subsequent workflow steps can read/move files.
+          sudo chown -R "$(id -u):$(id -g)" "releases/${VERSION}"
+
+      - name: Verify binary version
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.version.outputs.version }}'
+          BIN="releases/${VERSION}/voxtype-${VERSION}-linux-${{ matrix.arch }}-${{ matrix.variant }}"
+          test -f "${BIN}" || { echo "Missing binary: ${BIN}"; ls -la "releases/${VERSION}/"; exit 1; }
+          # The Dockerfile already sets the binary to 755; no chmod needed.
+          # GPU variants may not have CUDA/ROCm on the host runner; --version should
+          # still resolve without loading providers.
+          # AVX-512 variants are cross-compiled with target-cpu=x86-64-v4. Skip
+          # the runtime --version check on those because the GitHub-hosted
+          # runner CPU usually lacks AVX-512 and would SIGILL. The Dockerfile's
+          # in-build AVX-512 presence check already proves the binary is valid.
+          if [[ "${{ matrix.variant }}" == *avx512* ]]; then
+            echo "Skipping --version check on cross-compiled AVX-512 binary (runner CPU lacks AVX-512)."
+            file "${BIN}"
+          else
+            "${BIN}" --version
           fi
 
-      - name: Build AVX2 binary in Docker
+      - name: Verify glibc cap (max <= ${{ matrix.glibc_cap }})
         run: |
-          VERSION=${{ steps.version.outputs.version }}
-          docker build -f Dockerfile.build -t voxtype-avx2 --build-arg VERSION=${VERSION} .
-          mkdir -p releases/${VERSION}
-          docker run --rm -v $(pwd)/releases/${VERSION}:/output voxtype-avx2
+          set -euo pipefail
+          VERSION='${{ steps.version.outputs.version }}'
+          BIN="releases/${VERSION}/voxtype-${VERSION}-linux-${{ matrix.arch }}-${{ matrix.variant }}"
+          CAP='${{ matrix.glibc_cap }}'
+          MAX=$(objdump -T "${BIN}" 2>/dev/null \
+            | grep -oP 'GLIBC_\d+\.\d+' \
+            | sed 's/GLIBC_//' \
+            | sort -t. -k1,1n -k2,2n -u \
+            | tail -1)
+          echo "Max glibc requirement: GLIBC_${MAX} (cap GLIBC_${CAP})"
+          if [[ -z "${MAX}" ]]; then
+            echo "Could not determine max glibc version"; exit 1
+          fi
+          # Compare as version: fail if MAX > CAP.
+          higher=$(printf '%s\n%s\n' "${CAP}" "${MAX}" | sort -t. -k1,1n -k2,2n | tail -1)
+          if [[ "${higher}" != "${CAP}" ]]; then
+            echo "FAIL: binary requires GLIBC_${MAX} which exceeds cap GLIBC_${CAP}"
+            echo "This binary was likely linked against a newer host glibc than the Docker base image."
+            exit 1
+          fi
 
-      - name: Verify binary
+      - name: Verify AVX-512 absence (AVX2 and Vulkan variants only)
+        if: matrix.check_no_avx512
         run: |
-          VERSION=${{ steps.version.outputs.version }}
-          releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx2 --version
+          set -euo pipefail
+          VERSION='${{ steps.version.outputs.version }}'
+          BIN="releases/${VERSION}/voxtype-${VERSION}-linux-${{ matrix.arch }}-${{ matrix.variant }}"
+          ZMM=$(objdump -d "${BIN}" | grep -c zmm || true)
+          echo "AVX-512 zmm register count: ${ZMM}"
+          if [[ "${ZMM}" -ne 0 ]]; then
+            echo "FAIL: ${{ matrix.variant }} binary contains ${ZMM} AVX-512 zmm references."
+            echo "It will SIGILL on pre-AVX-512 CPUs (Zen 3, Haswell, etc.)."
+            exit 1
+          fi
+
+      - name: Stage companion libraries
+        if: matrix.companion_libs != ''
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.version.outputs.version }}'
+          PREFIX="releases/${VERSION}/voxtype-${VERSION}-linux-${{ matrix.arch }}-${{ matrix.variant }}"
+          missing=0
+          for lib in ${{ matrix.companion_libs }}; do
+            f="${PREFIX}.${lib}"
+            if [[ -f "${f}" ]]; then
+              echo "Found ${f}"
+            else
+              echo "MISSING ${f}"
+              missing=1
+            fi
+          done
+          if [[ "${missing}" -ne 0 ]]; then
+            echo "One or more companion libraries are missing from the Docker output."
+            ls -la "releases/${VERSION}/"
+            exit 1
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: linux-avx2
-          path: releases/${{ steps.version.outputs.version }}/voxtype-*-linux-x86_64-avx2
+          name: voxtype-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}-${{ matrix.variant }}
+          path: releases/${{ steps.version.outputs.version }}/voxtype-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}-${{ matrix.variant }}*
+          if-no-files-found: error
+          retention-days: 14
 
-  # Vulkan build - uses Docker for clean toolchain
-  build-vulkan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Determine version
-        id: version
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
-          else
-            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Build Vulkan binary in Docker
-        run: |
-          VERSION=${{ steps.version.outputs.version }}
-          docker build -f Dockerfile.vulkan -t voxtype-vulkan --build-arg VERSION=${VERSION} .
-          mkdir -p releases/${VERSION}
-          docker run --rm -v $(pwd)/releases/${VERSION}:/output voxtype-vulkan
-
-      - name: Verify binary
-        run: |
-          VERSION=${{ steps.version.outputs.version }}
-          releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-vulkan --version
-
-      - name: Upload artifact
+      # The OSD launcher and GTK4 frontend are engine-agnostic and built once
+      # by Dockerfile.onnx alongside the onnx-avx2 binary (same `cargo build
+      # --bin voxtype-osd --bin voxtype-osd-gtk4` invocation). The onnx-avx2
+      # job is the only place those binaries end up in /output, so upload them
+      # as their own artifacts here. Other matrix variants skip this step.
+      - name: Upload OSD binaries (onnx-avx2 only)
+        if: matrix.variant == 'onnx-avx2'
         uses: actions/upload-artifact@v4
         with:
-          name: linux-vulkan
-          path: releases/${{ steps.version.outputs.version }}/voxtype-*-linux-x86_64-vulkan
+          name: voxtype-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}-osd
+          path: releases/${{ steps.version.outputs.version }}/voxtype-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}-osd*
+          if-no-files-found: error
+          retention-days: 14
 
-  # Parakeet AVX2 build - uses Docker for clean toolchain
-  build-parakeet-avx2:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Determine version
-        id: version
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
-          else
-            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Build Parakeet AVX2 binary in Docker
-        run: |
-          VERSION=${{ steps.version.outputs.version }}
-          docker build -f Dockerfile.parakeet -t voxtype-parakeet-avx2 --build-arg VERSION=${VERSION} .
-          mkdir -p releases/${VERSION}
-          docker run --rm -v $(pwd)/releases/${VERSION}:/output voxtype-parakeet-avx2
-
-      - name: Verify binary
-        run: |
-          VERSION=${{ steps.version.outputs.version }}
-          releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-parakeet-avx2 --version
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-parakeet-avx2
-          path: releases/${{ steps.version.outputs.version }}/voxtype-*-linux-x86_64-parakeet-avx2
-
-  # AVX-512 build - requires AVX-512 capable runner (best effort)
-  build-avx512:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Check for AVX-512 support
-        id: check-avx512
-        run: |
-          if grep -q avx512f /proc/cpuinfo; then
-            echo "supported=true" >> $GITHUB_OUTPUT
-            echo "AVX-512 is supported on this runner"
-          else
-            echo "supported=false" >> $GITHUB_OUTPUT
-            echo "AVX-512 is NOT supported on this runner - skipping build"
-          fi
-
-      - name: Determine version
-        if: steps.check-avx512.outputs.supported == 'true'
-        id: version
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
-          else
-            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Install Rust
-        if: steps.check-avx512.outputs.supported == 'true'
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install dependencies
-        if: steps.check-avx512.outputs.supported == 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev libclang-dev cmake \
-            libgtk-3-dev libglib2.0-dev libx11-dev libxi-dev libxtst-dev
-
-      - name: Build AVX-512 binary
-        if: steps.check-avx512.outputs.supported == 'true'
-        env:
-          RUSTFLAGS: "-C target-cpu=native"
-        run: |
-          cargo build --release
-          VERSION=${{ steps.version.outputs.version }}
-          mkdir -p releases/${VERSION}
-          cp target/release/voxtype releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx512
-
-      - name: Verify binary
-        if: steps.check-avx512.outputs.supported == 'true'
-        run: |
-          VERSION=${{ steps.version.outputs.version }}
-          releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx512 --version
-
-      - name: Upload artifact
-        if: steps.check-avx512.outputs.supported == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-avx512
-          path: releases/${{ steps.version.outputs.version }}/voxtype-*-linux-x86_64-avx512
-
-  # Parakeet AVX-512 build - requires AVX-512 capable runner (best effort)
-  build-parakeet-avx512:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Check for AVX-512 support
-        id: check-avx512
-        run: |
-          if grep -q avx512f /proc/cpuinfo; then
-            echo "supported=true" >> $GITHUB_OUTPUT
-            echo "AVX-512 is supported on this runner"
-          else
-            echo "supported=false" >> $GITHUB_OUTPUT
-            echo "AVX-512 is NOT supported on this runner - skipping build"
-          fi
-
-      - name: Determine version
-        if: steps.check-avx512.outputs.supported == 'true'
-        id: version
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
-          else
-            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Install Rust
-        if: steps.check-avx512.outputs.supported == 'true'
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install dependencies
-        if: steps.check-avx512.outputs.supported == 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev libclang-dev cmake \
-            libgtk-3-dev libglib2.0-dev libx11-dev libxi-dev libxtst-dev \
-            libssl-dev protobuf-compiler libprotobuf-dev
-
-      - name: Build Parakeet AVX-512 binary
-        if: steps.check-avx512.outputs.supported == 'true'
-        env:
-          RUSTFLAGS: "-C target-cpu=native"
-        run: |
-          cargo build --release --features parakeet
-          VERSION=${{ steps.version.outputs.version }}
-          mkdir -p releases/${VERSION}
-          cp target/release/voxtype releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-parakeet-avx512
-
-      - name: Verify binary
-        if: steps.check-avx512.outputs.supported == 'true'
-        run: |
-          VERSION=${{ steps.version.outputs.version }}
-          releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-parakeet-avx512 --version
-
-      - name: Upload artifact
-        if: steps.check-avx512.outputs.supported == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-parakeet-avx512
-          path: releases/${{ steps.version.outputs.version }}/voxtype-*-linux-x86_64-parakeet-avx512
-
-  # Collect all artifacts and create release
   release:
-    needs: [build-avx2, build-vulkan, build-parakeet-avx2, build-avx512, build-parakeet-avx512]
-    if: always() && needs.build-avx2.result == 'success'
+    name: collect-and-release
+    needs: build
+    if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
+      - uses: actions/checkout@v4
+
       - name: Determine version
         id: version
         run: |
+          set -euo pipefail
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            INPUT_VERSION="${{ github.event.inputs.version }}"
+            if [[ -n "${INPUT_VERSION}" ]]; then
+              VERSION="${INPUT_VERSION}"
+            else
+              VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+            fi
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
           else
-            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+            VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
           fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved VERSION=${VERSION}"
 
-      - name: Download all artifacts
+      - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          # Pull each matrix-job artifact (named voxtype-${VERSION}-linux-${arch}-${variant})
+          # but skip the combined linux-all artifact this same job will write.
+          pattern: voxtype-*-linux-*-*
 
       - name: Collect binaries
         run: |
-          VERSION=${{ steps.version.outputs.version }}
-          mkdir -p releases/${VERSION}
+          set -euo pipefail
+          VERSION='${{ steps.version.outputs.version }}'
+          mkdir -p "releases/${VERSION}"
+          # Flatten artifact subdirs into releases/${VERSION}/.
+          find artifacts -type f -name 'voxtype-*' -exec mv -n {} "releases/${VERSION}/" \;
+          echo "Collected files:"
+          ls -la "releases/${VERSION}/"
 
-          # Move all binaries to releases directory
-          find artifacts -name 'voxtype-*' -type f -exec mv {} releases/${VERSION}/ \;
-
-          # List collected binaries
-          echo "Collected binaries:"
-          ls -la releases/${VERSION}/
-
-      - name: Generate checksums
+      - name: Generate SHA256SUMS.txt
         run: |
-          VERSION=${{ steps.version.outputs.version }}
-          cd releases/${VERSION}
-          sha256sum voxtype-* > SHA256SUMS.txt
-          echo "Checksums:"
+          set -euo pipefail
+          VERSION='${{ steps.version.outputs.version }}'
+          cd "releases/${VERSION}"
+          # Sums cover every voxtype-* binary and any companion .so files.
+          shopt -s nullglob
+          files=( voxtype-* )
+          if [[ ${#files[@]} -eq 0 ]]; then
+            echo "No voxtype-* files to checksum; failing."
+            exit 1
+          fi
+          sha256sum "${files[@]}" > SHA256SUMS.txt
+          echo "SHA256SUMS.txt:"
           cat SHA256SUMS.txt
+
+      # TODO: sign binaries with GPG_PRIVATE_KEY secret (and upload .asc files)
+      # once the secret is configured. Detach-sign each voxtype-* artifact and
+      # SHA256SUMS.txt; include the .asc files in the combined artifact and the
+      # GitHub release upload below.
 
       - name: Upload combined artifact
         uses: actions/upload-artifact@v4
         with:
-          name: linux-release-all
+          name: voxtype-${{ steps.version.outputs.version }}-linux-all
           path: |
             releases/${{ steps.version.outputs.version }}/voxtype-*
             releases/${{ steps.version.outputs.version }}/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
 
-      - name: Upload to release
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+      - name: Upload to GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v1
         with:
+          prerelease: ${{ contains(github.ref_name, '-rc') }}
+          fail_on_unmatched_files: true
           files: |
             releases/${{ steps.version.outputs.version }}/voxtype-*
             releases/${{ steps.version.outputs.version }}/SHA256SUMS.txt

@@ -44,8 +44,20 @@ pub async fn send_with_engine(title: &str, body: &str, engine: Option<Transcript
 /// Send a notification on Linux using notify-send
 #[cfg(target_os = "linux")]
 async fn send_linux(title: &str, body: &str) {
+    // Synchronous + transient hints ([#345]) keep this in the same
+    // overwrite slot as the daemon's recording/transcribing notifications
+    // and prevent stacking in the GNOME/Ubuntu notification history.
     let result = Command::new("notify-send")
-        .args(["--app-name=Voxtype", "--expire-time=2000", title, body])
+        .args([
+            "--app-name=Voxtype",
+            "--expire-time=2000",
+            "-h",
+            "string:x-canonical-private-synchronous:voxtype",
+            "-h",
+            "int:transient:1",
+            title,
+            body,
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -161,8 +173,18 @@ pub fn send_sync_with_engine(title: &str, body: &str, engine: Option<Transcripti
 /// Send a notification on Linux using notify-send (synchronous)
 #[cfg(target_os = "linux")]
 fn send_linux_sync(title: &str, body: &str) {
+    // Same overwrite-and-transient hints as the async path ([#345]).
     let _ = std::process::Command::new("notify-send")
-        .args(["--app-name=Voxtype", "--expire-time=5000", title, body])
+        .args([
+            "--app-name=Voxtype",
+            "--expire-time=5000",
+            "-h",
+            "string:x-canonical-private-synchronous:voxtype",
+            "-h",
+            "int:transient:1",
+            title,
+            body,
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn();

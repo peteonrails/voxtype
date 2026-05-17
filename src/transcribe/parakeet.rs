@@ -287,7 +287,7 @@ impl Transcriber for ParakeetTranscriber {
 }
 
 /// Build execution config based on compile-time feature flags
-fn build_execution_config() -> Option<ExecutionConfig> {
+pub(super) fn build_execution_config() -> Option<ExecutionConfig> {
     #[cfg(feature = "parakeet-cuda")]
     {
         if probe_cuda_runtime() {
@@ -458,7 +458,7 @@ fn detect_model_type(path: &PathBuf) -> ParakeetModelType {
 }
 
 /// Resolve model name to directory path
-fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
+pub(super) fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
     // If it's already an absolute path, use it directly
     let path = PathBuf::from(model);
     if path.is_absolute() && path.exists() {

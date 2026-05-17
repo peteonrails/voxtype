@@ -318,6 +318,16 @@
             <p class="section-subtitle">Recent releases and what they bring</p>
 
             <div class="news-preview-grid">
+                <a href="news/#v072" class="news-preview-card">
+                    <div class="news-preview-meta">
+                        <time datetime="2026-05-17">May 17, 2026</time>
+                        <span class="news-preview-tag">Release</span>
+                    </div>
+                    <h3>v0.7.2: Streaming Dictation, Modifier-Release Guard, Notification Cleanup</h3>
+                    <p>Parakeet streaming types text at the cursor as you speak (toggle activation only). A new evdev-based modifier-release guard stops chord hotkeys from triggering on the first typed letter. Notifications now overwrite in place instead of stacking. Experimental aarch64 binaries land for Raspberry Pi, Ampere, and Snapdragon X.</p>
+                    <span class="news-preview-link">Read more &rarr;</span>
+                </a>
+
                 <a href="news/#v071" class="news-preview-card">
                     <div class="news-preview-meta">
                         <time datetime="2026-05-11">May 11, 2026</time>
@@ -899,11 +909,11 @@ sudo pacman -S wtype wl-clipboard libnotify gtk4-layer-shell</code></pre>
                     <div class="code-block">
                         <div class="code-header">
                             <span>Install .deb package</span>
-                            <button class="copy-btn" data-copy="sudo apt install ./voxtype_0.7.1-1_amd64.deb">Copy</button>
+                            <button class="copy-btn" data-copy="sudo apt install ./voxtype_0.7.2-1_amd64.deb">Copy</button>
                         </div>
                         <pre><code><span class="comment"># Download and install</span>
-wget https://github.com/peteonrails/voxtype/releases/download/v0.7.1/voxtype_0.7.1-1_amd64.deb
-sudo apt install ./voxtype_0.7.1-1_amd64.deb
+wget https://github.com/peteonrails/voxtype/releases/download/v0.7.2/voxtype_0.7.2-1_amd64.deb
+sudo apt install ./voxtype_0.7.2-1_amd64.deb
 
 <span class="comment"># Recommended optional dependencies</span>
 sudo apt install wtype wl-clipboard libnotify-bin pipewire-alsa playerctl</code></pre>
@@ -916,11 +926,11 @@ sudo apt install wtype wl-clipboard libnotify-bin pipewire-alsa playerctl</code>
                     <div class="code-block">
                         <div class="code-header">
                             <span>Install RPM package</span>
-                            <button class="copy-btn" data-copy="sudo dnf install ./voxtype-0.7.1-1.x86_64.rpm">Copy</button>
+                            <button class="copy-btn" data-copy="sudo dnf install ./voxtype-0.7.2-1.x86_64.rpm">Copy</button>
                         </div>
                         <pre><code><span class="comment"># Download and install</span>
-wget https://github.com/peteonrails/voxtype/releases/download/v0.7.1/voxtype-0.7.1-1.x86_64.rpm
-sudo dnf install ./voxtype-0.7.1-1.x86_64.rpm
+wget https://github.com/peteonrails/voxtype/releases/download/v0.7.2/voxtype-0.7.2-1.x86_64.rpm
+sudo dnf install ./voxtype-0.7.2-1.x86_64.rpm
 
 <span class="comment"># Recommended optional dependencies</span>
 sudo dnf install wtype wl-clipboard libnotify pipewire-alsa playerctl</code></pre>
@@ -941,7 +951,7 @@ brew install --cask voxtype
 <span class="comment"># First launch opens a setup wizard that walks you through</span>
 <span class="comment"># Accessibility permissions, model download, and the FN-key hotkey.</span></code></pre>
                     </div>
-                    <p class="install-note" style="margin-top: 1rem;">Or download <code>voxtype-0.7.1-macOS-arm64.dmg</code> from the <a href="https://github.com/peteonrails/voxtype/releases/latest">latest release</a>.</p>
+                    <p class="install-note" style="margin-top: 1rem;">Or download <code>voxtype-0.7.2-macOS-arm64.dmg</code> from the <a href="https://github.com/peteonrails/voxtype/releases/latest">latest release</a>.</p>
                 </div>
 
                 <div id="nixos" class="tab-content">
@@ -949,16 +959,16 @@ brew install --cask voxtype
                     <div class="code-block">
                         <div class="code-header">
                             <span>Install via flake</span>
-                            <button class="copy-btn" data-copy="nix profile install github:peteonrails/voxtype/v0.7.1#vulkan">Copy</button>
+                            <button class="copy-btn" data-copy="nix profile install github:peteonrails/voxtype/v0.7.2#vulkan">Copy</button>
                         </div>
                         <pre><code><span class="comment"># Imperative install</span>
-nix profile install github:peteonrails/voxtype/v0.7.1#vulkan
+nix profile install github:peteonrails/voxtype/v0.7.2#vulkan
 
 <span class="comment"># Available outputs: default, vulkan, cuda, rocm, osdGtk4, osdNative</span>
-nix build github:peteonrails/voxtype/v0.7.1#osdGtk4
+nix build github:peteonrails/voxtype/v0.7.2#osdGtk4
 
 <span class="comment"># Or pin in your flake inputs</span>
-inputs.voxtype.url = "github:peteonrails/voxtype/v0.7.1";</code></pre>
+inputs.voxtype.url = "github:peteonrails/voxtype/v0.7.2";</code></pre>
                     </div>
                     <p class="install-note" style="margin-top: 1rem;"><strong>Next:</strong> <a href="#quick-start">First-run setup</a> below.</p>
                 </div>
@@ -968,15 +978,15 @@ inputs.voxtype.url = "github:peteonrails/voxtype/v0.7.1";</code></pre>
                     <div class="code-block">
                         <div class="code-header">
                             <span>Download and run</span>
-                            <button class="copy-btn" data-copy="chmod +x voxtype-0.7.1-x86_64.AppImage && ./voxtype-0.7.1-x86_64.AppImage">Copy</button>
+                            <button class="copy-btn" data-copy="chmod +x voxtype-0.7.2-x86_64.AppImage && ./voxtype-0.7.2-x86_64.AppImage">Copy</button>
                         </div>
                         <pre><code><span class="comment"># Download a variant from the latest release</span>
-wget https://github.com/peteonrails/voxtype/releases/download/v0.7.1/voxtype-0.7.1-x86_64.AppImage
-chmod +x voxtype-0.7.1-x86_64.AppImage
+wget https://github.com/peteonrails/voxtype/releases/download/v0.7.2/voxtype-0.7.2-x86_64.AppImage
+chmod +x voxtype-0.7.2-x86_64.AppImage
 
 <span class="comment"># Run directly, or move to ~/.local/bin/ for permanent install</span>
-./voxtype-0.7.1-x86_64.AppImage --help
-mv voxtype-0.7.1-x86_64.AppImage ~/.local/bin/voxtype</code></pre>
+./voxtype-0.7.2-x86_64.AppImage --help
+mv voxtype-0.7.2-x86_64.AppImage ~/.local/bin/voxtype</code></pre>
                     </div>
                     <p class="install-note" style="margin-top: 1rem;"><strong>Next:</strong> <a href="#quick-start">First-run setup</a> below.</p>
                 </div>

@@ -99,14 +99,18 @@ After install, see [Post-Install Setup](#post-install-setup) for the model downl
 
 ### Arch Linux
 
-Two AUR packages:
+Three AUR packages, two prebuilt channels plus a from-source option:
 
-- **`voxtype-bin`** — prebuilt binaries, installs in seconds. **Recommended for most users.**
+- **`voxtype-bin`** — prebuilt binaries from the latest stable release. **Recommended for most users.**
+- **`voxtype-bin-rc`** — prebuilt binaries from the latest GitHub *pre-release* (e.g., `v0.7.3-rc1`). Use this if you want to help test upcoming features (streaming, new engines, etc.) before they ship to stable. Otherwise stay on `voxtype-bin`.
 - **`voxtype`** — builds from source via cargo, 20+ minutes.
 
 ```bash
-# Recommended: prebuilt binaries
+# Recommended: stable prebuilt binaries
 paru -S voxtype-bin       # or: yay -S voxtype-bin
+
+# Release-candidate channel (for testers)
+paru -S voxtype-bin-rc    # or: yay -S voxtype-bin-rc
 
 # Or build from source
 paru -S voxtype           # or: yay -S voxtype
@@ -114,6 +118,16 @@ paru -S voxtype           # or: yay -S voxtype
 # Or manual AUR clone
 git clone https://aur.archlinux.org/voxtype-bin.git
 cd voxtype-bin && makepkg -si
+```
+
+`voxtype-bin-rc` conflicts with both `voxtype-bin` and `voxtype`. Switching channels is a remove-then-install:
+
+```bash
+# stable -> RC
+yay -R voxtype-bin && yay -S voxtype-bin-rc
+
+# RC -> stable (do this once the next stable ships)
+yay -R voxtype-bin-rc && yay -S voxtype-bin
 ```
 
 Recommended optional packages:
@@ -182,6 +196,40 @@ nix build github:peteonrails/voxtype/v0.7.1#osdGtk4
 # Or pin in your flake inputs
 inputs.voxtype.url = "github:peteonrails/voxtype/v0.7.1";
 ```
+
+### Linux arm64 (aarch64) — manual install
+
+The 0.7.2 release ships two experimental arm64 Linux binaries for
+Raspberry Pi 4/5, Ampere servers, Snapdragon X laptops, and AWS
+Graviton instances. They are not yet wired into the .deb / .rpm / AUR
+packages, so install is manual:
+
+```bash
+# Whisper engine, CPU-only
+curl -L https://github.com/peteonrails/voxtype/releases/download/v0.7.2/voxtype-0.7.2-linux-aarch64-cpu \
+  -o /tmp/voxtype
+chmod 755 /tmp/voxtype
+sudo mv /tmp/voxtype /usr/local/bin/voxtype
+voxtype --version
+
+# Or, for the ONNX engines (Parakeet, Moonshine, SenseVoice, Paraformer, etc.)
+curl -L https://github.com/peteonrails/voxtype/releases/download/v0.7.2/voxtype-0.7.2-linux-aarch64-onnx \
+  -o /tmp/voxtype
+chmod 755 /tmp/voxtype
+sudo mv /tmp/voxtype /usr/local/bin/voxtype
+```
+
+These binaries are CPU-only. No CUDA, MIGraphX, or Vulkan support on
+arm64 in 0.7.2 because the Jetson CUDA toolchain is awkward and there
+is no mainstream consumer arm64 hardware with Vulkan GPUs yet.
+
+Once installed, the rest of the setup (input group, models, hotkey)
+is the same as on x86_64. Skip to [Post-Install Setup](#post-install-setup).
+
+If you run into issues, please file a GitHub issue with your hardware
+details (CPU, distro, kernel). Real-world reports from arm64 users
+inform the v0.7.3 work that will integrate arm64 into the package
+tooling.
 
 ### AppImage
 

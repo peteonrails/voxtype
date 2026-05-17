@@ -834,9 +834,14 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
     // Check input group
     println!("\nInput:");
     if user_in_group("input") {
-        print_success("User is in 'input' group (evdev hotkeys available)");
+        print_success(
+            "User is in 'input' group (evdev hotkeys + modifier-release guard available)",
+        );
     } else {
-        print_warning("User is not in 'input' group (evdev hotkeys unavailable)");
+        print_warning("User is not in 'input' group");
+        println!("       evdev hotkeys: unavailable");
+        println!("       Modifier-release guard: unavailable");
+        println!("         (typed text may trigger keybindings if the hotkey is released late)");
         println!("       Required only for evdev hotkey mode, not compositor keybindings");
         println!("       To enable: sudo usermod -aG input $USER && logout");
     }

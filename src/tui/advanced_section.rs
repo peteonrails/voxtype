@@ -20,6 +20,7 @@ pub struct AdvancedState {
     pub flash_attention: bool,
     pub eager_processing: bool,
     pub gpu_device: Option<i64>,
+    pub streaming: bool,
     pub field: Field,
     pub feedback: Option<(FeedbackLevel, String)>,
     pub dirty_since_load: bool,
@@ -32,6 +33,7 @@ pub enum Field {
     FlashAttention,
     Eager,
     GpuDevice,
+    Streaming,
 }
 impl Field {
     const ALL: &'static [Field] = &[
@@ -40,6 +42,7 @@ impl Field {
         Field::FlashAttention,
         Field::Eager,
         Field::GpuDevice,
+        Field::Streaming,
     ];
 }
 
@@ -56,6 +59,7 @@ impl AdvancedState {
                 .get_bool("whisper", "eager_processing")
                 .unwrap_or(false),
             gpu_device: ed.get_int("whisper", "gpu_device"),
+            streaming: ed.get_bool("parakeet", "streaming").unwrap_or(false),
             field: Field::GpuIsolation,
             feedback: None,
             dirty_since_load: false,
@@ -77,13 +81,43 @@ impl AdvancedState {
             Some(n) if n >= 0 => ed.set_int("whisper", "gpu_device", n),
             _ => ed.unset("whisper", "gpu_device"),
         }
+        ed.set_bool("parakeet", "streaming", self.streaming);
+
+        // Streaming dictation requires toggle activation: typing at the cursor
+        // while a PTT key is held confuses libinput's held-key tracker on
+        // Hyprland/Sway/River, so the key-release event never reaches voxtype.
+        // Rewrite the user's hotkey mode rather than silently letting the
+        // daemon fight it at startup.
+        let promoted_hotkey_mode = if self.streaming
+            && ed
+                .get_string("hotkey", "mode")
+                .map(|m| m == "push_to_talk")
+                .unwrap_or(false)
+        {
+            ed.set_string("hotkey", "mode", "toggle");
+            true
+        } else {
+            false
+        };
+
         match ed.save() {
             Ok(()) => {
                 self.dirty_since_load = false;
-                self.feedback = Some((
-                    FeedbackLevel::Ok,
-                    format!("Saved to {}", ed.path().display()),
-                ));
+                self.feedback = if promoted_hotkey_mode {
+                    Some((
+                        FeedbackLevel::Warn,
+                        format!(
+                            "Saved to {}. Streaming requires toggle mode: \
+                             hotkey activation auto-promoted from push_to_talk to toggle.",
+                            ed.path().display()
+                        ),
+                    ))
+                } else {
+                    Some((
+                        FeedbackLevel::Ok,
+                        format!("Saved to {}", ed.path().display()),
+                    ))
+                };
             }
             Err(e) => self.feedback = Some((FeedbackLevel::Err, format!("save: {}", e))),
         }
@@ -113,6 +147,7 @@ impl AdvancedState {
                 let next = cur + delta as i64;
                 self.gpu_device = if next < 0 { None } else { Some(next.min(7)) };
             }
+            Field::Streaming => self.streaming = !self.streaming,
         }
         self.dirty_since_load = true;
         self.feedback = None;
@@ -159,6 +194,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 .gpu_device
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "auto".to_string()),
+        ),
+        FormRowSpec::new(
+            state.field == Field::Streaming,
+            "Streaming output (experimental, Parakeet)",
+            yesno(state.streaming),
         ),
     ];
 
@@ -332,6 +372,56 @@ fn guidance_for_field(state: &AdvancedState) -> Vec<Line<'_>> {
             Line::from(Span::styled(
                 "Run `vulkaninfo --summary` or `nvidia-smi -L` to see your \
                  device numbering.",
+                Style::default().fg(Color::Gray),
+            )),
+        ],
+        Field::Streaming => vec![
+            heading("Streaming output (experimental)"),
+            Line::from(""),
+            Line::from(Span::styled(
+                "EXPERIMENTAL in 0.7.2 — Parakeet only.",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(
+                "Voxtype types text incrementally while you're still speaking \
+                 instead of waiting for hotkey release. Uses the parakeet-rs \
+                 ParakeetUnified cache-aware streaming API; sub-second first \
+                 token on most hardware.",
+            ),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Turn it on if:",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(
+                "  • You're on Parakeet TDT v3 and want a live feel rather \
+                 than waiting for the final stitched transcript.",
+            ),
+            Line::from(
+                "  • You record long-form and want partials to appear as \
+                 you speak.",
+            ),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Leave it off if:",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(
+                "  • You're on Whisper or another batch engine. Streaming \
+                 returns an error rather than silently shimming — switch \
+                 engine first via the Engine section.",
+            ),
+            Line::from(
+                "  • You use heavy text post-processing (LLM cleanup). \
+                 Streaming types partials before post_process can see the \
+                 final transcript.",
+            ),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Requires a streaming-capable model (TDT v3 family with \
+                 tokenizer.model). Voxtype prints a clear error at daemon \
+                 start if the active model can't stream.",
                 Style::default().fg(Color::Gray),
             )),
         ],

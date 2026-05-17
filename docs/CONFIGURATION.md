@@ -1101,6 +1101,38 @@ model = "parakeet-tdt-0.6b-v3"
 on_demand_loading = true  # Free memory when not transcribing
 ```
 
+### streaming
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+When `true`, voxtype types text incrementally while you are still speaking
+instead of waiting for hotkey release. Uses the parakeet-rs cache-aware
+streaming pipeline and a TDT v3 family model with `tokenizer.model`.
+
+**Requires toggle activation.** Streaming output types characters at the
+cursor while you dictate. On Wayland compositors backed by libinput
+(Hyprland, Sway, River), synthetic key events emitted by `wtype` and
+`dotool` clobber the held-key state tracker, so the release of a held PTT
+key never fires `bindrd` and the daemon gets stuck in streaming. Use
+`[hotkey] mode = "toggle"`, or bind your compositor to `voxtype record
+toggle` rather than a press/release pair. The daemon auto-promotes
+`push_to_talk` to `toggle` at startup when streaming is enabled and emits
+a warning to the log.
+
+**Example:**
+```toml
+engine = "parakeet"
+
+[parakeet]
+model = "parakeet-tdt-0.6b-v3"
+streaming = true
+
+[hotkey]
+mode = "toggle"
+```
+
 ### Complete Example
 
 ```toml

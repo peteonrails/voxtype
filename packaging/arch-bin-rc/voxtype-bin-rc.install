@@ -1,0 +1,259 @@
+# Resolve the canonical real binary that /usr/bin/voxtype dispatches to,
+# regardless of whether /usr/bin/voxtype is a symlink (CPU variant) or a
+# wrapper script (GPU/ONNX variant whose binary lives next to companion
+# .so files). Echoes the real path or empty string if not present.
+_resolve_active_binary() {
+    if [ -L /usr/bin/voxtype ]; then
+        readlink -f /usr/bin/voxtype
+    elif [ -f /usr/bin/voxtype ]; then
+        # Wrapper script — extract the `exec /path` line.
+        sed -n 's/^exec \([^ ]*\).*/\1/p' /usr/bin/voxtype | head -1
+    fi
+}
+
+# Install /usr/bin/voxtype dispatching to $1 (a path under /usr/lib/voxtype/).
+# Uses a thin shell wrapper when $1 lives in a GPU subdirectory next to its
+# companion ONNX Runtime provider .so files (cuda-12/, cuda-13/, migraphx/).
+# Without the wrapper, ORT's argv[0]-based provider lookup hits /usr/bin/
+# which doesn't have the .so files and silently falls back to CPU. The
+# wrapper `exec`s the real path so argv[0] becomes the canonical location
+# and ORT finds the .so files alongside.
+_install_active_binary() {
+    local target="$1"
+    rm -f /usr/bin/voxtype
+    local target_dir
+    target_dir=$(dirname "$target")
+    local subdir="${target_dir##*/}"
+    case "$subdir" in
+        cuda-12|cuda-13|migraphx)
+            local migraphx_env=""
+            if [ "$subdir" = "migraphx" ]; then
+                # MIGraphX needs a writeable model-cache directory or its
+                # runtime fails to save compiled graphs and inference
+                # errors out. Default to $XDG_CACHE_HOME/voxtype/migraphx,
+                # honoring user override.
+                migraphx_env=': "${ORT_MIGRAPHX_MODEL_CACHE_PATH:=${XDG_CACHE_HOME:-$HOME/.cache}/voxtype/migraphx}"\nmkdir -p "$ORT_MIGRAPHX_MODEL_CACHE_PATH"\nexport ORT_MIGRAPHX_MODEL_CACHE_PATH\n'
+            fi
+            {
+                printf '#!/bin/sh\n'
+                printf '# voxtype dispatch wrapper (voxtype-bin-rc).\n'
+                printf '# Execs the GPU/ONNX binary by canonical path so ORT'\''s argv[0]\n'
+                printf '# based provider .so lookup resolves to the right subdirectory.\n'
+                printf '# Managed by `voxtype setup onnx --enable` and the AUR package'\''s\n'
+                printf '# post_install / post_upgrade hooks; do not edit by hand.\n'
+                printf '%b' "$migraphx_env"
+                printf 'exec %s "$@"\n' "$target"
+            } > /usr/bin/voxtype
+            chmod 755 /usr/bin/voxtype
+            ;;
+        *)
+            ln -sf "$target" /usr/bin/voxtype
+            ;;
+    esac
+}
+
+_set_default_backend() {
+    # Set the default CPU backend based on CPU capabilities
+    if grep -q avx512f /proc/cpuinfo 2>/dev/null; then
+        _install_active_binary /usr/lib/voxtype/voxtype-avx512
+        echo "avx512"
+    else
+        _install_active_binary /usr/lib/voxtype/voxtype-avx2
+        echo "avx2"
+    fi
+}
+
+_preserve_or_set_backend() {
+    # Restore saved backend from pre_upgrade, or set default
+    local saved="/tmp/.voxtype-backend-upgrade"
+    if [ -f "$saved" ]; then
+        target=$(cat "$saved")
+        rm -f "$saved"
+        if [ -f "$target" ]; then
+            _install_active_binary "$target"
+            local short=${target##*/voxtype-}
+            echo "${short%/*}"
+            return
+        fi
+    fi
+
+    _set_default_backend
+}
+
+# Detect the host's CUDA runtime major version by inspecting libcudart's SONAME.
+_detect_cuda_major() {
+    local lib
+    for lib in libcudart.so.13 libcudart.so.12; do
+        if /sbin/ldconfig -p 2>/dev/null | grep -q "\b$lib\b"; then
+            echo "${lib##*.so.}"
+            return
+        fi
+    done
+    if [ -e /usr/lib/libcudart.so.13 ] || [ -e /opt/cuda/lib64/libcudart.so.13 ]; then
+        echo "13"
+    elif [ -e /usr/lib/libcudart.so.12 ] || [ -e /opt/cuda/lib64/libcudart.so.12 ]; then
+        echo "12"
+    fi
+}
+
+_set_onnx_cuda_symlink() {
+    local cuda_major target
+    cuda_major=$(_detect_cuda_major)
+    case "$cuda_major" in
+        13)
+            target="cuda-13/voxtype-onnx-cuda-13"
+            ;;
+        12)
+            target="cuda-12/voxtype-onnx-cuda-12"
+            ;;
+        *)
+            if [ -f /usr/lib/voxtype/cuda-13/voxtype-onnx-cuda-13 ]; then
+                target="cuda-13/voxtype-onnx-cuda-13"
+            elif [ -f /usr/lib/voxtype/cuda-12/voxtype-onnx-cuda-12 ]; then
+                target="cuda-12/voxtype-onnx-cuda-12"
+            else
+                return
+            fi
+            ;;
+    esac
+
+    if [ -f "/usr/lib/voxtype/$target" ]; then
+        ln -sf "$target" /usr/lib/voxtype/voxtype-onnx-cuda
+        echo "$cuda_major"
+    fi
+}
+
+_detect_gpu() {
+    GPU_DETECTED=""
+    GPU_VENDOR=""
+    if [ -d /dev/dri ]; then
+        if ls /dev/dri/renderD* >/dev/null 2>&1; then
+            if command -v lspci >/dev/null 2>&1; then
+                GPU_INFO=$(lspci 2>/dev/null | grep -i 'vga\|3d\|display' | head -1 | sed 's/.*: //')
+                if [ -n "$GPU_INFO" ]; then
+                    GPU_DETECTED="$GPU_INFO"
+                    case "$GPU_INFO" in
+                        *NVIDIA*|*GeForce*|*RTX*|*GTX*) GPU_VENDOR="nvidia" ;;
+                        *AMD*|*Radeon*) GPU_VENDOR="amd" ;;
+                        *Intel*) GPU_VENDOR="intel" ;;
+                    esac
+                fi
+            fi
+            if [ -z "$GPU_DETECTED" ]; then
+                GPU_DETECTED="GPU detected (install pciutils for details)"
+            fi
+        fi
+    fi
+
+    if [ -n "$GPU_DETECTED" ]; then
+        echo ""
+        echo "    GPU detected: $GPU_DETECTED"
+        echo ""
+        echo "    For GPU acceleration, run:"
+        echo "      sudo voxtype setup gpu --enable"
+        echo ""
+        if [ "$GPU_VENDOR" = "nvidia" ]; then
+            local cuda_major
+            cuda_major=$(_detect_cuda_major)
+            if [ "$cuda_major" = "13" ]; then
+                echo "    CUDA 13 runtime detected — voxtype-onnx-cuda points to cuda-13 binary"
+            elif [ "$cuda_major" = "12" ]; then
+                echo "    CUDA 12 runtime detected — voxtype-onnx-cuda points to cuda-12 binary"
+            else
+                echo "    Whisper: requires vulkan-icd-loader"
+                echo "    ONNX engines: requires cuda (CUDA 13) or cuda12.6 (CUDA 12) package"
+            fi
+        elif [ "$GPU_VENDOR" = "amd" ]; then
+            echo "    Whisper: requires vulkan-icd-loader"
+            echo "    ONNX engines: requires rocm-hip-runtime (AMD GPU EP is MIGraphX as of v0.7.0)"
+        else
+            echo "    Requires: vulkan-icd-loader package"
+        fi
+    fi
+}
+
+post_install() {
+    echo ""
+    echo "==> Voxtype RC channel — release candidate builds for testing"
+    echo ""
+    echo "    You installed voxtype-bin-rc, which tracks the latest GitHub"
+    echo "    pre-release. Behavior, config keys, and binary names may change"
+    echo "    between RC tags as we stabilize for the next stable release."
+    echo ""
+    echo "    For production use, switch to the stable channel:"
+    echo "      yay -R voxtype-bin-rc && yay -S voxtype-bin"
+    echo ""
+    echo "==> Post-installation Steps:"
+    echo ""
+
+    CPU_VARIANT=$(_set_default_backend)
+    echo "    CPU backend: $CPU_VARIANT (using voxtype-$CPU_VARIANT)"
+
+    CUDA_PICK=$(_set_onnx_cuda_symlink)
+    if [ -n "$CUDA_PICK" ]; then
+        echo "    CUDA runtime: $CUDA_PICK detected, voxtype-onnx-cuda → cuda-$CUDA_PICK variant"
+    fi
+
+    _detect_gpu
+
+    echo ""
+    echo "    1. Add your user to the 'input' group:"
+    echo "       sudo usermod -aG input \$USER"
+    echo ""
+    echo "    2. Log out and back in for group changes to take effect"
+    echo ""
+    echo "    3. Download a model:"
+    echo "       voxtype setup model"
+    echo ""
+    echo "    4. Start voxtype:"
+    echo "       systemctl --user enable --now voxtype"
+    echo ""
+    echo "    Optional: Switch to an ONNX engine (Parakeet, SenseVoice, etc.):"
+    echo "       voxtype setup onnx --enable"
+    echo ""
+    echo "    Report RC issues at https://github.com/peteonrails/voxtype/issues"
+    echo "    and include the RC tag from 'voxtype --version'."
+    echo ""
+}
+
+pre_upgrade() {
+    local target
+    target=$(_resolve_active_binary)
+    if [ -n "$target" ]; then
+        echo "$target" > /tmp/.voxtype-backend-upgrade
+    fi
+}
+
+post_upgrade() {
+    echo ""
+    echo "==> Voxtype RC channel upgraded"
+    echo ""
+    echo "    This is a release candidate build. Pre-release behavior may"
+    echo "    differ from the previous RC; check the GitHub release notes"
+    echo "    for the tag you just installed."
+    echo ""
+
+    BACKEND=$(_preserve_or_set_backend)
+    echo "    Backend: $BACKEND (using voxtype-$BACKEND)"
+
+    CUDA_PICK=$(_set_onnx_cuda_symlink)
+    if [ -n "$CUDA_PICK" ]; then
+        echo "    CUDA runtime: $CUDA_PICK detected, voxtype-onnx-cuda → cuda-$CUDA_PICK variant"
+    fi
+
+    echo ""
+    echo "    Restart the daemon to apply updates:"
+    echo "      systemctl --user restart voxtype"
+    echo ""
+    echo "    Release notes (replace TAG with the version from 'voxtype --version'):"
+    echo "      https://github.com/peteonrails/voxtype/releases/tag/vTAG"
+    echo ""
+    echo "    To switch back to stable when the next stable ships:"
+    echo "      yay -R voxtype-bin-rc && yay -S voxtype-bin"
+    echo ""
+}
+
+post_remove() {
+    rm -f /usr/bin/voxtype
+    rm -f /usr/lib/voxtype/voxtype-onnx-cuda
+}

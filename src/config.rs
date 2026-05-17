@@ -210,12 +210,27 @@ type_delay_ms = 0
 # Allows time for the paste operation to complete (default: 200)
 # restore_clipboard_delay_ms = 200
 
+# Wait for modifier keys to be released before typing (default: true)
+# Prevents transcribed letters from combining with held modifiers (Ctrl/Alt/
+# Shift/Super) and triggering compositor or application keybindings. Reads
+# modifier state via evdev; requires user to be in the 'input' group.
+# Silently disabled when /dev/input is unreadable, so output proceeds as
+# before in that case.
+# wait_for_modifier_release = true
+
+# Maximum milliseconds to wait for modifier release before falling back to
+# clipboard output. Prevents a stuck modifier from indefinitely blocking
+# transcription delivery. (default: 750)
+# modifier_release_timeout_ms = 750
+
 # Pre/post output hooks (optional)
 # Commands to run before and after typing output. Useful for compositor integration.
 # Example: Block modifier keys during typing with Hyprland submap:
 #   pre_output_command = "hyprctl dispatch submap voxtype_suppress"
 #   post_output_command = "hyprctl dispatch submap reset"
 # See troubleshooting docs for the required Hyprland submap configuration.
+# Note: usually unnecessary now that wait_for_modifier_release is enabled by
+# default; the submap workaround is only needed if /dev/input is unreadable.
 
 # Post-processing command (optional)
 # Pipe transcribed text through an external command for cleanup before output.
@@ -591,6 +606,7 @@ impl Default for StatusConfig {
 pub struct StatusIconOverrides {
     pub idle: Option<String>,
     pub recording: Option<String>,
+    pub streaming: Option<String>,
     pub transcribing: Option<String>,
     pub stopped: Option<String>,
 }
@@ -600,6 +616,7 @@ pub struct StatusIconOverrides {
 pub struct ResolvedIcons {
     pub idle: String,
     pub recording: String,
+    pub streaming: String,
     pub transcribing: String,
     pub stopped: String,
 }
@@ -616,6 +633,9 @@ impl StatusConfig {
         }
         if let Some(ref icon) = self.icons.recording {
             icons.recording = icon.clone();
+        }
+        if let Some(ref icon) = self.icons.streaming {
+            icons.streaming = icon.clone();
         }
         if let Some(ref icon) = self.icons.transcribing {
             icons.transcribing = icon.clone();
@@ -634,6 +654,7 @@ fn load_icon_theme(theme: &str) -> ResolvedIcons {
         "emoji" => ResolvedIcons {
             idle: "🎙️".to_string(),
             recording: "🎤".to_string(),
+            streaming: "📡".to_string(), // satellite antenna — live broadcast
             transcribing: "⏳".to_string(),
             stopped: "".to_string(),
         },
@@ -641,6 +662,7 @@ fn load_icon_theme(theme: &str) -> ResolvedIcons {
             // Nerd Font icons: microphone, circle, spinner, microphone-slash
             idle: "\u{f130}".to_string(),         // nf-fa-microphone
             recording: "\u{f111}".to_string(),    // nf-fa-circle (filled)
+            streaming: "\u{f519}".to_string(),    // nf-fa-broadcast_tower
             transcribing: "\u{f110}".to_string(), // nf-fa-spinner
             stopped: "\u{f131}".to_string(),      // nf-fa-microphone_slash
         },
@@ -648,12 +670,14 @@ fn load_icon_theme(theme: &str) -> ResolvedIcons {
             // Material Design icons matching Omarchy waybar config
             idle: "\u{ec12}".to_string(), // nf-md-microphone_outline
             recording: "\u{f036c}".to_string(), // nf-md-microphone
+            streaming: "\u{f048b}".to_string(), // nf-md-access_point — broadcasting/live
             transcribing: "\u{f051f}".to_string(), // nf-md-timer_sand
             stopped: "\u{ec12}".to_string(), // nf-md-microphone_outline
         },
         "minimal" => ResolvedIcons {
             idle: "○".to_string(),
             recording: "●".to_string(),
+            streaming: "⊙".to_string(), // U+2299 circled dot — active/live
             transcribing: "◐".to_string(),
             stopped: "×".to_string(),
         },
@@ -661,6 +685,7 @@ fn load_icon_theme(theme: &str) -> ResolvedIcons {
             // Material Design Icons (requires MDI font)
             idle: "\u{f036c}".to_string(),         // mdi-microphone
             recording: "\u{f040a}".to_string(),    // mdi-record
+            streaming: "\u{f048b}".to_string(),    // mdi-access-point
             transcribing: "\u{f04ce}".to_string(), // mdi-sync
             stopped: "\u{f036d}".to_string(),      // mdi-microphone-off
         },
@@ -668,6 +693,7 @@ fn load_icon_theme(theme: &str) -> ResolvedIcons {
             // Phosphor Icons (requires Phosphor font)
             idle: "\u{e43a}".to_string(),         // ph-microphone
             recording: "\u{e438}".to_string(),    // ph-record
+            streaming: "\u{e7ee}".to_string(),    // ph-broadcast
             transcribing: "\u{e225}".to_string(), // ph-circle-notch (spinner)
             stopped: "\u{e43b}".to_string(),      // ph-microphone-slash
         },
@@ -675,6 +701,7 @@ fn load_icon_theme(theme: &str) -> ResolvedIcons {
             // VS Code Codicons (requires Codicons font)
             idle: "\u{eb51}".to_string(),         // codicon-mic
             recording: "\u{ebfc}".to_string(),    // codicon-record
+            streaming: "\u{ebba}".to_string(),    // codicon-radio-tower
             transcribing: "\u{eb4c}".to_string(), // codicon-sync
             stopped: "\u{eb52}".to_string(),      // codicon-mute
         },
@@ -682,6 +709,7 @@ fn load_icon_theme(theme: &str) -> ResolvedIcons {
             // Plain text labels (no special fonts required)
             idle: "[MIC]".to_string(),
             recording: "[REC]".to_string(),
+            streaming: "[LIVE]".to_string(),
             transcribing: "[...]".to_string(),
             stopped: "[OFF]".to_string(),
         },
@@ -689,6 +717,7 @@ fn load_icon_theme(theme: &str) -> ResolvedIcons {
             // Unicode geometric shapes (no special fonts required)
             idle: "◯".to_string(),         // U+25EF white circle
             recording: "⬤".to_string(),    // U+2B24 black large circle
+            streaming: "⊙".to_string(),    // U+2299 circled dot operator
             transcribing: "◔".to_string(), // U+25D4 circle with upper right quadrant black
             stopped: "◌".to_string(),      // U+25CC dotted circle
         },
@@ -696,6 +725,7 @@ fn load_icon_theme(theme: &str) -> ResolvedIcons {
             // Media player style (no special fonts required)
             idle: "▶".to_string(),         // U+25B6 play
             recording: "●".to_string(),    // U+25CF black circle
+            streaming: "⇉".to_string(),    // U+21C9 paired rightward arrows — flow
             transcribing: "↻".to_string(), // U+21BB clockwise arrow
             stopped: "■".to_string(),      // U+25A0 black square
         },
@@ -724,6 +754,7 @@ fn load_custom_icon_theme(path: &str) -> Result<ResolvedIcons, String> {
     struct ThemeFile {
         idle: Option<String>,
         recording: Option<String>,
+        streaming: Option<String>,
         transcribing: Option<String>,
         stopped: Option<String>,
     }
@@ -736,6 +767,7 @@ fn load_custom_icon_theme(path: &str) -> Result<ResolvedIcons, String> {
     Ok(ResolvedIcons {
         idle: theme.idle.unwrap_or(base.idle),
         recording: theme.recording.unwrap_or(base.recording),
+        streaming: theme.streaming.unwrap_or(base.streaming),
         transcribing: theme.transcribing.unwrap_or(base.transcribing),
         stopped: theme.stopped.unwrap_or(base.stopped),
     })
@@ -1040,6 +1072,42 @@ pub struct ParakeetConfig {
     /// Load model on-demand when recording starts (true) or keep loaded (false)
     #[serde(default = "default_on_demand_loading")]
     pub on_demand_loading: bool,
+
+    /// Use the cache-aware streaming pipeline (parakeet-rs `ParakeetUnified`)
+    /// instead of the batch CTC/TDT models. When true, voxtype emits live
+    /// partial transcripts during recording and types the final transcript
+    /// on hotkey release. Requires a streaming-capable model directory
+    /// (TDT v3 family with `tokenizer.model`).
+    /// Default: false (batch pipeline, identical to pre-streaming behavior).
+    #[serde(default)]
+    pub streaming: bool,
+
+    /// Streaming chunk length in seconds. Smaller = lower latency, more
+    /// inference overhead. Maps to `UnifiedStreamingConfig::chunk_secs`.
+    #[serde(default = "default_streaming_chunk_secs")]
+    pub streaming_chunk_secs: f32,
+
+    /// Streaming left context in seconds. Maps to
+    /// `UnifiedStreamingConfig::left_context_secs`.
+    #[serde(default = "default_streaming_left_context_secs")]
+    pub streaming_left_context_secs: f32,
+
+    /// Streaming right context in seconds. Maps to
+    /// `UnifiedStreamingConfig::right_context_secs`.
+    #[serde(default = "default_streaming_right_context_secs")]
+    pub streaming_right_context_secs: f32,
+}
+
+fn default_streaming_chunk_secs() -> f32 {
+    0.5
+}
+
+fn default_streaming_left_context_secs() -> f32 {
+    1.5
+}
+
+fn default_streaming_right_context_secs() -> f32 {
+    0.5
 }
 
 impl Default for ParakeetConfig {
@@ -1048,6 +1116,10 @@ impl Default for ParakeetConfig {
             model: "parakeet-tdt-0.6b-v3".to_string(),
             model_type: None, // Auto-detect
             on_demand_loading: false,
+            streaming: false,
+            streaming_chunk_secs: default_streaming_chunk_secs(),
+            streaming_left_context_secs: default_streaming_left_context_secs(),
+            streaming_right_context_secs: default_streaming_right_context_secs(),
         }
     }
 }
@@ -1846,6 +1918,27 @@ pub struct OutputConfig {
     /// Allows time for the paste operation to complete
     #[serde(default = "default_restore_clipboard_delay")]
     pub restore_clipboard_delay_ms: u32,
+
+    /// Wait for modifier keys (Ctrl/Alt/Shift/Super) to be released before
+    /// typing transcribed text. Prevents the typed letters from combining
+    /// with held modifiers and triggering compositor or application
+    /// keybindings (e.g. Super+X, Ctrl+W).
+    ///
+    /// Requires `/dev/input` access (typically `input` group membership).
+    /// Silently disabled when access is unavailable; output proceeds as
+    /// before in that case.
+    #[serde(default = "default_true")]
+    pub wait_for_modifier_release: bool,
+
+    /// Maximum time (milliseconds) to wait for modifier keys to be released
+    /// before falling back to clipboard output. Prevents a stuck modifier from
+    /// indefinitely blocking transcription delivery.
+    #[serde(default = "default_modifier_release_timeout_ms")]
+    pub modifier_release_timeout_ms: u64,
+}
+
+fn default_modifier_release_timeout_ms() -> u64 {
+    750
 }
 
 impl OutputConfig {
@@ -2019,6 +2112,8 @@ impl Default for Config {
                 file_mode: FileMode::default(),
                 restore_clipboard: false,
                 restore_clipboard_delay_ms: default_restore_clipboard_delay(),
+                wait_for_modifier_release: true,
+                modifier_release_timeout_ms: default_modifier_release_timeout_ms(),
             },
             engine: TranscriptionEngine::default(),
             parakeet: None,
@@ -2672,6 +2767,7 @@ mod tests {
             icons: StatusIconOverrides {
                 idle: None,
                 recording: Some("🔴".to_string()),
+                streaming: None,
                 transcribing: None,
                 stopped: Some("⚫".to_string()),
             },

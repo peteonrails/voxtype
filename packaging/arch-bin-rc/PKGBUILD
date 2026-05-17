@@ -1,0 +1,238 @@
+# Maintainer: Peter Jackson <pete@peteonrails.com>
+#
+# voxtype-bin-rc tracks the latest GitHub pre-release of voxtype (e.g.,
+# v0.7.3-rc1, v0.8.0-rc2). Stable users should stay on `voxtype-bin`.
+# This package conflicts with `voxtype-bin` and `voxtype` so users do not
+# accidentally have two daemons fighting over /usr/bin/voxtype.
+#
+# Updating for a new RC tag:
+#   1. Set `pkgver` to the upstream tag with the hyphen before "rc" replaced
+#      by a dot. AUR forbids hyphens in pkgver (they delimit pkgrel), so
+#      "v0.7.3-rc1" becomes pkgver=0.7.3.rc1. The `_upstream_ver` line below
+#      reverses the substitution for the GitHub download URLs.
+#   2. Reset `pkgrel=1`. Per CLAUDE.md, new binaries always need a fresh
+#      pkgver so AUR helpers re-download instead of trusting their cache.
+#   3. Fill in `sha256sums` from the uploaded release artifacts.
+#   4. Run `makepkg --printsrcinfo > .SRCINFO`.
+
+pkgname=voxtype-bin-rc
+pkgver=0.7.3.rc1
+pkgrel=1
+pkgdesc="Push-to-talk voice-to-text for Linux (pre-built binaries, release candidate channel)"
+arch=('x86_64')
+url="https://voxtype.io"
+license=('MIT')
+depends=(
+    'alsa-lib'
+    'curl'
+    'gcc-libs'
+    'glibc'
+)
+optdepends=(
+    'wtype: keyboard simulation for Wayland (recommended, best CJK support)'
+    'dotool: keyboard simulation with layout support (KDE/GNOME compatible)'
+    'ydotool: keyboard simulation fallback (X11/TTY support)'
+    'wl-clipboard: clipboard support'
+    'libnotify: desktop notifications'
+    'pipewire: audio server (recommended)'
+    'pipewire-alsa: ALSA compatibility for PipeWire (required if using PipeWire)'
+    'pulseaudio: audio server (alternative to PipeWire)'
+    'vulkan-icd-loader: GPU acceleration via Vulkan for Whisper (enable with: voxtype setup gpu --enable)'
+    'cuda: GPU acceleration via CUDA 13 for ONNX engines (NVIDIA GPUs, requires driver 580+)'
+    'cuda12.6: GPU acceleration via CUDA 12 for ONNX engines (older NVIDIA setups)'
+    'rocm-hip-runtime: GPU acceleration via MIGraphX for ONNX engines (AMD GPUs)'
+    'ollama: local AI summarization for meeting mode'
+    'gtk4-layer-shell: runtime for the GTK4 on-screen mic visualizer (voxtype-osd-gtk4)'
+)
+provides=('voxtype')
+conflicts=('voxtype' 'voxtype-bin')
+backup=('etc/voxtype/config.toml')
+install=voxtype-bin-rc.install
+validpgpkeys=('E79F5BAF8CD51A806AA27DBB7DA2709247D75BC6')  # Peter Jackson <pete@peteonrails.com>
+
+# Reverse the rc-pkgver mangling so GitHub URLs use the real tag name.
+# pkgver=0.7.3.rc1 -> _upstream_ver=0.7.3-rc1 -> tag v0.7.3-rc1.
+_upstream_ver="${pkgver/.rc/-rc}"
+_github="https://github.com/peteonrails/voxtype/releases/download/v${_upstream_ver}"
+_raw="https://raw.githubusercontent.com/peteonrails/voxtype/v${_upstream_ver}"
+
+source=(
+    # Whisper binaries
+    "voxtype-${pkgname}-${pkgver}-avx2::${_github}/voxtype-${_upstream_ver}-linux-x86_64-avx2"
+    "voxtype-${pkgname}-${pkgver}-avx2.asc::${_github}/voxtype-${_upstream_ver}-linux-x86_64-avx2.asc"
+    "voxtype-${pkgname}-${pkgver}-avx512::${_github}/voxtype-${_upstream_ver}-linux-x86_64-avx512"
+    "voxtype-${pkgname}-${pkgver}-avx512.asc::${_github}/voxtype-${_upstream_ver}-linux-x86_64-avx512.asc"
+    "voxtype-${pkgname}-${pkgver}-vulkan::${_github}/voxtype-${_upstream_ver}-linux-x86_64-vulkan"
+    "voxtype-${pkgname}-${pkgver}-vulkan.asc::${_github}/voxtype-${_upstream_ver}-linux-x86_64-vulkan.asc"
+    # ONNX CPU binaries (all ONNX engines: Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual)
+    "voxtype-${pkgname}-${pkgver}-onnx-avx2::${_github}/voxtype-${_upstream_ver}-linux-x86_64-onnx-avx2"
+    "voxtype-${pkgname}-${pkgver}-onnx-avx2.asc::${_github}/voxtype-${_upstream_ver}-linux-x86_64-onnx-avx2.asc"
+    "voxtype-${pkgname}-${pkgver}-onnx-avx512::${_github}/voxtype-${_upstream_ver}-linux-x86_64-onnx-avx512"
+    "voxtype-${pkgname}-${pkgver}-onnx-avx512.asc::${_github}/voxtype-${_upstream_ver}-linux-x86_64-onnx-avx512.asc"
+    # ONNX CUDA 12 binary + companion shared libs
+    "voxtype-${pkgname}-${pkgver}-onnx-cuda-12::${_github}/voxtype-${_upstream_ver}-linux-x86_64-onnx-cuda-12"
+    "voxtype-${pkgname}-${pkgver}-onnx-cuda-12.asc::${_github}/voxtype-${_upstream_ver}-linux-x86_64-onnx-cuda-12.asc"
+    "voxtype-${pkgname}-${pkgver}-onnx-cuda-12.libonnxruntime_providers_cuda.so::${_github}/voxtype-${_upstream_ver}-linux-x86_64-onnx-cuda-12.libonnxruntime_providers_cuda.so"
+    "voxtype-${pkgname}-${pkgver}-onnx-cuda-12.libonnxruntime_providers_shared.so::${_github}/voxtype-${_upstream_ver}-linux-x86_64-onnx-cuda-12.libonnxruntime_providers_shared.so"
+    # ONNX CUDA 13 binary + companion shared libs
+    "voxtype-${pkgname}-${pkgver}-onnx-cuda-13::${_github}/voxtype-${_upstream_ver}-linux-x86_64-onnx-cuda-13"
+    "voxtype-${pkgname}-${pkgver}-onnx-cuda-13.asc::${_github}/voxtype-${_upstream_ver}-linux-x86_64-onnx-cuda-13.asc"
+    "voxtype-${pkgname}-${pkgver}-onnx-cuda-13.libonnxruntime_providers_cuda.so::${_github}/voxtype-${_upstream_ver}-linux-x86_64-onnx-cuda-13.libonnxruntime_providers_cuda.so"
+    "voxtype-${pkgname}-${pkgver}-onnx-cuda-13.libonnxruntime_providers_shared.so::${_github}/voxtype-${_upstream_ver}-linux-x86_64-onnx-cuda-13.libonnxruntime_providers_shared.so"
+    # ONNX MIGraphX binary + companion shared libs
+    "voxtype-${pkgname}-${pkgver}-onnx-migraphx::${_github}/voxtype-${_upstream_ver}-linux-x86_64-onnx-migraphx"
+    "voxtype-${pkgname}-${pkgver}-onnx-migraphx.asc::${_github}/voxtype-${_upstream_ver}-linux-x86_64-onnx-migraphx.asc"
+    "voxtype-${pkgname}-${pkgver}-onnx-migraphx.libonnxruntime_providers_migraphx.so::${_github}/voxtype-${_upstream_ver}-linux-x86_64-onnx-migraphx.libonnxruntime_providers_migraphx.so"
+    "voxtype-${pkgname}-${pkgver}-onnx-migraphx.libonnxruntime_providers_shared.so::${_github}/voxtype-${_upstream_ver}-linux-x86_64-onnx-migraphx.libonnxruntime_providers_shared.so"
+    # OSD launcher + GTK4 frontend
+    "voxtype-${pkgname}-${pkgver}-osd::${_github}/voxtype-${_upstream_ver}-linux-x86_64-osd"
+    "voxtype-${pkgname}-${pkgver}-osd.asc::${_github}/voxtype-${_upstream_ver}-linux-x86_64-osd.asc"
+    "voxtype-${pkgname}-${pkgver}-osd-gtk4::${_github}/voxtype-${_upstream_ver}-linux-x86_64-osd-gtk4"
+    "voxtype-${pkgname}-${pkgver}-osd-gtk4.asc::${_github}/voxtype-${_upstream_ver}-linux-x86_64-osd-gtk4.asc"
+    # Config and support files
+    "config-${pkgname}-${pkgver}.toml::${_raw}/config/default.toml"
+    "voxtype-${pkgname}-${pkgver}.service::${_raw}/packaging/systemd/voxtype.service"
+    "voxtype-${pkgname}-${pkgver}.bash::${_raw}/packaging/completions/voxtype.bash"
+    "voxtype-${pkgname}-${pkgver}.zsh::${_raw}/packaging/completions/voxtype.zsh"
+    "voxtype-${pkgname}-${pkgver}.fish::${_raw}/packaging/completions/voxtype.fish"
+    "LICENSE-${pkgname}-${pkgver}::${_raw}/LICENSE"
+    "README-${pkgname}-${pkgver}.md::${_raw}/README.md"
+    # Desktop entry + terminal launcher for `voxtype configure`
+    "voxtype-configure-${pkgname}-${pkgver}.desktop::${_raw}/packaging/voxtype-configure.desktop"
+    "voxtype-configure-launcher-${pkgname}-${pkgver}::${_raw}/packaging/scripts/voxtype-configure-launcher"
+)
+
+# TODO: Update SHA256 sums from the GitHub pre-release artifacts before
+# pushing to AUR. Use the same workflow as voxtype-bin:
+#   cd releases/${_upstream_ver} && sha256sum voxtype-${_upstream_ver}-linux-x86_64-* | sort
+# Initial sums are SKIP placeholders so makepkg --printsrcinfo runs cleanly
+# on a freshly-tagged RC where the artifacts may not be uploaded yet.
+sha256sums=(
+    # Whisper binaries
+    'SKIP'  # voxtype-avx2
+    'SKIP'  # voxtype-avx2.asc
+    'SKIP'  # voxtype-avx512
+    'SKIP'  # voxtype-avx512.asc
+    'SKIP'  # voxtype-vulkan
+    'SKIP'  # voxtype-vulkan.asc
+    # ONNX CPU binaries
+    'SKIP'  # voxtype-onnx-avx2
+    'SKIP'  # voxtype-onnx-avx2.asc
+    'SKIP'  # voxtype-onnx-avx512
+    'SKIP'  # voxtype-onnx-avx512.asc
+    # ONNX CUDA 12
+    'SKIP'  # voxtype-onnx-cuda-12
+    'SKIP'  # voxtype-onnx-cuda-12.asc
+    'SKIP'  # voxtype-onnx-cuda-12.libonnxruntime_providers_cuda.so
+    'SKIP'  # voxtype-onnx-cuda-12.libonnxruntime_providers_shared.so
+    # ONNX CUDA 13
+    'SKIP'  # voxtype-onnx-cuda-13
+    'SKIP'  # voxtype-onnx-cuda-13.asc
+    'SKIP'  # voxtype-onnx-cuda-13.libonnxruntime_providers_cuda.so
+    'SKIP'  # voxtype-onnx-cuda-13.libonnxruntime_providers_shared.so
+    # ONNX MIGraphX
+    'SKIP'  # voxtype-onnx-migraphx
+    'SKIP'  # voxtype-onnx-migraphx.asc
+    'SKIP'  # voxtype-onnx-migraphx.libonnxruntime_providers_migraphx.so
+    'SKIP'  # voxtype-onnx-migraphx.libonnxruntime_providers_shared.so
+    # OSD launcher + GTK4 frontend
+    'SKIP'  # voxtype-osd
+    'SKIP'  # voxtype-osd.asc
+    'SKIP'  # voxtype-osd-gtk4
+    'SKIP'  # voxtype-osd-gtk4.asc
+    # Config and support files
+    'SKIP'  # config.toml
+    'SKIP'  # voxtype.service
+    'SKIP'  # voxtype.bash
+    'SKIP'  # voxtype.zsh
+    'SKIP'  # voxtype.fish
+    'SKIP'  # LICENSE
+    'SKIP'  # README.md
+    'SKIP'  # voxtype-configure.desktop
+    'SKIP'  # voxtype-configure-launcher
+)
+
+package() {
+    local src="$srcdir/voxtype-${pkgname}-${pkgver}"
+
+    # Install Whisper CPU binaries to /usr/lib/voxtype/
+    install -Dm755 "${src}-avx2" "$pkgdir/usr/lib/voxtype/voxtype-avx2"
+    install -Dm755 "${src}-avx512" "$pkgdir/usr/lib/voxtype/voxtype-avx512"
+
+    # Install Whisper Vulkan GPU binary
+    install -Dm755 "${src}-vulkan" "$pkgdir/usr/lib/voxtype/voxtype-vulkan"
+
+    # Install ONNX CPU binaries (no GPU EP, no companion .so files)
+    install -Dm755 "${src}-onnx-avx2" "$pkgdir/usr/lib/voxtype/voxtype-onnx-avx2"
+    install -Dm755 "${src}-onnx-avx512" "$pkgdir/usr/lib/voxtype/voxtype-onnx-avx512"
+
+    # GPU-using ONNX binaries each live in their own subdirectory alongside
+    # the EP companion shared libs they dlopen at runtime. ort 2.0.0-rc.12's
+    # CUDA/MIGraphX EPs resolve their .so files via /proc/self/exe; if they
+    # aren't co-located, EP registration fails and ort silently falls back
+    # to CPU. /proc/self/exe follows symlinks, so the user-facing names at
+    # /usr/lib/voxtype/voxtype-onnx-* are symlinks into these subdirs.
+
+    # ONNX CUDA 12 (locked to libcudart.so.12 ABI)
+    install -Dm755 "${src}-onnx-cuda-12" \
+        "$pkgdir/usr/lib/voxtype/cuda-12/voxtype-onnx-cuda-12"
+    install -Dm644 "${src}-onnx-cuda-12.libonnxruntime_providers_cuda.so" \
+        "$pkgdir/usr/lib/voxtype/cuda-12/libonnxruntime_providers_cuda.so"
+    install -Dm644 "${src}-onnx-cuda-12.libonnxruntime_providers_shared.so" \
+        "$pkgdir/usr/lib/voxtype/cuda-12/libonnxruntime_providers_shared.so"
+    ln -sf "cuda-12/voxtype-onnx-cuda-12" \
+        "$pkgdir/usr/lib/voxtype/voxtype-onnx-cuda-12"
+
+    # ONNX CUDA 13 (locked to libcudart.so.13 ABI, requires driver 580+)
+    install -Dm755 "${src}-onnx-cuda-13" \
+        "$pkgdir/usr/lib/voxtype/cuda-13/voxtype-onnx-cuda-13"
+    install -Dm644 "${src}-onnx-cuda-13.libonnxruntime_providers_cuda.so" \
+        "$pkgdir/usr/lib/voxtype/cuda-13/libonnxruntime_providers_cuda.so"
+    install -Dm644 "${src}-onnx-cuda-13.libonnxruntime_providers_shared.so" \
+        "$pkgdir/usr/lib/voxtype/cuda-13/libonnxruntime_providers_shared.so"
+    ln -sf "cuda-13/voxtype-onnx-cuda-13" \
+        "$pkgdir/usr/lib/voxtype/voxtype-onnx-cuda-13"
+
+    # ONNX MIGraphX (AMD GPU EP)
+    install -Dm755 "${src}-onnx-migraphx" \
+        "$pkgdir/usr/lib/voxtype/migraphx/voxtype-onnx-migraphx"
+    install -Dm644 "${src}-onnx-migraphx.libonnxruntime_providers_migraphx.so" \
+        "$pkgdir/usr/lib/voxtype/migraphx/libonnxruntime_providers_migraphx.so"
+    install -Dm644 "${src}-onnx-migraphx.libonnxruntime_providers_shared.so" \
+        "$pkgdir/usr/lib/voxtype/migraphx/libonnxruntime_providers_shared.so"
+    ln -sf "migraphx/voxtype-onnx-migraphx" \
+        "$pkgdir/usr/lib/voxtype/voxtype-onnx-migraphx"
+
+    # Compatibility symlink for users with scripts referencing the old
+    # voxtype-onnx-rocm name. Drop in v0.8.0.
+    ln -sf "voxtype-onnx-migraphx" "$pkgdir/usr/lib/voxtype/voxtype-onnx-rocm"
+
+    # OSD launcher + GTK4 frontend.
+    install -Dm755 "${src}-osd" "$pkgdir/usr/lib/voxtype/voxtype-osd"
+    install -Dm755 "${src}-osd-gtk4" "$pkgdir/usr/lib/voxtype/voxtype-osd-gtk4"
+    install -d "$pkgdir/usr/bin"
+    ln -sf /usr/lib/voxtype/voxtype-osd "$pkgdir/usr/bin/voxtype-osd"
+
+    # Desktop entry for the TUI configure command.
+    install -Dm755 "$srcdir/voxtype-configure-launcher-${pkgname}-${pkgver}" \
+        "$pkgdir/usr/bin/voxtype-configure-launcher"
+    install -Dm644 "$srcdir/voxtype-configure-${pkgname}-${pkgver}.desktop" \
+        "$pkgdir/usr/share/applications/voxtype-configure.desktop"
+
+    # Install default configuration
+    install -Dm644 "$srcdir/config-${pkgname}-${pkgver}.toml" "$pkgdir/etc/voxtype/config.toml"
+
+    # Install systemd user service
+    install -Dm644 "$srcdir/voxtype-${pkgname}-${pkgver}.service" "$pkgdir/usr/lib/systemd/user/voxtype.service"
+
+    # Install documentation
+    install -Dm644 "$srcdir/README-${pkgname}-${pkgver}.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+
+    # Install license
+    install -Dm644 "$srcdir/LICENSE-${pkgname}-${pkgver}" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+    # Install shell completions
+    install -Dm644 "$srcdir/voxtype-${pkgname}-${pkgver}.bash" "$pkgdir/usr/share/bash-completion/completions/voxtype"
+    install -Dm644 "$srcdir/voxtype-${pkgname}-${pkgver}.zsh" "$pkgdir/usr/share/zsh/site-functions/_voxtype"
+    install -Dm644 "$srcdir/voxtype-${pkgname}-${pkgver}.fish" "$pkgdir/usr/share/fish/vendor_completions.d/voxtype.fish"
+}

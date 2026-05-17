@@ -792,7 +792,17 @@ engine = "parakeet"
 model = "parakeet-tdt-0.6b-v3"  # or "parakeet-tdt-0.6b-v3-int8"
 # model_type = "tdt"            # "tdt" (recommended) or "ctc", auto-detected if omitted
 # on_demand_loading = false
+# streaming = true              # type text as you speak; requires toggle activation
 ```
+
+**Streaming dictation (experimental):** set `[parakeet] streaming = true` and
+voxtype types text incrementally while you speak. Streaming requires
+`[hotkey] mode = "toggle"` (or a compositor binding that calls
+`voxtype record toggle`). Synthetic key events from streaming output
+disrupt libinput's tracking of held physical keys on Wayland compositors,
+so a held PTT key never fires its release event. The daemon auto-promotes
+push-to-talk to toggle at startup when streaming is enabled and logs a
+warning.
 
 See [PARAKEET.md](PARAKEET.md) for detailed setup instructions.
 

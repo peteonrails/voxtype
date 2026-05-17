@@ -3,7 +3,7 @@ members = ["xtask"]
 
 [package]
 name = "voxtype"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2021"
 authors = ["Peter Jackson", "Jean-Paul van Tillo", "Máté Rémiás", "Rob Zolkos", "Dan Heuckeroth", "Igor Warzocha", "Julian Kaiser", "Kevin Miller", "konnsim", "reisset", "Zubair", "Loki Coyote", "Umesh", "Barrett Ruth", "André Silva", "Chmouel Boudjnah", "Christopher Albert", "Phuoc Thinh Vu", "Alexander Bosu-Kellett", "ayoahha", "Toizi", "kakapt", "Rinor Maloku", "Sami Jawhar", "jan Lemata", "Kai Stark", "graysky"]
 description = "Push-to-talk voice-to-text for Wayland"
@@ -272,3 +272,7 @@ required-features = ["osd-gtk4"]
 [[bin]]
 name = "voxtype-osd"
 path = "src/bin/voxtype_osd.rs"
+
+[[example]]
+name = "inspect_cohere_onnx"
+required-features = ["cohere"]

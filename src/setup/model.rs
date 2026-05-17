@@ -1943,18 +1943,32 @@ fn download_moonshine_model_by_info(model: &MoonshineModelInfo) -> anyhow::Resul
 // Cohere Transcribe Functions
 // =============================================================================
 
-/// Validate that a Cohere model directory has the required five files.
+/// Validate that a Cohere model directory has the required files.
+///
+/// The downloader renames variant-specific ONNX files to canonical names
+/// (`encoder_model.onnx`, `decoder_model_merged.onnx`) and keeps the
+/// `.onnx_data*` shards under their upstream variant-specific names because
+/// the ONNX graph references them by name. We look up the variant from the
+/// directory name to know which shard files to expect; if the directory
+/// doesn't match a known variant, we fall back to checking the canonical
+/// files shared across all variants.
 pub fn validate_cohere_model(path: &Path) -> anyhow::Result<()> {
     if !path.exists() {
         anyhow::bail!("Model directory does not exist: {:?}", path);
     }
-    let required = [
-        "cohere-encoder.int8.onnx",
-        "cohere-encoder.int8.onnx.data",
-        "cohere-decoder.int8.onnx",
-        "cohere-decoder.int8.onnx.data",
-        "tokens.txt",
-    ];
+    let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let variant = COHERE_MODELS.iter().find(|m| m.dir_name == dir_name);
+
+    let required: Vec<&str> = match variant {
+        Some(model) => model.files.iter().map(|(_, local)| *local).collect(),
+        None => vec![
+            "encoder_model.onnx",
+            "decoder_model_merged.onnx",
+            "tokenizer.json",
+            "config.json",
+            "generation_config.json",
+        ],
+    };
     let missing: Vec<&str> = required
         .iter()
         .copied()
@@ -3494,5 +3508,36 @@ mode = "type"
                 model.dir_name
             );
         }
+    }
+
+    #[test]
+    fn test_validate_cohere_model_accepts_all_variants() {
+        // Regression test for #357: validator hard-coded legacy filenames
+        // (cohere-encoder.int8.onnx, tokens.txt) that the post-Optimum
+        // downloader never produces. Every variant must validate against
+        // the files it actually writes to disk.
+        for model in COHERE_MODELS {
+            let tmp = tempfile::tempdir().unwrap();
+            let model_dir = tmp.path().join(model.dir_name);
+            std::fs::create_dir_all(&model_dir).unwrap();
+            for (_remote, local) in model.files {
+                std::fs::write(model_dir.join(local), b"").unwrap();
+            }
+            validate_cohere_model(&model_dir).unwrap_or_else(|e| {
+                panic!("variant {} failed validation: {}", model.name, e)
+            });
+        }
+    }
+
+    #[test]
+    fn test_validate_cohere_model_reports_missing_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let model_dir = tmp.path().join("cohere-transcribe-fp16");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        // Missing every file
+        let err = validate_cohere_model(&model_dir).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("encoder_model.onnx"), "got: {}", msg);
+        assert!(msg.contains("tokenizer.json"), "got: {}", msg);
     }
 }

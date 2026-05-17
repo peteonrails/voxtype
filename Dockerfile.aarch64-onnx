@@ -1,0 +1,115 @@
+# Build environment for voxtype aarch64 ONNX binary
+#
+# Mirrors Dockerfile.onnx (the x86_64 ONNX baseline) but targets
+# aarch64-unknown-linux-gnu. CPU-only ONNX execution providers. Intended
+# for Raspberry Pi 4/5, Ampere servers, Snapdragon X laptops, and AWS
+# Graviton.
+#
+# ort 2.0.0-rc.12 ships aarch64 prebuilts and parakeet-rs consumes them
+# via the same prebuilt path. The other ONNX engines (Moonshine,
+# SenseVoice, Paraformer, Dolphin, Omnilingual, Cohere) are pure-Rust
+# wrappers around ort's CPU EP. No CUDA/MIGraphX on this variant.
+#
+# Base image is arm64v8/ubuntu:24.04 (glibc 2.39) to match the
+# x86_64 onnx-avx2 variant's glibc cap.
+#
+# Usage:
+#   docker build --platform linux/arm64 -f Dockerfile.aarch64-onnx \
+#       -t voxtype-aarch64-onnx-builder .
+#   docker run --rm --platform linux/arm64 \
+#       -v $(pwd)/releases:/output voxtype-aarch64-onnx-builder
+#
+FROM arm64v8/ubuntu:24.04
+
+ARG VERSION=0.7.2
+ARG DEBIAN_FRONTEND=noninteractive
+
+ENV VERSION=${VERSION}
+
+# Install build dependencies. Same packages as Dockerfile.onnx; Ubuntu
+# ships them for arm64.
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    clang \
+    cmake \
+    pkg-config \
+    libasound2-dev \
+    libx11-dev \
+    libxi-dev \
+    libxtst-dev \
+    libgtk-3-dev \
+    libglib2.0-dev \
+    libappindicator3-dev \
+    libgtk-4-dev \
+    libssl-dev \
+    protobuf-compiler \
+    libprotobuf-dev \
+    git \
+    binutils \
+    meson \
+    ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
+# Ubuntu 24.04 doesn't package gtk4-layer-shell. Build the C library
+# from source so voxtype-osd-gtk4 can pkg-config against it.
+RUN git clone --depth 1 --branch v1.3.0 https://github.com/wmww/gtk4-layer-shell.git /tmp/gtk4-layer-shell \
+    && cd /tmp/gtk4-layer-shell \
+    && meson setup \
+        -Dexamples=false \
+        -Dtests=false \
+        -Ddocs=false \
+        -Dintrospection=false \
+        -Dvapi=false \
+        build \
+    && meson compile -C build \
+    && meson install -C build \
+    && ldconfig
+
+# Install Rust. Default target on arm64 host is aarch64-unknown-linux-gnu.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /build
+
+# Copy source code
+COPY . .
+
+# Tune for Neoverse N1 (Ampere Altra, AWS Graviton2, GitHub's
+# ubuntu-24.04-arm runner). Drop GGML AVX flags (x86-only); ggml uses its
+# own NEON detection on arm64. No ORT_CUDA_VERSION pin: this is a CPU EP
+# build, ort picks the aarch64 CPU prebuilt automatically.
+ENV RUSTFLAGS="-C target-cpu=neoverse-n1"
+ENV GGML_NATIVE=OFF
+
+# ONNX Runtime will be downloaded during build by the ort crate.
+ENV ORT_STRATEGY=download
+
+# Build with all ONNX engines. CPU-only on aarch64 — no GPU EPs.
+RUN cargo build --release --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,ml-diarization \
+    --config 'profile.release.lto=false' \
+    --config 'profile.release.codegen-units=8' \
+    && cp target/release/voxtype /tmp/voxtype-aarch64-onnx
+
+# Build the OSD launcher and gtk4 frontend in a separate cargo invocation
+# so the daemon binary stays clean of GTK4 / layer-shell baggage.
+RUN cargo build --release --features osd-gtk4 \
+    --bin voxtype-osd --bin voxtype-osd-gtk4 \
+    --config 'profile.release.lto=false' \
+    --config 'profile.release.codegen-units=8' \
+    && cp target/release/voxtype-osd /tmp/voxtype-osd \
+    && cp target/release/voxtype-osd-gtk4 /tmp/voxtype-osd-gtk4
+
+# Verify binary
+RUN echo "=== Verifying aarch64 ONNX binary ===" \
+    && /tmp/voxtype-aarch64-onnx --version \
+    && echo "=== Binary size ===" \
+    && ls -lh /tmp/voxtype-aarch64-onnx
+
+# Output stage
+CMD mkdir -p /output \
+    && cp /tmp/voxtype-aarch64-onnx /output/voxtype-${VERSION}-linux-aarch64-onnx \
+    && cp /tmp/voxtype-osd /output/voxtype-${VERSION}-linux-aarch64-osd \
+    && cp /tmp/voxtype-osd-gtk4 /output/voxtype-${VERSION}-linux-aarch64-osd-gtk4 \
+    && echo "Binaries copied to /output:" \
+    && ls -la /output/voxtype-*

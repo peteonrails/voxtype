@@ -38,21 +38,46 @@ WORKDIR /build
 
 COPY . .
 
-# Build with native optimizations (will use AVX-512 if available on host)
-ENV RUSTFLAGS="-C target-cpu=native"
+# Cross-compile the final voxtype binary to x86-64-v4 (AVX-512F+BW+CD+DQ+VL)
+# regardless of the build host's CPU. Two cargo nuances make this trickier
+# than just setting RUSTFLAGS:
+#
+#  1. RUSTFLAGS applies to every Rust compilation, including build scripts and
+#     proc macros that *execute on the build host* during the build. Forcing
+#     AVX-512 globally crashes those host-side binaries with SIGILL on any
+#     runner without AVX-512.
+#  2. Passing `--target <triple>` to cargo makes it separate host code from
+#     target code. Build scripts and proc macros then use host defaults,
+#     while only the final crate gets target-specific flags. The
+#     CARGO_TARGET_<triple>_RUSTFLAGS env var applies only to the target.
+#
+# The combination below produces an AVX-512 binary even on a stock ubuntu-22.04
+# GitHub-hosted runner (whose CPU is typically Cascade Lake-without-AVX-512
+# or older).
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C target-cpu=x86-64-v4"
 
-RUN cargo build --release \
-    && cp target/release/voxtype /tmp/voxtype-avx512
+# whisper.cpp / ggml is compiled by whisper-rs's build.rs via CMake. CMake
+# compiles output objects with these flags but runs its own configure-time
+# test binaries (which would SIGILL on a non-AVX-512 host) without them, so
+# this is safe.
+ENV CFLAGS="-march=x86-64-v4"
+ENV CXXFLAGS="-march=x86-64-v4"
+ENV WHISPER_CMAKE_ARGS="-DGGML_NATIVE=OFF -DGGML_AVX512=ON -DGGML_AVX512_VBMI=ON -DGGML_AVX512_VNNI=ON"
 
-# Verify AVX-512 instructions ARE present
+RUN cargo build --release --target x86_64-unknown-linux-gnu \
+    && cp target/x86_64-unknown-linux-gnu/release/voxtype /tmp/voxtype-avx512
+
+# Verify AVX-512 instructions ARE present. Fail the build if not, so the
+# pipeline never produces a mislabeled binary.
 RUN echo "=== Verifying AVX-512 binary ===" \
     && avx512_count=$(objdump -d /tmp/voxtype-avx512 | grep -cE 'zmm|vpternlog|vpermt2|\{1to' || echo 0) \
     && echo "  AVX-512 instructions: $avx512_count" \
     && if [ "$avx512_count" -eq 0 ]; then \
-         echo "WARNING: No AVX-512 instructions found. Is the host AVX-512 capable?"; \
-       else \
-         echo "✓ AVX-512 binary contains $avx512_count AVX-512 instructions"; \
-       fi
+         echo "ERROR: AVX-512 binary contains zero AVX-512 instructions." \
+         && echo "  Likely cause: target-cpu and/or CMake march flags reverted to host detection." \
+         && exit 1; \
+       fi \
+    && echo "✓ AVX-512 binary contains $avx512_count AVX-512 instructions"
 
 CMD mkdir -p /output \
     && cp /tmp/voxtype-avx512 /output/voxtype-${VERSION}-linux-x86_64-avx512 \

@@ -514,16 +514,15 @@ voxtype record start && sleep 3 && voxtype record stop
 
 ### VAD with Transcribe Command
 
+VAD configuration applies to recorded audio (record start/stop). The
+`transcribe` subcommand does not expose a per-invocation `--vad` flag —
+it reads the engine override only. To filter `voxtype transcribe` output
+through VAD, enable VAD in `config.toml` and re-run the command.
+
 ```bash
-# VAD can also filter files passed to the transcribe command
-
-# Transcribe a silent WAV file (should be rejected)
-voxtype transcribe --vad /path/to/silence.wav
-# Expected: "No speech detected" message, no transcription output
-
-# Transcribe a speech WAV file (should proceed normally)
-voxtype transcribe --vad /path/to/speech.wav
-# Expected: normal transcription output
+# Verify there is no --vad flag on transcribe (regression guard)
+voxtype transcribe --help 2>&1 | grep -- --vad
+# Expected: no match (transcribe takes <FILE> and --engine only)
 ```
 
 ### VAD Disabled (Default)
@@ -1297,8 +1296,8 @@ grep -c "TranscriptionComplete" src/audio/feedback.rs src/daemon.rs
 Verifies the pause_media feature is wired up.
 
 ```bash
-# CLI flag exists
-voxtype record start --help 2>&1 | grep -i "pause.media"
+# CLI flag exists (it is a top-level flag on `voxtype`, not on `record start`)
+voxtype --help 2>&1 | grep -i "pause.media"
 # Expected: --pause-media flag shown
 
 # Config field exists

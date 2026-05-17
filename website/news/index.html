@@ -77,6 +77,117 @@
 
             <!-- v0.7.x Era Posts -->
 
+            <article class="news-article" id="v072">
+                <div class="article-meta">
+                    <time datetime="2026-05-17">May 17, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v0.7.2: Streaming Dictation, Modifier-Release Guard, Notification Cleanup</h2>
+                <div class="article-body">
+                    <p>Live transcription appears at the cursor as you speak, modifier keys no longer collide with typed output, and Waybar gets a dedicated streaming icon. Streaming requires toggle activation, not push-to-talk.</p>
+
+                    <h3>Streaming Dictation (experimental)</h3>
+                    <p>Parakeet streaming output types text incrementally while you dictate. Powered by the <code>parakeet-rs</code> cache-aware streaming pipeline, it works with <code>parakeet-unified-en-0.6b</code> (English) and runs on CPU, NVIDIA CUDA, or AMD MIGraphX.</p>
+
+                    <p><strong>Why use it:</strong> Words appear as you speak instead of after you release a key. Useful for long-form dictation, live notes, and interactive editing where waiting for batch transcription breaks flow.</p>
+
+                    <p>Enable in the TUI Advanced section or in config:</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>engine = "parakeet"
+
+[parakeet]
+model = "parakeet-unified-en-0.6b"
+streaming = true
+
+[hotkey]
+mode = "toggle"</code></pre>
+                    </div>
+
+                    <p><strong>Streaming requires toggle activation.</strong> Push-to-talk does not work with streaming output: voxtype types characters at the cursor while you are still holding the key, and the synthetic key events from <code>wtype</code> or <code>dotool</code> clobber the held-key state tracker that Hyprland, Sway, and River use through libinput. After a few seconds the compositor decides the key was already released, so the actual release event never fires and the daemon stays in streaming mode.</p>
+
+                    <p>Toggle activation sidesteps the issue entirely: no key is held during the session. The daemon emits a strong warning and auto-promotes <code>push_to_talk</code> to <code>toggle</code> for the running session when streaming is enabled, and the TUI rewrites the config to match.</p>
+
+                    <p>Tunable parameters control the latency/accuracy tradeoff:</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[parakeet]
+streaming_chunk_secs = 0.32         # how often partials are emitted
+streaming_left_context_secs = 5.6   # history fed to each chunk
+streaming_right_context_secs = 0.32 # lookahead per chunk</code></pre>
+                    </div>
+
+                    <h3>Modifier-Release Guard (<a href="https://github.com/peteonrails/voxtype/issues/350">#350</a>)</h3>
+                    <p>When you bind voxtype to a chord like <code>Super+Ctrl+X</code>, the modifiers stay physically pressed while wtype types the transcription. On some compositors this caused the first typed letter to combine with the modifiers and fire an unrelated keybinding (closing windows, switching workspaces, opening menus).</p>
+
+                    <p>The daemon now takes an <code>EVIOCGKEY</code> snapshot of keyboard state via evdev before typing output, and waits for any held modifier to be released before sending keystrokes. If the timeout is hit (default 750ms) the output falls back to clipboard so the transcription is not lost, and a desktop notification tells the user where the text went.</p>
+
+                    <p><strong>Why use it:</strong> No more "voxtype just closed my window" surprises after a long dictation. Works on Hyprland, Sway, River, and any compositor-agnostic setup where the user is in the <code>input</code> group.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[output]
+wait_for_modifier_release = true     # default when input group is available
+modifier_release_timeout_ms = 750</code></pre>
+                    </div>
+
+                    <p>Disabled automatically during streaming (your modifiers are still down because you are still actively dictating; the guard would never fire).</p>
+
+                    <h3>Notification Stacking (<a href="https://github.com/peteonrails/voxtype/issues/345">#345</a>)</h3>
+                    <p>Voxtype's status notifications ("Recording...", "Transcribing...", "Transcribed", "Modifier key held...") now use the <code>x-canonical-private-synchronous</code> and <code>transient</code> libnotify hints, so a compositor with a notification daemon (mako, dunst, GNOME Shell, KDE) overwrites the previous Voxtype notification in place instead of stacking them in the notification history.</p>
+
+                    <p><strong>Why use it:</strong> The notification panel stays clean on GNOME/Ubuntu and similar setups instead of accumulating a long trail of "Recording..." / "Transcribing..." / "Transcribed" entries every time you dictate.</p>
+
+                    <p>Patch contributed by Stephan Schuster.</p>
+
+                    <h3>Streaming Status Icon</h3>
+                    <p>Waybar status followers now distinguish "recording" (batch capture) from "streaming" (live capture with cursor output). Custom themes can override the streaming glyph via <code>[status.icons]</code>:</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[status.icons]
+streaming = "&#xf071f;"  # nf-md-radio-handheld in Nerd Font</code></pre>
+                    </div>
+
+                    <p>The built-in themes (omarchy, nerd-font, material, phosphor, codicons, emoji, minimal, dots, arrows, text) each ship a sensible streaming glyph. The Waybar <code>format-icons</code> map has a new <code>"streaming"</code> key. The omarchy-voxtype-status script reports the new state.</p>
+
+                    <h3>Bug Fixes</h3>
+                    <ul>
+                        <li><strong>Streaming cursor protection:</strong> the parakeet backend used to emit one last <code>Final</code> event after <code>SIGUSR2</code>, which would type into whichever window had focus by the time the event arrived. The daemon now disowns the streaming session synchronously on stop so post-stop emissions are dropped instead of typed.</li>
+                        <li><strong><code>voxtype record toggle</code> during streaming:</strong> the toggle command checked for <code>"recording"</code> state only, so toggling during a streaming session would send <code>SIGUSR1</code> and start a second concurrent session instead of stopping the first. Both <code>"recording"</code> and <code>"streaming"</code> are now treated as active states.</li>
+                        <li><strong>Cohere model validator:</strong> updated to match HuggingFace Optimum filenames so <code>voxtype setup model</code> validates the Cohere variants correctly.</li>
+                        <li><strong>GTK4 OSD startup visibility:</strong> the OSD no longer flashes its chrome on the first frame at boot. Fix from Andre Silva.</li>
+                        <li><strong>Nix flake:</strong> the OSD binaries are now packaged in the flake. From Andre Silva.</li>
+                    </ul>
+
+                    <h3>Experimental aarch64 binaries</h3>
+                    <p>Two new arm64 Linux binaries land in this release: <code>aarch64-cpu</code> (the Whisper engine, equivalent to the x86_64 <code>avx2</code> variant) and <code>aarch64-onnx</code> (all ONNX engines: Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual, Cohere). Both are CPU-only. No CUDA or Vulkan on arm64 in this release, because the Jetson CUDA toolchain is awkward and there is no mainstream consumer arm64 hardware with Vulkan GPUs to support yet. Target hardware is Raspberry Pi 4/5, Ampere Altra servers, Snapdragon X laptops, and AWS Graviton instances. These binaries are marked experimental: nobody on the maintenance team owns arm64 hardware to smoke-test against, so users who run these and report back are the ones validating them in practice. File issues with hardware details if something breaks.</p>
+
+                    <p><strong>Manual install only in 0.7.2.</strong> The .deb / .rpm / AUR packages stay x86_64-only for this release because voxtype's installed-binary switching logic (in <code>src/setup/gpu.rs</code>) does not yet recognize arm64 variants. Download the binary directly from the GitHub release page and drop it into <code>/usr/local/bin/voxtype</code>:</p>
+
+                    <div class="code-block">
+                        <pre><code>curl -L https://github.com/peteonrails/voxtype/releases/download/v0.7.2/voxtype-0.7.2-linux-aarch64-cpu \
+  -o /usr/local/bin/voxtype
+chmod 755 /usr/local/bin/voxtype
+voxtype --version</code></pre>
+                    </div>
+
+                    <p>(Substitute <code>aarch64-onnx</code> for the ONNX-engine build.) The aarch64 binaries get full package-tooling integration in v0.7.3 alongside a chosen naming convention and <code>arch=('x86_64' 'aarch64')</code> in the PKGBUILDs.</p>
+
+                    <h3>Acknowledgments</h3>
+                    <ul>
+                        <li><strong>Andre Silva</strong> for the OSD startup-visibility fix and the Nix flake OSD packaging.</li>
+                        <li><strong>Stephan Schuster</strong> for the notification-stacking patch (#345), including the libnotify hint research and a working diff.</li>
+                        <li><strong>Jean-Paul van Tillo</strong> for early streaming feedback that informed the partial-typing implementation.</li>
+                    </ul>
+
+                    <h3>Downloads</h3>
+                    <p>Full changelog, signed binaries, and SHA256 sums: <a href="https://github.com/peteonrails/voxtype/releases/tag/v0.7.2">v0.7.2 on GitHub</a>.</p>
+                </div>
+            </article>
+
             <article class="news-article" id="v071">
                 <div class="article-meta">
                     <time datetime="2026-05-11">May 11, 2026</time>

@@ -1,0 +1,7 @@
+# Placeholder. Regenerate before each RC publish:
+#
+#   cd packaging/arch-bin-rc
+#   makepkg --printsrcinfo > .SRCINFO
+#
+# The AUR web frontend reads .SRCINFO to populate the package page; pushing
+# a PKGBUILD update without refreshing this file leaves stale metadata.

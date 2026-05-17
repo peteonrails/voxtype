@@ -58,6 +58,24 @@ pub enum State {
         /// Transcribed text
         text: String,
     },
+
+    /// Hotkey held, audio is being streamed to a streaming-capable backend
+    /// which is emitting partial and final segments concurrently. Replaces
+    /// `Recording` *and* `Transcribing` for streaming sessions.
+    Streaming {
+        /// When the streaming session started
+        started_at: Instant,
+        /// Optional model override for this session
+        model_override: Option<String>,
+        /// Most recent partial text (for status / debug only; never typed)
+        partial_buffer: String,
+        /// Concatenated finalized segments committed so far
+        finalized_text: String,
+        /// Number of characters typed to the output sink. Used by the
+        /// daemon's cancel path to send N backspaces and rewind text
+        /// that was already delivered to the user.
+        typed_chars: usize,
+    },
 }
 
 impl State {
@@ -71,9 +89,15 @@ impl State {
         matches!(self, State::Idle)
     }
 
-    /// Check if in recording state (normal or eager)
+    /// Check if in recording state (normal, eager, or streaming).
+    ///
+    /// `Streaming` reports `true` here so existing status-reporting and
+    /// hotkey-release logic continues to work without per-callsite changes.
     pub fn is_recording(&self) -> bool {
-        matches!(self, State::Recording { .. } | State::EagerRecording { .. })
+        matches!(
+            self,
+            State::Recording { .. } | State::EagerRecording { .. } | State::Streaming { .. }
+        )
     }
 
     /// Check if in eager recording state specifically
@@ -81,12 +105,17 @@ impl State {
         matches!(self, State::EagerRecording { .. })
     }
 
-    /// Get recording duration if currently recording (normal or eager)
+    /// Check if in streaming state specifically
+    pub fn is_streaming(&self) -> bool {
+        matches!(self, State::Streaming { .. })
+    }
+
+    /// Get recording duration if currently recording (normal, eager, or streaming)
     pub fn recording_duration(&self) -> Option<std::time::Duration> {
         match self {
-            State::Recording { started_at, .. } | State::EagerRecording { started_at, .. } => {
-                Some(started_at.elapsed())
-            }
+            State::Recording { started_at, .. }
+            | State::EagerRecording { started_at, .. }
+            | State::Streaming { started_at, .. } => Some(started_at.elapsed()),
             _ => None,
         }
     }
@@ -149,6 +178,20 @@ impl std::fmt::Display for State {
                     text.clone()
                 };
                 write!(f, "Outputting: {:?}", preview)
+            }
+            State::Streaming {
+                started_at,
+                finalized_text,
+                typed_chars,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Streaming ({:.1}s, {} typed, {} committed chars)",
+                    started_at.elapsed().as_secs_f32(),
+                    typed_chars,
+                    finalized_text.chars().count()
+                )
             }
         }
     }
@@ -221,6 +264,54 @@ mod tests {
         assert!(!state.is_eager_recording());
         assert_eq!(state.eager_chunks_sent(), None);
         assert_eq!(state.eager_tasks_in_flight(), None);
+    }
+
+    #[test]
+    fn test_streaming_state_is_recording() {
+        let state = State::Streaming {
+            started_at: Instant::now(),
+            model_override: None,
+            partial_buffer: String::new(),
+            finalized_text: String::new(),
+            typed_chars: 0,
+        };
+        assert!(state.is_recording());
+        assert!(state.is_streaming());
+        assert!(!state.is_idle());
+        assert!(!state.is_eager_recording());
+        assert!(state.recording_duration().is_some());
+    }
+
+    #[test]
+    fn test_streaming_state_display() {
+        let state = State::Streaming {
+            started_at: Instant::now(),
+            model_override: None,
+            partial_buffer: "hel".into(),
+            finalized_text: "hello".into(),
+            typed_chars: 5,
+        };
+        let display = format!("{}", state);
+        assert!(display.starts_with("Streaming"));
+        assert!(display.contains("5 typed"));
+    }
+
+    #[test]
+    fn test_recording_states_are_not_streaming() {
+        let r = State::Recording {
+            started_at: Instant::now(),
+            model_override: None,
+        };
+        assert!(!r.is_streaming());
+        let e = State::EagerRecording {
+            started_at: Instant::now(),
+            model_override: None,
+            accumulated_audio: vec![],
+            chunks_sent: 0,
+            chunk_results: vec![],
+            tasks_in_flight: 0,
+        };
+        assert!(!e.is_streaming());
     }
 
     #[test]
