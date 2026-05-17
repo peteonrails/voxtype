@@ -43,6 +43,12 @@ pub enum ModifierGuard {
     Disabled,
 }
 
+impl Default for ModifierGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ModifierGuard {
     /// Probe `/dev/input/event*` and open every device that looks like a
     /// keyboard. Permission errors are silently downgraded to `Disabled` so

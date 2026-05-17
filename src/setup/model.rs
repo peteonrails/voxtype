@@ -2725,6 +2725,7 @@ fn validate_onnx_ctc_model(path: &Path) -> anyhow::Result<()> {
 }
 
 /// Generic handler for ONNX engine model selection (download/config/restart)
+#[allow(clippy::type_complexity)]
 async fn handle_onnx_engine_selection(
     engine_name: &str,
     models: Vec<(&str, &str, u32, &[(&str, &str)], &str)>,

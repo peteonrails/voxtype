@@ -283,12 +283,7 @@ struct SilencedStderr {
 
 impl SilencedStderr {
     fn install() -> Self {
-        let null_fd = unsafe {
-            libc::open(
-                b"/dev/null\0".as_ptr() as *const libc::c_char,
-                libc::O_WRONLY,
-            )
-        };
+        let null_fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY) };
         if null_fd < 0 {
             return Self { saved_fd: None };
         }

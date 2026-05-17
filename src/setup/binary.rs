@@ -352,6 +352,7 @@ pub fn installed_engines(inv: &Inventory) -> std::collections::HashSet<&'static 
 ///      on AMD, Vulkan as cross-vendor fallback for Whisper).
 ///   3. AVX-512 if the host supports it.
 ///   4. AVX2 (universal x86_64 fallback).
+///
 /// Returns None when no installed variant supports the engine.
 pub fn best_variant_for_engine(inv: &Inventory, engine: &str) -> Option<Variant> {
     let candidates: Vec<&VariantStatus> = inv

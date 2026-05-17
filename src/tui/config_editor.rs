@@ -239,10 +239,7 @@ impl ConfigEditor {
         // file, loading from there, and only renaming on success.
         let parent = self.path.parent().ok_or_else(|| EditorError::Write {
             path: self.path.clone(),
-            source: std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "config path has no parent directory",
-            ),
+            source: std::io::Error::other("config path has no parent directory"),
         })?;
         fs::create_dir_all(parent).map_err(|e| EditorError::Write {
             path: parent.to_path_buf(),

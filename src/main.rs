@@ -818,7 +818,10 @@ async fn check_for_updates() -> anyhow::Result<()> {
     println!("Current version: {}", current);
     println!("Checking for updates...\n");
 
-    // Fetch latest release from GitHub API (blocking call wrapped in spawn_blocking)
+    // Fetch latest release from GitHub API (blocking call wrapped in spawn_blocking).
+    // ureq::Error is ~272 bytes; boxing the closure's Result would require an extra
+    // allocation just to satisfy clippy on a one-shot startup-time call.
+    #[allow(clippy::result_large_err)]
     let result = tokio::task::spawn_blocking(|| {
         ureq::get("https://api.github.com/repos/peteonrails/voxtype/releases/latest")
             .set("User-Agent", "voxtype-update-checker")

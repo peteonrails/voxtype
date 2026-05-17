@@ -454,11 +454,8 @@ impl EngineState {
             // Best we can do is flag it.
             let supported = match self.engine.as_str() {
                 "whisper" => true,
-                "parakeet" => inv.compiled_features.iter().any(|f| *f == "parakeet"),
-                _ => inv
-                    .compiled_features
-                    .iter()
-                    .any(|f| *f == self.engine.as_str()),
+                "parakeet" => inv.compiled_features.contains(&"parakeet"),
+                _ => inv.compiled_features.contains(&self.engine.as_str()),
             };
             if !supported {
                 self.binary_switch_blocked = Some(
@@ -1268,7 +1265,7 @@ fn mask(s: &str) -> String {
         return s.to_string();
     }
     let last = s.chars().last().map(|c| c.to_string()).unwrap_or_default();
-    let bullets: String = std::iter::repeat('•').take(s.chars().count() - 1).collect();
+    let bullets: String = std::iter::repeat_n('•', s.chars().count() - 1).collect();
     format!("{}{}", bullets, last)
 }
 
@@ -1886,11 +1883,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         }
         // `i` / Enter open inline-edit on text-editable fields.
         KeyCode::Enter | KeyCode::Char('i') => {
-            if state.start_edit_if_text_field() {
-                Action::None
-            } else {
-                Action::None
-            }
+            state.start_edit_if_text_field();
+            Action::None
         }
         KeyCode::Char('s') => state.save(),
         KeyCode::Char('r') => {

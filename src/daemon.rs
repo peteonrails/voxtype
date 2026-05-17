@@ -2055,8 +2055,7 @@ impl Daemon {
                         return Err(crate::error::VoxtypeError::Config(format!(
                             "Another voxtype instance is already running (lock error: {:?})",
                             e
-                        ))
-                        .into());
+                        )));
                     }
                     tracing::debug!("Acquired PID lock at {:?} (after stale cleanup)", lock_path);
                 } else {
@@ -2065,8 +2064,7 @@ impl Daemon {
                     );
                     return Err(crate::error::VoxtypeError::Config(
                         "Another voxtype instance is already running".to_string(),
-                    )
-                    .into());
+                    ));
                 }
                 #[cfg(not(unix))]
                 {

@@ -239,10 +239,8 @@ impl HotkeyState {
     fn commit_text_edit(&mut self, field: Field, buffer: String) {
         let trimmed = buffer.trim();
         match field {
-            Field::Key => {
-                if !trimmed.is_empty() {
-                    self.key = trimmed.to_uppercase();
-                }
+            Field::Key if !trimmed.is_empty() => {
+                self.key = trimmed.to_uppercase();
             }
             Field::CancelKey => {
                 self.cancel_key = if trimmed.is_empty() {
@@ -654,7 +652,7 @@ fn guidance_modifier<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
 }
 
 fn display_key(key: &str) -> String {
-    if KEY_CHOICES.iter().any(|c| *c == key) {
+    if KEY_CHOICES.contains(&key) {
         key.to_string()
     } else {
         format!("{}  (custom)", key)

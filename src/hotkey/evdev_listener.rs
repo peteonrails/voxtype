@@ -391,6 +391,7 @@ impl DeviceManager {
 }
 
 /// Main listener loop running in a blocking task
+#[allow(clippy::too_many_arguments)]
 fn evdev_listener_loop(
     target_key: Key,
     modifier_keys: HashSet<Key>,

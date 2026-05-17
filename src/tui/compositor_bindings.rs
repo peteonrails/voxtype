@@ -301,7 +301,7 @@ fn make_suggestion(
         None
     };
 
-    let mut config_lines = render_role(comp, role, key, stop_key.as_deref());
+    let mut config_lines = render_role(comp, role, key, stop_key);
     if collision {
         config_lines.insert(
             0,

@@ -175,6 +175,10 @@ pub fn project_envelope(frames: &[AudioFrame], n_columns: usize) -> Vec<Envelope
     }
 
     let n_frames = frames.len();
+    // Index-based loop: `col` is needed both to compute the bucket bounds and
+    // to write into `out[col]`. Suggested `iter_mut().enumerate()` would still
+    // need the index, so the index form reads more cleanly.
+    #[allow(clippy::needless_range_loop)]
     for col in 0..n_columns {
         // Bucket-map column index to a half-open frame range. When
         // n_frames >= n_columns, each bucket covers >=1 frame and we
