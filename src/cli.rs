@@ -1249,6 +1249,36 @@ pub enum SetupAction {
         #[arg(long)]
         status: bool,
     },
+
+    /// Install the Quickshell QML tree for the voxtype-osd-quickshell launcher
+    ///
+    /// Copies shell.qml, OsdSurface.qml, EnginePicker.qml,
+    /// MeetingControls.qml, and the voxtype-shared module into
+    /// $XDG_DATA_HOME/voxtype/quickshell/ (or ~/.local/share/voxtype/quickshell/
+    /// if XDG_DATA_HOME is unset), then prints Hyprland/Sway/River
+    /// keybinding examples for the Wave 2 engine-picker and meeting-controls
+    /// trigger flags.
+    Quickshell {
+        /// Override the install target directory.
+        #[arg(long, value_name = "DIR")]
+        target: Option<std::path::PathBuf>,
+
+        /// Override the QML source directory (otherwise auto-detected).
+        ///
+        /// Search order: $VOXTYPE_QUICKSHELL_SOURCE_DIR,
+        /// <binary>/../share/voxtype/quickshell/, /usr/share/voxtype/quickshell/,
+        /// ./quickshell/
+        #[arg(long, value_name = "DIR")]
+        source: Option<std::path::PathBuf>,
+
+        /// Overwrite an existing install at the target.
+        #[arg(long)]
+        force: bool,
+
+        /// Skip the file copy; only print the compositor binding examples.
+        #[arg(long)]
+        print_bindings: bool,
+    },
 }
 
 #[derive(Subcommand)]

@@ -3110,6 +3110,35 @@ voxtype setup --download --model medium.en
 
 ---
 
+## OSD Frontend
+
+The on-screen display has multiple frontend implementations. Pick which one
+the `voxtype-osd` wrapper launches via `[osd] frontend`.
+
+```toml
+[osd]
+frontend = "gtk4"           # Default. Uses voxtype-osd-gtk4.
+# frontend = "native"       # wgpu/egui-based (voxtype-osd-native).
+# frontend = "quickshell"   # QML/Quickshell launcher (voxtype-osd-quickshell).
+```
+
+If you pick `"quickshell"`, install the QML tree first so the launcher can
+find it:
+
+```bash
+voxtype setup quickshell
+```
+
+That command copies the QML files into `$XDG_DATA_HOME/voxtype/quickshell/`
+(or `~/.local/share/voxtype/quickshell/`) and prints compositor binding
+examples for the Wave 2 engine picker and meeting controls panels. The AUR
+packages already install the system-wide copy under
+`/usr/share/voxtype/quickshell/`; the per-user copy is only required for
+source builds or for customization. See the
+[user manual](USER_MANUAL.md#voxtype-setup-quickshell) for details.
+
+---
+
 ## Deprecated Options
 
 The following configuration options are deprecated but still supported for backwards compatibility. They will log a warning when used.
