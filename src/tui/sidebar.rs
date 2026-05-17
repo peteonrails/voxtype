@@ -35,8 +35,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
-        } else if focused_in_sidebar
-            && hovered_section(app).map(|s| s == *section).unwrap_or(false)
+        } else if focused_in_sidebar && hovered_section(app).map(|s| s == *section).unwrap_or(false)
         {
             Style::default().bg(Color::DarkGray).fg(Color::White)
         } else {

@@ -126,7 +126,10 @@ impl WaybarState {
 
     fn move_field(&mut self, delta: i32) {
         let len = Field::ALL.len() as i32;
-        let cur = Field::ALL.iter().position(|f| *f == self.field).unwrap_or(0) as i32;
+        let cur = Field::ALL
+            .iter()
+            .position(|f| *f == self.field)
+            .unwrap_or(0) as i32;
         self.field = Field::ALL[((cur + delta).rem_euclid(len)) as usize];
     }
 
@@ -138,12 +141,14 @@ impl WaybarState {
                     .position(|t| *t == self.icon_theme)
                     .map(|i| i as i32)
                     .unwrap_or(0);
-                self.icon_theme = THEMES
-                    [((idx + delta).rem_euclid(THEMES.len() as i32)) as usize]
-                    .to_string();
+                self.icon_theme =
+                    THEMES[((idx + delta).rem_euclid(THEMES.len() as i32)) as usize].to_string();
             }
             // Icon overrides are free-text; ←→ kicks off inline edit.
-            Field::IconIdle | Field::IconRecording | Field::IconTranscribing | Field::IconStopped => {
+            Field::IconIdle
+            | Field::IconRecording
+            | Field::IconTranscribing
+            | Field::IconStopped => {
                 self.start_edit_if_text_field();
                 return;
             }
@@ -155,10 +160,7 @@ impl WaybarState {
     fn is_text_field(field: Field) -> bool {
         matches!(
             field,
-            Field::IconIdle
-                | Field::IconRecording
-                | Field::IconTranscribing
-                | Field::IconStopped
+            Field::IconIdle | Field::IconRecording | Field::IconTranscribing | Field::IconStopped
         )
     }
 
@@ -216,7 +218,9 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let icon_value = |field: Field, value: &Option<String>| -> String {
         match state.editing.as_ref() {
             Some(e) if e.field == field => e.input.caret_string(),
-            _ => value.clone().unwrap_or_else(|| "(theme default)".to_string()),
+            _ => value
+                .clone()
+                .unwrap_or_else(|| "(theme default)".to_string()),
         }
     };
 

@@ -91,7 +91,10 @@ impl VadState {
 
     fn move_field(&mut self, delta: i32) {
         let len = Field::ALL.len() as i32;
-        let cur = Field::ALL.iter().position(|f| *f == self.field).unwrap_or(0) as i32;
+        let cur = Field::ALL
+            .iter()
+            .position(|f| *f == self.field)
+            .unwrap_or(0) as i32;
         let new = (cur + delta).rem_euclid(len);
         self.field = Field::ALL[new as usize];
     }
@@ -134,7 +137,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
     let dim_when_off = !state.enabled;
     let rows = vec![
-        FormRowSpec::new(state.field == Field::Enabled, "Enabled", yesno(state.enabled)),
+        FormRowSpec::new(
+            state.field == Field::Enabled,
+            "Enabled",
+            yesno(state.enabled),
+        ),
         FormRowSpec::new(state.field == Field::Backend, "Backend", &state.backend)
             .dimmed(dim_when_off),
         FormRowSpec::new(

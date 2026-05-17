@@ -21,8 +21,8 @@
 //! `[1, frames, 128]` batch tensor for the encoder.
 
 use ndarray::Array2;
-use rustfft::FftPlanner;
 use rustfft::num_complex::Complex;
+use rustfft::FftPlanner;
 
 const SAMPLE_RATE: usize = 16000;
 const FFT_SIZE: usize = 512;
@@ -54,11 +54,13 @@ impl CohereFbank {
         // periodic=True and what librosa/STFT uses).
         let hann: Vec<f32> = (0..FRAME_LENGTH)
             .map(|n| {
-                0.5 - 0.5
-                    * (2.0 * std::f32::consts::PI * n as f32 / FRAME_LENGTH as f32).cos()
+                0.5 - 0.5 * (2.0 * std::f32::consts::PI * n as f32 / FRAME_LENGTH as f32).cos()
             })
             .collect();
-        Self { mel_filterbank, hann }
+        Self {
+            mel_filterbank,
+            hann,
+        }
     }
 
     pub fn num_mels(&self) -> usize {
@@ -208,7 +210,11 @@ mod tests {
         let f = extractor.extract(&samples);
         assert_eq!(f.ncols(), NUM_MELS);
         // 1s @ 16kHz, frame 25ms, hop 10ms -> ~98 frames
-        assert!(f.nrows() >= 95 && f.nrows() <= 100, "got {} frames", f.nrows());
+        assert!(
+            f.nrows() >= 95 && f.nrows() <= 100,
+            "got {} frames",
+            f.nrows()
+        );
     }
 
     #[test]
@@ -225,11 +231,16 @@ mod tests {
         let n = f.nrows() as f32;
         for mel in 0..NUM_MELS {
             let mean: f32 = (0..f.nrows()).map(|r| f[[r, mel]]).sum::<f32>() / n;
-            let var: f32 =
-                (0..f.nrows()).map(|r| (f[[r, mel]] - mean).powi(2)).sum::<f32>() / n;
+            let var: f32 = (0..f.nrows())
+                .map(|r| (f[[r, mel]] - mean).powi(2))
+                .sum::<f32>()
+                / n;
             let std = var.sqrt();
             assert!(mean.abs() < 1e-3, "mel {mel} mean {mean}");
-            assert!((std - 1.0).abs() < 1e-2 || std < 1e-2, "mel {mel} std {std}");
+            assert!(
+                (std - 1.0).abs() < 1e-2 || std < 1e-2,
+                "mel {mel} std {std}"
+            );
         }
     }
 }

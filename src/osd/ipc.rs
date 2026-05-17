@@ -116,10 +116,7 @@ pub enum ConnectionOutcome {
 ///
 /// Returns when the connection ends. The caller is expected to sleep and
 /// retry per [`run_ipc_loop`], which composes this with a reconnect delay.
-pub async fn run_one_connection<F>(
-    socket_path: &Path,
-    mut on_frame: F,
-) -> ConnectionOutcome
+pub async fn run_one_connection<F>(socket_path: &Path, mut on_frame: F) -> ConnectionOutcome
 where
     F: FnMut(AudioFrame),
 {
@@ -158,11 +155,7 @@ where
 ///
 /// This function never returns under normal operation; it is intended to
 /// be spawned on a Tokio runtime by each frontend.
-pub async fn run_ipc_loop<F>(
-    socket_path: PathBuf,
-    reconnect_secs: f32,
-    mut on_frame: F,
-) -> !
+pub async fn run_ipc_loop<F>(socket_path: PathBuf, reconnect_secs: f32, mut on_frame: F) -> !
 where
     F: FnMut(AudioFrame) + Send,
 {

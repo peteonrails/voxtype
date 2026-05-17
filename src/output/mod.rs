@@ -176,7 +176,7 @@ pub fn engine_icon(engine: crate::config::TranscriptionEngine) -> &'static str {
         crate::config::TranscriptionEngine::Paraformer => "\u{1F4AC}", // 💬
         crate::config::TranscriptionEngine::Dolphin => "\u{1F42C}",  // 🐬
         crate::config::TranscriptionEngine::Omnilingual => "\u{1F30D}", // 🌍
-        crate::config::TranscriptionEngine::Cohere => "\u{1F4DD}",      // 📝
+        crate::config::TranscriptionEngine::Cohere => "\u{1F4DD}",   // 📝
     }
 }
 
@@ -458,8 +458,7 @@ pub struct OutputOptions<'a> {
 /// keybindings when modifiers are held. Used to filter the chain when the
 /// modifier-release wait times out.
 fn is_keystroke_method(name: &str) -> bool {
-    matches!(name, "wtype" | "eitype" | "dotool" | "ydotool")
-        || name.starts_with("paste")
+    matches!(name, "wtype" | "eitype" | "dotool" | "ydotool") || name.starts_with("paste")
 }
 
 /// Try each output method in the chain until one succeeds

@@ -384,19 +384,33 @@ pub struct Cli {
     pub pre_recording_command: Option<String>,
 
     /// Wait for modifier keys (Ctrl/Alt/Shift/Super) to be released before typing
-    #[arg(long, help_heading = "Output", hide_short_help = true,
+    #[arg(
+        long,
+        help_heading = "Output",
+        hide_short_help = true,
         long_help = "Wait for modifier keys (Ctrl/Alt/Shift/Super) to be released before typing.\n\
         Prevents transcribed text from triggering compositor or application keybindings\n\
         when the hotkey is still held. Requires user to be in the 'input' group;\n\
-        silently disabled otherwise.")]
+        silently disabled otherwise."
+    )]
     pub wait_for_modifier_release: bool,
 
     /// Disable waiting for modifier release (overrides config)
-    #[arg(long, conflicts_with = "wait_for_modifier_release", help_heading = "Output", hide_short_help = true)]
+    #[arg(
+        long,
+        conflicts_with = "wait_for_modifier_release",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
     pub no_wait_for_modifier_release: bool,
 
     /// Maximum milliseconds to wait for modifier release before falling back to clipboard
-    #[arg(long, value_name = "MS", help_heading = "Output", hide_short_help = true)]
+    #[arg(
+        long,
+        value_name = "MS",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
     pub modifier_release_timeout_ms: Option<u64>,
 
     // -- Text Processing --

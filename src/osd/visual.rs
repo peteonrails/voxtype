@@ -136,12 +136,7 @@ impl PeakHold {
 /// `held` snaps up to `current_peak` instantly when louder, otherwise
 /// decays linearly at `decay_db_per_sec`. The held value floors at -120.0
 /// so a quiet signal doesn't underflow toward -infinity.
-pub fn update_peak_hold(
-    current_peak: f32,
-    held: &mut f32,
-    decay_db_per_sec: f32,
-    dt_secs: f32,
-) {
+pub fn update_peak_hold(current_peak: f32, held: &mut f32, decay_db_per_sec: f32, dt_secs: f32) {
     if current_peak > *held {
         *held = current_peak;
     } else {
@@ -304,19 +299,28 @@ mod tests {
     fn envelope_partial_stretches_to_fill() {
         // 2 frames into 5 columns: every column must be populated (no
         // silent left edge). Frames stretch via sample-and-hold.
-        let frames = vec![
-            frame(0, -0.1, 0.1, -20.0),
-            frame(1, -0.2, 0.2, -14.0),
-        ];
+        let frames = vec![frame(0, -0.1, 0.1, -20.0), frame(1, -0.2, 0.2, -14.0)];
         let cols = project_envelope(&frames, 5);
         assert_eq!(cols.len(), 5);
         for (i, c) in cols.iter().enumerate() {
             assert_ne!(*c, EnvelopeColumn::SILENT, "column {i} was silent");
         }
         // The newest frame should appear in the last column.
-        assert_eq!(cols[4], EnvelopeColumn { min: -0.2, max: 0.2 });
+        assert_eq!(
+            cols[4],
+            EnvelopeColumn {
+                min: -0.2,
+                max: 0.2
+            }
+        );
         // The oldest frame should appear in the first column.
-        assert_eq!(cols[0], EnvelopeColumn { min: -0.1, max: 0.1 });
+        assert_eq!(
+            cols[0],
+            EnvelopeColumn {
+                min: -0.1,
+                max: 0.1
+            }
+        );
     }
 
     #[test]

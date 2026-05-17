@@ -137,7 +137,9 @@ fn print_help() {
 /// Also sniff `--config X`/`--config=X` so we know which file to read for
 /// the `[osd]` section without consuming it from the pass-through args
 /// (the child needs to see `--config` too).
-fn parse_frontend_and_config(args: &[String]) -> (Option<OsdFrontend>, Option<PathBuf>, Vec<String>) {
+fn parse_frontend_and_config(
+    args: &[String],
+) -> (Option<OsdFrontend>, Option<PathBuf>, Vec<String>) {
     let mut frontend: Option<OsdFrontend> = None;
     let mut config: Option<PathBuf> = None;
     let mut rest: Vec<String> = Vec::with_capacity(args.len());

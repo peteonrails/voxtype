@@ -497,8 +497,14 @@ const COHERE_MODELS: &[CohereModelInfo] = &[
         languages: "ar,de,el,en,es,fr,it,ja,ko,nl,pl,pt,vi,zh",
         files: &[
             ("encoder_model_q4f16.onnx", "encoder_model.onnx"),
-            ("encoder_model_q4f16.onnx_data", "encoder_model_q4f16.onnx_data"),
-            ("decoder_model_merged_q4f16.onnx", "decoder_model_merged.onnx"),
+            (
+                "encoder_model_q4f16.onnx_data",
+                "encoder_model_q4f16.onnx_data",
+            ),
+            (
+                "decoder_model_merged_q4f16.onnx",
+                "decoder_model_merged.onnx",
+            ),
             (
                 "decoder_model_merged_q4f16.onnx_data",
                 "decoder_model_merged_q4f16.onnx_data",
@@ -573,12 +579,18 @@ const COHERE_MODELS: &[CohereModelInfo] = &[
         languages: "ar,de,el,en,es,fr,it,ja,ko,nl,pl,pt,vi,zh",
         files: &[
             ("encoder_model_fp16.onnx", "encoder_model.onnx"),
-            ("encoder_model_fp16.onnx_data", "encoder_model_fp16.onnx_data"),
+            (
+                "encoder_model_fp16.onnx_data",
+                "encoder_model_fp16.onnx_data",
+            ),
             (
                 "encoder_model_fp16.onnx_data_1",
                 "encoder_model_fp16.onnx_data_1",
             ),
-            ("decoder_model_merged_fp16.onnx", "decoder_model_merged.onnx"),
+            (
+                "decoder_model_merged_fp16.onnx",
+                "decoder_model_merged.onnx",
+            ),
             (
                 "decoder_model_merged_fp16.onnx_data",
                 "decoder_model_merged_fp16.onnx_data",
@@ -3523,9 +3535,8 @@ mode = "type"
             for (_remote, local) in model.files {
                 std::fs::write(model_dir.join(local), b"").unwrap();
             }
-            validate_cohere_model(&model_dir).unwrap_or_else(|e| {
-                panic!("variant {} failed validation: {}", model.name, e)
-            });
+            validate_cohere_model(&model_dir)
+                .unwrap_or_else(|e| panic!("variant {} failed validation: {}", model.name, e));
         }
     }
 

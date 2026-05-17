@@ -83,7 +83,10 @@ impl MeetingState {
     }
     fn move_field(&mut self, delta: i32) {
         let len = Field::ALL.len() as i32;
-        let cur = Field::ALL.iter().position(|f| *f == self.field).unwrap_or(0) as i32;
+        let cur = Field::ALL
+            .iter()
+            .position(|f| *f == self.field)
+            .unwrap_or(0) as i32;
         self.field = Field::ALL[((cur + delta).rem_euclid(len)) as usize];
     }
     fn cycle(&mut self, delta: i32) {
@@ -96,9 +99,8 @@ impl MeetingState {
                     .position(|s| *s == self.audio_source)
                     .map(|i| i as i32)
                     .unwrap_or(0);
-                self.audio_source = SOURCES
-                    [(idx + delta).rem_euclid(SOURCES.len() as i32) as usize]
-                    .to_string();
+                self.audio_source =
+                    SOURCES[(idx + delta).rem_euclid(SOURCES.len() as i32) as usize].to_string();
             }
         }
         self.dirty_since_load = true;
@@ -113,14 +115,21 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             let block = Block::default().borders(Borders::ALL).title("Meeting");
             let inner = block.inner(area);
             f.render_widget(block, area);
-            f.render_widget(Paragraph::new("Failed to load config.").wrap(Wrap { trim: true }), inner);
+            f.render_widget(
+                Paragraph::new("Failed to load config.").wrap(Wrap { trim: true }),
+                inner,
+            );
             return;
         }
     };
 
     let dim_when_off = !state.enabled;
     let rows = vec![
-        FormRowSpec::new(state.field == Field::Enabled, "Meeting mode", yesno(state.enabled)),
+        FormRowSpec::new(
+            state.field == Field::Enabled,
+            "Meeting mode",
+            yesno(state.enabled),
+        ),
         FormRowSpec::new(
             state.field == Field::Diarization,
             "Speaker diarization",

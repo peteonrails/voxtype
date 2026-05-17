@@ -13,7 +13,7 @@
 use serde::Serialize;
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -592,8 +592,7 @@ pub fn active_variant() -> Option<Variant> {
     // binary path in both cases; we look up the variant from its
     // filename. Falls back to the legacy fs::read_link path for
     // robustness on edge cases.
-    let target = resolve_active_binary(SYSTEM_BIN)
-        .or_else(|| fs::read_link(SYSTEM_BIN).ok())?;
+    let target = resolve_active_binary(SYSTEM_BIN).or_else(|| fs::read_link(SYSTEM_BIN).ok())?;
     let name = target.file_name()?.to_str()?;
     Variant::from_binary_name(name)
 }
@@ -830,8 +829,14 @@ mod tests {
     fn recommendations_match_hardware() {
         // No GPU, AVX2 only → Whisper AVX2 + ONNX AVX2.
         let r = recommend(
-            &Cpu { avx2: true, avx512: false },
-            &Gpus { nvidia: false, amd: false },
+            &Cpu {
+                avx2: true,
+                avx512: false,
+            },
+            &Gpus {
+                nvidia: false,
+                amd: false,
+            },
         );
         assert_eq!(r.whisper, Variant::WhisperAvx2);
         assert_eq!(r.onnx, Variant::OnnxAvx2);
@@ -839,32 +844,56 @@ mod tests {
 
         // No GPU, AVX-512 → Whisper AVX-512 + ONNX AVX-512.
         let r = recommend(
-            &Cpu { avx2: true, avx512: true },
-            &Gpus { nvidia: false, amd: false },
+            &Cpu {
+                avx2: true,
+                avx512: true,
+            },
+            &Gpus {
+                nvidia: false,
+                amd: false,
+            },
         );
         assert_eq!(r.whisper, Variant::WhisperAvx512);
         assert_eq!(r.onnx, Variant::OnnxAvx512);
 
         // NVIDIA + AVX-512 → Whisper Vulkan + ONNX CUDA.
         let r = recommend(
-            &Cpu { avx2: true, avx512: true },
-            &Gpus { nvidia: true, amd: false },
+            &Cpu {
+                avx2: true,
+                avx512: true,
+            },
+            &Gpus {
+                nvidia: true,
+                amd: false,
+            },
         );
         assert_eq!(r.whisper, Variant::WhisperVulkan);
         assert_eq!(r.onnx, Variant::OnnxCuda);
 
         // NVIDIA but no AVX-512 → CUDA bundle won't load, fall back to ONNX AVX2.
         let r = recommend(
-            &Cpu { avx2: true, avx512: false },
-            &Gpus { nvidia: true, amd: false },
+            &Cpu {
+                avx2: true,
+                avx512: false,
+            },
+            &Gpus {
+                nvidia: true,
+                amd: false,
+            },
         );
         assert_eq!(r.whisper, Variant::WhisperVulkan);
         assert_eq!(r.onnx, Variant::OnnxAvx2);
 
         // AMD + AVX-512 → Vulkan for Whisper, AVX-512 (not MIGraphX) for ONNX.
         let r = recommend(
-            &Cpu { avx2: true, avx512: true },
-            &Gpus { nvidia: false, amd: true },
+            &Cpu {
+                avx2: true,
+                avx512: true,
+            },
+            &Gpus {
+                nvidia: false,
+                amd: true,
+            },
         );
         assert_eq!(r.whisper, Variant::WhisperVulkan);
         assert_eq!(r.onnx, Variant::OnnxAvx512);

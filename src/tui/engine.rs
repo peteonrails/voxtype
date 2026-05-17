@@ -393,9 +393,7 @@ impl EngineState {
                 .get_string("dolphin", "model")
                 .unwrap_or_else(|| default_model("dolphin").to_string()),
             dol_threads: ed.get_int("dolphin", "threads"),
-            dol_on_demand_loading: ed
-                .get_bool("dolphin", "on_demand_loading")
-                .unwrap_or(false),
+            dol_on_demand_loading: ed.get_bool("dolphin", "on_demand_loading").unwrap_or(false),
             dol_section_existed: ed.get_string("dolphin", "model").is_some(),
 
             // Omnilingual
@@ -416,9 +414,7 @@ impl EngineState {
                 .get_string("cohere", "language")
                 .unwrap_or_else(|| "en".to_string()),
             co_threads: ed.get_int("cohere", "threads"),
-            co_on_demand_loading: ed
-                .get_bool("cohere", "on_demand_loading")
-                .unwrap_or(false),
+            co_on_demand_loading: ed.get_bool("cohere", "on_demand_loading").unwrap_or(false),
             co_section_existed: ed.get_string("cohere", "model").is_some(),
         };
         let mut state = Self {
@@ -500,10 +496,7 @@ impl EngineState {
             // Fall back to any installed variant of the right family that
             // runs on this hardware.
             let fallback = inv.variants.iter().find(|s| {
-                s.variant.family() == needed
-                    && s.installed
-                    && s.runs_on_this_cpu
-                    && s.gpu_available
+                s.variant.family() == needed && s.installed && s.runs_on_this_cpu && s.gpu_available
             });
             match fallback {
                 Some(s) => self.pending_variant_switch = Some(s.variant),
@@ -827,18 +820,14 @@ impl EngineState {
                 // through hardcoded presets.
                 self.editing = Some(TextEdit {
                     field: FieldId::WPrompt,
-                    input: TextInput::new(
-                        f.w_initial_prompt.clone().unwrap_or_default(),
-                    ),
+                    input: TextInput::new(f.w_initial_prompt.clone().unwrap_or_default()),
                 });
                 return; // Don't mark dirty until commit.
             }
             FieldId::WFlashAttention => f.w_flash_attention = !f.w_flash_attention,
             FieldId::WOnDemandLoading => f.w_on_demand_loading = !f.w_on_demand_loading,
             FieldId::WGpuIsolation => f.w_gpu_isolation = !f.w_gpu_isolation,
-            FieldId::WRemoteEndpoint
-            | FieldId::WRemoteApiKey
-            | FieldId::WRemoteModel => {
+            FieldId::WRemoteEndpoint | FieldId::WRemoteApiKey | FieldId::WRemoteModel => {
                 self.start_edit_if_text_field();
                 return;
             }
@@ -1050,7 +1039,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         }
     };
 
-    let rows: Vec<FormRowSpec> = state.rows()
+    let rows: Vec<FormRowSpec> = state
+        .rows()
         .iter()
         .enumerate()
         .map(|(i, fid)| {
@@ -1136,7 +1126,10 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
             },
         ),
         FieldId::WFlashAttention => ("Whisper · flash attention", yesno(f.w_flash_attention)),
-        FieldId::WOnDemandLoading => ("Whisper · on-demand model load", yesno(f.w_on_demand_loading)),
+        FieldId::WOnDemandLoading => (
+            "Whisper · on-demand model load",
+            yesno(f.w_on_demand_loading),
+        ),
         FieldId::WGpuIsolation => ("Whisper · GPU isolation", yesno(f.w_gpu_isolation)),
         FieldId::WRemoteEndpoint => (
             "Whisper · remote endpoint",
@@ -1177,9 +1170,10 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
                 .unwrap_or("auto-detect")
                 .to_string(),
         ),
-        FieldId::PkOnDemandLoading => {
-            ("Parakeet · on-demand model load", yesno(f.pk_on_demand_loading))
-        }
+        FieldId::PkOnDemandLoading => (
+            "Parakeet · on-demand model load",
+            yesno(f.pk_on_demand_loading),
+        ),
 
         FieldId::MnModel => ("Moonshine · model", f.mn_model.clone()),
         FieldId::MnQuantized => ("Moonshine · use quantized model", yesno(f.mn_quantized)),
@@ -1189,9 +1183,10 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "auto".to_string()),
         ),
-        FieldId::MnOnDemandLoading => {
-            ("Moonshine · on-demand model load", yesno(f.mn_on_demand_loading))
-        }
+        FieldId::MnOnDemandLoading => (
+            "Moonshine · on-demand model load",
+            yesno(f.mn_on_demand_loading),
+        ),
 
         FieldId::SvModel => ("SenseVoice · model", f.sv_model.clone()),
         FieldId::SvLanguage => ("SenseVoice · language", f.sv_language.clone()),
@@ -1205,9 +1200,10 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "auto".to_string()),
         ),
-        FieldId::SvOnDemandLoading => {
-            ("SenseVoice · on-demand model load", yesno(f.sv_on_demand_loading))
-        }
+        FieldId::SvOnDemandLoading => (
+            "SenseVoice · on-demand model load",
+            yesno(f.sv_on_demand_loading),
+        ),
 
         FieldId::PfModel => ("Paraformer · model", f.pf_model.clone()),
         FieldId::PfThreads => (
@@ -1216,9 +1212,10 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "auto".to_string()),
         ),
-        FieldId::PfOnDemandLoading => {
-            ("Paraformer · on-demand model load", yesno(f.pf_on_demand_loading))
-        }
+        FieldId::PfOnDemandLoading => (
+            "Paraformer · on-demand model load",
+            yesno(f.pf_on_demand_loading),
+        ),
 
         FieldId::DolModel => ("Dolphin · model", f.dol_model.clone()),
         FieldId::DolThreads => (
@@ -1227,9 +1224,10 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "auto".to_string()),
         ),
-        FieldId::DolOnDemandLoading => {
-            ("Dolphin · on-demand model load", yesno(f.dol_on_demand_loading))
-        }
+        FieldId::DolOnDemandLoading => (
+            "Dolphin · on-demand model load",
+            yesno(f.dol_on_demand_loading),
+        ),
 
         FieldId::OmModel => ("Omnilingual · model", f.om_model.clone()),
         FieldId::OmThreads => (
@@ -1238,9 +1236,10 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "auto".to_string()),
         ),
-        FieldId::OmOnDemandLoading => {
-            ("Omnilingual · on-demand model load", yesno(f.om_on_demand_loading))
-        }
+        FieldId::OmOnDemandLoading => (
+            "Omnilingual · on-demand model load",
+            yesno(f.om_on_demand_loading),
+        ),
 
         FieldId::CoModel => ("Cohere · model", f.co_model.clone()),
         FieldId::CoLanguage => ("Cohere · language", f.co_language.clone()),
@@ -1310,9 +1309,7 @@ fn engine_guidance(state: &EngineState) -> Vec<Line<'static>> {
     } else if let Some(reason) = state.binary_switch_blocked {
         lines.push(Line::from(Span::styled(
             "⚠ Cannot switch binary",
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(reason.to_string()));
         lines.push(Line::from(""));
@@ -1478,7 +1475,11 @@ fn guidance(state: &EngineState) -> Vec<Line<'_>> {
                     Style::default().fg(Color::Gray),
                 )),
             ];
-            if state.editing.as_ref().is_some_and(|e| e.field == FieldId::WPrompt) {
+            if state
+                .editing
+                .as_ref()
+                .is_some_and(|e| e.field == FieldId::WPrompt)
+            {
                 lines.insert(
                     0,
                     Line::from(Span::styled(

@@ -124,7 +124,9 @@ impl TextState {
 
     pub fn reset(&mut self) {
         if let Ok(fresh) = Self::load() {
-            let cursor = self.cursor.min(total_rows(&fresh.replacements).saturating_sub(1));
+            let cursor = self
+                .cursor
+                .min(total_rows(&fresh.replacements).saturating_sub(1));
             *self = fresh;
             self.cursor = cursor;
             self.feedback = Some((FeedbackLevel::Ok, "Reverted unsaved changes".to_string()));
@@ -271,7 +273,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         EditTarget::Existing(i) => Some(i),
         EditTarget::New => None,
     });
-    let editing_new = matches!(state.editing.as_ref().map(|e| e.target), Some(EditTarget::New));
+    let editing_new = matches!(
+        state.editing.as_ref().map(|e| e.target),
+        Some(EditTarget::New)
+    );
 
     let mut rows: Vec<FormRowSpec> = Vec::new();
 
@@ -308,7 +313,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     } else {
         "press Enter".to_string()
     };
-    rows.push(FormRowSpec::new(state.cursor == add_idx, add_label, add_value));
+    rows.push(FormRowSpec::new(
+        state.cursor == add_idx,
+        add_label,
+        add_value,
+    ));
 
     let feedback_pair = state
         .feedback
@@ -332,11 +341,7 @@ fn replacement_edit_value(state: &TextState) -> String {
     };
     match edit.phase {
         EditPhase::Key => format!("editing key: {}", edit.input.caret_string()),
-        EditPhase::Value => format!(
-            "\"{}\" → {}",
-            edit.key_buffer,
-            edit.input.caret_string()
-        ),
+        EditPhase::Value => format!("\"{}\" → {}", edit.key_buffer, edit.input.caret_string()),
     }
 }
 
@@ -482,7 +487,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
             state.move_field(1);
             Action::None
         }
-        KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l')
+        KeyCode::Left
+        | KeyCode::Right
+        | KeyCode::Char('h')
+        | KeyCode::Char('l')
         | KeyCode::Char(' ') => {
             state.cycle();
             Action::None

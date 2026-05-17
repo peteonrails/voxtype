@@ -328,10 +328,7 @@ pub fn default_config_content() -> String {
     #[cfg(target_os = "macos")]
     {
         DEFAULT_CONFIG
-            .replace(
-                "key = \"SCROLLLOCK\"",
-                "key = \"FN\"",
-            )
+            .replace("key = \"SCROLLLOCK\"", "key = \"FN\"")
             .replace(
                 "# Common choices: SCROLLLOCK, PAUSE, RIGHTALT, F13-F24",
                 "# Common choices: FN, RIGHTALT, F13-F24",
@@ -2353,9 +2350,7 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             tracing::debug!("Config file not found at {:?}, using defaults", path);
         }
     } else {
-        tracing::debug!(
-            "No config file found at user or system path, using built-in defaults"
-        );
+        tracing::debug!("No config file found at user or system path, using built-in defaults");
     }
 
     // Override from environment variables
@@ -4081,7 +4076,10 @@ mod tests {
 
     #[test]
     fn test_system_path_constant() {
-        assert_eq!(Config::system_path(), PathBuf::from("/etc/voxtype/config.toml"));
+        assert_eq!(
+            Config::system_path(),
+            PathBuf::from("/etc/voxtype/config.toml")
+        );
         assert_eq!(Config::SYSTEM_PATH, "/etc/voxtype/config.toml");
     }
 

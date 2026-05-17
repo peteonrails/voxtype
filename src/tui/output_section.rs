@@ -124,7 +124,11 @@ impl OutputState {
     fn commit_text_edit(&mut self, field: Field, buffer: String) {
         match field {
             Field::AppendText => {
-                self.append_text = if buffer.is_empty() { None } else { Some(buffer) };
+                self.append_text = if buffer.is_empty() {
+                    None
+                } else {
+                    Some(buffer)
+                };
             }
             Field::PostProcess => {
                 self.post_process_command = if buffer.trim().is_empty() {
@@ -207,7 +211,10 @@ impl OutputState {
 
     fn move_field(&mut self, delta: i32) {
         let len = Field::ALL.len() as i32;
-        let cur = Field::ALL.iter().position(|f| *f == self.field).unwrap_or(0) as i32;
+        let cur = Field::ALL
+            .iter()
+            .position(|f| *f == self.field)
+            .unwrap_or(0) as i32;
         let new = (cur + delta).rem_euclid(len);
         self.field = Field::ALL[new as usize];
     }
@@ -246,8 +253,7 @@ impl OutputState {
                     .map(|i| i as i32)
                     .unwrap_or(0);
                 let n = (idx + delta).rem_euclid(POST_PROCESS_PRESETS.len() as i32);
-                self.post_process_command =
-                    POST_PROCESS_PRESETS[n as usize].map(|s| s.to_string());
+                self.post_process_command = POST_PROCESS_PRESETS[n as usize].map(|s| s.to_string());
             }
         }
         self.dirty_since_load = true;
@@ -394,9 +400,7 @@ fn guidance_for_field(state: &OutputState) -> Vec<Line<'_>> {
                 "file: ",
                 Style::default().add_modifier(Modifier::BOLD),
             )),
-            Line::from(
-                "Appends to a file. Set [output] file_path before using.",
-            ),
+            Line::from("Appends to a file. Set [output] file_path before using."),
         ],
         Field::Fallback => vec![
             heading("Fallback to clipboard"),
@@ -416,9 +420,7 @@ fn guidance_for_field(state: &OutputState) -> Vec<Line<'_>> {
         Field::AutoSubmit => vec![
             heading("Auto-submit"),
             Line::from(""),
-            Line::from(
-                "After typing the transcript, press Enter automatically.",
-            ),
+            Line::from("After typing the transcript, press Enter automatically."),
             Line::from(""),
             Line::from(
                 "Useful for chat boxes (Slack, Discord, terminal prompts) \

@@ -35,11 +35,11 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
+    backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
     widgets::Paragraph,
-    backend::CrosstermBackend,
     Frame, Terminal,
 };
 use std::io::{self, Stdout};
@@ -176,7 +176,11 @@ fn dispatch_action(
             restart_voxtype_daemon(app);
             Ok(LoopControl::Continue)
         }
-        Action::SwitchVariantAndDownload { variant, engine, model } => {
+        Action::SwitchVariantAndDownload {
+            variant,
+            engine,
+            model,
+        } => {
             leave_terminal(terminal)?;
             let switch_outcome = run_pkexec_switch(variant);
             // Always attempt the download even if the switch failed: the
@@ -502,10 +506,7 @@ fn render_help_overlay(f: &mut Frame) {
 fn render_title(f: &mut Frame, area: Rect) {
     let line = Line::from(vec![
         Span::raw(" Voxtype Configuration"),
-        Span::styled(
-            "  ·  ",
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             "edit settings without leaving the terminal",
             Style::default().fg(Color::DarkGray),
@@ -530,10 +531,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                 format!(" ↑↓ navigate · Enter open · Tab content ·{}", global),
                 Style::default().fg(Color::Gray),
             ),
-            Span::styled(
-                format!("│  {}", summary),
-                Style::default().fg(Color::Cyan),
-            ),
+            Span::styled(format!("│  {}", summary), Style::default().fg(Color::Cyan)),
         ])
     } else {
         let section_keys = match app.current_section {

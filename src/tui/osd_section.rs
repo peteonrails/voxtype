@@ -115,12 +115,8 @@ impl OsdState {
             margin_px: ed.get_int(TABLE, "margin_px").unwrap_or(24),
             top_margin: ed.get_float(TABLE, "top_margin").unwrap_or(0.85),
             opacity: ed.get_float(TABLE, "opacity").unwrap_or(0.95),
-            waveform_window_secs: ed
-                .get_float(TABLE, "waveform_window_secs")
-                .unwrap_or(3.0),
-            peak_decay_db_per_sec: ed
-                .get_float(TABLE, "peak_decay_db_per_sec")
-                .unwrap_or(6.0),
+            waveform_window_secs: ed.get_float(TABLE, "waveform_window_secs").unwrap_or(3.0),
+            peak_decay_db_per_sec: ed.get_float(TABLE, "peak_decay_db_per_sec").unwrap_or(6.0),
             waveform_gain: ed.get_float(TABLE, "waveform_gain").unwrap_or(10.0),
             field: Field::Enabled,
             feedback: None,
@@ -294,9 +290,21 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let rows = vec![
-        FormRowSpec::new(state.field == Field::Enabled, "Enabled", yesno(state.enabled)),
-        FormRowSpec::new(state.field == Field::Frontend, "Frontend", state.frontend.clone()),
-        FormRowSpec::new(state.field == Field::Position, "Position", state.position.clone()),
+        FormRowSpec::new(
+            state.field == Field::Enabled,
+            "Enabled",
+            yesno(state.enabled),
+        ),
+        FormRowSpec::new(
+            state.field == Field::Frontend,
+            "Frontend",
+            state.frontend.clone(),
+        ),
+        FormRowSpec::new(
+            state.field == Field::Position,
+            "Position",
+            state.position.clone(),
+        ),
         FormRowSpec::new(
             state.field == Field::WidthPx,
             "Width (px)",

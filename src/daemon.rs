@@ -967,17 +967,14 @@ impl Daemon {
     /// Returns `(capture, streaming_samples_rx)` on success.
     async fn start_streaming_capture(
         &mut self,
-    ) -> std::result::Result<
-        (Box<dyn AudioCapture>, tokio::sync::mpsc::Receiver<Vec<f32>>),
-        (),
-    > {
+    ) -> std::result::Result<(Box<dyn AudioCapture>, tokio::sync::mpsc::Receiver<Vec<f32>>), ()>
+    {
         match audio::create_capture(&self.config.audio) {
             Ok(mut capture) => match capture.start().await {
                 Ok(chunk_rx) => {
                     // Bounded; backed-up streaming backend drops chunks
                     // rather than back-pressuring the capture.
-                    let (streaming_tx, streaming_rx) =
-                        tokio::sync::mpsc::channel::<Vec<f32>>(64);
+                    let (streaming_tx, streaming_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(64);
 
                     if let Some(handle) = self.level_emitter_task.take() {
                         handle.abort();

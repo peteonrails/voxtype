@@ -89,11 +89,7 @@ fn palette_from(c: OmarchyColors) -> Palette {
             .and_then(parse_hex)
             .map(|c| c.with_alpha(bg_alpha))
             .unwrap_or(fb.background),
-        accent: c
-            .accent
-            .as_deref()
-            .and_then(parse_hex)
-            .unwrap_or(fb.accent),
+        accent: c.accent.as_deref().and_then(parse_hex).unwrap_or(fb.accent),
         meter_low: c
             .color2
             .as_deref()

@@ -202,7 +202,10 @@ impl HotkeyState {
 
     fn move_field(&mut self, delta: i32) {
         let len = Field::ALL.len() as i32;
-        let cur = Field::ALL.iter().position(|f| *f == self.field).unwrap_or(0) as i32;
+        let cur = Field::ALL
+            .iter()
+            .position(|f| *f == self.field)
+            .unwrap_or(0) as i32;
         let new = (cur + delta).rem_euclid(len);
         self.field = Field::ALL[new as usize];
     }
@@ -371,11 +374,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             "Cancel key",
             match state.editing.as_ref() {
                 Some(e) if e.field == Field::CancelKey => e.input.caret_string(),
-                _ => state
-                    .cancel_key
-                    .as_deref()
-                    .unwrap_or("(none)")
-                    .to_string(),
+                _ => state.cancel_key.as_deref().unwrap_or("(none)").to_string(),
             },
         )
         .dimmed(greyout),
@@ -384,11 +383,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             "Modifier (secondary model)",
             match state.editing.as_ref() {
                 Some(e) if e.field == Field::Modifier => e.input.caret_string(),
-                _ => state
-                    .modifier
-                    .as_deref()
-                    .unwrap_or("(none)")
-                    .to_string(),
+                _ => state.modifier.as_deref().unwrap_or("(none)").to_string(),
             },
         )
         .dimmed(greyout),
@@ -473,11 +468,7 @@ fn guidance_enabled<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
                 .add_modifier(Modifier::BOLD),
         )));
         for b in &bindings {
-            let file = b
-                .source
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
+            let file = b.source.file_name().and_then(|s| s.to_str()).unwrap_or("");
             lines.push(Line::from(format!(
                 "  • [{}] {}  →  voxtype {}",
                 b.compositor, b.keys, b.action
