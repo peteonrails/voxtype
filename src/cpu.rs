@@ -86,7 +86,7 @@ pub fn is_running_in_vm() -> bool {
     // CPUID leaf 1, ECX bit 31 is the hypervisor present bit
     #[cfg(target_arch = "x86_64")]
     {
-        let result = unsafe { std::arch::x86_64::__cpuid(1) };
+        let result = std::arch::x86_64::__cpuid(1);
         (result.ecx & (1 << 31)) != 0
     }
 }
