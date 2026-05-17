@@ -626,11 +626,50 @@ fn variant_gpu_available(v: Variant, g: &Gpus) -> bool {
     }
 }
 
+/// Enumerate Cargo features compiled into the running binary.
+///
+/// Drives the "Features:" line in `voxtype info variants`, the same field
+/// in the TUI's General and Engine inventory panes, and the source-build
+/// engine-validation warning at `src/tui/engine.rs::refresh_binary_match`.
+///
+/// **When adding a new engine or capability feature, add it here too.**
+/// The previous version of this function only enumerated `parakeet` and
+/// the four GPU backends; the six ONNX engines and `ml-diarization`
+/// silently disappeared from every display, and the source-build engine
+/// validator emitted a spurious "rebuild voxtype with the corresponding
+/// Cargo feature for this engine" warning when a user picked an engine
+/// that was actually compiled in (#383).
 pub fn compiled_features() -> Vec<&'static str> {
     let mut f = Vec::new();
+    // ASR engines. Whisper is unconditional and not a Cargo feature, so
+    // it never appears here; only optional engines are listed.
     if cfg!(feature = "parakeet") {
         f.push("parakeet");
     }
+    if cfg!(feature = "moonshine") {
+        f.push("moonshine");
+    }
+    if cfg!(feature = "sensevoice") {
+        f.push("sensevoice");
+    }
+    if cfg!(feature = "paraformer") {
+        f.push("paraformer");
+    }
+    if cfg!(feature = "dolphin") {
+        f.push("dolphin");
+    }
+    if cfg!(feature = "omnilingual") {
+        f.push("omnilingual");
+    }
+    if cfg!(feature = "cohere") {
+        f.push("cohere");
+    }
+    // Meeting-mode capability: ML-based speaker diarization (ECAPA-TDNN).
+    // When absent, meeting mode falls back to source-based attribution.
+    if cfg!(feature = "ml-diarization") {
+        f.push("ml-diarization");
+    }
+    // GPU acceleration backends
     if cfg!(feature = "gpu-vulkan") {
         f.push("gpu-vulkan");
     }
@@ -642,6 +681,15 @@ pub fn compiled_features() -> Vec<&'static str> {
     }
     if cfg!(feature = "gpu-metal") {
         f.push("gpu-metal");
+    }
+    // OSD frontends. Affects whether `voxtype-osd-gtk4` and
+    // `voxtype-osd-native` are present in the build. (The Quickshell
+    // launcher binary is unconditional and has no Cargo feature.)
+    if cfg!(feature = "osd-native") {
+        f.push("osd-native");
+    }
+    if cfg!(feature = "osd-gtk4") {
+        f.push("osd-gtk4");
     }
     f
 }
@@ -908,5 +956,47 @@ mod tests {
             InstallKind::Package | InstallKind::Source
         ));
         let _ = inv.recommendation;
+    }
+
+    /// Regression test for #383: `compiled_features()` previously omitted
+    /// the six ONNX engines and `ml-diarization`. The bug was visible to
+    /// users in `voxtype info variants` and the TUI inventory panes, and
+    /// caused the source-build engine validator to spuriously warn about
+    /// engines that were actually compiled in.
+    ///
+    /// This test asserts the contract: every Cargo feature checked below
+    /// must appear in the returned vec when its `cfg!` is true at test
+    /// compile time. CI runs the test under several feature sets so a
+    /// future omission shows up immediately.
+    #[test]
+    fn compiled_features_enumerates_all_optional_features() {
+        let f = compiled_features();
+        macro_rules! require_feature_listed {
+            ($name:literal) => {
+                if cfg!(feature = $name) {
+                    assert!(
+                        f.contains(&$name),
+                        "compiled_features() omitted `{}` (regression of #383); \
+                         add the corresponding `if cfg!(feature = \"{}\")` arm",
+                        $name,
+                        $name
+                    );
+                }
+            };
+        }
+        require_feature_listed!("parakeet");
+        require_feature_listed!("moonshine");
+        require_feature_listed!("sensevoice");
+        require_feature_listed!("paraformer");
+        require_feature_listed!("dolphin");
+        require_feature_listed!("omnilingual");
+        require_feature_listed!("cohere");
+        require_feature_listed!("ml-diarization");
+        require_feature_listed!("gpu-vulkan");
+        require_feature_listed!("gpu-cuda");
+        require_feature_listed!("gpu-hipblas");
+        require_feature_listed!("gpu-metal");
+        require_feature_listed!("osd-native");
+        require_feature_listed!("osd-gtk4");
     }
 }
