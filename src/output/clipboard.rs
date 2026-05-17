@@ -3,8 +3,12 @@
 //! Uses wl-copy to copy text to the Wayland clipboard.
 //! This is the most reliable fallback as it works on all Wayland compositors.
 //!
+//! Under an X11 session this method is unavailable; the chain falls through
+//! to `XclipOutput` (xclip/xsel) instead.
+//!
 //! Requires: wl-clipboard package installed
 
+use super::session::{detect, DisplaySession};
 use super::TextOutput;
 use crate::error::OutputError;
 use std::process::Stdio;
@@ -80,6 +84,13 @@ impl TextOutput for ClipboardOutput {
     }
 
     async fn is_available(&self) -> bool {
+        // wl-copy is a no-op without a Wayland compositor (the issue from
+        // GitHub #346). Under X11, defer to xclip/xsel via XclipOutput.
+        if detect() != DisplaySession::Wayland {
+            tracing::debug!("clipboard (wl-copy) skipped: not a Wayland session");
+            return false;
+        }
+
         Command::new("which")
             .arg("wl-copy")
             .stdout(Stdio::null())
