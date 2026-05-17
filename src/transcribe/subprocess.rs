@@ -33,6 +33,11 @@ struct WorkerResponse {
     text: Option<String>,
     #[serde(default)]
     error: Option<String>,
+    /// Two-letter language code chosen for this transcription, if the worker
+    /// tracked it. Used by output methods that benefit from a layout hint.
+    /// Older workers that do not emit this field deserialize to `None`.
+    #[serde(default)]
+    language: Option<String>,
 }
 
 /// A prepared worker process ready to receive audio
@@ -57,6 +62,10 @@ pub struct SubprocessTranscriber {
     config_path: Option<std::path::PathBuf>,
     /// Pre-spawned worker (from prepare())
     prepared_worker: Mutex<Option<PreparedWorker>>,
+    /// Last language reported by the worker, if any. Mirrors
+    /// `WhisperTranscriber::last_language` so the daemon can derive a layout
+    /// hint after transcription. See [`Transcriber::last_detected_language`].
+    last_language: Mutex<Option<String>>,
 }
 
 impl SubprocessTranscriber {
@@ -69,6 +78,7 @@ impl SubprocessTranscriber {
             config: config.clone(),
             config_path,
             prepared_worker: Mutex::new(None),
+            last_language: Mutex::new(None),
         })
     }
 
@@ -286,6 +296,15 @@ impl Transcriber for SubprocessTranscriber {
             start.elapsed().as_secs_f32()
         );
 
+        // Record reported language for layout-aware output methods. Missing
+        // (older worker) leaves the previous value untouched-by-success
+        // semantics: clear it on every successful call so stale language
+        // hints don't leak across transcriptions when the user switches
+        // engines or recordings.
+        if let Ok(mut guard) = self.last_language.lock() {
+            *guard = response.language.clone();
+        }
+
         // Handle response
         if response.ok {
             response.text.ok_or_else(|| {
@@ -299,6 +318,10 @@ impl Transcriber for SubprocessTranscriber {
             ))
         }
     }
+
+    fn last_detected_language(&self) -> Option<String> {
+        self.last_language.lock().ok().and_then(|g| g.clone())
+    }
 }
 
 #[cfg(test)]
@@ -311,10 +334,20 @@ mod tests {
             serde_json::from_str(r#"{"ok": true, "text": "Hello world"}"#).unwrap();
         assert!(success.ok);
         assert_eq!(success.text, Some("Hello world".to_string()));
+        // Backward compat: older workers don't emit "language".
+        assert_eq!(success.language, None);
 
         let error: WorkerResponse =
             serde_json::from_str(r#"{"ok": false, "error": "Model not found"}"#).unwrap();
         assert!(!error.ok);
         assert_eq!(error.error, Some("Model not found".to_string()));
+    }
+
+    #[test]
+    fn test_worker_response_parsing_with_language() {
+        let success: WorkerResponse =
+            serde_json::from_str(r#"{"ok": true, "text": "Privet", "language": "ru"}"#).unwrap();
+        assert!(success.ok);
+        assert_eq!(success.language, Some("ru".to_string()));
     }
 }

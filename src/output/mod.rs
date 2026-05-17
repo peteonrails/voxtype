@@ -277,6 +277,8 @@ fn create_driver_output(
             config.type_delay_ms,
             pre_type_delay_ms,
             config.shift_enter_newlines,
+            config.eitype_xkb_layout.clone(),
+            config.eitype_xkb_variant.clone(),
         )),
         OutputDriver::Dotool => Box::new(dotool::DotoolOutput::new(
             config.type_delay_ms,

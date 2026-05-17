@@ -311,6 +311,12 @@ async fn main() -> anyhow::Result<()> {
     if let Some(variant) = cli.dotool_xkb_variant {
         config.output.dotool_xkb_variant = Some(variant);
     }
+    if let Some(layout) = cli.eitype_xkb_layout {
+        config.output.eitype_xkb_layout = Some(layout);
+    }
+    if let Some(variant) = cli.eitype_xkb_variant {
+        config.output.eitype_xkb_variant = Some(variant);
+    }
     if let Some(path) = cli.file_path {
         config.output.file_path = Some(path);
     }

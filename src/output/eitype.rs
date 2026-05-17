@@ -25,6 +25,14 @@ pub struct EitypeOutput {
     pre_type_delay_ms: u32,
     /// Convert newlines to Shift+Enter (for apps where Enter submits)
     shift_enter_newlines: bool,
+    /// XKB keyboard layout to pass via `-l <layout>` (e.g., "us", "de", "ru").
+    /// Overrides eitype's view of the system layout for the call. Required
+    /// when the transcribed language does not match the active layout, see
+    /// issue #180.
+    xkb_layout: Option<String>,
+    /// XKB layout variant passed via `--variant <variant>` (e.g.,
+    /// "dvorak", "colemak", "nodeadkeys").
+    xkb_variant: Option<String>,
 }
 
 impl EitypeOutput {
@@ -35,13 +43,34 @@ impl EitypeOutput {
         type_delay_ms: u32,
         pre_type_delay_ms: u32,
         shift_enter_newlines: bool,
+        xkb_layout: Option<String>,
+        xkb_variant: Option<String>,
     ) -> Self {
+        if let Some(ref layout) = xkb_layout {
+            tracing::debug!("eitype: using keyboard layout '{}'", layout);
+        }
         Self {
             auto_submit,
             append_text,
             type_delay_ms,
             pre_type_delay_ms,
             shift_enter_newlines,
+            xkb_layout,
+            xkb_variant,
+        }
+    }
+
+    /// Append `-l <layout>` / `--variant <variant>` flags to a Command and
+    /// the debug_args vec, if configured. Centralized so type_text and the
+    /// key-press helpers stay in sync.
+    fn apply_layout_args(&self, cmd: &mut Command, debug_args: &mut Vec<String>) {
+        if let Some(ref layout) = self.xkb_layout {
+            cmd.arg("-l").arg(layout);
+            debug_args.push(format!("-l {}", layout));
+        }
+        if let Some(ref variant) = self.xkb_variant {
+            cmd.arg("--variant").arg(variant);
+            debug_args.push(format!("--variant {}", variant));
         }
     }
 
@@ -67,6 +96,9 @@ impl EitypeOutput {
             cmd.arg("-d").arg(self.type_delay_ms.to_string());
             debug_args.push(format!("-d {}", self.type_delay_ms));
         }
+
+        // Apply layout hint (e.g. -l ru when transcribing Russian on a US layout).
+        self.apply_layout_args(&mut cmd, &mut debug_args);
 
         debug_args.push(format!("\"{}\"", text.chars().take(20).collect::<String>()));
         tracing::debug!("Running: {}", debug_args.join(" "));
@@ -204,36 +236,100 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = EitypeOutput::new(false, None, 0, 0, false);
+        let output = EitypeOutput::new(false, None, 0, 0, false, None, None);
         assert!(!output.auto_submit);
         assert_eq!(output.type_delay_ms, 0);
         assert_eq!(output.pre_type_delay_ms, 0);
         assert!(!output.shift_enter_newlines);
+        assert!(output.xkb_layout.is_none());
+        assert!(output.xkb_variant.is_none());
     }
 
     #[test]
     fn test_new_with_enter() {
-        let output = EitypeOutput::new(true, None, 0, 0, false);
+        let output = EitypeOutput::new(true, None, 0, 0, false, None, None);
         assert!(output.auto_submit);
     }
 
     #[test]
     fn test_new_with_type_delay() {
-        let output = EitypeOutput::new(false, None, 50, 0, false);
+        let output = EitypeOutput::new(false, None, 50, 0, false, None, None);
         assert_eq!(output.type_delay_ms, 50);
         assert_eq!(output.pre_type_delay_ms, 0);
     }
 
     #[test]
     fn test_new_with_pre_type_delay() {
-        let output = EitypeOutput::new(false, None, 0, 200, false);
+        let output = EitypeOutput::new(false, None, 0, 200, false, None, None);
         assert_eq!(output.type_delay_ms, 0);
         assert_eq!(output.pre_type_delay_ms, 200);
     }
 
     #[test]
     fn test_new_with_shift_enter_newlines() {
-        let output = EitypeOutput::new(false, None, 0, 0, true);
+        let output = EitypeOutput::new(false, None, 0, 0, true, None, None);
         assert!(output.shift_enter_newlines);
+    }
+
+    #[test]
+    fn test_new_with_layout() {
+        let output = EitypeOutput::new(false, None, 0, 0, false, Some("ru".to_string()), None);
+        assert_eq!(output.xkb_layout, Some("ru".to_string()));
+        assert!(output.xkb_variant.is_none());
+    }
+
+    #[test]
+    fn test_new_with_layout_and_variant() {
+        let output = EitypeOutput::new(
+            false,
+            None,
+            0,
+            0,
+            false,
+            Some("de".to_string()),
+            Some("nodeadkeys".to_string()),
+        );
+        assert_eq!(output.xkb_layout, Some("de".to_string()));
+        assert_eq!(output.xkb_variant, Some("nodeadkeys".to_string()));
+    }
+
+    /// Resolve layout/variant against the standard cases covered by config:
+    /// - explicit layout, no variant
+    /// - layout + variant
+    /// - neither
+    #[test]
+    fn test_apply_layout_args_includes_layout_when_set() {
+        let output = EitypeOutput::new(false, None, 0, 0, false, Some("ru".to_string()), None);
+        let mut cmd = Command::new("eitype");
+        let mut debug_args: Vec<String> = vec![];
+        output.apply_layout_args(&mut cmd, &mut debug_args);
+        assert!(debug_args.iter().any(|s| s == "-l ru"));
+    }
+
+    #[test]
+    fn test_apply_layout_args_includes_variant_when_set() {
+        let output = EitypeOutput::new(
+            false,
+            None,
+            0,
+            0,
+            false,
+            Some("de".to_string()),
+            Some("nodeadkeys".to_string()),
+        );
+        let mut cmd = Command::new("eitype");
+        let mut debug_args: Vec<String> = vec![];
+        output.apply_layout_args(&mut cmd, &mut debug_args);
+        assert!(debug_args.iter().any(|s| s == "-l de"));
+        assert!(debug_args.iter().any(|s| s == "--variant nodeadkeys"));
+    }
+
+    #[test]
+    fn test_apply_layout_args_noop_when_unset() {
+        let output = EitypeOutput::new(false, None, 0, 0, false, None, None);
+        let mut cmd = Command::new("eitype");
+        let mut debug_args: Vec<String> = vec![];
+        output.apply_layout_args(&mut cmd, &mut debug_args);
+        assert!(debug_args.is_empty());
     }
 }

@@ -1576,6 +1576,95 @@ dotool_xkb_layout = "de"
 dotool_xkb_variant = "nodeadkeys"  # German without dead keys
 ```
 
+### eitype_xkb_layout
+
+**Type:** String (optional)
+**Default:** None
+**Required:** No
+
+Keyboard layout passed to eitype as `-l <layout>`. Use this when your
+transcribed language does not match the active system layout (issue #180).
+
+When unset, voxtype derives the layout from the transcriber's detected
+language using [language_to_layout](#language_to_layout). Setting this field
+explicitly disables that auto-detection and forces the chosen layout.
+
+**Example: pin eitype to US regardless of what voxtype detects**
+```toml
+[output]
+mode = "type"
+driver_order = ["eitype"]
+eitype_xkb_layout = "us"
+```
+
+### eitype_xkb_variant
+
+**Type:** String (optional)
+**Default:** None
+**Required:** No
+
+Layout variant passed to eitype as `--variant <variant>` (e.g., `dvorak`,
+`colemak`, `nodeadkeys`).
+
+```toml
+[output]
+eitype_xkb_layout = "de"
+eitype_xkb_variant = "nodeadkeys"
+```
+
+### language_to_layout
+
+**Type:** Table (map of two-letter language code to XKB layout)
+**Default:** Built-in map covering common languages
+
+Maps detected language codes (ISO 639-1, e.g. `en`, `ru`, `de`) to XKB
+keyboard layout codes (e.g. `us`, `ru`, `de`). When a transcriber reports the
+language used for a transcription and neither `eitype_xkb_layout` nor
+`dotool_xkb_layout` is set, voxtype looks the language up in this map and
+passes the resulting layout to eitype/dotool for that transcription only.
+
+This is what makes the multi-language case from issue #180 work
+end-to-end: with `language = ["en", "ru"]` and `driver_order = ["eitype"]`,
+voxtype detects the spoken language, looks it up here, and tells eitype
+to type with the right keyboard layout.
+
+**Built-in defaults include:**
+- `en = "us"` (English)
+- `ru = "ru"`, `de = "de"`, `fr = "fr"`, `es = "es"`, `it = "it"`
+- `pl = "pl"`, `uk = "uk"`, `cs = "cs"`, `sk = "sk"`
+- `sv = "sv"`, `no = "no"`, `fi = "fi"`, `da = "da"`, `nl = "nl"`
+- `pt = "pt"`, `tr = "tr"`, `gr = "gr"`, `hu = "hu"`, `ro = "ro"`
+- `bg = "bg"`, `hr = "hr"`, `sr = "sr"`, `sl = "sl"`
+- `lt = "lt"`, `lv = "lv"`, `et = "et"`, `is = "is"`
+- `ca = "ca"`, `eu = "eu"`
+- `el = "gr"` (Greek uses "gr")
+- `ja = "jp"`, `ko = "kr"`
+
+Languages without a mapping fall through with no layout hint (eitype uses
+the system layout).
+
+**Replacing the defaults.** Providing the `[output.language_to_layout]`
+section in your config replaces the entire built-in map (TOML does not
+merge tables). If you want to add a single entry while keeping the
+defaults, copy the entries you need.
+
+**Example: Brazilian Portuguese and Dvorak English**
+```toml
+[output.language_to_layout]
+en = "dvorak"   # English on Dvorak
+pt = "br"       # Brazilian Portuguese layout
+ru = "ru"       # Russian (kept from defaults)
+de = "de"       # German (kept from defaults)
+```
+
+**Disabling auto layout selection.** Set the map to empty to skip layout
+inference entirely; eitype/dotool will use whatever explicit
+`*_xkb_layout` you set (or the system layout):
+```toml
+[output.language_to_layout]
+# (empty)
+```
+
 ### file_path
 
 **Type:** String (path)
@@ -2766,6 +2855,9 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_FALLBACK_TO_CLIPBOARD` | bool | `output.fallback_to_clipboard` |
 | `VOXTYPE_PASTE_KEYS` | string | `output.paste_keys` |
 | `VOXTYPE_DOTOOL_XKB_LAYOUT` | string | `output.dotool_xkb_layout` |
+| `VOXTYPE_DOTOOL_XKB_VARIANT` | string | `output.dotool_xkb_variant` |
+| `VOXTYPE_EITYPE_XKB_LAYOUT` | string | `output.eitype_xkb_layout` |
+| `VOXTYPE_EITYPE_XKB_VARIANT` | string | `output.eitype_xkb_variant` |
 | `VOXTYPE_SPOKEN_PUNCTUATION` | bool | `text.spoken_punctuation` |
 | `VOXTYPE_SMART_AUTO_SUBMIT` | bool | `text.smart_auto_submit` |
 | `VOXTYPE_FILTER_FILLERS` | bool | `text.filter_filler_words` |
