@@ -658,6 +658,15 @@ async fn main() -> anyhow::Result<()> {
                         setup::vad::download_model()?;
                     }
                 }
+                Some(SetupAction::Quickshell {
+                    target,
+                    source,
+                    force,
+                    print_bindings,
+                }) => {
+                    warn_if_root("quickshell");
+                    setup::quickshell::run(target, source, force, print_bindings)?;
+                }
                 None => {
                     // Default: run setup (non-blocking)
                     warn_if_root("");

@@ -22,6 +22,7 @@ pub mod launchd;
 pub mod macos;
 pub mod model;
 pub mod parakeet;
+pub mod quickshell;
 pub mod systemd;
 pub mod vad;
 pub mod waybar;

@@ -256,6 +256,34 @@ voxtype setup dms --qml        # Output raw QML content
 
 See [With DankMaterialShell](#with-dankmaterialshell-kde-plasma) for details.
 
+### `voxtype setup quickshell`
+
+Install the Quickshell QML tree so `voxtype-osd-quickshell` (and the
+optional `[osd] frontend = "quickshell"` config setting) can find it.
+This is needed if you installed voxtype from source or from a `.deb`/`.rpm`
+package that didn't drop the QML files into `/usr/share/voxtype/`. The AUR
+packages already install the system-wide copy, but you can still run this
+command to put a per-user copy under `$XDG_DATA_HOME/voxtype/quickshell/`
+for customization.
+
+```bash
+voxtype setup quickshell                  # Install + print compositor bindings
+voxtype setup quickshell --target DIR     # Install to a custom location
+voxtype setup quickshell --source DIR     # Override the source tree (default: auto-detect)
+voxtype setup quickshell --force          # Overwrite an existing install
+voxtype setup quickshell --print-bindings # Print the bindings only, do not copy
+```
+
+The default target is `$XDG_DATA_HOME/voxtype/quickshell/` (or
+`~/.local/share/voxtype/quickshell/` if `XDG_DATA_HOME` is unset). The
+launcher searches that path first, then `/usr/share/voxtype/quickshell/`.
+
+The command prints Hyprland, Sway, and River keybinding examples that
+toggle the Wave 2 engine-picker and meeting-controls panels via flag
+files under `$XDG_RUNTIME_DIR/voxtype/`. The OSD itself does not need a
+keybinding; it activates automatically when the daemon enters the
+recording state.
+
 ### `voxtype record`
 
 Control recording from external sources (compositor keybindings, scripts).
