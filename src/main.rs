@@ -663,9 +663,20 @@ async fn main() -> anyhow::Result<()> {
                     source,
                     force,
                     print_bindings,
+                    bridge,
+                    bridge_target,
+                    skip_bridge,
                 }) => {
                     warn_if_root("quickshell");
-                    setup::quickshell::run(target, source, force, print_bindings)?;
+                    setup::quickshell::run(
+                        target,
+                        source,
+                        force,
+                        print_bindings,
+                        bridge,
+                        bridge_target,
+                        skip_bridge,
+                    )?;
                 }
                 None => {
                     // Default: run setup (non-blocking)

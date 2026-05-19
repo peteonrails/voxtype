@@ -3130,11 +3130,16 @@ voxtype setup quickshell
 ```
 
 That command copies the QML files into `$XDG_DATA_HOME/voxtype/quickshell/`
-(or `~/.local/share/voxtype/quickshell/`) and prints compositor binding
-examples for the Wave 2 engine picker and meeting controls panels. The AUR
-packages already install the system-wide copy under
-`/usr/share/voxtype/quickshell/`; the per-user copy is only required for
-source builds or for customization. See the
+(or `~/.local/share/voxtype/quickshell/`), symlinks the
+`voxtype-audio-bridge` sidecar into `$XDG_BIN_HOME/voxtype-audio-bridge`
+(or `~/.local/bin/voxtype-audio-bridge`) so the QML waveform can find
+it on PATH, and prints compositor binding examples for the Wave 2 engine
+picker and meeting controls panels. The AUR packages already install
+the system-wide copy under `/usr/share/voxtype/quickshell/` and ship the
+bridge at `/usr/lib/voxtype/voxtype-audio-bridge`; the per-user QML copy
+is only required for source builds or for customization, and the bridge
+symlink is what puts the sidecar on PATH where the QML expects it. Pass
+`--skip-bridge` if your install already has the bridge on PATH. See the
 [user manual](USER_MANUAL.md#voxtype-setup-quickshell) for details.
 
 ---
