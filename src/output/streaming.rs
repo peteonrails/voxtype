@@ -257,14 +257,24 @@ async fn try_wtype_backspaces(count: usize) -> bool {
 }
 
 async fn try_dotool_backspaces(count: usize) -> bool {
-    // dotool reads commands on stdin. `key backspace` per line.
+    // Prefer `dotoolc` whenever dotoold is actually accepting input.
+    // Spawning raw `dotool` creates a *new* uinput keyboard per call;
+    // KDE Plasma can drop events on the typing keyboard while these
+    // ephemeral keyboards rapidly appear and disappear. Routing through
+    // dotoolc reuses dotoold's persistent keyboard.
     use tokio::io::AsyncWriteExt;
-    let mut child = match Command::new("dotool")
-        .stdin(Stdio::piped())
+    let (binary, env_pipe) = match crate::output::dotool::DotoolOutput::live_daemon_pipe_path() {
+        Some(p) => ("dotoolc", Some(p)),
+        None => ("dotool", None),
+    };
+    let mut cmd = Command::new(binary);
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
+        .stderr(Stdio::null());
+    if let Some(p) = env_pipe {
+        cmd.env("DOTOOL_PIPE", p);
+    }
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(_) => return false,
     };
