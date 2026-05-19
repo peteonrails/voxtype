@@ -92,7 +92,11 @@ jobs:
             runner: ubuntu-24.04
             glibc_cap: '2.39'
             check_no_avx512: false
-            companion_libs: 'libonnxruntime_providers_cuda.so libonnxruntime_providers_shared.so'
+            # cuda-13 dlopens ORT via ort/load-dynamic so the runtime ships
+            # alongside the binary (Microsoft's prebuilt is the only 1.24.4
+            # build with sm_120 Blackwell coverage, and it's distributed as
+            # .so only — see Dockerfile.onnx-cuda-13 header).
+            companion_libs: 'libonnxruntime.so.1.24.4 libonnxruntime_providers_cuda.so libonnxruntime_providers_shared.so'
             timeout_minutes: 120
           - variant: onnx-migraphx
             arch: x86_64
