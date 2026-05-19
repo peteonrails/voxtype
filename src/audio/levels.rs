@@ -614,15 +614,28 @@ pub fn spawn_silence_pump(sink: FrameSink) -> tokio::task::JoinHandle<()> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use tempfile::TempDir;
     use tokio::io::AsyncReadExt;
 
     /// Global one-shot panic flag for the accept-loop fault injection
     /// test. We use a global because the panic check is inside
     /// `run_accept_loop`, which doesn't have access to the test
-    /// scaffolding directly. Tests serialise on `panic_test_lock`.
+    /// scaffolding directly.
+    ///
+    /// Every test that spins up a `LevelHub` must serialise on
+    /// `HUB_TEST_LOCK`: even tests that don't arm the panic flag still
+    /// run an accept loop that *reads* it, so a parallel arm-then-check
+    /// from another test would leak a panic into the wrong hub. This was
+    /// the root cause of issue #406 — `hub_start_accepts_a_connection`
+    /// (which never arms the flag) was running unserialised and getting
+    /// its hub respawned out from under it when a panic-arming test ran
+    /// in another thread.
     static ACCEPT_PANIC_NEXT: AtomicBool = AtomicBool::new(false);
-    /// Serialise tests that touch the global panic flag.
-    static PANIC_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Serialise *all* tests that construct a `LevelHub`. The lock has
+    /// to cover the entire lifetime of the hub, not just the moment the
+    /// flag is armed, because the accept loop polls the flag on every
+    /// iteration.
+    static HUB_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     pub(super) fn should_panic_now() -> bool {
         ACCEPT_PANIC_NEXT.swap(false, Ordering::SeqCst)
@@ -708,24 +721,27 @@ mod tests {
         assert!((out[0].max - 0.4).abs() < 1e-6);
     }
 
-    fn temp_socket_path(name: &str) -> PathBuf {
-        let mut p = std::env::temp_dir();
-        let pid = std::process::id();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        p.push(format!(
-            "voxtype-levels-test-{}-{}-{}.sock",
-            name, pid, nanos
-        ));
-        p
+    /// Build a fresh per-test socket path inside a private `TempDir`.
+    ///
+    /// The caller keeps the `TempDir` alive for the duration of the test;
+    /// the directory and any sockets inside it are unlinked on drop.
+    fn temp_socket_dir() -> (TempDir, PathBuf) {
+        let dir = TempDir::new().expect("create tempdir");
+        let path = dir.path().join("audio.sock");
+        (dir, path)
     }
 
     /// Smoke: starting the hub binds the socket and a client can connect.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn hub_start_accepts_a_connection() {
-        let path = temp_socket_path("accept");
+        // Serialise with the panic-arming tests. Even though this test
+        // never arms the panic flag itself, its accept loop *reads* the
+        // flag on every iteration; a parallel arm from another test
+        // would respawn this hub mid-test. See HUB_TEST_LOCK doc comment.
+        let _guard = HUB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let (_tmp, path) = temp_socket_dir();
         let hub = LevelHub::start(path.clone()).await.expect("start hub");
 
         // Connect a client.
@@ -760,9 +776,9 @@ mod tests {
         // Holding this std::sync::Mutex across `.await` is intentional:
         // the lock serialises tests that touch the global panic flag,
         // and the critical section never contends with itself.
-        let _guard = PANIC_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = HUB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-        let path = temp_socket_path("respawn");
+        let (_tmp, path) = temp_socket_dir();
         let hub = LevelHub::start(path.clone()).await.expect("start hub");
 
         // Arm the panic, then poke the accept loop so it advances past
@@ -837,9 +853,9 @@ mod tests {
     async fn frame_sink_survives_respawn() {
         // See note in `watchdog_respawns_after_accept_panic`: holding
         // this lock across awaits is intentional test serialisation.
-        let _guard = PANIC_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = HUB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-        let path = temp_socket_path("sink-survives");
+        let (_tmp, path) = temp_socket_dir();
         let hub = LevelHub::start(path.clone()).await.expect("start hub");
         let sink = hub.frame_sink();
 
