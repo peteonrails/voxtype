@@ -92,9 +92,12 @@ RUN set -eux; \
     test -f "${ORT_DIR}/lib/libonnxruntime_providers_shared.so"; \
     # Fail loudly at build time if a future Microsoft release ever drops
     # Blackwell. This is the gate that should have existed for the pyke
-    # prebuilt before #386 reached a 5090 user.
+    # prebuilt before #386 reached a 5090 user. The sm_120 token appears
+    # in `strings` output as a substring of compiler directives like
+    # `-arch sm_120a -m 64 -w` and `.target sm_120`, never as a whole
+    # line, so the pattern can't be line-anchored.
     strings "${ORT_DIR}/lib/libonnxruntime_providers_cuda.so" \
-      | grep -qE '^sm_120(a)?$' \
+      | grep -qE '(\.target sm_120|sm_120a)\b' \
       || { echo "FAIL: Microsoft ORT ${ORT_VERSION} cu13 EP lacks sm_120 — bundle layout changed upstream."; exit 1; }; \
     echo "Microsoft ORT ${ORT_VERSION} cu13 staged at ${ORT_DIR} (sm_70..sm_120a)."
 
