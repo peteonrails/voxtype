@@ -185,6 +185,7 @@ fn set_engine(engine: TranscriptionEngine) -> bool {
         TranscriptionEngine::Dolphin => "dolphin",
         TranscriptionEngine::Omnilingual => "omnilingual",
         TranscriptionEngine::Cohere => "cohere",
+        TranscriptionEngine::Soniox => "soniox",
     };
 
     // Check if engine line exists

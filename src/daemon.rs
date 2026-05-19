@@ -563,6 +563,10 @@ pub struct Daemon {
     level_hub: Option<audio::levels::LevelHub>,
     /// Active per-recording level emitter task; aborted when recording stops
     level_emitter_task: Option<tokio::task::JoinHandle<()>>,
+    /// Synthetic zero-level publisher that keeps the OSD visible while a
+    /// streaming session is draining server-side after the mic stopped.
+    /// Aborted in `end_streaming`.
+    streaming_drain_pump: Option<tokio::task::JoinHandle<()>>,
     /// OSD child supervisor task. Holds the JoinHandle so dropping it (on
     /// daemon shutdown) kill_on_drop's the spawned voxtype-osd process.
     osd_supervisor_task: Option<tokio::task::JoinHandle<()>>,
@@ -693,6 +697,7 @@ impl Daemon {
             last_dictation: None,
             level_hub: None,
             level_emitter_task: None,
+            streaming_drain_pump: None,
             osd_supervisor_task: None,
             model_manager: None,
             model_load_task: None,
@@ -873,6 +878,52 @@ impl Daemon {
     /// End a streaming session gracefully (called when the backend emits
     /// `Ended`, or as a teardown after an error). Stops audio capture, awaits
     /// the backend task, and drops the session locals.
+    /// Start the OSD "draining" pump that publishes silent frames at
+    /// 100 Hz to keep the visualizer on screen while the streaming
+    /// backend is flushing pending finals after the mic has stopped.
+    /// No-op if the pump is already running or the OSD level hub is
+    /// disabled.
+    fn start_streaming_drain_pump(&mut self) {
+        if self.streaming_drain_pump.is_some() {
+            return;
+        }
+        if let Some(hub) = &self.level_hub {
+            self.streaming_drain_pump = Some(audio::levels::spawn_silence_pump(hub.frame_sink()));
+        }
+    }
+
+    /// Cut audio flow to the streaming backend immediately. Aborts the
+    /// chunk-rx → streaming_tx pump so any samples still in the audio
+    /// capture's buffer never reach the backend — without this, the
+    /// ~50–100ms of residual samples between the user's stop press and
+    /// the actual mic shutdown leak in as low-level noise and cause
+    /// hallucinated trailing tokens.
+    fn cut_streaming_audio(&mut self) {
+        if let Some(handle) = self.level_emitter_task.take() {
+            handle.abort();
+        }
+    }
+
+    /// Abort the OSD draining pump (if running) so the visualizer can
+    /// fade out on its idle timer once the session is fully closed.
+    fn stop_streaming_drain_pump(&mut self) {
+        if let Some(h) = self.streaming_drain_pump.take() {
+            h.abort();
+        }
+    }
+
+    /// Early-stop the streaming capture: cut audio flow to the backend,
+    /// start the OSD silence pump so the visualizer stays alive during
+    /// drain, and stop the mic. Leaves `streaming_session`/`_chain` for
+    /// the caller to disown (or keep, to receive trailing finals).
+    async fn stop_streaming_capture(&mut self, audio_capture: &mut Option<Box<dyn AudioCapture>>) {
+        self.cut_streaming_audio();
+        self.start_streaming_drain_pump();
+        if let Some(mut c) = audio_capture.take() {
+            let _ = c.stop().await;
+        }
+    }
+
     async fn end_streaming(
         &mut self,
         state: &mut State,
@@ -889,6 +940,7 @@ impl Daemon {
             // completed. We drop events implicitly here.
             let _ = h.task.await;
         }
+        self.stop_streaming_drain_pump();
         *streaming_session = None;
         *streaming_chain = None;
 
@@ -930,6 +982,7 @@ impl Daemon {
                 tracing::warn!("Streaming rewind failed: {}", e);
             }
         }
+        self.stop_streaming_drain_pump();
         *streaming_session = None;
         *streaming_chain = None;
 
@@ -1063,7 +1116,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Soniox => {
                     if let Some(ref t) = transcriber_preloaded {
                         Ok(t.clone())
                     } else {
@@ -2017,16 +2071,11 @@ impl Daemon {
         // the daemon gets stuck in streaming. Force toggle activation when
         // streaming is enabled. The user's config file is left untouched; this
         // override only applies to the running daemon.
-        if self
-            .config
-            .parakeet
-            .as_ref()
-            .map(|p| p.streaming)
-            .unwrap_or(false)
+        if self.config.streaming_active()
             && self.config.hotkey.mode == crate::config::ActivationMode::PushToTalk
         {
             tracing::warn!(
-                "Parakeet streaming requires toggle activation, not push-to-talk. \
+                "Streaming transcription requires toggle activation, not push-to-talk. \
                  Auto-promoting [hotkey] mode from push_to_talk to toggle for this session. \
                  Streaming output types characters at the cursor while you dictate; if your \
                  PTT key is held during typing, libinput-based compositors (Hyprland, Sway, \
@@ -2239,8 +2288,10 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
-                    // Parakeet/Moonshine uses its own model loading
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Soniox => {
+                    // Non-Whisper engines do their own setup; Soniox just validates
+                    // API key + endpoint at construction (no model to download).
                     transcriber_preloaded = Some(Arc::from(crate::transcribe::create_transcriber(
                         &self.config,
                     )?));
@@ -2357,7 +2408,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Soniox => {
                                             let config = self.config.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                                 crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -2386,7 +2438,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Soniox => {
                                             if let Some(ref t) = transcriber_preloaded {
                                                 let transcriber = t.clone();
                                                 tokio::task::spawn_blocking(move || {
@@ -2458,9 +2511,7 @@ impl Daemon {
                             tracing::debug!("Received HotkeyEvent::Released (push-to-talk), state.is_recording() = {}", state.is_recording());
                             if state.is_streaming() {
                                 tracing::debug!("Streaming push-to-talk released; closing audio capture and disowning session");
-                                if let Some(mut c) = audio_capture.take() {
-                                    let _ = c.stop().await;
-                                }
+                                self.stop_streaming_capture(&mut audio_capture).await;
                                 // Drop session/chain so the backend's
                                 // post-stop flush emission is dropped at
                                 // the event pump instead of typed.
@@ -2574,7 +2625,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Soniox => {
                                             let config = self.config.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                                 crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -2603,7 +2655,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Soniox => {
                                             if let Some(ref t) = transcriber_preloaded {
                                                 let transcriber = t.clone();
                                                 tokio::task::spawn_blocking(move || {
@@ -2665,9 +2718,7 @@ impl Daemon {
                                 }
                             } else if state.is_streaming() {
                                 tracing::info!("Toggle stop while streaming; closing capture");
-                                if let Some(mut c) = audio_capture.take() {
-                                    let _ = c.stop().await;
-                                }
+                                self.stop_streaming_capture(&mut audio_capture).await;
                             } else if let State::Recording { model_override: current_model_override, .. } = &state {
                                 let transcriber = match self.get_transcriber_for_recording(
                                     current_model_override.as_deref(),
@@ -2941,71 +2992,85 @@ impl Daemon {
                         }
                     }
 
-                    // Check for recording timeout
-                    if let Some(duration) = state.recording_duration() {
-                        if duration > max_duration {
+                    // Check for recording timeout. Skip when audio_capture is
+                    // already gone so we don't re-fire cleanup on every 100ms
+                    // tick while the streaming session drains server-side
+                    // (state stays Streaming until Ended arrives).
+                    let timeout_fired = audio_capture.is_some()
+                        && state.recording_duration().is_some_and(|d| d > max_duration);
+                    if timeout_fired {
+                        // Streaming has its own clean stop path: skip the
+                        // batch_transcribe branch below to avoid opening a
+                        // second WS session for audio already being processed
+                        // by the active streaming one.
+                        if state.is_streaming() {
                             tracing::warn!(
-                                "Recording timeout ({:.0}s limit), transcribing captured audio",
+                                "Recording timeout ({:.0}s limit) while streaming; closing capture",
                                 max_duration.as_secs_f32()
                             );
+                            self.stop_streaming_capture(&mut audio_capture).await;
+                            continue;
+                        }
 
-                            cleanup_output_mode_override();
-                            cleanup_model_override();
-                            cleanup_profile_override();
-                            cleanup_bool_override("smart_auto_submit");
+                        tracing::warn!(
+                            "Recording timeout ({:.0}s limit), transcribing captured audio",
+                            max_duration.as_secs_f32()
+                        );
 
-                            // Get model override from state before transitioning
-                            let model_override = match &state {
-                                State::Recording { model_override, .. } => model_override.as_deref(),
-                                State::EagerRecording { model_override, .. } => model_override.as_deref(),
-                                _ => None,
-                            };
+                        cleanup_output_mode_override();
+                        cleanup_model_override();
+                        cleanup_profile_override();
+                        cleanup_bool_override("smart_auto_submit");
 
-                            // Get transcriber for this recording
-                            let transcriber = match self.get_transcriber_for_recording(
-                                model_override,
-                                &transcriber_preloaded,
-                            ).await {
-                                Ok(t) => Some(t),
-                                Err(()) => {
-                                    state = State::Idle;
-                                    self.update_state("idle");
-                                    continue;
-                                }
-                            };
+                        let model_override = match &state {
+                            State::Recording { model_override, .. } => model_override.as_deref(),
+                            State::EagerRecording { model_override, .. } => model_override.as_deref(),
+                            _ => None,
+                        };
 
-                            if state.is_eager_recording() {
-                                if let Some(mut capture) = audio_capture.take() {
-                                    if let Ok(final_samples) = capture.stop().await {
-                                        if let State::EagerRecording { accumulated_audio, .. } = &mut state {
-                                            accumulated_audio.extend(final_samples);
-                                        }
-                                    }
-                                }
-
-                                if let Some(transcriber) = transcriber {
-                                    self.update_state("transcribing");
-
-                                    if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
-                                        state = State::Transcribing { audio: Vec::new() };
-                                        self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
-                                    } else {
-                                        tracing::debug!("Eager recording timeout produced empty result");
-                                        self.reset_to_idle(&mut state).await;
-                                    }
-                                }
-                                eager_transcriber = None;
-                            } else {
-                                for (_, task) in self.eager_chunk_tasks.drain(..) {
-                                    task.abort();
-                                }
-
-                                self.start_transcription_task(
-                                    &mut state,
-                                    &mut audio_capture,
-                                    transcriber,
-                                ).await;
+                        let transcriber = match self.get_transcriber_for_recording(
+                            model_override,
+                            &transcriber_preloaded,
+                        ).await {
+                            Ok(t) => Some(t),
+                            Err(()) => {
+                                state = State::Idle;
+                                self.update_state("idle");
+                                continue;
                             }
+                        };
+
+                        if state.is_eager_recording() {
+                            if let Some(mut capture) = audio_capture.take() {
+                                if let Ok(final_samples) = capture.stop().await {
+                                    if let State::EagerRecording { accumulated_audio, .. } = &mut state {
+                                        accumulated_audio.extend(final_samples);
+                                    }
+                                }
+                            }
+
+                            if let Some(transcriber) = transcriber {
+                                self.update_state("transcribing");
+
+                                if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
+                                    state = State::Transcribing { audio: Vec::new() };
+                                    self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
+                                } else {
+                                    tracing::debug!("Eager recording timeout produced empty result");
+                                    self.reset_to_idle(&mut state).await;
+                                }
+                            }
+                            eager_transcriber = None;
+                        } else {
+                            for (_, task) in self.eager_chunk_tasks.drain(..) {
+                                task.abort();
+                            }
+
+                            self.start_transcription_task(
+                                &mut state,
+                                &mut audio_capture,
+                                transcriber,
+                            ).await;
                         }
                     }
                 }
@@ -3041,7 +3106,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Soniox => {
                                     let config = self.config.clone();
                                     self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                         crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -3069,7 +3135,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Soniox => {
                                     if let Some(ref t) = transcriber_preloaded {
                                         let transcriber = t.clone();
                                         tokio::task::spawn_blocking(move || {
@@ -3136,18 +3203,13 @@ impl Daemon {
                     tracing::debug!("Received SIGUSR2 (stop recording)");
                     if state.is_streaming() {
                         tracing::info!("SIGUSR2 stop while streaming; closing capture and disowning session");
-                        if let Some(mut c) = audio_capture.take() {
-                            let _ = c.stop().await;
-                        }
-                        // Drop the typing surface synchronously. Any
-                        // Final/Partial event the backend emits while
-                        // draining its internal buffer reaches the
-                        // event-pump arm with `streaming_session = None`
-                        // and is discarded instead of typed. Without
-                        // this, parakeet's flush() emission would type
-                        // into whatever window has focus by the time
-                        // the event arrives — voxtype#TBD streaming
-                        // data-leak.
+                        self.stop_streaming_capture(&mut audio_capture).await;
+                        // Drop the typing surface synchronously so any
+                        // Final/Partial events the backend emits while
+                        // draining its internal buffer reach the event-pump
+                        // arm with `streaming_session = None` and get
+                        // discarded instead of typed into whatever window
+                        // has focus by then.
                         streaming_session = None;
                         streaming_chain = None;
                     } else if let State::Recording { model_override, .. } = &state {
@@ -3269,6 +3331,26 @@ impl Daemon {
                                     tracing::error!("Streaming commit_segment failed: {}", e);
                                 }
                                 // Mirror typed_chars onto the state for cancel-rewind.
+                                if let State::Streaming { typed_chars, finalized_text, .. } = &mut state {
+                                    *typed_chars = s.typed_chars();
+                                    finalized_text.clear();
+                                    finalized_text.push_str(s.finalized_text());
+                                }
+                            }
+                        }
+                        Some(StreamingEvent::Replace { backspace, text, .. }) => {
+                            if let (Some(s), Some(chain)) =
+                                (streaming_session.as_mut(), streaming_chain.as_ref())
+                            {
+                                if let Err(e) = s.replace_and_commit(
+                                    chain,
+                                    backspace,
+                                    &text,
+                                    self.config.output.pre_output_command.as_deref(),
+                                    self.config.output.post_output_command.as_deref(),
+                                ).await {
+                                    tracing::error!("Streaming replace_and_commit failed: {}", e);
+                                }
                                 if let State::Streaming { typed_chars, finalized_text, .. } = &mut state {
                                     *typed_chars = s.typed_chars();
                                     finalized_text.clear();

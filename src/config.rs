@@ -397,6 +397,11 @@ pub struct Config {
     #[serde(default)]
     pub cohere: Option<CohereConfig>,
 
+    /// Soniox cloud streaming WebSocket STT configuration
+    /// (optional, only used when engine = "soniox")
+    #[serde(default)]
+    pub soniox: Option<SonioxConfig>,
+
     /// Text processing configuration (replacements, spoken punctuation)
     #[serde(default)]
     pub text: TextConfig,
@@ -1198,6 +1203,110 @@ impl Default for CohereConfig {
     }
 }
 
+/// Soniox cloud streaming WebSocket STT configuration
+/// Requires: cargo build --features soniox
+///
+/// Soniox is a paid cloud STT provider. API key required:
+/// either set `api_key` here or via the `SONIOX_API_KEY` env var.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SonioxConfig {
+    /// API key. If unset, falls back to the SONIOX_API_KEY env var.
+    #[serde(default)]
+    pub api_key: Option<String>,
+
+    /// Soniox model name. Default: "stt-rt-v4".
+    #[serde(default = "default_soniox_model")]
+    pub model: String,
+
+    /// Language hints (ISO 639-1 codes). Default: ["hu", "en"].
+    /// Empty array means auto-detect.
+    #[serde(default = "default_soniox_language_hints")]
+    pub language_hints: Vec<String>,
+
+    /// Strictly restrict recognition to the languages in `language_hints`.
+    /// When true (default), the model strongly prefers producing output
+    /// only in the hinted languages, avoiding occasional drift to a third
+    /// language in mid-stream partials. Ignored when `language_hints` is
+    /// empty. See https://soniox.com/docs/stt/concepts/language-restrictions.
+    #[serde(default = "default_true")]
+    pub language_hints_strict: bool,
+
+    /// Streaming mode. true = WebSocket session with live partials
+    /// (requires [hotkey] mode = "toggle"; PTT auto-promoted to toggle).
+    /// false = batch mode: buffer audio while held, send one-shot on release
+    /// (PTT-compatible).
+    #[serde(default = "default_true")]
+    pub streaming: bool,
+
+    /// Type partials at cursor as they arrive (streaming mode only).
+    /// false = only finalized segments are typed. Default: true.
+    #[serde(default = "default_true")]
+    pub type_partials: bool,
+
+    /// Free-form context text — mapped to `context.text` in Soniox's init
+    /// frame. Use for short domain prose ("medical consultation",
+    /// "podcast about Rust async runtime"). See
+    /// https://soniox.com/docs/stt/concepts/context.
+    #[serde(default)]
+    pub context: Option<String>,
+
+    /// Vocabulary boost terms (proper names, jargon, product names).
+    /// Mapped to `context.terms` in Soniox's init frame. Can be combined
+    /// with `terms_file`; entries are deduplicated in order.
+    #[serde(default)]
+    pub terms: Option<Vec<String>>,
+
+    /// Path to a JSON file containing a list of vocabulary boost terms
+    /// (`["term1", "term2", ...]`). Loaded once at daemon startup and
+    /// merged into `context.terms`. Useful for sharing a single
+    /// corrections list across multiple voxtype config snapshots.
+    #[serde(default)]
+    pub terms_file: Option<std::path::PathBuf>,
+
+    /// Use the Soniox async transcription API (file upload + poll) instead
+    /// of the realtime WebSocket. Higher accuracy, PTT-compatible, batch
+    /// only (no live partials). When true, overrides `streaming` and
+    /// `type_partials`. Default model becomes `stt-async-v4`.
+    /// Default: false.
+    #[serde(default)]
+    pub async_api: bool,
+
+    /// Maximum total wait time (seconds) for an async API job to complete
+    /// before giving up. Default: 120.
+    #[serde(default = "default_soniox_async_max_wait_secs")]
+    pub async_max_wait_secs: u64,
+}
+
+fn default_soniox_model() -> String {
+    "stt-rt-v4".to_string()
+}
+
+fn default_soniox_language_hints() -> Vec<String> {
+    vec!["hu".to_string(), "en".to_string()]
+}
+
+fn default_soniox_async_max_wait_secs() -> u64 {
+    120
+}
+
+impl Default for SonioxConfig {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            model: default_soniox_model(),
+            language_hints: default_soniox_language_hints(),
+            language_hints_strict: true,
+            streaming: true,
+            type_partials: true,
+            context: None,
+            terms: None,
+            terms_file: None,
+            async_api: false,
+            async_max_wait_secs: default_soniox_async_max_wait_secs(),
+        }
+    }
+}
+
 /// SenseVoice speech-to-text configuration (ONNX-based, CTC encoder-only ASR)
 /// Requires: cargo build --features sensevoice
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1349,6 +1458,9 @@ pub enum TranscriptionEngine {
     /// task tokens). Top of the Open ASR Leaderboard.
     /// Requires: cargo build --features cohere
     Cohere,
+    /// Use Soniox (cloud streaming WebSocket STT).
+    /// Requires: cargo build --features soniox
+    Soniox,
 }
 
 /// VAD backend selection
@@ -2175,6 +2287,7 @@ impl Default for Config {
             dolphin: None,
             omnilingual: None,
             cohere: None,
+            soniox: None,
             text: TextConfig::default(),
             vad: VadConfig::default(),
             status: StatusConfig::default(),
@@ -2187,6 +2300,55 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Returns true if the active engine is configured for streaming output.
+    ///
+    /// Used to decide whether to auto-promote push-to-talk to toggle activation:
+    /// streaming output types characters at the cursor while the user is still
+    /// holding the hotkey, which clobbers libinput's held-key state tracker on
+    /// Hyprland/Sway/River. New streaming backends plug into this gate without
+    /// editing the daemon.
+    pub fn streaming_active(&self) -> bool {
+        match self.engine {
+            TranscriptionEngine::Parakeet => {
+                self.parakeet.as_ref().map(|p| p.streaming).unwrap_or(false)
+            }
+            TranscriptionEngine::Soniox => self
+                .soniox
+                .as_ref()
+                .map(|s| s.streaming && !s.async_api)
+                .unwrap_or(true),
+            _ => false,
+        }
+    }
+
+    /// Clone this config with engine-specific overrides for meeting (long-form)
+    /// transcription. Currently:
+    ///
+    /// - **Soniox:** forces `async_api = true`. Meetings feed fixed-size audio
+    ///   chunks (30s default) to `Transcriber::transcribe()` — the realtime WS
+    ///   would open a fresh socket per chunk, pay connect latency, and bill by
+    ///   WS-duration. The async REST path (`stt-async-v4`) is purpose-built
+    ///   for this: bills audio-seconds, gives higher accuracy, integrates with
+    ///   speaker diarization, and survives network hiccups.
+    ///
+    /// The dictation path still reads the raw config, so a user who set
+    /// `async_api = false` (the default) keeps live-partial WS dictation while
+    /// meetings transparently use the async API.
+    pub fn with_meeting_mode_overrides(&self) -> Self {
+        let mut cfg = self.clone();
+        if matches!(cfg.engine, TranscriptionEngine::Soniox) {
+            if let Some(ref mut sx) = cfg.soniox {
+                if !sx.async_api {
+                    tracing::info!(
+                        "Soniox meeting mode: routing to async API (stt-async-v4); dictation path unchanged"
+                    );
+                    sx.async_api = true;
+                }
+            }
+        }
+        cfg
+    }
+
     /// System-wide config path used as a fallback when no user config exists.
     pub const SYSTEM_PATH: &'static str = "/etc/voxtype/config.toml";
 
@@ -2319,6 +2481,8 @@ impl Config {
                 .as_ref()
                 .map(|c| c.on_demand_loading)
                 .unwrap_or(false),
+            // Soniox is a cloud backend; nothing to load on demand.
+            TranscriptionEngine::Soniox => false,
         }
     }
 
@@ -2361,6 +2525,11 @@ impl Config {
                 .as_ref()
                 .map(|c| c.model.as_str())
                 .unwrap_or("cohere (not configured)"),
+            TranscriptionEngine::Soniox => self
+                .soniox
+                .as_ref()
+                .map(|s| s.model.as_str())
+                .unwrap_or("soniox (not configured)"),
         }
     }
 
@@ -2436,6 +2605,7 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             "dolphin" => config.engine = TranscriptionEngine::Dolphin,
             "omnilingual" => config.engine = TranscriptionEngine::Omnilingual,
             "cohere" => config.engine = TranscriptionEngine::Cohere,
+            "soniox" => config.engine = TranscriptionEngine::Soniox,
             _ => tracing::warn!("Unknown VOXTYPE_ENGINE value: {}", engine),
         }
     }
@@ -2544,6 +2714,14 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     if let Ok(key) = std::env::var("VOXTYPE_WHISPER_API_KEY") {
         config.whisper.remote_api_key = Some(key);
     }
+
+    // Soniox
+    if let Ok(key) = std::env::var("SONIOX_API_KEY") {
+        config
+            .soniox
+            .get_or_insert_with(SonioxConfig::default)
+            .api_key = Some(key);
+    }
     if let Ok(val) = std::env::var("VOXTYPE_RESTORE_CLIPBOARD") {
         config.output.restore_clipboard = parse_bool_env(&val);
     }
@@ -2583,6 +2761,42 @@ pub fn save_config(config: &Config, path: &Path) -> Result<(), VoxtypeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn meeting_mode_forces_soniox_async_when_user_had_realtime() {
+        let mut cfg = Config::default();
+        cfg.engine = TranscriptionEngine::Soniox;
+        cfg.soniox = Some(SonioxConfig {
+            api_key: Some("k".into()),
+            async_api: false,
+            ..SonioxConfig::default()
+        });
+        let meeting_cfg = cfg.with_meeting_mode_overrides();
+        assert!(meeting_cfg.soniox.as_ref().unwrap().async_api);
+        // Original config untouched — dictation path keeps realtime.
+        assert!(!cfg.soniox.as_ref().unwrap().async_api);
+    }
+
+    #[test]
+    fn meeting_mode_preserves_explicit_soniox_async() {
+        let mut cfg = Config::default();
+        cfg.engine = TranscriptionEngine::Soniox;
+        cfg.soniox = Some(SonioxConfig {
+            api_key: Some("k".into()),
+            async_api: true,
+            ..SonioxConfig::default()
+        });
+        let meeting_cfg = cfg.with_meeting_mode_overrides();
+        assert!(meeting_cfg.soniox.as_ref().unwrap().async_api);
+    }
+
+    #[test]
+    fn meeting_mode_is_noop_for_non_soniox_engines() {
+        let cfg = Config::default(); // engine = Whisper
+        let meeting_cfg = cfg.with_meeting_mode_overrides();
+        assert_eq!(meeting_cfg.engine, cfg.engine);
+        assert_eq!(meeting_cfg.whisper.model, cfg.whisper.model);
+    }
 
     #[test]
     fn test_default_config() {

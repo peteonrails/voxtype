@@ -122,9 +122,10 @@ impl MeetingDaemon {
         let storage = MeetingStorage::open(config.storage.clone())
             .map_err(|e| MeetingError::Storage(e.to_string()))?;
 
+        let meeting_app_config = app_config.with_meeting_mode_overrides();
         let transcriber: Arc<dyn Transcriber> =
-            Arc::from(transcribe::create_transcriber(app_config)?);
-        let engine_name = format!("{:?}", app_config.engine).to_lowercase();
+            Arc::from(transcribe::create_transcriber(&meeting_app_config)?);
+        let engine_name = format!("{:?}", meeting_app_config.engine).to_lowercase();
 
         let post_processor = app_config.output.post_process.as_ref().map(|cfg| {
             tracing::info!(

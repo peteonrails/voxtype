@@ -139,9 +139,10 @@ async fn main() -> anyhow::Result<()> {
             "dolphin" => config.engine = config::TranscriptionEngine::Dolphin,
             "omnilingual" => config.engine = config::TranscriptionEngine::Omnilingual,
             "cohere" => config.engine = config::TranscriptionEngine::Cohere,
+            "soniox" => config.engine = config::TranscriptionEngine::Soniox,
             _ => {
                 eprintln!(
-                    "Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere",
+                    "Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere, soniox",
                     engine
                 );
                 std::process::exit(1);
@@ -229,6 +230,14 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(key) = cli.remote_api_key {
         config.whisper.remote_api_key = Some(key);
+    }
+
+    // Soniox overrides
+    if let Some(key) = cli.soniox_api_key {
+        config
+            .soniox
+            .get_or_insert_with(config::SonioxConfig::default)
+            .api_key = Some(key);
     }
 
     // Audio overrides
@@ -457,8 +466,9 @@ async fn main() -> anyhow::Result<()> {
                     "dolphin" => config.engine = config::TranscriptionEngine::Dolphin,
                     "omnilingual" => config.engine = config::TranscriptionEngine::Omnilingual,
                     "cohere" => config.engine = config::TranscriptionEngine::Cohere,
+                    "soniox" => config.engine = config::TranscriptionEngine::Soniox,
                     _ => {
-                        eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere", engine_name);
+                        eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere, soniox", engine_name);
                         std::process::exit(1);
                     }
                 }

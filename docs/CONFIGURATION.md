@@ -1384,6 +1384,208 @@ The prebuilt `voxtype-*-onnx-*` release binaries already include `cohere`, so us
 
 ---
 
+## [soniox]
+
+Configuration for the Soniox cloud streaming WebSocket STT engine. This section is only used when `engine = "soniox"`.
+
+Soniox is a paid cloud STT provider with 60+ languages, per-token finality flags, and server-side endpoint detection. Unlike voxtype's other engines, no model runs on your machine — audio streams to Soniox's servers over WebSocket and tokens stream back.
+
+**Privacy:** Audio is sent to a third-party service. Use the local engines (Whisper, Parakeet, etc.) if you cannot send dictation off-device.
+
+### api_key
+
+**Type:** String (optional)
+**Default:** unset (falls back to `SONIOX_API_KEY` env var)
+**Required:** Yes (via this field or env var)
+
+Soniox API key. Get one at https://console.soniox.com.
+
+Prefer the env var so the key never lands in shell history or a checked-in config file:
+
+```bash
+export SONIOX_API_KEY="your-key-here"
+```
+
+### model
+
+**Type:** String
+**Default:** `"stt-rt-v4"`
+**Required:** No
+
+Soniox model identifier. The current realtime model is `stt-rt-v4`.
+
+### language_hints
+
+**Type:** Array of strings
+**Default:** `["hu", "en"]`
+**Required:** No
+
+ISO 639-1 codes hinting which languages to prefer. Use an empty array for full auto-detect across all 60+ supported languages.
+
+```toml
+[soniox]
+language_hints = ["en"]            # English only
+# or
+language_hints = ["hu", "en", "de"] # Hungarian, English, German
+# or
+language_hints = []                 # auto-detect everything
+```
+
+### language_hints_strict
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+When `true`, the model is strongly biased to produce output only in the languages listed in `language_hints`. When `false`, the model may occasionally produce other languages it detects with high confidence. Ignored when `language_hints` is empty.
+
+Strict mode is the right default for bilingual setups (`["hu", "en"]` etc.): without it, partials can briefly drift to a third language before snapping back when a final lands, causing unnecessary tail revisions. Turn it off only when you genuinely expect input in languages outside the hint list. See [Soniox language-restrictions docs](https://soniox.com/docs/stt/concepts/language-restrictions).
+
+```toml
+[soniox]
+language_hints = ["hu", "en"]
+language_hints_strict = false   # allow occasional third-language tokens
+```
+
+### streaming
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Activation mode for the Soniox backend:
+
+- `true` — Live WebSocket session. Tokens stream back during recording and are typed at the cursor as they arrive (or only on finalization if `type_partials = false`). **Requires `[hotkey] mode = "toggle"`.** Push-to-talk is auto-promoted to toggle for the running session with a warning, because typing characters while the PTT key is still held clobbers libinput's held-key state on Hyprland/Sway/River.
+- `false` — Batch mode. Audio buffered while the hotkey is held; on release one WebSocket session opens, the entire buffer is sent + finalized, and the resulting transcript is typed in one shot. Push-to-talk compatible. Loses live partials but keeps Soniox's accuracy.
+
+### type_partials
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Only used when `streaming = true`. When `true`, non-final tokens are typed at the cursor as they arrive (lower perceived latency). When `false`, only finalized segments are typed — partials still appear in `voxtype status --follow` but never touch the cursor.
+
+Soniox guarantees stable finals; non-finals can be revised. In practice revisions are rare and short. If you see occasional churn at the cursor, set `type_partials = false`.
+
+### context
+
+**Type:** String (optional)
+**Default:** unset
+**Required:** No
+
+Free-form domain context. Mapped to `context.text` in Soniox's init frame. Use for short prose describing the dictation domain — `"medical consultation"`, `"Rust async runtime podcast"`. Leave unset unless you have a clearly bounded vocabulary worth biasing the model toward. See [Soniox context docs](https://soniox.com/docs/stt/concepts/context).
+
+### terms
+
+**Type:** Array of strings (optional)
+**Default:** unset
+**Required:** No
+
+Inline vocabulary boost terms. Mapped to `context.terms` in Soniox's init frame. Use for proper names, jargon, product names — entries the generic model wouldn't get right. Combined with `terms_file` (deduplicated, order preserved).
+
+```toml
+[soniox]
+terms = ["Voxtype", "Hyprland", "tokio-tungstenite"]
+```
+
+### terms_file
+
+**Type:** Path (optional)
+**Default:** unset
+**Required:** No
+
+Path to a JSON file containing a list of vocabulary boost terms — `["term1", "term2", ...]`. Loaded once at daemon startup and merged into `context.terms`. Useful for sharing a corrections list across multiple voxtype config snapshots or projects.
+
+```toml
+[soniox]
+terms_file = "/home/me/dotfiles/voxtype-terms.json"
+```
+
+### async_api
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Use the Soniox **async transcription API** (file upload + poll) instead of the realtime WebSocket. Different model (`stt-async-v4`), different accuracy profile, batch only — no live partials, no flicker, push-to-talk compatible.
+
+When `true`:
+- Audio buffered while recording. On release, voxtype uploads the WAV to `https://api.soniox.com/v1/files`, creates a transcription job, polls until complete, fetches the transcript, then types it at the cursor in one shot.
+- `streaming` and `type_partials` are ignored.
+- `model` defaults to `stt-async-v4` (override only if you know what you're doing).
+- Push-to-talk is **not** auto-promoted to toggle (no live cursor typing means no compositor-state clobbering).
+
+Latency: typical 15s recording → ~1s upload + 2-5s processing = 3-6s total wait after release. Compare to realtime which streams partials as you speak.
+
+**Accuracy:** the async model (`stt-async-v4`) is marketed as higher accuracy than the realtime model (`stt-rt-v4`). In practice quality varies by language and content — benchmark both for your use case before committing.
+
+### async_max_wait_secs
+
+**Type:** Integer
+**Default:** `120`
+**Required:** No
+
+Maximum total wait time (seconds) for an async API job to complete. If exceeded, voxtype cleans up the server-side job and surfaces an error. Only used when `async_api = true`.
+
+### Configuration Summary
+
+| Option | CLI Flag | Environment Variable | Default | Description |
+|--------|----------|---------------------|---------|-------------|
+| `api_key` | `--soniox-api-key` | `SONIOX_API_KEY` | none (required) | Soniox API key |
+| `model` | - | - | `"stt-rt-v4"` | Soniox model (`stt-async-v4` when `async_api = true`) |
+| `language_hints` | - | - | `["hu", "en"]` | Language preference |
+| `language_hints_strict` | - | - | `true` | Restrict output to hinted languages (ignored if empty) |
+| `streaming` | - | - | `true` | Live WebSocket vs batch-on-release (realtime only) |
+| `type_partials` | - | - | `true` | Type non-final tokens at cursor (realtime only) |
+| `context` | - | - | none | Free-form domain context (`context.text`) |
+| `terms` | - | - | none | Inline boost terms array (`context.terms`) |
+| `terms_file` | - | - | none | JSON file path with boost terms |
+| `async_api` | - | - | `false` | Use async REST API instead of realtime WS |
+| `async_max_wait_secs` | - | - | `120` | Async job total timeout |
+
+### Complete Example — Realtime (with live partials)
+
+```toml
+engine = "soniox"
+
+[hotkey]
+mode = "toggle"   # Required when [soniox] streaming = true
+
+[soniox]
+language_hints = ["hu", "en"]
+streaming = true
+type_partials = true
+# api_key set via SONIOX_API_KEY env var
+```
+
+### Complete Example — Async (PTT-compatible, batch-only)
+
+```toml
+engine = "soniox"
+
+[hotkey]
+mode = "push_to_talk"   # Works with async_api; no toggle promotion
+
+[soniox]
+async_api = true
+language_hints = ["hu", "en"]
+# model defaults to stt-async-v4 when async_api = true
+# api_key set via SONIOX_API_KEY env var
+```
+
+### Building from Source
+
+Source builds need the `soniox` Cargo feature:
+
+```bash
+cargo build --release --features soniox
+```
+
+The `soniox` feature is independent of the other engine features and adds a small WebSocket client (tokio-tungstenite + rustls) plus an async HTTP client (reqwest) for the async API. It can be combined with any local engine feature, e.g. `--features "soniox parakeet"` for a binary that runs Parakeet locally and Soniox in the cloud depending on the `engine` setting.
+
+---
+
 ## [output]
 
 Controls how transcribed text is delivered.
@@ -1520,9 +1722,9 @@ Custom order of output drivers to try when `mode = "type"`. Each driver is tried
 
 **Available drivers:**
 - `wtype` - Wayland virtual keyboard protocol (best CJK/Unicode support, wlroots compositors only)
-- `eitype` - Wayland via libei/EI protocol (works on GNOME, KDE, and compositors with libei support)
-- `dotool` - uinput-based typing (supports keyboard layouts, works on X11/Wayland/TTY)
-- `ydotool` - uinput-based typing (requires daemon, X11/Wayland/TTY)
+- `eitype` - Wayland via libei/EI protocol (works on GNOME, KDE, and compositors with libei support). On KDE Plasma 6, each invocation briefly registers via the XDG RemoteDesktop portal, which can cause a system-tray icon to flicker during streaming dictation (many fast typing calls). Prefer `dotool` for streaming if you're on KDE.
+- `dotool` - uinput-based typing (supports keyboard layouts, works on X11/Wayland/TTY). For streaming backends (Parakeet, Soniox), run `dotoold` to make this **much** faster — see [Streaming performance: dotoold fast path](#streaming-performance-dotoold-fast-path) below.
+- `ydotool` - uinput-based typing (requires `ydotoold` daemon, X11/Wayland/TTY). Fast spawn, but **does not support keyboard layouts** — sends raw US keycodes. Wrong output on non-US layouts (e.g. Hungarian Z/Y swap).
 - `clipboard` - Wayland clipboard via wl-copy
 - `xclip` - X11 clipboard via xclip
 
@@ -1554,6 +1756,58 @@ voxtype --driver=ydotool,clipboard daemon
 ```
 
 **Note:** When `driver_order` is set, `fallback_to_clipboard` is ignored—the driver list explicitly defines what's tried.
+
+#### Streaming performance: dotoold fast path
+
+Streaming backends (Parakeet, Soniox) call the output driver many times per session — once for every partial token batch. With direct `dotool` invocations each call spawns a fresh dotool process that pays the kernel uinput device setup cost (**~700-800ms** on most systems). For 60+ partials per session this stacks into 40+ seconds of typing latency — unusable.
+
+dotool ships a daemon/client pair (`dotoold` + `dotoolc`) specifically for this case. When `dotoold` is running, voxtype auto-detects its FIFO at `/tmp/dotool-pipe` and routes every typing call through `dotoolc`, which simply relays commands to the long-lived daemon. The uinput device is registered **once** at daemon startup, not on every typed segment. Sub-10ms per call.
+
+**Strongly recommended** if you use `dotool` as your primary typing driver with any streaming backend.
+
+**Setup as a systemd user unit (persistent across reboots):**
+
+```bash
+mkdir -p ~/.config/systemd/user
+
+cat > ~/.config/systemd/user/dotoold.service <<'EOF'
+[Unit]
+Description=dotool daemon for low-latency keyboard injection
+After=default.target
+
+[Service]
+ExecStart=/usr/bin/dotoold
+# Set DOTOOL_XKB_LAYOUT here (NOT in voxtype) — layout applies to the
+# daemon, not the per-call client. voxtype's dotool_xkb_layout config
+# is ignored when routing through dotoolc.
+Environment=DOTOOL_XKB_LAYOUT=hu
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF
+
+systemctl --user enable --now dotoold
+```
+
+Replace `hu` with your XKB layout (`de`, `fr`, `us`, etc.).
+
+**Manual test:**
+```bash
+DOTOOL_XKB_LAYOUT=hu dotoold &
+ls -la /tmp/dotool-pipe   # confirm FIFO exists
+```
+
+**Verifying voxtype is using the fast path:**
+
+After dictating a session, check the daemon log:
+```bash
+journalctl --user -u voxtype --since "5 min ago" | grep "typed via"
+```
+- `Text typed via dotoolc (N chars)` — fast path active
+- `Text typed via dotool (N chars)` — daemon not running, slow per-call spawn
+
+**Important caveat:** Keyboard layout (`DOTOOL_XKB_LAYOUT` / `DOTOOL_XKB_VARIANT`) applies to **the daemon, not the client**. When dotoold is running, voxtype's `dotool_xkb_layout` config setting has no effect — set the env var in dotoold's unit file or shell instead.
 
 ### dotool_xkb_layout
 

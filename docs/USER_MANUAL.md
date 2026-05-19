@@ -436,6 +436,24 @@ on_recording_stop = false
 on_transcription = true
 ```
 
+### Cloud Backend: Soniox
+
+For a cloud streaming alternative to the local engines above, voxtype supports [Soniox](https://soniox.com). Different trade-off space: paid SaaS, no local model, 60+ languages with strong Hungarian/EU coverage, sub-second partials at the cursor.
+
+Build with `--features soniox`, set `SONIOX_API_KEY`, and:
+
+```toml
+engine = "soniox"
+
+[hotkey]
+mode = "toggle"   # required when streaming (default)
+
+[soniox]
+language_hints = ["en"]
+```
+
+See [SONIOX.md](SONIOX.md) for the full reference (realtime vs async modes, performance tips with dotoold, privacy considerations).
+
 ### Creating a Custom Configuration
 
 ```bash

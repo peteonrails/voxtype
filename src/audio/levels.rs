@@ -55,6 +55,7 @@ use crate::config::Config;
 use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, Mutex};
@@ -585,6 +586,27 @@ pub fn spawn_emitter_with_streaming_tap(
             }
         }
         tracing::trace!("Audio level emitter task ended");
+    })
+}
+
+/// Publish silent frames at 30 Hz to keep the OSD visible while a
+/// streaming session is draining server-side after the mic has been
+/// stopped. 30 Hz matches typical OSD redraw rates; pumping faster just
+/// burns timer wakeups. Cancelling the returned `JoinHandle` ends the pump.
+pub fn spawn_silence_pump(sink: FrameSink) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut seq: u32 = 0;
+        let mut tick = tokio::time::interval(Duration::from_millis(33));
+        loop {
+            tick.tick().await;
+            sink.publish(AudioFrame {
+                seq,
+                min: 0.0,
+                max: 0.0,
+                peak_dbfs: -120.0,
+            });
+            seq = seq.wrapping_add(1);
+        }
     })
 }
 
