@@ -21,23 +21,44 @@
 //! between, but only emits frames while a recording session has provided a
 //! sample stream.
 //!
-//! ## Performance
+//! ## Self-healing listener (issue #391)
 //!
-//! - No allocations in the hot path (per-sample). The input chunks are
-//!   already allocated by cpal_capture; bucketing reuses a small fixed
-//!   `[f32; 2]` accumulator.
-//! - Subscriber writes use non-blocking `try_send` on a bounded queue per
-//!   client; clients that can't keep up are dropped, not buffered.
-//! - Idle: zero work. The hub only spins up a forwarder task per
-//!   recording session and tears it down when the session ends.
+//! `LevelHub::start()` spawns two long-lived tasks (accept loop + broadcast
+//! loop) that under normal operation never exit. If one of them does exit
+//! (panic, runtime quirk, or an unforeseen bug), the listener gets dropped
+//! silently: the socket file stays on disk but new `connect()` calls fail
+//! with `ECONNREFUSED`. That orphaned-listener state was observed in the
+//! wild on a long-running daemon and broke fresh OSD / audio-bridge
+//! connections without any visible error in the daemon process.
+//!
+//! To make the failure both loud and survivable, the hub now:
+//!
+//! 1. Captures the `JoinHandle` for both tasks instead of letting them
+//!    detach as fire-and-forget.
+//! 2. Spawns a watchdog task that `await`s both handles via `select!`. If
+//!    either resolves (which should be impossible through normal code
+//!    paths) the watchdog logs at ERROR level and respawns the listener
+//!    plus both internal tasks from scratch.
+//! 3. Stores the live broadcast `Sender` behind a `Arc<RwLock<...>>` so
+//!    `FrameSink::publish` always picks up the current sender after a
+//!    respawn without recording sessions needing to be torn down and
+//!    rebuilt. The lock is read-only on the hot path (one acquire per
+//!    100 Hz frame), so the overhead is negligible.
+//!
+//! Pre-existing accepted connections do not migrate across a respawn;
+//! their per-client writer tasks will see their queue receiver close and
+//! exit cleanly. New clients connecting to the freshly-bound listener
+//! work as if the daemon had just started. That's an acceptable trade-off
+//! since the alternative is a permanently broken socket.
 
 use crate::config::Config;
 use std::io;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, Mutex};
+use tokio::task::JoinHandle;
 
 /// Native sample rate of audio fed to the emitter (matches the daemon's
 /// resampled mono stream).
@@ -114,18 +135,47 @@ const SUBSCRIBER_QUEUE_DEPTH: usize = 30;
 /// The hub owns the Unix listener and a list of currently-connected
 /// subscribers. Recording sessions feed frames into the hub via
 /// [`LevelHub::frame_sink`]; the hub fans them out non-blockingly.
+///
+/// If the internal accept or broadcast task ever exits unexpectedly, the
+/// hub's watchdog respawns both, rebinding the socket. See the module
+/// doc comment and issue #391 for the rationale.
 #[derive(Clone)]
 pub struct LevelHub {
     inner: Arc<HubInner>,
 }
 
-struct HubInner {
+/// The currently-live broadcast endpoint plus telemetry counters.
+///
+/// This is the mutable state of the hub. Replaced wholesale by a respawn.
+/// Wrapped in an `Arc` so `FrameSink` can hold a cheap snapshot reference
+/// without copying the channel internals.
+struct HubState {
     /// Bounded mpsc channel: recording-session producers send frames here,
     /// the broadcaster task drains it and fans out to clients.
     broadcast_tx: mpsc::Sender<AudioFrame>,
     /// Running count of attached subscribers, for telemetry/logging.
     subscriber_count: Mutex<usize>,
+}
+
+struct HubInner {
+    /// Live state; replaced atomically by the watchdog on respawn.
+    state: RwLock<Arc<HubState>>,
+    /// Immutable: the path used both for `bind()` and `cleanup()`.
     socket_path: PathBuf,
+}
+
+impl HubInner {
+    fn current(&self) -> Arc<HubState> {
+        // Panic-on-poison is fine here: a poisoned lock means a writer
+        // task panicked while replacing the state, which is already
+        // unrecoverable. The watchdog logs and we crash visibly.
+        self.state.read().expect("levels hub state lock").clone()
+    }
+
+    fn replace(&self, new_state: Arc<HubState>) {
+        let mut guard = self.state.write().expect("levels hub state lock");
+        *guard = new_state;
+    }
 }
 
 impl LevelHub {
@@ -138,52 +188,28 @@ impl LevelHub {
         if let Some(parent) = socket_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        // Remove any stale socket from a prior run.
-        if socket_path.exists() {
-            let _ = std::fs::remove_file(&socket_path);
-        }
 
-        let listener = UnixListener::bind(&socket_path)?;
+        let (state, accept_h, broadcast_h) = bind_and_spawn(&socket_path)?;
         tracing::info!("Audio level socket listening at {:?}", socket_path);
 
-        // Frame fan-in: any number of recording-session producers can send.
-        // 200 frames = 2 seconds of buffered headroom at 100 Hz, plenty.
-        let (broadcast_tx, broadcast_rx) = mpsc::channel::<AudioFrame>(200);
-
         let inner = Arc::new(HubInner {
-            broadcast_tx,
-            subscriber_count: Mutex::new(0),
+            state: RwLock::new(state),
             socket_path: socket_path.clone(),
         });
 
-        // The list of active subscriber senders is owned by the
-        // broadcaster task, not the hub, so we don't need a lock around
-        // it on the hot path.
-        let (sub_tx, sub_rx) = mpsc::unbounded_channel::<SubscriberSlot>();
-
-        // Accept loop: per-connection senders are forwarded to the
-        // broadcaster task via `sub_tx`.
-        let inner_for_accept = inner.clone();
-        tokio::spawn(async move {
-            run_accept_loop(listener, sub_tx, inner_for_accept).await;
-        });
-
-        // Broadcast loop: drains incoming frames, fans out to all
-        // connected subscribers, drops any whose queue is full.
-        tokio::spawn(async move {
-            run_broadcast_loop(broadcast_rx, sub_rx).await;
-        });
+        spawn_watchdog(inner.clone(), accept_h, broadcast_h);
 
         Ok(Self { inner })
     }
 
     /// Returns a sender that recording sessions can use to publish frames.
     ///
-    /// Sending is bounded; if the broadcaster falls behind we drop frames
-    /// rather than back-pressure the audio thread.
+    /// The handle survives a hub respawn: it reads the current broadcast
+    /// channel on each publish, so after the watchdog rebuilds the hub
+    /// the same `FrameSink` keeps working without the caller noticing.
     pub fn frame_sink(&self) -> FrameSink {
         FrameSink {
-            tx: self.inner.broadcast_tx.clone(),
+            inner: self.inner.clone(),
         }
     }
 
@@ -198,18 +224,132 @@ impl LevelHub {
     }
 }
 
+/// Bind the listener and spawn the accept + broadcast tasks. Returns the
+/// fresh `HubState` plus both `JoinHandle`s so the watchdog can supervise
+/// them. Called once from [`LevelHub::start`] and again from the
+/// watchdog's respawn path after a task exit.
+fn bind_and_spawn(
+    socket_path: &std::path::Path,
+) -> io::Result<(Arc<HubState>, JoinHandle<()>, JoinHandle<()>)> {
+    // Remove any stale socket from a prior run (or a prior incarnation
+    // of this hub in the respawn case).
+    if socket_path.exists() {
+        let _ = std::fs::remove_file(socket_path);
+    }
+
+    let listener = UnixListener::bind(socket_path)?;
+
+    // Frame fan-in: any number of recording-session producers can send.
+    // 200 frames = 2 seconds of buffered headroom at 100 Hz, plenty.
+    let (broadcast_tx, broadcast_rx) = mpsc::channel::<AudioFrame>(200);
+
+    let state = Arc::new(HubState {
+        broadcast_tx,
+        subscriber_count: Mutex::new(0),
+    });
+
+    let (sub_tx, sub_rx) = mpsc::unbounded_channel::<SubscriberSlot>();
+
+    let state_for_accept = state.clone();
+    let accept_handle = tokio::spawn(async move {
+        run_accept_loop(listener, sub_tx, state_for_accept).await;
+    });
+
+    let broadcast_handle = tokio::spawn(async move {
+        run_broadcast_loop(broadcast_rx, sub_rx).await;
+    });
+
+    Ok((state, accept_handle, broadcast_handle))
+}
+
+/// Watchdog task. Lives for the lifetime of the daemon.
+///
+/// Awaits both internal task handles via `select!`. The first one to
+/// resolve triggers a loud ERROR log and a respawn of the entire hub.
+/// After respawn, the watchdog loops back to supervise the new handles.
+fn spawn_watchdog(
+    inner: Arc<HubInner>,
+    mut accept_handle: JoinHandle<()>,
+    mut broadcast_handle: JoinHandle<()>,
+) {
+    tokio::spawn(async move {
+        loop {
+            let exit = tokio::select! {
+                res = &mut accept_handle => ("accept", res),
+                res = &mut broadcast_handle => ("broadcast", res),
+            };
+
+            let (which, res) = exit;
+            match res {
+                Ok(()) => tracing::error!(
+                    task = which,
+                    "Audio level {} loop exited unexpectedly (no panic). \
+                     Respawning the LevelHub. See issue #391.",
+                    which
+                ),
+                Err(join_err) => tracing::error!(
+                    task = which,
+                    err = %join_err,
+                    "Audio level {} loop panicked or was cancelled. \
+                     Respawning the LevelHub. See issue #391.",
+                    which
+                ),
+            }
+
+            // Drop the other handle so its task is not orphaned in the
+            // join set; the underlying task will be aborted when we
+            // overwrite the broadcast Sender (which closes its
+            // receiver) and the listener (which closes the accept
+            // loop's UnixListener).
+            accept_handle.abort();
+            broadcast_handle.abort();
+
+            // Rebuild. If bind fails (e.g., XDG_RUNTIME_DIR vanished),
+            // back off and try again. We never give up: a dead listener
+            // is the bug we're paid to fix.
+            loop {
+                match bind_and_spawn(&inner.socket_path) {
+                    Ok((new_state, ah, bh)) => {
+                        inner.replace(new_state);
+                        tracing::info!("Audio level socket rebound at {:?}", inner.socket_path);
+                        accept_handle = ah;
+                        broadcast_handle = bh;
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            err = %e,
+                            "Failed to rebind audio level socket; will retry"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                }
+            }
+        }
+    });
+}
+
 /// Sender handle handed out by [`LevelHub::frame_sink`].
+///
+/// Holds a reference to `HubInner` rather than the channel directly, so a
+/// respawn of the hub is transparent: the next `publish` call picks up
+/// the new channel automatically.
 #[derive(Clone)]
 pub struct FrameSink {
-    tx: mpsc::Sender<AudioFrame>,
+    inner: Arc<HubInner>,
 }
 
 impl FrameSink {
     /// Try to publish a frame. Drops the frame if the broadcaster is
     /// backed up. Never blocks and never allocates.
+    ///
+    /// The `RwLock` read here is the only synchronisation overhead added
+    /// by the self-healing design. At 100 Hz on a single producer it is
+    /// well under the noise floor of the audio pipeline.
     #[inline]
     pub fn publish(&self, frame: AudioFrame) {
-        let _ = self.tx.try_send(frame);
+        let state = self.inner.current();
+        let _ = state.broadcast_tx.try_send(frame);
     }
 }
 
@@ -222,9 +362,21 @@ struct SubscriberSlot {
 async fn run_accept_loop(
     listener: UnixListener,
     sub_tx: mpsc::UnboundedSender<SubscriberSlot>,
-    inner: Arc<HubInner>,
+    state: Arc<HubState>,
 ) {
     loop {
+        // Test-only fault injection. The flag lives on `HubInner`, but
+        // we don't have a direct reference here; instead, the test arms
+        // the panic before calling `LevelHub::arm_accept_panic`, which
+        // toggles a global thread-local. We avoid threading that through
+        // by checking via a separate hook.
+        #[cfg(test)]
+        {
+            if tests::should_panic_now() {
+                panic!("levels::run_accept_loop test-injected panic");
+            }
+        }
+
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let (tx, rx) = mpsc::channel::<AudioFrame>(SUBSCRIBER_QUEUE_DEPTH);
@@ -235,16 +387,16 @@ async fn run_accept_loop(
                     break;
                 }
 
-                let inner_for_writer = inner.clone();
+                let state_for_writer = state.clone();
                 tokio::spawn(async move {
                     {
-                        let mut count = inner_for_writer.subscriber_count.lock().await;
+                        let mut count = state_for_writer.subscriber_count.lock().await;
                         *count += 1;
                         tracing::debug!("Audio subscriber connected (count={})", *count);
                     }
                     run_subscriber_writer(stream, rx).await;
                     {
-                        let mut count = inner_for_writer.subscriber_count.lock().await;
+                        let mut count = state_for_writer.subscriber_count.lock().await;
                         *count = count.saturating_sub(1);
                         tracing::debug!("Audio subscriber disconnected (count={})", *count);
                     }
@@ -439,6 +591,24 @@ pub fn spawn_emitter_with_streaming_tap(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::io::AsyncReadExt;
+
+    /// Global one-shot panic flag for the accept-loop fault injection
+    /// test. We use a global because the panic check is inside
+    /// `run_accept_loop`, which doesn't have access to the test
+    /// scaffolding directly. Tests serialise on `panic_test_lock`.
+    static ACCEPT_PANIC_NEXT: AtomicBool = AtomicBool::new(false);
+    /// Serialise tests that touch the global panic flag.
+    static PANIC_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub(super) fn should_panic_now() -> bool {
+        ACCEPT_PANIC_NEXT.swap(false, Ordering::SeqCst)
+    }
+
+    fn arm_global_panic() {
+        ACCEPT_PANIC_NEXT.store(true, Ordering::SeqCst);
+    }
 
     #[test]
     fn frame_roundtrip() {
@@ -514,5 +684,172 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert!((out[0].min - -0.8).abs() < 1e-6);
         assert!((out[0].max - 0.4).abs() < 1e-6);
+    }
+
+    fn temp_socket_path(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        p.push(format!(
+            "voxtype-levels-test-{}-{}-{}.sock",
+            name, pid, nanos
+        ));
+        p
+    }
+
+    /// Smoke: starting the hub binds the socket and a client can connect.
+    #[tokio::test]
+    async fn hub_start_accepts_a_connection() {
+        let path = temp_socket_path("accept");
+        let hub = LevelHub::start(path.clone()).await.expect("start hub");
+
+        // Connect a client.
+        let _client = UnixStream::connect(&path).await.expect("client connect");
+
+        // Drive a frame through; the client should see 16 bytes.
+        hub.frame_sink().publish(AudioFrame {
+            seq: 7,
+            min: -0.1,
+            max: 0.2,
+            peak_dbfs: -10.0,
+        });
+
+        let mut buf = [0u8; FRAME_BYTES];
+        let mut client = _client;
+        let read_fut = client.read_exact(&mut buf);
+        let read_res = tokio::time::timeout(std::time::Duration::from_secs(2), read_fut).await;
+        assert!(read_res.is_ok(), "timed out reading frame");
+        read_res.unwrap().expect("read frame bytes");
+        let got = AudioFrame::from_bytes(&buf);
+        assert_eq!(got.seq, 7);
+
+        // Cleanup.
+        hub.cleanup();
+    }
+
+    /// Inject a panic in the accept loop and verify the watchdog rebinds
+    /// the socket so that a fresh client can connect afterwards.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn watchdog_respawns_after_accept_panic() {
+        // Holding this std::sync::Mutex across `.await` is intentional:
+        // the lock serialises tests that touch the global panic flag,
+        // and the critical section never contends with itself.
+        let _guard = PANIC_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let path = temp_socket_path("respawn");
+        let hub = LevelHub::start(path.clone()).await.expect("start hub");
+
+        // Arm the panic, then poke the accept loop so it advances past
+        // its `accept().await` and hits the panic check at the top of
+        // the next iteration. The connect itself may succeed or fail
+        // depending on whether the panic interleaves before or after the
+        // kernel completes the SYN handshake; we don't care, we only
+        // care that the watchdog respawns afterward.
+        arm_global_panic();
+        let _ = UnixStream::connect(&path).await;
+
+        // Give the watchdog up to 5s to notice and rebind.
+        let mut last_err = None;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let new_client = loop {
+            match UnixStream::connect(&path).await {
+                Ok(c) => break Some(c),
+                Err(e) => {
+                    last_err = Some(e);
+                    if std::time::Instant::now() > deadline {
+                        break None;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+        };
+        assert!(
+            new_client.is_some(),
+            "watchdog did not respawn the listener; last connect error: {:?}",
+            last_err
+        );
+
+        // Frames continue to flow through the same FrameSink because it
+        // dereferences the live HubState via Arc<HubInner>. The accept
+        // loop may not yet have registered the subscriber with the
+        // broadcast loop at the moment we publish, so emit a small burst
+        // and let the reader pick up the first one that lands.
+        let sink = hub.frame_sink();
+        let mut client = new_client.unwrap();
+        let mut buf = [0u8; FRAME_BYTES];
+
+        let read_res = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                sink.publish(AudioFrame {
+                    seq: 99,
+                    min: 0.0,
+                    max: 0.0,
+                    peak_dbfs: -120.0,
+                });
+                let try_read = tokio::time::timeout(
+                    std::time::Duration::from_millis(100),
+                    client.read_exact(&mut buf),
+                )
+                .await;
+                if let Ok(Ok(_)) = try_read {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(read_res.is_ok(), "post-respawn read timed out");
+        let got = AudioFrame::from_bytes(&buf);
+        assert_eq!(got.seq, 99);
+
+        hub.cleanup();
+    }
+
+    /// FrameSink should keep working after a respawn without being
+    /// recreated.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn frame_sink_survives_respawn() {
+        // See note in `watchdog_respawns_after_accept_panic`: holding
+        // this lock across awaits is intentional test serialisation.
+        let _guard = PANIC_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let path = temp_socket_path("sink-survives");
+        let hub = LevelHub::start(path.clone()).await.expect("start hub");
+        let sink = hub.frame_sink();
+
+        // Snapshot the pre-respawn HubState pointer for a sanity check.
+        let pre = Arc::as_ptr(&hub.inner.current()) as usize;
+
+        arm_global_panic();
+        {
+            let _ = UnixStream::connect(&path).await;
+        }
+
+        // Wait until HubState pointer changes (i.e., respawn replaced it).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let now = Arc::as_ptr(&hub.inner.current()) as usize;
+            if now != pre {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("HubState was never replaced; respawn did not occur");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        // The sink still works: publish does not panic, channel is live.
+        sink.publish(AudioFrame {
+            seq: 1,
+            min: 0.0,
+            max: 0.0,
+            peak_dbfs: -120.0,
+        });
+
+        hub.cleanup();
     }
 }
