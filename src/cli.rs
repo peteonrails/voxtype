@@ -1278,6 +1278,30 @@ pub enum SetupAction {
         /// Skip the file copy; only print the compositor binding examples.
         #[arg(long)]
         print_bindings: bool,
+
+        /// Override the source path of the voxtype-audio-bridge binary.
+        ///
+        /// Search order (when omitted): $VOXTYPE_AUDIO_BRIDGE_BINARY,
+        /// <binary>/../lib/voxtype/voxtype-audio-bridge,
+        /// /usr/lib/voxtype/voxtype-audio-bridge, `which voxtype-audio-bridge`,
+        /// target/release/voxtype-audio-bridge, target/debug/voxtype-audio-bridge.
+        #[arg(long, value_name = "PATH")]
+        bridge: Option<std::path::PathBuf>,
+
+        /// Override the symlink location for voxtype-audio-bridge.
+        ///
+        /// Defaults to $XDG_BIN_HOME/voxtype-audio-bridge or
+        /// ~/.local/bin/voxtype-audio-bridge. Must live under the user's
+        /// $HOME unless you also pass --force.
+        #[arg(long, value_name = "PATH")]
+        bridge_target: Option<std::path::PathBuf>,
+
+        /// Skip installing the voxtype-audio-bridge symlink.
+        ///
+        /// Use this if the bridge is already on PATH (e.g., a packaged
+        /// install put it there, or you have your own symlink).
+        #[arg(long)]
+        skip_bridge: bool,
     },
 }
 

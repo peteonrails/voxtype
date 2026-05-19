@@ -267,16 +267,30 @@ command to put a per-user copy under `$XDG_DATA_HOME/voxtype/quickshell/`
 for customization.
 
 ```bash
-voxtype setup quickshell                  # Install + print compositor bindings
-voxtype setup quickshell --target DIR     # Install to a custom location
-voxtype setup quickshell --source DIR     # Override the source tree (default: auto-detect)
-voxtype setup quickshell --force          # Overwrite an existing install
-voxtype setup quickshell --print-bindings # Print the bindings only, do not copy
+voxtype setup quickshell                       # Install QML + symlink the bridge
+voxtype setup quickshell --target DIR          # Install QML to a custom location
+voxtype setup quickshell --source DIR          # Override the source tree (default: auto-detect)
+voxtype setup quickshell --force               # Overwrite an existing install
+voxtype setup quickshell --print-bindings      # Print the bindings only, do not copy
+voxtype setup quickshell --bridge PATH         # Override the audio-bridge source binary
+voxtype setup quickshell --bridge-target PATH  # Override the audio-bridge symlink location
+voxtype setup quickshell --skip-bridge         # Skip the audio-bridge symlink entirely
 ```
 
-The default target is `$XDG_DATA_HOME/voxtype/quickshell/` (or
+The default QML target is `$XDG_DATA_HOME/voxtype/quickshell/` (or
 `~/.local/share/voxtype/quickshell/` if `XDG_DATA_HOME` is unset). The
 launcher searches that path first, then `/usr/share/voxtype/quickshell/`.
+
+The command also symlinks `voxtype-audio-bridge` into
+`$XDG_BIN_HOME/voxtype-audio-bridge` (or `~/.local/bin/voxtype-audio-bridge`)
+so the QML waveform can spawn the sidecar via a normal PATH lookup. The
+AUR `voxtype-bin` package installs the bridge under
+`/usr/lib/voxtype/voxtype-audio-bridge`, which is not on the default
+PATH; the symlink is what makes the waveform light up after install.
+Pass `--skip-bridge` if you already have the bridge on PATH and don't
+want a per-user symlink, or `--bridge-target` to point the symlink at a
+different user-owned directory. Writing outside of `$HOME` is refused
+unless `--force` is also passed.
 
 The command prints Hyprland, Sway, and River keybinding examples that
 toggle the Wave 2 engine-picker and meeting-controls panels via flag
