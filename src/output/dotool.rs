@@ -3,19 +3,58 @@
 //! Uses dotool to simulate keyboard input with proper keyboard layout support.
 //! Unlike ydotool, dotool respects keyboard layouts via DOTOOL_XKB_LAYOUT.
 //!
-//! Requires:
+//! ## Fast path: dotoold + dotoolc
+//!
+//! dotool ships a daemon/client pair specifically for low-latency repeated
+//! typing. When `dotoold` is running, voxtype detects its FIFO and routes
+//! every output() call through `dotoolc` — which simply relays commands
+//! to the long-lived daemon. The ~700ms uinput device setup is paid once
+//! at daemon startup, not on every typed segment. Sub-10ms per call.
+//!
+//! Strongly recommended for streaming backends (Parakeet, Soniox), where
+//! 60+ output() calls land per session — without the daemon, the first
+//! call alone stalls for nearly a second. Voxtype's Arch package
+//! installs `dotoold` as a dependency; setup is out of scope here.
+//!
+//! Keyboard layout (`DOTOOL_XKB_LAYOUT`) applies to **the daemon, not the
+//! client**. Set the env var on dotoold's startup; voxtype's
+//! `dotool_xkb_layout` config setting cannot override a running daemon.
+//!
+//! ## Fallback path: direct dotool
+//!
+//! When `dotoold` isn't running, voxtype spawns `dotool` directly per
+//! call. This is correct but pays the full uinput init cost (~700ms) on
+//! every typed segment — fine for one-shot batch transcription, painful
+//! for streaming.
+//!
+//! ## Requirements
+//!
 //! - dotool installed (https://sr.ht/~geb/dotool/)
 //! - User in 'input' group for uinput access
-//! - DOTOOL_XKB_LAYOUT set for non-US layouts
+//! - DOTOOL_XKB_LAYOUT set (on dotoold or in voxtype config) for non-US
+//!   keyboard layouts
 
 use super::TextOutput;
 use crate::error::OutputError;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-/// dotool-based text output with keyboard layout support
+/// Truncate a string for log emission, replacing newlines with literal `\n`
+/// so multi-line dotool command streams stay on one log line. Keeps the
+/// first `max_chars` Unicode scalars and appends an ellipsis when cut.
+fn truncate_for_log(s: &str, max_chars: usize) -> String {
+    let one_line = s.replace('\n', "\\n");
+    if one_line.chars().count() <= max_chars {
+        return one_line;
+    }
+    let head: String = one_line.chars().take(max_chars).collect();
+    format!("{}…", head)
+}
+
+/// dotool-based text output with keyboard layout support.
 pub struct DotoolOutput {
     /// Delay between keypresses in milliseconds
     type_delay_ms: u32,
@@ -54,7 +93,35 @@ impl DotoolOutput {
         }
     }
 
-    /// Build the dotool command string to send via stdin
+    /// Public wrapper for the FIFO-detection helper so backspace paths
+    /// (in `output/streaming.rs`) can decide whether to use `dotoolc` too.
+    pub fn live_daemon_pipe_path() -> Option<PathBuf> {
+        Self::daemon_pipe_path()
+    }
+
+    /// Detect whether `dotoold` is actually running and accepting input.
+    /// Returns the FIFO path only when it exists, is a FIFO, AND opening
+    /// it `O_WRONLY | O_NONBLOCK` succeeds — i.e. some process is reading
+    /// the other end. A crashed daemon leaves the FIFO on disk; the
+    /// kernel returns ENXIO from a non-blocking write-open in that case,
+    /// so we cleanly fall back to direct `dotool`.
+    fn daemon_pipe_path() -> Option<PathBuf> {
+        use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+        let path = std::env::var("DOTOOL_PIPE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/tmp/dotool-pipe"));
+        let meta = std::fs::metadata(&path).ok()?;
+        if !meta.file_type().is_fifo() {
+            return None;
+        }
+        std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+            .ok()?;
+        Some(path)
+    }
+
     fn build_commands(&self, text: &str) -> String {
         let mut commands = String::new();
 
@@ -99,37 +166,48 @@ impl TextOutput for DotoolOutput {
         }
 
         let commands = self.build_commands(text);
-        tracing::debug!(
-            "dotool: sending commands for text: \"{}\"",
-            text.chars().take(20).collect::<String>()
-        );
+        let pipe = Self::daemon_pipe_path();
+        let binary = if pipe.is_some() { "dotoolc" } else { "dotool" };
+        let set_layout_env = pipe.is_none();
+        // Wire trace only at the TRACE level so the user's typed text
+        // isn't dumped to logs on the default -vv (DEBUG) verbosity.
+        // The dotool command stream contains every typed character.
+        if tracing::enabled!(target: "voxtype::dotool::wire", tracing::Level::TRACE) {
+            tracing::trace!(
+                target: "voxtype::dotool::wire",
+                "-> {:?}",
+                truncate_for_log(&commands, 40)
+            );
+        }
 
-        // Spawn dotool with stdin pipe
-        let mut cmd = Command::new("dotool");
+        let mut cmd = Command::new(binary);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
-
-        // Set keyboard layout environment variables if configured
-        if let Some(ref layout) = self.xkb_layout {
-            cmd.env("DOTOOL_XKB_LAYOUT", layout);
+        if let Some(ref pipe) = pipe {
+            cmd.env("DOTOOL_PIPE", pipe);
         }
-        if let Some(ref variant) = self.xkb_variant {
-            cmd.env("DOTOOL_XKB_VARIANT", variant);
+        if set_layout_env {
+            if let Some(ref layout) = self.xkb_layout {
+                cmd.env("DOTOOL_XKB_LAYOUT", layout);
+            }
+            if let Some(ref variant) = self.xkb_variant {
+                cmd.env("DOTOOL_XKB_VARIANT", variant);
+            }
         }
 
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 OutputError::DotoolNotFound
             } else {
-                OutputError::InjectionFailed(format!("Failed to spawn dotool: {}", e))
+                OutputError::InjectionFailed(format!("Failed to spawn {}: {}", binary, e))
             }
         })?;
 
         // Write commands to stdin
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(commands.as_bytes()).await.map_err(|e| {
-                OutputError::InjectionFailed(format!("Failed to write to dotool stdin: {}", e))
+                OutputError::InjectionFailed(format!("Failed to write to {} stdin: {}", binary, e))
             })?;
             // Close stdin to signal end of input
             drop(stdin);
@@ -137,7 +215,7 @@ impl TextOutput for DotoolOutput {
 
         // Wait for dotool to complete
         let output = child.wait_with_output().await.map_err(|e| {
-            OutputError::InjectionFailed(format!("Failed to wait for dotool: {}", e))
+            OutputError::InjectionFailed(format!("Failed to wait for {}: {}", binary, e))
         })?;
 
         if !output.status.success() {
@@ -145,19 +223,18 @@ impl TextOutput for DotoolOutput {
 
             // Check for common errors
             if stderr.contains("uinput") || stderr.contains("permission") {
-                return Err(OutputError::InjectionFailed(
-                    "dotool: uinput permission denied. Is user in 'input' group?".to_string(),
-                ));
+                return Err(OutputError::InjectionFailed(format!(
+                    "{}: uinput permission denied. Is user in 'input' group?",
+                    binary
+                )));
             }
-
             return Err(OutputError::InjectionFailed(format!(
-                "dotool exited with error: {}",
-                stderr
+                "{} exited with error: {}",
+                binary, stderr
             )));
         }
 
-        tracing::info!("Text typed via dotool ({} chars)", text.len());
-
+        tracing::info!("Text typed via {} ({} chars)", binary, text.chars().count());
         Ok(())
     }
 
@@ -192,26 +269,71 @@ mod tests {
     }
 
     #[test]
-    fn test_build_commands_simple() {
+    fn build_commands_basic() {
         let output = DotoolOutput::new(0, 0, false, None, None, None);
         let cmds = output.build_commands("Hello world");
         assert_eq!(cmds, "type Hello world\n");
     }
 
     #[test]
-    fn test_build_commands_with_delay() {
-        let output = DotoolOutput::new(10, 0, false, None, None, None);
+    fn build_commands_with_delay() {
+        let output = DotoolOutput::new(17, 0, false, None, None, None);
         let cmds = output.build_commands("Test");
-        assert!(cmds.contains("typedelay 10"));
-        assert!(cmds.contains("typehold 10"));
+        assert!(cmds.contains("typedelay 17"));
+        assert!(cmds.contains("typehold 17"));
         assert!(cmds.contains("type Test"));
     }
 
     #[test]
-    fn test_build_commands_with_enter() {
+    fn build_commands_auto_submit_appends_enter() {
         let output = DotoolOutput::new(0, 0, true, None, None, None);
-        let cmds = output.build_commands("Test");
-        assert!(cmds.contains("type Test"));
+        let cmds = output.build_commands("hi");
         assert!(cmds.contains("key enter"));
+    }
+
+    #[test]
+    fn build_commands_appends_text_before_enter() {
+        let output = DotoolOutput::new(0, 0, true, Some(".".to_string()), None, None);
+        let cmds = output.build_commands("hi");
+        let dot_pos = cmds.find("type .\n").unwrap();
+        let enter_pos = cmds.find("key enter\n").unwrap();
+        assert!(dot_pos < enter_pos);
+    }
+
+    /// Serialize tests that mutate `DOTOOL_PIPE` — Rust's default
+    /// parallel test runner would otherwise see one test's env change
+    /// from another. RAII guard restores the prior value on drop so a
+    /// panicking test doesn't pollute the rest of the run.
+    static DOTOOL_PIPE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct DotoolPipeEnvGuard {
+        prior: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl DotoolPipeEnvGuard {
+        fn set(value: &str) -> Self {
+            // Allow re-entry on a poisoned lock; one panicking test
+            // shouldn't break every subsequent test in the same file.
+            let lock = DOTOOL_PIPE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prior = std::env::var("DOTOOL_PIPE").ok();
+            std::env::set_var("DOTOOL_PIPE", value);
+            Self { prior, _lock: lock }
+        }
+    }
+
+    impl Drop for DotoolPipeEnvGuard {
+        fn drop(&mut self) {
+            match self.prior.take() {
+                Some(v) => std::env::set_var("DOTOOL_PIPE", v),
+                None => std::env::remove_var("DOTOOL_PIPE"),
+            }
+        }
+    }
+
+    #[test]
+    fn daemon_pipe_detection_respects_env_var() {
+        let _guard = DotoolPipeEnvGuard::set("/nonexistent/dotool-pipe-test");
+        assert!(DotoolOutput::daemon_pipe_path().is_none());
     }
 }
