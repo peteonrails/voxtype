@@ -473,6 +473,17 @@ impl Reconciler {
 }
 
 impl Transcriber for SonioxTranscriber {
+    /// Run a one-shot transcription.
+    ///
+    /// **Runtime requirement:** when called from inside an existing tokio
+    /// runtime, that runtime must be **multi-threaded** (the default for
+    /// `#[tokio::main]`). The sync→async bridge below uses
+    /// `tokio::task::block_in_place`, which panics on a current-thread
+    /// runtime. Voxtype's binary entry point is multi-thread so this is
+    /// always satisfied in production; the caveat matters only for tests
+    /// — prefer `#[tokio::test(flavor = "multi_thread")]` when exercising
+    /// this method, or call the async helpers (`batch_transcribe` /
+    /// `async_transcribe`) directly.
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat("Empty audio buffer".into()));
@@ -1010,8 +1021,18 @@ async fn run_streaming_session(
             }
 
             // Drain timeout fired without server-initiated close.
+            //
+            // Logged at warn level because hitting the deadline means
+            // trailing finals from the server were dropped on the floor —
+            // the user may notice missing words at the end of an utterance.
+            // Typical clean closes complete in ~200-300 ms, so a 5 s hit
+            // usually indicates a degraded uplink or a server-side hang.
             _ = drain_timer, if drain_deadline.is_some() => {
-                tracing::info!("Soniox drain timeout reached after end-of-audio; closing session");
+                tracing::warn!(
+                    "Soniox drain timeout ({}s) reached after end-of-audio; \
+                     trailing finals may be lost",
+                    DRAIN_TIMEOUT.as_secs(),
+                );
                 break;
             }
 
