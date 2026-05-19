@@ -408,6 +408,13 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
     install_onnx_gpu_variant() {
         local variant="$1"      # cuda-12, cuda-13, migraphx
         local ep_lib="$2"       # cuda or migraphx
+        # When set, $3 is the libonnxruntime.so.X.Y.Z basename the variant
+        # bundles alongside the binary. The cuda-13 build links ORT
+        # dynamically (load-dynamic) because Microsoft's prebuilt is the
+        # only ORT 1.24.4 build that ships Blackwell sm_120 kernels, and
+        # Microsoft only distributes .so (no .a). cuda-12 and migraphx
+        # keep their static-linked layouts; pass empty for those.
+        local libort_versioned="${3:-}"
         local src="${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-onnx-${variant}"
         if [[ ! -f "$src" ]]; then
             return 0
@@ -420,6 +427,14 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
             "$subdir/libonnxruntime_providers_${ep_lib}.so"
         cp "${src}.libonnxruntime_providers_shared.so" \
             "$subdir/libonnxruntime_providers_shared.so"
+        if [[ -n "$libort_versioned" ]]; then
+            # Real file + symlink. ort/load-dynamic dlopens the unversioned
+            # name (`libonnxruntime.so`) relative to /proc/self/exe (see
+            # ort src/lib.rs:96-109); the SONAME symlink lets that resolve
+            # without env vars or RPATH plumbing.
+            cp "${src}.${libort_versioned}" "$subdir/${libort_versioned}"
+            ln -sf "${libort_versioned}" "$subdir/libonnxruntime.so"
+        fi
         # Convenience symlink at the top level so existing tooling (the
         # voxtype-wrapper.sh, voxtype setup gpu, ParakeetBackend detection)
         # finds the binary by its short name.
@@ -427,7 +442,7 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
             "$STAGING/usr/lib/voxtype/voxtype-onnx-${variant}"
     }
     install_onnx_gpu_variant cuda-12 cuda
-    install_onnx_gpu_variant cuda-13 cuda
+    install_onnx_gpu_variant cuda-13 cuda libonnxruntime.so.1.24.4
     install_onnx_gpu_variant migraphx migraphx
     # Legacy compat symlink for users with scripts referencing the old
     # voxtype-onnx-rocm name. The AMD GPU EP changed from ROCm to MIGraphX
