@@ -445,19 +445,22 @@ impl Reconciler {
             }
         }
 
-        if type_partials && !partial_text.is_empty() {
-            if partial_text.starts_with(&self.typed_partial) {
-                let delta = partial_text[self.typed_partial.len()..].to_string();
-                if !delta.is_empty() {
-                    out.events.push(StreamingEvent::Partial {
-                        text: delta,
-                        segment_id: SEGMENT_ID,
-                    });
-                    self.typed_partial = partial_text;
-                }
+        // When type_partials is off, no partial is empty, AND the server
+        // hasn't revised what we typed, emit only the new tail. The
+        // implicit "else" (server revised our typed partial) is silently
+        // dropped — the next finalization round resolves it.
+        if type_partials
+            && !partial_text.is_empty()
+            && partial_text.starts_with(&self.typed_partial)
+        {
+            let delta = partial_text[self.typed_partial.len()..].to_string();
+            if !delta.is_empty() {
+                out.events.push(StreamingEvent::Partial {
+                    text: delta,
+                    segment_id: SEGMENT_ID,
+                });
+                self.typed_partial = partial_text;
             }
-            // else: server revised our typed partial. Skip emission; the
-            // next finalization round will resolve the divergence.
         }
 
         if parsed.finished {
@@ -525,7 +528,7 @@ impl SonioxTranscriber {
 
         let init = self.init_frame();
         tracing::debug!(target: "voxtype::soniox::wire", "-> init {}", redact_api_key(&init));
-        write.send(Message::Text(init.into())).await.map_err(|e| {
+        write.send(Message::Text(init)).await.map_err(|e| {
             TranscribeError::InferenceFailed(format!("Soniox: send init failed: {}", e))
         })?;
 
@@ -536,7 +539,7 @@ impl SonioxTranscriber {
         const FRAME_BYTES: usize = 32 * 1024;
         for chunk in bytes.chunks(FRAME_BYTES) {
             write
-                .send(Message::Binary(chunk.to_vec().into()))
+                .send(Message::Binary(chunk.to_vec()))
                 .await
                 .map_err(|e| {
                     TranscribeError::InferenceFailed(format!("Soniox: send audio failed: {}", e))
@@ -557,7 +560,7 @@ impl SonioxTranscriber {
                 TranscribeError::InferenceFailed(format!("Soniox: send finalize failed: {}", e))
             })?;
         write
-            .send(Message::Text(String::new().into()))
+            .send(Message::Text(String::new()))
             .await
             .map_err(|e| {
                 TranscribeError::InferenceFailed(format!("Soniox: send EOA failed: {}", e))
@@ -771,7 +774,7 @@ impl SonioxTranscriber {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             // Best effort: delete the orphaned file.
-            self.async_delete_file(&client, &auth, &file_id).await;
+            self.async_delete_file(client, &auth, &file_id).await;
             return Err(TranscribeError::InferenceFailed(format!(
                 "Soniox async: create transcription returned {}: {}",
                 status, text
@@ -789,7 +792,7 @@ impl SonioxTranscriber {
         let poll_start = std::time::Instant::now();
         loop {
             if poll_start.elapsed() > max_wait {
-                self.async_cleanup(&client, &auth, &job_id).await;
+                self.async_cleanup(client, &auth, &job_id).await;
                 return Err(TranscribeError::InferenceFailed(format!(
                     "Soniox async: job {} did not complete within {}s",
                     job_id,
@@ -808,7 +811,7 @@ impl SonioxTranscriber {
             if !resp.status().is_success() {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();
-                self.async_cleanup(&client, &auth, &job_id).await;
+                self.async_cleanup(client, &auth, &job_id).await;
                 return Err(TranscribeError::InferenceFailed(format!(
                     "Soniox async: poll returned {}: {}",
                     status, text
@@ -826,7 +829,7 @@ impl SonioxTranscriber {
                     let err = status_resp
                         .error_message
                         .unwrap_or_else(|| "unspecified error".to_string());
-                    self.async_cleanup(&client, &auth, &job_id).await;
+                    self.async_cleanup(client, &auth, &job_id).await;
                     return Err(TranscribeError::InferenceFailed(format!(
                         "Soniox async: server error: {}",
                         err
@@ -863,7 +866,7 @@ impl SonioxTranscriber {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            self.async_cleanup(&client, &auth, &job_id).await;
+            self.async_cleanup(client, &auth, &job_id).await;
             return Err(TranscribeError::InferenceFailed(format!(
                 "Soniox async: fetch transcript returned {}: {}",
                 status, text
@@ -881,7 +884,7 @@ impl SonioxTranscriber {
         })?;
 
         // 5. Cleanup server-side state (best effort, don't fail user-visible).
-        self.async_cleanup(&client, &auth, &job_id).await;
+        self.async_cleanup(client, &auth, &job_id).await;
 
         // 6. Concatenate tokens (skip special markers).
         let mut out = String::new();
@@ -974,7 +977,7 @@ async fn run_streaming_session(
 
     // Send init.
     tracing::debug!(target: "voxtype::soniox::wire", "-> init {}", redact_api_key(&init_frame));
-    if let Err(e) = write.send(Message::Text(init_frame.into())).await {
+    if let Err(e) = write.send(Message::Text(init_frame)).await {
         send_fatal(&events_tx, format!("Soniox: send init failed: {}", e)).await;
         return Ok(());
     }
@@ -1016,7 +1019,7 @@ async fn run_streaming_session(
                 match chunk {
                     Some(c) if !c.is_empty() => {
                         let bytes = f32_to_s16le_bytes(&c);
-                        if let Err(e) = write.send(Message::Binary(bytes.into())).await {
+                        if let Err(e) = write.send(Message::Binary(bytes)).await {
                             let _ = events_tx.send(StreamingEvent::Error(
                                 TranscribeError::InferenceFailed(format!(
                                     "Soniox: send audio failed: {}", e
@@ -1046,9 +1049,7 @@ async fn run_streaming_session(
                             {
                                 tracing::warn!("Soniox: finalize send failed: {}", e);
                             }
-                            if let Err(e) =
-                                write.send(Message::Text(String::new().into())).await
-                            {
+                            if let Err(e) = write.send(Message::Text(String::new())).await {
                                 tracing::warn!("Soniox: EOA send failed: {}", e);
                             }
                             sent_eoa = true;

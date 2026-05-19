@@ -2764,13 +2764,15 @@ mod tests {
 
     #[test]
     fn meeting_mode_forces_soniox_async_when_user_had_realtime() {
-        let mut cfg = Config::default();
-        cfg.engine = TranscriptionEngine::Soniox;
-        cfg.soniox = Some(SonioxConfig {
-            api_key: Some("k".into()),
-            async_api: false,
-            ..SonioxConfig::default()
-        });
+        let cfg = Config {
+            engine: TranscriptionEngine::Soniox,
+            soniox: Some(SonioxConfig {
+                api_key: Some("k".into()),
+                async_api: false,
+                ..SonioxConfig::default()
+            }),
+            ..Config::default()
+        };
         let meeting_cfg = cfg.with_meeting_mode_overrides();
         assert!(meeting_cfg.soniox.as_ref().unwrap().async_api);
         // Original config untouched — dictation path keeps realtime.
@@ -2779,13 +2781,15 @@ mod tests {
 
     #[test]
     fn meeting_mode_preserves_explicit_soniox_async() {
-        let mut cfg = Config::default();
-        cfg.engine = TranscriptionEngine::Soniox;
-        cfg.soniox = Some(SonioxConfig {
-            api_key: Some("k".into()),
-            async_api: true,
-            ..SonioxConfig::default()
-        });
+        let cfg = Config {
+            engine: TranscriptionEngine::Soniox,
+            soniox: Some(SonioxConfig {
+                api_key: Some("k".into()),
+                async_api: true,
+                ..SonioxConfig::default()
+            }),
+            ..Config::default()
+        };
         let meeting_cfg = cfg.with_meeting_mode_overrides();
         assert!(meeting_cfg.soniox.as_ref().unwrap().async_api);
     }
