@@ -92,7 +92,11 @@ jobs:
             runner: ubuntu-24.04
             glibc_cap: '2.39'
             check_no_avx512: false
-            companion_libs: 'libonnxruntime_providers_cuda.so libonnxruntime_providers_shared.so'
+            # cuda-13 dlopens ORT via ort/load-dynamic so the runtime ships
+            # alongside the binary (Microsoft's prebuilt is the only 1.24.4
+            # build with sm_120 Blackwell coverage, and it's distributed as
+            # .so only — see Dockerfile.onnx-cuda-13 header).
+            companion_libs: 'libonnxruntime.so.1.24.4 libonnxruntime_providers_cuda.so libonnxruntime_providers_shared.so'
             timeout_minutes: 120
           - variant: onnx-migraphx
             arch: x86_64
@@ -211,17 +215,42 @@ jobs:
             exit 1
           fi
 
-      - name: Verify AVX-512 absence (AVX2 and Vulkan variants only)
+      - name: Verify ISA floor (Haswell / x86_64-v3) on AVX2 and Vulkan variants
         if: matrix.check_no_avx512
         run: |
           set -euo pipefail
           VERSION='${{ steps.version.outputs.version }}'
           BIN="releases/${VERSION}/voxtype-${VERSION}-linux-${{ matrix.arch }}-${{ matrix.variant }}"
-          ZMM=$(objdump -d "${BIN}" | grep -c zmm || true)
-          echo "AVX-512 zmm register count: ${ZMM}"
-          if [[ "${ZMM}" -ne 0 ]]; then
-            echo "FAIL: ${{ matrix.variant }} binary contains ${ZMM} AVX-512 zmm references."
-            echo "It will SIGILL on pre-AVX-512 CPUs (Zen 3, Haswell, etc.)."
+          # The "no AVX-512" variants must run on every x86_64-v3 CPU: Haswell,
+          # Kaby Lake, Zen 2, Zen 3, etc. That floor excludes AVX-512, GFNI,
+          # AVX-VNNI, and SSE4a (AMD-only). The previous gate only checked zmm
+          # registers — Zen 3 lacks AVX-512 but still has SSE4a's `insertq`,
+          # which is what crashed Kaby Lake daemons in issue #393. NOTE:
+          # SHA-NI, VAES (ymm), and VPCLMULQDQ (ymm) are NOT checked because
+          # the sha2/aes crates emit them behind cpufeatures-dispatched
+          # runtime CPUID guards; they show up in every working binary.
+          DUMP=$(objdump -d "${BIN}")
+          ZMM=$(echo "$DUMP" | grep -c zmm || true)
+          EVEX=$(echo "$DUMP" | grep -cE 'vpternlog|vpermt2|vpermi2|vpblendm|valign[dq]|vpcompress|vpexpand' || true)
+          BCAST=$(echo "$DUMP" | grep -c '{1to' || true)
+          GFNI=$(echo "$DUMP" | grep -cE '\b(vgf2p8|gf2p8)' || true)
+          SSE4A=$(echo "$DUMP" | grep -cE '\b(insertq|extrq)\b' || true)
+          AVXVNNI=$(echo "$DUMP" | grep -cE '\bvpdpbus(d|ds)|vpdpwss(d|ds)' || true)
+          printf '  zmm registers:     %s\n' "$ZMM"
+          printf '  AVX-512 EVEX:      %s\n' "$EVEX"
+          printf '  AVX-512 broadcast: %s\n' "$BCAST"
+          printf '  GFNI:              %s\n' "$GFNI"
+          printf '  SSE4a (AMD-only):  %s\n' "$SSE4A"
+          printf '  AVX-VNNI:          %s\n' "$AVXVNNI"
+          fail=0
+          for n in "$ZMM" "$EVEX" "$BCAST" "$GFNI" "$SSE4A" "$AVXVNNI"; do
+            [[ "${n:-0}" -gt 0 ]] && fail=1
+          done
+          if [[ "$fail" -ne 0 ]]; then
+            echo "FAIL: ${{ matrix.variant }} binary contains out-of-floor instructions."
+            echo "It will SIGILL on x86_64-v3 CPUs (Kaby Lake, Zen 2/3, Haswell, etc.)."
+            echo "Most likely cause: RUSTFLAGS uses target-cpu=native or GGML_NATIVE=ON"
+            echo "on a build host whose CPU has features the floor doesn't allow."
             exit 1
           fi
 

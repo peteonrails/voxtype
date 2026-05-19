@@ -5,6 +5,27 @@
 # voxtype-onnx-cuda is symlinked to whichever variant matches the host's
 # CUDA runtime (see voxtype setup gpu --enable).
 #
+# Linking model (cu13 only — differs from cu12):
+#   Unlike Dockerfile.onnx-cuda-12, this binary does NOT statically link
+#   ORT into voxtype. We use `ort/load-dynamic` and dlopen Microsoft's
+#   official `libonnxruntime.so.1.24.4` at runtime. The reason is that
+#   the pyke-distributed ORT 1.24.4 cu13 prebuilt (which ort-sys would
+#   otherwise download and link statically) ships a CUDA EP with arch
+#   coverage sm_30..sm_90a — no Blackwell (sm_120) SASS or PTX — so any
+#   RTX 50-series GPU fails the first transcription with
+#   `cudaErrorNoKernelImageForDevice` (see issue #386, RTX 5090). Upstream
+#   pyke has closed Blackwell support requests as "not planned", and as of
+#   2026-05 ort 2.0.0-rc.12 is still the newest crate on crates.io.
+#
+#   Microsoft's official ORT 1.24.4 cu13 prebuilt covers sm_70..sm_120a
+#   across both the main runtime and the CUDA EP, so this Dockerfile
+#   pivots to that prebuilt entirely (main runtime + EP + shared EP),
+#   linked dynamically. At runtime ort looks for `libonnxruntime.so` in
+#   the directory containing the executable (see ort src/lib.rs:96-109),
+#   so scripts/package.sh and the AUR PKGBUILD install all three files
+#   into /usr/lib/voxtype/cuda-13/ alongside the binary — no RPATH or
+#   LD_LIBRARY_PATH plumbing required.
+#
 # Usage:
 #   docker build -f Dockerfile.onnx-cuda-13 -t voxtype-onnx-cuda-13-builder .
 #   docker run --rm -v $(pwd)/releases:/output voxtype-onnx-cuda-13-builder
@@ -13,8 +34,9 @@
 #   - NVIDIA GPU with CUDA 13.x runtime
 #   - NVIDIA driver 580 or newer (CUDA 13 minimum)
 #   - libcudart.so.13 and cuDNN 9 at runtime (or via LD_LIBRARY_PATH)
-#   - The bundled libonnxruntime_providers_cuda.so and *_shared.so
-#     installed alongside the binary (handled by scripts/package.sh)
+#   - The bundled libonnxruntime.so.1.24.4 + libonnxruntime_providers_cuda.so
+#     + libonnxruntime_providers_shared.so co-located with the binary
+#     (handled by scripts/package.sh and the AUR voxtype-bin PKGBUILD)
 #
 FROM nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04
 
@@ -53,40 +75,98 @@ WORKDIR /build
 # Copy source code
 COPY . .
 
-# ONNX Runtime CUDA 13 settings
-# ort-sys reads ORT_CUDA_VERSION at build time to choose the cu12 or cu13
-# prebuilt. The base image's NV_CUDA_CUDART_VERSION would also yield cu13,
-# but setting ORT_CUDA_VERSION explicitly is unambiguous and survives any
-# upstream changes to NVIDIA's image env vars.
-ENV ORT_STRATEGY=download
-ENV ORT_CUDA_VERSION=13
+# Fetch Microsoft's ORT 1.24.4 cu13 prebuilt. We bundle it verbatim into
+# the release; ort/load-dynamic dlopens it at runtime. Pinned to match the
+# api-24 ABI surface ort 2.0.0-rc.12 expects; bump in lockstep when the
+# ort crate version moves.
+ENV ORT_VERSION=1.24.4
+ENV ORT_DIR=/opt/onnxruntime
+RUN set -eux; \
+    curl -fsSL -o /tmp/ort-msft.tgz \
+      "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-gpu_cuda13-${ORT_VERSION}.tgz"; \
+    mkdir -p "${ORT_DIR}"; \
+    tar -xzf /tmp/ort-msft.tgz --strip-components=1 -C "${ORT_DIR}"; \
+    rm /tmp/ort-msft.tgz; \
+    test -f "${ORT_DIR}/lib/libonnxruntime.so.${ORT_VERSION}"; \
+    test -f "${ORT_DIR}/lib/libonnxruntime_providers_cuda.so"; \
+    test -f "${ORT_DIR}/lib/libonnxruntime_providers_shared.so"; \
+    # Fail loudly at build time if a future Microsoft release ever drops
+    # Blackwell. This is the gate that should have existed for the pyke
+    # prebuilt before #386 reached a 5090 user. The sm_120 token appears
+    # in `strings` output as a substring of compiler directives like
+    # `-arch sm_120a -m 64 -w` and `.target sm_120`, never as a whole
+    # line, so the pattern can't be line-anchored.
+    strings "${ORT_DIR}/lib/libonnxruntime_providers_cuda.so" \
+      | grep -qE '(\.target sm_120|sm_120a)\b' \
+      || { echo "FAIL: Microsoft ORT ${ORT_VERSION} cu13 EP lacks sm_120 — bundle layout changed upstream."; exit 1; }; \
+    echo "Microsoft ORT ${ORT_VERSION} cu13 staged at ${ORT_DIR} (sm_70..sm_120a)."
 
-# Build with all ONNX engines + CUDA 13 support for NVIDIA GPUs
-# Disable LTO for faster builds
-RUN cargo build --release --features parakeet-cuda,moonshine-cuda,sensevoice-cuda,paraformer-cuda,dolphin-cuda,omnilingual-cuda,cohere-cuda,ml-diarization \
-    --config 'profile.release.lto=false' \
-    --config 'profile.release.codegen-units=8' \
+# Build voxtype with all ONNX engines + CUDA EP, linked dynamically.
+#
+# Feature breakdown:
+#   - parakeet-cuda          → parakeet-rs/cuda  (registers CUDA EP for Parakeet)
+#   - parakeet-load-dynamic  → parakeet-rs/load-dynamic  (dlopen ORT in parakeet-rs)
+#   - {moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere}-cuda
+#                            → onnx-cuda-enabled = ort/cuda  (CUDA EP type)
+#   - onnx-load-dynamic      → ort/load-dynamic  (dlopen ORT crate-wide)
+#   - ml-diarization         → ort (no EP gates needed)
+#
+# `ort/cuda` and `ort/load-dynamic` compose: ort/src/execution_providers/cuda.rs
+# gates the CUDA EP under `any(load-dynamic, cuda)`, and load-dynamic just
+# changes how libonnxruntime is reached, not whether the EP exists.
+#
+# Disable LTO for faster builds; same as the rest of the matrix.
+RUN cargo build --release \
+        --features parakeet-cuda,parakeet-load-dynamic,moonshine-cuda,sensevoice-cuda,paraformer-cuda,dolphin-cuda,omnilingual-cuda,cohere-cuda,onnx-load-dynamic,ml-diarization \
+        --config 'profile.release.lto=false' \
+        --config 'profile.release.codegen-units=8' \
     && cp target/release/voxtype /tmp/voxtype-onnx-cuda-13
 
-# Bundle the CUDA EP companion shared libs (see Dockerfile.onnx-cuda-12 for rationale)
-RUN mkdir -p /tmp/onnx-cuda-13-libs \
-    && find /build/target/release -maxdepth 2 -name 'libonnxruntime_providers_cuda.so' -exec cp -L {} /tmp/onnx-cuda-13-libs/ \; \
-    && find /build/target/release -maxdepth 2 -name 'libonnxruntime_providers_shared.so' -exec cp -L {} /tmp/onnx-cuda-13-libs/ \; \
-    && test -f /tmp/onnx-cuda-13-libs/libonnxruntime_providers_cuda.so \
-    && test -f /tmp/onnx-cuda-13-libs/libonnxruntime_providers_shared.so
+# Stage the bundled libs alongside the binary. Three files ship:
+#   - libonnxruntime.so.${ORT_VERSION}  (real file with Blackwell SASS)
+#   - libonnxruntime.so                 (symlink → libonnxruntime.so.${ORT_VERSION})
+#                                       ort/load-dynamic dlopens this exact name
+#                                       relative to /proc/self/exe.
+#   - libonnxruntime_providers_cuda.so  (Blackwell CUDA EP, dlopened by main)
+#   - libonnxruntime_providers_shared.so (EP support shim)
+RUN set -eux; \
+    mkdir -p /tmp/onnx-cuda-13-libs; \
+    cp -L "${ORT_DIR}/lib/libonnxruntime.so.${ORT_VERSION}" \
+        "/tmp/onnx-cuda-13-libs/libonnxruntime.so.${ORT_VERSION}"; \
+    ln -sf "libonnxruntime.so.${ORT_VERSION}" \
+        "/tmp/onnx-cuda-13-libs/libonnxruntime.so"; \
+    cp -L "${ORT_DIR}/lib/libonnxruntime_providers_cuda.so" \
+        /tmp/onnx-cuda-13-libs/libonnxruntime_providers_cuda.so; \
+    cp -L "${ORT_DIR}/lib/libonnxruntime_providers_shared.so" \
+        /tmp/onnx-cuda-13-libs/libonnxruntime_providers_shared.so; \
+    test -L /tmp/onnx-cuda-13-libs/libonnxruntime.so; \
+    test -f /tmp/onnx-cuda-13-libs/libonnxruntime.so.${ORT_VERSION}; \
+    test -f /tmp/onnx-cuda-13-libs/libonnxruntime_providers_cuda.so; \
+    test -f /tmp/onnx-cuda-13-libs/libonnxruntime_providers_shared.so
 
 # Verify binary
 RUN echo "=== Verifying ONNX CUDA 13 binary ===" \
     && /tmp/voxtype-onnx-cuda-13 --version \
     && echo "=== Binary size ===" \
     && ls -lh /tmp/voxtype-onnx-cuda-13 \
-    && echo "=== Companion .so files ===" \
-    && ls -lh /tmp/onnx-cuda-13-libs/
+    && echo "=== Bundled libs ===" \
+    && ls -lh /tmp/onnx-cuda-13-libs/ \
+    && echo "=== CUDA arch coverage in bundled EP ===" \
+    && strings /tmp/onnx-cuda-13-libs/libonnxruntime_providers_cuda.so | grep -oE 'sm_[0-9]+[a-z]?' | sort -u \
+    && echo "=== Confirm binary does NOT need libonnxruntime.so.1 at startup ===" \
+    && ! objdump -p /tmp/voxtype-onnx-cuda-13 | grep -q 'NEEDED.*libonnxruntime' \
+    || { echo "FAIL: voxtype has libonnxruntime in NEEDED — load-dynamic feature didn't take effect."; exit 1; }
 
-# Output stage: copy binary and companion .so files
+# Output stage: copy binary and bundled libs. Names follow the existing
+# release convention (`<binary>.<companion>`) so scripts/package.sh and
+# the AUR PKGBUILD can pick them up by predictable filenames.
 CMD mkdir -p /output \
     && cp /tmp/voxtype-onnx-cuda-13 /output/voxtype-${VERSION}-linux-x86_64-onnx-cuda-13 \
-    && cp /tmp/onnx-cuda-13-libs/libonnxruntime_providers_cuda.so /output/voxtype-${VERSION}-linux-x86_64-onnx-cuda-13.libonnxruntime_providers_cuda.so \
-    && cp /tmp/onnx-cuda-13-libs/libonnxruntime_providers_shared.so /output/voxtype-${VERSION}-linux-x86_64-onnx-cuda-13.libonnxruntime_providers_shared.so \
+    && cp /tmp/onnx-cuda-13-libs/libonnxruntime.so.${ORT_VERSION} \
+        /output/voxtype-${VERSION}-linux-x86_64-onnx-cuda-13.libonnxruntime.so.${ORT_VERSION} \
+    && cp /tmp/onnx-cuda-13-libs/libonnxruntime_providers_cuda.so \
+        /output/voxtype-${VERSION}-linux-x86_64-onnx-cuda-13.libonnxruntime_providers_cuda.so \
+    && cp /tmp/onnx-cuda-13-libs/libonnxruntime_providers_shared.so \
+        /output/voxtype-${VERSION}-linux-x86_64-onnx-cuda-13.libonnxruntime_providers_shared.so \
     && echo "Output:" \
     && ls -la /output/voxtype-${VERSION}-linux-x86_64-onnx-cuda-13*
