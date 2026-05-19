@@ -15,6 +15,7 @@ Solutions to common issues when using Voxtype.
   - [Text output not working on X11](#text-output-not-working-on-x11)
   - [Wrong characters on non-US keyboard layouts](#wrong-characters-on-non-us-keyboard-layouts-yz-swapped-qwertz-azerty)
 - [Performance Issues](#performance-issues)
+- [Soniox Backend Issues](#soniox-backend-issues)
 - [Systemd Service Issues](#systemd-service-issues)
 - [Debug Mode](#debug-mode)
 
@@ -950,6 +951,112 @@ model = "tiny.en"
 1. Ensure voxtype is running with normal priority
 2. Check for other applications using evdev
 3. Try a different hotkey
+
+---
+
+## Soniox Backend Issues
+
+### "Soniox API key required: set [soniox] api_key or SONIOX_API_KEY"
+
+The backend can't find a credential. Either set the env var:
+
+```bash
+export SONIOX_API_KEY="your-key-here"
+```
+
+…or add it to `~/.config/voxtype/config.toml`:
+
+```toml
+[soniox]
+api_key = "your-key-here"   # less safe — lands in dotfiles
+```
+
+The env var is preferred (no key in shell history, no key in config backups).
+
+### "Soniox: WS connect failed: ..." or "connect timeout"
+
+Network or DNS issue reaching `wss://stt-rt.soniox.com`. Check:
+- Internet connectivity (`curl https://api.soniox.com`)
+- Firewall / corporate proxy blocking outbound 443
+- VPN that mangles WebSocket handshakes
+
+Voxtype emits one `Streaming Error` notification and returns to idle. Press the hotkey again to retry once the network is back.
+
+### 401 Unauthorized / 403 Forbidden
+
+API key is invalid, revoked, or out of credit. Check the dashboard at https://console.soniox.com.
+
+### Soniox typed text occasionally diverges from spoken words (realtime mode)
+
+Soniox occasionally revises tail tokens between non-final and final states (`tévedések,` → `tévedések.`, `fejeztem` → `fejezte`). Voxtype emits a `StreamingEvent::Replace { backspace, text }` in this case so the cursor is patched up — but the patch only works if a backspace-capable driver is in the chain. The current backspace path tries `wtype`, then `dotool` (via `dotoolc` if the daemon is running), then `ydotool`. `eitype` does not have a backspace implementation.
+
+If you see persistent duplication or wrong tails:
+1. Check `journalctl --user -u voxtype` for `Soniox tail revision: backspace N chars, type … (lcp=N)` lines. If you see them, Replace is firing.
+2. If you also see `Streaming replace: no backspace-capable backend available; skipping backspace and accepting cursor artifact`, none of wtype/dotool/ydotool was usable — the original tail stayed at the cursor and the corrected text appended. Install at least one of them (`pacman -S wtype` or `pacman -S dotool` on Arch).
+3. Disable partial typing entirely: `[soniox] type_partials = false`. Finals are still typed, but no live cursor feedback. Trade-off: feels slower, zero divergence risk.
+
+### Notifications spam during dictation (transient tray icon flicker on KDE)
+
+If your KDE Plasma panel briefly shows an icon and re-layouts every ~150ms during streaming, the cause is usually the `eitype` driver. eitype connects via the XDG RemoteDesktop portal on each call, and KDE's security indicator briefly registers in the system tray.
+
+**Fix:** prefer `dotool` (or `ydotool`, layout-permitting) ahead of `eitype` in `[output] driver_order`. dotool uses kernel uinput directly — no portal, no tray.
+
+```toml
+[output]
+driver_order = ["dotool", "ydotool", "eitype", "clipboard"]
+```
+
+### Streaming is unusably slow (each typed segment takes ~1 second)
+
+You're hitting dotool's uinput init cost (~700ms) on every output call. With 60+ partials per session this stacks into 40+ seconds.
+
+**Fix:** run `dotoold` once at login. voxtype auto-detects its FIFO and routes through `dotoolc`, paying the init cost once for the daemon's lifetime instead of per call. Sub-10ms per typed segment.
+
+See [Streaming performance: dotoold fast path](CONFIGURATION.md#streaming-performance-dotoold-fast-path) in CONFIGURATION.md for the systemd user unit template.
+
+To verify the fast path is active after dictation:
+```bash
+journalctl --user -u voxtype --since "5 min ago" | grep "typed via"
+```
+- `Text typed via dotoolc (N chars)` — fast path
+- `Text typed via dotool (N chars)` — slow path; daemon not running
+
+### Wrong keyboard layout when dotoold is running
+
+dotool's layout setting applies to **the daemon, not the client**. Voxtype's `dotool_xkb_layout` config has no effect on commands routed through `dotoolc` — the layout is whatever dotoold inherits from its own environment.
+
+**Fix:** set `DOTOOL_XKB_LAYOUT` in dotoold's startup environment:
+
+```bash
+# In your systemd user unit:
+Environment=DOTOOL_XKB_LAYOUT=hu
+
+# Then:
+systemctl --user daemon-reload && systemctl --user restart dotoold
+```
+
+### PTT auto-promoted to toggle every time you start the daemon
+
+Expected when `[soniox] streaming = true` (the default for the realtime backend). Live cursor typing while the PTT key is still held breaks libinput's held-key state tracking on Hyprland/Sway/River. Voxtype auto-promotes to toggle for the running session and warns.
+
+To use Soniox with **real** push-to-talk, choose one of:
+- `[soniox] streaming = false` — one-shot WebSocket on key release, no live partials
+- `[soniox] async_api = true` — async REST API, slower but higher accuracy
+- `[hotkey] mode = "toggle"` — accept toggle activation (silences the warning)
+
+### Async API job stuck or "Soniox async: job ... did not complete within Ns"
+
+The async API processing took longer than `async_max_wait_secs` (default 120). For very long recordings or during Soniox capacity spikes, bump the timeout:
+
+```toml
+[soniox]
+async_api = true
+async_max_wait_secs = 300
+```
+
+### Post-stop "Streaming Error: Soniox server error (408): Request timeout"
+
+This notification used to appear when you released the hotkey and Soniox's server-side timer fired before the connection fully closed. Voxtype now suppresses 408s that arrive **after** you've signalled end-of-audio, so this should be silent. If you still see it, your build predates the fix (any release after v0.7.2 + soniox).
 
 ---
 

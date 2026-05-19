@@ -488,10 +488,25 @@ fn guidance_enabled<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
 
     // Streaming dictation requires toggle activation; if the user has it
     // enabled, suppress PTT-pair suggestions in favor of a toggle binding.
-    let streaming = ConfigEditor::load()
-        .ok()
-        .and_then(|ed| ed.get_bool("parakeet", "streaming"))
-        .unwrap_or(false);
+    // Covers all streaming-capable backends (Parakeet, Soniox, future).
+    let streaming = {
+        let ed = ConfigEditor::load().ok();
+        let engine = ed
+            .as_ref()
+            .and_then(|e| e.get_string("", "engine"))
+            .unwrap_or_else(|| "whisper".to_string());
+        match engine.as_str() {
+            "parakeet" => ed
+                .as_ref()
+                .and_then(|e| e.get_bool("parakeet", "streaming"))
+                .unwrap_or(false),
+            "soniox" => ed
+                .as_ref()
+                .and_then(|e| e.get_bool("soniox", "streaming"))
+                .unwrap_or(true),
+            _ => false,
+        }
+    };
     let suggestions = compositor_bindings::suggest_missing(&bindings, streaming);
     if !suggestions.is_empty() {
         let comp = compositor_bindings::dominant_compositor(&bindings);

@@ -199,6 +199,64 @@ impl StreamingSession {
         Ok(())
     }
 
+    /// Backspace `backspace` chars then commit `text`. Used by streaming
+    /// backends that revise the previously-typed partial tail when
+    /// finalizing (e.g. Soniox punctuation flips).
+    ///
+    /// The partial buffer is truncated by `backspace` scalars, then
+    /// `text` is appended to both cursor and finalized_text. Net effect:
+    /// the cursor ends up with the truncated partial + new text, matching
+    /// what the daemon's commit_segment would do for a plain Final.
+    pub async fn replace_and_commit(
+        &mut self,
+        chain: &[Box<dyn TextOutput>],
+        backspace: usize,
+        text: &str,
+        pre_output_command: Option<&str>,
+        post_output_command: Option<&str>,
+    ) -> Result<(), OutputError> {
+        // Cap backspace at what we've actually typed.
+        let n = backspace.min(self.typed_chars);
+        if n > 0 {
+            let emitted = emit_backspaces(n).await;
+            if emitted == 0 {
+                // No backspace-capable backend ran. The cursor still
+                // shows the old partial — DO NOT touch our bookkeeping,
+                // or `typed_chars` will drift from reality and the next
+                // cancel-rewind will leave stray characters behind. Accept
+                // the visual artifact and let the user see + correct.
+                tracing::warn!(
+                    "Streaming replace: no backspace-capable backend available; \
+                     skipping backspace and accepting cursor artifact"
+                );
+            } else {
+                // Truncate the partial buffer by the count actually emitted
+                // (which equals `n` when emit_backspaces returns non-zero,
+                // per its all-or-nothing contract).
+                let new_partial_len = self.partial.chars().count().saturating_sub(emitted);
+                self.partial = self.partial.chars().take(new_partial_len).collect();
+                self.typed_chars = self.typed_chars.saturating_sub(emitted);
+            }
+        }
+
+        if !text.is_empty() {
+            let opts = OutputOptions {
+                pre_output_command,
+                post_output_command,
+                wait_for_modifier_release: false,
+                modifier_release_timeout: std::time::Duration::from_millis(0),
+            };
+            output_with_fallback(chain, text, opts).await?;
+            self.typed_chars += text.chars().count();
+            // Treat the (now-truncated) partial + new text as committed,
+            // matching commit_segment's accounting.
+            let finalized_tail = format!("{}{}", self.partial, text);
+            self.finalized_text.push_str(&finalized_tail);
+        }
+        self.clear_partial();
+        Ok(())
+    }
+
     /// Best-effort rewind: emit `typed_chars` BackSpace key events via
     /// wtype, falling back to dotool then ydotool. Returns `Ok(())`
     /// even if no backspace backend is available, since the user has
@@ -213,18 +271,7 @@ impl StreamingSession {
             return Ok(());
         }
 
-        if try_wtype_backspaces(count).await {
-            tracing::debug!("Rewound {} chars via wtype", count);
-            self.typed_chars = 0;
-            return Ok(());
-        }
-        if try_dotool_backspaces(count).await {
-            tracing::debug!("Rewound {} chars via dotool", count);
-            self.typed_chars = 0;
-            return Ok(());
-        }
-        if try_ydotool_backspaces(count).await {
-            tracing::debug!("Rewound {} chars via ydotool", count);
+        if emit_backspaces(count).await > 0 {
             self.typed_chars = 0;
             return Ok(());
         }
@@ -243,6 +290,24 @@ impl Default for StreamingSession {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Backspace `count` chars using the first available method.
+/// Returns the actual number of backspaces emitted.
+async fn emit_backspaces(count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    if try_wtype_backspaces(count).await {
+        return count;
+    }
+    if try_dotool_backspaces(count).await {
+        return count;
+    }
+    if try_ydotool_backspaces(count).await {
+        return count;
+    }
+    0
 }
 
 async fn try_wtype_backspaces(count: usize) -> bool {

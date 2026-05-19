@@ -71,7 +71,7 @@ pub struct Cli {
         long,
         value_name = "ENGINE",
         help_heading = "Transcription",
-        long_help = "Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere"
+        long_help = "Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere, soniox"
     )]
     pub engine: Option<String>,
 
@@ -172,6 +172,16 @@ pub struct Cli {
         hide_short_help = true
     )]
     pub remote_api_key: Option<String>,
+
+    // -- Soniox --
+    /// API key for Soniox (or use SONIOX_API_KEY env var)
+    #[arg(
+        long,
+        value_name = "KEY",
+        help_heading = "Soniox",
+        hide_short_help = true
+    )]
+    pub soniox_api_key: Option<String>,
 
     // -- Hotkey --
     /// Override hotkey (e.g., SCROLLLOCK, PAUSE, F13, MEDIA, WEV_234, EVTEST_226)
