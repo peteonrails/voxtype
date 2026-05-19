@@ -596,8 +596,12 @@ PanelWindow {
         id: btn
         property string label: ""
         property string shortcut: ""
-        property bool enabled: true
         signal clicked()
+
+        // `enabled` is inherited from Item. Qt's built-in property already
+        // controls visual disabled state and gates input events on children
+        // (including the MouseArea below), so a redeclaration would only
+        // shadow it and trigger a QML propertyCache warning.
 
         Layout.fillWidth: true
         Layout.preferredHeight: 36
