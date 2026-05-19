@@ -133,21 +133,37 @@ jobs:
         id: version
         run: |
           set -euo pipefail
+          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             INPUT_VERSION="${{ github.event.inputs.version }}"
             if [[ -n "${INPUT_VERSION}" ]]; then
               VERSION="${INPUT_VERSION}"
             else
-              VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+              VERSION="${CARGO_VERSION}"
             fi
           elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
+            # On tag pushes, fail fast if Cargo.toml's version doesn't match
+            # the tag. `voxtype --version` reads CARGO_PKG_VERSION at compile
+            # time, and the AUR `voxtype` source PKGBUILD's `cargo fetch
+            # --locked` requires Cargo.lock to list the same version. A tag
+            # cut without a matching bump produces binaries that report the
+            # previous version and a source package that won't build (the
+            # v0.4.6 incident). Strip an optional `-rc.*` / `-rc*` suffix on
+            # both sides so a v0.7.3-rc1 tag matches Cargo.toml's 0.7.3.
+            tag_base="${VERSION%%-rc*}"
+            cargo_base="${CARGO_VERSION%%-rc*}"
+            if [[ "${tag_base}" != "${cargo_base}" ]]; then
+              echo "::error::Cargo.toml version (${CARGO_VERSION}) does not match tag (${VERSION})."
+              echo "::error::Bump Cargo.toml + Cargo.lock to ${tag_base} before tagging."
+              exit 1
+            fi
           else
             # Branch push (e.g. rc/*) — read from Cargo.toml so artifacts get a sensible name.
-            VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+            VERSION="${CARGO_VERSION}"
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Resolved VERSION=${VERSION}"
+          echo "Resolved VERSION=${VERSION} (Cargo.toml: ${CARGO_VERSION})"
 
       - name: Build ${{ matrix.variant }} binary in Docker
         run: |
