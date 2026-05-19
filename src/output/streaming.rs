@@ -220,15 +220,23 @@ impl StreamingSession {
         if n > 0 {
             let emitted = emit_backspaces(n).await;
             if emitted == 0 {
+                // No backspace-capable backend ran. The cursor still
+                // shows the old partial — DO NOT touch our bookkeeping,
+                // or `typed_chars` will drift from reality and the next
+                // cancel-rewind will leave stray characters behind. Accept
+                // the visual artifact and let the user see + correct.
                 tracing::warn!(
                     "Streaming replace: no backspace-capable backend available; \
                      skipping backspace and accepting cursor artifact"
                 );
+            } else {
+                // Truncate the partial buffer by the count actually emitted
+                // (which equals `n` when emit_backspaces returns non-zero,
+                // per its all-or-nothing contract).
+                let new_partial_len = self.partial.chars().count().saturating_sub(emitted);
+                self.partial = self.partial.chars().take(new_partial_len).collect();
+                self.typed_chars = self.typed_chars.saturating_sub(emitted);
             }
-            // Truncate the partial buffer by the same count (in scalars).
-            let new_partial_len = self.partial.chars().count().saturating_sub(n);
-            self.partial = self.partial.chars().take(new_partial_len).collect();
-            self.typed_chars = self.typed_chars.saturating_sub(n);
         }
 
         if !text.is_empty() {

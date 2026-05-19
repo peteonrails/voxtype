@@ -988,11 +988,11 @@ API key is invalid, revoked, or out of credit. Check the dashboard at https://co
 
 ### Soniox typed text occasionally diverges from spoken words (realtime mode)
 
-Soniox occasionally revises tail tokens between non-final and final states (`tévedések,` → `tévedések.`, `fejeztem` → `fejezte`). Voxtype emits a `StreamingEvent::Replace { backspace, text }` in this case so the cursor is patched up — but the patch only works if a backspace-capable driver is in the chain (wtype, dotool, eitype, or ydotool).
+Soniox occasionally revises tail tokens between non-final and final states (`tévedések,` → `tévedések.`, `fejeztem` → `fejezte`). Voxtype emits a `StreamingEvent::Replace { backspace, text }` in this case so the cursor is patched up — but the patch only works if a backspace-capable driver is in the chain. The current backspace path tries `wtype`, then `dotool` (via `dotoolc` if the daemon is running), then `ydotool`. `eitype` does not have a backspace implementation.
 
 If you see persistent duplication or wrong tails:
-1. Check `journalctl --user -u voxtype` for `Soniox tail revision: backspace N chars` lines. If you see them, Replace is firing.
-2. If `Soniox final … does not align with typed partial` appears, the divergence was bigger than my LCP-based reconciler could handle gracefully — the full final is typed verbatim and you may see a duplicate. Rare for `stt-rt-v4` with Hungarian/English; common when language hints are wrong.
+1. Check `journalctl --user -u voxtype` for `Soniox tail revision: backspace N chars, type … (lcp=N)` lines. If you see them, Replace is firing.
+2. If you also see `Streaming replace: no backspace-capable backend available; skipping backspace and accepting cursor artifact`, none of wtype/dotool/ydotool was usable — the original tail stayed at the cursor and the corrected text appended. Install at least one of them (`pacman -S wtype` or `pacman -S dotool` on Arch).
 3. Disable partial typing entirely: `[soniox] type_partials = false`. Finals are still typed, but no live cursor feedback. Trade-off: feels slower, zero divergence risk.
 
 ### Notifications spam during dictation (transient tray icon flicker on KDE)

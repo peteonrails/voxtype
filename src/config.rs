@@ -2312,11 +2312,15 @@ impl Config {
             TranscriptionEngine::Parakeet => {
                 self.parakeet.as_ref().map(|p| p.streaming).unwrap_or(false)
             }
+            // Missing [soniox] section → don't auto-promote PTT. The
+            // transcriber will fail to initialize anyway (no api_key); we
+            // shouldn't change hotkey behaviour for a config that can't
+            // run. Same shape as the Parakeet arm: explicit opt-in only.
             TranscriptionEngine::Soniox => self
                 .soniox
                 .as_ref()
                 .map(|s| s.streaming && !s.async_api)
-                .unwrap_or(true),
+                .unwrap_or(false),
             _ => false,
         }
     }

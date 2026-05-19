@@ -879,7 +879,7 @@ impl Daemon {
     /// `Ended`, or as a teardown after an error). Stops audio capture, awaits
     /// the backend task, and drops the session locals.
     /// Start the OSD "draining" pump that publishes silent frames at
-    /// 100 Hz to keep the visualizer on screen while the streaming
+    /// ~30 Hz to keep the visualizer on screen while the streaming
     /// backend is flushing pending finals after the mic has stopped.
     /// No-op if the pump is already running or the OSD level hub is
     /// disabled.

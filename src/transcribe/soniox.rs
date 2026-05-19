@@ -6,9 +6,10 @@
 //!
 //! - [`Transcriber::transcribe`] — batch path used when
 //!   `[soniox] streaming = false` (push-to-talk compatible). Buffers the
-//!   audio, opens a one-shot WS session, sends the buffer + empty
-//!   binary end-of-audio marker, drains finals until `finished: true`,
-//!   and returns the concatenated text.
+//!   audio, opens a one-shot WS session, sends the buffer followed by
+//!   the protocol stop sequence — `{"type":"finalize"}` then an empty
+//!   text frame as the end-of-audio marker — drains finals until
+//!   `finished: true`, and returns the concatenated text.
 //!
 //! - [`StreamingTranscriber::start_stream`] — live streaming session.
 //!   Exposed only when `[soniox] streaming = true` (the default). The
