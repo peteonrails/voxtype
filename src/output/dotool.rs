@@ -42,6 +42,18 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
+/// Truncate a string for log emission, replacing newlines with literal `\n`
+/// so multi-line dotool command streams stay on one log line. Keeps the
+/// first `max_chars` Unicode scalars and appends an ellipsis when cut.
+fn truncate_for_log(s: &str, max_chars: usize) -> String {
+    let one_line = s.replace('\n', "\\n");
+    if one_line.chars().count() <= max_chars {
+        return one_line;
+    }
+    let head: String = one_line.chars().take(max_chars).collect();
+    format!("{}…", head)
+}
+
 /// dotool-based text output with keyboard layout support.
 pub struct DotoolOutput {
     /// Delay between keypresses in milliseconds
@@ -157,7 +169,16 @@ impl TextOutput for DotoolOutput {
         let pipe = Self::daemon_pipe_path();
         let binary = if pipe.is_some() { "dotoolc" } else { "dotool" };
         let set_layout_env = pipe.is_none();
-        tracing::debug!(target: "voxtype::dotool::wire", "-> {:?}", commands);
+        // Wire trace only at the TRACE level so the user's typed text
+        // isn't dumped to logs on the default -vv (DEBUG) verbosity.
+        // The dotool command stream contains every typed character.
+        if tracing::enabled!(target: "voxtype::dotool::wire", tracing::Level::TRACE) {
+            tracing::trace!(
+                target: "voxtype::dotool::wire",
+                "-> {:?}",
+                truncate_for_log(&commands, 40)
+            );
+        }
 
         let mut cmd = Command::new(binary);
         cmd.stdin(Stdio::piped())
@@ -279,10 +300,40 @@ mod tests {
         assert!(dot_pos < enter_pos);
     }
 
+    /// Serialize tests that mutate `DOTOOL_PIPE` — Rust's default
+    /// parallel test runner would otherwise see one test's env change
+    /// from another. RAII guard restores the prior value on drop so a
+    /// panicking test doesn't pollute the rest of the run.
+    static DOTOOL_PIPE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct DotoolPipeEnvGuard {
+        prior: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl DotoolPipeEnvGuard {
+        fn set(value: &str) -> Self {
+            // Allow re-entry on a poisoned lock; one panicking test
+            // shouldn't break every subsequent test in the same file.
+            let lock = DOTOOL_PIPE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prior = std::env::var("DOTOOL_PIPE").ok();
+            std::env::set_var("DOTOOL_PIPE", value);
+            Self { prior, _lock: lock }
+        }
+    }
+
+    impl Drop for DotoolPipeEnvGuard {
+        fn drop(&mut self) {
+            match self.prior.take() {
+                Some(v) => std::env::set_var("DOTOOL_PIPE", v),
+                None => std::env::remove_var("DOTOOL_PIPE"),
+            }
+        }
+    }
+
     #[test]
     fn daemon_pipe_detection_respects_env_var() {
-        std::env::set_var("DOTOOL_PIPE", "/nonexistent/dotool-pipe-test");
+        let _guard = DotoolPipeEnvGuard::set("/nonexistent/dotool-pipe-test");
         assert!(DotoolOutput::daemon_pipe_path().is_none());
-        std::env::remove_var("DOTOOL_PIPE");
     }
 }
