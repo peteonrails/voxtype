@@ -213,11 +213,7 @@ impl TextOutput for DotoolOutput {
             )));
         }
 
-        tracing::info!(
-            "Text typed via {} ({} chars)",
-            binary,
-            text.chars().count()
-        );
+        tracing::info!("Text typed via {} ({} chars)", binary, text.chars().count());
         Ok(())
     }
 
