@@ -79,6 +79,12 @@ source=(
     "voxtype-${pkgname}-${pkgver}-onnx-cuda-13.asc::${_github}/voxtype-${_upstream_ver}-linux-x86_64-onnx-cuda-13.asc"
     "voxtype-${pkgname}-${pkgver}-onnx-cuda-13.libonnxruntime_providers_cuda.so::${_github}/voxtype-${_upstream_ver}-linux-x86_64-onnx-cuda-13.libonnxruntime_providers_cuda.so"
     "voxtype-${pkgname}-${pkgver}-onnx-cuda-13.libonnxruntime_providers_shared.so::${_github}/voxtype-${_upstream_ver}-linux-x86_64-onnx-cuda-13.libonnxruntime_providers_shared.so"
+    # cuda-13 dlopens ORT at runtime (Microsoft's prebuilt is the only
+    # 1.24.4 build with Blackwell sm_120 coverage, and it's distributed
+    # as .so only). The runtime ships alongside the binary; the install
+    # step below symlinks libonnxruntime.so → this versioned name so
+    # ort/load-dynamic finds it via /proc/self/exe's directory.
+    "voxtype-${pkgname}-${pkgver}-onnx-cuda-13.libonnxruntime.so.1.24.4::${_github}/voxtype-${_upstream_ver}-linux-x86_64-onnx-cuda-13.libonnxruntime.so.1.24.4"
     # ONNX MIGraphX binary + companion shared libs
     "voxtype-${pkgname}-${pkgver}-onnx-migraphx::${_github}/voxtype-${_upstream_ver}-linux-x86_64-onnx-migraphx"
     "voxtype-${pkgname}-${pkgver}-onnx-migraphx.asc::${_github}/voxtype-${_upstream_ver}-linux-x86_64-onnx-migraphx.asc"
@@ -130,6 +136,7 @@ sha256sums=(
     'SKIP'  # voxtype-onnx-cuda-13.asc
     'SKIP'  # voxtype-onnx-cuda-13.libonnxruntime_providers_cuda.so
     'SKIP'  # voxtype-onnx-cuda-13.libonnxruntime_providers_shared.so
+    'SKIP'  # voxtype-onnx-cuda-13.libonnxruntime.so.1.24.4
     # ONNX MIGraphX
     'SKIP'  # voxtype-onnx-migraphx
     'SKIP'  # voxtype-onnx-migraphx.asc
@@ -190,6 +197,13 @@ package() {
         "$pkgdir/usr/lib/voxtype/cuda-13/libonnxruntime_providers_cuda.so"
     install -Dm644 "${src}-onnx-cuda-13.libonnxruntime_providers_shared.so" \
         "$pkgdir/usr/lib/voxtype/cuda-13/libonnxruntime_providers_shared.so"
+    # cuda-13 dlopens ORT at runtime. Install Microsoft's libonnxruntime
+    # under its SONAME (libonnxruntime.so.1.24.4) and symlink the bare
+    # name ort/load-dynamic expects (libonnxruntime.so).
+    install -Dm644 "${src}-onnx-cuda-13.libonnxruntime.so.1.24.4" \
+        "$pkgdir/usr/lib/voxtype/cuda-13/libonnxruntime.so.1.24.4"
+    ln -sf "libonnxruntime.so.1.24.4" \
+        "$pkgdir/usr/lib/voxtype/cuda-13/libonnxruntime.so"
     ln -sf "cuda-13/voxtype-onnx-cuda-13" \
         "$pkgdir/usr/lib/voxtype/voxtype-onnx-cuda-13"
 
