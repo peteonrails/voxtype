@@ -1,11 +1,28 @@
 //! `voxtype-osd-quickshell` — a tiny launcher that finds voxtype's Quickshell
-//! shell directory (containing `shell.qml`) and execs `qs -p <dir>`.
+//! shell directory (containing `shell.qml`) and execs `qs -d -p <dir>`.
 //!
 //! Quickshell (`qs`) treats the directory as a config root and loads
 //! `shell.qml` from it. We pass the directory rather than the file so that
 //! sibling QML imports (`import "voxtype-shared" as VT`) resolve through
 //! Quickshell's virtual filesystem; passing the file directly traps `..`
 //! traversals in `qrc:/qs-blackhole`.
+//!
+//! ## Daemonize by default
+//!
+//! The launcher passes `-d` to `qs` by default. Without `-d`, qs stays
+//! attached to its controlling terminal and dies via SIGHUP when its
+//! parent process exits — which is exactly what happens when users invoke
+//! the launcher from a hotkey, a short-lived shell, or `voxtype setup
+//! quickshell` smoke tests (see issue #395). Passing `-d` forks qs into
+//! its own session so the OSD survives.
+//!
+//! The daemon's OSD supervisor needs the opposite behavior: it spawns
+//! `voxtype-osd` (the dispatcher) via `tokio::process::Command` with
+//! `kill_on_drop(true)` so the OSD child is killed on daemon shutdown. If
+//! qs daemonizes, the supervisor's child slot exits immediately, the
+//! supervisor thinks qs died, and it respawns in a loop. To opt out, the
+//! supervisor sets `VOXTYPE_OSD_SUPERVISED=1` and the dispatcher then
+//! passes `--no-daemonize` through to this launcher.
 //!
 //! The launcher resolves the shell directory in this order:
 //!
@@ -53,7 +70,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let (cli_qml_path, rest) = parse_qml_path(&raw_args);
+    let (cli_qml_path, daemonize, rest) = parse_args(&raw_args);
 
     let shell_dir = match resolve_shell_dir(cli_qml_path) {
         Some(p) => p,
@@ -92,10 +109,14 @@ fn main() -> ExitCode {
 
     tracing::info!(
         shell_dir = %shell_dir.display(),
+        daemonize,
         "launching Quickshell OSD"
     );
 
     let mut cmd = Command::new(QS_BIN);
+    if daemonize {
+        cmd.arg("-d");
+    }
     cmd.arg("-p").arg(&shell_dir).args(&rest);
     let err = cmd.exec();
     eprintln!(
@@ -116,10 +137,21 @@ fn print_help() {
              --qml-path <PATH>    Override the Quickshell config directory.\n\
                                   Accepts either the directory containing\n\
                                   shell.qml or the shell.qml file itself.\n    \
+             --daemonize          Pass `-d` to qs (default). qs forks and\n\
+                                  detaches from the controlling terminal so\n\
+                                  the OSD survives a short-lived parent\n\
+                                  shell or hotkey invocation.\n    \
+             --no-daemonize       Do NOT pass `-d` to qs. Use this when a\n\
+                                  supervisor wants to keep qs attached to a\n\
+                                  child-process slot (e.g. the daemon's OSD\n\
+                                  supervisor relies on this so kill_on_drop\n\
+                                  reaches qs on shutdown).\n    \
              -h, --help           Show this message.\n    \
              -V, --version        Show version.\n\
          \n\
-         All other arguments are forwarded to `qs` after `-p <dir>`.\n\
+         If both --daemonize and --no-daemonize appear, the last one wins.\n\
+         \n\
+         All other arguments are forwarded to `qs` after `-d -p <dir>`.\n\
          \n\
          ENV:\n    \
              VOXTYPE_OSD_QML_PATH   Same as --qml-path.\n",
@@ -127,10 +159,19 @@ fn print_help() {
     );
 }
 
-/// Strip `--qml-path X`/`--qml-path=X` out of `args`. Anything left over
-/// is passed through to `qs` unchanged.
-fn parse_qml_path(args: &[String]) -> (Option<PathBuf>, Vec<String>) {
+/// Strip our own flags out of `args`:
+///
+/// - `--qml-path X` / `--qml-path=X`: resolve to a `PathBuf`.
+/// - `--daemonize` / `--no-daemonize`: set the daemonize flag. Last one
+///   wins so callers can override an upstream default by appending the
+///   opposite flag at the end (the dispatcher relies on this when it
+///   appends `--no-daemonize` to the user's argv).
+///
+/// Anything left over is passed through to `qs` unchanged. The returned
+/// `daemonize` defaults to `true` (the bug-fix in #395).
+fn parse_args(args: &[String]) -> (Option<PathBuf>, bool, Vec<String>) {
     let mut qml: Option<PathBuf> = None;
+    let mut daemonize = true;
     let mut rest: Vec<String> = Vec::with_capacity(args.len());
     let mut i = 0;
     while i < args.len() {
@@ -146,12 +187,18 @@ fn parse_qml_path(args: &[String]) -> (Option<PathBuf>, Vec<String>) {
         } else if let Some(v) = a.strip_prefix("--qml-path=") {
             qml = Some(PathBuf::from(v));
             i += 1;
+        } else if a == "--daemonize" {
+            daemonize = true;
+            i += 1;
+        } else if a == "--no-daemonize" {
+            daemonize = false;
+            i += 1;
         } else {
             rest.push(a.clone());
             i += 1;
         }
     }
-    (qml, rest)
+    (qml, daemonize, rest)
 }
 
 /// Normalize a user-supplied path into the directory containing
@@ -222,36 +269,85 @@ mod tests {
     #[test]
     fn parse_qml_path_space_form() {
         let args = vec!["--qml-path".into(), "/tmp/x".into(), "extra".into()];
-        let (q, rest) = parse_qml_path(&args);
+        let (q, d, rest) = parse_args(&args);
         assert_eq!(q.as_deref(), Some(Path::new("/tmp/x")));
+        assert!(d, "daemonize defaults to true");
         assert_eq!(rest, vec!["extra".to_string()]);
     }
 
     #[test]
     fn parse_qml_path_equals_form() {
         let args = vec!["--qml-path=/tmp/y".into(), "extra".into()];
-        let (q, rest) = parse_qml_path(&args);
+        let (q, d, rest) = parse_args(&args);
         assert_eq!(q.as_deref(), Some(Path::new("/tmp/y")));
+        assert!(d);
         assert_eq!(rest, vec!["extra".to_string()]);
     }
 
     #[test]
     fn parse_qml_path_absent() {
         let args = vec!["--width-px".into(), "400".into()];
-        let (q, rest) = parse_qml_path(&args);
+        let (q, d, rest) = parse_args(&args);
         assert!(q.is_none());
+        assert!(d, "daemonize defaults to true");
         assert_eq!(rest, vec!["--width-px".to_string(), "400".to_string()]);
     }
 
     #[test]
     fn parse_qml_path_dangling_flag() {
         let args = vec!["--qml-path".into()];
-        let (q, rest) = parse_qml_path(&args);
+        let (q, d, rest) = parse_args(&args);
         // Dangling `--qml-path` with no value is passed through so the
         // child (which won't recognise it) errors out clearly rather than
         // being silently dropped.
         assert!(q.is_none());
+        assert!(d);
         assert_eq!(rest, vec!["--qml-path".to_string()]);
+    }
+
+    #[test]
+    fn parse_daemonize_default_true() {
+        // No flag at all → daemonize stays true (the v0.7.3 default).
+        let args: Vec<String> = vec!["--width-px".into(), "400".into()];
+        let (_, d, rest) = parse_args(&args);
+        assert!(d);
+        // The pass-through arg is preserved verbatim for qs.
+        assert_eq!(rest, vec!["--width-px".to_string(), "400".to_string()]);
+    }
+
+    #[test]
+    fn parse_no_daemonize_strips_flag_and_clears_default() {
+        let args = vec!["--no-daemonize".into(), "extra".into()];
+        let (_, d, rest) = parse_args(&args);
+        assert!(!d, "--no-daemonize must turn off daemonize");
+        assert_eq!(
+            rest,
+            vec!["extra".to_string()],
+            "--no-daemonize must be stripped from the pass-through args"
+        );
+    }
+
+    #[test]
+    fn parse_daemonize_explicit_flag_stripped() {
+        let args = vec!["--daemonize".into(), "extra".into()];
+        let (_, d, rest) = parse_args(&args);
+        assert!(d);
+        assert_eq!(rest, vec!["extra".to_string()]);
+    }
+
+    #[test]
+    fn parse_daemonize_flags_last_wins() {
+        // --daemonize then --no-daemonize → no-daemonize wins.
+        let args = vec!["--daemonize".into(), "--no-daemonize".into()];
+        let (_, d, rest) = parse_args(&args);
+        assert!(!d, "last flag wins: --no-daemonize at the end");
+        assert!(rest.is_empty());
+
+        // Reverse: --no-daemonize then --daemonize → daemonize wins.
+        let args = vec!["--no-daemonize".into(), "--daemonize".into()];
+        let (_, d, rest) = parse_args(&args);
+        assert!(d, "last flag wins: --daemonize at the end");
+        assert!(rest.is_empty());
     }
 
     #[test]

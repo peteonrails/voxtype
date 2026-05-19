@@ -16,6 +16,17 @@
 //! aborted, which is fine for the OSD: it owns no daemon-shared state and
 //! the frontend's own `--reconnect-secs` loop handles a clean re-attach
 //! after `systemctl --user restart voxtype`.
+//!
+//! ### `VOXTYPE_OSD_SUPERVISED`
+//!
+//! We set `VOXTYPE_OSD_SUPERVISED=1` on the child's environment so the
+//! dispatcher (`voxtype-osd`) knows it was spawned by the daemon rather
+//! than invoked interactively. When dispatching to the Quickshell
+//! launcher the dispatcher then appends `--no-daemonize`, which tells
+//! the launcher to skip `qs -d`. Without this, qs would fork off into
+//! its own session, the supervisor's child slot would exit immediately,
+//! `kill_on_drop` would have nothing to kill, and the supervisor would
+//! respawn in a loop thinking the child died (see issue #395).
 
 use std::time::{Duration, Instant};
 use tokio::process::Command;
@@ -44,6 +55,11 @@ async fn supervise() {
         let started = Instant::now();
         let mut cmd = Command::new(OSD_BINARY);
         cmd.kill_on_drop(true);
+        // Tell the dispatcher this child is supervised. The dispatcher
+        // uses this to suppress qs's daemonize fork when handing off to
+        // the Quickshell launcher (otherwise kill_on_drop has nothing
+        // to kill — see #395).
+        cmd.env("VOXTYPE_OSD_SUPERVISED", "1");
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,

@@ -24,6 +24,19 @@
 //! frontend (including `--config`, which the GTK4 and native frontends
 //! consume on their own to read the rest of the `[osd]` section; the
 //! Quickshell frontend reads the same config via its launcher).
+//!
+//! ## Supervisor opt-out for Quickshell daemonize
+//!
+//! `voxtype-osd-quickshell` passes `-d` to `qs` by default so that
+//! hotkey/CLI invocations survive a short-lived parent shell (see issue
+//! #395). The daemon's OSD supervisor in `src/osd/supervisor.rs` needs
+//! the opposite behavior: it uses `kill_on_drop(true)` to kill the OSD
+//! on shutdown, which only works if qs stays attached to its child slot.
+//!
+//! The supervisor sets `VOXTYPE_OSD_SUPERVISED=1` on the dispatcher's
+//! environment. When this dispatcher sees that env var AND it's about to
+//! exec the Quickshell launcher, it appends `--no-daemonize` to the
+//! launcher's args so qs stays in the foreground.
 
 use std::env;
 use std::os::unix::process::CommandExt;
@@ -96,10 +109,18 @@ fn main() -> ExitCode {
         );
     }
 
+    // Build the final argv. If the supervisor invoked us AND we're
+    // dispatching to the Quickshell launcher, append `--no-daemonize` so
+    // qs stays attached to its child slot for `kill_on_drop`.
+    let supervised = env::var("VOXTYPE_OSD_SUPERVISED")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let final_args = build_child_args(chosen.frontend, supervised, &rest);
+
     // Hand off. exec replaces this process so the child inherits stdin,
     // stdout, stderr, signals, and process group cleanly. There's no return
     // path on success.
-    let err = Command::new(&chosen.path).args(&rest).exec();
+    let err = Command::new(&chosen.path).args(&final_args).exec();
     eprintln!(
         "voxtype-osd: failed to exec '{}': {err}",
         chosen.path.display()
@@ -183,6 +204,21 @@ fn parse_frontend_and_config(
         }
     }
     (frontend, config, rest)
+}
+
+/// Build the argv we hand to the chosen frontend. Currently only the
+/// Quickshell launcher needs special handling: when the daemon
+/// supervisor invokes us we append `--no-daemonize` so qs stays attached
+/// to its child slot for `kill_on_drop`. We append (rather than prepend)
+/// so the user's own `--daemonize`/`--no-daemonize` in `rest` always
+/// loses to the supervisor's intent. The Quickshell launcher uses
+/// last-wins flag resolution.
+fn build_child_args(frontend: OsdFrontend, supervised: bool, rest: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = rest.to_vec();
+    if supervised && frontend == OsdFrontend::Quickshell {
+        out.push("--no-daemonize".into());
+    }
+    out
 }
 
 /// Load the `[osd] frontend` value from the voxtype config file, falling
@@ -304,6 +340,44 @@ mod tests {
                 "400".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn build_child_args_appends_no_daemonize_when_supervised_quickshell() {
+        let rest = vec!["--width-px".to_string(), "400".to_string()];
+        let out = build_child_args(OsdFrontend::Quickshell, true, &rest);
+        assert_eq!(
+            out,
+            vec![
+                "--width-px".to_string(),
+                "400".to_string(),
+                "--no-daemonize".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_child_args_no_op_for_quickshell_unsupervised() {
+        let rest = vec!["--width-px".to_string(), "400".to_string()];
+        let out = build_child_args(OsdFrontend::Quickshell, false, &rest);
+        assert_eq!(out, rest);
+    }
+
+    #[test]
+    fn build_child_args_no_op_for_gtk4_supervised() {
+        // The supervisor flag must not bleed into the GTK4 or Native
+        // frontends — they have no `--no-daemonize` flag and would
+        // error out on an unknown arg.
+        let rest = vec!["--width-px".to_string(), "400".to_string()];
+        let out = build_child_args(OsdFrontend::Gtk4, true, &rest);
+        assert_eq!(out, rest);
+    }
+
+    #[test]
+    fn build_child_args_no_op_for_native_supervised() {
+        let rest = vec!["--width-px".to_string(), "400".to_string()];
+        let out = build_child_args(OsdFrontend::Native, true, &rest);
+        assert_eq!(out, rest);
     }
 
     #[test]
