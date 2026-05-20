@@ -67,6 +67,42 @@ pub struct DiarizedSegment {
 /// Speaker labels mapping auto IDs to names
 pub type SpeakerLabels = HashMap<SpeakerId, String>;
 
+/// Split audio into overlapping voiced sub-windows by RMS gating.
+///
+/// Returns `(start_sample, end_sample, rms)` tuples for windows whose
+/// RMS energy meets or exceeds `rms_floor`. ECAPA-TDNN performs best on
+/// 2-5s segments, so callers should use `window_secs ≈ 4.0`, `hop_secs ≈ 2.0`.
+pub fn vad_subwindows(
+    samples: &[f32],
+    sample_rate: u32,
+    window_secs: f32,
+    hop_secs: f32,
+    rms_floor: f32,
+) -> Vec<(usize, usize, f32)> {
+    // Clamp at the seconds level: a hop of 0 or a very small fraction would
+    // otherwise produce hundreds of thousands of overlapping windows per
+    // segment and overwhelm ECAPA inference. 100 ms is the lowest hop that
+    // still makes sense for speaker fingerprinting.
+    let hop_secs = hop_secs.max(0.1);
+    let win = (window_secs * sample_rate as f32) as usize;
+    let hop = (hop_secs * sample_rate as f32) as usize;
+    if win == 0 || hop == 0 || samples.len() < win {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    while start + win <= samples.len() {
+        let segment = &samples[start..start + win];
+        let sum_sq: f32 = segment.iter().map(|s| s * s).sum();
+        let rms = (sum_sq / segment.len() as f32).sqrt();
+        if rms >= rms_floor {
+            out.push((start, start + win, rms));
+        }
+        start += hop;
+    }
+    out
+}
+
 /// Trait for diarization backends
 pub trait Diarizer: Send + Sync {
     /// Process audio samples and return diarized segments
@@ -94,6 +130,17 @@ pub struct DiarizationConfig {
     pub min_segment_ms: u64,
     /// Path to ONNX model for ML backend
     pub model_path: Option<String>,
+    /// Cosine similarity threshold for matching new embeddings to existing
+    /// speakers. Lower = more merging (fewer speakers detected); higher =
+    /// more fragmentation. Empirically 0.20-0.30 is the useful range for
+    /// ECAPA-TDNN on 4s windows.
+    pub similarity_threshold: f32,
+    /// VAD sub-window length in seconds for ECAPA feeding
+    pub vad_window_secs: f32,
+    /// VAD sub-window hop in seconds
+    pub vad_hop_secs: f32,
+    /// RMS floor below which a sub-window is treated as silence
+    pub vad_rms_floor: f32,
 }
 
 impl Default for DiarizationConfig {
@@ -104,6 +151,10 @@ impl Default for DiarizationConfig {
             max_speakers: 10,
             min_segment_ms: 500,
             model_path: None,
+            similarity_threshold: 0.25,
+            vad_window_secs: 4.0,
+            vad_hop_secs: 2.0,
+            vad_rms_floor: 0.005,
         }
     }
 }

@@ -1182,6 +1182,10 @@ impl Daemon {
                 max_speakers: self.config.meeting.diarization.max_speakers,
                 min_segment_ms: self.config.meeting.diarization.min_segment_ms,
                 model_path: self.config.meeting.diarization.model_path.clone(),
+                similarity_threshold: self.config.meeting.diarization.similarity_threshold,
+                vad_window_secs: self.config.meeting.diarization.vad_window_secs,
+                vad_hop_secs: self.config.meeting.diarization.vad_hop_secs,
+                vad_rms_floor: self.config.meeting.diarization.vad_rms_floor,
             })
         } else {
             None
