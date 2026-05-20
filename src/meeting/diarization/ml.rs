@@ -408,32 +408,40 @@ impl Diarizer for MlDiarizer {
                     self.vad_rms_floor,
                 );
 
-                // Count sub-window labels directly; one HashMap, one lock guard
-                // hoisted across the loop so we don't re-acquire per window.
+                // Extract all sub-window embeddings without holding the state
+                // lock — ECAPA inference is the slow step and shouldn't block
+                // any concurrent reader of speaker_embeddings. Fall back to a
+                // single whole-segment window when no voiced sub-window is
+                // found (very short or quiet segment).
+                let windows = if subwindows.is_empty() {
+                    vec![(0usize, segment_samples.len(), 0.0f32)]
+                } else {
+                    subwindows
+                };
+                let mut embeddings: Vec<Vec<f32>> = Vec::with_capacity(windows.len());
+                for (ws, we, _rms) in windows {
+                    match self.extract_embedding(&segment_samples[ws..we]) {
+                        Ok(embedding) => embeddings.push(embedding),
+                        Err(e) => tracing::warn!("Failed to extract embedding: {}", e),
+                    }
+                }
+
+                // Now take the lock once and process the cluster updates
+                // sequentially (order matters: online centroid updates feed
+                // back into subsequent matches within the same segment).
                 let mut counts: HashMap<SpeakerId, u32> = HashMap::new();
-                if let Ok(mut state) = self.state.lock() {
-                    let windows = if subwindows.is_empty() {
-                        // Fall back to whole-segment embedding when no voiced
-                        // sub-window is found (very short or quiet segment).
-                        vec![(0usize, segment_samples.len(), 0.0f32)]
-                    } else {
-                        subwindows
-                    };
-                    for (ws, we, _rms) in windows {
-                        match self.extract_embedding(&segment_samples[ws..we]) {
-                            Ok(embedding) => {
-                                let label = state.find_or_create_speaker(
-                                    &embedding,
-                                    self.similarity_threshold,
-                                    self.max_speakers,
-                                );
-                                *counts.entry(label).or_insert(0) += 1;
-                            }
-                            Err(e) => tracing::warn!("Failed to extract embedding: {}", e),
+                match self.state.lock() {
+                    Ok(mut state) => {
+                        for embedding in &embeddings {
+                            let label = state.find_or_create_speaker(
+                                embedding,
+                                self.similarity_threshold,
+                                self.max_speakers,
+                            );
+                            *counts.entry(label).or_insert(0) += 1;
                         }
                     }
-                } else {
-                    tracing::warn!("Speaker state lock poisoned");
+                    Err(e) => tracing::warn!("Speaker state lock poisoned: {}", e),
                 }
 
                 // Dominant speaker = mode of sub-window labels.
