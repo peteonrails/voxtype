@@ -160,7 +160,16 @@ See [CONFIGURATION.md → [soniox]](CONFIGURATION.md#soniox) for the full field-
 
 Streaming output calls the typing driver many times per session (~60 partials for typical dictation). With direct `dotool` invocations each call spawns a fresh dotool process that pays ~700ms of uinput device setup — stacking to 40+ seconds of typing latency per session.
 
-**Strongly recommended:** run `dotoold` so voxtype routes through `dotoolc` (sub-10ms per call). See [Streaming performance: dotoold fast path](CONFIGURATION.md#streaming-performance-dotoold-fast-path) for the systemd user unit template.
+**Strongly recommended:** run `dotoold` so voxtype can route calls without
+per-call XKB hints through `dotoolc` (sub-10ms per call). `dotoolc` does not
+work with variants and cannot receive voxtype's per-call XKB hints, so hinted
+layout/variant calls use direct `dotool` instead. See
+[Streaming performance: dotoold fast path](CONFIGURATION.md#streaming-performance-dotoold-fast-path)
+for the systemd user unit template.
+
+If you rely on direct dotool layout or variant hints for non-English text,
+switch the active desktop layout to the matching layout before dictating.
+dotool sends key events; it does not change the focused app's active layout.
 
 If you're on KDE Plasma and see system-tray flicker during streaming, that's the `eitype` driver triggering the RemoteDesktop portal security indicator on each invocation. Prefer `dotool` (via dotoold) in your `[output] driver_order`.
 
