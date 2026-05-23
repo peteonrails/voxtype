@@ -24,6 +24,11 @@ pub struct AdvancedState {
     pub field: Field,
     pub feedback: Option<(FeedbackLevel, String)>,
     pub dirty_since_load: bool,
+    /// Name of a Parakeet model the user just auto-switched into via the
+    /// streaming-toggle save handler, waiting for the user to confirm with
+    /// `d` that they want voxtype to fork the download in the background.
+    /// `None` when no prompt is pending. See #423.
+    pub pending_download: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +68,7 @@ impl AdvancedState {
             field: Field::GpuIsolation,
             feedback: None,
             dirty_since_load: false,
+            pending_download: None,
         })
     }
     pub fn save(&mut self) -> Action {
@@ -154,8 +160,14 @@ impl AdvancedState {
                     parts.push(format!(
                         "Streaming requires a model with tokenizer.model. \
                          Switched [parakeet] model from '{from}' to '{to}'. \
-                         Run `voxtype setup model {to}` to download (~2.7 GB)."
+                         Press 'd' to download in the background (~2.7 GB), \
+                         any other key to skip."
                     ));
+                    // Park the model name on state so the next 'd' keypress
+                    // can fork the download. Any other key is treated as
+                    // "skip"; the user can re-trigger by running
+                    // `voxtype setup model <NAME>` directly.
+                    self.pending_download = Some(to.to_string());
                 }
                 let level = if promoted_hotkey_mode || did_auto_switch {
                     FeedbackLevel::Warn
@@ -478,6 +490,30 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         Some(s) => s,
         None => return Action::None,
     };
+
+    // When a streaming-model auto-switch fires during save, `d` confirms the
+    // background download. Any other key dismisses the prompt — including
+    // navigation and re-save. Handle this BEFORE the regular key dispatch so
+    // a stale prompt can't bleed into a later edit.
+    if state.pending_download.is_some() {
+        if let KeyCode::Char(c) = key.code {
+            if c.eq_ignore_ascii_case(&'d') {
+                let model_name = state.pending_download.take().expect("checked above");
+                spawn_background_model_download(model_name.clone());
+                state.feedback = Some((
+                    FeedbackLevel::Ok,
+                    format!(
+                        "Downloading {} in the background. Watch for a desktop notification when it completes.",
+                        model_name
+                    ),
+                ));
+                return Action::None;
+            }
+        }
+        // Any other key dismisses the prompt and falls through to normal handling.
+        state.pending_download = None;
+    }
+
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => {
             state.move_field(-1);
@@ -502,4 +538,88 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         }
         _ => Action::None,
     }
+}
+
+/// Fork a detached worker thread that downloads the named Parakeet model and
+/// sends desktop notifications around the start, success, and failure
+/// transitions. The thread is fire-and-forget — voxtype's TUI doesn't
+/// supervise it, doesn't join on it, and survives a TUI exit (`std::thread`
+/// is detached, and `download_parakeet_model` writes to the on-disk models
+/// dir which the daemon picks up on next start).
+///
+/// All three notifications share the sync hint
+/// `x-canonical-private-synchronous:voxtype-model-download`, which tells
+/// notification daemons (mako, dunst, GNOME Shell, KDE) to overwrite the
+/// previous notification in that slot rather than stack them. Same pattern
+/// as `src/notification.rs::send_linux` uses for recording/transcribing
+/// transitions, just with a different sync key so the two don't collide.
+///
+/// Urgency levels:
+/// - `low` for the "starting" notification (informational, just letting the
+///   user know background work began)
+/// - `normal` for "complete" (user should see it but it's not urgent)
+/// - `critical` for "failed" (the user took an explicit action and it didn't
+///   succeed; they need to know to retry)
+fn spawn_background_model_download(model_name: String) {
+    std::thread::spawn(move || {
+        const SYNC_HINT: &str = "string:x-canonical-private-synchronous:voxtype-model-download";
+
+        // Starting notification — low urgency, just informational.
+        let _ = std::process::Command::new("notify-send")
+            .args([
+                "--app-name=Voxtype",
+                "--urgency=low",
+                "-h",
+                SYNC_HINT,
+                "Voxtype",
+                &format!(
+                    "Downloading model {} in the background…",
+                    model_name
+                ),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+
+        // Synchronous download in this worker thread. `download_parakeet_model`
+        // is `fn` (not `async fn`), so no tokio runtime is required here.
+        let result = crate::setup::model::download_parakeet_model(&model_name);
+
+        match result {
+            Ok(()) => {
+                let _ = std::process::Command::new("notify-send")
+                    .args([
+                        "--app-name=Voxtype",
+                        "--urgency=normal",
+                        "-h",
+                        SYNC_HINT,
+                        "Voxtype",
+                        &format!(
+                            "Model download complete: {}. Restart voxtype to use it.",
+                            model_name
+                        ),
+                    ])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+            Err(e) => {
+                let _ = std::process::Command::new("notify-send")
+                    .args([
+                        "--app-name=Voxtype",
+                        "--urgency=critical",
+                        "-h",
+                        SYNC_HINT,
+                        "Voxtype",
+                        &format!(
+                            "Model download failed: {}. Run `voxtype setup model {}` to retry.",
+                            e, model_name
+                        ),
+                    ])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
+    });
 }
