@@ -81,6 +81,11 @@ impl AdvancedState {
             Some(n) if n >= 0 => ed.set_int("whisper", "gpu_device", n),
             _ => ed.unset("whisper", "gpu_device"),
         }
+        // Read the previous streaming value BEFORE we overwrite it so we can
+        // detect the "just turned on" transition. Used below to decide whether
+        // to auto-switch the configured Parakeet model to a streaming-capable
+        // one.
+        let was_streaming = ed.get_bool("parakeet", "streaming").unwrap_or(false);
         ed.set_bool("parakeet", "streaming", self.streaming);
 
         // Streaming dictation requires toggle activation: typing at the cursor
@@ -100,24 +105,64 @@ impl AdvancedState {
             false
         };
 
+        // Streaming dictation also requires a model that ships
+        // tokenizer.model (parakeet-rs::ParakeetUnified::load fails without
+        // it). When the user flips streaming on from off, check the active
+        // Parakeet model and auto-switch to the canonical streaming-capable
+        // one if needed. Tell them clearly so they know to run
+        // `voxtype setup model` next — the download isn't blocking on the
+        // TUI save action (it's ~2.7 GB). #423.
+        let auto_switched_model: Option<(String, &'static str)> =
+            if self.streaming && !was_streaming {
+                let current = ed
+                    .get_string("parakeet", "model")
+                    .unwrap_or_else(|| "parakeet-tdt-0.6b-v3".to_string());
+                if !crate::setup::model::is_streaming_compatible_parakeet(&current) {
+                    ed.set_string(
+                        "parakeet",
+                        "model",
+                        crate::setup::model::DEFAULT_PARAKEET_STREAMING_MODEL,
+                    );
+                    Some((
+                        current,
+                        crate::setup::model::DEFAULT_PARAKEET_STREAMING_MODEL,
+                    ))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
         match ed.save() {
             Ok(()) => {
                 self.dirty_since_load = false;
-                self.feedback = if promoted_hotkey_mode {
-                    Some((
-                        FeedbackLevel::Warn,
-                        format!(
-                            "Saved to {}. Streaming requires toggle mode: \
-                             hotkey activation auto-promoted from push_to_talk to toggle.",
-                            ed.path().display()
-                        ),
-                    ))
+                // Compose feedback from whichever auto-fixes fired this save.
+                // Both can fire on the same save (PTT→toggle and model swap),
+                // so combine them rather than picking one.
+                let mut parts: Vec<String> = Vec::new();
+                parts.push(format!("Saved to {}", ed.path().display()));
+                if promoted_hotkey_mode {
+                    parts.push(
+                        "Streaming requires toggle mode: hotkey activation \
+                         auto-promoted from push_to_talk to toggle."
+                            .to_string(),
+                    );
+                }
+                let did_auto_switch = auto_switched_model.is_some();
+                if let Some((from, to)) = auto_switched_model {
+                    parts.push(format!(
+                        "Streaming requires a model with tokenizer.model. \
+                         Switched [parakeet] model from '{from}' to '{to}'. \
+                         Run `voxtype setup model {to}` to download (~2.7 GB)."
+                    ));
+                }
+                let level = if promoted_hotkey_mode || did_auto_switch {
+                    FeedbackLevel::Warn
                 } else {
-                    Some((
-                        FeedbackLevel::Ok,
-                        format!("Saved to {}", ed.path().display()),
-                    ))
+                    FeedbackLevel::Ok
                 };
+                self.feedback = Some((level, parts.join(" ")));
             }
             Err(e) => self.feedback = Some((FeedbackLevel::Err, format!("save: {}", e))),
         }
