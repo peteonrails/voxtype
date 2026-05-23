@@ -11,9 +11,10 @@ permissions:
 # with a matching ubuntu host runner as belt-and-suspenders. See CLAUDE.md
 # "Building Release Binaries" for the policy this enforces.
 #
-# TODO: sign binaries with GPG_PRIVATE_KEY secret once the secret is configured
-# in the repo. The release job should detach-sign each voxtype-* artifact and
-# upload the .asc files alongside the binaries and SHA256SUMS.txt.
+# The release job signs the GitHub auto-archive source tarball (issue #415)
+# using the GPG_PRIVATE_KEY secret. Once that secret is configured, the same
+# import can be extended to detach-sign each voxtype-* binary artifact and
+# SHA256SUMS.txt; the .asc files would be uploaded alongside the binaries.
 
 on:
   push:
@@ -376,10 +377,10 @@ jobs:
           echo "SHA256SUMS.txt:"
           cat SHA256SUMS.txt
 
-      # TODO: sign binaries with GPG_PRIVATE_KEY secret (and upload .asc files)
-      # once the secret is configured. Detach-sign each voxtype-* artifact and
-      # SHA256SUMS.txt; include the .asc files in the combined artifact and the
-      # GitHub release upload below.
+      # NOTE: binary signing (detach-sign each voxtype-* artifact + SHA256SUMS.txt)
+      # is a separate follow-up. The auto-archive signing step below (issue #415)
+      # already imports GPG_PRIVATE_KEY; binary signing can reuse that same setup
+      # once we decide whether to ship per-binary .asc files.
 
       - name: Upload combined artifact
         uses: actions/upload-artifact@v4
@@ -400,3 +401,124 @@ jobs:
           files: |
             releases/${{ steps.version.outputs.version }}/voxtype-*
             releases/${{ steps.version.outputs.version }}/SHA256SUMS.txt
+
+      # Sign the GitHub-generated source archive (what `makepkg` for the AUR
+      # `voxtype` source PKGBUILD downloads) and upload the detached signature
+      # as a release asset. See issue #415 for the post-mortem: a previous
+      # release shipped a `.asc` signed against a locally-built tarball with
+      # different gzip metadata, so `gpg --verify` failed on the auto-archive
+      # the PKGBUILD actually pulls. Signing the auto-archive byte-for-byte
+      # closes that gap.
+      #
+      # The signing key is the project maintainer's key
+      # (E79F5BAF8CD51A806AA27DBB7DA2709247D75BC6). It must be exported and
+      # stored in the repo's Actions secrets as GPG_PRIVATE_KEY (ASCII-armored,
+      # no passphrase or empty passphrase). On the maintainer's machine:
+      #
+      #   gpg --export-secret-key --armor E79F5BAF8CD51A806AA27DBB7DA2709247D75BC6 \
+      #     | gh secret set GPG_PRIVATE_KEY
+      #
+      # Until the secret is configured, the step will fail with an actionable
+      # error so the first release attempt loudly surfaces the gap rather than
+      # silently shipping an unsigned tarball.
+      - name: Sign GitHub auto-archive (closes #415)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.version.outputs.version }}'
+          TAG="v${VERSION}"
+          AUTO_TARBALL_URL="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
+
+          if [[ -z "${GPG_PRIVATE_KEY:-}" ]]; then
+            echo "::error::GPG_PRIVATE_KEY secret is not set."
+            echo "::error::The AUR 'voxtype' source PKGBUILD requires a signed auto-archive."
+            echo "::error::Add the maintainer's exported private key to repo secrets:"
+            echo "::error::  gpg --export-secret-key --armor E79F5BAF8CD51A806AA27DBB7DA2709247D75BC6 \\"
+            echo "::error::    | gh secret set GPG_PRIVATE_KEY"
+            exit 1
+          fi
+
+          WORK=$(mktemp -d)
+          trap 'rm -rf "${WORK}"' EXIT
+
+          # Import the maintainer key into a throwaway GPG home so we don't
+          # pollute the runner's default keyring across steps.
+          export GNUPGHOME="${WORK}/gpg"
+          mkdir -p "${GNUPGHOME}"
+          chmod 700 "${GNUPGHOME}"
+          echo "${GPG_PRIVATE_KEY}" | gpg --batch --import
+
+          # Wait briefly for GitHub to materialize the auto-archive. The
+          # archive is generated on first request, but a release uploaded
+          # seconds earlier may race with the tarball endpoint. Retry with
+          # backoff to keep the workflow robust.
+          TARBALL="${WORK}/voxtype-${VERSION}.tar.gz"
+          for attempt in 1 2 3 4 5; do
+            if curl -fsSL "${AUTO_TARBALL_URL}" -o "${TARBALL}"; then
+              break
+            fi
+            echo "Auto-archive not ready yet (attempt ${attempt}/5); sleeping..."
+            sleep $((attempt * 5))
+          done
+          test -s "${TARBALL}" || { echo "::error::Failed to download ${AUTO_TARBALL_URL}"; exit 1; }
+
+          # Detach-sign in ASCII-armored form. Output filename matches the
+          # AUR PKGBUILD's expected asset name (voxtype-$pkgver.tar.gz.asc).
+          ASC="${WORK}/voxtype-${VERSION}.tar.gz.asc"
+          gpg --batch --yes \
+              --default-key E79F5BAF8CD51A806AA27DBB7DA2709247D75BC6 \
+              --detach-sign --armor \
+              --output "${ASC}" \
+              "${TARBALL}"
+
+          # Upload (--clobber to overwrite any stale asset from a prior
+          # workflow re-run on the same tag).
+          gh release upload "${TAG}" "${ASC}" --clobber --repo "${GITHUB_REPOSITORY}"
+
+          echo "Uploaded signature for auto-archive: voxtype-${VERSION}.tar.gz.asc"
+
+      # Self-check: re-download both the auto-archive and the just-uploaded
+      # .asc, then verify. This guards against future regressions of the
+      # same class as #415 (signing the wrong bytes) and against accidental
+      # asset overwrites that break the signature link.
+      - name: Verify auto-archive signature
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.version.outputs.version }}'
+          TAG="v${VERSION}"
+          WORK=$(mktemp -d)
+          trap 'rm -rf "${WORK}"' EXIT
+
+          # Pull the same auto-archive URL the AUR PKGBUILD uses.
+          curl -fsSL \
+            "https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz" \
+            -o "${WORK}/voxtype-${VERSION}.tar.gz"
+
+          # Pull the signature asset we just uploaded.
+          gh release download "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "voxtype-${VERSION}.tar.gz.asc" \
+            --dir "${WORK}"
+
+          # Import the maintainer public key from the keyserver to verify
+          # without trusting the .asc's own claims. Falls back to whatever
+          # signed it if keyserver lookup fails (still proves the sig matches
+          # the bytes).
+          export GNUPGHOME="${WORK}/gpg"
+          mkdir -p "${GNUPGHOME}"
+          chmod 700 "${GNUPGHOME}"
+          gpg --batch --keyserver hkps://keys.openpgp.org \
+              --recv-keys E79F5BAF8CD51A806AA27DBB7DA2709247D75BC6 \
+              || echo "Keyserver lookup failed; verification will rely on the .asc's own key id"
+
+          gpg --batch --verify \
+            "${WORK}/voxtype-${VERSION}.tar.gz.asc" \
+            "${WORK}/voxtype-${VERSION}.tar.gz"
+
+          echo "Auto-archive signature verifies cleanly against the GitHub-generated tarball."
