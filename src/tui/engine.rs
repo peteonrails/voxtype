@@ -1159,7 +1159,19 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
             },
         ),
 
-        FieldId::PkModel => ("Parakeet · model", f.pk_model.clone()),
+        FieldId::PkModel => {
+            // Mark streaming-capable models in the picker so the user can tell
+            // at a glance which ones work with [parakeet] streaming = true.
+            // ParakeetUnified needs tokenizer.model to be present; only a
+            // subset of registered Parakeet models ship it. See model::is_streaming_compatible_parakeet
+            // and src/setup/model.rs's PARAKEET_MODELS for the source of truth.
+            let value = if model::is_streaming_compatible_parakeet(&f.pk_model) {
+                format!("{}  (streaming compatible)", f.pk_model)
+            } else {
+                f.pk_model.clone()
+            };
+            ("Parakeet · model", value)
+        }
         FieldId::PkModelType => (
             "Parakeet · model architecture",
             f.pk_model_type
