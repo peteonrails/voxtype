@@ -281,9 +281,12 @@ impl ChunkProcessor {
             });
         }
 
-        // Transcribe the chunk
+        // Transcribe the chunk. Display impl produces "You"/"Remote" — match
+        // the sibling skip log above (line ~270, `source = %source`) so a
+        // grep for "You chunk" or "Remote chunk" finds both transcribe and
+        // skip events for the same diarized label.
         tracing::info!(
-            "Transcribing {:?} chunk {} ({:.1}s of audio)",
+            "Transcribing {} chunk {} ({:.1}s of audio)",
             source,
             chunk_id,
             samples.len() as f32 / self.config.sample_rate as f32
