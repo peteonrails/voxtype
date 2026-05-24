@@ -194,6 +194,11 @@ type_delay_ms = 0   # Increase if characters are dropped
 # auto_submit = true  # Send Enter after transcription (for chat apps, terminals)
 # Note: "paste" mode copies to clipboard then simulates Ctrl+V
 #       Useful for non-US keyboard layouts where ydotool typing fails
+# For multilingual layouts with variants through direct dotool fallback:
+# [output.language_to_variant]
+# ru = "phonetic"
+# dotoolc does not work with variants and cannot receive these hints. When
+# using dotool, switch your desktop layout to Russian phonetic before dictating.
 
 [output.notification]
 on_recording_start = false  # Notify when PTT activates
@@ -602,6 +607,13 @@ which wtype dotool ydotool
 # In ~/.config/voxtype/config.toml:
 # [output]
 # dotool_xkb_layout = "de"  # Your layout (de, fr, es, etc.)
+# dotool_xkb_variant = "nodeadkeys"  # Optional fixed variant; uses direct dotool
+#
+# For multilingual dictation, prefer per-language variants through direct dotool:
+# [output.language_to_variant]
+# ru = "phonetic"
+# dotoolc does not work with variants and cannot receive these hints. Also
+# switch your desktop layout to the target layout before dictating.
 
 # If using ydotool fallback (X11/TTY), start the daemon:
 systemctl --user start ydotool
@@ -668,7 +680,7 @@ flowchart LR
 
 **Fallback: evdev hotkey.** For X11 or compositors without key-release support, voxtype includes a built-in hotkey using evdev (the Linux input subsystem). This requires the user to be in the `input` group.
 
-**Why wtype + dotool + ydotool?** On Wayland, wtype uses the virtual-keyboard protocol for text input, with excellent Unicode/CJK support and no daemon required. When wtype fails (KDE/GNOME), dotool provides keyboard layout support via XKB for non-US layouts. As a final fallback, ydotool uses uinput for text injection on X11/TTY. This combination ensures Voxtype works on any Linux desktop with proper keyboard layout support.
+**Why wtype + dotool + ydotool?** On Wayland, wtype uses the virtual-keyboard protocol for text input, with excellent Unicode/CJK support and no daemon required. When wtype fails (KDE/GNOME), direct dotool fallback provides keyboard layout support via XKB for non-US layouts. As a final fallback, ydotool uses uinput for text injection on X11/TTY. This combination ensures Voxtype works on any Linux desktop with proper keyboard layout support.
 
 **Post-processing.** Transcriptions can optionally be piped through an external command before output. Use this to integrate local LLMs (Ollama, llama.cpp) for grammar correction, text expansion, or domain-specific vocabulary. Any command that reads stdin and writes stdout works.
 

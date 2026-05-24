@@ -1622,7 +1622,13 @@ file_mode = "append"
 wtype does not work on KDE Plasma or GNOME Wayland because these compositors don't support the virtual keyboard protocol. On these desktops, voxtype automatically falls back to dotool (if installed) or ydotool. For ydotool, the daemon must be running (`systemctl --user enable --now ydotool`). See [Troubleshooting](TROUBLESHOOTING.md#wtype-not-working-on-kde-plasma-or-gnome-wayland) for details.
 
 **Note about non-US keyboard layouts:**
-For non-US keyboard layouts (German QWERTZ, French AZERTY, etc.), dotool is recommended over ydotool. Set `dotool_xkb_layout` to your layout code (e.g., `"de"` for German). ydotool does not support keyboard layouts and will produce incorrect characters (e.g., 'y' and 'z' swapped on German layouts).
+For non-US keyboard layouts (German QWERTZ, French AZERTY, etc.), dotool is recommended over ydotool. Set `dotool_xkb_layout` to your layout code (e.g., `"de"` for German) when using direct dotool fallback. ydotool does not support keyboard layouts and will produce incorrect characters (e.g., 'y' and 'z' swapped on German layouts).
+
+For multilingual dictation, prefer `language_to_layout` and
+`language_to_variant` so voxtype can use the right keymap for each
+transcription through direct dotool fallback. `dotoolc` does not work with
+voxtype's variants. When using dotool, you must also switch the active desktop
+keyboard layout to the language/variant you want to type in.
 
 **Note about paste mode:**
 The `paste` mode is an alternative for non-US keyboard layouts. Instead of typing characters directly, it copies text to the clipboard and simulates a paste keystroke. This works regardless of keyboard layout but overwrites your clipboard. Requires wl-copy for clipboard access.
@@ -1723,7 +1729,7 @@ Custom order of output drivers to try when `mode = "type"`. Each driver is tried
 **Available drivers:**
 - `wtype` - Wayland virtual keyboard protocol (best CJK/Unicode support, wlroots compositors only)
 - `eitype` - Wayland via libei/EI protocol (works on GNOME, KDE, and compositors with libei support). On KDE Plasma 6, each invocation briefly registers via the XDG RemoteDesktop portal, which can cause a system-tray icon to flicker during streaming dictation (many fast typing calls). Prefer `dotool` for streaming if you're on KDE.
-- `dotool` - uinput-based typing (supports keyboard layouts, works on X11/Wayland/TTY). For streaming backends (Parakeet, Soniox), run `dotoold` to make this **much** faster — see [Streaming performance: dotoold fast path](#streaming-performance-dotoold-fast-path) below.
+- `dotool` - uinput-based typing (supports keyboard layouts, works on X11/Wayland/TTY). For streaming backends (Parakeet, Soniox), run `dotoold` to make this **much** faster when no per-call layout or variant hint is needed — see [Streaming performance: dotoold fast path](#streaming-performance-dotoold-fast-path) below.
 - `ydotool` - uinput-based typing (requires `ydotoold` daemon, X11/Wayland/TTY). Fast spawn, but **does not support keyboard layouts** — sends raw US keycodes. Wrong output on non-US layouts (e.g. Hungarian Z/Y swap).
 - `clipboard` - Wayland clipboard via wl-copy
 - `xclip` - X11 clipboard via xclip
@@ -1761,7 +1767,7 @@ voxtype --driver=ydotool,clipboard daemon
 
 Streaming backends (Parakeet, Soniox) call the output driver many times per session — once for every partial token batch. With direct `dotool` invocations each call spawns a fresh dotool process that pays the kernel uinput device setup cost (**~700-800ms** on most systems). For 60+ partials per session this stacks into 40+ seconds of typing latency — unusable.
 
-dotool ships a daemon/client pair (`dotoold` + `dotoolc`) specifically for this case. When `dotoold` is running, voxtype auto-detects its FIFO at `/tmp/dotool-pipe` and routes every typing call through `dotoolc`, which simply relays commands to the long-lived daemon. The uinput device is registered **once** at daemon startup, not on every typed segment. Sub-10ms per call.
+dotool ships a daemon/client pair (`dotoold` + `dotoolc`) specifically for this case. When `dotoold` is running and voxtype has no per-call XKB layout or variant hint, voxtype auto-detects its FIFO at `/tmp/dotool-pipe` and routes typing through `dotoolc`, which simply relays commands to the long-lived daemon. The uinput device is registered **once** at daemon startup, not on every typed segment. Sub-10ms per call.
 
 **Strongly recommended** if you use `dotool` as your primary typing driver with any streaming backend.
 
@@ -1777,9 +1783,10 @@ After=default.target
 
 [Service]
 ExecStart=/usr/bin/dotoold
-# Set DOTOOL_XKB_LAYOUT here (NOT in voxtype) — layout applies to the
-# daemon, not the per-call client. voxtype's dotool_xkb_layout config
-# is ignored when routing through dotoolc.
+# Set DOTOOL_XKB_LAYOUT here when you want the dotoold fast path with one
+# fixed dotool keymap. dotoolc does not work with variants and cannot receive
+# voxtype's per-call XKB hints, so voxtype uses direct dotool instead whenever
+# it needs a layout or variant hint.
 Environment=DOTOOL_XKB_LAYOUT=hu
 Restart=on-failure
 
@@ -1805,9 +1812,24 @@ After dictating a session, check the daemon log:
 journalctl --user -u voxtype --since "5 min ago" | grep "typed via"
 ```
 - `Text typed via dotoolc (N chars)` — fast path active
-- `Text typed via dotool (N chars)` — daemon not running, slow per-call spawn
+- `Text typed via dotool (N chars)` — direct path; either the daemon is not running or voxtype had a per-call XKB hint
 
-**Important caveat:** Keyboard layout (`DOTOOL_XKB_LAYOUT` / `DOTOOL_XKB_VARIANT`) applies to **the daemon, not the client**. When dotoold is running, voxtype's `dotool_xkb_layout` config setting has no effect — set the env var in dotoold's unit file or shell instead.
+The layout setting for the fast path applies to **the daemon, not the client**.
+If you need the `dotoold` fast path with one fixed layout, set
+`DOTOOL_XKB_LAYOUT` in dotoold's unit file or shell and leave voxtype's dotool
+XKB fields unset.
+
+`dotoolc` does not work with variants and cannot receive voxtype's per-call XKB
+hints. When voxtype has a per-call XKB layout or variant hint, it bypasses
+`dotoolc` and invokes direct `dotool` so the hint is used for text-to-key
+lookup.
+
+**Important direct-dotool caveat:** direct dotool's keyboard layout
+(`DOTOOL_XKB_LAYOUT` / `DOTOOL_XKB_VARIANT`) only controls how dotool converts
+text to key events. It does **not** switch the active desktop/compositor layout.
+If the focused app is still using an English layout, Russian phonetic key events
+will be interpreted as English letters. Switch your desktop layout to the target
+layout/variant before dictating.
 
 ### dotool_xkb_layout
 
@@ -1815,9 +1837,18 @@ journalctl --user -u voxtype --since "5 min ago" | grep "typed via"
 **Default:** None
 **Required:** No
 
-Keyboard layout for dotool output driver. Required for non-US keyboard layouts (German, French, etc.) when using dotool as the typing backend.
+Keyboard layout for direct dotool fallback. Required for non-US keyboard
+layouts (German, French, etc.) when using dotool as the typing backend.
 
-dotool is automatically used as a fallback when wtype fails (e.g., on GNOME/KDE Wayland). Unlike ydotool, dotool supports keyboard layouts via XKB environment variables.
+dotool is automatically used as a fallback when wtype fails (e.g., on GNOME/KDE Wayland). Unlike ydotool, direct dotool fallback supports keyboard layouts via XKB environment variables.
+
+This setting tells direct `dotool` which XKB keymap to use when converting
+Unicode text to physical key events. Setting it in voxtype makes voxtype use
+direct `dotool` instead of the `dotoolc` fast path, because `dotoolc` does not
+work with variants and cannot receive voxtype's per-call XKB hints.
+
+It does not change the active desktop layout. Before dictating with dotool,
+switch your desktop/compositor to the same layout.
 
 **Common values:**
 - `"de"` - German (QWERTZ)
@@ -1839,7 +1870,13 @@ dotool_xkb_layout = "de"  # German keyboard layout
 **Default:** None
 **Required:** No
 
-Keyboard layout variant for dotool. Use this for layout variations like `nodeadkeys`.
+Keyboard layout variant for direct dotool fallback. Use this for layout
+variations like `nodeadkeys`.
+
+`dotoolc` does not work with variants. Setting this in voxtype makes
+voxtype use direct `dotool` so the variant can be passed to that invocation.
+As with `dotool_xkb_layout`, this configures dotool's key lookup only. The
+active desktop layout must already be using the same variant.
 
 **Example:**
 ```toml
@@ -1893,12 +1930,19 @@ Maps detected language codes (ISO 639-1, e.g. `en`, `ru`, `de`) to XKB
 keyboard layout codes (e.g. `us`, `ru`, `de`). When a transcriber reports the
 language used for a transcription and neither `eitype_xkb_layout` nor
 `dotool_xkb_layout` is set, voxtype looks the language up in this map and
-passes the resulting layout to eitype/dotool for that transcription only.
+passes the resulting layout hint to eitype/dotool for that transcription.
 
 This is what makes the multi-language case from issue #180 work
 end-to-end: with `language = ["en", "ru"]` and `driver_order = ["eitype"]`,
 voxtype detects the spoken language, looks it up here, and tells eitype
 to type with the right keyboard layout.
+
+For dotool, this map chooses the keymap used by direct dotool fallback to
+convert text into key events. `dotoolc` does not work with variants and cannot
+receive voxtype's per-call XKB hints, so voxtype bypasses `dotoolc` for those
+calls. This does not switch the active desktop layout. If you use dotool for
+Russian phonetic typing, switch your desktop layout to Russian phonetic before
+dictating Russian.
 
 **Built-in defaults include:**
 - `en = "us"` (English)
@@ -1936,6 +1980,41 @@ inference entirely; eitype/dotool will use whatever explicit
 [output.language_to_layout]
 # (empty)
 ```
+
+### language_to_variant
+
+**Type:** Table (map of two-letter language code to XKB layout variant)
+**Default:** Empty
+
+Maps detected language codes to XKB layout variants for that language. Use this
+when a language needs a variant, but that variant must not apply to every
+language you dictate.
+
+This is useful for Russian phonetic typing:
+
+```toml
+[whisper]
+language = ["en", "ru"]
+
+[output.language_to_layout]
+en = "us"
+ru = "ru"
+
+[output.language_to_variant]
+ru = "phonetic"
+```
+
+When Russian is detected, voxtype passes `ru` plus `phonetic` to eitype or
+direct dotool fallback. When English is detected, it passes `us` with no
+variant. `dotoolc` does not work with variants and cannot receive voxtype's
+per-call XKB hints, so voxtype bypasses it for these calls. With dotool, also
+switch the active desktop layout before dictating; otherwise the focused app
+will interpret the key events using whatever layout is currently active.
+
+Explicit driver settings still win. For example, `dotool_xkb_variant =
+"nodeadkeys"` prevents `language_to_variant` from changing dotool's key lookup
+variant, but eitype can still use the per-language variant if
+`eitype_xkb_variant` is unset.
 
 ### file_path
 

@@ -139,6 +139,16 @@ mode = "type"
 # Fall back to clipboard if typing fails
 fallback_to_clipboard = true
 
+# Per-language XKB layout variants for multilingual dictation.
+# Use this with language arrays such as `language = ["en", "ru"]` when a
+# language needs a variant that should not apply to other languages.
+# Built-in layout defaults already include `ru = "ru"` in language_to_layout.
+# dotoolc does not work with variants and cannot receive these hints; voxtype
+# uses direct dotool for them. Switch your desktop layout to the target
+# layout/variant before dictating; dotool does not change the active layout.
+# [output.language_to_variant]
+# ru = "phonetic"
+
 # Delay between typed characters in milliseconds
 # 0 = fastest possible, increase if characters are dropped
 type_delay_ms = 0

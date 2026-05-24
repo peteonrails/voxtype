@@ -2169,41 +2169,57 @@ impl Daemon {
                         output_config.auto_submit = true;
                     }
 
-                    // Inject a keyboard-layout hint derived from the
+                    // Inject keyboard layout/variant hints derived from the
                     // transcriber's detected language (issue #180). Skipped
-                    // when the user has already set an explicit
-                    // `eitype_xkb_layout` / `dotool_xkb_layout`, so static
-                    // configuration wins over auto-detection. Only the
-                    // `language_to_layout` map is consulted; if the language
-                    // isn't mapped, no hint is applied (eitype/dotool fall
-                    // back to the system layout).
+                    // per field when the user has already set explicit
+                    // `eitype_xkb_*` / `dotool_xkb_*` values, so static
+                    // configuration wins over auto-detection.
                     if let Some(ref transcriber) = active_transcriber {
                         if let Some(lang) = transcriber.last_detected_language() {
-                            if let Some(layout) =
-                                self.config.output.language_to_layout.get(&lang).cloned()
-                            {
-                                if output_config.eitype_xkb_layout.is_none() {
-                                    tracing::debug!(
-                                        "Auto layout for eitype: language='{}' -> layout='{}'",
-                                        lang,
-                                        layout
-                                    );
-                                    output_config.eitype_xkb_layout = Some(layout.clone());
-                                }
-                                if output_config.dotool_xkb_layout.is_none() {
-                                    tracing::debug!(
-                                        "Auto layout for dotool: language='{}' -> layout='{}'",
-                                        lang,
-                                        layout
-                                    );
-                                    output_config.dotool_xkb_layout = Some(layout);
-                                }
-                            } else {
+                            let applied = output_config.apply_language_xkb_hint(&lang);
+                            if applied.is_empty() {
                                 tracing::debug!(
-                                    "No layout mapping for detected language '{}'; \
-                                     not setting a layout hint",
+                                    "No XKB mapping for detected language '{}'; \
+                                     not setting a layout or variant hint",
                                     lang
                                 );
+                            } else {
+                                if applied.eitype_layout_applied {
+                                    if let Some(ref layout) = applied.layout {
+                                        tracing::debug!(
+                                            "Auto layout for eitype: language='{}' -> layout='{}'",
+                                            lang,
+                                            layout
+                                        );
+                                    }
+                                }
+                                if applied.dotool_layout_applied {
+                                    if let Some(ref layout) = applied.layout {
+                                        tracing::debug!(
+                                            "Auto layout for dotool: language='{}' -> layout='{}'",
+                                            lang,
+                                            layout
+                                        );
+                                    }
+                                }
+                                if applied.eitype_variant_applied {
+                                    if let Some(ref variant) = applied.variant {
+                                        tracing::debug!(
+                                            "Auto variant for eitype: language='{}' -> variant='{}'",
+                                            lang,
+                                            variant
+                                        );
+                                    }
+                                }
+                                if applied.dotool_variant_applied {
+                                    if let Some(ref variant) = applied.variant {
+                                        tracing::debug!(
+                                            "Auto variant for dotool: language='{}' -> variant='{}'",
+                                            lang,
+                                            variant
+                                        );
+                                    }
+                                }
                             }
                         }
                     }

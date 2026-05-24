@@ -183,6 +183,13 @@ fallback_to_clipboard = true
 #   driver_order = ["ydotool"]
 # driver_order = ["wtype", "dotool", "ydotool", "clipboard"]
 
+# Per-language XKB layout variants for multilingual dictation.
+# Use this with language arrays such as `language = ["en", "ru"]` when a
+# language needs a variant that should not apply to other languages.
+# Built-in layout defaults already include `ru = "ru"` in language_to_layout.
+# [output.language_to_variant]
+# ru = "phonetic"
+
 # Delay between typed characters in milliseconds
 # 0 = fastest possible, increase if characters are dropped
 type_delay_ms = 0
@@ -2083,6 +2090,16 @@ pub struct OutputConfig {
     #[serde(default = "default_language_to_layout")]
     pub language_to_layout: std::collections::HashMap<String, String>,
 
+    /// Mapping from detected language code (two-letter ISO 639-1) to XKB
+    /// keyboard layout variant. Applied per transcription, after
+    /// `language_to_layout`, when no explicit `eitype_xkb_variant` /
+    /// `dotool_xkb_variant` is set.
+    ///
+    /// This is intentionally empty by default. Variants are user-specific
+    /// layout choices (for example, Russian phonetic vs standard).
+    #[serde(default)]
+    pub language_to_variant: std::collections::HashMap<String, String>,
+
     /// File path for file output mode (required when mode = "file")
     /// Also used as default path for --output-file CLI flag
     #[serde(default)]
@@ -2125,6 +2142,29 @@ fn default_modifier_release_timeout_ms() -> u64 {
     750
 }
 
+/// Result of applying a per-language XKB layout/variant hint to output config.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AppliedLanguageXkbHint {
+    /// Layout found in `language_to_layout`, if any.
+    pub layout: Option<String>,
+    /// Variant found in `language_to_variant`, if any.
+    pub variant: Option<String>,
+    /// Whether the layout was applied to eitype for this transcription.
+    pub eitype_layout_applied: bool,
+    /// Whether the layout was applied to dotool for this transcription.
+    pub dotool_layout_applied: bool,
+    /// Whether the variant was applied to eitype for this transcription.
+    pub eitype_variant_applied: bool,
+    /// Whether the variant was applied to dotool for this transcription.
+    pub dotool_variant_applied: bool,
+}
+
+impl AppliedLanguageXkbHint {
+    pub fn is_empty(&self) -> bool {
+        self.layout.is_none() && self.variant.is_none()
+    }
+}
+
 /// Built-in mapping from two-letter ISO 639-1 language codes to XKB layout
 /// codes. Used when the transcriber reports a detected language and the user
 /// has not set an explicit `eitype_xkb_layout` / `dotool_xkb_layout`.
@@ -2154,6 +2194,45 @@ pub fn default_language_to_layout() -> std::collections::HashMap<String, String>
 }
 
 impl OutputConfig {
+    /// Apply per-language XKB layout/variant hints to eitype and dotool.
+    ///
+    /// Explicit driver-specific settings win independently per field:
+    /// `dotool_xkb_layout` prevents only the automatic dotool layout, while
+    /// `dotool_xkb_variant` prevents only the automatic dotool variant.
+    pub fn apply_language_xkb_hint(&mut self, lang: &str) -> AppliedLanguageXkbHint {
+        let layout = self.language_to_layout.get(lang).cloned();
+        let variant = self.language_to_variant.get(lang).cloned();
+        let mut applied = AppliedLanguageXkbHint {
+            layout,
+            variant,
+            ..AppliedLanguageXkbHint::default()
+        };
+
+        if let Some(ref layout) = applied.layout {
+            if self.eitype_xkb_layout.is_none() {
+                self.eitype_xkb_layout = Some(layout.clone());
+                applied.eitype_layout_applied = true;
+            }
+            if self.dotool_xkb_layout.is_none() {
+                self.dotool_xkb_layout = Some(layout.clone());
+                applied.dotool_layout_applied = true;
+            }
+        }
+
+        if let Some(ref variant) = applied.variant {
+            if self.eitype_xkb_variant.is_none() {
+                self.eitype_xkb_variant = Some(variant.clone());
+                applied.eitype_variant_applied = true;
+            }
+            if self.dotool_xkb_variant.is_none() {
+                self.dotool_xkb_variant = Some(variant.clone());
+                applied.dotool_variant_applied = true;
+            }
+        }
+
+        applied
+    }
+
     /// Get the effective pre-type delay, handling deprecated wtype_delay_ms
     pub fn effective_pre_type_delay_ms(&self) -> u32 {
         if self.wtype_delay_ms > 0 {
@@ -2323,6 +2402,7 @@ impl Default for Config {
                 eitype_xkb_layout: None,
                 eitype_xkb_variant: None,
                 language_to_layout: default_language_to_layout(),
+                language_to_variant: HashMap::new(),
                 file_path: None,
                 file_mode: FileMode::default(),
                 restore_clipboard: false,
@@ -4482,6 +4562,7 @@ mod tests {
             cfg.output.language_to_layout.get("en"),
             Some(&"us".to_string())
         );
+        assert!(cfg.output.language_to_variant.is_empty());
         // New eitype layout fields are unset by default; the layout is
         // inferred from the detected language only when both fields are
         // empty (see daemon::handle_transcription_result).
@@ -4551,6 +4632,101 @@ mod tests {
         assert_eq!(
             config.output.language_to_layout.get("en"),
             Some(&"dvorak".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_language_to_variant() {
+        let toml_str = r#"
+            [hotkey]
+            key = "PAUSE"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = ["en", "ru"]
+
+            [output]
+            mode = "type"
+
+            [output.language_to_layout]
+            en = "us"
+            ru = "ru"
+
+            [output.language_to_variant]
+            ru = "phonetic"
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.output.language_to_variant.get("ru"),
+            Some(&"phonetic".to_string())
+        );
+        assert!(!config.output.language_to_variant.contains_key("en"));
+    }
+
+    #[test]
+    fn test_apply_language_xkb_hint_applies_layout_and_variant() {
+        let mut output = Config::default().output;
+        output
+            .language_to_variant
+            .insert("ru".to_string(), "phonetic".to_string());
+
+        let applied = output.apply_language_xkb_hint("ru");
+
+        assert_eq!(applied.layout, Some("ru".to_string()));
+        assert_eq!(applied.variant, Some("phonetic".to_string()));
+        assert!(applied.eitype_layout_applied);
+        assert!(applied.dotool_layout_applied);
+        assert!(applied.eitype_variant_applied);
+        assert!(applied.dotool_variant_applied);
+        assert_eq!(output.eitype_xkb_layout, Some("ru".to_string()));
+        assert_eq!(output.dotool_xkb_layout, Some("ru".to_string()));
+        assert_eq!(output.eitype_xkb_variant, Some("phonetic".to_string()));
+        assert_eq!(output.dotool_xkb_variant, Some("phonetic".to_string()));
+    }
+
+    #[test]
+    fn test_apply_language_xkb_hint_does_not_leak_variant_between_languages() {
+        let mut output = Config::default().output;
+        output
+            .language_to_variant
+            .insert("ru".to_string(), "phonetic".to_string());
+
+        let applied = output.apply_language_xkb_hint("en");
+
+        assert_eq!(applied.layout, Some("us".to_string()));
+        assert_eq!(applied.variant, None);
+        assert_eq!(output.eitype_xkb_layout, Some("us".to_string()));
+        assert_eq!(output.dotool_xkb_layout, Some("us".to_string()));
+        assert_eq!(output.eitype_xkb_variant, None);
+        assert_eq!(output.dotool_xkb_variant, None);
+    }
+
+    #[test]
+    fn test_apply_language_xkb_hint_preserves_explicit_variant() {
+        let mut output = Config::default().output;
+        output.eitype_xkb_variant = Some("explicit-eitype".to_string());
+        output.dotool_xkb_variant = Some("explicit-dotool".to_string());
+        output
+            .language_to_variant
+            .insert("ru".to_string(), "phonetic".to_string());
+
+        let applied = output.apply_language_xkb_hint("ru");
+
+        assert_eq!(applied.variant, Some("phonetic".to_string()));
+        assert!(!applied.eitype_variant_applied);
+        assert!(!applied.dotool_variant_applied);
+        assert_eq!(
+            output.eitype_xkb_variant,
+            Some("explicit-eitype".to_string())
+        );
+        assert_eq!(
+            output.dotool_xkb_variant,
+            Some("explicit-dotool".to_string())
         );
     }
 }

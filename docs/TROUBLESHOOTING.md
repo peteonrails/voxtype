@@ -496,7 +496,7 @@ Look for log messages about speech detection to understand what VAD is doing wit
 
 **What happens:** Voxtype detects this failure and automatically falls back to dotool, then ydotool. If neither is set up, it falls back to clipboard mode.
 
-**Solution 1 (Recommended):** Install dotool. Unlike ydotool, dotool does not require a daemon and supports keyboard layouts for non-US keyboards:
+**Solution 1 (Recommended):** Install dotool. Unlike ydotool, direct dotool fallback does not require a daemon and supports keyboard layouts for non-US keyboards:
 
 ```bash
 # 1. Install dotool (check your distribution's package manager)
@@ -571,7 +571,7 @@ ERROR Output failed: All output methods failed.
 
 **Option 1 (Recommended): Install dotool**
 
-dotool works on X11, supports keyboard layouts, and doesn't need a daemon:
+direct dotool works on X11, supports keyboard layouts, and doesn't need a daemon:
 
 ```bash
 # Ubuntu/Debian (from source):
@@ -630,7 +630,8 @@ This shows which output tools are installed and available.
 
 **Cause:** ydotool sends raw US keycodes and doesn't support keyboard layouts. When voxtype falls back to ydotool (e.g., on X11, Cinnamon, or when wtype fails), characters are typed as if you had a US keyboard layout.
 
-**Solution:** Install dotool and configure your keyboard layout. Unlike ydotool, dotool supports keyboard layouts via XKB:
+**Solution:** Install dotool and configure your keyboard layout. Unlike
+ydotool, direct dotool fallback supports keyboard layouts via XKB:
 
 ```bash
 # 1. Install dotool
@@ -655,6 +656,10 @@ Add to `~/.config/voxtype/config.toml`:
 dotool_xkb_layout = "de"  # German QWERTZ
 ```
 
+Then switch your desktop/compositor keyboard layout to the same layout before
+dictating. dotool sends key events; it does not switch the active layout for
+the focused app.
+
 Common layout codes:
 - `de` - German (QWERTZ)
 - `fr` - French (AZERTY)
@@ -673,6 +678,28 @@ dotool_xkb_layout = "de"
 dotool_xkb_variant = "nodeadkeys"
 ```
 
+The active desktop layout must use the same variant.
+
+For multilingual dictation, use per-language mappings so the variant only
+applies to the language that needs it. For example, Russian phonetic typing:
+
+```toml
+[whisper]
+language = ["en", "ru"]
+
+[output.language_to_layout]
+en = "us"
+ru = "ru"
+
+[output.language_to_variant]
+ru = "phonetic"
+```
+
+Before dictating Russian through direct dotool fallback, switch the active
+desktop layout to Russian phonetic. If the active layout is still English,
+dotool will send the right key positions for Russian phonetic, but the focused
+app will receive English letters such as `Probuem goworitx po-russki`.
+
 **Alternative:** Use paste mode, which copies text to the clipboard and simulates Ctrl+V. This works regardless of keyboard layout:
 
 ```toml
@@ -684,21 +711,28 @@ mode = "paste"
 
 ---
 
-### eitype: "Character not found in keymap" or wrong characters when transcribing a second language
+### Wrong characters when transcribing a second language
 
-**Symptom:** With `language = ["en", "ru"]` and `driver_order = ["eitype"]`,
-transcribing Russian on a US system layout fails with eitype reporting
-`Character not found in keymap`, or prints garbled text. English
-transcriptions work fine.
+**Symptom:** With `language = ["en", "ru"]`, transcribing Russian on a US
+system layout fails with eitype reporting `Character not found in keymap`, or
+dotool/eitype prints garbled text. English transcriptions work fine.
 
 **Cause:** Before voxtype v0.7.3, the daemon did not pass a layout hint to
 the `eitype` binary. eitype fell back to the system's active XKB layout,
 which lacked the keycodes for Cyrillic (or any non-system language) and so
 either errored or typed the wrong characters. This is issue #180.
 
-**Solution:** Upgrade to voxtype v0.7.3 or later. The daemon now reads the
-language Whisper picked for each transcription and passes it to eitype as
-`-l <layout>`, switching the layout for that call only.
+**Solution:** Upgrade to a version with per-language XKB hints. The daemon
+reads the language Whisper picked for each transcription and passes a matching
+layout/variant hint to eitype or direct dotool fallback for that call.
+
+`dotoolc` does not work with variants and cannot receive voxtype's per-call XKB
+hints, so voxtype uses direct `dotool` for these hinted calls. This hint only
+controls dotool's text-to-key lookup. You must switch the active desktop layout
+to the target language/variant before dictating. If you dictate Russian while
+the active layout is English, the result can look transliterated
+(`Probuem goworitx po-russki`) even though dotool sent the intended key
+positions.
 
 Verify:
 
@@ -706,6 +740,7 @@ Verify:
 voxtype daemon -vv  # debug logs
 # After a Russian transcription you should see:
 # DEBUG Auto layout for eitype: language='ru' -> layout='ru'
+# DEBUG Auto variant for eitype: language='ru' -> variant='phonetic'
 ```
 
 **Forcing a specific layout.** To pin eitype to a fixed layout regardless of
@@ -718,15 +753,19 @@ eitype_xkb_layout = "us"          # or "de", "ru", etc.
 # eitype_xkb_variant = "dvorak"   # optional
 ```
 
-**Customizing the language-to-layout map.** Voxtype ships built-in defaults
-(`en→us`, `ru→ru`, `de→de`, etc.). Layouts that don't match the language code
-(e.g. Brazilian Portuguese uses `br`, not `pt`) need an override in config:
+**Customizing the language-to-layout and variant maps.** Voxtype ships built-in
+layout defaults (`en->us`, `ru->ru`, `de->de`, etc.). Layouts that don't match
+the language code (e.g. Brazilian Portuguese uses `br`, not `pt`) need an
+override in config. Variants are empty by default because they are user-specific:
 
 ```toml
 [output.language_to_layout]
 en = "us"
 pt = "br"
 ru = "ru"
+
+[output.language_to_variant]
+ru = "phonetic"
 ```
 
 See `docs/CONFIGURATION.md` for the full list of built-in defaults and merge
@@ -1010,7 +1049,10 @@ driver_order = ["dotool", "ydotool", "eitype", "clipboard"]
 
 You're hitting dotool's uinput init cost (~700ms) on every output call. With 60+ partials per session this stacks into 40+ seconds.
 
-**Fix:** run `dotoold` once at login. voxtype auto-detects its FIFO and routes through `dotoolc`, paying the init cost once for the daemon's lifetime instead of per call. Sub-10ms per typed segment.
+**Fix:** run `dotoold` once at login. When there is no per-call XKB hint,
+voxtype auto-detects its FIFO and routes through `dotoolc`, paying the init
+cost once for the daemon's lifetime instead of per call. Sub-10ms per typed
+segment.
 
 See [Streaming performance: dotoold fast path](CONFIGURATION.md#streaming-performance-dotoold-fast-path) in CONFIGURATION.md for the systemd user unit template.
 
@@ -1019,13 +1061,16 @@ To verify the fast path is active after dictation:
 journalctl --user -u voxtype --since "5 min ago" | grep "typed via"
 ```
 - `Text typed via dotoolc (N chars)` — fast path
-- `Text typed via dotool (N chars)` — slow path; daemon not running
+- `Text typed via dotool (N chars)` — direct path; daemon not running or voxtype had a per-call XKB hint
 
 ### Wrong keyboard layout when dotoold is running
 
-dotool's layout setting applies to **the daemon, not the client**. Voxtype's `dotool_xkb_layout` config has no effect on commands routed through `dotoolc` — the layout is whatever dotoold inherits from its own environment.
+dotool's layout setting applies to **the daemon, not the client**. When voxtype
+has no per-call XKB hint, commands routed through `dotoolc` use whatever
+layout dotoold inherited from its own environment.
 
-**Fix:** set `DOTOOL_XKB_LAYOUT` in dotoold's startup environment:
+**Fix for one fixed layout:** set `DOTOOL_XKB_LAYOUT` in dotoold's startup
+environment and leave voxtype's dotool XKB fields unset:
 
 ```bash
 # In your systemd user unit:
@@ -1034,6 +1079,12 @@ Environment=DOTOOL_XKB_LAYOUT=hu
 # Then:
 systemctl --user daemon-reload && systemctl --user restart dotoold
 ```
+
+For per-language layouts or variants, configure `language_to_layout` /
+`language_to_variant` in voxtype. `dotoolc` does not work with variants and
+cannot receive voxtype's per-call XKB hints, so voxtype will use direct
+`dotool` instead of `dotoolc` for those calls. You still need to switch the
+active desktop layout to the same language/variant before dictating.
 
 ### PTT auto-promoted to toggle every time you start the daemon
 
