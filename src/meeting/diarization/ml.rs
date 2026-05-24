@@ -601,6 +601,64 @@ mod tests {
 
     #[test]
     #[cfg(feature = "ml-diarization")]
+    fn test_find_or_create_speaker_online_mean_centroid() {
+        // PR #418 added an online-mean centroid update on match so the
+        // stored vector drifts toward the utterance average rather than
+        // anchoring on the first-seen embedding. Verify the math:
+        //   after match #n, centroid = (centroid_prev * n + new) / (n + 1)
+        let mut state = MlDiarizerState::new();
+
+        // First utterance: pure x-axis. State stores [1, 0, 0], count = 1.
+        let initial = vec![1.0_f32, 0.0, 0.0];
+        let speaker = state.find_or_create_speaker(&initial, 0.5, 10);
+        assert_eq!(speaker, SpeakerId::Auto(0));
+        assert_eq!(state.speaker_embeddings[0].count, 1);
+
+        // Second utterance is orthogonal (similarity = 0). Drop the
+        // threshold below 0 so the match path fires and we can observe the
+        // centroid update — otherwise the orthogonal embedding would spawn
+        // a new speaker and we'd never exercise the merge math.
+        let second = vec![0.0_f32, 1.0, 0.0];
+        let speaker = state.find_or_create_speaker(&second, -1.0, 10);
+        assert_eq!(speaker, SpeakerId::Auto(0), "forced match into speaker 0");
+
+        // Expected centroid: ([1,0,0] * 1 + [0,1,0]) / 2 = [0.5, 0.5, 0.0]
+        let centroid = &state.speaker_embeddings[0].vector;
+        assert!(
+            (centroid[0] - 0.5).abs() < 1e-5,
+            "x = 0.5, got {}",
+            centroid[0]
+        );
+        assert!(
+            (centroid[1] - 0.5).abs() < 1e-5,
+            "y = 0.5, got {}",
+            centroid[1]
+        );
+        assert!((centroid[2] - 0.0).abs() < 1e-5);
+        assert_eq!(state.speaker_embeddings[0].count, 2);
+
+        // Third utterance: aligns with original x-axis. Centroid should
+        // become (2 * [0.5, 0.5, 0] + [1, 0, 0]) / 3 = [2/3, 1/3, 0].
+        let third = vec![1.0_f32, 0.0, 0.0];
+        let speaker = state.find_or_create_speaker(&third, -1.0, 10);
+        assert_eq!(speaker, SpeakerId::Auto(0));
+
+        let centroid = &state.speaker_embeddings[0].vector;
+        assert!(
+            (centroid[0] - 2.0 / 3.0).abs() < 1e-5,
+            "x = 2/3, got {}",
+            centroid[0]
+        );
+        assert!(
+            (centroid[1] - 1.0 / 3.0).abs() < 1e-5,
+            "y = 1/3, got {}",
+            centroid[1]
+        );
+        assert_eq!(state.speaker_embeddings[0].count, 3);
+    }
+
+    #[test]
+    #[cfg(feature = "ml-diarization")]
     fn test_find_or_create_speaker_max_speakers() {
         let mut state = MlDiarizerState::new();
         // Fill up to max
