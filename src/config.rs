@@ -1651,6 +1651,11 @@ pub struct MeetingAudioConfig {
     /// and set this to "disabled".
     #[serde(default = "default_echo_cancel")]
     pub echo_cancel: String,
+
+    /// RMS threshold for meeting chunk voice activity detection.
+    /// Lower values are more permissive; 0.0 disables the pre-transcription gate.
+    #[serde(default = "default_meeting_vad_threshold")]
+    pub vad_threshold: f32,
 }
 
 fn default_mic_device() -> String {
@@ -1665,12 +1670,17 @@ fn default_echo_cancel() -> String {
     "auto".to_string()
 }
 
+fn default_meeting_vad_threshold() -> f32 {
+    0.01
+}
+
 impl Default for MeetingAudioConfig {
     fn default() -> Self {
         Self {
             mic_device: default_mic_device(),
             loopback_device: default_loopback(),
             echo_cancel: default_echo_cancel(),
+            vad_threshold: default_meeting_vad_threshold(),
         }
     }
 }
@@ -4090,6 +4100,7 @@ mod tests {
         let config = MeetingAudioConfig::default();
         assert_eq!(config.mic_device, "default");
         assert_eq!(config.loopback_device, "auto");
+        assert_eq!(config.vad_threshold, 0.01);
     }
 
     #[test]
@@ -4177,6 +4188,7 @@ mod tests {
             [meeting.audio]
             mic_device = "hw:1"
             loopback_device = "disabled"
+            vad_threshold = 0.001
 
             [meeting.diarization]
             enabled = false
@@ -4192,6 +4204,7 @@ mod tests {
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.meeting.audio.mic_device, "hw:1");
         assert_eq!(config.meeting.audio.loopback_device, "disabled");
+        assert_eq!(config.meeting.audio.vad_threshold, 0.001);
         assert!(!config.meeting.diarization.enabled);
         assert_eq!(config.meeting.diarization.backend, "ml");
         assert_eq!(config.meeting.diarization.max_speakers, 5);

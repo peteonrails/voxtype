@@ -2780,11 +2780,22 @@ Echo cancellation mode for removing speaker bleed-through from the microphone si
 - `"auto"` - Use GTCRN neural speech enhancement on mic audio before transcription, followed by a phrase-level transcript dedup pass. The GTCRN model (~523 KB) is automatically downloaded on first `voxtype meeting start`.
 - `"disabled"` - No enhancement. Use this if you have system-level echo cancellation configured (e.g., PipeWire's `echo-cancel` module) or if you don't use loopback capture.
 
+### vad_threshold
+
+**Type:** Float
+**Default:** `0.01`
+**Required:** No
+
+RMS threshold for meeting chunk voice activity detection. Lower values are more permissive and can help quiet microphones; higher values skip more low-level noise before transcription. Set to `0.0` to disable this pre-transcription gate.
+
+For quiet USB/XLR mics, try `0.001`.
+
 **Example:**
 ```toml
 [meeting.audio]
 loopback_device = "auto"
 echo_cancel = "auto"  # GTCRN enhancement + transcript dedup
+vad_threshold = 0.001  # Optional: quiet mic tuning
 ```
 
 ---
