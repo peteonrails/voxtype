@@ -226,9 +226,69 @@ mod tests {
 
     #[test]
     fn test_default_config() {
+        // All fields asserted to catch silent default drift — adding a new
+        // field without adding an assertion here would land a typo unnoticed.
         let config = DiarizationConfig::default();
         assert!(config.enabled);
         assert_eq!(config.backend, "simple");
         assert_eq!(config.max_speakers, 10);
+        assert_eq!(config.min_segment_ms, 500);
+        assert_eq!(config.model_path, None);
+        assert!((config.similarity_threshold - 0.25).abs() < f32::EPSILON);
+        assert!((config.vad_window_secs - 4.0).abs() < f32::EPSILON);
+        assert!((config.vad_hop_secs - 2.0).abs() < f32::EPSILON);
+        assert!((config.vad_rms_floor - 0.005).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_vad_subwindows_empty_when_too_short() {
+        // 0.5s of audio at 16kHz = 8000 samples; window is 4s = 64000. No fit.
+        let samples = vec![0.5f32; 8000];
+        let out = vad_subwindows(&samples, 16000, 4.0, 2.0, 0.001);
+        assert!(out.is_empty(), "short segment should produce zero windows");
+    }
+
+    #[test]
+    fn test_vad_subwindows_zero_window_returns_empty() {
+        let samples = vec![0.5f32; 64000];
+        // Zero window length → 0 samples per window → early-return empty.
+        let out = vad_subwindows(&samples, 16000, 0.0, 2.0, 0.001);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_vad_subwindows_rms_gates_silence() {
+        // 8s of true silence. Even at the lowest practical floor, every
+        // window's RMS is 0.0 < floor, so the vector is empty.
+        let samples = vec![0.0f32; 16000 * 8];
+        let out = vad_subwindows(&samples, 16000, 4.0, 2.0, 0.001);
+        assert!(out.is_empty(), "silent audio should be fully gated out");
+    }
+
+    #[test]
+    fn test_vad_subwindows_admits_voiced() {
+        // 8s of constant 0.5 amplitude (RMS = 0.5 ≫ floor). Window 4s, hop 2s:
+        // starts at 0, 2, 4 (window 4..8 still fits). 4 windows total.
+        let samples = vec![0.5f32; 16000 * 8];
+        let out = vad_subwindows(&samples, 16000, 4.0, 2.0, 0.001);
+        assert_eq!(out.len(), 3, "8s audio, 4s/2s window/hop → 3 windows");
+        for (s, e, rms) in &out {
+            assert_eq!(e - s, 16000 * 4, "window length = 4s of samples");
+            assert!((rms - 0.5).abs() < 0.01, "constant 0.5 → rms ≈ 0.5");
+        }
+    }
+
+    #[test]
+    fn test_vad_subwindows_clamps_tiny_hop() {
+        // Hop of 0.01s would normally produce 8s/0.01s ≈ 800 starts. The clamp
+        // floors hop at 0.1s → 8s/0.1s = 80 starts but with 4s window that
+        // fits, only floor((8-4)/0.1)+1 = 41 windows survive.
+        let samples = vec![0.5f32; 16000 * 8];
+        let out = vad_subwindows(&samples, 16000, 4.0, 0.01, 0.001);
+        assert!(
+            (40..=41).contains(&out.len()),
+            "tiny hop should clamp to 100ms, got {} windows",
+            out.len()
+        );
     }
 }
