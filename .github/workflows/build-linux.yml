@@ -410,45 +410,70 @@ jobs:
       # the PKGBUILD actually pulls. Signing the auto-archive byte-for-byte
       # closes that gap.
       #
-      # The signing key is the project maintainer's key
-      # (E79F5BAF8CD51A806AA27DBB7DA2709247D75BC6). It must be exported and
-      # stored in the repo's Actions secrets as GPG_PRIVATE_KEY (ASCII-armored,
-      # no passphrase or empty passphrase). On the maintainer's machine:
+      # Signing is done with a dedicated 1-year signing SUBKEY of the
+      # maintainer's primary key (E79F5BAF8CD51A806AA27DBB7DA2709247D75BC6).
+      # Subkey: 390AA166FE02D00BCF37150FC6277FA9D80B9EC8 (short id
+      # C6277FA9D80B9EC8). A subkey scopes blast radius if the CI secret is
+      # ever exfiltrated: the primary stays offline and can revoke the
+      # subkey, downstream verifiers still trust signatures via the primary
+      # binding (RFC 4880 §5.2.1 back-sig).
       #
-      #   gpg --export-secret-key --armor E79F5BAF8CD51A806AA27DBB7DA2709247D75BC6 \
-      #     | gh secret set GPG_PRIVATE_KEY
+      # Two repo secrets are required:
+      #   GPG_PRIVATE_KEY  — ASCII-armored export of the SIGNING SUBKEY's
+      #                      secret material (NOT the primary):
+      #                        gpg --export-secret-subkeys --armor \
+      #                          C6277FA9D80B9EC8! \
+      #                          | gh secret set GPG_PRIVATE_KEY \
+      #                            -R peteonrails/voxtype
+      #                      The trailing `!` on the key ID is critical:
+      #                      it tells gpg to export only that subkey.
+      #   GPG_PASSPHRASE   — the random passphrase guarding the subkey on
+      #                      disk; piped to gpg over stdin with
+      #                      `--passphrase-fd 0 --pinentry-mode loopback`.
       #
-      # Until the secret is configured, the step will fail with an actionable
-      # error so the first release attempt loudly surfaces the gap rather than
-      # silently shipping an unsigned tarball.
+      # If either secret is missing, the step fails with an actionable error
+      # so the first release attempt loudly surfaces the gap.
       - name: Sign GitHub auto-archive (closes #415)
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           VERSION='${{ steps.version.outputs.version }}'
           TAG="v${VERSION}"
           AUTO_TARBALL_URL="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
+          SIGNING_SUBKEY="C6277FA9D80B9EC8"
 
           if [[ -z "${GPG_PRIVATE_KEY:-}" ]]; then
             echo "::error::GPG_PRIVATE_KEY secret is not set."
             echo "::error::The AUR 'voxtype' source PKGBUILD requires a signed auto-archive."
-            echo "::error::Add the maintainer's exported private key to repo secrets:"
-            echo "::error::  gpg --export-secret-key --armor E79F5BAF8CD51A806AA27DBB7DA2709247D75BC6 \\"
-            echo "::error::    | gh secret set GPG_PRIVATE_KEY"
+            echo "::error::Export and upload the signing subkey (NOT the primary key):"
+            echo "::error::  gpg --export-secret-subkeys --armor ${SIGNING_SUBKEY}! \\"
+            echo "::error::    | gh secret set GPG_PRIVATE_KEY -R peteonrails/voxtype"
+            exit 1
+          fi
+          if [[ -z "${GPG_PASSPHRASE:-}" ]]; then
+            echo "::error::GPG_PASSPHRASE secret is not set."
+            echo "::error::The signing subkey is passphrase-protected; CI needs the passphrase."
+            echo "::error::Set it via:  gh secret set GPG_PASSPHRASE -R peteonrails/voxtype"
             exit 1
           fi
 
           WORK=$(mktemp -d)
           trap 'rm -rf "${WORK}"' EXIT
 
-          # Import the maintainer key into a throwaway GPG home so we don't
-          # pollute the runner's default keyring across steps.
+          # Import the maintainer subkey into a throwaway GPG home so we don't
+          # pollute the runner's default keyring across steps. allow-loopback-
+          # pinentry lets us pass the passphrase over stdin (--passphrase-fd 0)
+          # without an interactive prompt, which doesn't exist in CI.
           export GNUPGHOME="${WORK}/gpg"
           mkdir -p "${GNUPGHOME}"
           chmod 700 "${GNUPGHOME}"
+          printf 'allow-loopback-pinentry\n' > "${GNUPGHOME}/gpg-agent.conf"
+          printf 'pinentry-mode loopback\n' > "${GNUPGHOME}/gpg.conf"
+          gpgconf --kill gpg-agent || true
           echo "${GPG_PRIVATE_KEY}" | gpg --batch --import
 
           # Wait briefly for GitHub to materialize the auto-archive. The
@@ -465,11 +490,18 @@ jobs:
           done
           test -s "${TARBALL}" || { echo "::error::Failed to download ${AUTO_TARBALL_URL}"; exit 1; }
 
-          # Detach-sign in ASCII-armored form. Output filename matches the
-          # AUR PKGBUILD's expected asset name (voxtype-$pkgver.tar.gz.asc).
+          # Detach-sign in ASCII-armored form. Lock signing to the subkey
+          # explicitly with the `!` suffix on --local-user so gpg can't fall
+          # back to any other signing-capable key that might be present.
+          # Passphrase comes in over stdin via --passphrase-fd 0 with
+          # --pinentry-mode loopback, matching the gpg.conf above.
+          # Output filename matches the AUR PKGBUILD's expected asset name
+          # (voxtype-$pkgver.tar.gz.asc).
           ASC="${WORK}/voxtype-${VERSION}.tar.gz.asc"
-          gpg --batch --yes \
-              --default-key E79F5BAF8CD51A806AA27DBB7DA2709247D75BC6 \
+          printf '%s' "${GPG_PASSPHRASE}" | gpg --batch --yes \
+              --pinentry-mode loopback \
+              --passphrase-fd 0 \
+              --local-user "${SIGNING_SUBKEY}!" \
               --detach-sign --armor \
               --output "${ASC}" \
               "${TARBALL}"
