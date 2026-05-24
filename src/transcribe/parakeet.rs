@@ -400,25 +400,40 @@ fn probe_cuda_runtime() -> bool {
     // Voxtype ships separate voxtype-onnx-cuda-12 and voxtype-onnx-cuda-13
     // binaries. `voxtype setup gpu --enable` symlinks voxtype-onnx-cuda to
     // whichever variant matches the host's CUDA runtime.
-    const EXPECTED_CUDA_MAJOR: i32 = match env!("VOXTYPE_BUILD_CUDA_MAJOR").as_bytes() {
-        b"13" => 13,
-        _ => 12,
-    };
+    //
+    // Load-dynamic builds skip this check: there is no bundled ORT to
+    // mismatch — the binary dlopens whatever libonnxruntime the system
+    // provides, and ORT does its own kernel-image lookup against the host
+    // CUDA at session-create time. v0.7.3 cuda-13 forgot to set
+    // ORT_CUDA_VERSION=13 in its Dockerfile so VOXTYPE_BUILD_CUDA_MAJOR
+    // baked in the default ("12"), and this probe falsely rejected
+    // Blackwell hosts with "this binary's bundled ONNX Runtime requires
+    // CUDA 12.x" (#386). The Dockerfile fix sets the env var properly,
+    // and gating the check on `not(feature = "onnx-load-dynamic")`
+    // closes the design hole so future load-dynamic builds don't depend
+    // on remembering to set it.
+    #[cfg(not(feature = "onnx-load-dynamic"))]
+    {
+        const EXPECTED_CUDA_MAJOR: i32 = match env!("VOXTYPE_BUILD_CUDA_MAJOR").as_bytes() {
+            b"13" => 13,
+            _ => 12,
+        };
 
-    if major != EXPECTED_CUDA_MAJOR {
-        tracing::error!(
-            "CUDA version mismatch: found CUDA {major}.{minor}, but this binary's \
-             bundled ONNX Runtime requires CUDA {EXPECTED_CUDA_MAJOR}.x. \
-             Continuing would crash the process.\n  \
-             Options:\n  \
-             1. Install the matching voxtype-onnx-cuda-{EXPECTED_CUDA_MAJOR} package\n  \
-             2. Switch to voxtype-onnx-cuda-{} for your CUDA version (`voxtype setup gpu --enable` \
-             auto-detects and points the symlink at the right one)\n  \
-             3. Build from source with --features parakeet-load-dynamic to link \
-             against your system's ONNX Runtime instead",
-            major,
-        );
-        return false;
+        if major != EXPECTED_CUDA_MAJOR {
+            tracing::error!(
+                "CUDA version mismatch: found CUDA {major}.{minor}, but this binary's \
+                 bundled ONNX Runtime requires CUDA {EXPECTED_CUDA_MAJOR}.x. \
+                 Continuing would crash the process.\n  \
+                 Options:\n  \
+                 1. Install the matching voxtype-onnx-cuda-{EXPECTED_CUDA_MAJOR} package\n  \
+                 2. Switch to voxtype-onnx-cuda-{} for your CUDA version (`voxtype setup gpu --enable` \
+                 auto-detects and points the symlink at the right one)\n  \
+                 3. Build from source with --features parakeet-load-dynamic to link \
+                 against your system's ONNX Runtime instead",
+                major,
+            );
+            return false;
+        }
     }
 
     true

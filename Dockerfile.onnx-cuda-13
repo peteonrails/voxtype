@@ -115,6 +115,15 @@ RUN set -eux; \
 # gates the CUDA EP under `any(load-dynamic, cuda)`, and load-dynamic just
 # changes how libonnxruntime is reached, not whether the EP exists.
 #
+# ORT_CUDA_VERSION isn't consumed by ort-sys here (load-dynamic skips its
+# prebuilt selection), but build.rs reads the same env var to bake
+# VOXTYPE_BUILD_CUDA_MAJOR into the binary. That const drives the CUDA
+# runtime probe in src/transcribe/parakeet.rs, which would otherwise
+# default to "12" and reject CUDA 13.x hosts (#386 — v0.7.3 cuda-13 binary
+# falsely reported "this binary's bundled ONNX Runtime requires CUDA 12.x"
+# and fell back to CPU on Blackwell hosts).
+ENV ORT_CUDA_VERSION=13
+#
 # Disable LTO for faster builds; same as the rest of the matrix.
 RUN cargo build --release \
         --features parakeet-cuda,parakeet-load-dynamic,moonshine-cuda,sensevoice-cuda,paraformer-cuda,dolphin-cuda,omnilingual-cuda,cohere-cuda,onnx-load-dynamic,ml-diarization \
