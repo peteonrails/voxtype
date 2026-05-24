@@ -1707,6 +1707,24 @@ pub struct MeetingDiarizationConfig {
     /// Minimum segment duration in milliseconds for ML embedding extraction
     #[serde(default = "default_min_segment_ms")]
     pub min_segment_ms: u64,
+
+    // The four fields below apply only to backend = "ml"; the "simple" and
+    // "remote" backends ignore them.
+    /// Cosine similarity threshold for the ML backend (0.20-0.30 typical for ECAPA on 4s windows)
+    #[serde(default = "default_similarity_threshold")]
+    pub similarity_threshold: f32,
+
+    /// VAD sub-window length in seconds for ECAPA feeding
+    #[serde(default = "default_vad_window_secs")]
+    pub vad_window_secs: f32,
+
+    /// VAD sub-window hop in seconds
+    #[serde(default = "default_vad_hop_secs")]
+    pub vad_hop_secs: f32,
+
+    /// RMS floor for treating a sub-window as silence
+    #[serde(default = "default_vad_rms_floor")]
+    pub vad_rms_floor: f32,
 }
 
 fn default_diarization_backend() -> String {
@@ -1719,6 +1737,25 @@ fn default_max_speakers() -> u32 {
 
 fn default_min_segment_ms() -> u64 {
     500
+}
+
+// Empirically tuned against multi-speaker test clips (4-person roundtable,
+// 3-person panel, 1h talk). The previous 0.75 anchor was far too strict for
+// 4s ECAPA windows and produced overwhelmingly Unknown labels in practice.
+fn default_similarity_threshold() -> f32 {
+    0.25
+}
+
+fn default_vad_window_secs() -> f32 {
+    4.0
+}
+
+fn default_vad_hop_secs() -> f32 {
+    2.0
+}
+
+fn default_vad_rms_floor() -> f32 {
+    0.005
 }
 
 fn default_chunk_duration() -> u32 {
@@ -1741,6 +1778,10 @@ impl Default for MeetingDiarizationConfig {
             max_speakers: default_max_speakers(),
             model_path: None,
             min_segment_ms: default_min_segment_ms(),
+            similarity_threshold: default_similarity_threshold(),
+            vad_window_secs: default_vad_window_secs(),
+            vad_hop_secs: default_vad_hop_secs(),
+            vad_rms_floor: default_vad_rms_floor(),
         }
     }
 }
