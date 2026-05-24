@@ -576,10 +576,7 @@ fn spawn_background_model_download(model_name: String) {
                 "-h",
                 SYNC_HINT,
                 "Voxtype",
-                &format!(
-                    "Downloading model {} in the background…",
-                    model_name
-                ),
+                &format!("Downloading model {} in the background…", model_name),
             ])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
