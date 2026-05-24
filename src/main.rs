@@ -1999,7 +1999,7 @@ async fn run_meeting_command(config: &config::Config, action: MeetingAction) -> 
     };
 
     match action {
-        MeetingAction::Start { title } => {
+        MeetingAction::Start { title, diarization } => {
             // Check if meeting mode is enabled
             if !config.meeting.enabled {
                 eprintln!("Error: Meeting mode is disabled in config.");
@@ -2024,15 +2024,68 @@ async fn run_meeting_command(config: &config::Config, action: MeetingAction) -> 
                 }
             }
 
+            // --diarization ml requires the ml-diarization feature at build
+            // time. Without it the daemon's diarizer factory silently falls
+            // back, leaving the CLI's "(diarization backend: ml)" exit
+            // message a lie. Reject the request up front with a pointer to
+            // the binaries that DO carry ml-diarization.
+            if diarization.as_deref() == Some("ml") && !cfg!(feature = "ml-diarization") {
+                eprintln!("Error: --diarization ml requested but this binary was not built with");
+                eprintln!(
+                    "  the `ml-diarization` feature. ECAPA-TDNN diarization is shipped in the"
+                );
+                eprintln!(
+                    "  ONNX binaries (voxtype-onnx-avx2, voxtype-onnx-avx512, voxtype-onnx-cuda-*,"
+                );
+                eprintln!(
+                    "  voxtype-onnx-migraphx). Install one of those, or omit --diarization to"
+                );
+                eprintln!("  use the source-based `simple` backend.");
+                std::process::exit(1);
+            }
+
             // Ensure GTCRN speech enhancement model is available
             setup::model::ensure_gtcrn_model();
 
+            // A --diarization override only changes the *backend*; it cannot
+            // turn diarization on when config has disabled it. Warn loudly so
+            // users don't think they're getting speaker labels they aren't.
+            let diarization_active = config.meeting.diarization.enabled;
+            if diarization.is_some() && !diarization_active {
+                eprintln!(
+                    "Warning: --diarization is a backend override and only takes effect when"
+                );
+                eprintln!(
+                    "  [meeting.diarization] enabled = true in config; diarization is disabled,"
+                );
+                eprintln!("  so the override will be ignored for this meeting.");
+            }
+
+            // Write the diarization override first so it's visible by the time
+            // the daemon picks up the start trigger.
+            let runtime_dir = config::Config::runtime_dir();
+            let diarization_file = runtime_dir.join("meeting_start_diarization");
+            if let Some(ref backend) = diarization {
+                std::fs::write(&diarization_file, backend)?;
+            } else {
+                // Clear any stale override left from a prior run.
+                let _ = std::fs::remove_file(&diarization_file);
+            }
+
             // Write start trigger file (with optional title)
-            let start_file = config::Config::runtime_dir().join("meeting_start");
+            let start_file = runtime_dir.join("meeting_start");
             let content = title.unwrap_or_default();
             std::fs::write(&start_file, content)?;
 
-            println!("Meeting start requested. Check status with 'voxtype meeting status'.");
+            let suffix = diarization
+                .as_deref()
+                .filter(|_| diarization_active)
+                .map(|b| format!(" (diarization backend: {})", b))
+                .unwrap_or_default();
+            println!(
+                "Meeting start requested{}. Check status with 'voxtype meeting status'.",
+                suffix
+            );
         }
 
         MeetingAction::Stop => {
