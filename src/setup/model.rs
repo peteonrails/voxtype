@@ -104,6 +104,13 @@ struct ParakeetModelInfo {
     description: &'static str,
     files: &'static [(&'static str, u64)], // (filename, expected_size_bytes)
     huggingface_repo: &'static str,
+    /// Whether the model ships everything `parakeet-rs::ParakeetUnified` needs
+    /// to run the cache-aware streaming pipeline — specifically a
+    /// `tokenizer.model` alongside the encoder/decoder. The TUI marks these
+    /// models in the Engine picker and the Advanced section's streaming-toggle
+    /// handler auto-switches the configured model to one of these when the
+    /// user enables streaming on top of an incompatible model. See #423.
+    streaming_compatible: bool,
 }
 
 const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
@@ -119,6 +126,7 @@ const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
             ("config.json", 97),
         ],
         huggingface_repo: "istupakov/parakeet-tdt-0.6b-v2-onnx",
+        streaming_compatible: false,
     },
     ParakeetModelInfo {
         name: "parakeet-tdt-0.6b-v2-int8",
@@ -131,6 +139,7 @@ const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
             ("config.json", 97),
         ],
         huggingface_repo: "istupakov/parakeet-tdt-0.6b-v2-onnx",
+        streaming_compatible: false,
     },
     ParakeetModelInfo {
         name: "parakeet-tdt-0.6b-v3",
@@ -144,6 +153,7 @@ const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
             ("config.json", 97),
         ],
         huggingface_repo: "istupakov/parakeet-tdt-0.6b-v3-onnx",
+        streaming_compatible: false,
     },
     ParakeetModelInfo {
         name: "parakeet-tdt-0.6b-v3-int8",
@@ -156,8 +166,46 @@ const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
             ("config.json", 97),
         ],
         huggingface_repo: "istupakov/parakeet-tdt-0.6b-v3-onnx",
+        streaming_compatible: false,
+    },
+    // Streaming-capable Parakeet model. Ships `tokenizer.model` alongside the
+    // encoder/decoder, which `parakeet-rs::ParakeetUnified::load` requires for
+    // the cache-aware streaming pipeline. Filenames here use the unprefixed
+    // `encoder.onnx` / `decoder_joint.onnx` convention from the bobNight repo
+    // rather than the `encoder-model.onnx` / `decoder_joint-model.onnx`
+    // convention the istupakov entries use — ParakeetUnified handles both.
+    ParakeetModelInfo {
+        name: "parakeet-unified-en-0.6b",
+        size_mb: 2660,
+        description: "Streaming-capable, English-only, cache-aware (TDT v3 family)",
+        files: &[
+            ("encoder.onnx", 43_878_400),
+            ("encoder.onnx.data", 2_617_245_696),
+            ("decoder_joint.onnx", 37_537_792),
+            ("tokenizer.model", 257_024),
+            ("vocab.txt", 5_164),
+        ],
+        huggingface_repo: "bobNight/parakeet-unified-en-0.6b-onnx",
+        streaming_compatible: true,
     },
 ];
+
+/// Returns true when the named Parakeet model ships everything the cache-aware
+/// `parakeet-rs::ParakeetUnified` streaming pipeline needs at load time
+/// (specifically `tokenizer.model`). Used by the TUI to label the model picker
+/// and to auto-switch the configured model when the user enables streaming on
+/// top of an incompatible one. Unknown model names return `false`.
+pub fn is_streaming_compatible_parakeet(name: &str) -> bool {
+    PARAKEET_MODELS
+        .iter()
+        .any(|m| m.name == name && m.streaming_compatible)
+}
+
+/// Canonical Parakeet model name that the TUI auto-switches to when the user
+/// enables streaming on top of an incompatible model. Stable string identifier
+/// rather than a struct lookup so config writers and feedback messages can
+/// reference it directly.
+pub const DEFAULT_PARAKEET_STREAMING_MODEL: &str = "parakeet-unified-en-0.6b";
 
 // =============================================================================
 // Moonshine Model Definitions

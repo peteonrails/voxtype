@@ -24,6 +24,11 @@ pub struct AdvancedState {
     pub field: Field,
     pub feedback: Option<(FeedbackLevel, String)>,
     pub dirty_since_load: bool,
+    /// Name of a Parakeet model the user just auto-switched into via the
+    /// streaming-toggle save handler, waiting for the user to confirm with
+    /// `d` that they want voxtype to fork the download in the background.
+    /// `None` when no prompt is pending. See #423.
+    pub pending_download: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +64,7 @@ impl AdvancedState {
             field: Field::GpuIsolation,
             feedback: None,
             dirty_since_load: false,
+            pending_download: None,
         })
     }
     pub fn save(&mut self) -> Action {
@@ -77,6 +83,11 @@ impl AdvancedState {
             Some(n) if n >= 0 => ed.set_int("whisper", "gpu_device", n),
             _ => ed.unset("whisper", "gpu_device"),
         }
+        // Read the previous streaming value BEFORE we overwrite it so we can
+        // detect the "just turned on" transition. Used below to decide whether
+        // to auto-switch the configured Parakeet model to a streaming-capable
+        // one.
+        let was_streaming = ed.get_bool("parakeet", "streaming").unwrap_or(false);
         ed.set_bool("parakeet", "streaming", self.streaming);
 
         // Streaming dictation requires toggle activation: typing at the cursor
@@ -96,24 +107,70 @@ impl AdvancedState {
             false
         };
 
+        // Streaming dictation also requires a model that ships
+        // tokenizer.model (parakeet-rs::ParakeetUnified::load fails without
+        // it). When the user flips streaming on from off, check the active
+        // Parakeet model and auto-switch to the canonical streaming-capable
+        // one if needed. Tell them clearly so they know to run
+        // `voxtype setup model` next — the download isn't blocking on the
+        // TUI save action (it's ~2.7 GB). #423.
+        let auto_switched_model: Option<(String, &'static str)> =
+            if self.streaming && !was_streaming {
+                let current = ed
+                    .get_string("parakeet", "model")
+                    .unwrap_or_else(|| "parakeet-tdt-0.6b-v3".to_string());
+                if !crate::setup::model::is_streaming_compatible_parakeet(&current) {
+                    ed.set_string(
+                        "parakeet",
+                        "model",
+                        crate::setup::model::DEFAULT_PARAKEET_STREAMING_MODEL,
+                    );
+                    Some((
+                        current,
+                        crate::setup::model::DEFAULT_PARAKEET_STREAMING_MODEL,
+                    ))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
         match ed.save() {
             Ok(()) => {
                 self.dirty_since_load = false;
-                self.feedback = if promoted_hotkey_mode {
-                    Some((
-                        FeedbackLevel::Warn,
-                        format!(
-                            "Saved to {}. Streaming requires toggle mode: \
-                             hotkey activation auto-promoted from push_to_talk to toggle.",
-                            ed.path().display()
-                        ),
-                    ))
+                // Compose feedback from whichever auto-fixes fired this save.
+                // Both can fire on the same save (PTT→toggle and model swap),
+                // so combine them rather than picking one.
+                let mut parts: Vec<String> = Vec::new();
+                parts.push(format!("Saved to {}", ed.path().display()));
+                if promoted_hotkey_mode {
+                    parts.push(
+                        "Streaming requires toggle mode: hotkey activation \
+                         auto-promoted from push_to_talk to toggle."
+                            .to_string(),
+                    );
+                }
+                let did_auto_switch = auto_switched_model.is_some();
+                if let Some((from, to)) = auto_switched_model {
+                    parts.push(format!(
+                        "Streaming requires a model with tokenizer.model. \
+                         Switched [parakeet] model from '{from}' to '{to}'. \
+                         Press 'd' to download in the background (~2.7 GB), \
+                         any other key to skip."
+                    ));
+                    // Park the model name on state so the next 'd' keypress
+                    // can fork the download. Any other key is treated as
+                    // "skip"; the user can re-trigger by running
+                    // `voxtype setup model <NAME>` directly.
+                    self.pending_download = Some(to.to_string());
+                }
+                let level = if promoted_hotkey_mode || did_auto_switch {
+                    FeedbackLevel::Warn
                 } else {
-                    Some((
-                        FeedbackLevel::Ok,
-                        format!("Saved to {}", ed.path().display()),
-                    ))
+                    FeedbackLevel::Ok
                 };
+                self.feedback = Some((level, parts.join(" ")));
             }
             Err(e) => self.feedback = Some((FeedbackLevel::Err, format!("save: {}", e))),
         }
@@ -437,6 +494,30 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         Some(s) => s,
         None => return Action::None,
     };
+
+    // When a streaming-model auto-switch fires during save, `d` confirms the
+    // background download. Any other key dismisses the prompt — including
+    // navigation and re-save. Handle this BEFORE the regular key dispatch so
+    // a stale prompt can't bleed into a later edit.
+    if state.pending_download.is_some() {
+        if let KeyCode::Char(c) = key.code {
+            if c.eq_ignore_ascii_case(&'d') {
+                let model_name = state.pending_download.take().expect("checked above");
+                spawn_background_model_download(model_name.clone());
+                state.feedback = Some((
+                    FeedbackLevel::Ok,
+                    format!(
+                        "Downloading {} in the background. Watch for a desktop notification when it completes.",
+                        model_name
+                    ),
+                ));
+                return Action::None;
+            }
+        }
+        // Any other key dismisses the prompt and falls through to normal handling.
+        state.pending_download = None;
+    }
+
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => {
             state.move_field(-1);
@@ -461,4 +542,88 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         }
         _ => Action::None,
     }
+}
+
+/// Fork a detached worker thread that downloads the named Parakeet model and
+/// sends desktop notifications around the start, success, and failure
+/// transitions. The thread is fire-and-forget — voxtype's TUI doesn't
+/// supervise it, doesn't join on it, and survives a TUI exit (`std::thread`
+/// is detached, and `download_parakeet_model` writes to the on-disk models
+/// dir which the daemon picks up on next start).
+///
+/// All three notifications share the sync hint
+/// `x-canonical-private-synchronous:voxtype-model-download`, which tells
+/// notification daemons (mako, dunst, GNOME Shell, KDE) to overwrite the
+/// previous notification in that slot rather than stack them. Same pattern
+/// as `src/notification.rs::send_linux` uses for recording/transcribing
+/// transitions, just with a different sync key so the two don't collide.
+///
+/// Urgency levels:
+/// - `low` for the "starting" notification (informational, just letting the
+///   user know background work began)
+/// - `normal` for "complete" (user should see it but it's not urgent)
+/// - `critical` for "failed" (the user took an explicit action and it didn't
+///   succeed; they need to know to retry)
+fn spawn_background_model_download(model_name: String) {
+    std::thread::spawn(move || {
+        const SYNC_HINT: &str = "string:x-canonical-private-synchronous:voxtype-model-download";
+
+        // Starting notification — low urgency, just informational.
+        let _ = std::process::Command::new("notify-send")
+            .args([
+                "--app-name=Voxtype",
+                "--urgency=low",
+                "-h",
+                SYNC_HINT,
+                "Voxtype",
+                &format!(
+                    "Downloading model {} in the background…",
+                    model_name
+                ),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+
+        // Synchronous download in this worker thread. `download_parakeet_model`
+        // is `fn` (not `async fn`), so no tokio runtime is required here.
+        let result = crate::setup::model::download_parakeet_model(&model_name);
+
+        match result {
+            Ok(()) => {
+                let _ = std::process::Command::new("notify-send")
+                    .args([
+                        "--app-name=Voxtype",
+                        "--urgency=normal",
+                        "-h",
+                        SYNC_HINT,
+                        "Voxtype",
+                        &format!(
+                            "Model download complete: {}. Restart voxtype to use it.",
+                            model_name
+                        ),
+                    ])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+            Err(e) => {
+                let _ = std::process::Command::new("notify-send")
+                    .args([
+                        "--app-name=Voxtype",
+                        "--urgency=critical",
+                        "-h",
+                        SYNC_HINT,
+                        "Voxtype",
+                        &format!(
+                            "Model download failed: {}. Run `voxtype setup model {}` to retry.",
+                            e, model_name
+                        ),
+                    ])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
+    });
 }

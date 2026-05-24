@@ -77,6 +77,44 @@
 
             <!-- v0.7.x Era Posts -->
 
+            <article class="news-article" id="v073">
+                <div class="article-meta">
+                    <time datetime="2026-05-19">May 19, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v0.7.3: Kaby Lake Vulkan SIGILL fix, RTX 5090 Blackwell support</h2>
+                <div class="article-body">
+                    <p>A two-issue hotfix. The Vulkan binary regression came in via the move to GitHub-hosted CI runners; the CUDA 13 issue surfaced once RTX 5090 owners hit a transcription. Both fixes also harden the build pipeline so the same class of regression cannot ship again.</p>
+
+                    <h3>Vulkan binary works on Kaby Lake and older Intel CPUs (<a href="https://github.com/peteonrails/voxtype/issues/393">#393</a>)</h3>
+                    <p>The v0.7.2 Vulkan binary failed with SIGILL on Intel CPUs that lack SSE4a, including the i7-7700HQ in the reporter's machine. The instruction came from <code>RUSTFLAGS="-C target-cpu=native"</code> in <code>Dockerfile.vulkan</code>. That flag was safe when the build host was a pre-AVX-512 Coffee Lake server, but the v0.7.2 pipeline moved onto GitHub's <code>ubuntu-24.04</code> runner, which is AMD Zen 3 and has SSE4a. The compiler emitted <code>insertq</code> instructions, and Intel CPUs SIGILL on those.</p>
+
+                    <p><strong>Why use it:</strong> if you have a pre-Cascade-Lake Intel CPU (anything roughly 6th-gen or older) and the Vulkan backend, voxtype 0.7.2 daemons would not start. v0.7.3 boots cleanly on the same hardware.</p>
+
+                    <p>The build now bounds Rust at <code>target-cpu=haswell</code> with <code>-sse4a,-gfni,-avxvnni</code> disables, matches the ggml CMake flags to the same floor, and adds a CI gate that fails the build on any AVX-512 EVEX, GFNI, AVX-VNNI, or SSE4a instruction in the AVX2 or Vulkan variants. The previous gate only checked <code>zmm</code> registers, so SSE4a slipped through unnoticed.</p>
+
+                    <h3>NVIDIA Blackwell (RTX 5090) works on the CUDA 13 binary (<a href="https://github.com/peteonrails/voxtype/issues/386">#386</a>)</h3>
+                    <p><code>voxtype-onnx-cuda-13</code> shipped a CUDA execution provider with kernel coverage up to sm_90a (Hopper). Blackwell needs sm_120, so the RTX 5090 hit the EP and got <code>cudaErrorNoKernelImageForDevice</code> on every transcription. The upstream prebuilt ORT that the <code>ort</code> crate downloads does not include Blackwell, and the maintainer has marked Blackwell support as not planned.</p>
+
+                    <p><strong>Why use it:</strong> if you own an RTX 50-series card, voxtype 0.7.2's CUDA 13 binary would error on every transcription. v0.7.3 transcribes correctly on Blackwell.</p>
+
+                    <p><code>Dockerfile.onnx-cuda-13</code> now pulls Microsoft's official ORT 1.24.4 cu13 prebuilt and links to it with <code>ort/load-dynamic</code>. The bundled CUDA EP covers sm_70 through sm_120a. The runtime ships alongside the binary at <code>/usr/lib/voxtype/cuda-13/libonnxruntime.so.1.24.4</code> plus a <code>libonnxruntime.so</code> symlink, which is exactly where <code>ort/load-dynamic</code> looks first (relative to <code>/proc/self/exe</code>). No environment variable or LD_LIBRARY_PATH setup required.</p>
+
+                    <p>Two build gates went in alongside the fix: a check that <code>sm_120</code> markers are present in the bundled provider library, and a check that the binary did not silently fall back to static linking (which would have brought the old kernel coverage back).</p>
+
+                    <p><code>voxtype-onnx-cuda-12</code> is unchanged. Blackwell requires CUDA 13 and driver 580+, so cuda-12 users are not affected.</p>
+
+                    <h3>Acknowledgments</h3>
+                    <ul>
+                        <li><strong>Piotr Lipski</strong> for reporting the Kaby Lake Vulkan SIGILL with a complete environment dump.</li>
+                        <li><strong>tyvsmith</strong> for the RTX 5090 report including the source-build comparison that confirmed the diagnosis.</li>
+                    </ul>
+
+                    <h3>Downloads</h3>
+                    <p>Full changelog, signed binaries, and SHA256 sums: <a href="https://github.com/peteonrails/voxtype/releases/tag/v0.7.3">v0.7.3 on GitHub</a>.</p>
+                </div>
+            </article>
+
             <article class="news-article" id="v072">
                 <div class="article-meta">
                     <time datetime="2026-05-17">May 17, 2026</time>
