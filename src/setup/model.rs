@@ -1581,12 +1581,19 @@ pub fn validate_parakeet_model(path: &Path) -> anyhow::Result<()> {
         anyhow::bail!("Model directory does not exist: {:?}", path);
     }
 
-    // Check for TDT structure: encoder + decoder + vocab
+    // Two naming conventions in the wild:
+    // - istupakov/parakeet-tdt-*: `encoder-model.onnx`, `decoder_joint-model.onnx`
+    // - bobNight/parakeet-unified-*: `encoder.onnx`, `decoder_joint.onnx`
+    //   (streaming-compatible TDT v3 family — v0.7.4 added this entry)
+    // Accept either; parakeet-rs reads whichever filenames its loader expects.
     let has_encoder = path.join("encoder-model.onnx").exists()
         || path.join("encoder-model.onnx.data").exists()
-        || path.join("encoder-model.int8.onnx").exists();
+        || path.join("encoder-model.int8.onnx").exists()
+        || path.join("encoder.onnx").exists()
+        || path.join("encoder.onnx.data").exists();
     let has_decoder = path.join("decoder_joint-model.onnx").exists()
-        || path.join("decoder_joint-model.int8.onnx").exists();
+        || path.join("decoder_joint-model.int8.onnx").exists()
+        || path.join("decoder_joint.onnx").exists();
     let has_vocab = path.join("vocab.txt").exists();
 
     if has_encoder && has_decoder && has_vocab {
