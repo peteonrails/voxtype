@@ -390,6 +390,27 @@ fn read_trimmed_nonempty(path: &std::path::Path) -> Option<String> {
 /// sync with the `value_parser` list on `MeetingAction::Start::diarization`.
 const ALLOWED_DIARIZATION_OVERRIDES: &[&str] = &["simple", "ml"];
 
+/// Validate a diarization backend override against the allowlist.
+///
+/// The CLI's clap `value_parser` already rejects bad values at parse time, but
+/// the daemon reads the trigger from a runtime file written by an arbitrary
+/// process and shouldn't propagate unknown values. Returns `None` and logs a
+/// warning for anything outside the allowlist; defense-in-depth against stale
+/// trigger files, partial writes from older voxtype versions, or a malicious
+/// writer with access to the user's `$XDG_RUNTIME_DIR`.
+fn validate_diarization_override(value: String) -> Option<String> {
+    if ALLOWED_DIARIZATION_OVERRIDES.contains(&value.as_str()) {
+        Some(value)
+    } else {
+        tracing::warn!(
+            value = %value,
+            "Ignoring unknown diarization override; expected one of {:?}",
+            ALLOWED_DIARIZATION_OVERRIDES
+        );
+        None
+    }
+}
+
 /// Check for meeting start command (via file trigger)
 fn check_meeting_start() -> Option<MeetingStartTrigger> {
     let runtime_dir = Config::runtime_dir();
@@ -401,22 +422,11 @@ fn check_meeting_start() -> Option<MeetingStartTrigger> {
     let title = read_trimmed_nonempty(&start_file);
 
     // Diarization override is written by the CLI handler before the start
-    // trigger. Clap validates the CLI arg, but the daemon trusts a runtime
-    // file written by an arbitrary process, so re-check against the allowlist
-    // here and drop unknown values with a warning.
+    // trigger. Re-validate against the allowlist (see
+    // `validate_diarization_override` for the rationale).
     let diarization_file = runtime_dir.join("meeting_start_diarization");
-    let diarization = read_trimmed_nonempty(&diarization_file).and_then(|value| {
-        if ALLOWED_DIARIZATION_OVERRIDES.contains(&value.as_str()) {
-            Some(value)
-        } else {
-            tracing::warn!(
-                value = %value,
-                "Ignoring unknown diarization override; expected one of {:?}",
-                ALLOWED_DIARIZATION_OVERRIDES
-            );
-            None
-        }
-    });
+    let diarization =
+        read_trimmed_nonempty(&diarization_file).and_then(validate_diarization_override);
     let _ = std::fs::remove_file(&diarization_file);
 
     // Remove the start trigger last to acknowledge the command.
@@ -3855,6 +3865,54 @@ mod tests {
         // We can't easily mock Config::runtime_dir(), so we test the file operations
         // directly using the same logic as the functions under test
         f(runtime_dir)
+    }
+
+    #[test]
+    fn test_validate_diarization_override_accepts_allowlist() {
+        assert_eq!(
+            validate_diarization_override("simple".to_string()),
+            Some("simple".to_string())
+        );
+        assert_eq!(
+            validate_diarization_override("ml".to_string()),
+            Some("ml".to_string())
+        );
+    }
+
+    #[test]
+    fn test_validate_diarization_override_rejects_unknown() {
+        // Random unknown value the daemon should never propagate.
+        assert_eq!(validate_diarization_override("bogus".to_string()), None);
+
+        // Path-traversal flavor — `ALLOWED_DIARIZATION_OVERRIDES` is an exact
+        // string match so traversal can't sneak through, but the test pins
+        // the contract.
+        assert_eq!(
+            validate_diarization_override("../../etc/passwd".to_string()),
+            None
+        );
+
+        // Empty string (already filtered by `read_trimmed_nonempty` before
+        // this function is reached, but defense-in-depth).
+        assert_eq!(validate_diarization_override(String::new()), None);
+
+        // Common case variations that look like the right thing but aren't:
+        // case-sensitive match prevents these.
+        assert_eq!(validate_diarization_override("ML".to_string()), None);
+        assert_eq!(validate_diarization_override("Simple".to_string()), None);
+
+        // Whitespace-padded values shouldn't slip through if the trim step
+        // upstream somehow didn't fire.
+        assert_eq!(validate_diarization_override(" ml".to_string()), None);
+        assert_eq!(validate_diarization_override("ml ".to_string()), None);
+    }
+
+    #[test]
+    fn test_validate_diarization_override_const_in_sync() {
+        // Pin the allowlist contents so a future expansion of the CLI's
+        // `value_parser` requires touching this test, keeping the daemon
+        // and CLI surfaces in sync.
+        assert_eq!(ALLOWED_DIARIZATION_OVERRIDES, &["simple", "ml"]);
     }
 
     #[test]
