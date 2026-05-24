@@ -40,6 +40,7 @@ Selects which speech-to-text engine to use for transcription.
 - `dolphin` - Dictation-optimized CTC via ONNX Runtime (Chinese + English)
 - `omnilingual` - FunASR Omnilingual CTC via ONNX Runtime (50+ languages)
 - `cohere` - Cohere Transcribe encoder-decoder via ONNX Runtime (#1 Open ASR Leaderboard, 14 languages, ~3 GB model)
+- `openvino` - OpenVINO Whisper for Intel NPU/CPU/GPU (requires `--features openvino-whisper`)
 
 **Example:**
 ```toml
@@ -52,11 +53,12 @@ voxtype --engine parakeet daemon
 ```
 
 **Notes:**
-- All engines except Whisper require an ONNX-enabled binary (`voxtype-*-onnx-*`)
-- Each ONNX engine reads its own `[<engine>]` section (e.g. `[parakeet]`, `[cohere]`)
+- All engines except Whisper and OpenVINO require an ONNX-enabled binary (`voxtype-*-onnx-*`)
+- Each non-Whisper engine reads its own `[<engine>]` section (e.g. `[parakeet]`, `[cohere]`, `[openvino]`)
 - See [PARAKEET.md](PARAKEET.md) for detailed Parakeet setup instructions
 - See [MOONSHINE.md](MOONSHINE.md) for detailed Moonshine setup instructions
 - Cohere Transcribe is the largest model voxtype ships (~3 GB int8); use `voxtype setup model` to download it
+- OpenVINO Whisper requires the `openvino-whisper` feature and OpenVINO Runtime installed at runtime
 
 ---
 
@@ -1363,6 +1365,114 @@ cargo build --release --features cohere-tensorrt  # NVIDIA + TensorRT EP
 ```
 
 The prebuilt `voxtype-*-onnx-*` release binaries already include `cohere`, so users installing via AUR/.deb/.rpm don't need to rebuild.
+
+---
+
+## [openvino]
+
+Configuration for the OpenVINO Whisper speech-to-text engine. This section is only used when `engine = "openvino"`. Requires building with `--features openvino-whisper` and OpenVINO GenAI runtime libraries installed.
+
+### model
+
+**Type:** String
+**Default:** `"base.en"`
+**Required:** No
+
+Model name or absolute path to a directory containing OpenVINO IR model files. The directory must contain `openvino_encoder_model.xml/.bin`, `openvino_decoder_model.xml/.bin`, and `tokenizer.json`.
+
+**Available short names:** `"base.en-int8"`, `"base.en-fp16"`, `"small.en-int8"`, `"base-int8"`, `"large-v3-int8"`.
+
+### device
+
+**Type:** String
+**Default:** `"NPU"`
+**Required:** No
+
+OpenVINO device to run inference on. Options: `"NPU"` (Intel Neural Processing Unit), `"CPU"`, `"GPU"`, `"AUTO"` (automatic device selection).
+
+### quantized
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Prefer int8 quantized model variants. Int8 models are smaller and run faster on NPU. Set to `false` for fp16 models, which may have slightly higher accuracy.
+
+### language
+
+**Type:** String
+**Default:** `"en"`
+**Required:** No
+
+Language code for transcription. Uses Whisper language codes such as `"en"`, `"zh"`, `"fr"`, `"de"`, `"ja"`, and `"ko"`.
+
+### translate
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+When `true`, translates non-English speech to English instead of transcribing in the source language.
+
+### threads
+
+**Type:** Integer (optional)
+**Default:** System-detected
+**Required:** No
+
+Number of CPU threads for inference. Only applies when `device = "CPU"`.
+
+### on_demand_loading
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+When `true`, loads the model only when recording starts. When `false`, keeps the model loaded for faster response.
+
+### openvino.openvino_dir
+
+**Type:** String (optional)
+**Default:** None (automatic discovery)
+**Environment variable:** `VOXTYPE_OPENVINO_DIR`
+
+Path to the OpenVINO GenAI installation directory containing shared libraries. When set, voxtype loads `libopenvino_genai_c.so` from this directory instead of relying on automatic discovery via `LD_LIBRARY_PATH`, `OPENVINO_INSTALL_DIR`, or system package paths.
+
+The library is searched in these subdirectories:
+- `<openvino_dir>/`
+- `<openvino_dir>/runtime/lib/intel64/`
+- `<openvino_dir>/runtime/lib/intel64/Release/`
+
+This is useful when you have a custom OpenVINO build or an installation in a non-standard location (for example, a `pip install openvino-genai` environment or a manual extract).
+
+**Example:**
+```toml
+engine = "openvino"
+
+[openvino]
+model = "base.en-int8"
+device = "NPU"
+quantized = true
+language = "en"
+on_demand_loading = false
+openvino_dir = "/opt/intel/openvino"
+```
+
+Use `voxtype setup model` to download one of the bundled OpenVINO Whisper models into the standard models directory.
+
+### Building from Source
+
+```bash
+cargo build --release --features openvino-whisper
+```
+
+Install the OpenVINO Runtime separately, for example:
+
+```bash
+pip install openvino
+# or, if your distro packages it
+sudo apt install openvino
+```
 
 ---
 

@@ -288,14 +288,14 @@ impl Default for MlDiarizer {
 impl Diarizer for MlDiarizer {
     fn diarize(
         &self,
-        samples: &[f32],
+        _samples: &[f32],
         _source: AudioSource,
         transcript_segments: &[TranscriptSegment],
     ) -> Vec<DiarizedSegment> {
         // If model is not loaded or feature is disabled, fall back to simple attribution
         #[cfg(not(feature = "ml-diarization"))]
         {
-            let _ = samples;
+            let _ = _samples;
             transcript_segments
                 .iter()
                 .map(|seg| DiarizedSegment {

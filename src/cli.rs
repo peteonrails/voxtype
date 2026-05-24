@@ -71,7 +71,7 @@ pub struct Cli {
         long,
         value_name = "ENGINE",
         help_heading = "Transcription",
-        long_help = "Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere"
+        long_help = "Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere, openvino"
     )]
     pub engine: Option<String>,
 
@@ -505,7 +505,7 @@ pub enum Commands {
         /// Path to audio file
         file: std::path::PathBuf,
 
-        /// Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere
+        /// Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere, openvino
         #[arg(long, value_name = "ENGINE")]
         engine: Option<String>,
     },
@@ -1125,6 +1125,21 @@ pub enum SetupAction {
         disable: bool,
 
         /// Show current backend status
+        #[arg(long)]
+        status: bool,
+    },
+
+    /// Manage NPU acceleration (Intel NPU via OpenVINO)
+    Npu {
+        /// Enable NPU acceleration (set engine to OpenVINO, download model if needed)
+        #[arg(long)]
+        enable: bool,
+
+        /// Disable NPU acceleration (revert engine to Whisper)
+        #[arg(long)]
+        disable: bool,
+
+        /// Show NPU hardware and configuration status
         #[arg(long)]
         status: bool,
     },

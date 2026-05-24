@@ -3,10 +3,10 @@
 use crate::setup::binary::{self, Acceleration, EngineFamily, InstallKind, Inventory, Variant};
 use std::path::Path;
 
+use super::advanced_section::AdvancedState;
 use super::audio::AudioState;
 use super::engine::EngineState;
 use super::hotkey::HotkeyState;
-use super::advanced_section::AdvancedState;
 use super::meeting_section::MeetingState;
 use super::notifications_section::NotificationsState;
 use super::osd_section::OsdState;
@@ -30,7 +30,10 @@ pub enum Action {
     SwitchVariant(Variant),
     /// Run `voxtype setup model <model>` to download a missing model. The
     /// engine name is included only for human-readable feedback.
-    DownloadModel { engine: String, model: String },
+    DownloadModel {
+        engine: String,
+        model: String,
+    },
     /// Engine save needed BOTH a binary swap and a model download. Run them
     /// in order — the symlink swap first so the post-download daemon
     /// restart picks the right binary.
@@ -243,10 +246,7 @@ impl App {
         self.sidebar_focused = true;
         // Keep cursor in sync with the active section so the user lands on the
         // currently-open section when they Tab back to the sidebar.
-        if let Some(idx) = Section::ALL
-            .iter()
-            .position(|s| *s == self.current_section)
-        {
+        if let Some(idx) = Section::ALL.iter().position(|s| *s == self.current_section) {
             self.sidebar_cursor = idx;
         }
     }
@@ -388,10 +388,7 @@ impl App {
         result: Result<(), String>,
     ) {
         let (success, message) = match result {
-            Ok(()) => (
-                true,
-                format!("Downloaded {} model `{}`.", engine, model),
-            ),
+            Ok(()) => (true, format!("Downloaded {} model `{}`.", engine, model)),
             Err(e) => (false, format!("Download `{}`: {}", model, e)),
         };
         self.last_switch = Some(SwitchOutcome { success, message });
@@ -427,11 +424,9 @@ fn detect_missing_model() -> Option<MissingModel> {
     let cfg = config::load_config(None).ok()?;
     let dir = config::Config::models_dir();
     let (engine_name, model, setup_command) = match cfg.engine {
-        config::TranscriptionEngine::Whisper => (
-            "whisper",
-            cfg.whisper.model.clone(),
-            "voxtype setup model",
-        ),
+        config::TranscriptionEngine::Whisper => {
+            ("whisper", cfg.whisper.model.clone(), "voxtype setup model")
+        }
         config::TranscriptionEngine::Parakeet => (
             "parakeet",
             cfg.parakeet
@@ -483,6 +478,9 @@ fn detect_missing_model() -> Option<MissingModel> {
         // Cohere — checked but model layout differs by rc/0.7.0; skip the
         // disk probe rather than emit a false-positive missing warning.
         config::TranscriptionEngine::Cohere => return None,
+        // OpenVINO models are stored as multi-file IR directories; skip the
+        // generic probe here until the TUI grows engine-specific validation.
+        config::TranscriptionEngine::OpenVino => return None,
     };
 
     if model.is_empty() {

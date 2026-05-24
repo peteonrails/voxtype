@@ -91,7 +91,8 @@ fn send_macos_native(title: &str, body: &str, engine: Option<TranscriptionEngine
         | TranscriptionEngine::Paraformer
         | TranscriptionEngine::Dolphin
         | TranscriptionEngine::Omnilingual
-        | TranscriptionEngine::Cohere => None,
+        | TranscriptionEngine::Cohere
+        | TranscriptionEngine::OpenVino => None,
     });
 
     for notifier in notifier_paths {
