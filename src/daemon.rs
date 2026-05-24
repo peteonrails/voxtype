@@ -357,25 +357,72 @@ fn cleanup_bool_override(name: &str) {
 
 // === Meeting Mode IPC ===
 
-/// Check for meeting start command (via file trigger)
-fn check_meeting_start() -> Option<Option<String>> {
-    let start_file = Config::runtime_dir().join("meeting_start");
-    if start_file.exists() {
-        // Read optional title from file content
-        let title = std::fs::read_to_string(&start_file).ok().and_then(|s| {
-            let trimmed = s.trim();
+/// A pending meeting-start trigger with optional title and diarization override.
+struct MeetingStartTrigger {
+    title: Option<String>,
+    diarization: Option<String>,
+}
+
+/// Read a file and return its trimmed contents, or None if missing or empty.
+///
+/// Logs read failures so transient FS / permission errors aren't silent: a
+/// trigger file existing but being unreadable previously looked identical to
+/// "no file" and would then be consumed by the caller's remove_file.
+fn read_trimmed_nonempty(path: &std::path::Path) -> Option<String> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => {
+            let trimmed = contents.trim();
             if trimmed.is_empty() {
                 None
             } else {
                 Some(trimmed.to_string())
             }
-        });
-        // Remove the file to acknowledge the command
-        let _ = std::fs::remove_file(&start_file);
-        Some(title)
-    } else {
-        None
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            tracing::warn!(path = %path.display(), error = %err, "Failed to read IPC trigger file");
+            None
+        }
     }
+}
+
+/// Allowed diarization backend override values from the CLI handler. Kept in
+/// sync with the `value_parser` list on `MeetingAction::Start::diarization`.
+const ALLOWED_DIARIZATION_OVERRIDES: &[&str] = &["simple", "ml"];
+
+/// Check for meeting start command (via file trigger)
+fn check_meeting_start() -> Option<MeetingStartTrigger> {
+    let runtime_dir = Config::runtime_dir();
+    let start_file = runtime_dir.join("meeting_start");
+    if !start_file.exists() {
+        return None;
+    }
+
+    let title = read_trimmed_nonempty(&start_file);
+
+    // Diarization override is written by the CLI handler before the start
+    // trigger. Clap validates the CLI arg, but the daemon trusts a runtime
+    // file written by an arbitrary process, so re-check against the allowlist
+    // here and drop unknown values with a warning.
+    let diarization_file = runtime_dir.join("meeting_start_diarization");
+    let diarization = read_trimmed_nonempty(&diarization_file).and_then(|value| {
+        if ALLOWED_DIARIZATION_OVERRIDES.contains(&value.as_str()) {
+            Some(value)
+        } else {
+            tracing::warn!(
+                value = %value,
+                "Ignoring unknown diarization override; expected one of {:?}",
+                ALLOWED_DIARIZATION_OVERRIDES
+            );
+            None
+        }
+    });
+    let _ = std::fs::remove_file(&diarization_file);
+
+    // Remove the start trigger last to acknowledge the command.
+    let _ = std::fs::remove_file(&start_file);
+
+    Some(MeetingStartTrigger { title, diarization })
 }
 
 /// Check for meeting stop command (via file trigger)
@@ -416,6 +463,7 @@ fn cleanup_meeting_files() {
     let runtime_dir = Config::runtime_dir();
     for name in &[
         "meeting_start",
+        "meeting_start_diarization",
         "meeting_stop",
         "meeting_pause",
         "meeting_resume",
@@ -1163,22 +1211,32 @@ impl Daemon {
     }
 
     /// Start a new meeting
-    async fn start_meeting(&mut self, title: Option<String>) -> Result<()> {
+    async fn start_meeting(
+        &mut self,
+        title: Option<String>,
+        diarization_override: Option<String>,
+    ) -> Result<()> {
         if self.meeting_daemon.is_some() {
             tracing::warn!("Meeting already in progress");
             return Ok(());
         }
 
+        // CLI override (validated against ["simple", "ml"] by clap) wins over config.
+        let backend = diarization_override
+            .clone()
+            .unwrap_or_else(|| self.config.meeting.diarization.backend.clone());
+
         // Create meeting config from main config
         tracing::debug!(
-            "Diarization config: enabled={}, backend={}",
+            "Diarization config: enabled={}, backend={} (override={:?})",
             self.config.meeting.diarization.enabled,
-            self.config.meeting.diarization.backend
+            backend,
+            diarization_override
         );
         let diarization_config = if self.config.meeting.diarization.enabled {
             Some(meeting::diarization::DiarizationConfig {
                 enabled: true,
-                backend: self.config.meeting.diarization.backend.clone(),
+                backend,
                 max_speakers: self.config.meeting.diarization.max_speakers,
                 min_segment_ms: self.config.meeting.diarization.min_segment_ms,
                 model_path: self.config.meeting.diarization.model_path.clone(),
@@ -3579,10 +3637,10 @@ impl Daemon {
                 // Poll for meeting commands (file-based IPC)
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {
                     // Check for meeting start command
-                    if let Some(title) = check_meeting_start() {
+                    if let Some(trigger) = check_meeting_start() {
                         if self.config.meeting.enabled && self.meeting_daemon.is_none() {
                             tracing::debug!("Meeting start requested via file trigger");
-                            if let Err(e) = self.start_meeting(title).await {
+                            if let Err(e) = self.start_meeting(trigger.title, trigger.diarization).await {
                                 tracing::error!("Failed to start meeting: {}", e);
                             }
                         } else if !self.config.meeting.enabled {
