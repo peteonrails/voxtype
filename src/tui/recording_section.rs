@@ -176,10 +176,11 @@ fn guidance_for_field(state: &RecordingState) -> Vec<Line<'_>> {
             Line::from(""),
             Line::from(concat!(
                 "When enabled, normal batch dictation requests are queued while ",
-                "a transcription is already in progress."
+                "a previous normal batch is transcribing or outputting."
             )),
             Line::from(""),
             Line::from("The queue is FIFO and applies only to push-to-talk batch dictation."),
+            Line::from("The active live recording reserves one future slot after start."),
             Line::from(""),
             Line::from("Turn it on if:"),
             Line::from(concat!(
@@ -190,14 +191,18 @@ fn guidance_for_field(state: &RecordingState) -> Vec<Line<'_>> {
             Line::from(
                 "  - You use eager processing or streaming modes and want immediate cancellation/ordering behavior to remain unchanged.",
             ),
+            Line::from(
+                "  - Queueing is ignored with eager/streaming modes, and the daemon logs a startup warning.",
+            ),
         ],
         Field::QueueSize => vec![
             heading("Maximum queued recordings"),
             Line::from(""),
-            Line::from("How many completed recordings can wait for their turn."),
+            Line::from("How many stopped recordings can wait, transcribe, or output."),
+            Line::from("The active live recording does not count against this limit."),
             Line::from("Set a larger value to allow more queued recordings."),
             Line::from(""),
-            Line::from("Set to 0 to disable queueing even when queue-enabled is true."),
+            Line::from("Set to 0 or 1 to disable queueing even when queue-enabled is true."),
             Line::from(Span::styled(
                 "If the queue is full, new batch recordings are rejected.",
                 Style::default().fg(Color::Gray),

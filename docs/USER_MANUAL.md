@@ -160,7 +160,7 @@ sets the window class to `voxtype` so compositors can float it.
 | VAD | Silero VAD enable, backend (auto/energy/whisper), threshold |
 | Meeting | Meeting mode enable, speaker diarization, audio source (mic/system/both) |
 | Notifications | Desktop notifications for recording start/stop and transcription |
-| Recording | Queue normal batch recordings while transcription is in progress |
+| Recording | Queue normal batch recordings while transcribing or outputting |
 | Waybar | Status integration: icon theme + per-state icon overrides |
 | Advanced | GPU isolation, on-demand model loading, flash attention, eager processing, GPU device |
 
@@ -327,7 +327,11 @@ The model must be configured as `model`, `secondary_model`, or listed in `availa
 ```bash
 voxtype record start --clipboard  # Output to clipboard instead of typing
 voxtype record toggle --paste     # Use paste mode for this recording
+voxtype record stop --file=out.txt # Override output path for this stopped recording
 ```
+
+When queueing is active, stop-time output overrides are applied before the
+stopped recording is queued.
 
 **File output:** The `--file` flag writes transcription to a file instead of typing or using clipboard. Use `--file=path.txt` for a specific file, or `--file` alone to use `file_path` from config. By default, the file is overwritten on each transcription. To append instead, set `file_mode = "append"` in your config file:
 
@@ -414,11 +418,13 @@ translate = false
 # on_demand_loading = true
 
 [recording]
-# Queue normal batch recordings while a transcription is active.
-# Set to false for immediate failure/ignore behavior (default).
+# Queue normal batch recordings while a previous normal batch is transcribing or
+# outputting.
 # queue_enabled = false
 
-# Maximum number of queued recordings. 0 disables queueing.
+# Maximum stopped recordings waiting, transcribing, or outputting.
+# The active live recording does not count; it reserves one future slot after
+# start. 0 or 1 disables queueing; minimum enabled value is 2.
 # queue_size = 5
 
 [output]
@@ -722,7 +728,13 @@ If you use a multi-key combination (e.g., `SUPER+CTRL+X`) and release keys slowl
 
 ## Canceling Transcription
 
-You can cancel recording or transcription at any time. When canceled, no text is output.
+You can cancel recording/transcription at any time.
+
+If a live recording is active, canceling removes only that live recording and lets
+previous queued or output-ready jobs continue.
+
+If no live recording is active, cancellation keeps the existing behavior for
+active transcription/output.
 
 ### With Compositor Keybindings
 
@@ -764,8 +776,10 @@ Any valid evdev key name works. Common choices:
 
 ### What Gets Canceled
 
-- **During recording**: Audio capture stops, recorded audio is discarded
-- **During transcription**: Transcription is aborted, no text is output
+- **During recording**: Active live audio capture stops and is discarded. Previous
+  queued or output-ready jobs can continue.
+- **With no live recording**: Cancellation keeps current behavior for active
+  transcription/output; transcription can be aborted before output.
 - **While idle**: No effect
 
 ---
@@ -1501,10 +1515,12 @@ Then record for 10+ seconds. You should see log messages like:
 
 Queueing applies to **normal batch dictation** only (push-to-talk recordings that
 produce one transcript per trigger). It does not change eager or streaming modes.
+When queueing is enabled with eager/streaming, it is ignored and a startup warning
+is printed.
 
 ### What It Does
 
-- Keep up with fast consecutive recordings when transcription falls behind.
+- Keep up with fast consecutive recordings when transcription or output falls behind.
 - Preserve order by processing queued recordings in FIFO order.
 - Use a fixed maximum queue length to avoid unbounded memory growth.
 
@@ -1512,12 +1528,19 @@ produce one transcript per trigger). It does not change eager or streaming modes
 
 Set `queue_enabled = true` to allow queueing. When enabled:
 
-1. A recording that finishes while another is still transcribing is enqueued.
-2. Up to `queue_size` waiting recordings are accepted.
+1. A recording that finishes while another is still transcribing or outputting is
+   enqueued.
+2. Up to `queue_size` stopped recordings can wait, transcribe, or output.
 3. If the queue is full, additional recordings are rejected until space is free.
-4. As each transcription finishes, the next queued recording is processed.
+4. As each transcription/output finishes, the next queued recording is processed.
 
-Setting `queue_size = 0` disables queueing even when `queue_enabled` is on.
+The active live recording does not count against `queue_size`; it reserves one
+future slot immediately after start.
+
+When eager processing or streaming mode is enabled, queueing is ignored and
+the daemon logs a startup warning.
+
+Setting `queue_size = 0` or `1` disables queueing even when `queue_enabled` is on.
 
 ### Configuration
 
