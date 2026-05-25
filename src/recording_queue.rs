@@ -29,6 +29,7 @@ pub(crate) struct RecordingMetadata {
 
 impl RecordingMetadata {
     /// Construct metadata from explicit runtime values at recording start.
+    #[allow(clippy::too_many_arguments)]
     pub fn started(
         model_override: Option<String>,
         profile_override: Option<String>,
@@ -66,8 +67,6 @@ pub(crate) enum RecordingStage {
     Waiting,
     /// Running transcription.
     Transcribing,
-    /// Running output.
-    Outputting,
 }
 
 /// A stopped recording kept in queue.
@@ -112,6 +111,7 @@ impl QueueConfig {
 pub(crate) struct RecordingQueue {
     config: QueueConfig,
     queue: VecDeque<QueuedStoppedRecording>,
+    processing_count: usize,
     /// There is at most one active live capture reserved for one future queue slot.
     live_recording_reserved: bool,
 }
@@ -121,6 +121,7 @@ impl RecordingQueue {
         Self {
             config,
             queue: VecDeque::new(),
+            processing_count: 0,
             live_recording_reserved: false,
         }
     }
@@ -133,6 +134,10 @@ impl RecordingQueue {
         self.queue.len()
     }
 
+    pub fn stopped_count(&self) -> usize {
+        self.queue.len() + self.processing_count
+    }
+
     pub fn can_start_recording(&self) -> bool {
         if !self.is_enabled() {
             return false;
@@ -140,10 +145,10 @@ impl RecordingQueue {
         if self.live_recording_reserved {
             return false;
         }
-        // The active live recording reserves one additional slot not yet represented
-        // in the queue. That means we can still start when the current stopped queue
-        // length is equal to the configured queue size.
-        self.queue.len() <= self.config.queue_size
+        // The active live recording reserves one additional future slot.
+        // Start is allowed when stopped waiting/processing work is at capacity,
+        // but not after that reservation has been converted into a stopped item.
+        self.stopped_count() <= self.config.queue_size
     }
 
     pub fn start_recording(&mut self) -> bool {
@@ -154,14 +159,18 @@ impl RecordingQueue {
         true
     }
 
+    pub fn release_live_recording(&mut self) {
+        self.live_recording_reserved = false;
+    }
+
     pub fn can_queue_stopped_recording(&self) -> bool {
         if !self.is_enabled() || !self.live_recording_reserved {
             return false;
         }
-        // When a live slot is reserved, it can be converted into one queue slot.
-        // This allows a single recording to be active while the stopped queue is already
-        // at configured size.
-        self.queue.len() <= self.config.queue_size
+        // When a live slot is reserved, it can be converted into one stopped
+        // item. This allows a single active recording while stopped work is
+        // already at configured capacity.
+        self.stopped_count() <= self.config.queue_size
     }
 
     pub fn queue_stopped_recording(&mut self, item: QueuedStoppedRecording) -> bool {
@@ -174,10 +183,21 @@ impl RecordingQueue {
         true
     }
 
+    /// Cancel a reserved live recording slot when a live recording is aborted
+    /// before stop is reached (e.g. explicit cancel).
+    pub fn cancel_active_recording(&mut self) {
+        self.live_recording_reserved = false;
+    }
+
     pub fn pop_next_for_transcription(&mut self) -> Option<QueuedStoppedRecording> {
         let mut item = self.queue.pop_front()?;
         item.stage = RecordingStage::Transcribing;
+        self.processing_count += 1;
         Some(item)
+    }
+
+    pub fn finish_processing(&mut self) {
+        self.processing_count = self.processing_count.saturating_sub(1);
     }
 }
 
@@ -225,6 +245,7 @@ mod tests {
         )));
 
         assert_eq!(queue.queued_count(), 1);
+        assert_eq!(queue.stopped_count(), 1);
         assert!(queue.can_start_recording());
         assert!(queue.start_recording());
         assert!(queue.can_queue_stopped_recording());
@@ -235,7 +256,46 @@ mod tests {
         )));
 
         assert_eq!(queue.queued_count(), 2);
+        assert_eq!(queue.stopped_count(), 2);
         assert!(!queue.can_start_recording());
+    }
+
+    #[test]
+    fn processing_job_counts_toward_capacity_until_finished() {
+        let mut queue = RecordingQueue::new(QueueConfig::new(true, 1));
+
+        assert!(queue.start_recording());
+        assert!(queue.queue_stopped_recording(QueuedStoppedRecording::new(
+            base_metadata("first", 1, 2),
+            vec![0.1],
+        )));
+
+        let _processing = queue.pop_next_for_transcription().unwrap();
+        assert_eq!(queue.queued_count(), 0);
+        assert_eq!(queue.stopped_count(), 1);
+        assert!(queue.start_recording());
+        assert!(queue.queue_stopped_recording(QueuedStoppedRecording::new(
+            base_metadata("second", 3, 4),
+            vec![0.2],
+        )));
+        assert_eq!(queue.stopped_count(), 2);
+        assert!(!queue.can_start_recording());
+
+        queue.finish_processing();
+        assert_eq!(queue.stopped_count(), 1);
+        assert!(queue.can_start_recording());
+    }
+
+    #[test]
+    fn released_live_recording_does_not_consume_capacity() {
+        let mut queue = RecordingQueue::new(QueueConfig::new(true, 1));
+
+        assert!(queue.start_recording());
+        assert!(!queue.can_start_recording());
+        queue.release_live_recording();
+
+        assert!(queue.can_start_recording());
+        assert_eq!(queue.stopped_count(), 0);
     }
 
     #[test]
@@ -272,10 +332,11 @@ mod tests {
         );
         assert_eq!(first.stage, RecordingStage::Transcribing);
         assert_eq!(second.stage, RecordingStage::Transcribing);
+        assert_eq!(queue.stopped_count(), 2);
 
-        let mut completed = first;
-        completed.stage = RecordingStage::Outputting;
-        assert_eq!(completed.stage, RecordingStage::Outputting);
+        queue.finish_processing();
+        queue.finish_processing();
+        assert_eq!(queue.stopped_count(), 0);
     }
 
     #[test]
