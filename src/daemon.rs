@@ -1709,6 +1709,10 @@ impl Daemon {
             && !self.config.streaming_active()
     }
 
+    fn can_start_recording_in_state(&self, state: &State) -> bool {
+        state.is_idle() || self.can_use_queue_for_new_recording(state)
+    }
+
     fn can_use_queue_for_new_recording(&self, state: &State) -> bool {
         if !self.queueing_effective() {
             return false;
@@ -1717,8 +1721,16 @@ impl Daemon {
         state.is_idle() || matches!(state, State::Transcribing { .. } | State::Outputting { .. })
     }
 
+    fn can_queue_while_busy(&self, state: &State) -> bool {
+        self.can_use_queue_for_new_recording(state) && self.recording_queue.can_start_recording()
+    }
+
     fn queued_live_recording_active(&self) -> bool {
         self.queueing_effective() && self.active_recording_metadata.is_some()
+    }
+
+    fn should_drain_deferred_output(&self, state: &State) -> bool {
+        !state.is_recording()
     }
 
     fn mark_queued_recording_stopped(&mut self, state: &mut State) {
@@ -1882,6 +1894,10 @@ impl Daemon {
         log_context: &str,
     ) -> bool {
         if self.queueing_effective() {
+            if !state.is_idle() && !self.can_queue_while_busy(state) {
+                self.reject_recording_start("Recording queue is full").await;
+                return false;
+            }
             if !self.recording_queue.start_recording() {
                 self.reject_recording_start("Recording queue is full").await;
                 return false;
@@ -2700,7 +2716,7 @@ impl Daemon {
         state: &mut State,
         transcriber_preloaded: &Option<Arc<dyn Transcriber>>,
     ) {
-        if !state.is_recording() {
+        if self.should_drain_deferred_output(state) {
             if let Some(output) = self.deferred_output.take() {
                 self.output_completed_batch(state, output).await;
                 self.recording_queue.finish_processing();
@@ -3458,7 +3474,7 @@ impl Daemon {
                         (HotkeyEvent::Pressed { model_override, profile_override }, ActivationMode::PushToTalk) => {
                             tracing::debug!("Received HotkeyEvent::Pressed (push-to-talk), state.is_idle() = {}, model_override = {:?}, profile_override = {:?}",
                                 state.is_idle(), model_override, profile_override);
-                            if state.is_idle() || self.can_use_queue_for_new_recording(&state) {
+                            if self.can_start_recording_in_state(&state) {
                                 self.start_recording_session(
                                     &mut state,
                                     &mut audio_capture,
@@ -3576,7 +3592,7 @@ impl Daemon {
                             tracing::debug!("Received HotkeyEvent::Pressed (toggle), state.is_idle() = {}, state.is_recording() = {}, model_override = {:?}, profile_override = {:?}",
                                 state.is_idle(), state.is_recording(), model_override, profile_override);
 
-                            if state.is_idle() || self.can_use_queue_for_new_recording(&state) {
+                            if self.can_start_recording_in_state(&state) {
                                 self.start_recording_session(
                                     &mut state,
                                     &mut audio_capture,
@@ -4086,7 +4102,7 @@ impl Daemon {
                 // Handle SIGUSR1 - start recording (for compositor keybindings)
                 _ = sigusr1.recv() => {
                     tracing::debug!("Received SIGUSR1 (start recording)");
-                    if state.is_idle() || self.can_use_queue_for_new_recording(&state) {
+                    if self.can_start_recording_in_state(&state) {
                         let model_override = read_model_override();
                         self.start_recording_session(
                             &mut state,
@@ -4594,6 +4610,7 @@ impl Daemon {
 mod tests {
     use super::*;
     use std::fs;
+    use std::time::{Instant, SystemTime};
     use tempfile::TempDir;
 
     // Helper to create a test runtime directory and set it up
@@ -4607,6 +4624,22 @@ mod tests {
         // We can't easily mock Config::runtime_dir(), so we test the file operations
         // directly using the same logic as the functions under test
         f(runtime_dir)
+    }
+
+    fn queue_transcribing_state() -> State {
+        State::Transcribing {
+            audio: vec![0.1, 0.2, 0.3],
+        }
+    }
+
+    fn queue_outputting_state() -> State {
+        State::Outputting {
+            text: "existing output".to_string(),
+        }
+    }
+
+    fn queue_recording_metadata() -> RecordingMetadata {
+        RecordingMetadata::started(None, None, None, None, None, None, None, SystemTime::now())
     }
 
     #[test]
@@ -4911,5 +4944,141 @@ mod tests {
             assert!(!cleaned, "Lockfile with running PID should not be cleaned");
             assert!(lock_path.exists(), "Lockfile should still exist");
         });
+    }
+
+    #[test]
+    fn test_can_start_recording_when_queue_enabled_in_busy_states() {
+        let mut config = Config::default();
+        config.recording.queue_enabled = true;
+        config.recording.queue_size = 3;
+
+        let daemon = Daemon::new(config, None);
+
+        assert!(daemon.can_start_recording_in_state(&queue_transcribing_state()));
+        assert!(daemon.can_start_recording_in_state(&queue_outputting_state()));
+    }
+
+    #[test]
+    fn test_busy_start_disabled_for_eager_streaming_or_zero_queue() {
+        let mut config = Config::default();
+        config.recording.queue_enabled = true;
+        config.recording.queue_size = 3;
+        config.whisper.eager_processing = true;
+
+        let eager = Daemon::new(config, None);
+        assert!(!eager.can_start_recording_in_state(&queue_transcribing_state()));
+        assert!(!eager.can_start_recording_in_state(&queue_outputting_state()));
+
+        let mut stream_config = Config::default();
+        stream_config.recording.queue_enabled = true;
+        stream_config.recording.queue_size = 3;
+        stream_config.engine = crate::config::TranscriptionEngine::Soniox;
+        stream_config.soniox = Some(crate::config::SonioxConfig::default());
+
+        let streaming = Daemon::new(stream_config, None);
+        assert!(!streaming.can_start_recording_in_state(&queue_transcribing_state()));
+        assert!(!streaming.can_start_recording_in_state(&queue_outputting_state()));
+
+        let mut queue_zero = Config::default();
+        queue_zero.recording.queue_enabled = true;
+        queue_zero.recording.queue_size = 0;
+
+        let disabled = Daemon::new(queue_zero, None);
+        assert!(!disabled.can_start_recording_in_state(&queue_transcribing_state()));
+        assert!(!disabled.can_start_recording_in_state(&queue_outputting_state()));
+    }
+
+    #[test]
+    fn test_queue_full_blocks_new_live_recording() {
+        let mut active_reservation = Config::default();
+        active_reservation.recording.queue_enabled = true;
+        active_reservation.recording.queue_size = 2;
+        let mut active_daemon = Daemon::new(active_reservation, None);
+        let state = queue_transcribing_state();
+        assert!(active_daemon.can_queue_while_busy(&state));
+        assert!(active_daemon.recording_queue.start_recording());
+        assert!(!active_daemon.can_queue_while_busy(&state));
+        active_daemon.recording_queue.release_live_recording();
+
+        let mut stopped_full = Config::default();
+        stopped_full.recording.queue_enabled = true;
+        stopped_full.recording.queue_size = 1;
+        let mut stopped_daemon = Daemon::new(stopped_full, None);
+
+        assert!(stopped_daemon.recording_queue.start_recording());
+        assert!(stopped_daemon.recording_queue.queue_stopped_recording(
+            QueuedStoppedRecording::new(queue_recording_metadata(), vec![0.1],)
+        ));
+
+        assert!(stopped_daemon.recording_queue.start_recording());
+        assert!(stopped_daemon.recording_queue.queue_stopped_recording(
+            QueuedStoppedRecording::new(queue_recording_metadata(), vec![0.2],)
+        ));
+        assert_eq!(stopped_daemon.recording_queue.stopped_count(), 2);
+        assert!(!stopped_daemon.can_queue_while_busy(&state));
+    }
+
+    #[test]
+    fn test_queued_live_recording_active_only_tracks_live_capture() {
+        let mut config = Config::default();
+        config.recording.queue_enabled = true;
+        config.recording.queue_size = 1;
+        let mut daemon = Daemon::new(config, None);
+
+        assert!(!daemon.queued_live_recording_active());
+
+        daemon.active_transcription_metadata = Some(queue_recording_metadata());
+        assert!(
+            !daemon.queued_live_recording_active(),
+            "queued transcription alone should keep normal transcription cancel behavior"
+        );
+
+        daemon.active_recording_metadata = Some(queue_recording_metadata());
+        assert!(daemon.queued_live_recording_active());
+    }
+
+    #[tokio::test]
+    async fn test_deferred_output_waits_while_recording_and_flushes_after_cancel() {
+        let output_dir = TempDir::new().unwrap();
+        let output_file = output_dir.path().join("queued_output.txt");
+
+        let mut config = Config::default();
+        config.recording.queue_enabled = true;
+        config.recording.queue_size = 1;
+        config.output.mode = OutputMode::File;
+        config.output.file_path = Some(output_file.clone());
+
+        let mut daemon = Daemon::new(config, None);
+        assert!(daemon.recording_queue.start_recording());
+        daemon.active_recording_metadata = Some(queue_recording_metadata());
+        daemon.deferred_output = Some(CompletedBatchOutput {
+            text: "queue deferred".to_string(),
+            output_config: daemon.config.output.clone(),
+            file_output_path: Some(output_file.clone()),
+            file_mode: FileMode::Overwrite,
+        });
+        daemon.active_transcription_metadata = Some(queue_recording_metadata());
+
+        let mut state = State::Recording {
+            started_at: Instant::now(),
+            model_override: None,
+        };
+
+        daemon.drain_recording_queue(&mut state, &None).await;
+        assert!(
+            !output_file.exists(),
+            "deferred output should not emit while recording"
+        );
+
+        daemon.recording_queue.cancel_active_recording();
+        daemon.active_recording_metadata = None;
+        state = State::Idle;
+
+        daemon.drain_recording_queue(&mut state, &None).await;
+        assert_eq!(
+            std::fs::read_to_string(&output_file).unwrap(),
+            "queue deferred\n"
+        );
+        assert!(matches!(state, State::Idle));
     }
 }
