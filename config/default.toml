@@ -236,3 +236,10 @@ icon_theme = "emoji"
 # recording = "🎤"
 # transcribing = "⏳"
 # stopped = ""
+
+[recording]
+# Queue normal-batch recordings that arrive while transcription is active.
+# queue_enabled = false
+# Maximum number of recordings to queue before new requests are rejected.
+# Set to 0 to disable queueing.
+# queue_size = 5

@@ -18,6 +18,7 @@ Voxtype is a push-to-talk voice-to-text tool for Linux. Optimized for Wayland, w
 - [Remote Whisper Servers](#remote-whisper-servers)
 - [CLI Backend (whisper-cli)](#cli-backend-whisper-cli)
 - [Eager Processing](#eager-processing)
+- [Recording Queue](#recording-queue)
 - [Output Modes](#output-modes)
 - [Post-Processing with LLMs](#post-processing-with-llms)
 - [Profiles](#profiles)
@@ -159,6 +160,7 @@ sets the window class to `voxtype` so compositors can float it.
 | VAD | Silero VAD enable, backend (auto/energy/whisper), threshold |
 | Meeting | Meeting mode enable, speaker diarization, audio source (mic/system/both) |
 | Notifications | Desktop notifications for recording start/stop and transcription |
+| Recording | Queue normal batch recordings while transcription is in progress |
 | Waybar | Status integration: icon theme + per-state icon overrides |
 | Advanced | GPU isolation, on-demand model loading, flash attention, eager processing, GPU device |
 
@@ -410,6 +412,14 @@ translate = false
 
 # Load model on-demand (saves memory/VRAM, slight delay per recording)
 # on_demand_loading = true
+
+[recording]
+# Queue normal batch recordings while a transcription is active.
+# Set to false for immediate failure/ignore behavior (default).
+# queue_enabled = false
+
+# Maximum number of queued recordings. 0 disables queueing.
+# queue_size = 5
 
 [output]
 # Primary output mode
@@ -1484,6 +1494,37 @@ Then record for 10+ seconds. You should see log messages like:
 [DEBUG] Chunk 0 completed: "This is the first part of my recording"
 [DEBUG] Chunk 1 completed: "the first part of my recording and here is more"
 [DEBUG] Combined eager chunks with deduplication
+```
+
+---
+## Recording Queue
+
+Queueing applies to **normal batch dictation** only (push-to-talk recordings that
+produce one transcript per trigger). It does not change eager or streaming modes.
+
+### What It Does
+
+- Keep up with fast consecutive recordings when transcription falls behind.
+- Preserve order by processing queued recordings in FIFO order.
+- Use a fixed maximum queue length to avoid unbounded memory growth.
+
+### Behavior
+
+Set `queue_enabled = true` to allow queueing. When enabled:
+
+1. A recording that finishes while another is still transcribing is enqueued.
+2. Up to `queue_size` waiting recordings are accepted.
+3. If the queue is full, additional recordings are rejected until space is free.
+4. As each transcription finishes, the next queued recording is processed.
+
+Setting `queue_size = 0` disables queueing even when `queue_enabled` is on.
+
+### Configuration
+
+```toml
+[recording]
+queue_enabled = true
+queue_size = 5
 ```
 
 ---

@@ -12,6 +12,7 @@ use super::meeting_section::MeetingState;
 use super::notifications_section::NotificationsState;
 use super::osd_section::OsdState;
 use super::output_section::OutputState;
+use super::recording_section::RecordingState;
 use super::section::Section;
 use super::text_section::TextState;
 use super::vad_section::VadState;
@@ -104,6 +105,7 @@ pub struct App {
     pub engine: Option<EngineState>,
     pub output: Option<OutputState>,
     pub text: Option<TextState>,
+    pub recording: Option<RecordingState>,
     pub vad: Option<VadState>,
     pub meeting: Option<MeetingState>,
     pub notifications: Option<NotificationsState>,
@@ -187,6 +189,7 @@ impl App {
             engine: None,
             output: None,
             text: None,
+            recording: None,
             vad: None,
             meeting: None,
             notifications: None,
@@ -213,6 +216,9 @@ impl App {
             }
             Section::Text if self.text.is_none() => {
                 self.text = TextState::load().ok();
+            }
+            Section::Recording if self.recording.is_none() => {
+                self.recording = RecordingState::load().ok();
             }
             Section::Vad if self.vad.is_none() => {
                 self.vad = VadState::load().ok();
@@ -308,6 +314,7 @@ impl App {
             || self.engine.is_some()
             || self.output.is_some()
             || self.text.is_some()
+            || self.recording.is_some()
             || self.vad.is_some()
             || self.meeting.is_some()
             || self.notifications.is_some()
@@ -341,6 +348,10 @@ impl App {
             count += 1;
         }
         if let Some(s) = self.text.as_mut() {
+            s.save();
+            count += 1;
+        }
+        if let Some(s) = self.recording.as_mut() {
             s.save();
             count += 1;
         }
