@@ -27,7 +27,7 @@ use crate::state::{ChunkResult, State};
 use crate::text::TextProcessor;
 use crate::transcribe::{StreamHandle, StreamingEvent, Transcriber};
 use pidlock::Pidlock;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -194,6 +194,15 @@ enum OutputOverride {
     Mode(OutputMode),
     FileWithPath(PathBuf),
 }
+
+const RECORDING_START_OVERRIDE_FILES: &[&str] = &[
+    "output_mode_override",
+    "model_override",
+    "profile_override",
+    "auto_submit_override",
+    "shift_enter_override",
+    "smart_auto_submit_override",
+];
 
 /// Read and consume the output mode override file
 /// Format: "type", "clipboard", "paste", "file", or "file:/path/to/file.txt"
@@ -594,6 +603,12 @@ fn read_model_override() -> Option<String> {
 fn cleanup_model_override() {
     let override_file = Config::runtime_dir().join("model_override");
     let _ = std::fs::remove_file(&override_file);
+}
+
+fn cleanup_recording_start_overrides_in(runtime_dir: &Path) {
+    for file_name in RECORDING_START_OVERRIDE_FILES {
+        let _ = std::fs::remove_file(runtime_dir.join(file_name));
+    }
 }
 
 /// Result type for transcription task
@@ -1740,12 +1755,7 @@ impl Daemon {
     }
 
     fn clear_recording_start_overrides() {
-        cleanup_output_mode_override();
-        cleanup_model_override();
-        cleanup_profile_override();
-        cleanup_bool_override("auto_submit");
-        cleanup_bool_override("shift_enter");
-        cleanup_bool_override("smart_auto_submit");
+        cleanup_recording_start_overrides_in(&Config::runtime_dir());
     }
 
     fn metadata_from_overrides(
@@ -1778,11 +1788,15 @@ impl Daemon {
         )
     }
 
-    fn apply_stop_overrides_to_metadata(
-        &self,
+    fn apply_stop_overrides_to_metadata(&self, metadata: RecordingMetadata) -> RecordingMetadata {
+        Self::apply_output_override_to_metadata(metadata, read_output_mode_override())
+    }
+
+    fn apply_output_override_to_metadata(
         mut metadata: RecordingMetadata,
+        output_override: Option<OutputOverride>,
     ) -> RecordingMetadata {
-        match read_output_mode_override() {
+        match output_override {
             Some(OutputOverride::Mode(mode)) => {
                 metadata.output_mode_override = Some(mode);
                 metadata.output_file_path = None;
@@ -4609,9 +4623,34 @@ impl Daemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::fs;
     use std::time::{Instant, SystemTime};
     use tempfile::TempDir;
+
+    static RUNTIME_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     // Helper to create a test runtime directory and set it up
     fn with_test_runtime_dir<F, R>(f: F) -> R
@@ -4640,6 +4679,136 @@ mod tests {
 
     fn queue_recording_metadata() -> RecordingMetadata {
         RecordingMetadata::started(None, None, None, None, None, None, None, SystemTime::now())
+    }
+
+    #[test]
+    fn test_stop_time_output_override_updates_metadata_before_enqueue() {
+        let started_at = SystemTime::now();
+        let started_metadata = RecordingMetadata::started(
+            Some("model-a".to_string()),
+            Some("profile-a".to_string()),
+            Some(OutputMode::Clipboard),
+            Some(PathBuf::from("/tmp/start-output.txt")),
+            Some(true),
+            Some(false),
+            Some(true),
+            started_at,
+        );
+
+        let stop_file = PathBuf::from("/tmp/stop-output.txt");
+        let file_metadata = Daemon::apply_output_override_to_metadata(
+            started_metadata.clone(),
+            Some(OutputOverride::FileWithPath(stop_file.clone())),
+        );
+        assert_eq!(file_metadata.output_mode_override, Some(OutputMode::File));
+        assert_eq!(file_metadata.output_file_path, Some(stop_file));
+        assert_eq!(file_metadata.model_override.as_deref(), Some("model-a"));
+        assert_eq!(file_metadata.profile_override.as_deref(), Some("profile-a"));
+        assert_eq!(file_metadata.auto_submit_override, Some(true));
+        assert_eq!(file_metadata.shift_enter_override, Some(false));
+        assert_eq!(file_metadata.smart_auto_submit_override, Some(true));
+        assert_eq!(file_metadata.started_at, started_at);
+
+        let paste_metadata = Daemon::apply_output_override_to_metadata(
+            started_metadata.clone(),
+            Some(OutputOverride::Mode(OutputMode::Paste)),
+        );
+        assert_eq!(paste_metadata.output_mode_override, Some(OutputMode::Paste));
+        assert_eq!(paste_metadata.output_file_path, None);
+
+        let unchanged_metadata =
+            Daemon::apply_output_override_to_metadata(started_metadata.clone(), None);
+        assert_eq!(unchanged_metadata, started_metadata);
+    }
+
+    #[test]
+    fn test_recording_start_override_cleanup_removes_all_runtime_files() {
+        with_test_runtime_dir(|dir| {
+            for file_name in RECORDING_START_OVERRIDE_FILES {
+                fs::write(dir.join(file_name), "stale").unwrap();
+            }
+            let unrelated = dir.join("meeting_start");
+            fs::write(&unrelated, "keep").unwrap();
+
+            cleanup_recording_start_overrides_in(dir);
+
+            for file_name in RECORDING_START_OVERRIDE_FILES {
+                assert!(
+                    !dir.join(file_name).exists(),
+                    "{file_name} should be removed"
+                );
+            }
+            assert!(
+                unrelated.exists(),
+                "unrelated runtime triggers should remain"
+            );
+        });
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_rejected_recording_start_cleans_runtime_overrides() {
+        let _env_lock = RUNTIME_ENV_LOCK.lock().await;
+        let xdg_runtime = TempDir::new().unwrap();
+        let _xdg_guard = EnvVarGuard::set("XDG_RUNTIME_DIR", xdg_runtime.path());
+        let runtime_dir = Config::runtime_dir();
+        fs::create_dir_all(&runtime_dir).unwrap();
+        for file_name in RECORDING_START_OVERRIDE_FILES {
+            fs::write(runtime_dir.join(file_name), "stale").unwrap();
+        }
+
+        let daemon = Daemon::new(Config::default(), None);
+        daemon
+            .reject_recording_start("Recording queue is full")
+            .await;
+
+        for file_name in RECORDING_START_OVERRIDE_FILES {
+            assert!(
+                !runtime_dir.join(file_name).exists(),
+                "{file_name} should be removed"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_queued_result_handling_ignores_runtime_override_files() {
+        let _env_lock = RUNTIME_ENV_LOCK.lock().await;
+        let xdg_runtime = TempDir::new().unwrap();
+        let _xdg_guard = EnvVarGuard::set("XDG_RUNTIME_DIR", xdg_runtime.path());
+        let runtime_dir = Config::runtime_dir();
+        fs::create_dir_all(&runtime_dir).unwrap();
+        fs::write(runtime_dir.join("output_mode_override"), "type").unwrap();
+        fs::write(runtime_dir.join("auto_submit_override"), "false").unwrap();
+        fs::write(runtime_dir.join("shift_enter_override"), "false").unwrap();
+
+        let queued_file = xdg_runtime.path().join("queued-output.txt");
+        let mut config = Config::default();
+        config.output.mode = OutputMode::Type;
+        config.output.auto_submit = false;
+        config.output.shift_enter_newlines = false;
+        let mut daemon = Daemon::new(config, None);
+        let metadata = RecordingMetadata::started(
+            None,
+            None,
+            Some(OutputMode::File),
+            Some(queued_file.clone()),
+            Some(true),
+            Some(true),
+            None,
+            SystemTime::now(),
+        );
+
+        let output = daemon
+            .process_queued_transcription_result(Ok(Ok("queued text".to_string())), &metadata)
+            .await
+            .unwrap();
+
+        assert_eq!(output.output_config.mode, OutputMode::File);
+        assert_eq!(output.file_output_path, Some(queued_file));
+        assert!(output.output_config.auto_submit);
+        assert!(output.output_config.shift_enter_newlines);
+        assert!(runtime_dir.join("output_mode_override").exists());
+        assert!(runtime_dir.join("auto_submit_override").exists());
+        assert!(runtime_dir.join("shift_enter_override").exists());
     }
 
     #[test]

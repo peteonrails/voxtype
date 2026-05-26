@@ -33,6 +33,7 @@ verification.
 | Test | What it covers |
 |------|----------------|
 | [Smart Auto-Submit](smoke_tests/smart-auto-submit.md) | Auto-stop on silence, CLI/env/config layering, negative cases |
+| [Recording Queue](smoke_tests/recording-queue.md) | FIFO queueing while previous batch recordings transcribe or output |
 | [Rapid Successive Recordings](smoke_tests/rapid-successive-recordings.md) | Back-to-back recordings don't leak state |
 | [Long Recording](smoke_tests/long-recording.md) | Multi-minute recordings transcribe cleanly without OOM |
 
