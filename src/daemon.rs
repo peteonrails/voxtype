@@ -1748,10 +1748,32 @@ impl Daemon {
         !state.is_recording()
     }
 
+    fn queued_transcription_running(&self) -> bool {
+        self.active_transcription_metadata.is_some() && self.transcription_task.is_some()
+    }
+
+    fn restore_state_after_queued_live_capture_ends(&self, state: &mut State) {
+        if self.queued_transcription_running() {
+            *state = State::Transcribing { audio: Vec::new() };
+            self.update_state("transcribing");
+        } else {
+            *state = State::Idle;
+            self.update_state("idle");
+        }
+    }
+
+    fn can_start_next_queued_transcription(&self, state: &State) -> bool {
+        !state.is_recording()
+            && self.recording_queue.queued_count() > 0
+            && self.recording_queue.can_start_next_queued_job()
+            && self.transcription_task.is_none()
+            && self.deferred_output.is_none()
+            && self.active_transcription_metadata.is_none()
+    }
+
     fn mark_queued_recording_stopped(&mut self, state: &mut State) {
         self.active_recording_metadata = None;
-        *state = State::Idle;
-        self.update_state("idle");
+        self.restore_state_after_queued_live_capture_ends(state);
     }
 
     fn clear_recording_start_overrides() {
@@ -2455,10 +2477,7 @@ impl Daemon {
         state: &mut State,
         transcriber_preloaded: &Option<Arc<dyn Transcriber>>,
     ) -> bool {
-        if self.transcription_task.is_some()
-            || self.deferred_output.is_some()
-            || self.active_transcription_metadata.is_some()
-        {
+        if !self.can_start_next_queued_transcription(state) {
             return false;
         }
 
@@ -2731,6 +2750,13 @@ impl Daemon {
         transcriber_preloaded: &Option<Arc<dyn Transcriber>>,
     ) {
         if self.should_drain_deferred_output(state) {
+            // Output is intentionally handled inline to preserve the current
+            // dequeue->output->resume invariant. The main loop therefore
+            // does not service new start events during actual output even
+            // though State::Outputting is accepted by the queue policy; fixing
+            // that requires a daemon-visible output completion path so the
+            // next queued transcription cannot start before output hooks and
+            // media cleanup finish.
             if let Some(output) = self.deferred_output.take() {
                 self.output_completed_batch(state, output).await;
                 self.recording_queue.finish_processing();
@@ -2738,10 +2764,7 @@ impl Daemon {
             }
         }
 
-        if self.transcription_task.is_none()
-            && self.deferred_output.is_none()
-            && self.active_transcription_metadata.is_none()
-        {
+        if self.can_start_next_queued_transcription(state) {
             let _ = self
                 .start_next_queued_transcription(state, transcriber_preloaded)
                 .await;
@@ -3754,8 +3777,7 @@ impl Daemon {
                                     }
 
                                     Self::clear_recording_start_overrides();
-                                    state = State::Idle;
-                                    self.update_state("idle");
+                                    self.restore_state_after_queued_live_capture_ends(&mut state);
                                     self.play_feedback(SoundEvent::Cancelled);
 
                                     // Run post_output_command to reset compositor submap
@@ -3888,9 +3910,8 @@ impl Daemon {
                             }
 
                             Self::clear_recording_start_overrides();
-                            state = State::Idle;
                             eager_transcriber = None;
-                            self.update_state("idle");
+                            self.restore_state_after_queued_live_capture_ends(&mut state);
                             self.play_feedback(SoundEvent::Cancelled);
 
                             // Run post_output_command to reset compositor submap
@@ -4243,6 +4264,11 @@ impl Daemon {
 
                         match queued_output {
                             Some(output) => {
+                                if !self.recording_queue.move_transcribing_to_deferred_output() {
+                                    tracing::warn!(
+                                        "Queued transcription produced output without an active queue processing slot"
+                                    );
+                                }
                                 self.deferred_output = Some(output);
                                 self.active_transcription_metadata = Some(metadata);
                             }
@@ -4625,6 +4651,7 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
     use std::fs;
+    use std::sync::Arc;
     use std::time::{Instant, SystemTime};
     use tempfile::TempDir;
 
@@ -4679,6 +4706,120 @@ mod tests {
 
     fn queue_recording_metadata() -> RecordingMetadata {
         RecordingMetadata::started(None, None, None, None, None, None, None, SystemTime::now())
+    }
+
+    #[derive(Default)]
+    struct DummyTranscriber;
+
+    impl crate::transcribe::Transcriber for DummyTranscriber {
+        fn transcribe(
+            &self,
+            _: &[f32],
+        ) -> std::result::Result<String, crate::error::TranscribeError> {
+            Ok("queued text".to_string())
+        }
+    }
+
+    #[test]
+    fn test_can_start_next_queued_transcription_blocks_recording_state() {
+        let mut config = Config::default();
+        config.recording.queue_enabled = true;
+        config.recording.queue_size = 2;
+        let mut daemon = Daemon::new(config, None);
+        assert!(daemon.recording_queue.start_recording());
+        assert!(daemon
+            .recording_queue
+            .queue_stopped_recording(QueuedStoppedRecording::new(
+                queue_recording_metadata(),
+                vec![0.1],
+            )));
+
+        assert!(
+            !daemon.can_start_next_queued_transcription(&State::Recording {
+                started_at: Instant::now(),
+                model_override: None,
+            })
+        );
+
+        assert!(
+            daemon.can_start_next_queued_transcription(&State::Transcribing { audio: vec![0.1] })
+        );
+        assert!(
+            daemon.can_start_next_queued_transcription(&State::Outputting {
+                text: "done".to_string(),
+            })
+        );
+        assert!(daemon.can_start_next_queued_transcription(&State::Idle));
+    }
+
+    #[tokio::test]
+    async fn test_queued_live_recording_stop_restores_transcription_state() {
+        let mut config = Config::default();
+        config.recording.queue_enabled = true;
+        config.recording.queue_size = 2;
+        let mut daemon = Daemon::new(config, None);
+        daemon.active_recording_metadata = Some(queue_recording_metadata());
+        daemon.active_transcription_metadata = Some(queue_recording_metadata());
+        daemon.transcription_task = Some(tokio::spawn(async {
+            std::future::pending::<TranscriptionResult>().await
+        }));
+
+        let mut state = State::Recording {
+            started_at: Instant::now(),
+            model_override: None,
+        };
+
+        daemon.mark_queued_recording_stopped(&mut state);
+
+        assert!(matches!(state, State::Transcribing { .. }));
+        assert!(
+            daemon.active_recording_metadata.is_none(),
+            "live recording metadata should be cleared"
+        );
+
+        if let Some(task) = daemon.transcription_task.take() {
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_drain_queue_does_not_start_next_transcription_while_live_recording() {
+        let mut config = Config::default();
+        config.recording.queue_enabled = true;
+        config.recording.queue_size = 2;
+        config.engine = crate::config::TranscriptionEngine::Soniox;
+
+        let mut daemon = Daemon::new(config, None);
+
+        assert!(daemon.recording_queue.start_recording());
+        assert!(daemon
+            .recording_queue
+            .queue_stopped_recording(QueuedStoppedRecording::new(
+                queue_recording_metadata(),
+                vec![0.1]
+            )));
+
+        let preloaded_transcriber: Option<Arc<dyn crate::transcribe::Transcriber>> =
+            Some(Arc::new(DummyTranscriber));
+        let mut state = State::Recording {
+            started_at: Instant::now(),
+            model_override: None,
+        };
+
+        daemon
+            .drain_recording_queue(&mut state, &preloaded_transcriber)
+            .await;
+
+        assert!(
+            matches!(state, State::Recording { .. }),
+            "live recording should continue while output queue drains"
+        );
+        assert!(
+            daemon.transcription_task.is_none(),
+            "should not start queued transcription"
+        );
+        assert_eq!(daemon.recording_queue.queued_count(), 1);
+        assert_eq!(daemon.recording_queue.stopped_count(), 1);
     }
 
     #[test]
@@ -5213,20 +5354,33 @@ mod tests {
 
         let mut config = Config::default();
         config.recording.queue_enabled = true;
-        config.recording.queue_size = 1;
+        config.recording.queue_size = 2;
         config.output.mode = OutputMode::File;
         config.output.file_path = Some(output_file.clone());
 
         let mut daemon = Daemon::new(config, None);
         assert!(daemon.recording_queue.start_recording());
-        daemon.active_recording_metadata = Some(queue_recording_metadata());
+        assert!(daemon
+            .recording_queue
+            .queue_stopped_recording(QueuedStoppedRecording::new(
+                queue_recording_metadata(),
+                vec![0.1],
+            )));
+        let processing = daemon.recording_queue.pop_next_for_transcription().unwrap();
+        assert!(daemon
+            .recording_queue
+            .move_transcribing_to_deferred_output());
         daemon.deferred_output = Some(CompletedBatchOutput {
             text: "queue deferred".to_string(),
             output_config: daemon.config.output.clone(),
             file_output_path: Some(output_file.clone()),
             file_mode: FileMode::Overwrite,
         });
-        daemon.active_transcription_metadata = Some(queue_recording_metadata());
+        daemon.active_transcription_metadata = Some(processing.metadata);
+        assert_eq!(daemon.recording_queue.deferred_output_count(), 1);
+
+        assert!(daemon.recording_queue.start_recording());
+        daemon.active_recording_metadata = Some(queue_recording_metadata());
 
         let mut state = State::Recording {
             started_at: Instant::now(),
@@ -5248,6 +5402,7 @@ mod tests {
             std::fs::read_to_string(&output_file).unwrap(),
             "queue deferred\n"
         );
+        assert_eq!(daemon.recording_queue.deferred_output_count(), 0);
         assert!(matches!(state, State::Idle));
     }
 }
