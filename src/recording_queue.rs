@@ -1,4 +1,4 @@
-use crate::config::OutputMode;
+use crate::config::{OutputMode, MIN_ENABLED_RECORDING_QUEUE_SIZE};
 use crate::state::AudioBuffer;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -102,7 +102,7 @@ impl QueueConfig {
     }
 
     pub const fn is_effective_enabled(&self) -> bool {
-        self.enabled && self.queue_size > 0
+        self.enabled && self.queue_size >= MIN_ENABLED_RECORDING_QUEUE_SIZE
     }
 }
 
@@ -111,7 +111,10 @@ impl QueueConfig {
 pub(crate) struct RecordingQueue {
     config: QueueConfig,
     queue: VecDeque<QueuedStoppedRecording>,
+    /// Work in-flight for queued items.
     processing_count: usize,
+    /// Work in-flight for queued items deferred to output.
+    deferred_output_count: usize,
     /// There is at most one active live capture reserved for one future queue slot.
     live_recording_reserved: bool,
 }
@@ -122,6 +125,7 @@ impl RecordingQueue {
             config,
             queue: VecDeque::new(),
             processing_count: 0,
+            deferred_output_count: 0,
             live_recording_reserved: false,
         }
     }
@@ -134,8 +138,28 @@ impl RecordingQueue {
         self.queue.len()
     }
 
+    #[allow(dead_code)]
+    pub fn capacity(&self) -> usize {
+        self.config.queue_size
+    }
+
     pub fn stopped_count(&self) -> usize {
-        self.queue.len() + self.processing_count
+        self.queue.len() + self.processing_count + self.deferred_output_count
+    }
+
+    #[allow(dead_code)]
+    pub fn processing_count(&self) -> usize {
+        self.processing_count
+    }
+
+    #[allow(dead_code)]
+    pub fn deferred_output_count(&self) -> usize {
+        self.deferred_output_count
+    }
+
+    #[allow(dead_code)]
+    pub fn can_start_next_queued_job(&self) -> bool {
+        self.processing_count == 0 && self.deferred_output_count == 0
     }
 
     pub fn can_start_recording(&self) -> bool {
@@ -145,10 +169,7 @@ impl RecordingQueue {
         if self.live_recording_reserved {
             return false;
         }
-        // The active live recording reserves one additional future slot.
-        // Start is allowed when stopped waiting/processing work is at capacity,
-        // but not after that reservation has been converted into a stopped item.
-        self.stopped_count() <= self.config.queue_size
+        self.stopped_count() < self.config.queue_size
     }
 
     pub fn start_recording(&mut self) -> bool {
@@ -167,10 +188,9 @@ impl RecordingQueue {
         if !self.is_enabled() || !self.live_recording_reserved {
             return false;
         }
-        // When a live slot is reserved, it can be converted into one stopped
-        // item. This allows a single active recording while stopped work is
-        // already at configured capacity.
-        self.stopped_count() <= self.config.queue_size
+        // Live capture does not count in stopped_count(), but it may only stop
+        // into the queue while stopped capacity remains.
+        self.stopped_count() < self.config.queue_size
     }
 
     pub fn queue_stopped_recording(&mut self, item: QueuedStoppedRecording) -> bool {
@@ -189,7 +209,22 @@ impl RecordingQueue {
         self.live_recording_reserved = false;
     }
 
+    /// Move a queued job from transcribing to deferred output state.
+    /// Returns true when a processing slot was moved.
+    #[allow(dead_code)]
+    pub fn move_transcribing_to_deferred_output(&mut self) -> bool {
+        if self.processing_count == 0 {
+            return false;
+        }
+        self.processing_count -= 1;
+        self.deferred_output_count += 1;
+        true
+    }
+
     pub fn pop_next_for_transcription(&mut self) -> Option<QueuedStoppedRecording> {
+        if !self.can_start_next_queued_job() {
+            return None;
+        }
         let mut item = self.queue.pop_front()?;
         item.stage = RecordingStage::Transcribing;
         self.processing_count += 1;
@@ -197,6 +232,11 @@ impl RecordingQueue {
     }
 
     pub fn finish_processing(&mut self) {
+        if self.deferred_output_count > 0 {
+            self.deferred_output_count -= 1;
+            return;
+        }
+
         self.processing_count = self.processing_count.saturating_sub(1);
     }
 }
@@ -225,16 +265,17 @@ mod tests {
     }
 
     #[test]
-    fn queueing_is_effective_only_when_enabled_and_nonzero() {
-        let enabled_zero = QueueConfig::new(true, 0);
-        assert!(!enabled_zero.is_effective_enabled());
+    fn queueing_is_effective_only_when_enabled_and_at_least_two() {
+        assert!(!QueueConfig::new(true, 0).is_effective_enabled());
+        assert!(!QueueConfig::new(true, 1).is_effective_enabled());
         assert!(!QueueConfig::new(false, 5).is_effective_enabled());
+        assert!(QueueConfig::new(true, 2).is_effective_enabled());
         assert!(QueueConfig::new(true, 4).is_effective_enabled());
     }
 
     #[test]
-    fn capacity_allows_live_reserve_with_full_stopped_queue() {
-        let mut queue = RecordingQueue::new(QueueConfig::new(true, 1));
+    fn capacity_allows_live_reserve_until_stopped_queue_is_full() {
+        let mut queue = RecordingQueue::new(QueueConfig::new(true, 2));
 
         assert!(queue.can_start_recording());
         assert!(queue.start_recording());
@@ -261,8 +302,16 @@ mod tests {
     }
 
     #[test]
+    fn queue_size_one_disables_queueing() {
+        let queue = RecordingQueue::new(QueueConfig::new(true, 1));
+        assert_eq!(queue.capacity(), 1);
+        assert!(!queue.is_enabled());
+        assert!(!queue.can_start_recording());
+    }
+
+    #[test]
     fn processing_job_counts_toward_capacity_until_finished() {
-        let mut queue = RecordingQueue::new(QueueConfig::new(true, 1));
+        let mut queue = RecordingQueue::new(QueueConfig::new(true, 2));
 
         assert!(queue.start_recording());
         assert!(queue.queue_stopped_recording(QueuedStoppedRecording::new(
@@ -273,6 +322,7 @@ mod tests {
         let _processing = queue.pop_next_for_transcription().unwrap();
         assert_eq!(queue.queued_count(), 0);
         assert_eq!(queue.stopped_count(), 1);
+        assert!(!queue.can_start_next_queued_job());
         assert!(queue.start_recording());
         assert!(queue.queue_stopped_recording(QueuedStoppedRecording::new(
             base_metadata("second", 3, 4),
@@ -287,8 +337,44 @@ mod tests {
     }
 
     #[test]
+    fn deferred_output_slot_counts_toward_stop_capacity() {
+        let mut queue = RecordingQueue::new(QueueConfig::new(true, 2));
+
+        assert!(queue.start_recording());
+        assert!(queue.queue_stopped_recording(QueuedStoppedRecording::new(
+            base_metadata("first", 1, 2),
+            vec![0.1],
+        )));
+
+        let _processing = queue.pop_next_for_transcription().unwrap();
+        assert_eq!(queue.stopped_count(), 1);
+        assert_eq!(queue.processing_count(), 1);
+        assert!(!queue.can_start_next_queued_job());
+
+        assert!(queue.move_transcribing_to_deferred_output());
+        assert_eq!(queue.processing_count(), 0);
+        assert_eq!(queue.deferred_output_count(), 1);
+        assert_eq!(queue.stopped_count(), 1);
+        assert!(!queue.can_start_next_queued_job());
+
+        assert!(queue.start_recording());
+        assert!(queue.can_queue_stopped_recording());
+        assert!(queue.queue_stopped_recording(QueuedStoppedRecording::new(
+            base_metadata("second", 3, 4),
+            vec![0.2],
+        )));
+        assert_eq!(queue.stopped_count(), 2);
+        assert!(!queue.can_start_recording());
+
+        queue.finish_processing();
+        assert_eq!(queue.deferred_output_count(), 0);
+        assert_eq!(queue.stopped_count(), 1);
+        assert!(queue.can_start_recording());
+    }
+
+    #[test]
     fn released_live_recording_does_not_consume_capacity() {
-        let mut queue = RecordingQueue::new(QueueConfig::new(true, 1));
+        let mut queue = RecordingQueue::new(QueueConfig::new(true, 2));
 
         assert!(queue.start_recording());
         assert!(!queue.can_start_recording());
@@ -321,18 +407,22 @@ mod tests {
             .unwrap();
 
         let first = queue.pop_next_for_transcription().unwrap();
-        let second = queue.pop_next_for_transcription().unwrap();
         assert_eq!(
             first.metadata.model_override.as_deref(),
             Some("first-model")
         );
+        assert_eq!(first.stage, RecordingStage::Transcribing);
+        assert!(!queue.can_start_next_queued_job());
+
+        queue.finish_processing();
+
+        let second = queue.pop_next_for_transcription().unwrap();
         assert_eq!(
             second.metadata.model_override.as_deref(),
             Some("second-model")
         );
-        assert_eq!(first.stage, RecordingStage::Transcribing);
         assert_eq!(second.stage, RecordingStage::Transcribing);
-        assert_eq!(queue.stopped_count(), 2);
+        assert_eq!(queue.stopped_count(), 1);
 
         queue.finish_processing();
         queue.finish_processing();

@@ -5171,7 +5171,7 @@ mod tests {
 
         let mut stopped_full = Config::default();
         stopped_full.recording.queue_enabled = true;
-        stopped_full.recording.queue_size = 1;
+        stopped_full.recording.queue_size = 2;
         let mut stopped_daemon = Daemon::new(stopped_full, None);
 
         assert!(stopped_daemon.recording_queue.start_recording());
@@ -5191,7 +5191,7 @@ mod tests {
     fn test_queued_live_recording_active_only_tracks_live_capture() {
         let mut config = Config::default();
         config.recording.queue_enabled = true;
-        config.recording.queue_size = 1;
+        config.recording.queue_size = 2;
         let mut daemon = Daemon::new(config, None);
 
         assert!(!daemon.queued_live_recording_active());

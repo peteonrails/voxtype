@@ -36,15 +36,19 @@ const TABLE: &str = "recording";
 const DEFAULT_QUEUE_SIZE: i64 = 5;
 const QUEUE_STEP: i64 = 1;
 
+fn normalize_queue_size(value: i64) -> i64 {
+    value.max(0)
+}
+
 impl RecordingState {
     pub fn load() -> Result<Self, EditorError> {
         let ed = ConfigEditor::load()?;
         Ok(Self {
             queue_enabled: ed.get_bool(TABLE, "queue_enabled").unwrap_or(false),
-            queue_size: ed
-                .get_int(TABLE, "queue_size")
-                .unwrap_or(DEFAULT_QUEUE_SIZE)
-                .max(0),
+            queue_size: normalize_queue_size(
+                ed.get_int(TABLE, "queue_size")
+                    .unwrap_or(DEFAULT_QUEUE_SIZE),
+            ),
             field: Field::QueueEnabled,
             feedback: None,
             dirty_since_load: false,
@@ -104,7 +108,7 @@ impl RecordingState {
         match self.field {
             Field::QueueEnabled => self.queue_enabled = !self.queue_enabled,
             Field::QueueSize => {
-                self.queue_size = (self.queue_size + delta as i64 * QUEUE_STEP).max(0);
+                self.queue_size = normalize_queue_size(self.queue_size + delta as i64 * QUEUE_STEP);
             }
         }
         self.dirty_since_load = true;
@@ -180,7 +184,7 @@ fn guidance_for_field(state: &RecordingState) -> Vec<Line<'_>> {
             )),
             Line::from(""),
             Line::from("The queue is FIFO and applies only to push-to-talk batch dictation."),
-            Line::from("The active live recording reserves one future slot after start."),
+            Line::from("Starting a live recording requires one available stopped slot."),
             Line::from(""),
             Line::from("Turn it on if:"),
             Line::from(concat!(
@@ -199,7 +203,8 @@ fn guidance_for_field(state: &RecordingState) -> Vec<Line<'_>> {
             heading("Maximum queued recordings"),
             Line::from(""),
             Line::from("How many stopped recordings can wait, transcribe, or output."),
-            Line::from("The active live recording does not count against this limit."),
+            Line::from("0 or 1 disables queueing; minimum enabled value is 2."),
+            Line::from("Live capture is counted only when it stops into the queue."),
             Line::from("Set a larger value to allow more queued recordings."),
             Line::from(""),
             Line::from("Set to 0 or 1 to disable queueing even when queue-enabled is true."),

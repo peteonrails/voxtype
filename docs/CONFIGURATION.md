@@ -1607,9 +1607,10 @@ transcribed in FIFO order.
 **Required:** No
 
 Maximum number of stopped normal-batch recordings that can wait, transcribe, or
-output. The active live recording does not count against this limit; it reserves
-one future slot after start. Set to `0` or `1` to disable queueing. Queueing is
-active only when `queue_enabled` is `true` and `queue_size >= 2`.
+output. The active live recording is not counted while it is still capturing,
+but starting it requires one available stopped slot so stopping can enqueue it.
+Set `queue_size` to `0` or `1` to disable queueing. Queueing is active only when
+`queue_enabled` is `true` and `queue_size >= 2`.
 
 When the queue reaches capacity, additional normal-batch recordings are rejected
 until space is available.

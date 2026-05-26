@@ -423,8 +423,9 @@ translate = false
 # queue_enabled = false
 
 # Maximum stopped recordings waiting, transcribing, or outputting.
-# The active live recording does not count; it reserves one future slot after
-# start. 0 or 1 disables queueing; minimum enabled value is 2.
+# A live recording is not counted while active, but starting one requires one
+# available stopped slot so stopping can enqueue it.
+# 0 or 1 disables queueing; minimum enabled value is 2.
 # queue_size = 5
 
 [output]
@@ -1534,8 +1535,9 @@ Set `queue_enabled = true` to allow queueing. When enabled:
 3. If the queue is full, additional recordings are rejected until space is free.
 4. As each transcription/output finishes, the next queued recording is processed.
 
-The active live recording does not count against `queue_size`; it reserves one
-future slot immediately after start.
+The active live recording is not part of `queue_size` while it is still
+capturing, but starting it requires one available stopped slot so stopping can
+enqueue it.
 
 When eager processing or streaming mode is enabled, queueing is ignored and
 the daemon logs a startup warning.
