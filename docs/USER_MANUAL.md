@@ -309,6 +309,8 @@ voxtype record start                # Start recording (sends SIGUSR1 to daemon)
 voxtype record start --file=out.txt # Write transcription to a file
 voxtype record start --file         # Write to file_path from config
 voxtype record stop                 # Stop recording and transcribe (sends SIGUSR2 to daemon)
+voxtype record stop --file=out.txt  # Write stopped recording to a file
+voxtype record stop --file          # Write to file_path from config
 voxtype record toggle               # Toggle recording state
 voxtype record cancel               # Cancel recording or transcription in progress
 ```
@@ -322,7 +324,7 @@ voxtype record stop                          # Transcribes with the model specif
 
 The model must be configured as `model`, `secondary_model`, or listed in `available_models` in your config. See [Multi-Model Configuration](CONFIGURATION.md#secondary_model) for setup.
 
-**Output mode override:** Use `--type`, `--clipboard`, or `--paste` to override the output mode:
+**Output mode override:** Use `--type`, `--clipboard`, `--paste`, or `--file` to override the output mode:
 
 ```bash
 voxtype record start --clipboard  # Output to clipboard instead of typing

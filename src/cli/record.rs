@@ -78,6 +78,11 @@ pub enum RecordAction {
         /// Override output mode to paste (clipboard + Ctrl+V)
         #[arg(long, group = "output_mode")]
         paste: bool,
+
+        /// Write transcription to a file
+        /// Use --file alone to use file_path from config, or --file=path.txt for explicit path
+        #[arg(long, value_name = "FILE", group = "output_mode", num_args = 0..=1, default_missing_value = "")]
+        file: Option<String>,
     },
     /// Toggle recording state
     Toggle {
@@ -171,7 +176,8 @@ impl RecordAction {
                 type_mode,
                 clipboard,
                 paste,
-            } => (*type_mode, *clipboard, *paste, None),
+                file,
+            } => (*type_mode, *clipboard, *paste, file.as_ref()),
             RecordAction::Cancel => return None,
         };
 
@@ -194,8 +200,10 @@ impl RecordAction {
     /// Returns None if --file was not used
     pub fn file_path(&self) -> Option<&str> {
         match self {
-            RecordAction::Start { file, .. } | RecordAction::Toggle { file, .. } => file.as_deref(),
-            RecordAction::Stop { .. } | RecordAction::Cancel => None,
+            RecordAction::Start { file, .. }
+            | RecordAction::Toggle { file, .. }
+            | RecordAction::Stop { file, .. } => file.as_deref(),
+            RecordAction::Cancel => None,
         }
     }
 
@@ -360,6 +368,46 @@ mod tests {
             }
             _ => panic!("Expected Record command"),
         }
+    }
+
+    #[test]
+    fn test_record_stop_file_with_path() {
+        let cli = Cli::parse_from(["voxtype", "record", "stop", "--file=out.txt"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::File)
+                );
+                assert_eq!(action.file_path(), Some("out.txt"));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_stop_file_without_path() {
+        let cli = Cli::parse_from(["voxtype", "record", "stop", "--file"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::File)
+                );
+                assert_eq!(action.file_path(), Some(""));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_stop_file_mutually_exclusive_with_clipboard() {
+        let result =
+            Cli::try_parse_from(["voxtype", "record", "stop", "--file=out.txt", "--clipboard"]);
+        assert!(
+            result.is_err(),
+            "Should not allow both --file and --clipboard on stop"
+        );
     }
 
     #[test]
