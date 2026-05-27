@@ -102,12 +102,15 @@ pub async fn install() -> anyhow::Result<()> {
     }
 
     // Install tray icons if tray is enabled (default).
-    let config = crate::config::load_config(None).unwrap_or_default();
-    if config.tray.enabled {
-        println!("\nInstalling tray icons...");
-        match super::icons::install().await {
-            Ok(()) => {}
-            Err(e) => println!("  Warning: could not install tray icons: {e}"),
+    #[cfg(target_os = "linux")]
+    {
+        let config = crate::config::load_config(None).unwrap_or_default();
+        if config.tray.enabled {
+            println!("\nInstalling tray icons...");
+            match super::icons::install().await {
+                Ok(()) => {}
+                Err(e) => println!("  Warning: could not install tray icons: {e}"),
+            }
         }
     }
 

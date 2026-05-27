@@ -1,37 +1,44 @@
 //! Install voxtype XDG icon theme entries for the system tray.
 //!
-//! Installs `voxtype.png` (blue, idle state) and `voxtype-recording.png`
-//! (red, recording/transcribing state) to the hicolor icon theme so that
-//! SNI-compatible panels (KDE Plasma, waybar, etc.) can display them.
+//! Installs `voxtype.png` and `voxtype-recording.png` at all standard hicolor
+//! pixel sizes (16, 22, 24, 32, 48, 128, 256) plus scalable SVGs under
+//! `hicolor/scalable/apps/`. Panels choose the best-fit size they need.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const ICON_IDLE: &[u8] = include_bytes!("../../assets/icon.png");
-const ICON_RECORDING: &[u8] = include_bytes!("../../assets/icon-recording.png");
+const ICON_IDLE_PNG: &[u8] = include_bytes!("../../assets/icon.png");
+const ICON_RECORDING_PNG: &[u8] = include_bytes!("../../assets/icon-recording.png");
+const ICON_IDLE_SVG: &[u8] = include_bytes!("../../assets/icon.svg");
+const ICON_RECORDING_SVG: &[u8] = include_bytes!("../../assets/icon-recording.svg");
 
-/// Install tray icons to `~/.local/share/icons/hicolor/128x128/apps/` and
-/// update the icon cache. Prints a summary of what was installed.
-/// Skips silently if icons are already up to date.
+/// Standard hicolor pixel sizes to install.
+const PNG_SIZES: &[u32] = &[16, 22, 24, 32, 48, 128, 256];
+
+/// Install tray icons to `~/.local/share/icons/hicolor/` at all standard sizes
+/// plus scalable SVGs. Skips silently if icons are already up to date.
 pub async fn install() -> anyhow::Result<()> {
-    let icon_dir = icon_dir()?;
-    fs::create_dir_all(&icon_dir)?;
+    let base = hicolor_base()?;
+    let mut any_changed = false;
 
-    let idle_path = icon_dir.join("voxtype.png");
-    let recording_path = icon_dir.join("voxtype-recording.png");
+    // PNG sizes — install the same 128px PNG into every size directory;
+    // panels that request a smaller size will scale it down.
+    for &size in PNG_SIZES {
+        let dir = base.join(format!("{size}x{size}/apps"));
+        fs::create_dir_all(&dir)?;
+        any_changed |= write_if_changed(&dir.join("voxtype.png"), ICON_IDLE_PNG)?;
+        any_changed |= write_if_changed(&dir.join("voxtype-recording.png"), ICON_RECORDING_PNG)?;
+    }
 
-    let idle_changed = write_if_changed(&idle_path, ICON_IDLE)?;
-    let recording_changed = write_if_changed(&recording_path, ICON_RECORDING)?;
+    // Scalable SVGs
+    let scalable = base.join("scalable/apps");
+    fs::create_dir_all(&scalable)?;
+    any_changed |= write_if_changed(&scalable.join("voxtype.svg"), ICON_IDLE_SVG)?;
+    any_changed |= write_if_changed(&scalable.join("voxtype-recording.svg"), ICON_RECORDING_SVG)?;
 
-    if idle_changed || recording_changed {
-        println!("Installed tray icons:");
-        if idle_changed {
-            println!("  {} (idle state)", idle_path.display());
-        }
-        if recording_changed {
-            println!("  {} (recording state)", recording_path.display());
-        }
-        update_icon_cache(&icon_dir);
+    if any_changed {
+        tracing::info!("Installed tray icons");
+        update_icon_cache(&base);
     }
 
     Ok(())
@@ -39,7 +46,7 @@ pub async fn install() -> anyhow::Result<()> {
 
 /// Write `data` to `path` only if the file is missing or has different content.
 /// Returns true if the file was written.
-fn write_if_changed(path: &std::path::Path, data: &[u8]) -> anyhow::Result<bool> {
+fn write_if_changed(path: &Path, data: &[u8]) -> anyhow::Result<bool> {
     if let Ok(existing) = fs::read(path) {
         if existing == data {
             return Ok(false);
@@ -51,37 +58,44 @@ fn write_if_changed(path: &std::path::Path, data: &[u8]) -> anyhow::Result<bool>
 
 /// Remove tray icons installed by `install()`.
 pub async fn uninstall() -> anyhow::Result<()> {
-    let icon_dir = icon_dir()?;
+    let base = hicolor_base()?;
 
-    for name in ["voxtype.png", "voxtype-recording.png"] {
-        let path = icon_dir.join(name);
-        if path.exists() {
-            fs::remove_file(&path)?;
-            println!("Removed {}", path.display());
+    for &size in PNG_SIZES {
+        let dir = base.join(format!("{size}x{size}/apps"));
+        for name in ["voxtype.png", "voxtype-recording.png"] {
+            let path = dir.join(name);
+            if path.exists() {
+                fs::remove_file(&path)?;
+                tracing::info!(path = %path.display(), "Removed tray icon");
+            }
         }
     }
 
-    update_icon_cache(&icon_dir);
+    let scalable = base.join("scalable/apps");
+    for name in ["voxtype.svg", "voxtype-recording.svg"] {
+        let path = scalable.join(name);
+        if path.exists() {
+            fs::remove_file(&path)?;
+            tracing::info!(path = %path.display(), "Removed tray icon");
+        }
+    }
+
+    update_icon_cache(&base);
 
     Ok(())
 }
 
-fn icon_dir() -> anyhow::Result<PathBuf> {
+fn hicolor_base() -> anyhow::Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
-    Ok(home.join(".local/share/icons/hicolor/128x128/apps"))
+    Ok(home.join(".local/share/icons/hicolor"))
 }
 
 /// Run gtk-update-icon-cache on the hicolor theme directory (best-effort).
-fn update_icon_cache(app_dir: &Path) {
-    // Walk up two levels: 128x128/apps -> 128x128 -> hicolor
-    let hicolor = match app_dir.parent().and_then(|p| p.parent()) {
-        Some(d) => d.to_owned(),
-        None => return,
-    };
+fn update_icon_cache(hicolor: &Path) {
     let result = std::process::Command::new("gtk-update-icon-cache")
         .arg("-f")
         .arg("-t")
-        .arg(&hicolor)
+        .arg(hicolor)
         .status();
     match result {
         Ok(s) if s.success() => tracing::debug!("Updated icon cache at {}", hicolor.display()),

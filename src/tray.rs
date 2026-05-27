@@ -11,7 +11,7 @@
 
 use ksni::{menu::*, Status, ToolTip, Tray, TrayMethods};
 use std::path::PathBuf;
-use tokio::sync::watch;
+use tokio::{process::Command as TokioCommand, sync::watch};
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -29,7 +29,14 @@ impl TrayState {
             "idle" => TrayState::Idle,
             "recording" => TrayState::Recording,
             "transcribing" => TrayState::Transcribing,
-            _ => TrayState::Stopped,
+            "stopped" => TrayState::Stopped,
+            other => {
+                tracing::warn!(
+                    state = other,
+                    "Unrecognized daemon state; tray will show Idle"
+                );
+                TrayState::Idle
+            }
         }
     }
 
@@ -112,11 +119,11 @@ impl Tray for VoxtypeTray {
             MenuItem::Separator,
             StandardItem {
                 label: "Restart Daemon".into(),
-                activate: Box::new(|_| {
-                    let _ = std::process::Command::new("systemctl")
-                        .args(["--user", "restart", "voxtype"])
-                        .spawn();
-                }),
+                // Only enable when running under systemd (INVOCATION_ID is set by
+                // systemd for every service it manages). On manually-launched
+                // daemons, systemctl would either fail or target the wrong unit.
+                enabled: std::env::var("INVOCATION_ID").is_ok(),
+                activate: Box::new(|_| restart_daemon()),
                 ..Default::default()
             }
             .into(),
@@ -132,8 +139,46 @@ fn spawn_voxtype(args: &[&str]) {
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("voxtype")))
         .filter(|p| p.exists())
-        .unwrap_or_else(|| PathBuf::from("voxtype"));
-    let _ = std::process::Command::new(bin).args(args).spawn();
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                "voxtype binary not found next to current exe; \
+                 falling back to PATH lookup (may fail under systemd)"
+            );
+            PathBuf::from("voxtype")
+        });
+    let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+    tokio::task::spawn(async move {
+        match TokioCommand::new(&bin).args(&args).spawn() {
+            Ok(mut child) => {
+                if let Err(e) = child.wait().await {
+                    tracing::warn!(bin = %bin.display(), "Failed to wait for voxtype: {e}");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(bin = %bin.display(), args = ?args, "Failed to spawn voxtype: {e}");
+            }
+        }
+    });
+}
+
+/// Restart the voxtype systemd user service. Only call when running under
+/// systemd (`INVOCATION_ID` is set); the menu item is disabled otherwise.
+fn restart_daemon() {
+    tokio::task::spawn(async move {
+        match TokioCommand::new("systemctl")
+            .args(["--user", "restart", "voxtype"])
+            .spawn()
+        {
+            Ok(mut child) => {
+                // The process will be killed by systemd before the child returns;
+                // swallow the wait error.
+                let _ = child.wait().await;
+            }
+            Err(e) => {
+                tracing::warn!("Failed to restart voxtype via systemctl: {e}");
+            }
+        }
+    });
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -199,9 +244,16 @@ mod tests {
     }
 
     #[test]
-    fn from_str_unknown_is_stopped() {
-        assert_eq!(TrayState::from_state_name("whatever"), TrayState::Stopped);
-        assert_eq!(TrayState::from_state_name(""), TrayState::Stopped);
+    fn from_str_unknown_is_idle() {
+        // Unknown state names default to Idle (not Stopped) so the tray does
+        // not falsely report "Daemon not running" if a new state is added.
+        assert_eq!(TrayState::from_state_name("whatever"), TrayState::Idle);
+        assert_eq!(TrayState::from_state_name(""), TrayState::Idle);
+    }
+
+    #[test]
+    fn from_str_stopped_is_explicit() {
+        assert_eq!(TrayState::from_state_name("stopped"), TrayState::Stopped);
     }
 
     #[test]
