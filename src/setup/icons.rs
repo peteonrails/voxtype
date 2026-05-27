@@ -1,8 +1,9 @@
 //! Install voxtype XDG icon theme entries for the system tray.
 //!
-//! Installs `voxtype.png` and `voxtype-recording.png` at all standard hicolor
-//! pixel sizes (16, 22, 24, 32, 48, 128, 256) plus scalable SVGs under
-//! `hicolor/scalable/apps/`. Panels choose the best-fit size they need.
+//! Installs `voxtype.png` and `voxtype-recording.png` at `hicolor/128x128/apps/`
+//! (the native size of the bundled PNGs) plus scalable SVGs under
+//! `hicolor/scalable/apps/`. Panels that support SVG use the scalable assets;
+//! panels that fall back to raster get the correctly-sized 128×128 PNG.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,23 +13,18 @@ const ICON_RECORDING_PNG: &[u8] = include_bytes!("../../assets/icon-recording.pn
 const ICON_IDLE_SVG: &[u8] = include_bytes!("../../assets/icon.svg");
 const ICON_RECORDING_SVG: &[u8] = include_bytes!("../../assets/icon-recording.svg");
 
-/// Standard hicolor pixel sizes to install.
-const PNG_SIZES: &[u32] = &[16, 22, 24, 32, 48, 128, 256];
-
-/// Install tray icons to `~/.local/share/icons/hicolor/` at all standard sizes
-/// plus scalable SVGs. Skips silently if icons are already up to date.
-pub async fn install() -> anyhow::Result<()> {
+/// Install tray icons to `~/.local/share/icons/hicolor/` at the native PNG
+/// size (128×128) plus scalable SVGs. Skips silently if icons are already up
+/// to date.
+pub fn install() -> anyhow::Result<()> {
     let base = hicolor_base()?;
     let mut any_changed = false;
 
-    // PNG sizes — install the same 128px PNG into every size directory;
-    // panels that request a smaller size will scale it down.
-    for &size in PNG_SIZES {
-        let dir = base.join(format!("{size}x{size}/apps"));
-        fs::create_dir_all(&dir)?;
-        any_changed |= write_if_changed(&dir.join("voxtype.png"), ICON_IDLE_PNG)?;
-        any_changed |= write_if_changed(&dir.join("voxtype-recording.png"), ICON_RECORDING_PNG)?;
-    }
+    // PNG — install only at the native 128×128 size per the XDG icon spec.
+    let png_dir = base.join("128x128/apps");
+    fs::create_dir_all(&png_dir)?;
+    any_changed |= write_if_changed(&png_dir.join("voxtype.png"), ICON_IDLE_PNG)?;
+    any_changed |= write_if_changed(&png_dir.join("voxtype-recording.png"), ICON_RECORDING_PNG)?;
 
     // Scalable SVGs
     let scalable = base.join("scalable/apps");
@@ -57,15 +53,19 @@ fn write_if_changed(path: &Path, data: &[u8]) -> anyhow::Result<bool> {
 }
 
 /// Remove tray icons installed by `install()`.
-pub async fn uninstall() -> anyhow::Result<()> {
+///
+/// Best-effort: logs errors and continues so all files are attempted even if
+/// one removal fails. Always returns `Ok(())`.
+pub fn uninstall() -> anyhow::Result<()> {
     let base = hicolor_base()?;
 
-    for &size in PNG_SIZES {
-        let dir = base.join(format!("{size}x{size}/apps"));
-        for name in ["voxtype.png", "voxtype-recording.png"] {
-            let path = dir.join(name);
-            if path.exists() {
-                fs::remove_file(&path)?;
+    let png_dir = base.join("128x128/apps");
+    for name in ["voxtype.png", "voxtype-recording.png"] {
+        let path = png_dir.join(name);
+        if path.exists() {
+            if let Err(e) = fs::remove_file(&path) {
+                tracing::warn!(path = %path.display(), "Failed to remove tray icon: {e}");
+            } else {
                 tracing::info!(path = %path.display(), "Removed tray icon");
             }
         }
@@ -75,8 +75,11 @@ pub async fn uninstall() -> anyhow::Result<()> {
     for name in ["voxtype.svg", "voxtype-recording.svg"] {
         let path = scalable.join(name);
         if path.exists() {
-            fs::remove_file(&path)?;
-            tracing::info!(path = %path.display(), "Removed tray icon");
+            if let Err(e) = fs::remove_file(&path) {
+                tracing::warn!(path = %path.display(), "Failed to remove tray icon: {e}");
+            } else {
+                tracing::info!(path = %path.display(), "Removed tray icon");
+            }
         }
     }
 

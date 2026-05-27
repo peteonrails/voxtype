@@ -10,7 +10,6 @@
 //! reflects state changes in the icon, tooltip, and context menu.
 
 use ksni::{menu::*, Status, ToolTip, Tray, TrayMethods};
-use std::path::PathBuf;
 use tokio::{process::Command as TokioCommand, sync::watch};
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -24,6 +23,7 @@ pub enum TrayState {
 }
 
 impl TrayState {
+    #[cfg(test)]
     pub fn from_state_name(s: &str) -> Self {
         match s.trim().to_lowercase().as_str() {
             "idle" => TrayState::Idle,
@@ -62,6 +62,8 @@ impl TrayState {
 
 struct VoxtypeTray {
     state: TrayState,
+    /// Cached once at construction: true when started by systemd (INVOCATION_ID is set).
+    under_systemd: bool,
 }
 
 impl Tray for VoxtypeTray {
@@ -122,7 +124,7 @@ impl Tray for VoxtypeTray {
                 // Only enable when running under systemd (INVOCATION_ID is set by
                 // systemd for every service it manages). On manually-launched
                 // daemons, systemctl would either fail or target the wrong unit.
-                enabled: std::env::var("INVOCATION_ID").is_ok(),
+                enabled: self.under_systemd,
                 activate: Box::new(|_| restart_daemon()),
                 ..Default::default()
             }
@@ -133,19 +135,15 @@ impl Tray for VoxtypeTray {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Spawn a voxtype sub-command, finding the binary next to the current exe.
+/// Spawn a voxtype sub-command using the current executable (unified binary).
 fn spawn_voxtype(args: &[&str]) {
-    let bin = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("voxtype")))
-        .filter(|p| p.exists())
-        .unwrap_or_else(|| {
-            tracing::warn!(
-                "voxtype binary not found next to current exe; \
-                 falling back to PATH lookup (may fail under systemd)"
-            );
-            PathBuf::from("voxtype")
-        });
+    let bin = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Failed to resolve current exe for tray command: {e}");
+            return;
+        }
+    };
     let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
     tokio::task::spawn(async move {
         match TokioCommand::new(&bin).args(&args).spawn() {
@@ -190,6 +188,7 @@ pub fn spawn(rx: watch::Receiver<TrayState>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let tray = VoxtypeTray {
             state: *rx.borrow(),
+            under_systemd: std::env::var("INVOCATION_ID").is_ok(),
         };
         let handle = match tray.spawn().await {
             Ok(h) => h,
@@ -200,7 +199,14 @@ pub fn spawn(rx: watch::Receiver<TrayState>) -> tokio::task::JoinHandle<()> {
         };
         tracing::info!("Tray icon active (SNI via ksni)");
 
+        // Apply any state change that arrived while the tray was starting up
+        // (e.g. during the DBus handshake). borrow_and_update marks the current
+        // value as seen so the loop's changed() won't redundantly re-apply it.
         let mut rx = rx;
+        {
+            let current = *rx.borrow_and_update();
+            handle.update(|t| t.state = current).await;
+        }
         loop {
             match rx.changed().await {
                 Ok(_) => {
@@ -286,6 +292,7 @@ mod tests {
         // Must match the filename stem written by setup::icons::install().
         let t = VoxtypeTray {
             state: TrayState::Idle,
+            under_systemd: false,
         };
         assert_eq!(t.icon_name(), "voxtype");
     }
@@ -295,6 +302,7 @@ mod tests {
         use ksni::Tray;
         let t = VoxtypeTray {
             state: TrayState::Idle,
+            under_systemd: false,
         };
         assert_eq!(t.attention_icon_name(), "voxtype-recording");
     }

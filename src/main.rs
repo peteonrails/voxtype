@@ -580,9 +580,9 @@ async fn main() -> anyhow::Result<()> {
                 Some(SetupAction::Icons { uninstall }) => {
                     warn_if_root("icons");
                     if uninstall {
-                        setup::icons::uninstall().await?;
+                        setup::icons::uninstall()?;
                     } else {
-                        setup::icons::install().await?;
+                        setup::icons::install()?;
                     }
                 }
                 Some(SetupAction::Dms {

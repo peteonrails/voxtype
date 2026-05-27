@@ -757,7 +757,18 @@ impl Daemon {
         }
         #[cfg(target_os = "linux")]
         if let Some(ref tx) = self.tray_tx {
-            let _ = tx.send(crate::tray::TrayState::from_state_name(state_name));
+            use crate::tray::TrayState;
+            let tray_state = match state_name {
+                "idle" => TrayState::Idle,
+                "recording" => TrayState::Recording,
+                "transcribing" => TrayState::Transcribing,
+                "stopped" => TrayState::Stopped,
+                other => {
+                    tracing::warn!(state = other, "Unrecognized daemon state for tray");
+                    TrayState::Idle
+                }
+            };
+            let _ = tx.send(tray_state);
         }
     }
 
@@ -2157,11 +2168,12 @@ impl Daemon {
         #[cfg(target_os = "linux")]
         if self.config.tray.enabled {
             // Ensure icons are installed — silently installs on first run.
-            tokio::spawn(async {
-                if let Err(e) = crate::setup::icons::install().await {
-                    tracing::debug!("Tray icon install skipped: {}", e);
-                }
-            });
+            // Run in spawn_blocking so filesystem I/O doesn't stall the async runtime.
+            match tokio::task::spawn_blocking(crate::setup::icons::install).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::debug!("Tray icon install skipped: {}", e),
+                Err(e) => tracing::debug!("Tray icon install task panicked: {}", e),
+            }
             let (tx, rx) = tokio::sync::watch::channel(crate::tray::TrayState::Idle);
             self.tray_tx = Some(tx);
             self.tray_task = Some(crate::tray::spawn(rx));
