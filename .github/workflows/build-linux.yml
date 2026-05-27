@@ -412,12 +412,11 @@ jobs:
           echo "Distro packages built:"
           ls -lh "releases/${VERSION}/"*.deb "releases/${VERSION}/"*.rpm
 
-      # Sign the .deb and .rpm with the same subkey CI uses for the
-      # auto-archive. Per `feedback_signing_workflow.md`, the binary
-      # voxtype-bin AUR channel uses the primary key offline because
-      # makepkg verifies sigs against the user's local keyring; .deb/.rpm
-      # consumers (apt, dnf) don't gpg-verify .asc files at install time
-      # the same way, so the subkey is fine for this channel.
+      # Sign the .deb and .rpm with the dedicated CI signing primary,
+      # cross-signed by the offline maintainer key. Both keys are listed
+      # in voxtype-bin's `validpgpkeys`, so first-time AUR users get a
+      # clean auto-fetch of the new primary by fingerprint (unlike the
+      # subkey-by-keyid lookup that broke v0.7.4 yay upgrades).
       - name: Sign .deb and .rpm artifacts
         if: startsWith(github.ref, 'refs/tags/v')
         env:
@@ -430,7 +429,7 @@ jobs:
             exit 0
           fi
           VERSION='${{ steps.version.outputs.version }}'
-          SIGNING_SUBKEY="C6277FA9D80B9EC8"
+          SIGNING_KEY="9CCF7915B750CAE8B095ED1AA3FC9F33FD209279"
           WORK=$(mktemp -d)
           trap 'rm -rf "${WORK}"' EXIT
           export GNUPGHOME="${WORK}/gpg"
@@ -444,7 +443,7 @@ jobs:
           for f in voxtype_${VERSION}-1_amd64.deb voxtype-${VERSION}-1.x86_64.rpm; do
             printf '%s' "${GPG_PASSPHRASE}" | gpg --batch --yes \
                 --pinentry-mode loopback --passphrase-fd 0 \
-                --local-user "${SIGNING_SUBKEY}!" \
+                --local-user "${SIGNING_KEY}!" \
                 --detach-sign --armor --output "${f}.asc" "${f}"
             echo "Signed ${f}"
           done
@@ -479,25 +478,31 @@ jobs:
       # the PKGBUILD actually pulls. Signing the auto-archive byte-for-byte
       # closes that gap.
       #
-      # Signing is done with a dedicated 1-year signing SUBKEY of the
-      # maintainer's primary key (E79F5BAF8CD51A806AA27DBB7DA2709247D75BC6).
-      # Subkey: 390AA166FE02D00BCF37150FC6277FA9D80B9EC8 (short id
-      # C6277FA9D80B9EC8). A subkey scopes blast radius if the CI secret is
-      # ever exfiltrated: the primary stays offline and can revoke the
-      # subkey, downstream verifiers still trust signatures via the primary
-      # binding (RFC 4880 §5.2.1 back-sig).
+      # Signing is done with a dedicated CI signing primary key:
+      # 9CCF7915B750CAE8B095ED1AA3FC9F33FD209279 ("Voxtype Release Signing"),
+      # cross-signed by the offline maintainer key
+      # (E79F5BAF8CD51A806AA27DBB7DA2709247D75BC6). The dedicated primary
+      # lives entirely in CI secrets; the offline maintainer primary
+      # never enters CI. Compromise of the CI key impersonates only
+      # "Voxtype Release Signing", not Pete's primary identity.
+      #
+      # The cross-signature on `NEW_PRIMARY` from `E79F5BAF...` gives
+      # security-conscious users a verifiable chain back to the offline
+      # primary they already trust. makepkg / yay don't enforce WoT depth
+      # so the cross-sig is informational for that flow — the practical
+      # benefit is that the new primary's fingerprint can be auto-fetched
+      # from keyservers (which can't be done reliably for subkey IDs),
+      # eliminating the v0.7.4 stale-keyring upgrade friction.
       #
       # Two repo secrets are required:
-      #   GPG_PRIVATE_KEY  — ASCII-armored export of the SIGNING SUBKEY's
-      #                      secret material (NOT the primary):
-      #                        gpg --export-secret-subkeys --armor \
-      #                          C6277FA9D80B9EC8! \
+      #   GPG_PRIVATE_KEY  — ASCII-armored export of the CI signing primary's
+      #                      secret material:
+      #                        gpg --export-secret-keys --armor \
+      #                          9CCF7915B750CAE8B095ED1AA3FC9F33FD209279 \
       #                          | gh secret set GPG_PRIVATE_KEY \
       #                            -R peteonrails/voxtype
-      #                      The trailing `!` on the key ID is critical:
-      #                      it tells gpg to export only that subkey.
-      #   GPG_PASSPHRASE   — the random passphrase guarding the subkey on
-      #                      disk; piped to gpg over stdin with
+      #   GPG_PASSPHRASE   — the random passphrase guarding the key on disk;
+      #                      piped to gpg over stdin with
       #                      `--passphrase-fd 0 --pinentry-mode loopback`.
       #
       # If either secret is missing, the step fails with an actionable error
@@ -513,19 +518,19 @@ jobs:
           VERSION='${{ steps.version.outputs.version }}'
           TAG="v${VERSION}"
           AUTO_TARBALL_URL="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
-          SIGNING_SUBKEY="C6277FA9D80B9EC8"
+          SIGNING_KEY="9CCF7915B750CAE8B095ED1AA3FC9F33FD209279"
 
           if [[ -z "${GPG_PRIVATE_KEY:-}" ]]; then
             echo "::error::GPG_PRIVATE_KEY secret is not set."
             echo "::error::The AUR 'voxtype' source PKGBUILD requires a signed auto-archive."
-            echo "::error::Export and upload the signing subkey (NOT the primary key):"
-            echo "::error::  gpg --export-secret-subkeys --armor ${SIGNING_SUBKEY}! \\"
+            echo "::error::Export and upload the CI signing primary:"
+            echo "::error::  gpg --export-secret-keys --armor ${SIGNING_KEY} \\"
             echo "::error::    | gh secret set GPG_PRIVATE_KEY -R peteonrails/voxtype"
             exit 1
           fi
           if [[ -z "${GPG_PASSPHRASE:-}" ]]; then
             echo "::error::GPG_PASSPHRASE secret is not set."
-            echo "::error::The signing subkey is passphrase-protected; CI needs the passphrase."
+            echo "::error::The CI signing primary is passphrase-protected; CI needs the passphrase."
             echo "::error::Set it via:  gh secret set GPG_PASSPHRASE -R peteonrails/voxtype"
             exit 1
           fi
@@ -533,7 +538,7 @@ jobs:
           WORK=$(mktemp -d)
           trap 'rm -rf "${WORK}"' EXIT
 
-          # Import the maintainer subkey into a throwaway GPG home so we don't
+          # Import the CI signing key into a throwaway GPG home so we don't
           # pollute the runner's default keyring across steps. allow-loopback-
           # pinentry lets us pass the passphrase over stdin (--passphrase-fd 0)
           # without an interactive prompt, which doesn't exist in CI.
@@ -559,9 +564,9 @@ jobs:
           done
           test -s "${TARBALL}" || { echo "::error::Failed to download ${AUTO_TARBALL_URL}"; exit 1; }
 
-          # Detach-sign in ASCII-armored form. Lock signing to the subkey
-          # explicitly with the `!` suffix on --local-user so gpg can't fall
-          # back to any other signing-capable key that might be present.
+          # Detach-sign in ASCII-armored form. Lock signing to the CI signing
+          # primary explicitly with the `!` suffix on --local-user so gpg can't
+          # fall back to any other signing-capable key that might be present.
           # Passphrase comes in over stdin via --passphrase-fd 0 with
           # --pinentry-mode loopback, matching the gpg.conf above.
           # Output filename matches the AUR PKGBUILD's expected asset name
@@ -570,7 +575,7 @@ jobs:
           printf '%s' "${GPG_PASSPHRASE}" | gpg --batch --yes \
               --pinentry-mode loopback \
               --passphrase-fd 0 \
-              --local-user "${SIGNING_SUBKEY}!" \
+              --local-user "${SIGNING_KEY}!" \
               --detach-sign --armor \
               --output "${ASC}" \
               "${TARBALL}"
@@ -614,8 +619,14 @@ jobs:
           export GNUPGHOME="${WORK}/gpg"
           mkdir -p "${GNUPGHOME}"
           chmod 700 "${GNUPGHOME}"
+          # Fetch the CI signing primary by fingerprint so the verify step
+          # below can prove the .asc actually came from voxtype CI. Also
+          # fetch the offline maintainer primary that cross-signs the CI
+          # key; this gives the audit chain (CI key ← maintainer key) for
+          # anyone watching the run.
           gpg --batch --keyserver hkps://keys.openpgp.org \
-              --recv-keys E79F5BAF8CD51A806AA27DBB7DA2709247D75BC6 \
+              --recv-keys 9CCF7915B750CAE8B095ED1AA3FC9F33FD209279 \
+              E79F5BAF8CD51A806AA27DBB7DA2709247D75BC6 \
               || echo "Keyserver lookup failed; verification will rely on the .asc's own key id"
 
           gpg --batch --verify \
