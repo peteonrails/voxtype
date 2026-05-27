@@ -385,12 +385,77 @@ jobs:
       # already imports GPG_PRIVATE_KEY; binary signing can reuse that same setup
       # once we decide whether to ship per-binary .asc files.
 
+      # Build distro packages (.deb for Debian/Ubuntu, .rpm for Fedora/RHEL).
+      # Prior to v0.7.5 these were manual: Pete ran `./scripts/package.sh
+      # --skip-build $VERSION` on his laptop after each CI cycle. The step
+      # gets skipped on hotfix cycles and downstream users ended up without
+      # a distro install path on tag (v0.7.4 was a recent example). Moving
+      # to CI eliminates the manual step and guarantees parity with the
+      # binary set in every release.
+      #
+      # fpm and rpmbuild both run cleanly on ubuntu-latest. The script
+      # honors --skip-build so it consumes the binaries already in
+      # releases/$VERSION/ from the collect step above; no rebuild.
+      - name: Install fpm and rpmbuild
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm ruby ruby-dev build-essential
+          sudo gem install --no-document fpm
+
+      - name: Build .deb and .rpm packages
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.version.outputs.version }}'
+          ./scripts/package.sh --skip-build "${VERSION}"
+          echo "Distro packages built:"
+          ls -lh "releases/${VERSION}/"*.deb "releases/${VERSION}/"*.rpm
+
+      # Sign the .deb and .rpm with the same subkey CI uses for the
+      # auto-archive. Per `feedback_signing_workflow.md`, the binary
+      # voxtype-bin AUR channel uses the primary key offline because
+      # makepkg verifies sigs against the user's local keyring; .deb/.rpm
+      # consumers (apt, dnf) don't gpg-verify .asc files at install time
+      # the same way, so the subkey is fine for this channel.
+      - name: Sign .deb and .rpm artifacts
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GPG_PRIVATE_KEY:-}" || -z "${GPG_PASSPHRASE:-}" ]]; then
+            echo "::warning::GPG secrets not set; skipping .deb/.rpm signing."
+            exit 0
+          fi
+          VERSION='${{ steps.version.outputs.version }}'
+          SIGNING_SUBKEY="C6277FA9D80B9EC8"
+          WORK=$(mktemp -d)
+          trap 'rm -rf "${WORK}"' EXIT
+          export GNUPGHOME="${WORK}/gpg"
+          mkdir -p "${GNUPGHOME}"
+          chmod 700 "${GNUPGHOME}"
+          printf 'allow-loopback-pinentry\n' > "${GNUPGHOME}/gpg-agent.conf"
+          printf 'pinentry-mode loopback\n' > "${GNUPGHOME}/gpg.conf"
+          gpgconf --kill gpg-agent || true
+          echo "${GPG_PRIVATE_KEY}" | gpg --batch --import
+          cd "releases/${VERSION}"
+          for f in voxtype_${VERSION}-1_amd64.deb voxtype-${VERSION}-1.x86_64.rpm; do
+            printf '%s' "${GPG_PASSPHRASE}" | gpg --batch --yes \
+                --pinentry-mode loopback --passphrase-fd 0 \
+                --local-user "${SIGNING_SUBKEY}!" \
+                --detach-sign --armor --output "${f}.asc" "${f}"
+            echo "Signed ${f}"
+          done
+
       - name: Upload combined artifact
         uses: actions/upload-artifact@v4
         with:
           name: voxtype-${{ steps.version.outputs.version }}-linux-all
           path: |
             releases/${{ steps.version.outputs.version }}/voxtype-*
+            releases/${{ steps.version.outputs.version }}/voxtype_*
             releases/${{ steps.version.outputs.version }}/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
@@ -403,6 +468,7 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             releases/${{ steps.version.outputs.version }}/voxtype-*
+            releases/${{ steps.version.outputs.version }}/voxtype_*
             releases/${{ steps.version.outputs.version }}/SHA256SUMS.txt
 
       # Sign the GitHub-generated source archive (what `makepkg` for the AUR
