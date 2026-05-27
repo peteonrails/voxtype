@@ -101,6 +101,16 @@ pub async fn install() -> anyhow::Result<()> {
         println!("    Check logs with: journalctl --user -u voxtype");
     }
 
+    // Install tray icons if tray is enabled (default).
+    let config = crate::config::load_config(None).unwrap_or_default();
+    if config.tray.enabled {
+        println!("\nInstalling tray icons...");
+        match super::icons::install().await {
+            Ok(()) => {}
+            Err(e) => println!("  Warning: could not install tray icons: {e}"),
+        }
+    }
+
     // Show status
     println!("\n---");
     println!("Service installed successfully!\n");

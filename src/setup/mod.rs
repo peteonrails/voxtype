@@ -17,6 +17,8 @@ pub mod dms;
 pub mod gpu;
 #[cfg(target_os = "macos")]
 pub mod hammerspoon;
+#[cfg(target_os = "linux")]
+pub mod icons;
 pub mod launchd;
 #[cfg(target_os = "macos")]
 pub mod macos;

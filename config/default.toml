@@ -226,3 +226,11 @@ icon_theme = "emoji"
 # recording = "🎤"
 # transcribing = "⏳"
 # stopped = ""
+
+# ──────────────────────────────────────────────────────────────────────────────
+# System Tray (Linux only, StatusNotifierItem)
+# ──────────────────────────────────────────────────────────────────────────────
+[tray]
+# Enable the system tray icon. Shows a blue mic when idle, red when recording.
+# Requires icons to be installed first: voxtype setup icons
+enabled = true

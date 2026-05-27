@@ -56,3 +56,6 @@ website/docs
 # Local agent worktrees and ephemeral plans
 .claude/worktrees/
 PLAN-*.md
+
+# AI assistant temp files
+ai/temp/

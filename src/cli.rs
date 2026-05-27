@@ -1166,6 +1166,16 @@ pub enum SetupAction {
         uninstall: bool,
     },
 
+    /// Install system tray icons to the XDG icon theme (Linux only).
+    /// Required for the tray icon to display correctly. Installs a blue mic
+    /// icon for idle state and a red mic icon for recording state.
+    #[cfg(target_os = "linux")]
+    Icons {
+        /// Remove installed tray icons instead of installing
+        #[arg(long)]
+        uninstall: bool,
+    },
+
     /// DankMaterialShell (DMS) integration
     Dms {
         /// Install DMS plugin (create widget directory and QML file)
