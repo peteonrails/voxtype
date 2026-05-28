@@ -23,9 +23,10 @@ Soniox is paid SaaS. Sign up at [console.soniox.com](https://console.soniox.com)
 
 ## Requirements
 
-- voxtype (Soniox ships in every release binary; no feature flag needed)
 - A Soniox API key (free tier credits available)
 - Outbound HTTPS / WebSocket (wss://) access
+
+Soniox ships in every release binary; no build flag needed.
 
 No local model files. No GPU.
 
