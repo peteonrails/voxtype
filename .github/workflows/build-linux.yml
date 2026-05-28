@@ -11,10 +11,11 @@ permissions:
 # with a matching ubuntu host runner as belt-and-suspenders. See CLAUDE.md
 # "Building Release Binaries" for the policy this enforces.
 #
-# The release job signs the GitHub auto-archive source tarball (issue #415)
-# using the GPG_PRIVATE_KEY secret. Once that secret is configured, the same
-# import can be extended to detach-sign each voxtype-* binary artifact and
-# SHA256SUMS.txt; the .asc files would be uploaded alongside the binaries.
+# The release job signs every binary, companion .so, SHA256SUMS.txt, .deb,
+# .rpm, and the GitHub auto-archive source tarball (issue #415) using the
+# dedicated CI signing primary 9CCF7915... via the GPG_PRIVATE_KEY secret.
+# All .asc files are uploaded alongside their artifacts on tag push so AUR /
+# Deb / RPM consumers can verify without manual maintainer signing.
 
 on:
   push:
@@ -380,10 +381,68 @@ jobs:
           echo "SHA256SUMS.txt:"
           cat SHA256SUMS.txt
 
-      # NOTE: binary signing (detach-sign each voxtype-* artifact + SHA256SUMS.txt)
-      # is a separate follow-up. The auto-archive signing step below (issue #415)
-      # already imports GPG_PRIVATE_KEY; binary signing can reuse that same setup
-      # once we decide whether to ship per-binary .asc files.
+      # Sign every binary + companion .so + SHA256SUMS.txt with the dedicated
+      # CI signing primary 9CCF7915..., cross-signed by the offline maintainer
+      # key. Prior to v0.7.5 these `.asc` files were produced manually on Pete's
+      # laptop after each release; v0.7.4 was distributed without any per-binary
+      # `.asc` files in the initial cut for that reason. Moving signing to CI
+      # closes that gap so every release has hands-off per-artifact signatures
+      # without requiring a maintainer at the keyboard.
+      #
+      # Runs after SHA256SUMS.txt is written but before the .deb/.rpm packages
+      # are built, so the for-loop only walks binaries + companion .so files
+      # (the .deb/.rpm artifacts are signed in their own step below to keep
+      # the loop's glob simple). Both signing steps use the same GPG import
+      # plumbing — they share `WORK`/`GNUPGHOME` semantics by re-creating the
+      # ephemeral keyring per step, which is cheap and keeps the two signing
+      # surfaces independent.
+      - name: Sign binary artifacts
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GPG_PRIVATE_KEY:-}" || -z "${GPG_PASSPHRASE:-}" ]]; then
+            echo "::warning::GPG secrets not set; skipping binary signing."
+            exit 0
+          fi
+          VERSION='${{ steps.version.outputs.version }}'
+          SIGNING_KEY="9CCF7915B750CAE8B095ED1AA3FC9F33FD209279"
+          WORK=$(mktemp -d)
+          trap 'rm -rf "${WORK}"' EXIT
+          export GNUPGHOME="${WORK}/gpg"
+          mkdir -p "${GNUPGHOME}"
+          chmod 700 "${GNUPGHOME}"
+          printf 'allow-loopback-pinentry\n' > "${GNUPGHOME}/gpg-agent.conf"
+          printf 'pinentry-mode loopback\n' > "${GNUPGHOME}/gpg.conf"
+          gpgconf --kill gpg-agent || true
+          echo "${GPG_PRIVATE_KEY}" | gpg --batch --import
+          cd "releases/${VERSION}"
+          shopt -s nullglob
+          # Every binary + companion .so + the checksum manifest. `.asc` is
+          # excluded so a re-run doesn't sign sigs of sigs; .deb/.rpm don't
+          # exist yet at this point but are filtered defensively.
+          targets=()
+          for f in voxtype-* SHA256SUMS.txt; do
+            case "$f" in
+              *.asc|*.deb|*.rpm) continue ;;
+            esac
+            [[ -f "$f" ]] && targets+=("$f")
+          done
+          if [[ ${#targets[@]} -eq 0 ]]; then
+            echo "::warning::No artifacts to sign."
+            exit 0
+          fi
+          for f in "${targets[@]}"; do
+            printf '%s' "${GPG_PASSPHRASE}" | gpg --batch --yes \
+                --pinentry-mode loopback --passphrase-fd 0 \
+                --local-user "${SIGNING_KEY}!" \
+                --detach-sign --armor --output "${f}.asc" "${f}"
+            echo "Signed ${f}"
+          done
+          echo "Detached signatures produced:"
+          ls -1 *.asc
 
       # Build distro packages (.deb for Debian/Ubuntu, .rpm for Fedora/RHEL).
       # Prior to v0.7.5 these were manual: Pete ran `./scripts/package.sh
@@ -455,7 +514,7 @@ jobs:
           path: |
             releases/${{ steps.version.outputs.version }}/voxtype-*
             releases/${{ steps.version.outputs.version }}/voxtype_*
-            releases/${{ steps.version.outputs.version }}/SHA256SUMS.txt
+            releases/${{ steps.version.outputs.version }}/SHA256SUMS.txt*
           if-no-files-found: error
           retention-days: 30
 
@@ -468,7 +527,7 @@ jobs:
           files: |
             releases/${{ steps.version.outputs.version }}/voxtype-*
             releases/${{ steps.version.outputs.version }}/voxtype_*
-            releases/${{ steps.version.outputs.version }}/SHA256SUMS.txt
+            releases/${{ steps.version.outputs.version }}/SHA256SUMS.txt*
 
       # Sign the GitHub-generated source archive (what `makepkg` for the AUR
       # `voxtype` source PKGBUILD downloads) and upload the detached signature
