@@ -58,34 +58,30 @@ fn write_if_changed(path: &Path, data: &[u8]) -> anyhow::Result<bool> {
 /// one removal fails. Always returns `Ok(())`.
 pub fn uninstall() -> anyhow::Result<()> {
     let base = hicolor_base()?;
-
-    let png_dir = base.join("128x128/apps");
-    for name in ["voxtype.png", "voxtype-recording.png"] {
-        let path = png_dir.join(name);
-        if path.exists() {
-            if let Err(e) = fs::remove_file(&path) {
-                tracing::warn!(path = %path.display(), "Failed to remove tray icon: {e}");
-            } else {
-                tracing::info!(path = %path.display(), "Removed tray icon");
-            }
-        }
-    }
-
-    let scalable = base.join("scalable/apps");
-    for name in ["voxtype.svg", "voxtype-recording.svg"] {
-        let path = scalable.join(name);
-        if path.exists() {
-            if let Err(e) = fs::remove_file(&path) {
-                tracing::warn!(path = %path.display(), "Failed to remove tray icon: {e}");
-            } else {
-                tracing::info!(path = %path.display(), "Removed tray icon");
-            }
-        }
-    }
-
+    remove_icons(
+        &base.join("128x128/apps"),
+        &["voxtype.png", "voxtype-recording.png"],
+    );
+    remove_icons(
+        &base.join("scalable/apps"),
+        &["voxtype.svg", "voxtype-recording.svg"],
+    );
     update_icon_cache(&base);
-
     Ok(())
+}
+
+/// Best-effort removal of named icon files from `dir`. Logs warnings on error.
+fn remove_icons(dir: &Path, names: &[&str]) {
+    for name in names {
+        let path = dir.join(name);
+        if path.exists() {
+            if let Err(e) = fs::remove_file(&path) {
+                tracing::warn!(path = %path.display(), "Failed to remove tray icon: {e}");
+            } else {
+                tracing::info!(path = %path.display(), "Removed tray icon");
+            }
+        }
+    }
 }
 
 fn hicolor_base() -> anyhow::Result<PathBuf> {

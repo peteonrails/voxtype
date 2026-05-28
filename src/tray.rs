@@ -23,7 +23,6 @@ pub enum TrayState {
 }
 
 impl TrayState {
-    #[cfg(test)]
     pub fn from_state_name(s: &str) -> Self {
         match s.trim().to_lowercase().as_str() {
             "idle" => TrayState::Idle,
@@ -162,21 +161,20 @@ fn spawn_voxtype(args: &[&str]) {
 /// Restart the voxtype systemd user service. Only call when running under
 /// systemd (`INVOCATION_ID` is set); the menu item is disabled otherwise.
 fn restart_daemon() {
-    tokio::task::spawn(async move {
-        match TokioCommand::new("systemctl")
-            .args(["--user", "restart", "voxtype"])
-            .spawn()
-        {
-            Ok(mut child) => {
-                // The process will be killed by systemd before the child returns;
-                // swallow the wait error.
-                let _ = child.wait().await;
-            }
-            Err(e) => {
-                tracing::warn!("Failed to restart voxtype via systemctl: {e}");
-            }
+    // Fire-and-forget: systemd will SIGTERM this process before any child.wait()
+    // could complete, so we just spawn and drop the child immediately.
+    // kill_on_drop(false) ensures the systemctl process isn't killed when the
+    // Child handle is dropped.
+    match TokioCommand::new("systemctl")
+        .args(["--user", "restart", "voxtype"])
+        .kill_on_drop(false)
+        .spawn()
+    {
+        Ok(_child) => {} // dropped immediately — fire and forget
+        Err(e) => {
+            tracing::warn!("Failed to restart voxtype via systemctl: {e}");
         }
-    });
+    }
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────

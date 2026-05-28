@@ -757,18 +757,7 @@ impl Daemon {
         }
         #[cfg(target_os = "linux")]
         if let Some(ref tx) = self.tray_tx {
-            use crate::tray::TrayState;
-            let tray_state = match state_name {
-                "idle" => TrayState::Idle,
-                "recording" => TrayState::Recording,
-                "transcribing" => TrayState::Transcribing,
-                "stopped" => TrayState::Stopped,
-                other => {
-                    tracing::warn!(state = other, "Unrecognized daemon state for tray");
-                    TrayState::Idle
-                }
-            };
-            let _ = tx.send(tray_state);
+            let _ = tx.send(crate::tray::TrayState::from_state_name(state_name));
         }
     }
 
