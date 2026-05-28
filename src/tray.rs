@@ -185,7 +185,7 @@ fn restart_daemon() {
 pub fn spawn(rx: watch::Receiver<TrayState>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let tray = VoxtypeTray {
-            state: *rx.borrow(),
+            state: TrayState::Idle,
             under_systemd: std::env::var("INVOCATION_ID").is_ok(),
         };
         let handle = match tray.spawn().await {

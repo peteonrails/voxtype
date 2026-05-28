@@ -114,9 +114,10 @@ pub async fn install() -> anyhow::Result<()> {
         };
         if tray_enabled {
             println!("\nInstalling tray icons...");
-            match super::icons::install() {
-                Ok(()) => {}
-                Err(e) => println!("  Warning: could not install tray icons: {e}"),
+            match tokio::task::spawn_blocking(super::icons::install).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => println!("  Warning: could not install tray icons: {e}"),
+                Err(e) => println!("  Warning: tray icon install task panicked: {e}"),
             }
         }
     }
