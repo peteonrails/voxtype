@@ -23,10 +23,7 @@ Soniox is paid SaaS. Sign up at [console.soniox.com](https://console.soniox.com)
 
 ## Requirements
 
-- voxtype built with the `soniox` Cargo feature:
-  ```bash
-  cargo build --release --features soniox
-  ```
+- voxtype (Soniox ships in every release binary; no feature flag needed)
 - A Soniox API key (free tier credits available)
 - Outbound HTTPS / WebSocket (wss://) access
 
