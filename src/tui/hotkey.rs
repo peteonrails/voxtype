@@ -202,7 +202,10 @@ impl HotkeyState {
 
     fn move_field(&mut self, delta: i32) {
         let len = Field::ALL.len() as i32;
-        let cur = Field::ALL.iter().position(|f| *f == self.field).unwrap_or(0) as i32;
+        let cur = Field::ALL
+            .iter()
+            .position(|f| *f == self.field)
+            .unwrap_or(0) as i32;
         let new = (cur + delta).rem_euclid(len);
         self.field = Field::ALL[new as usize];
     }
@@ -236,10 +239,8 @@ impl HotkeyState {
     fn commit_text_edit(&mut self, field: Field, buffer: String) {
         let trimmed = buffer.trim();
         match field {
-            Field::Key => {
-                if !trimmed.is_empty() {
-                    self.key = trimmed.to_uppercase();
-                }
+            Field::Key if !trimmed.is_empty() => {
+                self.key = trimmed.to_uppercase();
             }
             Field::CancelKey => {
                 self.cancel_key = if trimmed.is_empty() {
@@ -371,11 +372,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             "Cancel key",
             match state.editing.as_ref() {
                 Some(e) if e.field == Field::CancelKey => e.input.caret_string(),
-                _ => state
-                    .cancel_key
-                    .as_deref()
-                    .unwrap_or("(none)")
-                    .to_string(),
+                _ => state.cancel_key.as_deref().unwrap_or("(none)").to_string(),
             },
         )
         .dimmed(greyout),
@@ -384,11 +381,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             "Modifier (secondary model)",
             match state.editing.as_ref() {
                 Some(e) if e.field == Field::Modifier => e.input.caret_string(),
-                _ => state
-                    .modifier
-                    .as_deref()
-                    .unwrap_or("(none)")
-                    .to_string(),
+                _ => state.modifier.as_deref().unwrap_or("(none)").to_string(),
             },
         )
         .dimmed(greyout),
@@ -473,11 +466,7 @@ fn guidance_enabled<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
                 .add_modifier(Modifier::BOLD),
         )));
         for b in &bindings {
-            let file = b
-                .source
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
+            let file = b.source.file_name().and_then(|s| s.to_str()).unwrap_or("");
             lines.push(Line::from(format!(
                 "  • [{}] {}  →  voxtype {}",
                 b.compositor, b.keys, b.action
@@ -499,10 +488,25 @@ fn guidance_enabled<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
 
     // Streaming dictation requires toggle activation; if the user has it
     // enabled, suppress PTT-pair suggestions in favor of a toggle binding.
-    let streaming = ConfigEditor::load()
-        .ok()
-        .and_then(|ed| ed.get_bool("parakeet", "streaming"))
-        .unwrap_or(false);
+    // Covers all streaming-capable backends (Parakeet, Soniox, future).
+    let streaming = {
+        let ed = ConfigEditor::load().ok();
+        let engine = ed
+            .as_ref()
+            .and_then(|e| e.get_string("", "engine"))
+            .unwrap_or_else(|| "whisper".to_string());
+        match engine.as_str() {
+            "parakeet" => ed
+                .as_ref()
+                .and_then(|e| e.get_bool("parakeet", "streaming"))
+                .unwrap_or(false),
+            "soniox" => ed
+                .as_ref()
+                .and_then(|e| e.get_bool("soniox", "streaming"))
+                .unwrap_or(true),
+            _ => false,
+        }
+    };
     let suggestions = compositor_bindings::suggest_missing(&bindings, streaming);
     if !suggestions.is_empty() {
         let comp = compositor_bindings::dominant_compositor(&bindings);
@@ -663,7 +667,7 @@ fn guidance_modifier<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
 }
 
 fn display_key(key: &str) -> String {
-    if KEY_CHOICES.iter().any(|c| *c == key) {
+    if KEY_CHOICES.contains(&key) {
         key.to_string()
     } else {
         format!("{}  (custom)", key)

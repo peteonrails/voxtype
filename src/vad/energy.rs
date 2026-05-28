@@ -206,8 +206,10 @@ mod tests {
 
     #[test]
     fn test_min_speech_duration() {
-        let mut config = VadConfig::default();
-        config.min_speech_duration_ms = 500; // 500ms minimum
+        let config = VadConfig {
+            min_speech_duration_ms: 500, // 500ms minimum
+            ..VadConfig::default()
+        };
         let vad = EnergyVad::new(&config);
 
         // Create 200ms of loud audio followed by silence

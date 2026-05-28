@@ -92,7 +92,10 @@ fn render_banner(f: &mut Frame, area: Rect, app: &App) {
     }
 
     let block = Block::default().borders(Borders::ALL).title("Status");
-    f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: true }), area);
+    f.render_widget(
+        Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 fn render_info(f: &mut Frame, area: Rect, app: &App) {
@@ -119,11 +122,7 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
         .unwrap_or_else(|| "unknown (symlink missing or unrecognized)".to_string());
 
     let rec = &inv.recommendation;
-    let recommended = format!(
-        "{}  /  {}",
-        rec.whisper.display(),
-        rec.onnx.display()
-    );
+    let recommended = format!("{}  /  {}", rec.whisper.display(), rec.onnx.display());
 
     let lines = vec![
         Line::from(vec![
@@ -226,11 +225,7 @@ fn render_cell(app: &App, row: usize, col: usize) -> String {
         return "—".to_string();
     };
 
-    let status = app
-        .inventory
-        .variants
-        .iter()
-        .find(|s| s.variant == variant);
+    let status = app.inventory.variants.iter().find(|s| s.variant == variant);
 
     let glyph = match status {
         Some(s) if s.active => "● active",
@@ -703,7 +698,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
 /// restart is based on the cached `daemon_running` flag; refreshing the
 /// inventory afterwards reconciles the displayed status.
 fn start_or_restart_daemon(app: &mut App) {
-    let action = if app.daemon_running { "restart" } else { "start" };
+    let action = if app.daemon_running {
+        "restart"
+    } else {
+        "start"
+    };
 
     let result = Command::new("systemctl")
         .args(["--user", action, "voxtype"])

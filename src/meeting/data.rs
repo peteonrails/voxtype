@@ -251,8 +251,8 @@ impl Transcript {
                         break;
                     }
 
-                    for j in i..end {
-                        keep[j] = false;
+                    for entry in keep.iter_mut().take(end).skip(i) {
+                        *entry = false;
                     }
                     total_removed += end - i;
 

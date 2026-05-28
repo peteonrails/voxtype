@@ -91,19 +91,14 @@ impl AudioState {
                 .map(|n| n.clamp(0, u32::MAX as i64) as u32)
                 .unwrap_or(120),
             pause_media: ed.get_bool("audio", "pause_media").unwrap_or(false),
-            feedback_enabled: ed
-                .get_bool("audio.feedback", "enabled")
-                .unwrap_or(false),
+            feedback_enabled: ed.get_bool("audio.feedback", "enabled").unwrap_or(false),
             feedback_theme: ed
                 .get_string("audio.feedback", "theme")
                 .unwrap_or_else(|| "default".to_string()),
             feedback_volume: ed
                 .get_string("audio.feedback", "volume")
                 .and_then(|s| s.parse().ok())
-                .or_else(|| {
-                    ed.get_int("audio.feedback", "volume")
-                        .map(|n| n as f32)
-                })
+                .or_else(|| ed.get_int("audio.feedback", "volume").map(|n| n as f32))
                 .unwrap_or(0.7),
             field: Field::Device,
             feedback: None,
@@ -153,11 +148,7 @@ impl AudioState {
             }
         };
         ed.set_string("audio", "device", &self.device);
-        ed.set_int(
-            "audio",
-            "max_duration_secs",
-            self.max_duration_secs as i64,
-        );
+        ed.set_int("audio", "max_duration_secs", self.max_duration_secs as i64);
         ed.set_bool("audio", "pause_media", self.pause_media);
         ed.set_bool("audio.feedback", "enabled", self.feedback_enabled);
         ed.set_string("audio.feedback", "theme", &self.feedback_theme);
@@ -209,7 +200,10 @@ impl AudioState {
 
     fn move_field(&mut self, delta: i32) {
         let len = Field::ALL.len() as i32;
-        let cur = Field::ALL.iter().position(|f| *f == self.field).unwrap_or(0) as i32;
+        let cur = Field::ALL
+            .iter()
+            .position(|f| *f == self.field)
+            .unwrap_or(0) as i32;
         let new = (cur + delta).rem_euclid(len);
         self.field = Field::ALL[new as usize];
     }
@@ -289,12 +283,7 @@ struct SilencedStderr {
 
 impl SilencedStderr {
     fn install() -> Self {
-        let null_fd = unsafe {
-            libc::open(
-                b"/dev/null\0".as_ptr() as *const libc::c_char,
-                libc::O_WRONLY,
-            )
-        };
+        let null_fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY) };
         if null_fd < 0 {
             return Self { saved_fd: None };
         }

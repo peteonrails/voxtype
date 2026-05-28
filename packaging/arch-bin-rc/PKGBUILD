@@ -17,7 +17,7 @@
 
 pkgname=voxtype-bin-rc
 pkgver=0.7.3.rc1
-pkgrel=1
+pkgrel=2
 pkgdesc="Push-to-talk voice-to-text for Linux (pre-built binaries, release candidate channel)"
 arch=('x86_64')
 url="https://voxtype.io"
@@ -43,6 +43,7 @@ optdepends=(
     'rocm-hip-runtime: GPU acceleration via MIGraphX for ONNX engines (AMD GPUs)'
     'ollama: local AI summarization for meeting mode'
     'gtk4-layer-shell: runtime for the GTK4 on-screen mic visualizer (voxtype-osd-gtk4)'
+    'quickshell: Quickshell-based on-screen display frontend (opt in via [osd] frontend = "quickshell")'
 )
 provides=('voxtype')
 conflicts=('voxtype' 'voxtype-bin')
@@ -106,6 +107,19 @@ source=(
     # Desktop entry + terminal launcher for `voxtype configure`
     "voxtype-configure-${pkgname}-${pkgver}.desktop::${_raw}/packaging/voxtype-configure.desktop"
     "voxtype-configure-launcher-${pkgname}-${pkgver}::${_raw}/packaging/scripts/voxtype-configure-launcher"
+    # Quickshell QML tree. voxtype-osd-quickshell probes
+    # /usr/share/voxtype/quickshell/ for shell.qml after user/runtime paths,
+    # so shipping these files lets users opt in via [osd] frontend = "quickshell"
+    # without copying anything by hand. quickshell itself is an optdepend.
+    "quickshell-shell-${pkgname}-${pkgver}.qml::${_raw}/quickshell/shell.qml"
+    "quickshell-OsdSurface-${pkgname}-${pkgver}.qml::${_raw}/quickshell/OsdSurface.qml"
+    "quickshell-EnginePicker-${pkgname}-${pkgver}.qml::${_raw}/quickshell/EnginePicker.qml"
+    "quickshell-MeetingControls-${pkgname}-${pkgver}.qml::${_raw}/quickshell/MeetingControls.qml"
+    "quickshell-README-${pkgname}-${pkgver}.md::${_raw}/quickshell/README.md"
+    "quickshell-voxtype-shared-Theme-${pkgname}-${pkgver}.qml::${_raw}/quickshell/voxtype-shared/Theme.qml"
+    "quickshell-voxtype-shared-StateReader-${pkgname}-${pkgver}.qml::${_raw}/quickshell/voxtype-shared/StateReader.qml"
+    "quickshell-voxtype-shared-AudioBridge-${pkgname}-${pkgver}.qml::${_raw}/quickshell/voxtype-shared/AudioBridge.qml"
+    "quickshell-voxtype-shared-qmldir-${pkgname}-${pkgver}::${_raw}/quickshell/voxtype-shared/qmldir"
 )
 
 # TODO: Update SHA256 sums from the GitHub pre-release artifacts before
@@ -157,6 +171,16 @@ sha256sums=(
     'SKIP'  # README.md
     'SKIP'  # voxtype-configure.desktop
     'SKIP'  # voxtype-configure-launcher
+    # Quickshell QML tree
+    'SKIP'  # quickshell/shell.qml
+    'SKIP'  # quickshell/OsdSurface.qml
+    'SKIP'  # quickshell/EnginePicker.qml
+    'SKIP'  # quickshell/MeetingControls.qml
+    'SKIP'  # quickshell/README.md
+    'SKIP'  # quickshell/voxtype-shared/Theme.qml
+    'SKIP'  # quickshell/voxtype-shared/StateReader.qml
+    'SKIP'  # quickshell/voxtype-shared/AudioBridge.qml
+    'SKIP'  # quickshell/voxtype-shared/qmldir
 )
 
 package() {
@@ -249,4 +273,27 @@ package() {
     install -Dm644 "$srcdir/voxtype-${pkgname}-${pkgver}.bash" "$pkgdir/usr/share/bash-completion/completions/voxtype"
     install -Dm644 "$srcdir/voxtype-${pkgname}-${pkgver}.zsh" "$pkgdir/usr/share/zsh/site-functions/_voxtype"
     install -Dm644 "$srcdir/voxtype-${pkgname}-${pkgver}.fish" "$pkgdir/usr/share/fish/vendor_completions.d/voxtype.fish"
+
+    # Install the Quickshell QML tree into /usr/share/voxtype/quickshell/.
+    # voxtype-osd-quickshell finds shell.qml here after the user/runtime paths.
+    # The voxtype-shared module lives under its own subdirectory so the qmldir
+    # is discovered alongside Theme.qml / StateReader.qml / AudioBridge.qml.
+    install -Dm644 "$srcdir/quickshell-shell-${pkgname}-${pkgver}.qml" \
+        "$pkgdir/usr/share/voxtype/quickshell/shell.qml"
+    install -Dm644 "$srcdir/quickshell-OsdSurface-${pkgname}-${pkgver}.qml" \
+        "$pkgdir/usr/share/voxtype/quickshell/OsdSurface.qml"
+    install -Dm644 "$srcdir/quickshell-EnginePicker-${pkgname}-${pkgver}.qml" \
+        "$pkgdir/usr/share/voxtype/quickshell/EnginePicker.qml"
+    install -Dm644 "$srcdir/quickshell-MeetingControls-${pkgname}-${pkgver}.qml" \
+        "$pkgdir/usr/share/voxtype/quickshell/MeetingControls.qml"
+    install -Dm644 "$srcdir/quickshell-README-${pkgname}-${pkgver}.md" \
+        "$pkgdir/usr/share/voxtype/quickshell/README.md"
+    install -Dm644 "$srcdir/quickshell-voxtype-shared-Theme-${pkgname}-${pkgver}.qml" \
+        "$pkgdir/usr/share/voxtype/quickshell/voxtype-shared/Theme.qml"
+    install -Dm644 "$srcdir/quickshell-voxtype-shared-StateReader-${pkgname}-${pkgver}.qml" \
+        "$pkgdir/usr/share/voxtype/quickshell/voxtype-shared/StateReader.qml"
+    install -Dm644 "$srcdir/quickshell-voxtype-shared-AudioBridge-${pkgname}-${pkgver}.qml" \
+        "$pkgdir/usr/share/voxtype/quickshell/voxtype-shared/AudioBridge.qml"
+    install -Dm644 "$srcdir/quickshell-voxtype-shared-qmldir-${pkgname}-${pkgver}" \
+        "$pkgdir/usr/share/voxtype/quickshell/voxtype-shared/qmldir"
 }

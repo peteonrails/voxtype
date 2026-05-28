@@ -13,7 +13,7 @@
 use serde::Serialize;
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -36,15 +36,59 @@ pub const SYSTEM_BIN: &str = "/usr/bin/voxtype";
 /// `binary_path` may be the top-level convenience symlink (e.g.
 /// /usr/lib/voxtype/voxtype-onnx-migraphx) or the canonical real path;
 /// this function canonicalizes before deciding wrapper vs symlink.
-pub fn install_active_binary(active_bin: &str, binary_path: &Path) -> anyhow::Result<()> {
-    let canonical = fs::canonicalize(binary_path).unwrap_or_else(|_| binary_path.to_path_buf());
+/// Variant basenames that need a wrapper script. The ORT EPs they ship
+/// with (`libonnxruntime_providers_{cuda,migraphx}.so`) resolve their
+/// loader path from argv[0], so /usr/bin/voxtype has to be a script
+/// that execs the real binary by absolute path. Plain symlinks fail
+/// the load and silently fall back to CPU. See issue #443.
+const VARIANTS_NEEDING_WRAPPER: &[&str] = &[
+    "voxtype-onnx-cuda-12",
+    "voxtype-onnx-cuda-13",
+    "voxtype-onnx-migraphx",
+];
 
-    let needs_wrapper = canonical
-        .parent()
-        .and_then(|p| p.file_name())
+/// Return the subdirectory under /usr/lib/voxtype/ where a wrapper-needing
+/// variant's real binary lives. Used to reconstruct the canonical exec
+/// path when fs::canonicalize fails (broken symlink, transient FS error,
+/// etc.) so the wrapper can still be written with the correct target.
+fn variant_subdir(basename: &str) -> Option<&'static str> {
+    match basename {
+        "voxtype-onnx-cuda-12" => Some("cuda-12"),
+        "voxtype-onnx-cuda-13" => Some("cuda-13"),
+        "voxtype-onnx-migraphx" => Some("migraphx"),
+        _ => None,
+    }
+}
+
+pub fn install_active_binary(active_bin: &str, binary_path: &Path) -> anyhow::Result<()> {
+    // Decide whether this variant needs a wrapper script (vs a plain symlink)
+    // from the BASENAME, not from the canonicalized parent dir. The previous
+    // implementation looked at `fs::canonicalize(binary_path).parent()`,
+    // which fails open: when canonicalize errored, it fell back to the raw
+    // input path — whose parent is `/usr/lib/voxtype/` rather than the
+    // variant subdir like `migraphx/`. Result: a symlink got written at
+    // /usr/bin/voxtype instead of the wrapper, and ORT's argv[0]-based
+    // provider .so lookup failed at runtime with silent CPU fallback (#443).
+    //
+    // Closed-set basename match is the most reliable signal and doesn't
+    // depend on any filesystem state.
+    let basename = binary_path
+        .file_name()
         .and_then(|s| s.to_str())
-        .map(|name| name.starts_with("cuda-") || name == "migraphx")
-        .unwrap_or(false);
+        .unwrap_or("");
+    let needs_wrapper = VARIANTS_NEEDING_WRAPPER.contains(&basename);
+
+    // Resolve the canonical exec target. If canonicalize succeeds, trust
+    // it (follows the full symlink chain to the real binary). If it
+    // fails, reconstruct from the package-install convention
+    // (/usr/lib/voxtype/<subdir>/<basename>) so the wrapper still points
+    // at the .so-adjacent real binary.
+    let canonical = fs::canonicalize(binary_path).unwrap_or_else(|_| {
+        match (variant_subdir(basename), binary_path.parent()) {
+            (Some(sub), Some(parent)) => parent.join(sub).join(basename),
+            _ => binary_path.to_path_buf(),
+        }
+    });
 
     if fs::symlink_metadata(active_bin).is_ok() {
         fs::remove_file(active_bin).map_err(|e| {
@@ -62,11 +106,7 @@ pub fn install_active_binary(active_bin: &str, binary_path: &Path) -> anyhow::Re
         // fails to save compiled graphs and inference errors out (silent
         // CPU fallback isn't available — the EP fails the call). Default
         // to $XDG_CACHE_HOME/voxtype/migraphx, honoring any user override.
-        let is_migraphx = canonical
-            .parent()
-            .and_then(|p| p.file_name())
-            .and_then(|s| s.to_str())
-            == Some("migraphx");
+        let is_migraphx = basename == "voxtype-onnx-migraphx";
         let migraphx_env = if is_migraphx {
             "\
              : \"${ORT_MIGRAPHX_MODEL_CACHE_PATH:=${XDG_CACHE_HOME:-$HOME/.cache}/voxtype/migraphx}\"\n\
@@ -352,6 +392,7 @@ pub fn installed_engines(inv: &Inventory) -> std::collections::HashSet<&'static 
 ///      on AMD, Vulkan as cross-vendor fallback for Whisper).
 ///   3. AVX-512 if the host supports it.
 ///   4. AVX2 (universal x86_64 fallback).
+///
 /// Returns None when no installed variant supports the engine.
 pub fn best_variant_for_engine(inv: &Inventory, engine: &str) -> Option<Variant> {
     let candidates: Vec<&VariantStatus> = inv
@@ -592,8 +633,7 @@ pub fn active_variant() -> Option<Variant> {
     // binary path in both cases; we look up the variant from its
     // filename. Falls back to the legacy fs::read_link path for
     // robustness on edge cases.
-    let target = resolve_active_binary(SYSTEM_BIN)
-        .or_else(|| fs::read_link(SYSTEM_BIN).ok())?;
+    let target = resolve_active_binary(SYSTEM_BIN).or_else(|| fs::read_link(SYSTEM_BIN).ok())?;
     let name = target.file_name()?.to_str()?;
     Variant::from_binary_name(name)
 }
@@ -626,11 +666,50 @@ fn variant_gpu_available(v: Variant, g: &Gpus) -> bool {
     }
 }
 
+/// Enumerate Cargo features compiled into the running binary.
+///
+/// Drives the "Features:" line in `voxtype info variants`, the same field
+/// in the TUI's General and Engine inventory panes, and the source-build
+/// engine-validation warning at `src/tui/engine.rs::refresh_binary_match`.
+///
+/// **When adding a new engine or capability feature, add it here too.**
+/// The previous version of this function only enumerated `parakeet` and
+/// the four GPU backends; the six ONNX engines and `ml-diarization`
+/// silently disappeared from every display, and the source-build engine
+/// validator emitted a spurious "rebuild voxtype with the corresponding
+/// Cargo feature for this engine" warning when a user picked an engine
+/// that was actually compiled in (#383).
 pub fn compiled_features() -> Vec<&'static str> {
     let mut f = Vec::new();
+    // ASR engines. Whisper is unconditional and not a Cargo feature, so
+    // it never appears here; only optional engines are listed.
     if cfg!(feature = "parakeet") {
         f.push("parakeet");
     }
+    if cfg!(feature = "moonshine") {
+        f.push("moonshine");
+    }
+    if cfg!(feature = "sensevoice") {
+        f.push("sensevoice");
+    }
+    if cfg!(feature = "paraformer") {
+        f.push("paraformer");
+    }
+    if cfg!(feature = "dolphin") {
+        f.push("dolphin");
+    }
+    if cfg!(feature = "omnilingual") {
+        f.push("omnilingual");
+    }
+    if cfg!(feature = "cohere") {
+        f.push("cohere");
+    }
+    // Meeting-mode capability: ML-based speaker diarization (ECAPA-TDNN).
+    // When absent, meeting mode falls back to source-based attribution.
+    if cfg!(feature = "ml-diarization") {
+        f.push("ml-diarization");
+    }
+    // GPU acceleration backends
     if cfg!(feature = "gpu-vulkan") {
         f.push("gpu-vulkan");
     }
@@ -642,6 +721,15 @@ pub fn compiled_features() -> Vec<&'static str> {
     }
     if cfg!(feature = "gpu-metal") {
         f.push("gpu-metal");
+    }
+    // OSD frontends. Affects whether `voxtype-osd-gtk4` and
+    // `voxtype-osd-native` are present in the build. (The Quickshell
+    // launcher binary is unconditional and has no Cargo feature.)
+    if cfg!(feature = "osd-native") {
+        f.push("osd-native");
+    }
+    if cfg!(feature = "osd-gtk4") {
+        f.push("osd-gtk4");
     }
     f
 }
@@ -830,8 +918,14 @@ mod tests {
     fn recommendations_match_hardware() {
         // No GPU, AVX2 only → Whisper AVX2 + ONNX AVX2.
         let r = recommend(
-            &Cpu { avx2: true, avx512: false },
-            &Gpus { nvidia: false, amd: false },
+            &Cpu {
+                avx2: true,
+                avx512: false,
+            },
+            &Gpus {
+                nvidia: false,
+                amd: false,
+            },
         );
         assert_eq!(r.whisper, Variant::WhisperAvx2);
         assert_eq!(r.onnx, Variant::OnnxAvx2);
@@ -839,32 +933,56 @@ mod tests {
 
         // No GPU, AVX-512 → Whisper AVX-512 + ONNX AVX-512.
         let r = recommend(
-            &Cpu { avx2: true, avx512: true },
-            &Gpus { nvidia: false, amd: false },
+            &Cpu {
+                avx2: true,
+                avx512: true,
+            },
+            &Gpus {
+                nvidia: false,
+                amd: false,
+            },
         );
         assert_eq!(r.whisper, Variant::WhisperAvx512);
         assert_eq!(r.onnx, Variant::OnnxAvx512);
 
         // NVIDIA + AVX-512 → Whisper Vulkan + ONNX CUDA.
         let r = recommend(
-            &Cpu { avx2: true, avx512: true },
-            &Gpus { nvidia: true, amd: false },
+            &Cpu {
+                avx2: true,
+                avx512: true,
+            },
+            &Gpus {
+                nvidia: true,
+                amd: false,
+            },
         );
         assert_eq!(r.whisper, Variant::WhisperVulkan);
         assert_eq!(r.onnx, Variant::OnnxCuda);
 
         // NVIDIA but no AVX-512 → CUDA bundle won't load, fall back to ONNX AVX2.
         let r = recommend(
-            &Cpu { avx2: true, avx512: false },
-            &Gpus { nvidia: true, amd: false },
+            &Cpu {
+                avx2: true,
+                avx512: false,
+            },
+            &Gpus {
+                nvidia: true,
+                amd: false,
+            },
         );
         assert_eq!(r.whisper, Variant::WhisperVulkan);
         assert_eq!(r.onnx, Variant::OnnxAvx2);
 
         // AMD + AVX-512 → Vulkan for Whisper, AVX-512 (not MIGraphX) for ONNX.
         let r = recommend(
-            &Cpu { avx2: true, avx512: true },
-            &Gpus { nvidia: false, amd: true },
+            &Cpu {
+                avx2: true,
+                avx512: true,
+            },
+            &Gpus {
+                nvidia: false,
+                amd: true,
+            },
         );
         assert_eq!(r.whisper, Variant::WhisperVulkan);
         assert_eq!(r.onnx, Variant::OnnxAvx512);
@@ -878,5 +996,131 @@ mod tests {
             InstallKind::Package | InstallKind::Source
         ));
         let _ = inv.recommendation;
+    }
+
+    /// Regression test for #383: `compiled_features()` previously omitted
+    /// the six ONNX engines and `ml-diarization`. The bug was visible to
+    /// users in `voxtype info variants` and the TUI inventory panes, and
+    /// caused the source-build engine validator to spuriously warn about
+    /// engines that were actually compiled in.
+    ///
+    /// This test asserts the contract: every Cargo feature checked below
+    /// must appear in the returned vec when its `cfg!` is true at test
+    /// compile time. CI runs the test under several feature sets so a
+    /// future omission shows up immediately.
+    #[test]
+    fn compiled_features_enumerates_all_optional_features() {
+        let f = compiled_features();
+        macro_rules! require_feature_listed {
+            ($name:literal) => {
+                if cfg!(feature = $name) {
+                    assert!(
+                        f.contains(&$name),
+                        "compiled_features() omitted `{}` (regression of #383); \
+                         add the corresponding `if cfg!(feature = \"{}\")` arm",
+                        $name,
+                        $name
+                    );
+                }
+            };
+        }
+        require_feature_listed!("parakeet");
+        require_feature_listed!("moonshine");
+        require_feature_listed!("sensevoice");
+        require_feature_listed!("paraformer");
+        require_feature_listed!("dolphin");
+        require_feature_listed!("omnilingual");
+        require_feature_listed!("cohere");
+        require_feature_listed!("ml-diarization");
+        require_feature_listed!("gpu-vulkan");
+        require_feature_listed!("gpu-cuda");
+        require_feature_listed!("gpu-hipblas");
+        require_feature_listed!("gpu-metal");
+        require_feature_listed!("osd-native");
+        require_feature_listed!("osd-gtk4");
+    }
+
+    /// Regression test for #443: when `install_active_binary` is called
+    /// with the top-level alias path (`/usr/lib/voxtype/voxtype-onnx-migraphx`,
+    /// itself a symlink into `migraphx/`), `needs_wrapper` must come out
+    /// true regardless of whether `fs::canonicalize` succeeded — the
+    /// basename alone is enough signal because the variant set is closed.
+    /// Earlier implementation derived `needs_wrapper` from the canonical
+    /// parent dir; on canonicalize failure that fell back to the raw
+    /// `/usr/lib/voxtype/` parent and emitted a symlink instead of the
+    /// wrapper, silently breaking ORT EP loading.
+    #[test]
+    fn wrapper_decision_uses_basename_not_canonical_parent() {
+        // Constructed paths that don't exist on disk in the test runner,
+        // so `fs::canonicalize` will fail — exactly the bug scenario.
+        for variant in [
+            "voxtype-onnx-cuda-12",
+            "voxtype-onnx-cuda-13",
+            "voxtype-onnx-migraphx",
+        ] {
+            let path = std::path::Path::new("/nonexistent/usr/lib/voxtype").join(variant);
+            let basename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            assert!(
+                VARIANTS_NEEDING_WRAPPER.contains(&basename),
+                "variant {} should be in the wrapper list",
+                variant
+            );
+            assert!(
+                variant_subdir(basename).is_some(),
+                "variant {} should have a subdir mapping",
+                variant
+            );
+        }
+    }
+
+    /// Variants without ORT EP `.so` companions (Whisper avx2/avx512/vulkan,
+    /// ONNX CPU variants) should NOT get a wrapper — plain symlink works
+    /// because there's no argv[0]-relative library lookup involved.
+    #[test]
+    fn wrapper_skipped_for_non_ep_variants() {
+        for variant in [
+            "voxtype-avx2",
+            "voxtype-avx512",
+            "voxtype-vulkan",
+            "voxtype-onnx-avx2",
+            "voxtype-onnx-avx512",
+        ] {
+            assert!(
+                !VARIANTS_NEEDING_WRAPPER.contains(&variant),
+                "variant {} should NOT need a wrapper",
+                variant
+            );
+            assert!(
+                variant_subdir(variant).is_none(),
+                "variant {} should have no subdir mapping",
+                variant
+            );
+        }
+    }
+
+    /// The canonical-path fallback (used when fs::canonicalize fails)
+    /// should reconstruct `/usr/lib/voxtype/<subdir>/<basename>` for
+    /// wrapper variants. This guarantees the wrapper writes the correct
+    /// `exec` target even when the top-level alias symlink is broken or
+    /// otherwise unresolvable.
+    #[test]
+    fn variant_subdir_reconstructs_expected_path() {
+        let cases = [
+            ("voxtype-onnx-cuda-12", "cuda-12"),
+            ("voxtype-onnx-cuda-13", "cuda-13"),
+            ("voxtype-onnx-migraphx", "migraphx"),
+        ];
+        for (basename, expected_sub) in cases {
+            assert_eq!(
+                variant_subdir(basename),
+                Some(expected_sub),
+                "basename {} should map to subdir {}",
+                basename,
+                expected_sub
+            );
+        }
+        assert_eq!(variant_subdir("voxtype-avx2"), None);
+        assert_eq!(variant_subdir("voxtype-vulkan"), None);
+        assert_eq!(variant_subdir(""), None);
     }
 }

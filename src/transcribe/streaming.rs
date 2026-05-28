@@ -73,6 +73,17 @@ pub enum StreamingEvent {
     /// not produce visible churn.
     Final { text: String, segment_id: SegmentId },
 
+    /// Backspace `backspace` chars then commit `text`. Used by streaming
+    /// backends (notably Soniox) that revise the tail of a previously
+    /// typed non-final tail when finalizing — e.g. punctuation flips
+    /// from `,` to `.` or a token spelling changes between non-final
+    /// and final. Equivalent to `Final` when `backspace == 0`.
+    Replace {
+        backspace: usize,
+        text: String,
+        segment_id: SegmentId,
+    },
+
     /// The backend has finished processing all audio sent so far and is
     /// closing the stream gracefully (e.g., the daemon dropped the
     /// samples sender and the backend has flushed).

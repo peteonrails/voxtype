@@ -3,7 +3,7 @@ members = ["xtask"]
 
 [package]
 name = "voxtype"
-version = "0.7.4"
+version = "0.7.5"
 edition = "2021"
 authors = ["Peter Jackson", "Jean-Paul van Tillo", "Máté Rémiás", "Rob Zolkos", "Dan Heuckeroth", "Igor Warzocha", "Julian Kaiser", "Kevin Miller", "konnsim", "reisset", "Zubair", "Loki Coyote", "Umesh", "Barrett Ruth", "André Silva", "Chmouel Boudjnah", "Christopher Albert", "Phuoc Thinh Vu", "Alexander Bosu-Kellett", "ayoahha", "Toizi", "kakapt", "Rinor Maloku", "Sami Jawhar", "jan Lemata", "Kai Stark", "graysky"]
 description = "Push-to-talk voice-to-text for Wayland"
@@ -24,6 +24,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 directories = "5"
 dirs = "5"
+cachedir = "0.3"
 
 # Logging
 tracing = "0.1"
@@ -48,6 +49,12 @@ hound = "3"  # WAV file reading/writing
 
 # HTTP client for remote transcription
 ureq = { version = "2", features = ["json"] }
+
+# WebSocket client for Soniox streaming backend (optional)
+tokio-tungstenite = { version = "0.24", optional = true, features = ["rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", optional = true }
+# Async HTTP client for Soniox async transcription API (multipart upload + poll)
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["json", "multipart", "rustls-tls"] }
 
 # JSON parsing (for CLI backend)
 serde_json = "1"
@@ -223,6 +230,8 @@ omnilingual-tensorrt = ["omnilingual", "onnx-tensorrt-enabled"]
 cohere = ["onnx-common", "dep:half", "dep:tokenizers"]
 cohere-cuda = ["cohere", "onnx-cuda-enabled"]
 cohere-tensorrt = ["cohere", "onnx-tensorrt-enabled"]
+# Soniox cloud streaming WebSocket STT backend (no local model, just a network client)
+soniox = ["dep:tokio-tungstenite", "dep:futures-util", "dep:reqwest"]
 # No cohere-migraphx feature: MIGraphX 7.2 still fails on the
 # onnx-community q4 export. Original blocker was MatMulNBits bits=8
 # (cstr int8); q4 has bits=4 which is supported, but its zero_points
@@ -265,13 +274,28 @@ name = "voxtype-osd-gtk4"
 path = "src/bin/voxtype_osd_gtk4.rs"
 required-features = ["osd-gtk4"]
 
-# Tiny launcher that picks between voxtype-osd-gtk4 and voxtype-osd-native
-# at runtime based on config/env/CLI. Always built, no GUI deps; falls back
-# to whichever frontend binary it finds on PATH if the preferred one isn't
-# installed.
+# Tiny launcher that picks between voxtype-osd-gtk4, voxtype-osd-native,
+# and voxtype-osd-quickshell at runtime based on config/env/CLI. Always
+# built, no GUI deps; falls back to whichever frontend binary it finds on
+# PATH if the preferred one isn't installed.
 [[bin]]
 name = "voxtype-osd"
 path = "src/bin/voxtype_osd.rs"
+
+# Sidecar that exposes the daemon's audio frame socket as NDJSON on stdout
+# for clients (e.g. Quickshell QML's Process element) that can't read Unix
+# sockets directly. No GUI deps; always built.
+[[bin]]
+name = "voxtype-audio-bridge"
+path = "src/bin/voxtype_audio_bridge.rs"
+
+# Quickshell launcher: finds voxtype's shell.qml and execs `qs -p <path>`.
+# Always built, no GUI deps. Runtime dependency on the system `quickshell`
+# package; the launcher prints a clear remediation message if `qs` is
+# missing.
+[[bin]]
+name = "voxtype-osd-quickshell"
+path = "src/bin/voxtype_osd_quickshell.rs"
 
 [[example]]
 name = "inspect_cohere_onnx"

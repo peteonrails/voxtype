@@ -67,6 +67,42 @@ pub struct DiarizedSegment {
 /// Speaker labels mapping auto IDs to names
 pub type SpeakerLabels = HashMap<SpeakerId, String>;
 
+/// Split audio into overlapping voiced sub-windows by RMS gating.
+///
+/// Returns `(start_sample, end_sample, rms)` tuples for windows whose
+/// RMS energy meets or exceeds `rms_floor`. ECAPA-TDNN performs best on
+/// 2-5s segments, so callers should use `window_secs ≈ 4.0`, `hop_secs ≈ 2.0`.
+pub fn vad_subwindows(
+    samples: &[f32],
+    sample_rate: u32,
+    window_secs: f32,
+    hop_secs: f32,
+    rms_floor: f32,
+) -> Vec<(usize, usize, f32)> {
+    // Clamp at the seconds level: a hop of 0 or a very small fraction would
+    // otherwise produce hundreds of thousands of overlapping windows per
+    // segment and overwhelm ECAPA inference. 100 ms is the lowest hop that
+    // still makes sense for speaker fingerprinting.
+    let hop_secs = hop_secs.max(0.1);
+    let win = (window_secs * sample_rate as f32) as usize;
+    let hop = (hop_secs * sample_rate as f32) as usize;
+    if win == 0 || hop == 0 || samples.len() < win {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    while start + win <= samples.len() {
+        let segment = &samples[start..start + win];
+        let sum_sq: f32 = segment.iter().map(|s| s * s).sum();
+        let rms = (sum_sq / segment.len() as f32).sqrt();
+        if rms >= rms_floor {
+            out.push((start, start + win, rms));
+        }
+        start += hop;
+    }
+    out
+}
+
 /// Trait for diarization backends
 pub trait Diarizer: Send + Sync {
     /// Process audio samples and return diarized segments
@@ -94,6 +130,17 @@ pub struct DiarizationConfig {
     pub min_segment_ms: u64,
     /// Path to ONNX model for ML backend
     pub model_path: Option<String>,
+    /// Cosine similarity threshold for matching new embeddings to existing
+    /// speakers. Lower = more merging (fewer speakers detected); higher =
+    /// more fragmentation. Empirically 0.20-0.30 is the useful range for
+    /// ECAPA-TDNN on 4s windows.
+    pub similarity_threshold: f32,
+    /// VAD sub-window length in seconds for ECAPA feeding
+    pub vad_window_secs: f32,
+    /// VAD sub-window hop in seconds
+    pub vad_hop_secs: f32,
+    /// RMS floor below which a sub-window is treated as silence
+    pub vad_rms_floor: f32,
 }
 
 impl Default for DiarizationConfig {
@@ -104,6 +151,10 @@ impl Default for DiarizationConfig {
             max_speakers: 10,
             min_segment_ms: 500,
             model_path: None,
+            similarity_threshold: 0.25,
+            vad_window_secs: 4.0,
+            vad_hop_secs: 2.0,
+            vad_rms_floor: 0.005,
         }
     }
 }
@@ -175,9 +226,69 @@ mod tests {
 
     #[test]
     fn test_default_config() {
+        // All fields asserted to catch silent default drift — adding a new
+        // field without adding an assertion here would land a typo unnoticed.
         let config = DiarizationConfig::default();
         assert!(config.enabled);
         assert_eq!(config.backend, "simple");
         assert_eq!(config.max_speakers, 10);
+        assert_eq!(config.min_segment_ms, 500);
+        assert_eq!(config.model_path, None);
+        assert!((config.similarity_threshold - 0.25).abs() < f32::EPSILON);
+        assert!((config.vad_window_secs - 4.0).abs() < f32::EPSILON);
+        assert!((config.vad_hop_secs - 2.0).abs() < f32::EPSILON);
+        assert!((config.vad_rms_floor - 0.005).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_vad_subwindows_empty_when_too_short() {
+        // 0.5s of audio at 16kHz = 8000 samples; window is 4s = 64000. No fit.
+        let samples = vec![0.5f32; 8000];
+        let out = vad_subwindows(&samples, 16000, 4.0, 2.0, 0.001);
+        assert!(out.is_empty(), "short segment should produce zero windows");
+    }
+
+    #[test]
+    fn test_vad_subwindows_zero_window_returns_empty() {
+        let samples = vec![0.5f32; 64000];
+        // Zero window length → 0 samples per window → early-return empty.
+        let out = vad_subwindows(&samples, 16000, 0.0, 2.0, 0.001);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_vad_subwindows_rms_gates_silence() {
+        // 8s of true silence. Even at the lowest practical floor, every
+        // window's RMS is 0.0 < floor, so the vector is empty.
+        let samples = vec![0.0f32; 16000 * 8];
+        let out = vad_subwindows(&samples, 16000, 4.0, 2.0, 0.001);
+        assert!(out.is_empty(), "silent audio should be fully gated out");
+    }
+
+    #[test]
+    fn test_vad_subwindows_admits_voiced() {
+        // 8s of constant 0.5 amplitude (RMS = 0.5 ≫ floor). Window 4s, hop 2s:
+        // starts at 0, 2, 4 (window 4..8 still fits). 4 windows total.
+        let samples = vec![0.5f32; 16000 * 8];
+        let out = vad_subwindows(&samples, 16000, 4.0, 2.0, 0.001);
+        assert_eq!(out.len(), 3, "8s audio, 4s/2s window/hop → 3 windows");
+        for (s, e, rms) in &out {
+            assert_eq!(e - s, 16000 * 4, "window length = 4s of samples");
+            assert!((rms - 0.5).abs() < 0.01, "constant 0.5 → rms ≈ 0.5");
+        }
+    }
+
+    #[test]
+    fn test_vad_subwindows_clamps_tiny_hop() {
+        // Hop of 0.01s would normally produce 8s/0.01s ≈ 800 starts. The clamp
+        // floors hop at 0.1s → 8s/0.1s = 80 starts but with 4s window that
+        // fits, only floor((8-4)/0.1)+1 = 41 windows survive.
+        let samples = vec![0.5f32; 16000 * 8];
+        let out = vad_subwindows(&samples, 16000, 4.0, 0.01, 0.001);
+        assert!(
+            (40..=41).contains(&out.len()),
+            "tiny hop should clamp to 100ms, got {} windows",
+            out.len()
+        );
     }
 }

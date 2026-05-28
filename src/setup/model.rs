@@ -544,11 +544,17 @@ const COHERE_MODELS: &[CohereModelInfo] = &[
         description: "Encoder-decoder ASR, q4 weights + fp16 activations (smallest, GPU-friendly)",
         languages: "ar,de,el,en,es,fr,it,ja,ko,nl,pl,pt,vi,zh",
         files: &[
-            ("encoder_model_q4f16.onnx", "encoder_model.onnx"),
-            ("encoder_model_q4f16.onnx_data", "encoder_model_q4f16.onnx_data"),
-            ("decoder_model_merged_q4f16.onnx", "decoder_model_merged.onnx"),
+            ("onnx/encoder_model_q4f16.onnx", "encoder_model.onnx"),
             (
-                "decoder_model_merged_q4f16.onnx_data",
+                "onnx/encoder_model_q4f16.onnx_data",
+                "encoder_model_q4f16.onnx_data",
+            ),
+            (
+                "onnx/decoder_model_merged_q4f16.onnx",
+                "decoder_model_merged.onnx",
+            ),
+            (
+                "onnx/decoder_model_merged_q4f16.onnx_data",
                 "decoder_model_merged_q4f16.onnx_data",
             ),
             ("tokenizer.json", "tokenizer.json"),
@@ -566,11 +572,17 @@ const COHERE_MODELS: &[CohereModelInfo] = &[
         description: "Encoder-decoder ASR, 4-bit weights (MIGraphX-compatible on AMD GPU)",
         languages: "ar,de,el,en,es,fr,it,ja,ko,nl,pl,pt,vi,zh",
         files: &[
-            ("encoder_model_q4.onnx", "encoder_model.onnx"),
-            ("encoder_model_q4.onnx_data", "encoder_model_q4.onnx_data"),
-            ("decoder_model_merged_q4.onnx", "decoder_model_merged.onnx"),
+            ("onnx/encoder_model_q4.onnx", "encoder_model.onnx"),
             (
-                "decoder_model_merged_q4.onnx_data",
+                "onnx/encoder_model_q4.onnx_data",
+                "encoder_model_q4.onnx_data",
+            ),
+            (
+                "onnx/decoder_model_merged_q4.onnx",
+                "decoder_model_merged.onnx",
+            ),
+            (
+                "onnx/decoder_model_merged_q4.onnx_data",
                 "decoder_model_merged_q4.onnx_data",
             ),
             ("tokenizer.json", "tokenizer.json"),
@@ -588,21 +600,21 @@ const COHERE_MODELS: &[CohereModelInfo] = &[
         description: "Encoder-decoder ASR, 8-bit weights",
         languages: "ar,de,el,en,es,fr,it,ja,ko,nl,pl,pt,vi,zh",
         files: &[
-            ("encoder_model_quantized.onnx", "encoder_model.onnx"),
+            ("onnx/encoder_model_quantized.onnx", "encoder_model.onnx"),
             (
-                "encoder_model_quantized.onnx_data",
+                "onnx/encoder_model_quantized.onnx_data",
                 "encoder_model_quantized.onnx_data",
             ),
             (
-                "encoder_model_quantized.onnx_data_1",
+                "onnx/encoder_model_quantized.onnx_data_1",
                 "encoder_model_quantized.onnx_data_1",
             ),
             (
-                "decoder_model_merged_quantized.onnx",
+                "onnx/decoder_model_merged_quantized.onnx",
                 "decoder_model_merged.onnx",
             ),
             (
-                "decoder_model_merged_quantized.onnx_data",
+                "onnx/decoder_model_merged_quantized.onnx_data",
                 "decoder_model_merged_quantized.onnx_data",
             ),
             ("tokenizer.json", "tokenizer.json"),
@@ -620,15 +632,21 @@ const COHERE_MODELS: &[CohereModelInfo] = &[
         description: "Encoder-decoder ASR, FP16 weights (highest accuracy, GPU-friendly)",
         languages: "ar,de,el,en,es,fr,it,ja,ko,nl,pl,pt,vi,zh",
         files: &[
-            ("encoder_model_fp16.onnx", "encoder_model.onnx"),
-            ("encoder_model_fp16.onnx_data", "encoder_model_fp16.onnx_data"),
+            ("onnx/encoder_model_fp16.onnx", "encoder_model.onnx"),
             (
-                "encoder_model_fp16.onnx_data_1",
+                "onnx/encoder_model_fp16.onnx_data",
+                "encoder_model_fp16.onnx_data",
+            ),
+            (
+                "onnx/encoder_model_fp16.onnx_data_1",
                 "encoder_model_fp16.onnx_data_1",
             ),
-            ("decoder_model_merged_fp16.onnx", "decoder_model_merged.onnx"),
             (
-                "decoder_model_merged_fp16.onnx_data",
+                "onnx/decoder_model_merged_fp16.onnx",
+                "decoder_model_merged.onnx",
+            ),
+            (
+                "onnx/decoder_model_merged_fp16.onnx_data",
                 "decoder_model_merged_fp16.onnx_data",
             ),
             ("tokenizer.json", "tokenizer.json"),
@@ -1611,12 +1629,19 @@ pub fn validate_parakeet_model(path: &Path) -> anyhow::Result<()> {
         anyhow::bail!("Model directory does not exist: {:?}", path);
     }
 
-    // Check for TDT structure: encoder + decoder + vocab
+    // Two naming conventions in the wild:
+    // - istupakov/parakeet-tdt-*: `encoder-model.onnx`, `decoder_joint-model.onnx`
+    // - bobNight/parakeet-unified-*: `encoder.onnx`, `decoder_joint.onnx`
+    //   (streaming-compatible TDT v3 family — v0.7.4 added this entry)
+    // Accept either; parakeet-rs reads whichever filenames its loader expects.
     let has_encoder = path.join("encoder-model.onnx").exists()
         || path.join("encoder-model.onnx.data").exists()
-        || path.join("encoder-model.int8.onnx").exists();
+        || path.join("encoder-model.int8.onnx").exists()
+        || path.join("encoder.onnx").exists()
+        || path.join("encoder.onnx.data").exists();
     let has_decoder = path.join("decoder_joint-model.onnx").exists()
-        || path.join("decoder_joint-model.int8.onnx").exists();
+        || path.join("decoder_joint-model.int8.onnx").exists()
+        || path.join("decoder_joint.onnx").exists();
     let has_vocab = path.join("vocab.txt").exists();
 
     if has_encoder && has_decoder && has_vocab {
@@ -2761,6 +2786,7 @@ fn validate_onnx_ctc_model(path: &Path) -> anyhow::Result<()> {
 }
 
 /// Generic handler for ONNX engine model selection (download/config/restart)
+#[allow(clippy::type_complexity)]
 async fn handle_onnx_engine_selection(
     engine_name: &str,
     models: Vec<(&str, &str, u32, &[(&str, &str)], &str)>,
@@ -3571,9 +3597,8 @@ mode = "type"
             for (_remote, local) in model.files {
                 std::fs::write(model_dir.join(local), b"").unwrap();
             }
-            validate_cohere_model(&model_dir).unwrap_or_else(|e| {
-                panic!("variant {} failed validation: {}", model.name, e)
-            });
+            validate_cohere_model(&model_dir)
+                .unwrap_or_else(|e| panic!("variant {} failed validation: {}", model.name, e));
         }
     }
 

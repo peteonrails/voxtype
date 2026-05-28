@@ -154,7 +154,11 @@ pub fn detect_cuda_runtime_major() -> Option<i32> {
     let handle = candidates.iter().find_map(|name| {
         let cstr = CString::new(*name).ok()?;
         let h = unsafe { libc::dlopen(cstr.as_ptr(), libc::RTLD_LAZY) };
-        if h.is_null() { None } else { Some(h) }
+        if h.is_null() {
+            None
+        } else {
+            Some(h)
+        }
     })?;
 
     let sym_name = CString::new("cudaRuntimeGetVersion").ok()?;
@@ -369,9 +373,18 @@ mod tests {
 
     #[test]
     fn parakeet_backend_binary_names() {
-        assert_eq!(ParakeetBackend::Cuda12.variant().binary_name(), "voxtype-onnx-cuda-12");
-        assert_eq!(ParakeetBackend::Cuda13.variant().binary_name(), "voxtype-onnx-cuda-13");
-        assert_eq!(ParakeetBackend::Migraphx.variant().binary_name(), "voxtype-onnx-migraphx");
+        assert_eq!(
+            ParakeetBackend::Cuda12.variant().binary_name(),
+            "voxtype-onnx-cuda-12"
+        );
+        assert_eq!(
+            ParakeetBackend::Cuda13.variant().binary_name(),
+            "voxtype-onnx-cuda-13"
+        );
+        assert_eq!(
+            ParakeetBackend::Migraphx.variant().binary_name(),
+            "voxtype-onnx-migraphx"
+        );
     }
 
     #[test]

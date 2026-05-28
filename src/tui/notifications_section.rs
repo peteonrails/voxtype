@@ -89,7 +89,10 @@ impl NotificationsState {
     }
     fn move_field(&mut self, delta: i32) {
         let len = Field::ALL.len() as i32;
-        let cur = Field::ALL.iter().position(|f| *f == self.field).unwrap_or(0) as i32;
+        let cur = Field::ALL
+            .iter()
+            .position(|f| *f == self.field)
+            .unwrap_or(0) as i32;
         self.field = Field::ALL[((cur + delta).rem_euclid(len)) as usize];
     }
     fn cycle(&mut self) {
@@ -108,10 +111,15 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let state = match &app.notifications {
         Some(s) => s,
         None => {
-            let block = Block::default().borders(Borders::ALL).title("Notifications");
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title("Notifications");
             let inner = block.inner(area);
             f.render_widget(block, area);
-            f.render_widget(Paragraph::new("Failed to load config.").wrap(Wrap { trim: true }), inner);
+            f.render_widget(
+                Paragraph::new("Failed to load config.").wrap(Wrap { trim: true }),
+                inner,
+            );
             return;
         }
     };
@@ -244,7 +252,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
             state.move_field(1);
             Action::None
         }
-        KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l')
+        KeyCode::Left
+        | KeyCode::Right
+        | KeyCode::Char('h')
+        | KeyCode::Char('l')
         | KeyCode::Char(' ') => {
             state.cycle();
             Action::None

@@ -16,6 +16,8 @@ pub mod cli;
 #[cfg(feature = "parakeet")]
 pub mod parakeet_streaming;
 pub mod remote;
+#[cfg(feature = "soniox")]
+pub mod soniox;
 pub mod streaming;
 pub mod subprocess;
 pub mod whisper;
@@ -129,6 +131,22 @@ pub trait Transcriber: Send + Sync {
     /// The daemon consults this when `[transcribe] streaming = true` is set in
     /// config to decide between batch and streaming pipelines.
     fn as_streaming(&self) -> Option<&dyn StreamingTranscriber> {
+        None
+    }
+
+    /// Two-letter language code detected (or selected) for the most recent
+    /// transcription, if the backend tracks it.
+    ///
+    /// This is used by output methods that benefit from a layout hint
+    /// (notably [`crate::output::eitype::EitypeOutput`] and
+    /// [`crate::output::dotool::DotoolOutput`]). It is set by backends with
+    /// language auto-detection or explicit single-language mode; backends
+    /// without language awareness return `None`.
+    ///
+    /// The default implementation returns `None`. Backends override this when
+    /// they track the language used for the previous call to
+    /// [`Self::transcribe`].
+    fn last_detected_language(&self) -> Option<String> {
         None
     }
 }
@@ -249,6 +267,20 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
         #[cfg(not(feature = "cohere"))]
         TranscriptionEngine::Cohere => Err(TranscribeError::InitFailed(
             "Cohere engine requested but voxtype was not compiled with --features cohere"
+                .to_string(),
+        )),
+        #[cfg(feature = "soniox")]
+        TranscriptionEngine::Soniox => {
+            let cfg = config.soniox.as_ref().ok_or_else(|| {
+                TranscribeError::InitFailed(
+                    "Soniox engine selected but [soniox] config section is missing".to_string(),
+                )
+            })?;
+            Ok(Box::new(soniox::SonioxTranscriber::new(cfg.clone())?))
+        }
+        #[cfg(not(feature = "soniox"))]
+        TranscriptionEngine::Soniox => Err(TranscribeError::InitFailed(
+            "Soniox engine requested but voxtype was not compiled with --features soniox"
                 .to_string(),
         )),
     }

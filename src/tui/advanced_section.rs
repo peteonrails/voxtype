@@ -56,13 +56,9 @@ impl AdvancedState {
         let ed = ConfigEditor::load()?;
         Ok(Self {
             gpu_isolation: ed.get_bool("whisper", "gpu_isolation").unwrap_or(false),
-            on_demand_loading: ed
-                .get_bool("whisper", "on_demand_loading")
-                .unwrap_or(false),
+            on_demand_loading: ed.get_bool("whisper", "on_demand_loading").unwrap_or(false),
             flash_attention: ed.get_bool("whisper", "flash_attention").unwrap_or(false),
-            eager_processing: ed
-                .get_bool("whisper", "eager_processing")
-                .unwrap_or(false),
+            eager_processing: ed.get_bool("whisper", "eager_processing").unwrap_or(false),
             gpu_device: ed.get_int("whisper", "gpu_device"),
             streaming: ed.get_bool("parakeet", "streaming").unwrap_or(false),
             field: Field::GpuIsolation,
@@ -190,7 +186,10 @@ impl AdvancedState {
     }
     fn move_field(&mut self, delta: i32) {
         let len = Field::ALL.len() as i32;
-        let cur = Field::ALL.iter().position(|f| *f == self.field).unwrap_or(0) as i32;
+        let cur = Field::ALL
+            .iter()
+            .position(|f| *f == self.field)
+            .unwrap_or(0) as i32;
         self.field = Field::ALL[((cur + delta).rem_euclid(len)) as usize];
     }
     fn cycle(&mut self, delta: i32) {
@@ -218,7 +217,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             let block = Block::default().borders(Borders::ALL).title("Advanced");
             let inner = block.inner(area);
             f.render_widget(block, area);
-            f.render_widget(Paragraph::new("Failed to load config.").wrap(Wrap { trim: true }), inner);
+            f.render_widget(
+                Paragraph::new("Failed to load config.").wrap(Wrap { trim: true }),
+                inner,
+            );
             return;
         }
     };
@@ -437,7 +439,9 @@ fn guidance_for_field(state: &AdvancedState) -> Vec<Line<'_>> {
             Line::from(""),
             Line::from(Span::styled(
                 "EXPERIMENTAL in 0.7.2 — Parakeet only.",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
             Line::from(
@@ -572,10 +576,7 @@ fn spawn_background_model_download(model_name: String) {
                 "-h",
                 SYNC_HINT,
                 "Voxtype",
-                &format!(
-                    "Downloading model {} in the background…",
-                    model_name
-                ),
+                &format!("Downloading model {} in the background…", model_name),
             ])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

@@ -15,9 +15,8 @@ impl Exporter for SrtExporter {
         options: &ExportOptions,
     ) -> Result<String, ExportError> {
         let mut output = String::new();
-        let mut index = 1;
 
-        for segment in &meeting.transcript.segments {
+        for (index, segment) in (1..).zip(meeting.transcript.segments.iter()) {
             // Sequence number
             output.push_str(&format!("{}\n", index));
 
@@ -40,7 +39,6 @@ impl Exporter for SrtExporter {
 
             // Blank line between entries
             output.push('\n');
-            index += 1;
         }
 
         Ok(output)

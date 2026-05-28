@@ -29,7 +29,6 @@ const VOXTYPE_BIN_LOCAL: &str = "/usr/local/bin/voxtype";
 const VOXTYPE_CPU_BACKUP: &str = "/usr/lib/voxtype/voxtype-cpu";
 const VOXTYPE_NATIVE: &str = "/usr/lib/voxtype/voxtype-native";
 
-
 /// Get the active voxtype binary path (prefers /usr/bin, falls back to /usr/local/bin)
 fn get_active_binary_path() -> &'static str {
     // If /usr/bin/voxtype exists and points somewhere, use it
@@ -555,11 +554,31 @@ pub fn show_status() {
     if is_parakeet {
         // Show ONNX backends (check both new and legacy names)
         let onnx_backends = [
-            ("voxtype-onnx-avx2", "voxtype-parakeet-avx2", "ONNX CPU (AVX2)"),
-            ("voxtype-onnx-avx512", "voxtype-parakeet-avx512", "ONNX CPU (AVX-512)"),
-            ("voxtype-onnx-cuda-12", "voxtype-onnx-cuda", "ONNX GPU (CUDA 12)"),
-            ("voxtype-onnx-cuda-13", "voxtype-onnx-cuda-13", "ONNX GPU (CUDA 13)"),
-            ("voxtype-onnx-migraphx", "voxtype-onnx-rocm", "ONNX GPU (MIGraphX)"),
+            (
+                "voxtype-onnx-avx2",
+                "voxtype-parakeet-avx2",
+                "ONNX CPU (AVX2)",
+            ),
+            (
+                "voxtype-onnx-avx512",
+                "voxtype-parakeet-avx512",
+                "ONNX CPU (AVX-512)",
+            ),
+            (
+                "voxtype-onnx-cuda-12",
+                "voxtype-onnx-cuda",
+                "ONNX GPU (CUDA 12)",
+            ),
+            (
+                "voxtype-onnx-cuda-13",
+                "voxtype-onnx-cuda-13",
+                "ONNX GPU (CUDA 13)",
+            ),
+            (
+                "voxtype-onnx-migraphx",
+                "voxtype-onnx-rocm",
+                "ONNX GPU (MIGraphX)",
+            ),
         ];
 
         // Get current symlink target
@@ -733,7 +752,11 @@ fn detect_best_parakeet_gpu_backend() -> Option<(&'static str, &'static str)> {
             Some(13) => &["voxtype-onnx-cuda-13", "voxtype-onnx-cuda"],
             Some(12) => &["voxtype-onnx-cuda-12", "voxtype-onnx-cuda"],
             // No detection — try cu13 first (rolling-distro default), then cu12
-            _ => &["voxtype-onnx-cuda-13", "voxtype-onnx-cuda-12", "voxtype-onnx-cuda"],
+            _ => &[
+                "voxtype-onnx-cuda-13",
+                "voxtype-onnx-cuda-12",
+                "voxtype-onnx-cuda",
+            ],
         };
         for name in cuda_pref {
             if Path::new(VOXTYPE_LIB_DIR).join(name).exists() {
@@ -751,7 +774,11 @@ fn detect_best_parakeet_gpu_backend() -> Option<(&'static str, &'static str)> {
     if let Some(binary) = find_binary("voxtype-onnx-migraphx", "voxtype-onnx-rocm") {
         return Some((binary, "MIGraphX"));
     }
-    for name in ["voxtype-onnx-cuda-13", "voxtype-onnx-cuda-12", "voxtype-onnx-cuda"] {
+    for name in [
+        "voxtype-onnx-cuda-13",
+        "voxtype-onnx-cuda-12",
+        "voxtype-onnx-cuda",
+    ] {
         if Path::new(VOXTYPE_LIB_DIR).join(name).exists() {
             return Some((name, "CUDA"));
         }

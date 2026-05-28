@@ -71,7 +71,7 @@ pub struct Cli {
         long,
         value_name = "ENGINE",
         help_heading = "Transcription",
-        long_help = "Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere"
+        long_help = "Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere, soniox"
     )]
     pub engine: Option<String>,
 
@@ -172,6 +172,16 @@ pub struct Cli {
         hide_short_help = true
     )]
     pub remote_api_key: Option<String>,
+
+    // -- Soniox --
+    /// API key for Soniox (or use SONIOX_API_KEY env var)
+    #[arg(
+        long,
+        value_name = "KEY",
+        help_heading = "Soniox",
+        hide_short_help = true
+    )]
+    pub soniox_api_key: Option<String>,
 
     // -- Hotkey --
     /// Override hotkey (e.g., SCROLLLOCK, PAUSE, F13, MEDIA, WEV_234, EVTEST_226)
@@ -356,6 +366,25 @@ pub struct Cli {
     )]
     pub dotool_xkb_variant: Option<String>,
 
+    /// Keyboard layout for eitype (e.g., de, ru, us). Passed as `-l <LAYOUT>`.
+    /// Overrides any layout derived from the transcribed language.
+    #[arg(
+        long,
+        value_name = "LAYOUT",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
+    pub eitype_xkb_layout: Option<String>,
+
+    /// Keyboard layout variant for eitype (e.g., dvorak, colemak)
+    #[arg(
+        long,
+        value_name = "VARIANT",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
+    pub eitype_xkb_variant: Option<String>,
+
     /// Command to run before typing output (e.g., compositor submap switch)
     #[arg(
         long,
@@ -384,19 +413,33 @@ pub struct Cli {
     pub pre_recording_command: Option<String>,
 
     /// Wait for modifier keys (Ctrl/Alt/Shift/Super) to be released before typing
-    #[arg(long, help_heading = "Output", hide_short_help = true,
+    #[arg(
+        long,
+        help_heading = "Output",
+        hide_short_help = true,
         long_help = "Wait for modifier keys (Ctrl/Alt/Shift/Super) to be released before typing.\n\
         Prevents transcribed text from triggering compositor or application keybindings\n\
         when the hotkey is still held. Requires user to be in the 'input' group;\n\
-        silently disabled otherwise.")]
+        silently disabled otherwise."
+    )]
     pub wait_for_modifier_release: bool,
 
     /// Disable waiting for modifier release (overrides config)
-    #[arg(long, conflicts_with = "wait_for_modifier_release", help_heading = "Output", hide_short_help = true)]
+    #[arg(
+        long,
+        conflicts_with = "wait_for_modifier_release",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
     pub no_wait_for_modifier_release: bool,
 
     /// Maximum milliseconds to wait for modifier release before falling back to clipboard
-    #[arg(long, value_name = "MS", help_heading = "Output", hide_short_help = true)]
+    #[arg(
+        long,
+        value_name = "MS",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
     pub modifier_release_timeout_ms: Option<u64>,
 
     // -- Text Processing --
@@ -555,8 +598,15 @@ pub enum Commands {
         no_post_install: bool,
     },
 
-    /// Show current configuration
-    Config,
+    /// Show or modify configuration
+    ///
+    /// With no subcommand, prints the resolved configuration. Use `voxtype
+    /// config set engine <NAME>` to change the active transcription engine
+    /// in the on-disk config file (preserving comments and other settings).
+    Config {
+        #[command(subcommand)]
+        action: Option<ConfigAction>,
+    },
 
     /// Inspect runtime/install information
     Info {
@@ -750,6 +800,16 @@ pub enum MeetingAction {
         /// Meeting title (optional)
         #[arg(long, short)]
         title: Option<String>,
+
+        /// Diarization backend override for this meeting only.
+        ///
+        /// `simple` attributes by audio source (You vs Remote) — best for 1:1 calls.
+        /// `ml` uses ONNX speaker embeddings for multi-speaker meetings (requires
+        /// the `ml-diarization` feature and the ECAPA-TDNN model).
+        ///
+        /// When omitted, falls back to `[meeting.diarization].backend` in config.
+        #[arg(long, value_parser = ["simple", "ml"], env = "VOXTYPE_MEETING_DIARIZATION")]
+        diarization: Option<String>,
     },
     /// Stop the current meeting
     Stop,
@@ -987,6 +1047,38 @@ impl RecordAction {
 }
 
 #[derive(Subcommand)]
+pub enum ConfigAction {
+    /// Modify a single configuration value in the on-disk config file
+    ///
+    /// Only `engine` is supported today. Comments and other fields are
+    /// preserved. A restart of the voxtype daemon is required for the
+    /// new value to take effect.
+    Set {
+        #[command(subcommand)]
+        key: ConfigSetKey,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ConfigSetKey {
+    /// Set the active transcription engine
+    ///
+    /// Valid engines: whisper, parakeet, moonshine, sensevoice, paraformer,
+    /// dolphin, omnilingual, cohere. The engine must be compiled into this
+    /// binary; check `voxtype info variants` if unsure.
+    ///
+    /// Examples:
+    ///   voxtype config set engine whisper
+    ///   voxtype config set engine parakeet
+    Engine {
+        /// Engine name (one of: whisper, parakeet, moonshine, sensevoice,
+        /// paraformer, dolphin, omnilingual, cohere)
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum InfoAction {
     /// Show installed binary variants and which one is active
     Variants {
@@ -1176,6 +1268,60 @@ pub enum SetupAction {
         /// Show VAD model status
         #[arg(long)]
         status: bool,
+    },
+
+    /// Install the Quickshell QML tree for the voxtype-osd-quickshell launcher
+    ///
+    /// Copies shell.qml, OsdSurface.qml, EnginePicker.qml,
+    /// MeetingControls.qml, and the voxtype-shared module into
+    /// $XDG_DATA_HOME/voxtype/quickshell/ (or ~/.local/share/voxtype/quickshell/
+    /// if XDG_DATA_HOME is unset), then prints Hyprland/Sway/River
+    /// keybinding examples for the Wave 2 engine-picker and meeting-controls
+    /// trigger flags.
+    Quickshell {
+        /// Override the install target directory.
+        #[arg(long, value_name = "DIR")]
+        target: Option<std::path::PathBuf>,
+
+        /// Override the QML source directory (otherwise auto-detected).
+        ///
+        /// Search order: $VOXTYPE_QUICKSHELL_SOURCE_DIR,
+        /// <binary>/../share/voxtype/quickshell/, /usr/share/voxtype/quickshell/,
+        /// ./quickshell/
+        #[arg(long, value_name = "DIR")]
+        source: Option<std::path::PathBuf>,
+
+        /// Overwrite an existing install at the target.
+        #[arg(long)]
+        force: bool,
+
+        /// Skip the file copy; only print the compositor binding examples.
+        #[arg(long)]
+        print_bindings: bool,
+
+        /// Override the source path of the voxtype-audio-bridge binary.
+        ///
+        /// Search order (when omitted): $VOXTYPE_AUDIO_BRIDGE_BINARY,
+        /// <binary>/../lib/voxtype/voxtype-audio-bridge,
+        /// /usr/lib/voxtype/voxtype-audio-bridge, `which voxtype-audio-bridge`,
+        /// target/release/voxtype-audio-bridge, target/debug/voxtype-audio-bridge.
+        #[arg(long, value_name = "PATH")]
+        bridge: Option<std::path::PathBuf>,
+
+        /// Override the symlink location for voxtype-audio-bridge.
+        ///
+        /// Defaults to $XDG_BIN_HOME/voxtype-audio-bridge or
+        /// ~/.local/bin/voxtype-audio-bridge. Must live under the user's
+        /// $HOME unless you also pass --force.
+        #[arg(long, value_name = "PATH")]
+        bridge_target: Option<std::path::PathBuf>,
+
+        /// Skip installing the voxtype-audio-bridge symlink.
+        ///
+        /// Use this if the bridge is already on PATH (e.g., a packaged
+        /// install put it there, or you have your own symlink).
+        #[arg(long)]
+        skip_bridge: bool,
     },
 }
 
@@ -2149,6 +2295,85 @@ mod tests {
                 assert_eq!(action.smart_auto_submit_override(), None);
             }
             _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_meeting_start_diarization_simple_flag() {
+        let cli = Cli::parse_from(["voxtype", "meeting", "start", "--diarization", "simple"]);
+        match cli.command {
+            Some(Commands::Meeting {
+                action: MeetingAction::Start { diarization, .. },
+            }) => {
+                assert_eq!(diarization.as_deref(), Some("simple"));
+            }
+            _ => panic!("Expected Meeting Start command"),
+        }
+    }
+
+    #[test]
+    fn test_meeting_start_diarization_ml_flag() {
+        let cli = Cli::parse_from([
+            "voxtype",
+            "meeting",
+            "start",
+            "--diarization",
+            "ml",
+            "--title",
+            "standup",
+        ]);
+        match cli.command {
+            Some(Commands::Meeting {
+                action: MeetingAction::Start { diarization, title },
+            }) => {
+                assert_eq!(diarization.as_deref(), Some("ml"));
+                assert_eq!(title.as_deref(), Some("standup"));
+            }
+            _ => panic!("Expected Meeting Start command"),
+        }
+    }
+
+    #[test]
+    fn test_meeting_start_diarization_rejects_invalid() {
+        let result = Cli::try_parse_from(["voxtype", "meeting", "start", "--diarization", "bogus"]);
+        assert!(
+            result.is_err(),
+            "clap should reject diarization values outside [\"simple\", \"ml\"]"
+        );
+    }
+
+    /// Env-var wiring is exercised together with the "no override" case in a
+    /// single test to avoid `VOXTYPE_MEETING_DIARIZATION` leaking between
+    /// tests that run in parallel — env vars are process-global, so two
+    /// independent #[test] functions would race.
+    #[test]
+    fn test_meeting_start_diarization_env_and_default() {
+        // Make sure no stale value is set from the host or a sibling test.
+        std::env::remove_var("VOXTYPE_MEETING_DIARIZATION");
+
+        // No flag, no env var → no override.
+        let cli = Cli::parse_from(["voxtype", "meeting", "start"]);
+        match cli.command {
+            Some(Commands::Meeting {
+                action: MeetingAction::Start { diarization, title },
+            }) => {
+                assert_eq!(diarization, None);
+                assert_eq!(title, None);
+            }
+            _ => panic!("Expected Meeting Start command"),
+        }
+
+        // Env var alone should be picked up by clap's #[arg(env = ...)].
+        std::env::set_var("VOXTYPE_MEETING_DIARIZATION", "ml");
+        let cli = Cli::parse_from(["voxtype", "meeting", "start"]);
+        std::env::remove_var("VOXTYPE_MEETING_DIARIZATION");
+        match cli.command {
+            Some(Commands::Meeting {
+                action: MeetingAction::Start { diarization, .. },
+            }) => {
+                assert_eq!(diarization.as_deref(), Some("ml"));
+            }
+            _ => panic!("Expected Meeting Start command"),
         }
     }
 }

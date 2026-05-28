@@ -33,6 +33,7 @@ pub mod paste;
 #[cfg(target_os = "macos")]
 pub mod pbcopy;
 pub mod post_process;
+pub mod session;
 pub mod streaming;
 pub mod wtype;
 pub mod xclip;
@@ -176,7 +177,8 @@ pub fn engine_icon(engine: crate::config::TranscriptionEngine) -> &'static str {
         crate::config::TranscriptionEngine::Paraformer => "\u{1F4AC}", // 💬
         crate::config::TranscriptionEngine::Dolphin => "\u{1F42C}",  // 🐬
         crate::config::TranscriptionEngine::Omnilingual => "\u{1F30D}", // 🌍
-        crate::config::TranscriptionEngine::Cohere => "\u{1F4DD}",      // 📝
+        crate::config::TranscriptionEngine::Cohere => "\u{1F4DD}",   // 📝
+        crate::config::TranscriptionEngine::Soniox => "\u{2601}\u{FE0F}", // ☁️
     }
 }
 
@@ -277,6 +279,8 @@ fn create_driver_output(
             config.type_delay_ms,
             pre_type_delay_ms,
             config.shift_enter_newlines,
+            config.eitype_xkb_layout.clone(),
+            config.eitype_xkb_variant.clone(),
         )),
         OutputDriver::Dotool => Box::new(dotool::DotoolOutput::new(
             config.type_delay_ms,
@@ -458,8 +462,7 @@ pub struct OutputOptions<'a> {
 /// keybindings when modifiers are held. Used to filter the chain when the
 /// modifier-release wait times out.
 fn is_keystroke_method(name: &str) -> bool {
-    matches!(name, "wtype" | "eitype" | "dotool" | "ydotool")
-        || name.starts_with("paste")
+    matches!(name, "wtype" | "eitype" | "dotool" | "ydotool") || name.starts_with("paste")
 }
 
 /// Try each output method in the chain until one succeeds
@@ -618,7 +621,7 @@ mod tests {
         assert!(is_keystroke_method("ydotool"));
         assert!(is_keystroke_method("paste (clipboard + keystroke)"));
         assert!(!is_keystroke_method("clipboard (wl-copy)"));
-        assert!(!is_keystroke_method("clipboard (xclip)"));
+        assert!(!is_keystroke_method("clipboard (xclip/xsel)"));
     }
 
     #[test]

@@ -10,8 +10,8 @@ use tracing_subscriber::EnvFilter;
 #[cfg(target_os = "macos")]
 use voxtype::menubar;
 use voxtype::{
-    config, cpu, daemon, meeting, setup, transcribe, vad, Cli, Commands, InfoAction, MeetingAction,
-    RecordAction, SetupAction,
+    config, config_set, cpu, daemon, meeting, setup, transcribe, vad, Cli, Commands, ConfigAction,
+    ConfigSetKey, InfoAction, MeetingAction, RecordAction, SetupAction,
 };
 
 /// Parse a comma-separated list of driver names into OutputDriver vec
@@ -139,9 +139,10 @@ async fn main() -> anyhow::Result<()> {
             "dolphin" => config.engine = config::TranscriptionEngine::Dolphin,
             "omnilingual" => config.engine = config::TranscriptionEngine::Omnilingual,
             "cohere" => config.engine = config::TranscriptionEngine::Cohere,
+            "soniox" => config.engine = config::TranscriptionEngine::Soniox,
             _ => {
                 eprintln!(
-                    "Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere",
+                    "Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere, soniox",
                     engine
                 );
                 std::process::exit(1);
@@ -231,6 +232,14 @@ async fn main() -> anyhow::Result<()> {
         config.whisper.remote_api_key = Some(key);
     }
 
+    // Soniox overrides
+    if let Some(key) = cli.soniox_api_key {
+        config
+            .soniox
+            .get_or_insert_with(config::SonioxConfig::default)
+            .api_key = Some(key);
+    }
+
     // Audio overrides
     if let Some(device) = cli.audio_device {
         config.audio.device = device;
@@ -310,6 +319,12 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(variant) = cli.dotool_xkb_variant {
         config.output.dotool_xkb_variant = Some(variant);
+    }
+    if let Some(layout) = cli.eitype_xkb_layout {
+        config.output.eitype_xkb_layout = Some(layout);
+    }
+    if let Some(variant) = cli.eitype_xkb_variant {
+        config.output.eitype_xkb_variant = Some(variant);
     }
     if let Some(path) = cli.file_path {
         config.output.file_path = Some(path);
@@ -451,8 +466,9 @@ async fn main() -> anyhow::Result<()> {
                     "dolphin" => config.engine = config::TranscriptionEngine::Dolphin,
                     "omnilingual" => config.engine = config::TranscriptionEngine::Omnilingual,
                     "cohere" => config.engine = config::TranscriptionEngine::Cohere,
+                    "soniox" => config.engine = config::TranscriptionEngine::Soniox,
                     _ => {
-                        eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere", engine_name);
+                        eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere, soniox", engine_name);
                         std::process::exit(1);
                     }
                 }
@@ -603,16 +619,18 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 Some(SetupAction::Variant { to }) => {
-                    let variant = setup::binary::Variant::from_binary_name(&to)
-                        .ok_or_else(|| anyhow::anyhow!(
-                            "Unknown variant '{}'. Expected one of: {}",
-                            to,
-                            setup::binary::Variant::ALL
-                                .iter()
-                                .map(|v| v.binary_name())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ))?;
+                    let variant =
+                        setup::binary::Variant::from_binary_name(&to).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Unknown variant '{}'. Expected one of: {}",
+                                to,
+                                setup::binary::Variant::ALL
+                                    .iter()
+                                    .map(|v| v.binary_name())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        })?;
                     setup::binary::switch_to(variant)?;
                     println!("Switched /usr/bin/voxtype to {}.", variant.binary_name());
                 }
@@ -650,6 +668,26 @@ async fn main() -> anyhow::Result<()> {
                         setup::vad::download_model()?;
                     }
                 }
+                Some(SetupAction::Quickshell {
+                    target,
+                    source,
+                    force,
+                    print_bindings,
+                    bridge,
+                    bridge_target,
+                    skip_bridge,
+                }) => {
+                    warn_if_root("quickshell");
+                    setup::quickshell::run(
+                        target,
+                        source,
+                        force,
+                        print_bindings,
+                        bridge,
+                        bridge_target,
+                        skip_bridge,
+                    )?;
+                }
                 None => {
                     // Default: run setup (non-blocking)
                     warn_if_root("");
@@ -659,9 +697,14 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        Commands::Config => {
-            show_config(&config).await?;
-        }
+        Commands::Config { action } => match action {
+            None => show_config(&config).await?,
+            Some(ConfigAction::Set { key }) => match key {
+                ConfigSetKey::Engine { name } => {
+                    run_config_set_engine(cli.config.clone(), &name)?;
+                }
+            },
+        },
 
         Commands::Info { action } => {
             run_info_command(action)?;
@@ -703,7 +746,6 @@ async fn main() -> anyhow::Result<()> {
 /// so the user can start recording immediately after granting permissions.
 #[cfg(target_os = "macos")]
 async fn first_launch_setup(_config: &config::Config) {
-
     // Check if config file exists
     let config_exists = config::Config::default_path()
         .map(|p| p.exists())
@@ -751,7 +793,11 @@ async fn first_launch_setup(_config: &config::Config) {
                 let s = String::from_utf8_lossy(&o.stdout);
                 s.lines()
                     .find(|l| l.trim().starts_with('"'))
-                    .map(|l| l.trim().trim_matches(|c| c == '"' || c == ',').starts_with("en"))
+                    .map(|l| {
+                        l.trim()
+                            .trim_matches(|c| c == '"' || c == ',')
+                            .starts_with("en")
+                    })
                     .unwrap_or(true)
             })
             .unwrap_or(true);
@@ -779,8 +825,7 @@ async fn first_launch_setup(_config: &config::Config) {
         let download_result = {
             let model = if is_english { "base.en" } else { "base" };
             tracing::info!("First launch: downloading Whisper {} model", model);
-            setup::model::download_model(model)
-                .and_then(|_| setup::model::set_model_config(model))
+            setup::model::download_model(model).and_then(|_| setup::model::set_model_config(model))
         };
 
         match download_result {
@@ -814,7 +859,10 @@ async fn check_for_updates() -> anyhow::Result<()> {
     println!("Current version: {}", current);
     println!("Checking for updates...\n");
 
-    // Fetch latest release from GitHub API (blocking call wrapped in spawn_blocking)
+    // Fetch latest release from GitHub API (blocking call wrapped in spawn_blocking).
+    // ureq::Error is ~272 bytes; boxing the closure's Result would require an extra
+    // allocation just to satisfy clippy on a one-shot startup-time call.
+    #[allow(clippy::result_large_err)]
     let result = tokio::task::spawn_blocking(|| {
         ureq::get("https://api.github.com/repos/peteonrails/voxtype/releases/latest")
             .set("User-Agent", "voxtype-update-checker")
@@ -1602,7 +1650,11 @@ fn format_meeting_config_section(meeting: &config::MeetingConfig) -> String {
     if let Some(ref path) = meeting.diarization.model_path {
         let _ = writeln!(s, "  model_path = {:?}", path);
     }
-    let _ = writeln!(s, "  min_segment_ms = {}", meeting.diarization.min_segment_ms);
+    let _ = writeln!(
+        s,
+        "  min_segment_ms = {}",
+        meeting.diarization.min_segment_ms
+    );
 
     let _ = writeln!(s, "\n[meeting.summary]");
     let _ = writeln!(s, "  backend = {:?}", meeting.summary.backend);
@@ -1617,6 +1669,49 @@ fn format_meeting_config_section(meeting: &config::MeetingConfig) -> String {
     let _ = writeln!(s, "  timeout_secs = {}", meeting.summary.timeout_secs);
 
     s
+}
+
+/// Resolve the config file path the same way the daemon does — honoring
+/// `--config <FILE>` first, then the existing user/system path, then the
+/// XDG default. The default path is used even when nothing is on disk so
+/// the file gets created in a predictable location on first write.
+fn resolve_config_path_for_write(cli_override: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    if let Some(p) = cli_override {
+        return Ok(p);
+    }
+    if let Some(p) = config::Config::resolve_existing_path() {
+        return Ok(p);
+    }
+    config::Config::default_path().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Cannot determine config path. Set $XDG_CONFIG_HOME or $HOME, \
+             or pass --config <FILE>."
+        )
+    })
+}
+
+/// Dispatcher for `voxtype config set engine <NAME>`. Exits the process
+/// with code 2 on validation errors (bad name or missing feature) and code
+/// 1 on filesystem failures, matching the contract documented in
+/// `voxtype config set --help`.
+fn run_config_set_engine(cli_override: Option<PathBuf>, name: &str) -> anyhow::Result<()> {
+    let path = resolve_config_path_for_write(cli_override)?;
+    match config_set::set_engine(path, name) {
+        Ok(written) => {
+            println!("Set engine = \"{}\" in {}", name, written.display());
+            println!("Restart voxtype to apply: systemctl --user restart voxtype");
+            Ok(())
+        }
+        Err(e @ config_set::ConfigSetError::UnknownEngine(_))
+        | Err(e @ config_set::ConfigSetError::FeatureNotCompiled(_)) => {
+            eprintln!("error: {}", e);
+            std::process::exit(2);
+        }
+        Err(e @ config_set::ConfigSetError::Editor(_)) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    }
 }
 
 async fn show_config(config: &config::Config) -> anyhow::Result<()> {
@@ -1900,11 +1995,12 @@ async fn run_meeting_command(config: &config::Config, action: MeetingAction) -> 
         },
         retain_audio: config.meeting.retain_audio,
         max_duration_mins: config.meeting.max_duration_mins,
+        vad_threshold: config.meeting.audio.vad_threshold,
         diarization: None,
     };
 
     match action {
-        MeetingAction::Start { title } => {
+        MeetingAction::Start { title, diarization } => {
             // Check if meeting mode is enabled
             if !config.meeting.enabled {
                 eprintln!("Error: Meeting mode is disabled in config.");
@@ -1929,15 +2025,68 @@ async fn run_meeting_command(config: &config::Config, action: MeetingAction) -> 
                 }
             }
 
+            // --diarization ml requires the ml-diarization feature at build
+            // time. Without it the daemon's diarizer factory silently falls
+            // back, leaving the CLI's "(diarization backend: ml)" exit
+            // message a lie. Reject the request up front with a pointer to
+            // the binaries that DO carry ml-diarization.
+            if diarization.as_deref() == Some("ml") && !cfg!(feature = "ml-diarization") {
+                eprintln!("Error: --diarization ml requested but this binary was not built with");
+                eprintln!(
+                    "  the `ml-diarization` feature. ECAPA-TDNN diarization is shipped in the"
+                );
+                eprintln!(
+                    "  ONNX binaries (voxtype-onnx-avx2, voxtype-onnx-avx512, voxtype-onnx-cuda-*,"
+                );
+                eprintln!(
+                    "  voxtype-onnx-migraphx). Install one of those, or omit --diarization to"
+                );
+                eprintln!("  use the source-based `simple` backend.");
+                std::process::exit(1);
+            }
+
             // Ensure GTCRN speech enhancement model is available
             setup::model::ensure_gtcrn_model();
 
+            // A --diarization override only changes the *backend*; it cannot
+            // turn diarization on when config has disabled it. Warn loudly so
+            // users don't think they're getting speaker labels they aren't.
+            let diarization_active = config.meeting.diarization.enabled;
+            if diarization.is_some() && !diarization_active {
+                eprintln!(
+                    "Warning: --diarization is a backend override and only takes effect when"
+                );
+                eprintln!(
+                    "  [meeting.diarization] enabled = true in config; diarization is disabled,"
+                );
+                eprintln!("  so the override will be ignored for this meeting.");
+            }
+
+            // Write the diarization override first so it's visible by the time
+            // the daemon picks up the start trigger.
+            let runtime_dir = config::Config::runtime_dir();
+            let diarization_file = runtime_dir.join("meeting_start_diarization");
+            if let Some(ref backend) = diarization {
+                std::fs::write(&diarization_file, backend)?;
+            } else {
+                // Clear any stale override left from a prior run.
+                let _ = std::fs::remove_file(&diarization_file);
+            }
+
             // Write start trigger file (with optional title)
-            let start_file = config::Config::runtime_dir().join("meeting_start");
+            let start_file = runtime_dir.join("meeting_start");
             let content = title.unwrap_or_default();
             std::fs::write(&start_file, content)?;
 
-            println!("Meeting start requested. Check status with 'voxtype meeting status'.");
+            let suffix = diarization
+                .as_deref()
+                .filter(|_| diarization_active)
+                .map(|b| format!(" (diarization backend: {})", b))
+                .unwrap_or_default();
+            println!(
+                "Meeting start requested{}. Check status with 'voxtype meeting status'.",
+                suffix
+            );
         }
 
         MeetingAction::Stop => {

@@ -15,6 +15,7 @@ Solutions to common issues when using Voxtype.
   - [Text output not working on X11](#text-output-not-working-on-x11)
   - [Wrong characters on non-US keyboard layouts](#wrong-characters-on-non-us-keyboard-layouts-yz-swapped-qwertz-azerty)
 - [Performance Issues](#performance-issues)
+- [Soniox Backend Issues](#soniox-backend-issues)
 - [Systemd Service Issues](#systemd-service-issues)
 - [Debug Mode](#debug-mode)
 
@@ -495,7 +496,7 @@ Look for log messages about speech detection to understand what VAD is doing wit
 
 **What happens:** Voxtype detects this failure and automatically falls back to dotool, then ydotool. If neither is set up, it falls back to clipboard mode.
 
-**Solution 1 (Recommended):** Install dotool. Unlike ydotool, dotool does not require a daemon and supports keyboard layouts for non-US keyboards:
+**Solution 1 (Recommended):** Install dotool. Unlike ydotool, direct dotool fallback does not require a daemon and supports keyboard layouts for non-US keyboards:
 
 ```bash
 # 1. Install dotool (check your distribution's package manager)
@@ -570,7 +571,7 @@ ERROR Output failed: All output methods failed.
 
 **Option 1 (Recommended): Install dotool**
 
-dotool works on X11, supports keyboard layouts, and doesn't need a daemon:
+direct dotool works on X11, supports keyboard layouts, and doesn't need a daemon:
 
 ```bash
 # Ubuntu/Debian (from source):
@@ -629,7 +630,8 @@ This shows which output tools are installed and available.
 
 **Cause:** ydotool sends raw US keycodes and doesn't support keyboard layouts. When voxtype falls back to ydotool (e.g., on X11, Cinnamon, or when wtype fails), characters are typed as if you had a US keyboard layout.
 
-**Solution:** Install dotool and configure your keyboard layout. Unlike ydotool, dotool supports keyboard layouts via XKB:
+**Solution:** Install dotool and configure your keyboard layout. Unlike
+ydotool, direct dotool fallback supports keyboard layouts via XKB:
 
 ```bash
 # 1. Install dotool
@@ -654,6 +656,10 @@ Add to `~/.config/voxtype/config.toml`:
 dotool_xkb_layout = "de"  # German QWERTZ
 ```
 
+Then switch your desktop/compositor keyboard layout to the same layout before
+dictating. dotool sends key events; it does not switch the active layout for
+the focused app.
+
 Common layout codes:
 - `de` - German (QWERTZ)
 - `fr` - French (AZERTY)
@@ -672,6 +678,28 @@ dotool_xkb_layout = "de"
 dotool_xkb_variant = "nodeadkeys"
 ```
 
+The active desktop layout must use the same variant.
+
+For multilingual dictation, use per-language mappings so the variant only
+applies to the language that needs it. For example, Russian phonetic typing:
+
+```toml
+[whisper]
+language = ["en", "ru"]
+
+[output.language_to_layout]
+en = "us"
+ru = "ru"
+
+[output.language_to_variant]
+ru = "phonetic"
+```
+
+Before dictating Russian through direct dotool fallback, switch the active
+desktop layout to Russian phonetic. If the active layout is still English,
+dotool will send the right key positions for Russian phonetic, but the focused
+app will receive English letters such as `Probuem goworitx po-russki`.
+
 **Alternative:** Use paste mode, which copies text to the clipboard and simulates Ctrl+V. This works regardless of keyboard layout:
 
 ```toml
@@ -680,6 +708,69 @@ mode = "paste"
 ```
 
 **Note:** The keyboard layout fix requires voxtype v0.5.0 or later. If you're on an older version, upgrade first.
+
+---
+
+### Wrong characters when transcribing a second language
+
+**Symptom:** With `language = ["en", "ru"]`, transcribing Russian on a US
+system layout fails with eitype reporting `Character not found in keymap`, or
+dotool/eitype prints garbled text. English transcriptions work fine.
+
+**Cause:** Before voxtype v0.7.3, the daemon did not pass a layout hint to
+the `eitype` binary. eitype fell back to the system's active XKB layout,
+which lacked the keycodes for Cyrillic (or any non-system language) and so
+either errored or typed the wrong characters. This is issue #180.
+
+**Solution:** Upgrade to a version with per-language XKB hints. The daemon
+reads the language Whisper picked for each transcription and passes a matching
+layout/variant hint to eitype or direct dotool fallback for that call.
+
+`dotoolc` does not work with variants and cannot receive voxtype's per-call XKB
+hints, so voxtype uses direct `dotool` for these hinted calls. This hint only
+controls dotool's text-to-key lookup. You must switch the active desktop layout
+to the target language/variant before dictating. If you dictate Russian while
+the active layout is English, the result can look transliterated
+(`Probuem goworitx po-russki`) even though dotool sent the intended key
+positions.
+
+Verify:
+
+```bash
+voxtype daemon -vv  # debug logs
+# After a Russian transcription you should see:
+# DEBUG Auto layout for eitype: language='ru' -> layout='ru'
+# DEBUG Auto variant for eitype: language='ru' -> variant='phonetic'
+```
+
+**Forcing a specific layout.** To pin eitype to a fixed layout regardless of
+the detected language, set it explicitly:
+
+```toml
+[output]
+driver_order = ["eitype"]
+eitype_xkb_layout = "us"          # or "de", "ru", etc.
+# eitype_xkb_variant = "dvorak"   # optional
+```
+
+**Customizing the language-to-layout and variant maps.** Voxtype ships built-in
+layout defaults (`en->us`, `ru->ru`, `de->de`, etc.). Layouts that don't match
+the language code (e.g. Brazilian Portuguese uses `br`, not `pt`) need an
+override in config. Variants are empty by default because they are user-specific:
+
+```toml
+[output.language_to_layout]
+en = "us"
+pt = "br"
+ru = "ru"
+
+[output.language_to_variant]
+ru = "phonetic"
+```
+
+See `docs/CONFIGURATION.md` for the full list of built-in defaults and merge
+semantics (the user table replaces the defaults, so copy the entries you
+want to keep).
 
 ---
 
@@ -899,6 +990,124 @@ model = "tiny.en"
 1. Ensure voxtype is running with normal priority
 2. Check for other applications using evdev
 3. Try a different hotkey
+
+---
+
+## Soniox Backend Issues
+
+### "Soniox API key required: set [soniox] api_key or SONIOX_API_KEY"
+
+The backend can't find a credential. Either set the env var:
+
+```bash
+export SONIOX_API_KEY="your-key-here"
+```
+
+…or add it to `~/.config/voxtype/config.toml`:
+
+```toml
+[soniox]
+api_key = "your-key-here"   # less safe — lands in dotfiles
+```
+
+The env var is preferred (no key in shell history, no key in config backups).
+
+### "Soniox: WS connect failed: ..." or "connect timeout"
+
+Network or DNS issue reaching `wss://stt-rt.soniox.com`. Check:
+- Internet connectivity (`curl https://api.soniox.com`)
+- Firewall / corporate proxy blocking outbound 443
+- VPN that mangles WebSocket handshakes
+
+Voxtype emits one `Streaming Error` notification and returns to idle. Press the hotkey again to retry once the network is back.
+
+### 401 Unauthorized / 403 Forbidden
+
+API key is invalid, revoked, or out of credit. Check the dashboard at https://console.soniox.com.
+
+### Soniox typed text occasionally diverges from spoken words (realtime mode)
+
+Soniox occasionally revises tail tokens between non-final and final states (`tévedések,` → `tévedések.`, `fejeztem` → `fejezte`). Voxtype emits a `StreamingEvent::Replace { backspace, text }` in this case so the cursor is patched up — but the patch only works if a backspace-capable driver is in the chain. The current backspace path tries `wtype`, then `dotool` (via `dotoolc` if the daemon is running), then `ydotool`. `eitype` does not have a backspace implementation.
+
+If you see persistent duplication or wrong tails:
+1. Check `journalctl --user -u voxtype` for `Soniox tail revision: backspace N chars, type … (lcp=N)` lines. If you see them, Replace is firing.
+2. If you also see `Streaming replace: no backspace-capable backend available; skipping backspace and accepting cursor artifact`, none of wtype/dotool/ydotool was usable — the original tail stayed at the cursor and the corrected text appended. Install at least one of them (`pacman -S wtype` or `pacman -S dotool` on Arch).
+3. Disable partial typing entirely: `[soniox] type_partials = false`. Finals are still typed, but no live cursor feedback. Trade-off: feels slower, zero divergence risk.
+
+### Notifications spam during dictation (transient tray icon flicker on KDE)
+
+If your KDE Plasma panel briefly shows an icon and re-layouts every ~150ms during streaming, the cause is usually the `eitype` driver. eitype connects via the XDG RemoteDesktop portal on each call, and KDE's security indicator briefly registers in the system tray.
+
+**Fix:** prefer `dotool` (or `ydotool`, layout-permitting) ahead of `eitype` in `[output] driver_order`. dotool uses kernel uinput directly — no portal, no tray.
+
+```toml
+[output]
+driver_order = ["dotool", "ydotool", "eitype", "clipboard"]
+```
+
+### Streaming is unusably slow (each typed segment takes ~1 second)
+
+You're hitting dotool's uinput init cost (~700ms) on every output call. With 60+ partials per session this stacks into 40+ seconds.
+
+**Fix:** run `dotoold` once at login. When there is no per-call XKB hint,
+voxtype auto-detects its FIFO and routes through `dotoolc`, paying the init
+cost once for the daemon's lifetime instead of per call. Sub-10ms per typed
+segment.
+
+See [Streaming performance: dotoold fast path](CONFIGURATION.md#streaming-performance-dotoold-fast-path) in CONFIGURATION.md for the systemd user unit template.
+
+To verify the fast path is active after dictation:
+```bash
+journalctl --user -u voxtype --since "5 min ago" | grep "typed via"
+```
+- `Text typed via dotoolc (N chars)` — fast path
+- `Text typed via dotool (N chars)` — direct path; daemon not running or voxtype had a per-call XKB hint
+
+### Wrong keyboard layout when dotoold is running
+
+dotool's layout setting applies to **the daemon, not the client**. When voxtype
+has no per-call XKB hint, commands routed through `dotoolc` use whatever
+layout dotoold inherited from its own environment.
+
+**Fix for one fixed layout:** set `DOTOOL_XKB_LAYOUT` in dotoold's startup
+environment and leave voxtype's dotool XKB fields unset:
+
+```bash
+# In your systemd user unit:
+Environment=DOTOOL_XKB_LAYOUT=hu
+
+# Then:
+systemctl --user daemon-reload && systemctl --user restart dotoold
+```
+
+For per-language layouts or variants, configure `language_to_layout` /
+`language_to_variant` in voxtype. `dotoolc` does not work with variants and
+cannot receive voxtype's per-call XKB hints, so voxtype will use direct
+`dotool` instead of `dotoolc` for those calls. You still need to switch the
+active desktop layout to the same language/variant before dictating.
+
+### PTT auto-promoted to toggle every time you start the daemon
+
+Expected when `[soniox] streaming = true` (the default for the realtime backend). Live cursor typing while the PTT key is still held breaks libinput's held-key state tracking on Hyprland/Sway/River. Voxtype auto-promotes to toggle for the running session and warns.
+
+To use Soniox with **real** push-to-talk, choose one of:
+- `[soniox] streaming = false` — one-shot WebSocket on key release, no live partials
+- `[soniox] async_api = true` — async REST API, slower but higher accuracy
+- `[hotkey] mode = "toggle"` — accept toggle activation (silences the warning)
+
+### Async API job stuck or "Soniox async: job ... did not complete within Ns"
+
+The async API processing took longer than `async_max_wait_secs` (default 120). For very long recordings or during Soniox capacity spikes, bump the timeout:
+
+```toml
+[soniox]
+async_api = true
+async_max_wait_secs = 300
+```
+
+### Post-stop "Streaming Error: Soniox server error (408): Request timeout"
+
+This notification used to appear when you released the hotkey and Soniox's server-side timer fired before the connection fully closed. Voxtype now suppresses 408s that arrive **after** you've signalled end-of-audio, so this should be silent. If you still see it, your build predates the fix (any release after v0.7.2 + soniox).
 
 ---
 

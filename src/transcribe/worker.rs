@@ -27,13 +27,29 @@ pub const READY_SIGNAL: &str = "READY";
 #[derive(Debug, serde::Serialize)]
 #[serde(untagged)]
 pub enum WorkerResponse {
-    Success { ok: bool, text: String },
-    Error { ok: bool, error: String },
+    Success {
+        ok: bool,
+        text: String,
+        /// Two-letter language code chosen for this transcription, if the
+        /// worker tracked one. The parent reads this so layout-aware output
+        /// methods (eitype, dotool) can switch keyboard layouts. Older
+        /// parents that ignore the field simply skip the hint.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        language: Option<String>,
+    },
+    Error {
+        ok: bool,
+        error: String,
+    },
 }
 
 impl WorkerResponse {
-    pub fn success(text: String) -> Self {
-        WorkerResponse::Success { ok: true, text }
+    pub fn success(text: String, language: Option<String>) -> Self {
+        WorkerResponse::Success {
+            ok: true,
+            text,
+            language,
+        }
     }
 
     pub fn error(msg: impl Into<String>) -> Self {
@@ -150,7 +166,12 @@ pub fn run_worker(config: &WhisperConfig) -> anyhow::Result<()> {
                 transcribe_start.elapsed().as_secs_f32(),
                 text.len()
             );
-            write_response_to(&mut stdout_lock, WorkerResponse::success(text));
+            // Capture the chosen language so the parent can hint output
+            // methods (eitype --layout, dotool DOTOOL_XKB_LAYOUT) about
+            // what keyboard layout to use. Field is omitted from the JSON
+            // if no language was tracked.
+            let language = transcriber.last_detected_language();
+            write_response_to(&mut stdout_lock, WorkerResponse::success(text, language));
         }
         Err(e) => {
             eprintln!("[worker] Transcription failed: {}", e);
@@ -175,15 +196,25 @@ mod tests {
 
     #[test]
     fn test_worker_response_serialization() {
-        let success = WorkerResponse::success("Hello world".to_string());
+        let success = WorkerResponse::success("Hello world".to_string(), None);
         let json = serde_json::to_string(&success).unwrap();
         assert!(json.contains(r#""ok":true"#));
         assert!(json.contains(r#""text":"Hello world""#));
+        // No language present: serialized form omits the field entirely.
+        assert!(!json.contains(r#""language""#));
 
         let error = WorkerResponse::error("Something went wrong");
         let json = serde_json::to_string(&error).unwrap();
         assert!(json.contains(r#""ok":false"#));
         assert!(json.contains(r#""error":"Something went wrong""#));
+    }
+
+    #[test]
+    fn test_worker_response_serialization_with_language() {
+        let success = WorkerResponse::success("Привет".to_string(), Some("ru".to_string()));
+        let json = serde_json::to_string(&success).unwrap();
+        assert!(json.contains(r#""ok":true"#));
+        assert!(json.contains(r#""language":"ru""#));
     }
 
     #[test]

@@ -52,8 +52,8 @@
 
 use crate::config::CohereConfig;
 use crate::error::TranscribeError;
-use crate::transcribe::Transcriber;
 use crate::transcribe::cohere_fbank::CohereFbank;
+use crate::transcribe::Transcriber;
 use ort::session::Session;
 use ort::value::{DynTensor, DynValue, Tensor, TensorElementType, ValueType};
 use std::borrow::Cow;
@@ -68,7 +68,6 @@ use tokenizers::Tokenizer;
 const N_LAYERS: usize = 8;
 const N_HEADS: usize = 8;
 const HEAD_DIM: usize = 128;
-const D_MODEL: usize = N_HEADS * HEAD_DIM; // 1024
 const N_MELS: usize = 128;
 const VOCAB_SIZE: usize = 16384;
 const SAMPLE_RATE: usize = 16_000;
@@ -211,9 +210,7 @@ impl CohereTranscriber {
                 _ => None,
             })
             .unwrap_or(TensorElementType::Float32);
-        if float_dtype != TensorElementType::Float32
-            && float_dtype != TensorElementType::Float16
-        {
+        if float_dtype != TensorElementType::Float32 && float_dtype != TensorElementType::Float16 {
             return Err(TranscribeError::InitFailed(format!(
                 "Cohere decoder past_key_values dtype {:?} is neither Float32 nor Float16",
                 float_dtype,
@@ -328,13 +325,11 @@ impl CohereTranscriber {
             };
 
             let input_ids = Tensor::<i64>::from_array(([1usize, seq_len], input_ids_vec))
-                .map_err(|e| {
-                    TranscribeError::InferenceFailed(format!("input_ids tensor: {e}"))
-                })?;
-            let attention_mask = Tensor::<i64>::from_array(([1usize, total_len], attention_mask_vec))
-                .map_err(|e| {
-                    TranscribeError::InferenceFailed(format!("attention_mask tensor: {e}"))
-                })?;
+                .map_err(|e| TranscribeError::InferenceFailed(format!("input_ids tensor: {e}")))?;
+            let attention_mask =
+                Tensor::<i64>::from_array(([1usize, total_len], attention_mask_vec)).map_err(
+                    |e| TranscribeError::InferenceFailed(format!("attention_mask tensor: {e}")),
+                )?;
             let position_ids = Tensor::<i64>::from_array(([1usize, seq_len], position_ids_vec))
                 .map_err(|e| {
                     TranscribeError::InferenceFailed(format!("position_ids tensor: {e}"))
@@ -385,9 +380,10 @@ impl CohereTranscriber {
                 present_dec,
                 present_enc,
             } = {
-                let mut dec = self.decoder.lock().map_err(|e| {
-                    TranscribeError::InferenceFailed(format!("decoder lock: {e}"))
-                })?;
+                let mut dec = self
+                    .decoder
+                    .lock()
+                    .map_err(|e| TranscribeError::InferenceFailed(format!("decoder lock: {e}")))?;
                 let mut outputs = dec.run(inputs).map_err(|e| {
                     TranscribeError::InferenceFailed(format!("decoder step {step}: {e}"))
                 })?;
@@ -471,10 +467,7 @@ fn empty_kv(dtype: TensorElementType) -> Result<DynValue, TranscribeError> {
 /// per the model variant. f16 values are widened to f32 for the
 /// comparison so we don't have to depend on `half`'s `Ord` impl across
 /// versions.
-fn argmax_logits(
-    logits: &DynValue,
-    dtype: TensorElementType,
-) -> Result<i64, TranscribeError> {
+fn argmax_logits(logits: &DynValue, dtype: TensorElementType) -> Result<i64, TranscribeError> {
     fn pick<F: Copy + PartialOrd, I: Iterator<Item = F>>(it: I) -> i64 {
         let mut best_idx = 0_i64;
         let mut best_val: Option<F> = None;

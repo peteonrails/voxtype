@@ -183,6 +183,13 @@ fallback_to_clipboard = true
 #   driver_order = ["ydotool"]
 # driver_order = ["wtype", "dotool", "ydotool", "clipboard"]
 
+# Per-language XKB layout variants for multilingual dictation.
+# Use this with language arrays such as `language = ["en", "ru"]` when a
+# language needs a variant that should not apply to other languages.
+# Built-in layout defaults already include `ru = "ru"` in language_to_layout.
+# [output.language_to_variant]
+# ru = "phonetic"
+
 # Delay between typed characters in milliseconds
 # 0 = fastest possible, increase if characters are dropped
 type_delay_ms = 0
@@ -328,10 +335,7 @@ pub fn default_config_content() -> String {
     #[cfg(target_os = "macos")]
     {
         DEFAULT_CONFIG
-            .replace(
-                "key = \"SCROLLLOCK\"",
-                "key = \"FN\"",
-            )
+            .replace("key = \"SCROLLLOCK\"", "key = \"FN\"")
             .replace(
                 "# Common choices: SCROLLLOCK, PAUSE, RIGHTALT, F13-F24",
                 "# Common choices: FN, RIGHTALT, F13-F24",
@@ -399,6 +403,11 @@ pub struct Config {
     /// Cohere Transcribe configuration (optional, only used when engine = "cohere")
     #[serde(default)]
     pub cohere: Option<CohereConfig>,
+
+    /// Soniox cloud streaming WebSocket STT configuration
+    /// (optional, only used when engine = "soniox")
+    #[serde(default)]
+    pub soniox: Option<SonioxConfig>,
 
     /// Text processing configuration (replacements, spoken punctuation)
     #[serde(default)]
@@ -1201,6 +1210,110 @@ impl Default for CohereConfig {
     }
 }
 
+/// Soniox cloud streaming WebSocket STT configuration
+/// Requires: cargo build --features soniox
+///
+/// Soniox is a paid cloud STT provider. API key required:
+/// either set `api_key` here or via the `SONIOX_API_KEY` env var.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SonioxConfig {
+    /// API key. If unset, falls back to the SONIOX_API_KEY env var.
+    #[serde(default)]
+    pub api_key: Option<String>,
+
+    /// Soniox model name. Default: "stt-rt-v4".
+    #[serde(default = "default_soniox_model")]
+    pub model: String,
+
+    /// Language hints (ISO 639-1 codes). Default: ["hu", "en"].
+    /// Empty array means auto-detect.
+    #[serde(default = "default_soniox_language_hints")]
+    pub language_hints: Vec<String>,
+
+    /// Strictly restrict recognition to the languages in `language_hints`.
+    /// When true (default), the model strongly prefers producing output
+    /// only in the hinted languages, avoiding occasional drift to a third
+    /// language in mid-stream partials. Ignored when `language_hints` is
+    /// empty. See https://soniox.com/docs/stt/concepts/language-restrictions.
+    #[serde(default = "default_true")]
+    pub language_hints_strict: bool,
+
+    /// Streaming mode. true = WebSocket session with live partials
+    /// (requires [hotkey] mode = "toggle"; PTT auto-promoted to toggle).
+    /// false = batch mode: buffer audio while held, send one-shot on release
+    /// (PTT-compatible).
+    #[serde(default = "default_true")]
+    pub streaming: bool,
+
+    /// Type partials at cursor as they arrive (streaming mode only).
+    /// false = only finalized segments are typed. Default: true.
+    #[serde(default = "default_true")]
+    pub type_partials: bool,
+
+    /// Free-form context text — mapped to `context.text` in Soniox's init
+    /// frame. Use for short domain prose ("medical consultation",
+    /// "podcast about Rust async runtime"). See
+    /// https://soniox.com/docs/stt/concepts/context.
+    #[serde(default)]
+    pub context: Option<String>,
+
+    /// Vocabulary boost terms (proper names, jargon, product names).
+    /// Mapped to `context.terms` in Soniox's init frame. Can be combined
+    /// with `terms_file`; entries are deduplicated in order.
+    #[serde(default)]
+    pub terms: Option<Vec<String>>,
+
+    /// Path to a JSON file containing a list of vocabulary boost terms
+    /// (`["term1", "term2", ...]`). Loaded once at daemon startup and
+    /// merged into `context.terms`. Useful for sharing a single
+    /// corrections list across multiple voxtype config snapshots.
+    #[serde(default)]
+    pub terms_file: Option<std::path::PathBuf>,
+
+    /// Use the Soniox async transcription API (file upload + poll) instead
+    /// of the realtime WebSocket. Higher accuracy, PTT-compatible, batch
+    /// only (no live partials). When true, overrides `streaming` and
+    /// `type_partials`. Default model becomes `stt-async-v4`.
+    /// Default: false.
+    #[serde(default)]
+    pub async_api: bool,
+
+    /// Maximum total wait time (seconds) for an async API job to complete
+    /// before giving up. Default: 120.
+    #[serde(default = "default_soniox_async_max_wait_secs")]
+    pub async_max_wait_secs: u64,
+}
+
+fn default_soniox_model() -> String {
+    "stt-rt-v4".to_string()
+}
+
+fn default_soniox_language_hints() -> Vec<String> {
+    vec!["hu".to_string(), "en".to_string()]
+}
+
+fn default_soniox_async_max_wait_secs() -> u64 {
+    120
+}
+
+impl Default for SonioxConfig {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            model: default_soniox_model(),
+            language_hints: default_soniox_language_hints(),
+            language_hints_strict: true,
+            streaming: true,
+            type_partials: true,
+            context: None,
+            terms: None,
+            terms_file: None,
+            async_api: false,
+            async_max_wait_secs: default_soniox_async_max_wait_secs(),
+        }
+    }
+}
+
 /// SenseVoice speech-to-text configuration (ONNX-based, CTC encoder-only ASR)
 /// Requires: cargo build --features sensevoice
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1325,8 +1438,10 @@ impl Default for OmnilingualConfig {
 /// Transcription engine selection (which ASR technology to use)
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum TranscriptionEngine {
     /// Use Whisper (whisper.cpp via whisper-rs)
+    #[default]
     Whisper,
     /// Use Parakeet (NVIDIA's FastConformer via ONNX Runtime)
     /// Requires: cargo build --features parakeet
@@ -1350,6 +1465,9 @@ pub enum TranscriptionEngine {
     /// task tokens). Top of the Open ASR Leaderboard.
     /// Requires: cargo build --features cohere
     Cohere,
+    /// Use Soniox (cloud streaming WebSocket STT).
+    /// Requires: cargo build --features soniox
+    Soniox,
 }
 
 /// VAD backend selection
@@ -1422,12 +1540,6 @@ impl Default for VadConfig {
             min_speech_duration_ms: default_min_speech_duration_ms(),
             model: None,
         }
-    }
-}
-
-impl Default for TranscriptionEngine {
-    fn default() -> Self {
-        TranscriptionEngine::Whisper
     }
 }
 
@@ -1546,6 +1658,11 @@ pub struct MeetingAudioConfig {
     /// and set this to "disabled".
     #[serde(default = "default_echo_cancel")]
     pub echo_cancel: String,
+
+    /// RMS threshold for meeting chunk voice activity detection.
+    /// Lower values are more permissive; 0.0 disables the pre-transcription gate.
+    #[serde(default = "default_meeting_vad_threshold")]
+    pub vad_threshold: f32,
 }
 
 fn default_mic_device() -> String {
@@ -1560,12 +1677,17 @@ fn default_echo_cancel() -> String {
     "auto".to_string()
 }
 
+fn default_meeting_vad_threshold() -> f32 {
+    0.01
+}
+
 impl Default for MeetingAudioConfig {
     fn default() -> Self {
         Self {
             mic_device: default_mic_device(),
             loopback_device: default_loopback(),
             echo_cancel: default_echo_cancel(),
+            vad_threshold: default_meeting_vad_threshold(),
         }
     }
 }
@@ -1592,6 +1714,24 @@ pub struct MeetingDiarizationConfig {
     /// Minimum segment duration in milliseconds for ML embedding extraction
     #[serde(default = "default_min_segment_ms")]
     pub min_segment_ms: u64,
+
+    // The four fields below apply only to backend = "ml"; the "simple" and
+    // "remote" backends ignore them.
+    /// Cosine similarity threshold for the ML backend (0.20-0.30 typical for ECAPA on 4s windows)
+    #[serde(default = "default_similarity_threshold")]
+    pub similarity_threshold: f32,
+
+    /// VAD sub-window length in seconds for ECAPA feeding
+    #[serde(default = "default_vad_window_secs")]
+    pub vad_window_secs: f32,
+
+    /// VAD sub-window hop in seconds
+    #[serde(default = "default_vad_hop_secs")]
+    pub vad_hop_secs: f32,
+
+    /// RMS floor for treating a sub-window as silence
+    #[serde(default = "default_vad_rms_floor")]
+    pub vad_rms_floor: f32,
 }
 
 fn default_diarization_backend() -> String {
@@ -1604,6 +1744,25 @@ fn default_max_speakers() -> u32 {
 
 fn default_min_segment_ms() -> u64 {
     500
+}
+
+// Empirically tuned against multi-speaker test clips (4-person roundtable,
+// 3-person panel, 1h talk). The previous 0.75 anchor was far too strict for
+// 4s ECAPA windows and produced overwhelmingly Unknown labels in practice.
+fn default_similarity_threshold() -> f32 {
+    0.25
+}
+
+fn default_vad_window_secs() -> f32 {
+    4.0
+}
+
+fn default_vad_hop_secs() -> f32 {
+    2.0
+}
+
+fn default_vad_rms_floor() -> f32 {
+    0.005
 }
 
 fn default_chunk_duration() -> u32 {
@@ -1626,6 +1785,10 @@ impl Default for MeetingDiarizationConfig {
             max_speakers: default_max_speakers(),
             model_path: None,
             min_segment_ms: default_min_segment_ms(),
+            similarity_threshold: default_similarity_threshold(),
+            vad_window_secs: default_vad_window_secs(),
+            vad_hop_secs: default_vad_hop_secs(),
+            vad_rms_floor: default_vad_rms_floor(),
         }
     }
 }
@@ -1899,6 +2062,44 @@ pub struct OutputConfig {
     #[serde(default)]
     pub dotool_xkb_variant: Option<String>,
 
+    /// Keyboard layout for eitype (e.g., "de" for German, "ru" for Russian).
+    /// Passed to eitype as `-l <layout>`. Overrides the system XKB layout
+    /// while eitype is typing, then restores it when eitype exits.
+    /// Required when the transcribed language does not match the active
+    /// system layout (see issue #180).
+    #[serde(default)]
+    pub eitype_xkb_layout: Option<String>,
+
+    /// Keyboard layout variant for eitype (e.g., "dvorak", "colemak").
+    /// Passed to eitype as `--variant <variant>`.
+    #[serde(default)]
+    pub eitype_xkb_variant: Option<String>,
+
+    /// Mapping from detected language code (two-letter ISO 639-1) to XKB
+    /// keyboard layout. When voxtype's transcriber reports a language for the
+    /// current transcription and no explicit `eitype_xkb_layout` /
+    /// `dotool_xkb_layout` is set, the layout is looked up here.
+    ///
+    /// Built-in defaults cover the common cases (en→us, ru→ru, de→de, ...);
+    /// see [`default_language_to_layout`]. Users can override or extend the
+    /// map in config to handle layouts that differ from the language code
+    /// (e.g. `pt = "br"` for Brazilian Portuguese).
+    ///
+    /// Set to an empty map (or remove all entries) to disable automatic
+    /// layout selection from the detected language.
+    #[serde(default = "default_language_to_layout")]
+    pub language_to_layout: std::collections::HashMap<String, String>,
+
+    /// Mapping from detected language code (two-letter ISO 639-1) to XKB
+    /// keyboard layout variant. Applied per transcription, after
+    /// `language_to_layout`, when no explicit `eitype_xkb_variant` /
+    /// `dotool_xkb_variant` is set.
+    ///
+    /// This is intentionally empty by default. Variants are user-specific
+    /// layout choices (for example, Russian phonetic vs standard).
+    #[serde(default)]
+    pub language_to_variant: std::collections::HashMap<String, String>,
+
     /// File path for file output mode (required when mode = "file")
     /// Also used as default path for --output-file CLI flag
     #[serde(default)]
@@ -1941,7 +2142,97 @@ fn default_modifier_release_timeout_ms() -> u64 {
     750
 }
 
+/// Result of applying a per-language XKB layout/variant hint to output config.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AppliedLanguageXkbHint {
+    /// Layout found in `language_to_layout`, if any.
+    pub layout: Option<String>,
+    /// Variant found in `language_to_variant`, if any.
+    pub variant: Option<String>,
+    /// Whether the layout was applied to eitype for this transcription.
+    pub eitype_layout_applied: bool,
+    /// Whether the layout was applied to dotool for this transcription.
+    pub dotool_layout_applied: bool,
+    /// Whether the variant was applied to eitype for this transcription.
+    pub eitype_variant_applied: bool,
+    /// Whether the variant was applied to dotool for this transcription.
+    pub dotool_variant_applied: bool,
+}
+
+impl AppliedLanguageXkbHint {
+    pub fn is_empty(&self) -> bool {
+        self.layout.is_none() && self.variant.is_none()
+    }
+}
+
+/// Built-in mapping from two-letter ISO 639-1 language codes to XKB layout
+/// codes. Used when the transcriber reports a detected language and the user
+/// has not set an explicit `eitype_xkb_layout` / `dotool_xkb_layout`.
+///
+/// Covers the most common cases where layout code matches language code
+/// (en→us is the notable exception). Users can extend or override this map
+/// in config under `[output] language_to_layout`. To disable automatic
+/// layout selection entirely, set `language_to_layout = {}` in config.
+pub fn default_language_to_layout() -> std::collections::HashMap<String, String> {
+    let mut m = std::collections::HashMap::new();
+    // English uses "us" by convention, not "en".
+    m.insert("en".to_string(), "us".to_string());
+    // Other common languages where layout name matches ISO 639-1.
+    for code in [
+        "ru", "de", "fr", "es", "it", "pl", "uk", "cs", "sk", "sv", "no", "fi", "da", "nl", "pt",
+        "tr", "gr", "hu", "ro", "bg", "hr", "sr", "sl", "lt", "lv", "et", "is", "ca", "eu",
+    ] {
+        m.insert(code.to_string(), code.to_string());
+    }
+    // Greek uses "gr" not "el".
+    m.insert("el".to_string(), "gr".to_string());
+    // Japanese, Korean, Chinese typically need IMEs rather than XKB layouts,
+    // but voxtype passes the hint through so users can map them as they wish.
+    m.insert("ja".to_string(), "jp".to_string());
+    m.insert("ko".to_string(), "kr".to_string());
+    m
+}
+
 impl OutputConfig {
+    /// Apply per-language XKB layout/variant hints to eitype and dotool.
+    ///
+    /// Explicit driver-specific settings win independently per field:
+    /// `dotool_xkb_layout` prevents only the automatic dotool layout, while
+    /// `dotool_xkb_variant` prevents only the automatic dotool variant.
+    pub fn apply_language_xkb_hint(&mut self, lang: &str) -> AppliedLanguageXkbHint {
+        let layout = self.language_to_layout.get(lang).cloned();
+        let variant = self.language_to_variant.get(lang).cloned();
+        let mut applied = AppliedLanguageXkbHint {
+            layout,
+            variant,
+            ..AppliedLanguageXkbHint::default()
+        };
+
+        if let Some(ref layout) = applied.layout {
+            if self.eitype_xkb_layout.is_none() {
+                self.eitype_xkb_layout = Some(layout.clone());
+                applied.eitype_layout_applied = true;
+            }
+            if self.dotool_xkb_layout.is_none() {
+                self.dotool_xkb_layout = Some(layout.clone());
+                applied.dotool_layout_applied = true;
+            }
+        }
+
+        if let Some(ref variant) = applied.variant {
+            if self.eitype_xkb_variant.is_none() {
+                self.eitype_xkb_variant = Some(variant.clone());
+                applied.eitype_variant_applied = true;
+            }
+            if self.dotool_xkb_variant.is_none() {
+                self.dotool_xkb_variant = Some(variant.clone());
+                applied.dotool_variant_applied = true;
+            }
+        }
+
+        applied
+    }
+
     /// Get the effective pre-type delay, handling deprecated wtype_delay_ms
     pub fn effective_pre_type_delay_ms(&self) -> u32 {
         if self.wtype_delay_ms > 0 {
@@ -2108,6 +2399,10 @@ impl Default for Config {
                 paste_keys: None,
                 dotool_xkb_layout: None,
                 dotool_xkb_variant: None,
+                eitype_xkb_layout: None,
+                eitype_xkb_variant: None,
+                language_to_layout: default_language_to_layout(),
+                language_to_variant: HashMap::new(),
                 file_path: None,
                 file_mode: FileMode::default(),
                 restore_clipboard: false,
@@ -2123,6 +2418,7 @@ impl Default for Config {
             dolphin: None,
             omnilingual: None,
             cohere: None,
+            soniox: None,
             text: TextConfig::default(),
             vad: VadConfig::default(),
             status: StatusConfig::default(),
@@ -2135,6 +2431,59 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Returns true if the active engine is configured for streaming output.
+    ///
+    /// Used to decide whether to auto-promote push-to-talk to toggle activation:
+    /// streaming output types characters at the cursor while the user is still
+    /// holding the hotkey, which clobbers libinput's held-key state tracker on
+    /// Hyprland/Sway/River. New streaming backends plug into this gate without
+    /// editing the daemon.
+    pub fn streaming_active(&self) -> bool {
+        match self.engine {
+            TranscriptionEngine::Parakeet => {
+                self.parakeet.as_ref().map(|p| p.streaming).unwrap_or(false)
+            }
+            // Missing [soniox] section → don't auto-promote PTT. The
+            // transcriber will fail to initialize anyway (no api_key); we
+            // shouldn't change hotkey behaviour for a config that can't
+            // run. Same shape as the Parakeet arm: explicit opt-in only.
+            TranscriptionEngine::Soniox => self
+                .soniox
+                .as_ref()
+                .map(|s| s.streaming && !s.async_api)
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    /// Clone this config with engine-specific overrides for meeting (long-form)
+    /// transcription. Currently:
+    ///
+    /// - **Soniox:** forces `async_api = true`. Meetings feed fixed-size audio
+    ///   chunks (30s default) to `Transcriber::transcribe()` — the realtime WS
+    ///   would open a fresh socket per chunk, pay connect latency, and bill by
+    ///   WS-duration. The async REST path (`stt-async-v4`) is purpose-built
+    ///   for this: bills audio-seconds, gives higher accuracy, integrates with
+    ///   speaker diarization, and survives network hiccups.
+    ///
+    /// The dictation path still reads the raw config, so a user who set
+    /// `async_api = false` (the default) keeps live-partial WS dictation while
+    /// meetings transparently use the async API.
+    pub fn with_meeting_mode_overrides(&self) -> Self {
+        let mut cfg = self.clone();
+        if matches!(cfg.engine, TranscriptionEngine::Soniox) {
+            if let Some(ref mut sx) = cfg.soniox {
+                if !sx.async_api {
+                    tracing::info!(
+                        "Soniox meeting mode: routing to async API (stt-async-v4); dictation path unchanged"
+                    );
+                    sx.async_api = true;
+                }
+            }
+        }
+        cfg
+    }
+
     /// System-wide config path used as a fallback when no user config exists.
     pub const SYSTEM_PATH: &'static str = "/etc/voxtype/config.toml";
 
@@ -2222,6 +2571,8 @@ impl Config {
         let models_dir = Self::models_dir();
         std::fs::create_dir_all(&models_dir)?;
         tracing::debug!("Ensured models directory exists: {:?}", models_dir);
+        cachedir::ensure_tag(&models_dir)
+            .unwrap_or_else(|e| tracing::warn!("could not tag models dir: {e}"));
 
         Ok(())
     }
@@ -2265,6 +2616,8 @@ impl Config {
                 .as_ref()
                 .map(|c| c.on_demand_loading)
                 .unwrap_or(false),
+            // Soniox is a cloud backend; nothing to load on demand.
+            TranscriptionEngine::Soniox => false,
         }
     }
 
@@ -2307,6 +2660,11 @@ impl Config {
                 .as_ref()
                 .map(|c| c.model.as_str())
                 .unwrap_or("cohere (not configured)"),
+            TranscriptionEngine::Soniox => self
+                .soniox
+                .as_ref()
+                .map(|s| s.model.as_str())
+                .unwrap_or("soniox (not configured)"),
         }
     }
 
@@ -2353,9 +2711,7 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             tracing::debug!("Config file not found at {:?}, using defaults", path);
         }
     } else {
-        tracing::debug!(
-            "No config file found at user or system path, using built-in defaults"
-        );
+        tracing::debug!("No config file found at user or system path, using built-in defaults");
     }
 
     // Override from environment variables
@@ -2384,6 +2740,7 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             "dolphin" => config.engine = TranscriptionEngine::Dolphin,
             "omnilingual" => config.engine = TranscriptionEngine::Omnilingual,
             "cohere" => config.engine = TranscriptionEngine::Cohere,
+            "soniox" => config.engine = TranscriptionEngine::Soniox,
             _ => tracing::warn!("Unknown VOXTYPE_ENGINE value: {}", engine),
         }
     }
@@ -2475,6 +2832,15 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     if let Ok(layout) = std::env::var("VOXTYPE_DOTOOL_XKB_LAYOUT") {
         config.output.dotool_xkb_layout = Some(layout);
     }
+    if let Ok(variant) = std::env::var("VOXTYPE_DOTOOL_XKB_VARIANT") {
+        config.output.dotool_xkb_variant = Some(variant);
+    }
+    if let Ok(layout) = std::env::var("VOXTYPE_EITYPE_XKB_LAYOUT") {
+        config.output.eitype_xkb_layout = Some(layout);
+    }
+    if let Ok(variant) = std::env::var("VOXTYPE_EITYPE_XKB_VARIANT") {
+        config.output.eitype_xkb_variant = Some(variant);
+    }
 
     // Remote whisper
     if let Ok(endpoint) = std::env::var("VOXTYPE_REMOTE_ENDPOINT") {
@@ -2482,6 +2848,14 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     }
     if let Ok(key) = std::env::var("VOXTYPE_WHISPER_API_KEY") {
         config.whisper.remote_api_key = Some(key);
+    }
+
+    // Soniox
+    if let Ok(key) = std::env::var("SONIOX_API_KEY") {
+        config
+            .soniox
+            .get_or_insert_with(SonioxConfig::default)
+            .api_key = Some(key);
     }
     if let Ok(val) = std::env::var("VOXTYPE_RESTORE_CLIPBOARD") {
         config.output.restore_clipboard = parse_bool_env(&val);
@@ -2522,6 +2896,46 @@ pub fn save_config(config: &Config, path: &Path) -> Result<(), VoxtypeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn meeting_mode_forces_soniox_async_when_user_had_realtime() {
+        let cfg = Config {
+            engine: TranscriptionEngine::Soniox,
+            soniox: Some(SonioxConfig {
+                api_key: Some("k".into()),
+                async_api: false,
+                ..SonioxConfig::default()
+            }),
+            ..Config::default()
+        };
+        let meeting_cfg = cfg.with_meeting_mode_overrides();
+        assert!(meeting_cfg.soniox.as_ref().unwrap().async_api);
+        // Original config untouched — dictation path keeps realtime.
+        assert!(!cfg.soniox.as_ref().unwrap().async_api);
+    }
+
+    #[test]
+    fn meeting_mode_preserves_explicit_soniox_async() {
+        let cfg = Config {
+            engine: TranscriptionEngine::Soniox,
+            soniox: Some(SonioxConfig {
+                api_key: Some("k".into()),
+                async_api: true,
+                ..SonioxConfig::default()
+            }),
+            ..Config::default()
+        };
+        let meeting_cfg = cfg.with_meeting_mode_overrides();
+        assert!(meeting_cfg.soniox.as_ref().unwrap().async_api);
+    }
+
+    #[test]
+    fn meeting_mode_is_noop_for_non_soniox_engines() {
+        let cfg = Config::default(); // engine = Whisper
+        let meeting_cfg = cfg.with_meeting_mode_overrides();
+        assert_eq!(meeting_cfg.engine, cfg.engine);
+        assert_eq!(meeting_cfg.whisper.model, cfg.whisper.model);
+    }
 
     #[test]
     fn test_default_config() {
@@ -3807,6 +4221,7 @@ mod tests {
         let config = MeetingAudioConfig::default();
         assert_eq!(config.mic_device, "default");
         assert_eq!(config.loopback_device, "auto");
+        assert_eq!(config.vad_threshold, 0.01);
     }
 
     #[test]
@@ -3894,6 +4309,7 @@ mod tests {
             [meeting.audio]
             mic_device = "hw:1"
             loopback_device = "disabled"
+            vad_threshold = 0.001
 
             [meeting.diarization]
             enabled = false
@@ -3909,6 +4325,7 @@ mod tests {
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.meeting.audio.mic_device, "hw:1");
         assert_eq!(config.meeting.audio.loopback_device, "disabled");
+        assert_eq!(config.meeting.audio.vad_threshold, 0.001);
         assert!(!config.meeting.diarization.enabled);
         assert_eq!(config.meeting.diarization.backend, "ml");
         assert_eq!(config.meeting.diarization.max_speakers, 5);
@@ -4081,7 +4498,10 @@ mod tests {
 
     #[test]
     fn test_system_path_constant() {
-        assert_eq!(Config::system_path(), PathBuf::from("/etc/voxtype/config.toml"));
+        assert_eq!(
+            Config::system_path(),
+            PathBuf::from("/etc/voxtype/config.toml")
+        );
         assert_eq!(Config::SYSTEM_PATH, "/etc/voxtype/config.toml");
     }
 
@@ -4115,5 +4535,198 @@ mod tests {
         assert_eq!(config.hotkey.key, "F12");
         assert_eq!(config.whisper.model, "tiny.en");
         assert_eq!(config.output.mode, OutputMode::Clipboard);
+    }
+
+    #[test]
+    fn test_default_language_to_layout_common_cases() {
+        let map = default_language_to_layout();
+        // English maps to "us", the XKB convention.
+        assert_eq!(map.get("en"), Some(&"us".to_string()));
+        // Russian, German, French, Spanish are direct passthroughs.
+        assert_eq!(map.get("ru"), Some(&"ru".to_string()));
+        assert_eq!(map.get("de"), Some(&"de".to_string()));
+        assert_eq!(map.get("fr"), Some(&"fr".to_string()));
+        assert_eq!(map.get("es"), Some(&"es".to_string()));
+        // Greek uses "gr", not "el".
+        assert_eq!(map.get("el"), Some(&"gr".to_string()));
+        // Japanese / Korean map to common XKB names.
+        assert_eq!(map.get("ja"), Some(&"jp".to_string()));
+        assert_eq!(map.get("ko"), Some(&"kr".to_string()));
+    }
+
+    #[test]
+    fn test_output_config_default_includes_language_layout_map() {
+        let cfg = Config::default();
+        assert!(!cfg.output.language_to_layout.is_empty());
+        assert_eq!(
+            cfg.output.language_to_layout.get("en"),
+            Some(&"us".to_string())
+        );
+        assert!(cfg.output.language_to_variant.is_empty());
+        // New eitype layout fields are unset by default; the layout is
+        // inferred from the detected language only when both fields are
+        // empty (see daemon::handle_transcription_result).
+        assert!(cfg.output.eitype_xkb_layout.is_none());
+        assert!(cfg.output.eitype_xkb_variant.is_none());
+    }
+
+    #[test]
+    fn test_parse_eitype_layout_from_toml() {
+        let toml_str = r#"
+            [hotkey]
+            key = "PAUSE"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+            eitype_xkb_layout = "ru"
+            eitype_xkb_variant = "phonetic"
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.output.eitype_xkb_layout, Some("ru".to_string()));
+        assert_eq!(
+            config.output.eitype_xkb_variant,
+            Some("phonetic".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_language_to_layout_override() {
+        // User can override individual mappings (e.g. Brazilian Portuguese
+        // typically needs the `br` layout, not `pt`). Providing the field
+        // replaces the built-in defaults; users are expected to copy
+        // entries they want to keep (documented in CONFIGURATION.md).
+        let toml_str = r#"
+            [hotkey]
+            key = "PAUSE"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [output.language_to_layout]
+            pt = "br"
+            en = "dvorak"
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.output.language_to_layout.get("pt"),
+            Some(&"br".to_string())
+        );
+        assert_eq!(
+            config.output.language_to_layout.get("en"),
+            Some(&"dvorak".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_language_to_variant() {
+        let toml_str = r#"
+            [hotkey]
+            key = "PAUSE"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = ["en", "ru"]
+
+            [output]
+            mode = "type"
+
+            [output.language_to_layout]
+            en = "us"
+            ru = "ru"
+
+            [output.language_to_variant]
+            ru = "phonetic"
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.output.language_to_variant.get("ru"),
+            Some(&"phonetic".to_string())
+        );
+        assert!(!config.output.language_to_variant.contains_key("en"));
+    }
+
+    #[test]
+    fn test_apply_language_xkb_hint_applies_layout_and_variant() {
+        let mut output = Config::default().output;
+        output
+            .language_to_variant
+            .insert("ru".to_string(), "phonetic".to_string());
+
+        let applied = output.apply_language_xkb_hint("ru");
+
+        assert_eq!(applied.layout, Some("ru".to_string()));
+        assert_eq!(applied.variant, Some("phonetic".to_string()));
+        assert!(applied.eitype_layout_applied);
+        assert!(applied.dotool_layout_applied);
+        assert!(applied.eitype_variant_applied);
+        assert!(applied.dotool_variant_applied);
+        assert_eq!(output.eitype_xkb_layout, Some("ru".to_string()));
+        assert_eq!(output.dotool_xkb_layout, Some("ru".to_string()));
+        assert_eq!(output.eitype_xkb_variant, Some("phonetic".to_string()));
+        assert_eq!(output.dotool_xkb_variant, Some("phonetic".to_string()));
+    }
+
+    #[test]
+    fn test_apply_language_xkb_hint_does_not_leak_variant_between_languages() {
+        let mut output = Config::default().output;
+        output
+            .language_to_variant
+            .insert("ru".to_string(), "phonetic".to_string());
+
+        let applied = output.apply_language_xkb_hint("en");
+
+        assert_eq!(applied.layout, Some("us".to_string()));
+        assert_eq!(applied.variant, None);
+        assert_eq!(output.eitype_xkb_layout, Some("us".to_string()));
+        assert_eq!(output.dotool_xkb_layout, Some("us".to_string()));
+        assert_eq!(output.eitype_xkb_variant, None);
+        assert_eq!(output.dotool_xkb_variant, None);
+    }
+
+    #[test]
+    fn test_apply_language_xkb_hint_preserves_explicit_variant() {
+        let mut output = Config::default().output;
+        output.eitype_xkb_variant = Some("explicit-eitype".to_string());
+        output.dotool_xkb_variant = Some("explicit-dotool".to_string());
+        output
+            .language_to_variant
+            .insert("ru".to_string(), "phonetic".to_string());
+
+        let applied = output.apply_language_xkb_hint("ru");
+
+        assert_eq!(applied.variant, Some("phonetic".to_string()));
+        assert!(!applied.eitype_variant_applied);
+        assert!(!applied.dotool_variant_applied);
+        assert_eq!(
+            output.eitype_xkb_variant,
+            Some("explicit-eitype".to_string())
+        );
+        assert_eq!(
+            output.dotool_xkb_variant,
+            Some("explicit-dotool".to_string())
+        );
     }
 }

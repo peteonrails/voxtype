@@ -256,6 +256,48 @@ voxtype setup dms --qml        # Output raw QML content
 
 See [With DankMaterialShell](#with-dankmaterialshell-kde-plasma) for details.
 
+### `voxtype setup quickshell`
+
+Install the Quickshell QML tree so `voxtype-osd-quickshell` (and the
+optional `[osd] frontend = "quickshell"` config setting) can find it.
+This is needed if you installed voxtype from source or from a `.deb`/`.rpm`
+package that didn't drop the QML files into `/usr/share/voxtype/`. The AUR
+packages already install the system-wide copy, but you can still run this
+command to put a per-user copy under `$XDG_DATA_HOME/voxtype/quickshell/`
+for customization.
+
+```bash
+voxtype setup quickshell                       # Install QML + symlink the bridge
+voxtype setup quickshell --target DIR          # Install QML to a custom location
+voxtype setup quickshell --source DIR          # Override the source tree (default: auto-detect)
+voxtype setup quickshell --force               # Overwrite an existing install
+voxtype setup quickshell --print-bindings      # Print the bindings only, do not copy
+voxtype setup quickshell --bridge PATH         # Override the audio-bridge source binary
+voxtype setup quickshell --bridge-target PATH  # Override the audio-bridge symlink location
+voxtype setup quickshell --skip-bridge         # Skip the audio-bridge symlink entirely
+```
+
+The default QML target is `$XDG_DATA_HOME/voxtype/quickshell/` (or
+`~/.local/share/voxtype/quickshell/` if `XDG_DATA_HOME` is unset). The
+launcher searches that path first, then `/usr/share/voxtype/quickshell/`.
+
+The command also symlinks `voxtype-audio-bridge` into
+`$XDG_BIN_HOME/voxtype-audio-bridge` (or `~/.local/bin/voxtype-audio-bridge`)
+so the QML waveform can spawn the sidecar via a normal PATH lookup. The
+AUR `voxtype-bin` package installs the bridge under
+`/usr/lib/voxtype/voxtype-audio-bridge`, which is not on the default
+PATH; the symlink is what makes the waveform light up after install.
+Pass `--skip-bridge` if you already have the bridge on PATH and don't
+want a per-user symlink, or `--bridge-target` to point the symlink at a
+different user-owned directory. Writing outside of `$HOME` is refused
+unless `--force` is also passed.
+
+The command prints Hyprland, Sway, and River keybinding examples that
+toggle the Wave 2 engine-picker and meeting-controls panels via flag
+files under `$XDG_RUNTIME_DIR/voxtype/`. The OSD itself does not need a
+keybinding; it activates automatically when the daemon enters the
+recording state.
+
 ### `voxtype record`
 
 Control recording from external sources (compositor keybindings, scripts).
@@ -393,6 +435,24 @@ on_recording_stop = false
 # Show notification with transcribed text
 on_transcription = true
 ```
+
+### Cloud Backend: Soniox
+
+For a cloud streaming alternative to the local engines above, voxtype supports [Soniox](https://soniox.com). Different trade-off space: paid SaaS, no local model, 60+ languages with strong Hungarian/EU coverage, sub-second partials at the cursor.
+
+Build with `--features soniox`, set `SONIOX_API_KEY`, and:
+
+```toml
+engine = "soniox"
+
+[hotkey]
+mode = "toggle"   # required when streaming (default)
+
+[soniox]
+language_hints = ["en"]
+```
+
+See [SONIOX.md](SONIOX.md) for the full reference (realtime vs async modes, performance tips with dotoold, privacy considerations).
 
 ### Creating a Custom Configuration
 
@@ -2145,6 +2205,7 @@ max_duration_mins = 180          # Maximum meeting length (0 = unlimited)
 mic_device = "default"           # Microphone (uses audio.device if not set)
 loopback_device = "auto"         # Capture remote participants: "auto", "disabled", or device name
 echo_cancel = "auto"             # GTCRN neural enhancement + transcript dedup
+vad_threshold = 0.01             # Lower to 0.001 for quiet mics; 0.0 disables meeting VAD
 
 [meeting.diarization]
 enabled = true

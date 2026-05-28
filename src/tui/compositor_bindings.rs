@@ -231,7 +231,15 @@ fn candidates_for(role: Role) -> &'static [&'static str] {
     match role {
         // PTT keys: typically modifier-free function/utility keys.
         Role::Start | Role::Stop | Role::PttPair => &[
-            "F13", "F14", "F15", "F16", "HOME", "PAUSE", "SCROLLLOCK", "INSERT", "MENU",
+            "F13",
+            "F14",
+            "F15",
+            "F16",
+            "HOME",
+            "PAUSE",
+            "SCROLLLOCK",
+            "INSERT",
+            "MENU",
         ],
         Role::Toggle => &[
             "SUPER+SPACE",
@@ -248,21 +256,9 @@ fn candidates_for(role: Role) -> &'static [&'static str] {
             "SUPER+DELETE",
             "CTRL+SUPER+ESCAPE",
         ],
-        Role::MeetingStart => &[
-            "SUPER+M",
-            "CTRL+SUPER+M",
-            "ALT+SUPER+M",
-        ],
-        Role::MeetingStop => &[
-            "SHIFT+SUPER+M",
-            "ALT+SUPER+M",
-            "CTRL+SUPER+M",
-        ],
-        Role::MeetingPair => &[
-            "SUPER+M",
-            "CTRL+SUPER+M",
-            "ALT+SUPER+M",
-        ],
+        Role::MeetingStart => &["SUPER+M", "CTRL+SUPER+M", "ALT+SUPER+M"],
+        Role::MeetingStop => &["SHIFT+SUPER+M", "ALT+SUPER+M", "CTRL+SUPER+M"],
+        Role::MeetingPair => &["SUPER+M", "CTRL+SUPER+M", "ALT+SUPER+M"],
     }
 }
 
@@ -305,12 +301,11 @@ fn make_suggestion(
         None
     };
 
-    let mut config_lines = render_role(comp, role, key, stop_key.as_deref());
+    let mut config_lines = render_role(comp, role, key, stop_key);
     if collision {
         config_lines.insert(
             0,
-            "// All preferred candidates are already bound; pick a key that's free."
-                .to_string(),
+            "// All preferred candidates are already bound; pick a key that's free.".to_string(),
         );
     }
 
@@ -323,37 +318,67 @@ fn make_suggestion(
 
 /// Render one role into compositor-formatted binding lines, parameterized by
 /// the chosen canonical key (and optional second key for paired roles).
-fn render_role(
-    comp: Compositor,
-    role: Role,
-    key: &str,
-    second_key: Option<&str>,
-) -> Vec<String> {
+fn render_role(comp: Compositor, role: Role, key: &str, second_key: Option<&str>) -> Vec<String> {
     match (comp, role) {
         (Compositor::Hyprland, Role::Start) => {
-            vec![hyprland_bind("bindd", key, "Voxtype PTT (start)", "voxtype record start")]
+            vec![hyprland_bind(
+                "bindd",
+                key,
+                "Voxtype PTT (start)",
+                "voxtype record start",
+            )]
         }
         (Compositor::Hyprland, Role::Stop) => {
-            vec![hyprland_bind("bindrd", key, "Voxtype PTT (stop)", "voxtype record stop")]
+            vec![hyprland_bind(
+                "bindrd",
+                key,
+                "Voxtype PTT (stop)",
+                "voxtype record stop",
+            )]
         }
         (Compositor::Hyprland, Role::PttPair) => vec![
             hyprland_bind("bindd", key, "Voxtype PTT (start)", "voxtype record start"),
             hyprland_bind("bindrd", key, "Voxtype PTT (stop)", "voxtype record stop"),
         ],
         (Compositor::Hyprland, Role::Toggle) => {
-            vec![hyprland_bind("bind", key, "Voxtype toggle", "voxtype record toggle")]
+            vec![hyprland_bind(
+                "bind",
+                key,
+                "Voxtype toggle",
+                "voxtype record toggle",
+            )]
         }
         (Compositor::Hyprland, Role::Cancel) => {
-            vec![hyprland_bind("bind", key, "Voxtype cancel", "voxtype record cancel")]
+            vec![hyprland_bind(
+                "bind",
+                key,
+                "Voxtype cancel",
+                "voxtype record cancel",
+            )]
         }
         (Compositor::Hyprland, Role::MeetingStart) => {
-            vec![hyprland_bind("bind", key, "Voxtype meeting start", "voxtype meeting start")]
+            vec![hyprland_bind(
+                "bind",
+                key,
+                "Voxtype meeting start",
+                "voxtype meeting start",
+            )]
         }
         (Compositor::Hyprland, Role::MeetingStop) => {
-            vec![hyprland_bind("bind", key, "Voxtype meeting stop", "voxtype meeting stop")]
+            vec![hyprland_bind(
+                "bind",
+                key,
+                "Voxtype meeting stop",
+                "voxtype meeting stop",
+            )]
         }
         (Compositor::Hyprland, Role::MeetingPair) => vec![
-            hyprland_bind("bind", key, "Voxtype meeting start", "voxtype meeting start"),
+            hyprland_bind(
+                "bind",
+                key,
+                "Voxtype meeting start",
+                "voxtype meeting start",
+            ),
             hyprland_bind(
                 "bind",
                 second_key.unwrap_or("SHIFT+SUPER+M"),
@@ -363,14 +388,20 @@ fn render_role(
         ],
 
         (Compositor::Sway, Role::Start) => {
-            vec![format!("bindsym {} exec voxtype record start", canonical_to_sway(key))]
+            vec![format!(
+                "bindsym {} exec voxtype record start",
+                canonical_to_sway(key)
+            )]
         }
         (Compositor::Sway, Role::Stop) => vec![format!(
             "bindsym --release {} exec voxtype record stop",
             canonical_to_sway(key)
         )],
         (Compositor::Sway, Role::PttPair) => vec![
-            format!("bindsym {} exec voxtype record start", canonical_to_sway(key)),
+            format!(
+                "bindsym {} exec voxtype record start",
+                canonical_to_sway(key)
+            ),
             format!(
                 "bindsym --release {} exec voxtype record stop",
                 canonical_to_sway(key)
@@ -415,8 +446,7 @@ fn render_role(
                 "{} {{ spawn \"voxtype\" \"record\" \"toggle\"; }}",
                 canonical_to_niri(key)
             ),
-            "// (Niri lacks key-release binds; use toggle in place of PTT.)"
-                .to_string(),
+            "// (Niri lacks key-release binds; use toggle in place of PTT.)".to_string(),
         ],
         (Compositor::Niri, Role::Toggle) => vec![format!(
             "{} {{ spawn \"voxtype\" \"record\" \"toggle\"; }}",
@@ -453,7 +483,10 @@ fn hyprland_bind(directive: &str, canonical_key: &str, label: &str, cmd: &str) -
     if mods_hypr.is_empty() {
         format!("{} = , {}, {}, exec, {}", directive, key, label, cmd)
     } else {
-        format!("{} = {}, {}, {}, exec, {}", directive, mods_hypr, key, label, cmd)
+        format!(
+            "{} = {}, {}, {}, exec, {}",
+            directive, mods_hypr, key, label, cmd
+        )
     }
 }
 
@@ -589,19 +622,25 @@ fn enumerate_occupied_keys(_comp: Compositor) -> std::collections::HashSet<Strin
 
 fn enumerate_hyprland_keys(home: &Path, out: &mut std::collections::HashSet<String>) {
     let dir = home.join(".config/hypr");
-    let Ok(entries) = fs::read_dir(&dir) else { return };
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("conf") {
             continue;
         }
-        let Ok(text) = fs::read_to_string(&path) else { continue };
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
         for line in text.lines() {
             let trimmed = line.trim();
             if trimmed.starts_with('#') {
                 continue;
             }
-            let Some((lhs, rhs)) = trimmed.split_once('=') else { continue };
+            let Some((lhs, rhs)) = trimmed.split_once('=') else {
+                continue;
+            };
             if !lhs.trim().starts_with("bind") {
                 continue;
             }
@@ -631,7 +670,9 @@ fn enumerate_sway_keys(home: &Path, out: &mut std::collections::HashSet<String>)
         }
     }
     for path in paths {
-        let Ok(text) = fs::read_to_string(&path) else { continue };
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
         for line in text.lines() {
             let trimmed = line.trim();
             if trimmed.starts_with('#') {
@@ -658,13 +699,17 @@ fn enumerate_sway_keys(home: &Path, out: &mut std::collections::HashSet<String>)
 
 fn enumerate_niri_keys(home: &Path, out: &mut std::collections::HashSet<String>) {
     let path = home.join(".config/niri/config.kdl");
-    let Ok(text) = fs::read_to_string(&path) else { return };
+    let Ok(text) = fs::read_to_string(&path) else {
+        return;
+    };
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("//") {
             continue;
         }
-        let Some((keys, _)) = trimmed.split_once('{') else { continue };
+        let Some((keys, _)) = trimmed.split_once('{') else {
+            continue;
+        };
         let keys = keys.trim();
         if keys.is_empty() {
             continue;
@@ -1018,7 +1063,11 @@ mod tests {
 
     #[test]
     fn skips_hyprland_comments_and_unrelated() {
-        assert!(parse_hyprland_line("# bind = , HOME, ..., exec, voxtype record start", dummy_path()).is_none());
+        assert!(parse_hyprland_line(
+            "# bind = , HOME, ..., exec, voxtype record start",
+            dummy_path()
+        )
+        .is_none());
         assert!(parse_hyprland_line("bind = , HOME, ..., exec, alacritty", dummy_path()).is_none());
     }
 
@@ -1057,17 +1106,20 @@ mod tests {
 
     #[test]
     fn suggests_cancel_when_only_ptt_bound() {
-        let detected = vec![Binding {
-            compositor: "Hyprland",
-            keys: "HOME".into(),
-            action: "record start".into(),
-            source: PathBuf::from("/dev/null"),
-        }, Binding {
-            compositor: "Hyprland",
-            keys: "HOME".into(),
-            action: "record stop".into(),
-            source: PathBuf::from("/dev/null"),
-        }];
+        let detected = vec![
+            Binding {
+                compositor: "Hyprland",
+                keys: "HOME".into(),
+                action: "record start".into(),
+                source: PathBuf::from("/dev/null"),
+            },
+            Binding {
+                compositor: "Hyprland",
+                keys: "HOME".into(),
+                action: "record stop".into(),
+                source: PathBuf::from("/dev/null"),
+            },
+        ];
         let labels: Vec<_> = suggest_missing(&detected, false)
             .iter()
             .map(|s| s.label.clone())
@@ -1156,7 +1208,9 @@ mod tests {
             s.config_lines
         );
         assert!(
-            !s.config_lines.iter().any(|l| l.contains(" F13 ") || l.contains(" F14 ")),
+            !s.config_lines
+                .iter()
+                .any(|l| l.contains(" F13 ") || l.contains(" F14 ")),
             "lines should not include F13/F14: {:?}",
             s.config_lines
         );
@@ -1187,26 +1241,14 @@ mod tests {
     #[test]
     fn sway_render_uses_release_for_stop() {
         let mut taken = std::collections::HashSet::new();
-        let s = make_suggestion(
-            Compositor::Sway,
-            &mut taken,
-            "Stop",
-            "test",
-            Role::Stop,
-        );
+        let s = make_suggestion(Compositor::Sway, &mut taken, "Stop", "test", Role::Stop);
         assert!(s.config_lines.iter().any(|l| l.contains("--release")));
     }
 
     #[test]
     fn niri_pttpair_falls_back_to_toggle() {
         let mut taken = std::collections::HashSet::new();
-        let s = make_suggestion(
-            Compositor::Niri,
-            &mut taken,
-            "PTT",
-            "test",
-            Role::PttPair,
-        );
+        let s = make_suggestion(Compositor::Niri, &mut taken, "PTT", "test", Role::PttPair);
         assert!(s.config_lines.iter().any(|l| l.contains("\"toggle\"")));
     }
 

@@ -53,6 +53,13 @@ impl ConfigEditor {
         Self::load_from(path)
     }
 
+    /// Load from an arbitrary path (creating an empty document if the file
+    /// is missing). Used by the CLI `voxtype config set` command, which has
+    /// to honor `--config <FILE>` and the resolution chain in main.rs.
+    pub fn load_from_path(path: PathBuf) -> Result<Self, EditorError> {
+        Self::load_from(path)
+    }
+
     fn load_from(path: PathBuf) -> Result<Self, EditorError> {
         let text = match fs::read_to_string(&path) {
             Ok(s) => s,
@@ -156,9 +163,7 @@ impl ConfigEditor {
             return Some(current);
         }
         for segment in dotted.split('.') {
-            current = current
-                .get_mut(segment)
-                .and_then(|i| i.as_table_mut())?;
+            current = current.get_mut(segment).and_then(|i| i.as_table_mut())?;
         }
         Some(current)
     }
@@ -216,11 +221,7 @@ impl ConfigEditor {
         // Walk through (or create) intermediate tables.
         let mut current: &mut toml_edit::Table = self.document.as_table_mut();
         for segment in rest {
-            if !current
-                .get(segment)
-                .map(|i| i.is_table())
-                .unwrap_or(false)
-            {
+            if !current.get(segment).map(|i| i.is_table()).unwrap_or(false) {
                 current.insert(segment, Item::Table(toml_edit::Table::new()));
             }
             current = current[segment]
@@ -228,11 +229,7 @@ impl ConfigEditor {
                 .expect("just inserted a table");
         }
 
-        if !current
-            .get(last)
-            .map(|i| i.is_table())
-            .unwrap_or(false)
-        {
+        if !current.get(last).map(|i| i.is_table()).unwrap_or(false) {
             current.insert(last, Item::Table(toml_edit::Table::new()));
         }
         &mut current[last]
@@ -249,10 +246,7 @@ impl ConfigEditor {
         // file, loading from there, and only renaming on success.
         let parent = self.path.parent().ok_or_else(|| EditorError::Write {
             path: self.path.clone(),
-            source: std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "config path has no parent directory",
-            ),
+            source: std::io::Error::other("config path has no parent directory"),
         })?;
         fs::create_dir_all(parent).map_err(|e| EditorError::Write {
             path: parent.to_path_buf(),
@@ -322,7 +316,6 @@ impl ConfigEditor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
 
     fn temp_config(contents: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
@@ -334,9 +327,8 @@ mod tests {
 
     #[test]
     fn round_trip_preserves_comments() {
-        let (_dir, path) = temp_config(
-            "# top comment\n[hotkey]\n# inline\nkey = \"HOME\"\nmode = \"toggle\"\n",
-        );
+        let (_dir, path) =
+            temp_config("# top comment\n[hotkey]\n# inline\nkey = \"HOME\"\nmode = \"toggle\"\n");
         let mut ed = ConfigEditor::load_from(path.clone()).unwrap();
         ed.set_string("hotkey", "key", "PAUSE");
         let serialized = ed.document.to_string();

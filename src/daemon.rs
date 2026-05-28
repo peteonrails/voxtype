@@ -14,6 +14,7 @@ use crate::hotkey::{self, HotkeyEvent};
 use crate::hotkey_macos::{self as hotkey, HotkeyEvent};
 use crate::meeting::{self, MeetingDaemon, MeetingEvent, StorageConfig};
 use crate::model_manager::ModelManager;
+#[cfg(target_os = "macos")]
 use crate::notification;
 use crate::output;
 use crate::output::post_process::PostProcessor;
@@ -356,25 +357,82 @@ fn cleanup_bool_override(name: &str) {
 
 // === Meeting Mode IPC ===
 
-/// Check for meeting start command (via file trigger)
-fn check_meeting_start() -> Option<Option<String>> {
-    let start_file = Config::runtime_dir().join("meeting_start");
-    if start_file.exists() {
-        // Read optional title from file content
-        let title = std::fs::read_to_string(&start_file).ok().and_then(|s| {
-            let trimmed = s.trim();
+/// A pending meeting-start trigger with optional title and diarization override.
+struct MeetingStartTrigger {
+    title: Option<String>,
+    diarization: Option<String>,
+}
+
+/// Read a file and return its trimmed contents, or None if missing or empty.
+///
+/// Logs read failures so transient FS / permission errors aren't silent: a
+/// trigger file existing but being unreadable previously looked identical to
+/// "no file" and would then be consumed by the caller's remove_file.
+fn read_trimmed_nonempty(path: &std::path::Path) -> Option<String> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => {
+            let trimmed = contents.trim();
             if trimmed.is_empty() {
                 None
             } else {
                 Some(trimmed.to_string())
             }
-        });
-        // Remove the file to acknowledge the command
-        let _ = std::fs::remove_file(&start_file);
-        Some(title)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            tracing::warn!(path = %path.display(), error = %err, "Failed to read IPC trigger file");
+            None
+        }
+    }
+}
+
+/// Allowed diarization backend override values from the CLI handler. Kept in
+/// sync with the `value_parser` list on `MeetingAction::Start::diarization`.
+const ALLOWED_DIARIZATION_OVERRIDES: &[&str] = &["simple", "ml"];
+
+/// Validate a diarization backend override against the allowlist.
+///
+/// The CLI's clap `value_parser` already rejects bad values at parse time, but
+/// the daemon reads the trigger from a runtime file written by an arbitrary
+/// process and shouldn't propagate unknown values. Returns `None` and logs a
+/// warning for anything outside the allowlist; defense-in-depth against stale
+/// trigger files, partial writes from older voxtype versions, or a malicious
+/// writer with access to the user's `$XDG_RUNTIME_DIR`.
+fn validate_diarization_override(value: String) -> Option<String> {
+    if ALLOWED_DIARIZATION_OVERRIDES.contains(&value.as_str()) {
+        Some(value)
     } else {
+        tracing::warn!(
+            value = %value,
+            "Ignoring unknown diarization override; expected one of {:?}",
+            ALLOWED_DIARIZATION_OVERRIDES
+        );
         None
     }
+}
+
+/// Check for meeting start command (via file trigger)
+fn check_meeting_start() -> Option<MeetingStartTrigger> {
+    let runtime_dir = Config::runtime_dir();
+    let start_file = runtime_dir.join("meeting_start");
+    if !start_file.exists() {
+        return None;
+    }
+
+    let title = read_trimmed_nonempty(&start_file);
+
+    // Diarization override is written by the CLI handler before the start
+    // trigger. Re-validate against the allowlist (see
+    // `validate_diarization_override` for the rationale).
+    let diarization_file = runtime_dir.join("meeting_start_diarization");
+    let diarization =
+        read_trimmed_nonempty(&diarization_file).and_then(validate_diarization_override);
+    let _ = std::fs::remove_file(&diarization_file);
+
+    // Remove the start trigger last to acknowledge the command.
+    let _ = std::fs::remove_file(&start_file);
+
+    Some(MeetingStartTrigger { title, diarization })
 }
 
 /// Check for meeting stop command (via file trigger)
@@ -415,6 +473,7 @@ fn cleanup_meeting_files() {
     let runtime_dir = Config::runtime_dir();
     for name in &[
         "meeting_start",
+        "meeting_start_diarization",
         "meeting_stop",
         "meeting_pause",
         "meeting_resume",
@@ -562,6 +621,10 @@ pub struct Daemon {
     level_hub: Option<audio::levels::LevelHub>,
     /// Active per-recording level emitter task; aborted when recording stops
     level_emitter_task: Option<tokio::task::JoinHandle<()>>,
+    /// Synthetic zero-level publisher that keeps the OSD visible while a
+    /// streaming session is draining server-side after the mic stopped.
+    /// Aborted in `end_streaming`.
+    streaming_drain_pump: Option<tokio::task::JoinHandle<()>>,
     /// OSD child supervisor task. Holds the JoinHandle so dropping it (on
     /// daemon shutdown) kill_on_drop's the spawned voxtype-osd process.
     osd_supervisor_task: Option<tokio::task::JoinHandle<()>>,
@@ -579,6 +642,11 @@ pub struct Daemon {
     whisper_prepare_task: Option<tokio::task::JoinHandle<()>>,
     // Background task for transcription (allows cancel during transcription)
     transcription_task: Option<tokio::task::JoinHandle<TranscriptionResult>>,
+    // Transcriber Arc used for the in-flight transcription_task. Held so the
+    // result handler can query language metadata (e.g. detected language for
+    // keyboard-layout hints to eitype/dotool, see issue #180) after the task
+    // completes. Cleared when transcription_task is taken.
+    active_transcriber: Option<Arc<dyn Transcriber>>,
     // Background tasks for eager chunk transcriptions (chunk_index, task)
     eager_chunk_tasks: Vec<(
         usize,
@@ -687,11 +755,13 @@ impl Daemon {
             last_dictation: None,
             level_hub: None,
             level_emitter_task: None,
+            streaming_drain_pump: None,
             osd_supervisor_task: None,
             model_manager: None,
             model_load_task: None,
             whisper_prepare_task: None,
             transcription_task: None,
+            active_transcriber: None,
             eager_chunk_tasks: Vec::new(),
             vad,
             meeting_daemon: None,
@@ -866,6 +936,52 @@ impl Daemon {
     /// End a streaming session gracefully (called when the backend emits
     /// `Ended`, or as a teardown after an error). Stops audio capture, awaits
     /// the backend task, and drops the session locals.
+    /// Start the OSD "draining" pump that publishes silent frames at
+    /// ~30 Hz to keep the visualizer on screen while the streaming
+    /// backend is flushing pending finals after the mic has stopped.
+    /// No-op if the pump is already running or the OSD level hub is
+    /// disabled.
+    fn start_streaming_drain_pump(&mut self) {
+        if self.streaming_drain_pump.is_some() {
+            return;
+        }
+        if let Some(hub) = &self.level_hub {
+            self.streaming_drain_pump = Some(audio::levels::spawn_silence_pump(hub.frame_sink()));
+        }
+    }
+
+    /// Cut audio flow to the streaming backend immediately. Aborts the
+    /// chunk-rx → streaming_tx pump so any samples still in the audio
+    /// capture's buffer never reach the backend — without this, the
+    /// ~50–100ms of residual samples between the user's stop press and
+    /// the actual mic shutdown leak in as low-level noise and cause
+    /// hallucinated trailing tokens.
+    fn cut_streaming_audio(&mut self) {
+        if let Some(handle) = self.level_emitter_task.take() {
+            handle.abort();
+        }
+    }
+
+    /// Abort the OSD draining pump (if running) so the visualizer can
+    /// fade out on its idle timer once the session is fully closed.
+    fn stop_streaming_drain_pump(&mut self) {
+        if let Some(h) = self.streaming_drain_pump.take() {
+            h.abort();
+        }
+    }
+
+    /// Early-stop the streaming capture: cut audio flow to the backend,
+    /// start the OSD silence pump so the visualizer stays alive during
+    /// drain, and stop the mic. Leaves `streaming_session`/`_chain` for
+    /// the caller to disown (or keep, to receive trailing finals).
+    async fn stop_streaming_capture(&mut self, audio_capture: &mut Option<Box<dyn AudioCapture>>) {
+        self.cut_streaming_audio();
+        self.start_streaming_drain_pump();
+        if let Some(mut c) = audio_capture.take() {
+            let _ = c.stop().await;
+        }
+    }
+
     async fn end_streaming(
         &mut self,
         state: &mut State,
@@ -882,6 +998,7 @@ impl Daemon {
             // completed. We drop events implicitly here.
             let _ = h.task.await;
         }
+        self.stop_streaming_drain_pump();
         *streaming_session = None;
         *streaming_chain = None;
 
@@ -923,6 +1040,7 @@ impl Daemon {
                 tracing::warn!("Streaming rewind failed: {}", e);
             }
         }
+        self.stop_streaming_drain_pump();
         *streaming_session = None;
         *streaming_chain = None;
 
@@ -966,17 +1084,14 @@ impl Daemon {
     /// Returns `(capture, streaming_samples_rx)` on success.
     async fn start_streaming_capture(
         &mut self,
-    ) -> std::result::Result<
-        (Box<dyn AudioCapture>, tokio::sync::mpsc::Receiver<Vec<f32>>),
-        (),
-    > {
+    ) -> std::result::Result<(Box<dyn AudioCapture>, tokio::sync::mpsc::Receiver<Vec<f32>>), ()>
+    {
         match audio::create_capture(&self.config.audio) {
             Ok(mut capture) => match capture.start().await {
                 Ok(chunk_rx) => {
                     // Bounded; backed-up streaming backend drops chunks
                     // rather than back-pressuring the capture.
-                    let (streaming_tx, streaming_rx) =
-                        tokio::sync::mpsc::channel::<Vec<f32>>(64);
+                    let (streaming_tx, streaming_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(64);
 
                     if let Some(handle) = self.level_emitter_task.take() {
                         handle.abort();
@@ -1059,7 +1174,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Soniox => {
                     if let Some(ref t) = transcriber_preloaded {
                         Ok(t.clone())
                     } else {
@@ -1105,25 +1221,39 @@ impl Daemon {
     }
 
     /// Start a new meeting
-    async fn start_meeting(&mut self, title: Option<String>) -> Result<()> {
+    async fn start_meeting(
+        &mut self,
+        title: Option<String>,
+        diarization_override: Option<String>,
+    ) -> Result<()> {
         if self.meeting_daemon.is_some() {
             tracing::warn!("Meeting already in progress");
             return Ok(());
         }
 
+        // CLI override (validated against ["simple", "ml"] by clap) wins over config.
+        let backend = diarization_override
+            .clone()
+            .unwrap_or_else(|| self.config.meeting.diarization.backend.clone());
+
         // Create meeting config from main config
         tracing::debug!(
-            "Diarization config: enabled={}, backend={}",
+            "Diarization config: enabled={}, backend={} (override={:?})",
             self.config.meeting.diarization.enabled,
-            self.config.meeting.diarization.backend
+            backend,
+            diarization_override
         );
         let diarization_config = if self.config.meeting.diarization.enabled {
             Some(meeting::diarization::DiarizationConfig {
                 enabled: true,
-                backend: self.config.meeting.diarization.backend.clone(),
+                backend,
                 max_speakers: self.config.meeting.diarization.max_speakers,
                 min_segment_ms: self.config.meeting.diarization.min_segment_ms,
                 model_path: self.config.meeting.diarization.model_path.clone(),
+                similarity_threshold: self.config.meeting.diarization.similarity_threshold,
+                vad_window_secs: self.config.meeting.diarization.vad_window_secs,
+                vad_hop_secs: self.config.meeting.diarization.vad_hop_secs,
+                vad_rms_floor: self.config.meeting.diarization.vad_rms_floor,
             })
         } else {
             None
@@ -1143,6 +1273,7 @@ impl Daemon {
             },
             retain_audio: self.config.meeting.retain_audio,
             max_duration_mins: self.config.meeting.max_duration_mins,
+            vad_threshold: self.config.meeting.audio.vad_threshold,
             diarization: diarization_config,
         };
 
@@ -1165,7 +1296,18 @@ impl Daemon {
                                 "disabled" | "" => None,
                                 other => Some(other),
                             };
-                        match audio::DualCapture::new(&self.config.audio, loopback_device) {
+                        let mut meeting_audio_config = self.config.audio.clone();
+                        let meeting_mic_device = self.config.meeting.audio.mic_device.as_str();
+                        if !matches!(meeting_mic_device, "default" | "") {
+                            tracing::info!(
+                                "Meeting mic override: {} (dictation uses {})",
+                                meeting_mic_device,
+                                self.config.audio.device
+                            );
+                            meeting_audio_config.device =
+                                self.config.meeting.audio.mic_device.clone();
+                        }
+                        match audio::DualCapture::new(&meeting_audio_config, loopback_device) {
                             Ok(mut capture) => {
                                 if let Err(e) = capture.start().await {
                                     tracing::error!("Failed to start meeting audio: {}", e);
@@ -1249,12 +1391,24 @@ impl Daemon {
 
     /// Stop the current meeting
     async fn stop_meeting(&mut self) -> Result<()> {
-        if let Some(mut daemon) = self.meeting_daemon.take() {
-            // Stop audio capture
+        if self.meeting_daemon.is_some() {
+            // Stop audio capture and keep any samples that arrived since the last poll.
             if let Some(mut capture) = self.meeting_audio_capture.take() {
-                let _ = capture.stop().await;
+                match capture.stop().await {
+                    Ok(dual_samples) => {
+                        self.meeting_mic_buffer.extend(dual_samples.mic);
+                        self.meeting_loopback_buffer.extend(dual_samples.loopback);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to stop meeting audio cleanly: {}", e);
+                    }
+                }
             }
 
+            // Flush the final partial chunk so speech near stop is not dropped.
+            self.process_buffered_meeting_audio(true).await;
+
+            let mut daemon = self.meeting_daemon.take().expect("checked above");
             match daemon.stop().await {
                 Ok(meeting_id) => {
                     self.update_meeting_state("idle", None);
@@ -1341,6 +1495,115 @@ impl Daemon {
     fn meeting_chunk_samples(&self) -> usize {
         // 16kHz sample rate * chunk duration in seconds
         16000 * self.config.meeting.chunk_duration_secs as usize
+    }
+
+    async fn process_meeting_audio_pair(&mut self, mic_chunk: Vec<f32>, loopback_chunk: Vec<f32>) {
+        #[cfg_attr(not(feature = "onnx-common"), allow(unused_mut))]
+        let mut mic_chunk = mic_chunk;
+
+        // Enhance mic audio with GTCRN if available (removes echo/noise)
+        #[cfg(feature = "onnx-common")]
+        {
+            if !mic_chunk.is_empty() {
+                if let Some(ref enhancer) = self.speech_enhancer {
+                    match enhancer.enhance(&mic_chunk) {
+                        Ok(enhanced) => {
+                            tracing::debug!(
+                                "GTCRN enhanced mic chunk ({} samples)",
+                                enhanced.len()
+                            );
+                            mic_chunk = enhanced;
+                        }
+                        Err(e) => {
+                            tracing::warn!("GTCRN enhancement failed, using raw mic: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(ref mut daemon) = self.meeting_daemon {
+            let mut had_loopback = false;
+
+            if !mic_chunk.is_empty() {
+                match daemon
+                    .process_chunk_with_source(mic_chunk, meeting::data::AudioSource::Microphone)
+                    .await
+                {
+                    Ok(Some(segments)) => {
+                        tracing::debug!("Processed mic chunk with {} segments", segments.len());
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::error!("Error processing mic chunk: {}", e);
+                    }
+                }
+            }
+
+            if !loopback_chunk.is_empty() {
+                match daemon
+                    .process_chunk_with_source(loopback_chunk, meeting::data::AudioSource::Loopback)
+                    .await
+                {
+                    Ok(Some(segments)) => {
+                        tracing::debug!(
+                            "Processed loopback chunk with {} segments",
+                            segments.len()
+                        );
+                        if !segments.is_empty() {
+                            had_loopback = true;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::error!("Error processing loopback chunk: {}", e);
+                    }
+                }
+            }
+
+            // Reconcile per-source offsets so any source that received a short
+            // or skipped chunk this iteration catches up to wall-clock before
+            // the next one. Added in PR #330 to fix dual-source timestamp
+            // inflation in meeting mode.
+            daemon.sync_source_offsets();
+
+            // Dedup bleed-through: strip echoed phrases from mic segments
+            if had_loopback {
+                if let Some(ref mut meeting) = daemon.current_meeting_mut() {
+                    let removed = meeting.transcript.dedup_bleed_through();
+                    if removed > 0 {
+                        tracing::info!("Removed {} bleed-through word(s) via dedup", removed);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn process_buffered_meeting_audio(&mut self, include_tail: bool) {
+        let chunk_samples = self.meeting_chunk_samples();
+
+        while self.meeting_mic_buffer.len() >= chunk_samples {
+            let mic_chunk: Vec<f32> = self.meeting_mic_buffer.drain(..chunk_samples).collect();
+            let loopback_len = self.meeting_loopback_buffer.len().min(chunk_samples);
+            let loopback_chunk: Vec<f32> =
+                self.meeting_loopback_buffer.drain(..loopback_len).collect();
+            self.process_meeting_audio_pair(mic_chunk, loopback_chunk)
+                .await;
+        }
+
+        if include_tail {
+            let mic_tail = std::mem::take(&mut self.meeting_mic_buffer);
+            let loopback_tail = std::mem::take(&mut self.meeting_loopback_buffer);
+            if !mic_tail.is_empty() || !loopback_tail.is_empty() {
+                tracing::debug!(
+                    mic_samples = mic_tail.len(),
+                    loopback_samples = loopback_tail.len(),
+                    "Processing final meeting audio tail"
+                );
+                self.process_meeting_audio_pair(mic_tail, loopback_tail)
+                    .await;
+            }
+        }
     }
 
     /// Reset state to idle and run post_output_command to reset compositor submap
@@ -1641,6 +1904,11 @@ impl Daemon {
 
                     // Spawn transcription task (non-blocking)
                     if let Some(t) = transcriber {
+                        // Hold an Arc clone so the result handler can query
+                        // post-transcription metadata (e.g. detected language
+                        // for layout hints, issue #180) without re-fetching
+                        // the transcriber.
+                        self.active_transcriber = Some(t.clone());
                         self.transcription_task =
                             Some(tokio::task::spawn_blocking(move || t.transcribe(&samples)));
                         true
@@ -1669,6 +1937,11 @@ impl Daemon {
         state: &mut State,
         result: std::result::Result<TranscriptionResult, tokio::task::JoinError>,
     ) {
+        // Take ownership of the transcriber Arc we cloned at spawn time so it
+        // is dropped on every exit path (success, transcription error, or
+        // task error). The Ok(Ok(_)) branch consults it for the language
+        // layout hint before letting it drop.
+        let active_transcriber = self.active_transcriber.take();
         match result {
             Ok(Ok(text)) => {
                 if text.is_empty() {
@@ -1896,6 +2169,61 @@ impl Daemon {
                         output_config.auto_submit = true;
                     }
 
+                    // Inject keyboard layout/variant hints derived from the
+                    // transcriber's detected language (issue #180). Skipped
+                    // per field when the user has already set explicit
+                    // `eitype_xkb_*` / `dotool_xkb_*` values, so static
+                    // configuration wins over auto-detection.
+                    if let Some(ref transcriber) = active_transcriber {
+                        if let Some(lang) = transcriber.last_detected_language() {
+                            let applied = output_config.apply_language_xkb_hint(&lang);
+                            if applied.is_empty() {
+                                tracing::debug!(
+                                    "No XKB mapping for detected language '{}'; \
+                                     not setting a layout or variant hint",
+                                    lang
+                                );
+                            } else {
+                                if applied.eitype_layout_applied {
+                                    if let Some(ref layout) = applied.layout {
+                                        tracing::debug!(
+                                            "Auto layout for eitype: language='{}' -> layout='{}'",
+                                            lang,
+                                            layout
+                                        );
+                                    }
+                                }
+                                if applied.dotool_layout_applied {
+                                    if let Some(ref layout) = applied.layout {
+                                        tracing::debug!(
+                                            "Auto layout for dotool: language='{}' -> layout='{}'",
+                                            lang,
+                                            layout
+                                        );
+                                    }
+                                }
+                                if applied.eitype_variant_applied {
+                                    if let Some(ref variant) = applied.variant {
+                                        tracing::debug!(
+                                            "Auto variant for eitype: language='{}' -> variant='{}'",
+                                            lang,
+                                            variant
+                                        );
+                                    }
+                                }
+                                if applied.dotool_variant_applied {
+                                    if let Some(ref variant) = applied.variant {
+                                        tracing::debug!(
+                                            "Auto variant for dotool: language='{}' -> variant='{}'",
+                                            lang,
+                                            variant
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     let output_chain = output::create_output_chain(&output_config);
 
                     // Output the text
@@ -1964,16 +2292,11 @@ impl Daemon {
         // the daemon gets stuck in streaming. Force toggle activation when
         // streaming is enabled. The user's config file is left untouched; this
         // override only applies to the running daemon.
-        if self
-            .config
-            .parakeet
-            .as_ref()
-            .map(|p| p.streaming)
-            .unwrap_or(false)
+        if self.config.streaming_active()
             && self.config.hotkey.mode == crate::config::ActivationMode::PushToTalk
         {
             tracing::warn!(
-                "Parakeet streaming requires toggle activation, not push-to-talk. \
+                "Streaming transcription requires toggle activation, not push-to-talk. \
                  Auto-promoting [hotkey] mode from push_to_talk to toggle for this session. \
                  Streaming output types characters at the cursor while you dictate; if your \
                  PTT key is held during typing, libinput-based compositors (Hyprland, Sway, \
@@ -2057,8 +2380,7 @@ impl Daemon {
                         return Err(crate::error::VoxtypeError::Config(format!(
                             "Another voxtype instance is already running (lock error: {:?})",
                             e
-                        ))
-                        .into());
+                        )));
                     }
                     tracing::debug!("Acquired PID lock at {:?} (after stale cleanup)", lock_path);
                 } else {
@@ -2067,8 +2389,7 @@ impl Daemon {
                     );
                     return Err(crate::error::VoxtypeError::Config(
                         "Another voxtype instance is already running".to_string(),
-                    )
-                    .into());
+                    ));
                 }
                 #[cfg(not(unix))]
                 {
@@ -2188,8 +2509,10 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
-                    // Parakeet/Moonshine uses its own model loading
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Soniox => {
+                    // Non-Whisper engines do their own setup; Soniox just validates
+                    // API key + endpoint at construction (no model to download).
                     transcriber_preloaded = Some(Arc::from(crate::transcribe::create_transcriber(
                         &self.config,
                     )?));
@@ -2306,7 +2629,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Soniox => {
                                             let config = self.config.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                                 crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -2335,7 +2659,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Soniox => {
                                             if let Some(ref t) = transcriber_preloaded {
                                                 let transcriber = t.clone();
                                                 tokio::task::spawn_blocking(move || {
@@ -2407,9 +2732,7 @@ impl Daemon {
                             tracing::debug!("Received HotkeyEvent::Released (push-to-talk), state.is_recording() = {}", state.is_recording());
                             if state.is_streaming() {
                                 tracing::debug!("Streaming push-to-talk released; closing audio capture and disowning session");
-                                if let Some(mut c) = audio_capture.take() {
-                                    let _ = c.stop().await;
-                                }
+                                self.stop_streaming_capture(&mut audio_capture).await;
                                 // Drop session/chain so the backend's
                                 // post-stop flush emission is dropped at
                                 // the event pump instead of typed.
@@ -2523,7 +2846,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Soniox => {
                                             let config = self.config.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                                 crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -2552,7 +2876,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Soniox => {
                                             if let Some(ref t) = transcriber_preloaded {
                                                 let transcriber = t.clone();
                                                 tokio::task::spawn_blocking(move || {
@@ -2614,9 +2939,7 @@ impl Daemon {
                                 }
                             } else if state.is_streaming() {
                                 tracing::info!("Toggle stop while streaming; closing capture");
-                                if let Some(mut c) = audio_capture.take() {
-                                    let _ = c.stop().await;
-                                }
+                                self.stop_streaming_capture(&mut audio_capture).await;
                             } else if let State::Recording { model_override: current_model_override, .. } = &state {
                                 let transcriber = match self.get_transcriber_for_recording(
                                     current_model_override.as_deref(),
@@ -2748,6 +3071,9 @@ impl Daemon {
                                 if let Some(task) = self.transcription_task.take() {
                                     task.abort();
                                 }
+                                // Drop the cloned transcriber Arc so it isn't
+                                // held until the next transcription.
+                                self.active_transcriber = None;
 
                                 cleanup_output_mode_override();
                                 cleanup_model_override();
@@ -2887,71 +3213,85 @@ impl Daemon {
                         }
                     }
 
-                    // Check for recording timeout
-                    if let Some(duration) = state.recording_duration() {
-                        if duration > max_duration {
+                    // Check for recording timeout. Skip when audio_capture is
+                    // already gone so we don't re-fire cleanup on every 100ms
+                    // tick while the streaming session drains server-side
+                    // (state stays Streaming until Ended arrives).
+                    let timeout_fired = audio_capture.is_some()
+                        && state.recording_duration().is_some_and(|d| d > max_duration);
+                    if timeout_fired {
+                        // Streaming has its own clean stop path: skip the
+                        // batch_transcribe branch below to avoid opening a
+                        // second WS session for audio already being processed
+                        // by the active streaming one.
+                        if state.is_streaming() {
                             tracing::warn!(
-                                "Recording timeout ({:.0}s limit), transcribing captured audio",
+                                "Recording timeout ({:.0}s limit) while streaming; closing capture",
                                 max_duration.as_secs_f32()
                             );
+                            self.stop_streaming_capture(&mut audio_capture).await;
+                            continue;
+                        }
 
-                            cleanup_output_mode_override();
-                            cleanup_model_override();
-                            cleanup_profile_override();
-                            cleanup_bool_override("smart_auto_submit");
+                        tracing::warn!(
+                            "Recording timeout ({:.0}s limit), transcribing captured audio",
+                            max_duration.as_secs_f32()
+                        );
 
-                            // Get model override from state before transitioning
-                            let model_override = match &state {
-                                State::Recording { model_override, .. } => model_override.as_deref(),
-                                State::EagerRecording { model_override, .. } => model_override.as_deref(),
-                                _ => None,
-                            };
+                        cleanup_output_mode_override();
+                        cleanup_model_override();
+                        cleanup_profile_override();
+                        cleanup_bool_override("smart_auto_submit");
 
-                            // Get transcriber for this recording
-                            let transcriber = match self.get_transcriber_for_recording(
-                                model_override,
-                                &transcriber_preloaded,
-                            ).await {
-                                Ok(t) => Some(t),
-                                Err(()) => {
-                                    state = State::Idle;
-                                    self.update_state("idle");
-                                    continue;
-                                }
-                            };
+                        let model_override = match &state {
+                            State::Recording { model_override, .. } => model_override.as_deref(),
+                            State::EagerRecording { model_override, .. } => model_override.as_deref(),
+                            _ => None,
+                        };
 
-                            if state.is_eager_recording() {
-                                if let Some(mut capture) = audio_capture.take() {
-                                    if let Ok(final_samples) = capture.stop().await {
-                                        if let State::EagerRecording { accumulated_audio, .. } = &mut state {
-                                            accumulated_audio.extend(final_samples);
-                                        }
-                                    }
-                                }
-
-                                if let Some(transcriber) = transcriber {
-                                    self.update_state("transcribing");
-
-                                    if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
-                                        state = State::Transcribing { audio: Vec::new() };
-                                        self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
-                                    } else {
-                                        tracing::debug!("Eager recording timeout produced empty result");
-                                        self.reset_to_idle(&mut state).await;
-                                    }
-                                }
-                                eager_transcriber = None;
-                            } else {
-                                for (_, task) in self.eager_chunk_tasks.drain(..) {
-                                    task.abort();
-                                }
-
-                                self.start_transcription_task(
-                                    &mut state,
-                                    &mut audio_capture,
-                                    transcriber,
-                                ).await;
+                        let transcriber = match self.get_transcriber_for_recording(
+                            model_override,
+                            &transcriber_preloaded,
+                        ).await {
+                            Ok(t) => Some(t),
+                            Err(()) => {
+                                state = State::Idle;
+                                self.update_state("idle");
+                                continue;
                             }
+                        };
+
+                        if state.is_eager_recording() {
+                            if let Some(mut capture) = audio_capture.take() {
+                                if let Ok(final_samples) = capture.stop().await {
+                                    if let State::EagerRecording { accumulated_audio, .. } = &mut state {
+                                        accumulated_audio.extend(final_samples);
+                                    }
+                                }
+                            }
+
+                            if let Some(transcriber) = transcriber {
+                                self.update_state("transcribing");
+
+                                if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
+                                    state = State::Transcribing { audio: Vec::new() };
+                                    self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
+                                } else {
+                                    tracing::debug!("Eager recording timeout produced empty result");
+                                    self.reset_to_idle(&mut state).await;
+                                }
+                            }
+                            eager_transcriber = None;
+                        } else {
+                            for (_, task) in self.eager_chunk_tasks.drain(..) {
+                                task.abort();
+                            }
+
+                            self.start_transcription_task(
+                                &mut state,
+                                &mut audio_capture,
+                                transcriber,
+                            ).await;
                         }
                     }
                 }
@@ -2987,7 +3327,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Soniox => {
                                     let config = self.config.clone();
                                     self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                         crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -3015,7 +3356,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Paraformer
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere => {
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::Soniox => {
                                     if let Some(ref t) = transcriber_preloaded {
                                         let transcriber = t.clone();
                                         tokio::task::spawn_blocking(move || {
@@ -3082,18 +3424,13 @@ impl Daemon {
                     tracing::debug!("Received SIGUSR2 (stop recording)");
                     if state.is_streaming() {
                         tracing::info!("SIGUSR2 stop while streaming; closing capture and disowning session");
-                        if let Some(mut c) = audio_capture.take() {
-                            let _ = c.stop().await;
-                        }
-                        // Drop the typing surface synchronously. Any
-                        // Final/Partial event the backend emits while
-                        // draining its internal buffer reaches the
-                        // event-pump arm with `streaming_session = None`
-                        // and is discarded instead of typed. Without
-                        // this, parakeet's flush() emission would type
-                        // into whatever window has focus by the time
-                        // the event arrives — voxtype#TBD streaming
-                        // data-leak.
+                        self.stop_streaming_capture(&mut audio_capture).await;
+                        // Drop the typing surface synchronously so any
+                        // Final/Partial events the backend emits while
+                        // draining its internal buffer reach the event-pump
+                        // arm with `streaming_session = None` and get
+                        // discarded instead of typed into whatever window
+                        // has focus by then.
                         streaming_session = None;
                         streaming_chain = None;
                     } else if let State::Recording { model_override, .. } = &state {
@@ -3222,6 +3559,26 @@ impl Daemon {
                                 }
                             }
                         }
+                        Some(StreamingEvent::Replace { backspace, text, .. }) => {
+                            if let (Some(s), Some(chain)) =
+                                (streaming_session.as_mut(), streaming_chain.as_ref())
+                            {
+                                if let Err(e) = s.replace_and_commit(
+                                    chain,
+                                    backspace,
+                                    &text,
+                                    self.config.output.pre_output_command.as_deref(),
+                                    self.config.output.post_output_command.as_deref(),
+                                ).await {
+                                    tracing::error!("Streaming replace_and_commit failed: {}", e);
+                                }
+                                if let State::Streaming { typed_chars, finalized_text, .. } = &mut state {
+                                    *typed_chars = s.typed_chars();
+                                    finalized_text.clear();
+                                    finalized_text.push_str(s.finalized_text());
+                                }
+                            }
+                        }
                         Some(StreamingEvent::Error(err)) => {
                             tracing::error!("Streaming backend error: {}", err);
                             send_notification(
@@ -3260,6 +3617,9 @@ impl Daemon {
                         if let Some(task) = self.transcription_task.take() {
                             task.abort();
                         }
+                        // Drop the cloned transcriber Arc so it isn't held
+                        // until the next transcription.
+                        self.active_transcriber = None;
 
                         cleanup_output_mode_override();
                         cleanup_model_override();
@@ -3303,10 +3663,10 @@ impl Daemon {
                 // Poll for meeting commands (file-based IPC)
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {
                     // Check for meeting start command
-                    if let Some(title) = check_meeting_start() {
+                    if let Some(trigger) = check_meeting_start() {
                         if self.config.meeting.enabled && self.meeting_daemon.is_none() {
                             tracing::debug!("Meeting start requested via file trigger");
-                            if let Err(e) = self.start_meeting(title).await {
+                            if let Err(e) = self.start_meeting(trigger.title, trigger.diarization).await {
                                 tracing::error!("Failed to start meeting: {}", e);
                             }
                         } else if !self.config.meeting.enabled {
@@ -3378,72 +3738,7 @@ impl Daemon {
                         self.meeting_mic_buffer.extend(dual_samples.mic);
                         self.meeting_loopback_buffer.extend(dual_samples.loopback);
 
-                        // Check if mic buffer has enough samples for a chunk
-                        let chunk_samples = self.meeting_chunk_samples();
-                        if self.meeting_mic_buffer.len() >= chunk_samples {
-                            let mic_chunk: Vec<f32> = self.meeting_mic_buffer.drain(..chunk_samples).collect();
-
-                            // Also drain loopback buffer up to the same amount
-                            let loopback_len = self.meeting_loopback_buffer.len().min(chunk_samples);
-                            let loopback_chunk: Vec<f32> = self.meeting_loopback_buffer.drain(..loopback_len).collect();
-
-                            // Enhance mic audio with GTCRN if available (removes echo/noise)
-                            #[cfg(feature = "onnx-common")]
-                            let mic_chunk = if let Some(ref enhancer) = self.speech_enhancer {
-                                match enhancer.enhance(&mic_chunk) {
-                                    Ok(enhanced) => {
-                                        tracing::debug!("GTCRN enhanced mic chunk ({} samples)", enhanced.len());
-                                        enhanced
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("GTCRN enhancement failed, using raw mic: {}", e);
-                                        mic_chunk
-                                    }
-                                }
-                            } else {
-                                mic_chunk
-                            };
-
-                            if let Some(ref mut daemon) = self.meeting_daemon {
-                                // Process mic chunk
-                                let mut had_loopback = false;
-                                match daemon.process_chunk_with_source(mic_chunk, meeting::data::AudioSource::Microphone).await {
-                                    Ok(Some(segments)) => {
-                                        tracing::debug!("Processed mic chunk with {} segments", segments.len());
-                                    }
-                                    Ok(None) => {}
-                                    Err(e) => {
-                                        tracing::error!("Error processing mic chunk: {}", e);
-                                    }
-                                }
-
-                                // Process loopback chunk if non-empty
-                                if !loopback_chunk.is_empty() {
-                                    match daemon.process_chunk_with_source(loopback_chunk, meeting::data::AudioSource::Loopback).await {
-                                        Ok(Some(segments)) => {
-                                            tracing::debug!("Processed loopback chunk with {} segments", segments.len());
-                                            if !segments.is_empty() {
-                                                had_loopback = true;
-                                            }
-                                        }
-                                        Ok(None) => {}
-                                        Err(e) => {
-                                            tracing::error!("Error processing loopback chunk: {}", e);
-                                        }
-                                    }
-                                }
-
-                                // Dedup bleed-through: strip echoed phrases from mic segments
-                                if had_loopback {
-                                    if let Some(ref mut meeting) = daemon.current_meeting_mut() {
-                                        let removed = meeting.transcript.dedup_bleed_through();
-                                        if removed > 0 {
-                                            tracing::info!("Removed {} bleed-through word(s) via dedup", removed);
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        self.process_buffered_meeting_audio(false).await;
                     }
 
                     // Check meeting timeout
@@ -3526,6 +3821,7 @@ impl Daemon {
         if let Some(task) = self.transcription_task.take() {
             task.abort();
         }
+        self.active_transcriber = None;
 
         // Abort any pending eager chunk tasks
         for (_, task) in self.eager_chunk_tasks.drain(..) {
@@ -3585,6 +3881,54 @@ mod tests {
         // We can't easily mock Config::runtime_dir(), so we test the file operations
         // directly using the same logic as the functions under test
         f(runtime_dir)
+    }
+
+    #[test]
+    fn test_validate_diarization_override_accepts_allowlist() {
+        assert_eq!(
+            validate_diarization_override("simple".to_string()),
+            Some("simple".to_string())
+        );
+        assert_eq!(
+            validate_diarization_override("ml".to_string()),
+            Some("ml".to_string())
+        );
+    }
+
+    #[test]
+    fn test_validate_diarization_override_rejects_unknown() {
+        // Random unknown value the daemon should never propagate.
+        assert_eq!(validate_diarization_override("bogus".to_string()), None);
+
+        // Path-traversal flavor — `ALLOWED_DIARIZATION_OVERRIDES` is an exact
+        // string match so traversal can't sneak through, but the test pins
+        // the contract.
+        assert_eq!(
+            validate_diarization_override("../../etc/passwd".to_string()),
+            None
+        );
+
+        // Empty string (already filtered by `read_trimmed_nonempty` before
+        // this function is reached, but defense-in-depth).
+        assert_eq!(validate_diarization_override(String::new()), None);
+
+        // Common case variations that look like the right thing but aren't:
+        // case-sensitive match prevents these.
+        assert_eq!(validate_diarization_override("ML".to_string()), None);
+        assert_eq!(validate_diarization_override("Simple".to_string()), None);
+
+        // Whitespace-padded values shouldn't slip through if the trim step
+        // upstream somehow didn't fire.
+        assert_eq!(validate_diarization_override(" ml".to_string()), None);
+        assert_eq!(validate_diarization_override("ml ".to_string()), None);
+    }
+
+    #[test]
+    fn test_validate_diarization_override_const_in_sync() {
+        // Pin the allowlist contents so a future expansion of the CLI's
+        // `value_parser` requires touching this test, keeping the daemon
+        // and CLI surfaces in sync.
+        assert_eq!(ALLOWED_DIARIZATION_OVERRIDES, &["simple", "ml"]);
     }
 
     #[test]

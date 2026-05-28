@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+# Three parallel jobs (fmt, clippy, test) instead of a single sequential `check`.
+# Each runs on its own runner so a 4 min clippy run doesn't block a 30 s fmt
+# check, and PR failures attribute to the specific gate that broke. Required
+# status checks on dev (PR-time) and main (release-time) reference all three
+# job names; if you rename or remove one here, update branch protection.
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libclang-dev cmake \
+            libgtk-3-dev libglib2.0-dev libx11-dev libxi-dev libxtst-dev
+
+      - name: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets --no-deps -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libclang-dev cmake \
+            libgtk-3-dev libglib2.0-dev libx11-dev libxi-dev libxtst-dev
+
+      - name: cargo test
+        run: cargo test
+
+  # Aggregator job — branch protection only needs to require `ci-success`.
+  # Adding/removing parallel checks above just updates the `needs:` list;
+  # the protection rule never needs to be touched.
+  ci-success:
+    name: ci-success
+    needs: [fmt, clippy, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all required jobs succeeded
+        run: |
+          set -e
+          fmt='${{ needs.fmt.result }}'
+          clippy='${{ needs.clippy.result }}'
+          test='${{ needs.test.result }}'
+          echo "fmt:    $fmt"
+          echo "clippy: $clippy"
+          echo "test:   $test"
+          if [[ "$fmt" != success || "$clippy" != success || "$test" != success ]]; then
+            echo "::error::One or more required jobs failed"
+            exit 1
+          fi
+          echo "All required jobs succeeded."

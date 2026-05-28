@@ -218,7 +218,10 @@ mod tests {
     #[test]
     fn backspace_deletes_prev_char() {
         let mut input = TextInput::new("hello");
-        assert_eq!(input.handle_key(key(KeyCode::Backspace)), TextInputResult::Continue);
+        assert_eq!(
+            input.handle_key(key(KeyCode::Backspace)),
+            TextInputResult::Continue
+        );
         assert_eq!(input.buffer(), "hell");
     }
 
@@ -233,7 +236,10 @@ mod tests {
     #[test]
     fn enter_signals_commit() {
         let mut input = TextInput::new("done");
-        assert_eq!(input.handle_key(key(KeyCode::Enter)), TextInputResult::Commit);
+        assert_eq!(
+            input.handle_key(key(KeyCode::Enter)),
+            TextInputResult::Commit
+        );
     }
 
     #[test]
@@ -351,12 +357,7 @@ pub fn form_row<'a>(focused: bool, label: &str, value: &str) -> Line<'a> {
 
 /// Form row that supports a `dimmed` variant for fields disabled by another
 /// toggle (e.g. the rest of the Hotkey form when the evdev listener is off).
-pub fn form_row_dimmed<'a>(
-    focused: bool,
-    dimmed: bool,
-    label: &str,
-    value: &str,
-) -> Line<'a> {
+pub fn form_row_dimmed<'a>(focused: bool, dimmed: bool, label: &str, value: &str) -> Line<'a> {
     let dim_color = Color::DarkGray;
     let label_style = if dimmed {
         Style::default().fg(dim_color)

@@ -1,27 +1,42 @@
-//! `voxtype-osd` — a tiny launcher that picks between the `voxtype-osd-gtk4`
-//! and `voxtype-osd-native` frontends and execs the chosen one.
+//! `voxtype-osd` — a tiny launcher that picks between the `voxtype-osd-gtk4`,
+//! `voxtype-osd-native`, and `voxtype-osd-quickshell` frontends and execs
+//! the chosen one.
 //!
 //! The user's preference comes from (in priority order):
 //!
-//! 1. `--frontend gtk4|native` on the command line
-//! 2. `VOXTYPE_OSD_FRONTEND=gtk4|native` env var
-//! 3. `[osd] frontend = "gtk4|native"` in `~/.config/voxtype/config.toml`
+//! 1. `--frontend gtk4|native|quickshell` on the command line
+//! 2. `VOXTYPE_OSD_FRONTEND=gtk4|native|quickshell` env var
+//! 3. `[osd] frontend = "gtk4|native|quickshell"` in `~/.config/voxtype/config.toml`
 //! 4. Default: `gtk4`
 //!
-//! That preference is then reconciled with what's actually installed:
+//! That preference is then reconciled with what's actually installed: the
+//! preferred frontend's binary is searched alongside this launcher and on
+//! `$PATH`; if missing, the launcher tries the other installed frontends
+//! in a fixed fallback order and warns about the substitution. If nothing
+//! is installed at all the launcher exits with a clear error pointing to
+//! the build feature flags.
 //!
-//! - Both binaries available → use the preferred one
-//! - Only one available → use it (warn if it's not the preferred one)
-//! - Neither available → exit with a clear error pointing to the build
-//!   feature flags
-//!
-//! Source builders who only enabled one of `osd-gtk4`/`osd-native` thus
-//! get a working `voxtype-osd` regardless of config — the launcher
-//! adapts to what was actually built.
+//! Source builders who only enabled one of `osd-gtk4`/`osd-native`/
+//! `osd-quickshell` thus get a working `voxtype-osd` regardless of config
+//! — the launcher adapts to what was actually built.
 //!
 //! All other CLI args + env vars pass through unchanged to the chosen
-//! frontend (including `--config`, which both frontends consume on their
-//! own to read the rest of the `[osd]` section).
+//! frontend (including `--config`, which the GTK4 and native frontends
+//! consume on their own to read the rest of the `[osd]` section; the
+//! Quickshell frontend reads the same config via its launcher).
+//!
+//! ## Supervisor opt-out for Quickshell daemonize
+//!
+//! `voxtype-osd-quickshell` passes `-d` to `qs` by default so that
+//! hotkey/CLI invocations survive a short-lived parent shell (see issue
+//! #395). The daemon's OSD supervisor in `src/osd/supervisor.rs` needs
+//! the opposite behavior: it uses `kill_on_drop(true)` to kill the OSD
+//! on shutdown, which only works if qs stays attached to its child slot.
+//!
+//! The supervisor sets `VOXTYPE_OSD_SUPERVISED=1` on the dispatcher's
+//! environment. When this dispatcher sees that env var AND it's about to
+//! exec the Quickshell launcher, it appends `--no-daemonize` to the
+//! launcher's args so qs stays in the foreground.
 
 use std::env;
 use std::os::unix::process::CommandExt;
@@ -33,6 +48,7 @@ use voxtype::osd::config::{OsdConfig, OsdFrontend};
 
 const NATIVE_BIN: &str = "voxtype-osd-native";
 const GTK4_BIN: &str = "voxtype-osd-gtk4";
+const QUICKSHELL_BIN: &str = "voxtype-osd-quickshell";
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -70,12 +86,13 @@ fn main() -> ExitCode {
         Some(c) => c,
         None => {
             eprintln!(
-                "voxtype-osd: neither '{NATIVE_BIN}' nor '{GTK4_BIN}' was found on PATH \
-                 or next to this binary.\n\
+                "voxtype-osd: none of '{GTK4_BIN}', '{NATIVE_BIN}', or '{QUICKSHELL_BIN}' \
+                 was found on PATH or next to this binary.\n\
                  \n\
                  If you built from source, enable at least one OSD feature:\n\
-                   cargo build --release --features osd-gtk4    # GTK4 frontend\n\
-                   cargo build --release --features osd-native  # SCTK + wgpu + egui\n\
+                   cargo build --release --features osd-gtk4       # GTK4 frontend\n\
+                   cargo build --release --features osd-native     # SCTK + wgpu + egui\n\
+                   cargo build --release --bin voxtype-osd-quickshell  # Quickshell launcher\n\
                  \n\
                  If you installed a package, the OSD binaries may be a separate\n\
                  optional dependency."
@@ -92,10 +109,18 @@ fn main() -> ExitCode {
         );
     }
 
+    // Build the final argv. If the supervisor invoked us AND we're
+    // dispatching to the Quickshell launcher, append `--no-daemonize` so
+    // qs stays attached to its child slot for `kill_on_drop`.
+    let supervised = env::var("VOXTYPE_OSD_SUPERVISED")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let final_args = build_child_args(chosen.frontend, supervised, &rest);
+
     // Hand off. exec replaces this process so the child inherits stdin,
     // stdout, stderr, signals, and process group cleanly. There's no return
     // path on success.
-    let err = Command::new(&chosen.path).args(&rest).exec();
+    let err = Command::new(&chosen.path).args(&final_args).exec();
     eprintln!(
         "voxtype-osd: failed to exec '{}': {err}",
         chosen.path.display()
@@ -108,10 +133,11 @@ fn print_help() {
         "voxtype-osd {} — launcher for the on-screen mic visualizer\n\
          \n\
          USAGE:\n    \
-             voxtype-osd [--frontend gtk4|native] [FRONTEND ARGS...]\n\
+             voxtype-osd [--frontend gtk4|native|quickshell] [FRONTEND ARGS...]\n\
          \n\
          OPTIONS:\n    \
-             --frontend <gtk4|native>     Which frontend to launch. Falls back to\n\
+             --frontend <gtk4|native|quickshell>\n    \
+                                          Which frontend to launch. Falls back to\n\
                                           whatever is installed if the preferred\n\
                                           frontend isn't found on PATH.\n    \
              -h, --help                   Show this message.\n    \
@@ -123,7 +149,7 @@ fn print_help() {
          \n\
          CONFIG:\n    \
              [osd]\n    \
-             frontend = \"gtk4\"  # or \"native\"\n\
+             frontend = \"gtk4\"  # or \"native\", \"quickshell\"\n\
          \n\
          ENV:\n    \
              VOXTYPE_OSD_FRONTEND   Same as --frontend.\n    \
@@ -137,7 +163,9 @@ fn print_help() {
 /// Also sniff `--config X`/`--config=X` so we know which file to read for
 /// the `[osd]` section without consuming it from the pass-through args
 /// (the child needs to see `--config` too).
-fn parse_frontend_and_config(args: &[String]) -> (Option<OsdFrontend>, Option<PathBuf>, Vec<String>) {
+fn parse_frontend_and_config(
+    args: &[String],
+) -> (Option<OsdFrontend>, Option<PathBuf>, Vec<String>) {
     let mut frontend: Option<OsdFrontend> = None;
     let mut config: Option<PathBuf> = None;
     let mut rest: Vec<String> = Vec::with_capacity(args.len());
@@ -178,6 +206,21 @@ fn parse_frontend_and_config(args: &[String]) -> (Option<OsdFrontend>, Option<Pa
     (frontend, config, rest)
 }
 
+/// Build the argv we hand to the chosen frontend. Currently only the
+/// Quickshell launcher needs special handling: when the daemon
+/// supervisor invokes us we append `--no-daemonize` so qs stays attached
+/// to its child slot for `kill_on_drop`. We append (rather than prepend)
+/// so the user's own `--daemonize`/`--no-daemonize` in `rest` always
+/// loses to the supervisor's intent. The Quickshell launcher uses
+/// last-wins flag resolution.
+fn build_child_args(frontend: OsdFrontend, supervised: bool, rest: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = rest.to_vec();
+    if supervised && frontend == OsdFrontend::Quickshell {
+        out.push("--no-daemonize".into());
+    }
+    out
+}
+
 /// Load the `[osd] frontend` value from the voxtype config file, falling
 /// back to the default when the file is missing, unreadable, or doesn't
 /// contain a usable value.
@@ -209,22 +252,31 @@ struct ResolvedFrontend {
     path: PathBuf,
 }
 
-/// Find the binary for `preferred`; if missing, fall back to the other
-/// frontend. Returns `None` only if neither binary is installed.
+/// Find the binary for `preferred`; if missing, fall back to the next
+/// available frontend in a fixed order. Quickshell sits at the bottom of
+/// non-Quickshell chains because users who didn't ask for it usually
+/// don't have `qs` installed; conversely a Quickshell user who's missing
+/// their launcher falls back to Gtk4 (the default) before Native.
 fn resolve_installed(preferred: OsdFrontend) -> Option<ResolvedFrontend> {
-    if let Some(path) = find_binary(preferred.binary_name()) {
-        return Some(ResolvedFrontend {
-            frontend: preferred,
-            path,
-        });
-    }
-    let other = match preferred {
-        OsdFrontend::Gtk4 => OsdFrontend::Native,
-        OsdFrontend::Native => OsdFrontend::Gtk4,
+    let chain: [OsdFrontend; 3] = match preferred {
+        OsdFrontend::Gtk4 => [
+            OsdFrontend::Gtk4,
+            OsdFrontend::Native,
+            OsdFrontend::Quickshell,
+        ],
+        OsdFrontend::Native => [
+            OsdFrontend::Native,
+            OsdFrontend::Gtk4,
+            OsdFrontend::Quickshell,
+        ],
+        OsdFrontend::Quickshell => [
+            OsdFrontend::Quickshell,
+            OsdFrontend::Gtk4,
+            OsdFrontend::Native,
+        ],
     };
-    find_binary(other.binary_name()).map(|path| ResolvedFrontend {
-        frontend: other,
-        path,
+    chain.into_iter().find_map(|f| {
+        find_binary(f.binary_name()).map(|path| ResolvedFrontend { frontend: f, path })
     })
 }
 
@@ -288,6 +340,44 @@ mod tests {
                 "400".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn build_child_args_appends_no_daemonize_when_supervised_quickshell() {
+        let rest = vec!["--width-px".to_string(), "400".to_string()];
+        let out = build_child_args(OsdFrontend::Quickshell, true, &rest);
+        assert_eq!(
+            out,
+            vec![
+                "--width-px".to_string(),
+                "400".to_string(),
+                "--no-daemonize".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_child_args_no_op_for_quickshell_unsupervised() {
+        let rest = vec!["--width-px".to_string(), "400".to_string()];
+        let out = build_child_args(OsdFrontend::Quickshell, false, &rest);
+        assert_eq!(out, rest);
+    }
+
+    #[test]
+    fn build_child_args_no_op_for_gtk4_supervised() {
+        // The supervisor flag must not bleed into the GTK4 or Native
+        // frontends — they have no `--no-daemonize` flag and would
+        // error out on an unknown arg.
+        let rest = vec!["--width-px".to_string(), "400".to_string()];
+        let out = build_child_args(OsdFrontend::Gtk4, true, &rest);
+        assert_eq!(out, rest);
+    }
+
+    #[test]
+    fn build_child_args_no_op_for_native_supervised() {
+        let rest = vec!["--width-px".to_string(), "400".to_string()];
+        let out = build_child_args(OsdFrontend::Native, true, &rest);
+        assert_eq!(out, rest);
     }
 
     #[test]

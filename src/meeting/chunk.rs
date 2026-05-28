@@ -265,7 +265,14 @@ impl ChunkProcessor {
 
         // Check for speech
         if !self.vad.contains_speech(&samples) {
-            tracing::debug!("Chunk {} has no speech, skipping", chunk_id);
+            tracing::debug!(
+                chunk_id,
+                source = %source,
+                duration_secs = samples.len() as f32 / self.config.sample_rate as f32,
+                rms = VoiceActivityDetector::calculate_rms(&samples),
+                threshold = self.config.vad_threshold,
+                "Meeting chunk skipped: no speech detected"
+            );
             return Ok(ProcessedChunk {
                 chunk_id,
                 segments: vec![],
@@ -274,9 +281,13 @@ impl ChunkProcessor {
             });
         }
 
-        // Transcribe the chunk
+        // Transcribe the chunk. Display impl produces "You"/"Remote" — match
+        // the sibling skip log above (line ~270, `source = %source`) so a
+        // grep for "You chunk" or "Remote chunk" finds both transcribe and
+        // skip events for the same diarized label.
         tracing::info!(
-            "Transcribing chunk {} ({:.1}s of audio)",
+            "Transcribing {} chunk {} ({:.1}s of audio)",
+            source,
             chunk_id,
             samples.len() as f32 / self.config.sample_rate as f32
         );

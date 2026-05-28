@@ -189,3 +189,23 @@ jobs:
           files: |
             releases/${{ steps.version.outputs.version }}/voxtype-*
             releases/${{ steps.version.outputs.version }}/SHA256SUMS.txt
+
+  # Aggregator job — branch protection only needs to require `macos-ci-success`.
+  # If we add more macOS jobs (arm64 smoke test, notarization gate, etc.) they
+  # join the `needs:` list and the protection rule keeps working unchanged.
+  macos-ci-success:
+    name: macos-ci-success
+    needs: [build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all required jobs succeeded
+        run: |
+          set -e
+          build='${{ needs.build.result }}'
+          echo "build: $build"
+          if [[ "$build" != success ]]; then
+            echo "::error::macOS build did not succeed"
+            exit 1
+          fi
+          echo "macOS build succeeded."

@@ -10,9 +10,11 @@
 //!   - eitype: EI protocol, works on GNOME/KDE/Sway with libei
 //!   - ydotool: Works on X11/Wayland/TTY, requires ydotoold daemon
 
+use super::session::{detect, DisplaySession};
 use super::TextOutput;
 use crate::error::OutputError;
 use crate::output::find_ydotool_socket;
+use crate::output::xclip::copy_to_x11_clipboard;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -244,8 +246,16 @@ impl PasteOutput {
         }
     }
 
-    /// Copy text to clipboard using wl-copy
+    /// Copy text to clipboard, dispatching by session type.
+    ///
+    /// Wayland sessions use `wl-copy`; X11 sessions use `xclip` (preferred)
+    /// or `xsel` (fallback). Without this dispatch, X11 users see voxtype
+    /// silently no-op on the clipboard (GitHub #346).
     async fn copy_to_clipboard(&self, text: &str) -> Result<(), OutputError> {
+        if detect() == DisplaySession::X11 {
+            return copy_to_x11_clipboard(text.as_bytes()).await;
+        }
+
         // Spawn wl-copy with stdin pipe
         let mut child = Command::new("wl-copy")
             .stdin(Stdio::piped())
@@ -889,18 +899,44 @@ impl TextOutput for PasteOutput {
     }
 
     async fn is_available(&self) -> bool {
-        // Check if wl-copy exists (required for clipboard)
-        let wl_copy_available = Command::new("which")
-            .arg("wl-copy")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false);
+        // Probe the appropriate clipboard tool for the active session.
+        // Wayland needs wl-copy; X11 needs xclip or xsel.
+        let session = detect();
+        let clipboard_available = match session {
+            DisplaySession::Wayland => Command::new("which")
+                .arg("wl-copy")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await
+                .map(|s| s.success())
+                .unwrap_or(false),
+            DisplaySession::X11 => {
+                let xclip_ok = Command::new("which")
+                    .arg("xclip")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .await
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                let xsel_ok = Command::new("which")
+                    .arg("xsel")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .await
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                xclip_ok || xsel_ok
+            }
+        };
 
-        if !wl_copy_available {
-            tracing::debug!("paste mode unavailable: wl-copy not found");
+        if !clipboard_available {
+            tracing::debug!(
+                "paste mode unavailable: no clipboard tool for {:?} session",
+                session
+            );
             return false;
         }
 

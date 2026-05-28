@@ -51,6 +51,24 @@ engine = "whisper"
 voxtype --engine parakeet daemon
 ```
 
+**Persistent change via CLI:**
+
+To change the engine in your config file (preserving comments and other
+settings), use:
+
+```bash
+voxtype config set engine whisper
+voxtype config set engine parakeet
+```
+
+This is non-interactive equivalent of the `voxtype configure` TUI's engine
+picker. It validates that the requested engine is compiled into your binary
+(rebuild with `cargo build --features <engine>` or install a matching
+prebuilt variant if it isn't), updates `~/.config/voxtype/config.toml`
+atomically, and prints the restart hint. The daemon does not hot-reload
+config changes; restart it with `systemctl --user restart voxtype` for the
+new engine to take effect.
+
 **Notes:**
 - All engines except Whisper require an ONNX-enabled binary (`voxtype-*-onnx-*`)
 - Each ONNX engine reads its own `[<engine>]` section (e.g. `[parakeet]`, `[cohere]`)
@@ -1366,6 +1384,208 @@ The prebuilt `voxtype-*-onnx-*` release binaries already include `cohere`, so us
 
 ---
 
+## [soniox]
+
+Configuration for the Soniox cloud streaming WebSocket STT engine. This section is only used when `engine = "soniox"`.
+
+Soniox is a paid cloud STT provider with 60+ languages, per-token finality flags, and server-side endpoint detection. Unlike voxtype's other engines, no model runs on your machine — audio streams to Soniox's servers over WebSocket and tokens stream back.
+
+**Privacy:** Audio is sent to a third-party service. Use the local engines (Whisper, Parakeet, etc.) if you cannot send dictation off-device.
+
+### api_key
+
+**Type:** String (optional)
+**Default:** unset (falls back to `SONIOX_API_KEY` env var)
+**Required:** Yes (via this field or env var)
+
+Soniox API key. Get one at https://console.soniox.com.
+
+Prefer the env var so the key never lands in shell history or a checked-in config file:
+
+```bash
+export SONIOX_API_KEY="your-key-here"
+```
+
+### model
+
+**Type:** String
+**Default:** `"stt-rt-v4"`
+**Required:** No
+
+Soniox model identifier. The current realtime model is `stt-rt-v4`.
+
+### language_hints
+
+**Type:** Array of strings
+**Default:** `["hu", "en"]`
+**Required:** No
+
+ISO 639-1 codes hinting which languages to prefer. Use an empty array for full auto-detect across all 60+ supported languages.
+
+```toml
+[soniox]
+language_hints = ["en"]            # English only
+# or
+language_hints = ["hu", "en", "de"] # Hungarian, English, German
+# or
+language_hints = []                 # auto-detect everything
+```
+
+### language_hints_strict
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+When `true`, the model is strongly biased to produce output only in the languages listed in `language_hints`. When `false`, the model may occasionally produce other languages it detects with high confidence. Ignored when `language_hints` is empty.
+
+Strict mode is the right default for bilingual setups (`["hu", "en"]` etc.): without it, partials can briefly drift to a third language before snapping back when a final lands, causing unnecessary tail revisions. Turn it off only when you genuinely expect input in languages outside the hint list. See [Soniox language-restrictions docs](https://soniox.com/docs/stt/concepts/language-restrictions).
+
+```toml
+[soniox]
+language_hints = ["hu", "en"]
+language_hints_strict = false   # allow occasional third-language tokens
+```
+
+### streaming
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Activation mode for the Soniox backend:
+
+- `true` — Live WebSocket session. Tokens stream back during recording and are typed at the cursor as they arrive (or only on finalization if `type_partials = false`). **Requires `[hotkey] mode = "toggle"`.** Push-to-talk is auto-promoted to toggle for the running session with a warning, because typing characters while the PTT key is still held clobbers libinput's held-key state on Hyprland/Sway/River.
+- `false` — Batch mode. Audio buffered while the hotkey is held; on release one WebSocket session opens, the entire buffer is sent + finalized, and the resulting transcript is typed in one shot. Push-to-talk compatible. Loses live partials but keeps Soniox's accuracy.
+
+### type_partials
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Only used when `streaming = true`. When `true`, non-final tokens are typed at the cursor as they arrive (lower perceived latency). When `false`, only finalized segments are typed — partials still appear in `voxtype status --follow` but never touch the cursor.
+
+Soniox guarantees stable finals; non-finals can be revised. In practice revisions are rare and short. If you see occasional churn at the cursor, set `type_partials = false`.
+
+### context
+
+**Type:** String (optional)
+**Default:** unset
+**Required:** No
+
+Free-form domain context. Mapped to `context.text` in Soniox's init frame. Use for short prose describing the dictation domain — `"medical consultation"`, `"Rust async runtime podcast"`. Leave unset unless you have a clearly bounded vocabulary worth biasing the model toward. See [Soniox context docs](https://soniox.com/docs/stt/concepts/context).
+
+### terms
+
+**Type:** Array of strings (optional)
+**Default:** unset
+**Required:** No
+
+Inline vocabulary boost terms. Mapped to `context.terms` in Soniox's init frame. Use for proper names, jargon, product names — entries the generic model wouldn't get right. Combined with `terms_file` (deduplicated, order preserved).
+
+```toml
+[soniox]
+terms = ["Voxtype", "Hyprland", "tokio-tungstenite"]
+```
+
+### terms_file
+
+**Type:** Path (optional)
+**Default:** unset
+**Required:** No
+
+Path to a JSON file containing a list of vocabulary boost terms — `["term1", "term2", ...]`. Loaded once at daemon startup and merged into `context.terms`. Useful for sharing a corrections list across multiple voxtype config snapshots or projects.
+
+```toml
+[soniox]
+terms_file = "/home/me/dotfiles/voxtype-terms.json"
+```
+
+### async_api
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Use the Soniox **async transcription API** (file upload + poll) instead of the realtime WebSocket. Different model (`stt-async-v4`), different accuracy profile, batch only — no live partials, no flicker, push-to-talk compatible.
+
+When `true`:
+- Audio buffered while recording. On release, voxtype uploads the WAV to `https://api.soniox.com/v1/files`, creates a transcription job, polls until complete, fetches the transcript, then types it at the cursor in one shot.
+- `streaming` and `type_partials` are ignored.
+- `model` defaults to `stt-async-v4` (override only if you know what you're doing).
+- Push-to-talk is **not** auto-promoted to toggle (no live cursor typing means no compositor-state clobbering).
+
+Latency: typical 15s recording → ~1s upload + 2-5s processing = 3-6s total wait after release. Compare to realtime which streams partials as you speak.
+
+**Accuracy:** the async model (`stt-async-v4`) is marketed as higher accuracy than the realtime model (`stt-rt-v4`). In practice quality varies by language and content — benchmark both for your use case before committing.
+
+### async_max_wait_secs
+
+**Type:** Integer
+**Default:** `120`
+**Required:** No
+
+Maximum total wait time (seconds) for an async API job to complete. If exceeded, voxtype cleans up the server-side job and surfaces an error. Only used when `async_api = true`.
+
+### Configuration Summary
+
+| Option | CLI Flag | Environment Variable | Default | Description |
+|--------|----------|---------------------|---------|-------------|
+| `api_key` | `--soniox-api-key` | `SONIOX_API_KEY` | none (required) | Soniox API key |
+| `model` | - | - | `"stt-rt-v4"` | Soniox model (`stt-async-v4` when `async_api = true`) |
+| `language_hints` | - | - | `["hu", "en"]` | Language preference |
+| `language_hints_strict` | - | - | `true` | Restrict output to hinted languages (ignored if empty) |
+| `streaming` | - | - | `true` | Live WebSocket vs batch-on-release (realtime only) |
+| `type_partials` | - | - | `true` | Type non-final tokens at cursor (realtime only) |
+| `context` | - | - | none | Free-form domain context (`context.text`) |
+| `terms` | - | - | none | Inline boost terms array (`context.terms`) |
+| `terms_file` | - | - | none | JSON file path with boost terms |
+| `async_api` | - | - | `false` | Use async REST API instead of realtime WS |
+| `async_max_wait_secs` | - | - | `120` | Async job total timeout |
+
+### Complete Example — Realtime (with live partials)
+
+```toml
+engine = "soniox"
+
+[hotkey]
+mode = "toggle"   # Required when [soniox] streaming = true
+
+[soniox]
+language_hints = ["hu", "en"]
+streaming = true
+type_partials = true
+# api_key set via SONIOX_API_KEY env var
+```
+
+### Complete Example — Async (PTT-compatible, batch-only)
+
+```toml
+engine = "soniox"
+
+[hotkey]
+mode = "push_to_talk"   # Works with async_api; no toggle promotion
+
+[soniox]
+async_api = true
+language_hints = ["hu", "en"]
+# model defaults to stt-async-v4 when async_api = true
+# api_key set via SONIOX_API_KEY env var
+```
+
+### Building from Source
+
+Source builds need the `soniox` Cargo feature:
+
+```bash
+cargo build --release --features soniox
+```
+
+The `soniox` feature is independent of the other engine features and adds a small WebSocket client (tokio-tungstenite + rustls) plus an async HTTP client (reqwest) for the async API. It can be combined with any local engine feature, e.g. `--features "soniox parakeet"` for a binary that runs Parakeet locally and Soniox in the cloud depending on the `engine` setting.
+
+---
+
 ## [output]
 
 Controls how transcribed text is delivered.
@@ -1402,7 +1622,13 @@ file_mode = "append"
 wtype does not work on KDE Plasma or GNOME Wayland because these compositors don't support the virtual keyboard protocol. On these desktops, voxtype automatically falls back to dotool (if installed) or ydotool. For ydotool, the daemon must be running (`systemctl --user enable --now ydotool`). See [Troubleshooting](TROUBLESHOOTING.md#wtype-not-working-on-kde-plasma-or-gnome-wayland) for details.
 
 **Note about non-US keyboard layouts:**
-For non-US keyboard layouts (German QWERTZ, French AZERTY, etc.), dotool is recommended over ydotool. Set `dotool_xkb_layout` to your layout code (e.g., `"de"` for German). ydotool does not support keyboard layouts and will produce incorrect characters (e.g., 'y' and 'z' swapped on German layouts).
+For non-US keyboard layouts (German QWERTZ, French AZERTY, etc.), dotool is recommended over ydotool. Set `dotool_xkb_layout` to your layout code (e.g., `"de"` for German) when using direct dotool fallback. ydotool does not support keyboard layouts and will produce incorrect characters (e.g., 'y' and 'z' swapped on German layouts).
+
+For multilingual dictation, prefer `language_to_layout` and
+`language_to_variant` so voxtype can use the right keymap for each
+transcription through direct dotool fallback. `dotoolc` does not work with
+voxtype's variants. When using dotool, you must also switch the active desktop
+keyboard layout to the language/variant you want to type in.
 
 **Note about paste mode:**
 The `paste` mode is an alternative for non-US keyboard layouts. Instead of typing characters directly, it copies text to the clipboard and simulates a paste keystroke. This works regardless of keyboard layout but overwrites your clipboard. Requires wl-copy for clipboard access.
@@ -1502,9 +1728,9 @@ Custom order of output drivers to try when `mode = "type"`. Each driver is tried
 
 **Available drivers:**
 - `wtype` - Wayland virtual keyboard protocol (best CJK/Unicode support, wlroots compositors only)
-- `eitype` - Wayland via libei/EI protocol (works on GNOME, KDE, and compositors with libei support)
-- `dotool` - uinput-based typing (supports keyboard layouts, works on X11/Wayland/TTY)
-- `ydotool` - uinput-based typing (requires daemon, X11/Wayland/TTY)
+- `eitype` - Wayland via libei/EI protocol (works on GNOME, KDE, and compositors with libei support). On KDE Plasma 6, each invocation briefly registers via the XDG RemoteDesktop portal, which can cause a system-tray icon to flicker during streaming dictation (many fast typing calls). Prefer `dotool` for streaming if you're on KDE.
+- `dotool` - uinput-based typing (supports keyboard layouts, works on X11/Wayland/TTY). For streaming backends (Parakeet, Soniox), run `dotoold` to make this **much** faster when no per-call layout or variant hint is needed — see [Streaming performance: dotoold fast path](#streaming-performance-dotoold-fast-path) below.
+- `ydotool` - uinput-based typing (requires `ydotoold` daemon, X11/Wayland/TTY). Fast spawn, but **does not support keyboard layouts** — sends raw US keycodes. Wrong output on non-US layouts (e.g. Hungarian Z/Y swap).
 - `clipboard` - Wayland clipboard via wl-copy
 - `xclip` - X11 clipboard via xclip
 
@@ -1537,15 +1763,92 @@ voxtype --driver=ydotool,clipboard daemon
 
 **Note:** When `driver_order` is set, `fallback_to_clipboard` is ignored—the driver list explicitly defines what's tried.
 
+#### Streaming performance: dotoold fast path
+
+Streaming backends (Parakeet, Soniox) call the output driver many times per session — once for every partial token batch. With direct `dotool` invocations each call spawns a fresh dotool process that pays the kernel uinput device setup cost (**~700-800ms** on most systems). For 60+ partials per session this stacks into 40+ seconds of typing latency — unusable.
+
+dotool ships a daemon/client pair (`dotoold` + `dotoolc`) specifically for this case. When `dotoold` is running and voxtype has no per-call XKB layout or variant hint, voxtype auto-detects its FIFO at `/tmp/dotool-pipe` and routes typing through `dotoolc`, which simply relays commands to the long-lived daemon. The uinput device is registered **once** at daemon startup, not on every typed segment. Sub-10ms per call.
+
+**Strongly recommended** if you use `dotool` as your primary typing driver with any streaming backend.
+
+**Setup as a systemd user unit (persistent across reboots):**
+
+```bash
+mkdir -p ~/.config/systemd/user
+
+cat > ~/.config/systemd/user/dotoold.service <<'EOF'
+[Unit]
+Description=dotool daemon for low-latency keyboard injection
+After=default.target
+
+[Service]
+ExecStart=/usr/bin/dotoold
+# Set DOTOOL_XKB_LAYOUT here when you want the dotoold fast path with one
+# fixed dotool keymap. dotoolc does not work with variants and cannot receive
+# voxtype's per-call XKB hints, so voxtype uses direct dotool instead whenever
+# it needs a layout or variant hint.
+Environment=DOTOOL_XKB_LAYOUT=hu
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF
+
+systemctl --user enable --now dotoold
+```
+
+Replace `hu` with your XKB layout (`de`, `fr`, `us`, etc.).
+
+**Manual test:**
+```bash
+DOTOOL_XKB_LAYOUT=hu dotoold &
+ls -la /tmp/dotool-pipe   # confirm FIFO exists
+```
+
+**Verifying voxtype is using the fast path:**
+
+After dictating a session, check the daemon log:
+```bash
+journalctl --user -u voxtype --since "5 min ago" | grep "typed via"
+```
+- `Text typed via dotoolc (N chars)` — fast path active
+- `Text typed via dotool (N chars)` — direct path; either the daemon is not running or voxtype had a per-call XKB hint
+
+The layout setting for the fast path applies to **the daemon, not the client**.
+If you need the `dotoold` fast path with one fixed layout, set
+`DOTOOL_XKB_LAYOUT` in dotoold's unit file or shell and leave voxtype's dotool
+XKB fields unset.
+
+`dotoolc` does not work with variants and cannot receive voxtype's per-call XKB
+hints. When voxtype has a per-call XKB layout or variant hint, it bypasses
+`dotoolc` and invokes direct `dotool` so the hint is used for text-to-key
+lookup.
+
+**Important direct-dotool caveat:** direct dotool's keyboard layout
+(`DOTOOL_XKB_LAYOUT` / `DOTOOL_XKB_VARIANT`) only controls how dotool converts
+text to key events. It does **not** switch the active desktop/compositor layout.
+If the focused app is still using an English layout, Russian phonetic key events
+will be interpreted as English letters. Switch your desktop layout to the target
+layout/variant before dictating.
+
 ### dotool_xkb_layout
 
 **Type:** String (optional)
 **Default:** None
 **Required:** No
 
-Keyboard layout for dotool output driver. Required for non-US keyboard layouts (German, French, etc.) when using dotool as the typing backend.
+Keyboard layout for direct dotool fallback. Required for non-US keyboard
+layouts (German, French, etc.) when using dotool as the typing backend.
 
-dotool is automatically used as a fallback when wtype fails (e.g., on GNOME/KDE Wayland). Unlike ydotool, dotool supports keyboard layouts via XKB environment variables.
+dotool is automatically used as a fallback when wtype fails (e.g., on GNOME/KDE Wayland). Unlike ydotool, direct dotool fallback supports keyboard layouts via XKB environment variables.
+
+This setting tells direct `dotool` which XKB keymap to use when converting
+Unicode text to physical key events. Setting it in voxtype makes voxtype use
+direct `dotool` instead of the `dotoolc` fast path, because `dotoolc` does not
+work with variants and cannot receive voxtype's per-call XKB hints.
+
+It does not change the active desktop layout. Before dictating with dotool,
+switch your desktop/compositor to the same layout.
 
 **Common values:**
 - `"de"` - German (QWERTZ)
@@ -1567,7 +1870,13 @@ dotool_xkb_layout = "de"  # German keyboard layout
 **Default:** None
 **Required:** No
 
-Keyboard layout variant for dotool. Use this for layout variations like `nodeadkeys`.
+Keyboard layout variant for direct dotool fallback. Use this for layout
+variations like `nodeadkeys`.
+
+`dotoolc` does not work with variants. Setting this in voxtype makes
+voxtype use direct `dotool` so the variant can be passed to that invocation.
+As with `dotool_xkb_layout`, this configures dotool's key lookup only. The
+active desktop layout must already be using the same variant.
 
 **Example:**
 ```toml
@@ -1575,6 +1884,137 @@ Keyboard layout variant for dotool. Use this for layout variations like `nodeadk
 dotool_xkb_layout = "de"
 dotool_xkb_variant = "nodeadkeys"  # German without dead keys
 ```
+
+### eitype_xkb_layout
+
+**Type:** String (optional)
+**Default:** None
+**Required:** No
+
+Keyboard layout passed to eitype as `-l <layout>`. Use this when your
+transcribed language does not match the active system layout (issue #180).
+
+When unset, voxtype derives the layout from the transcriber's detected
+language using [language_to_layout](#language_to_layout). Setting this field
+explicitly disables that auto-detection and forces the chosen layout.
+
+**Example: pin eitype to US regardless of what voxtype detects**
+```toml
+[output]
+mode = "type"
+driver_order = ["eitype"]
+eitype_xkb_layout = "us"
+```
+
+### eitype_xkb_variant
+
+**Type:** String (optional)
+**Default:** None
+**Required:** No
+
+Layout variant passed to eitype as `--variant <variant>` (e.g., `dvorak`,
+`colemak`, `nodeadkeys`).
+
+```toml
+[output]
+eitype_xkb_layout = "de"
+eitype_xkb_variant = "nodeadkeys"
+```
+
+### language_to_layout
+
+**Type:** Table (map of two-letter language code to XKB layout)
+**Default:** Built-in map covering common languages
+
+Maps detected language codes (ISO 639-1, e.g. `en`, `ru`, `de`) to XKB
+keyboard layout codes (e.g. `us`, `ru`, `de`). When a transcriber reports the
+language used for a transcription and neither `eitype_xkb_layout` nor
+`dotool_xkb_layout` is set, voxtype looks the language up in this map and
+passes the resulting layout hint to eitype/dotool for that transcription.
+
+This is what makes the multi-language case from issue #180 work
+end-to-end: with `language = ["en", "ru"]` and `driver_order = ["eitype"]`,
+voxtype detects the spoken language, looks it up here, and tells eitype
+to type with the right keyboard layout.
+
+For dotool, this map chooses the keymap used by direct dotool fallback to
+convert text into key events. `dotoolc` does not work with variants and cannot
+receive voxtype's per-call XKB hints, so voxtype bypasses `dotoolc` for those
+calls. This does not switch the active desktop layout. If you use dotool for
+Russian phonetic typing, switch your desktop layout to Russian phonetic before
+dictating Russian.
+
+**Built-in defaults include:**
+- `en = "us"` (English)
+- `ru = "ru"`, `de = "de"`, `fr = "fr"`, `es = "es"`, `it = "it"`
+- `pl = "pl"`, `uk = "uk"`, `cs = "cs"`, `sk = "sk"`
+- `sv = "sv"`, `no = "no"`, `fi = "fi"`, `da = "da"`, `nl = "nl"`
+- `pt = "pt"`, `tr = "tr"`, `gr = "gr"`, `hu = "hu"`, `ro = "ro"`
+- `bg = "bg"`, `hr = "hr"`, `sr = "sr"`, `sl = "sl"`
+- `lt = "lt"`, `lv = "lv"`, `et = "et"`, `is = "is"`
+- `ca = "ca"`, `eu = "eu"`
+- `el = "gr"` (Greek uses "gr")
+- `ja = "jp"`, `ko = "kr"`
+
+Languages without a mapping fall through with no layout hint (eitype uses
+the system layout).
+
+**Replacing the defaults.** Providing the `[output.language_to_layout]`
+section in your config replaces the entire built-in map (TOML does not
+merge tables). If you want to add a single entry while keeping the
+defaults, copy the entries you need.
+
+**Example: Brazilian Portuguese and Dvorak English**
+```toml
+[output.language_to_layout]
+en = "dvorak"   # English on Dvorak
+pt = "br"       # Brazilian Portuguese layout
+ru = "ru"       # Russian (kept from defaults)
+de = "de"       # German (kept from defaults)
+```
+
+**Disabling auto layout selection.** Set the map to empty to skip layout
+inference entirely; eitype/dotool will use whatever explicit
+`*_xkb_layout` you set (or the system layout):
+```toml
+[output.language_to_layout]
+# (empty)
+```
+
+### language_to_variant
+
+**Type:** Table (map of two-letter language code to XKB layout variant)
+**Default:** Empty
+
+Maps detected language codes to XKB layout variants for that language. Use this
+when a language needs a variant, but that variant must not apply to every
+language you dictate.
+
+This is useful for Russian phonetic typing:
+
+```toml
+[whisper]
+language = ["en", "ru"]
+
+[output.language_to_layout]
+en = "us"
+ru = "ru"
+
+[output.language_to_variant]
+ru = "phonetic"
+```
+
+When Russian is detected, voxtype passes `ru` plus `phonetic` to eitype or
+direct dotool fallback. When English is detected, it passes `us` with no
+variant. `dotoolc` does not work with variants and cannot receive voxtype's
+per-call XKB hints, so voxtype bypasses it for these calls. With dotool, also
+switch the active desktop layout before dictating; otherwise the focused app
+will interpret the key events using whatever layout is currently active.
+
+Explicit driver settings still win. For example, `dotool_xkb_variant =
+"nodeadkeys"` prevents `language_to_variant` from changing dotool's key lookup
+variant, but eitype can still use the per-language variant if
+`eitype_xkb_variant` is unset.
 
 ### file_path
 
@@ -2419,11 +2859,22 @@ Echo cancellation mode for removing speaker bleed-through from the microphone si
 - `"auto"` - Use GTCRN neural speech enhancement on mic audio before transcription, followed by a phrase-level transcript dedup pass. The GTCRN model (~523 KB) is automatically downloaded on first `voxtype meeting start`.
 - `"disabled"` - No enhancement. Use this if you have system-level echo cancellation configured (e.g., PipeWire's `echo-cancel` module) or if you don't use loopback capture.
 
+### vad_threshold
+
+**Type:** Float
+**Default:** `0.01`
+**Required:** No
+
+RMS threshold for meeting chunk voice activity detection. Lower values are more permissive and can help quiet microphones; higher values skip more low-level noise before transcription. Set to `0.0` to disable this pre-transcription gate.
+
+For quiet USB/XLR mics, try `0.001`.
+
 **Example:**
 ```toml
 [meeting.audio]
 loopback_device = "auto"
 echo_cancel = "auto"  # GTCRN enhancement + transcript dedup
+vad_threshold = 0.001  # Optional: quiet mic tuning
 ```
 
 ---
@@ -2766,6 +3217,9 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_FALLBACK_TO_CLIPBOARD` | bool | `output.fallback_to_clipboard` |
 | `VOXTYPE_PASTE_KEYS` | string | `output.paste_keys` |
 | `VOXTYPE_DOTOOL_XKB_LAYOUT` | string | `output.dotool_xkb_layout` |
+| `VOXTYPE_DOTOOL_XKB_VARIANT` | string | `output.dotool_xkb_variant` |
+| `VOXTYPE_EITYPE_XKB_LAYOUT` | string | `output.eitype_xkb_layout` |
+| `VOXTYPE_EITYPE_XKB_VARIANT` | string | `output.eitype_xkb_variant` |
 | `VOXTYPE_SPOKEN_PUNCTUATION` | bool | `text.spoken_punctuation` |
 | `VOXTYPE_SMART_AUTO_SUBMIT` | bool | `text.smart_auto_submit` |
 | `VOXTYPE_FILTER_FILLERS` | bool | `text.filter_filler_words` |
@@ -2997,6 +3451,40 @@ voxtype setup --download --model medium.en
 - `on_demand_loading = true`: Models load in background during recording
 - `gpu_isolation = true`: Fresh subprocess per transcription with requested model
 - `backend = "remote"`: Model name passed to remote server
+
+---
+
+## OSD Frontend
+
+The on-screen display has multiple frontend implementations. Pick which one
+the `voxtype-osd` wrapper launches via `[osd] frontend`.
+
+```toml
+[osd]
+frontend = "gtk4"           # Default. Uses voxtype-osd-gtk4.
+# frontend = "native"       # wgpu/egui-based (voxtype-osd-native).
+# frontend = "quickshell"   # QML/Quickshell launcher (voxtype-osd-quickshell).
+```
+
+If you pick `"quickshell"`, install the QML tree first so the launcher can
+find it:
+
+```bash
+voxtype setup quickshell
+```
+
+That command copies the QML files into `$XDG_DATA_HOME/voxtype/quickshell/`
+(or `~/.local/share/voxtype/quickshell/`), symlinks the
+`voxtype-audio-bridge` sidecar into `$XDG_BIN_HOME/voxtype-audio-bridge`
+(or `~/.local/bin/voxtype-audio-bridge`) so the QML waveform can find
+it on PATH, and prints compositor binding examples for the Wave 2 engine
+picker and meeting controls panels. The AUR packages already install
+the system-wide copy under `/usr/share/voxtype/quickshell/` and ship the
+bridge at `/usr/lib/voxtype/voxtype-audio-bridge`; the per-user QML copy
+is only required for source builds or for customization, and the bridge
+symlink is what puts the sidecar on PATH where the QML expects it. Pass
+`--skip-bridge` if your install already has the bridge on PATH. See the
+[user manual](USER_MANUAL.md#voxtype-setup-quickshell) for details.
 
 ---
 
