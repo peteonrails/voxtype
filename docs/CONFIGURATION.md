@@ -70,7 +70,7 @@ config changes; restart it with `systemctl --user restart voxtype` for the
 new engine to take effect.
 
 **Notes:**
-- All engines except Whisper require an ONNX-enabled binary (`voxtype-*-onnx-*`)
+- Whisper, Remote Whisper, and Soniox run in every binary. The other engines (Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual, Cohere) require an ONNX-enabled binary (`voxtype-*-onnx-*`)
 - Each ONNX engine reads its own `[<engine>]` section (e.g. `[parakeet]`, `[cohere]`)
 - See [PARAKEET.md](PARAKEET.md) for detailed Parakeet setup instructions
 - See [MOONSHINE.md](MOONSHINE.md) for detailed Moonshine setup instructions

@@ -2,7 +2,7 @@
 
 This guide helps you choose the right transcription engine and model for voxtype v0.6.0. The choice depends on your language, hardware, and how you use dictation.
 
-Voxtype has seven transcription engines. Two are bundled with the standard binary (Whisper and Remote Whisper). The other five require the ONNX binary variant.
+Voxtype has eight transcription engines. Three ship in every binary — Whisper (local), Remote Whisper (HTTP API), and Soniox (cloud streaming). The other five require the ONNX binary variant.
 
 ---
 
