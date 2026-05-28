@@ -95,18 +95,23 @@ RUN cargo build --release --features parakeet,moonshine,sensevoice,paraformer,do
     --config 'profile.release.codegen-units=8' \
     && cp target/release/voxtype /tmp/voxtype-onnx-avx2
 
-# Build the OSD launcher and gtk4 frontend in a separate cargo invocation
-# so the daemon binary stays clean of GTK4 / layer-shell baggage. The OSD
-# binaries are engine-agnostic — voxtype-osd is just a launcher and
-# voxtype-osd-gtk4 only renders the audio waveform — so we build them once
-# in the Dockerfile.onnx pipeline and the rest of the release matrix
-# reuses the same artifacts.
+# Build the OSD launcher + frontends + audio bridge in a separate cargo
+# invocation so the daemon binary stays clean of GTK4 / layer-shell baggage.
+# These binaries are engine-agnostic — voxtype-osd is the dispatcher,
+# voxtype-osd-gtk4 renders the audio waveform via GTK4, voxtype-osd-quickshell
+# execs `qs` against the Quickshell shell directory, and voxtype-audio-bridge
+# bridges the daemon's audio.sock to NDJSON for the Quickshell QML modules.
+# All four build with no extra GUI deps beyond what osd-gtk4 already pulls
+# in, so they ride alongside the existing gtk4 build with no overhead.
 RUN cargo build --release --features osd-gtk4 \
     --bin voxtype-osd --bin voxtype-osd-gtk4 \
+    --bin voxtype-osd-quickshell --bin voxtype-audio-bridge \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
     && cp target/release/voxtype-osd /tmp/voxtype-osd \
-    && cp target/release/voxtype-osd-gtk4 /tmp/voxtype-osd-gtk4
+    && cp target/release/voxtype-osd-gtk4 /tmp/voxtype-osd-gtk4 \
+    && cp target/release/voxtype-osd-quickshell /tmp/voxtype-osd-quickshell \
+    && cp target/release/voxtype-audio-bridge /tmp/voxtype-audio-bridge
 
 # Verify binary
 RUN echo "=== Verifying ONNX AVX2 binary ===" \
@@ -127,5 +132,7 @@ CMD mkdir -p /output \
     && cp /tmp/voxtype-onnx-avx2 /output/voxtype-${VERSION}-linux-x86_64-onnx-avx2 \
     && cp /tmp/voxtype-osd /output/voxtype-${VERSION}-linux-x86_64-osd \
     && cp /tmp/voxtype-osd-gtk4 /output/voxtype-${VERSION}-linux-x86_64-osd-gtk4 \
+    && cp /tmp/voxtype-osd-quickshell /output/voxtype-${VERSION}-linux-x86_64-osd-quickshell \
+    && cp /tmp/voxtype-audio-bridge /output/voxtype-${VERSION}-linux-x86_64-audio-bridge \
     && echo "Binaries copied to /output:" \
     && ls -la /output/voxtype-*
