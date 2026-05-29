@@ -144,12 +144,13 @@ fn print_help() {
              -V, --version                Show version.\n\
          \n\
          All other arguments are passed through to the chosen frontend\n\
-         (--config, --width-px, --waveform-gain, etc.). See the frontend's\n\
+         (--config, --width-px, --style, --waveform-gain, etc.). See the frontend's\n\
          own --help for the full list.\n\
          \n\
          CONFIG:\n    \
              [osd]\n    \
              frontend = \"gtk4\"  # or \"native\", \"quickshell\"\n\
+             style = \"waveform\" # or \"compact-pill\" on GTK4\n\
          \n\
          ENV:\n    \
              VOXTYPE_OSD_FRONTEND   Same as --frontend.\n    \

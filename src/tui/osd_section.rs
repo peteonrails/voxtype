@@ -2,7 +2,8 @@
 //!
 //! Surfaces every field on `[osd]` from `OsdConfig` (src/osd/config.rs) so
 //! users can tune the floating waveform/level surface without leaving the
-//! TUI. The OSD binaries (voxtype-osd, voxtype-osd-gtk4, voxtype-osd-native)
+//! TUI. The OSD binaries (voxtype-osd, voxtype-osd-gtk4,
+//! voxtype-osd-native, voxtype-osd-quickshell)
 //! re-read this table at launch — the daemon doesn't load it, so a save
 //! here only takes effect for OSD restarts, not the next dictation.
 
@@ -23,6 +24,7 @@ use super::config_editor::{ConfigEditor, EditorError};
 pub struct OsdState {
     pub enabled: bool,
     pub frontend: String,
+    pub style: String,
     pub position: String,
     pub width_px: i64,
     pub height_px: i64,
@@ -35,7 +37,7 @@ pub struct OsdState {
     pub field: Field,
     pub feedback: Option<(FeedbackLevel, String)>,
     pub dirty_since_load: bool,
-    /// True when neither voxtype-osd-gtk4 nor voxtype-osd-native is on
+    /// True when no OSD frontend binary is on
     /// PATH. The config-form still works (you can edit the table), but the
     /// daemon has nothing to launch and the OSD won't render. Surfaced as
     /// a yellow banner above the form so users don't save in vain.
@@ -46,6 +48,7 @@ pub struct OsdState {
 pub enum Field {
     Enabled,
     Frontend,
+    Style,
     Position,
     WidthPx,
     HeightPx,
@@ -61,6 +64,7 @@ impl Field {
     const ALL: &'static [Field] = &[
         Field::Enabled,
         Field::Frontend,
+        Field::Style,
         Field::Position,
         Field::WidthPx,
         Field::HeightPx,
@@ -75,7 +79,8 @@ impl Field {
 
 const TABLE: &str = "osd";
 
-const FRONTEND_CHOICES: &[&str] = &["gtk4", "native"];
+const FRONTEND_CHOICES: &[&str] = &["gtk4", "native", "quickshell"];
+const STYLE_CHOICES: &[&str] = &["waveform", "compact-pill"];
 const POSITION_CHOICES: &[&str] = &[
     "bottom-center",
     "top-center",
@@ -107,6 +112,9 @@ impl OsdState {
             frontend: ed
                 .get_string(TABLE, "frontend")
                 .unwrap_or_else(|| "gtk4".to_string()),
+            style: ed
+                .get_string(TABLE, "style")
+                .unwrap_or_else(|| "waveform".to_string()),
             position: ed
                 .get_string(TABLE, "position")
                 .unwrap_or_else(|| "bottom-center".to_string()),
@@ -135,6 +143,7 @@ impl OsdState {
         };
         ed.set_bool(TABLE, "enabled", self.enabled);
         ed.set_string(TABLE, "frontend", &self.frontend);
+        ed.set_string(TABLE, "style", &self.style);
         ed.set_string(TABLE, "position", &self.position);
         ed.set_int(TABLE, "width_px", self.width_px);
         ed.set_int(TABLE, "height_px", self.height_px);
@@ -180,6 +189,7 @@ impl OsdState {
         match self.field {
             Field::Enabled => self.enabled = !self.enabled,
             Field::Frontend => self.frontend = cycle_str(FRONTEND_CHOICES, &self.frontend, delta),
+            Field::Style => self.style = cycle_str(STYLE_CHOICES, &self.style, delta),
             Field::Position => self.position = cycle_str(POSITION_CHOICES, &self.position, delta),
             Field::WidthPx => self.width_px = cycle_int(WIDTH_CHOICES, self.width_px, delta),
             Field::HeightPx => self.height_px = cycle_int(HEIGHT_CHOICES, self.height_px, delta),
@@ -217,10 +227,13 @@ fn osd_binary_available() -> bool {
     const CANDIDATES: &[&str] = &[
         "/usr/bin/voxtype-osd-gtk4",
         "/usr/bin/voxtype-osd-native",
+        "/usr/bin/voxtype-osd-quickshell",
         "/usr/lib/voxtype/voxtype-osd-gtk4",
         "/usr/lib/voxtype/voxtype-osd-native",
+        "/usr/lib/voxtype/voxtype-osd-quickshell",
         "/usr/local/bin/voxtype-osd-gtk4",
         "/usr/local/bin/voxtype-osd-native",
+        "/usr/local/bin/voxtype-osd-quickshell",
     ];
     if CANDIDATES.iter().any(|p| Path::new(p).exists()) {
         return true;
@@ -234,6 +247,7 @@ fn osd_binary_available() -> bool {
             }
             if Path::new(dir).join("voxtype-osd-gtk4").exists()
                 || Path::new(dir).join("voxtype-osd-native").exists()
+                || Path::new(dir).join("voxtype-osd-quickshell").exists()
             {
                 return true;
             }
@@ -300,6 +314,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             "Frontend",
             state.frontend.clone(),
         ),
+        FormRowSpec::new(state.field == Field::Style, "Style", state.style.clone()),
         FormRowSpec::new(
             state.field == Field::Position,
             "Position",
@@ -352,8 +367,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     // save/error feedback wins if the user has interacted, so this only
     // shows on first render of an unconfigured install.
     let missing_msg = "OSD binaries not installed. Saving the config will work but \
-                       nothing will render until voxtype-osd-gtk4 (Arch: gtk4-layer-shell) \
-                       or voxtype-osd-native is installed.";
+                       nothing will render until voxtype-osd-gtk4 (Arch: gtk4-layer-shell), \
+                       voxtype-osd-native, or voxtype-osd-quickshell is installed.";
     let feedback_pair = match state.feedback.as_ref() {
         Some((lvl, msg)) => Some((*lvl, msg.as_str())),
         None if state.binary_missing => Some((FeedbackLevel::Warn, missing_msg)),
@@ -394,12 +409,12 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
             heading("Enabled"),
             Line::from(""),
             Line::from(
-                "Master switch for the floating OSD. When off, both \
-                 voxtype-osd-gtk4 and voxtype-osd-native exit immediately at \
+                "Master switch for the floating OSD. When off, OSD frontends \
+                 exit immediately at \
                  launch and the daemon doesn't render anything on screen.",
             ),
             Line::from(""),
-            dim("Per-state visibility (idle/recording/transcribing) is fixed: the OSD always shows during recording."),
+            dim("Per-state visibility (idle/recording/transcribing/outputting) is fixed: the OSD always shows during recording."),
         ],
         Field::Frontend => vec![
             heading("Frontend"),
@@ -416,7 +431,24 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
             Line::from("  native  SCTK + wgpu + egui. Skips GTK4 entirely if you want to"),
             Line::from("          avoid GTK in your stack. Slightly heavier first-paint."),
             Line::from(""),
+            Line::from("  quickshell  QML/Quickshell frontend. Requires `voxtype setup quickshell`."),
+            Line::from(""),
             dim("If the chosen binary isn't on PATH, the wrapper falls back to whichever it finds and logs a warning."),
+        ],
+        Field::Style => vec![
+            heading("Style"),
+            Line::from(""),
+            Line::from(
+                "Visual style drawn inside the OSD surface. This changes the \
+                 indicator only; recording and transcription behavior stay \
+                 the same.",
+            ),
+            Line::from(""),
+            Line::from("  waveform      Original scrolling waveform plus peak meter. Default."),
+            Line::from("  compact-pill  Compact GTK4 pill with a voice glyph, processing"),
+            Line::from("                bar, and completion checkmark."),
+            Line::from(""),
+            dim("Non-GTK4 frontends currently render their default waveform-style UI."),
         ],
         Field::Position => vec![
             heading("Position"),

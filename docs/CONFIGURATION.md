@@ -3047,15 +3047,112 @@ Voxtype outputs an `alt` field in JSON that enables Waybar's `format-icons` feat
            "idle": "",
            "recording": "",
            "transcribing": "",
+           "outputting": "",
            "stopped": ""
        },
        "tooltip": true
    }
    ```
 
-The `alt` field values match state names: `idle`, `recording`, `transcribing`, `stopped`.
+The `alt` field values match state names: `idle`, `recording`, `transcribing`, `outputting`, `stopped`.
 
 See [User Manual - Waybar Integration](USER_MANUAL.md#with-waybar-status-indicator) for complete setup instructions.
+
+---
+
+## [osd]
+
+Controls the floating on-screen visualizer.
+
+### enabled
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Enable or disable the OSD process.
+
+### frontend
+
+**Type:** String
+**Default:** `"gtk4"`
+**Required:** No
+
+Selects which OSD frontend the `voxtype-osd` launcher starts.
+
+**Values:**
+- `gtk4` - GTK4 + layer-shell frontend (default)
+- `native` - SCTK + wgpu + egui frontend
+- `quickshell` - QML/Quickshell launcher
+
+### style
+
+**Type:** String
+**Default:** `"waveform"`
+**Required:** No
+
+Selects the visual style drawn inside the OSD surface.
+
+**Values:**
+- `waveform` - Original scrolling waveform with segmented peak meter
+- `compact-pill` - Compact GTK4 pill with a centered voice glyph, processing bar, and completion checkmark
+
+**Example:**
+```toml
+[osd]
+frontend = "gtk4"
+style = "compact-pill"
+```
+
+The native frontend currently renders the waveform style. If `style = "compact-pill"` is set with `frontend = "native"`, the native frontend logs a warning and continues with the waveform renderer.
+
+### width_px / height_px
+
+**Type:** Integer
+**Defaults:** `400` / `48`
+**Required:** No
+
+Surface size in physical pixels.
+
+### position
+
+**Type:** String
+**Default:** `"bottom-center"`
+**Required:** No
+
+Anchor point for the OSD.
+
+**Values:**
+- `bottom-center`
+- `top-center`
+- `bottom-left`
+- `bottom-right`
+- `top-left`
+- `top-right`
+
+### margin_px / top_margin
+
+**Types:** Integer / Float
+**Defaults:** `24` / `0.85`
+**Required:** No
+
+`margin_px` controls corner anchors. Centered anchors use `top_margin`, a fraction of monitor height, so the OSD aligns with swayosd-style system feedback.
+
+### opacity
+
+**Type:** Float
+**Default:** `0.95`
+**Required:** No
+
+Background opacity from `0.0` to `1.0`.
+
+### waveform_window_secs / peak_decay_db_per_sec / waveform_gain
+
+**Types:** Float
+**Defaults:** `3.0` / `6.0` / `10.0`
+**Required:** No
+
+Waveform and level tuning. `waveform_gain` is visual only and does not affect transcription.
 
 ---
 
@@ -3071,6 +3168,7 @@ Path to a state file for external integrations like Waybar or Polybar. When conf
 - `idle` - Ready for input
 - `recording` - Push-to-talk active, capturing audio
 - `transcribing` - Processing audio through Whisper
+- `outputting` - Writing the finished text to the configured output target
 
 **Special values:**
 - `"auto"` - Uses `$XDG_RUNTIME_DIR/voxtype/state` (default, recommended)

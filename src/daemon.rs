@@ -2095,6 +2095,7 @@ impl Daemon {
                         *state = State::Outputting {
                             text: final_text.clone(),
                         };
+                        self.update_state("outputting");
 
                         let file_mode = &self.config.output.file_mode;
                         match write_transcription_to_file(&output_path, &final_text, file_mode)
@@ -2220,6 +2221,7 @@ impl Daemon {
                     *state = State::Outputting {
                         text: final_text.clone(),
                     };
+                    self.update_state("outputting");
 
                     let output_options = output::OutputOptions {
                         pre_output_command: output_config.pre_output_command.as_deref(),
