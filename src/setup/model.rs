@@ -856,6 +856,147 @@ impl ModelArtifact for CohereModelInfo {
 }
 
 // =============================================================================
+// Registry export (for the mirror script)
+// =============================================================================
+
+/// One entry in the registry consumed by the `voxtype-mirror-registry`
+/// helper binary. The mirror script reads JSON-serialised
+/// `RegistryEntry`s and iterates them to populate R2 from upstream HF.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RegistryEntry {
+    pub engine_prefix: &'static str,
+    pub name: String,
+    pub upstream_repo: String,
+    /// Mapping from upstream HF repo path to the local file path we
+    /// publish on R2. Identical to what `download_artifact` writes to
+    /// disk. The mirror script keeps the local form authoritative so
+    /// the manifest's sha256s match what the runtime will see.
+    pub files: Vec<RegistryFile>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RegistryFile {
+    pub upstream_path: String,
+    pub local_path: String,
+}
+
+/// Snapshot the full ONNX-engine model registry (Parakeet, Moonshine,
+/// SenseVoice, Paraformer, Dolphin, Omnilingual, Cohere) into a single
+/// flat list. Used by `voxtype-mirror-registry` to drive
+/// `scripts/mirror-models-to-r2.sh`.
+pub fn registry_snapshot() -> Vec<RegistryEntry> {
+    let mut out = Vec::new();
+    for m in PARAKEET_MODELS {
+        out.push(RegistryEntry {
+            engine_prefix: "parakeet",
+            name: m.name.to_string(),
+            upstream_repo: m.huggingface_repo.to_string(),
+            // Parakeet's `files` is `(filename, size)`; the same name is
+            // used upstream and locally.
+            files: m
+                .files
+                .iter()
+                .map(|(f, _)| RegistryFile {
+                    upstream_path: (*f).to_string(),
+                    local_path: (*f).to_string(),
+                })
+                .collect(),
+        });
+    }
+    for m in MOONSHINE_MODELS {
+        out.push(RegistryEntry {
+            engine_prefix: "moonshine",
+            name: m.dir_name.to_string(),
+            upstream_repo: m.huggingface_repo.to_string(),
+            files: m
+                .files
+                .iter()
+                .map(|(remote, local)| RegistryFile {
+                    upstream_path: (*remote).to_string(),
+                    local_path: (*local).to_string(),
+                })
+                .collect(),
+        });
+    }
+    for m in SENSEVOICE_MODELS {
+        out.push(RegistryEntry {
+            engine_prefix: "sensevoice",
+            name: m.dir_name.to_string(),
+            upstream_repo: m.huggingface_repo.to_string(),
+            files: m
+                .files
+                .iter()
+                .map(|(remote, local)| RegistryFile {
+                    upstream_path: (*remote).to_string(),
+                    local_path: (*local).to_string(),
+                })
+                .collect(),
+        });
+    }
+    for m in PARAFORMER_MODELS {
+        out.push(RegistryEntry {
+            engine_prefix: "paraformer",
+            name: m.dir_name.to_string(),
+            upstream_repo: m.huggingface_repo.to_string(),
+            files: m
+                .files
+                .iter()
+                .map(|(remote, local)| RegistryFile {
+                    upstream_path: (*remote).to_string(),
+                    local_path: (*local).to_string(),
+                })
+                .collect(),
+        });
+    }
+    for m in DOLPHIN_MODELS {
+        out.push(RegistryEntry {
+            engine_prefix: "dolphin",
+            name: m.dir_name.to_string(),
+            upstream_repo: m.huggingface_repo.to_string(),
+            files: m
+                .files
+                .iter()
+                .map(|(remote, local)| RegistryFile {
+                    upstream_path: (*remote).to_string(),
+                    local_path: (*local).to_string(),
+                })
+                .collect(),
+        });
+    }
+    for m in OMNILINGUAL_MODELS {
+        out.push(RegistryEntry {
+            engine_prefix: "omnilingual",
+            name: m.dir_name.to_string(),
+            upstream_repo: m.huggingface_repo.to_string(),
+            files: m
+                .files
+                .iter()
+                .map(|(remote, local)| RegistryFile {
+                    upstream_path: (*remote).to_string(),
+                    local_path: (*local).to_string(),
+                })
+                .collect(),
+        });
+    }
+    for m in COHERE_MODELS {
+        out.push(RegistryEntry {
+            engine_prefix: "cohere",
+            name: m.dir_name.to_string(),
+            upstream_repo: m.huggingface_repo.to_string(),
+            files: m
+                .files
+                .iter()
+                .map(|(remote, local)| RegistryFile {
+                    upstream_path: (*remote).to_string(),
+                    local_path: (*local).to_string(),
+                })
+                .collect(),
+        });
+    }
+    out
+}
+
+// =============================================================================
 // Unified R2 downloader
 // =============================================================================
 

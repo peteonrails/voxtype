@@ -305,6 +305,13 @@ path = "src/bin/voxtype_audio_bridge.rs"
 name = "voxtype-osd-quickshell"
 path = "src/bin/voxtype_osd_quickshell.rs"
 
+# Internal helper that dumps the ONNX model registry as JSON for the
+# `scripts/mirror-models-to-r2.sh` script. Not shipped in releases; it's
+# a build-tree-only utility for populating R2 from upstream HF.
+[[bin]]
+name = "voxtype-mirror-registry"
+path = "src/bin/voxtype_mirror_registry.rs"
+
 [[example]]
 name = "inspect_cohere_onnx"
 required-features = ["cohere"]
