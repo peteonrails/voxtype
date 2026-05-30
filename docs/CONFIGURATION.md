@@ -2982,6 +2982,24 @@ Each session produces files sharing a timestamped stem (e.g. `2026-04-20T14-32-0
 | CLI | `--corpus` / `--no-corpus` / `--corpus-path <DIR>` |
 | Env | `VOXTYPE_CORPUS_ENABLED=true`, `VOXTYPE_CORPUS_PATH=/path` |
 
+### Operational notes
+
+- **Disk growth.** Audio is uncompressed 16 kHz mono int16 PCM (~32 KB/sec).
+  Roughly 115 MB per hour of speech. There is no built-in rotation or size
+  cap; long-term use needs an external cleanup policy (e.g. a cron job that
+  prunes sessions older than N days). Watch this directory if you dictate
+  hours per day.
+- **Streaming engines (Parakeet, Soniox).** Only the final aggregated text
+  per session is captured. Intermediate partials are not recorded — fine for
+  a post-processing training corpus, but be aware if you were hoping to
+  study mid-utterance revisions.
+- **Crash recovery.** If voxtype is killed between writing the `.wav` and
+  the `.json` sidecar, the session is left orphaned. Corpus consumers
+  should filter by the presence of `<stem>.json` to skip partial sessions.
+- **Schema version.** The `.json` sidecar carries a `schema_version` field
+  (currently `1`). New optional fields may appear without bumping the
+  version; incompatible changes will increment it.
+
 ---
 
 ## [status]

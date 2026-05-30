@@ -83,8 +83,19 @@ pub struct TextStages {
     pub post: bool,
 }
 
+/// Sidecar schema version. Bump on incompatible field changes so consumers
+/// can branch on it. Backwards-compatible additions (new optional fields)
+/// do not require a bump.
+pub const SIDECAR_SCHEMA_VERSION: u32 = 1;
+
+fn default_schema_version() -> u32 {
+    SIDECAR_SCHEMA_VERSION
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSidecar {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     pub id: String,
     pub recorded_at: DateTime<Local>,
     pub duration_secs: f32,
@@ -173,6 +184,7 @@ impl CorpusWriter {
         }
 
         let sidecar = SessionSidecar {
+            schema_version: SIDECAR_SCHEMA_VERSION,
             id: stem.clone(),
             recorded_at: session.recorded_at,
             duration_secs: session.duration_secs,
@@ -250,6 +262,7 @@ mod tests {
         use chrono::{Local, TimeZone};
         let dt = Local.with_ymd_and_hms(2026, 4, 20, 14, 32, 5).unwrap();
         let sidecar = SessionSidecar {
+            schema_version: SIDECAR_SCHEMA_VERSION,
             id: "2026-04-20T14-32-05_a7f3".to_string(),
             recorded_at: dt,
             duration_secs: 4.73,
@@ -282,6 +295,7 @@ mod tests {
     fn sidecar_serializes_with_null_optionals() {
         use chrono::Local;
         let sidecar = SessionSidecar {
+            schema_version: SIDECAR_SCHEMA_VERSION,
             id: "x".to_string(),
             recorded_at: Local::now(),
             duration_secs: 1.0,
