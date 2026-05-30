@@ -284,3 +284,303 @@ pub enum CompositorType {
         show: bool,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_setup_quiet_flag() {
+        let cli = Cli::parse_from(["voxtype", "setup", "--quiet"]);
+        match cli.command {
+            Some(Commands::Setup { quiet, .. }) => {
+                assert!(quiet, "setup --quiet should set quiet=true");
+            }
+            _ => panic!("Expected Setup command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_no_post_install_flag() {
+        let cli = Cli::parse_from(["voxtype", "setup", "--no-post-install"]);
+        match cli.command {
+            Some(Commands::Setup {
+                no_post_install,
+                quiet,
+                ..
+            }) => {
+                assert!(
+                    no_post_install,
+                    "setup --no-post-install should set no_post_install=true"
+                );
+                assert!(!quiet, "quiet should be false");
+            }
+            _ => panic!("Expected Setup command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_without_flags() {
+        let cli = Cli::parse_from(["voxtype", "setup"]);
+        match cli.command {
+            Some(Commands::Setup {
+                quiet,
+                no_post_install,
+                ..
+            }) => {
+                assert!(!quiet, "setup without --quiet should have quiet=false");
+                assert!(
+                    !no_post_install,
+                    "setup without --no-post-install should have no_post_install=false"
+                );
+            }
+            _ => panic!("Expected Setup command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_quiet_with_download() {
+        let cli = Cli::parse_from(["voxtype", "setup", "--quiet", "--download"]);
+        match cli.command {
+            Some(Commands::Setup {
+                quiet, download, ..
+            }) => {
+                assert!(quiet, "should have quiet=true");
+                assert!(download, "should have download=true");
+            }
+            _ => panic!("Expected Setup command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_both_quiet_flags() {
+        // Both flags can be used together (quiet takes precedence)
+        let cli = Cli::parse_from(["voxtype", "setup", "--quiet", "--no-post-install"]);
+        match cli.command {
+            Some(Commands::Setup {
+                quiet,
+                no_post_install,
+                ..
+            }) => {
+                assert!(quiet, "should have quiet=true");
+                assert!(no_post_install, "should have no_post_install=true");
+            }
+            _ => panic!("Expected Setup command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_no_post_install_with_download() {
+        let cli = Cli::parse_from(["voxtype", "setup", "--no-post-install", "--download"]);
+        match cli.command {
+            Some(Commands::Setup {
+                quiet,
+                no_post_install,
+                download,
+                ..
+            }) => {
+                assert!(!quiet, "quiet should be false");
+                assert!(no_post_install, "should have no_post_install=true");
+                assert!(download, "should have download=true");
+            }
+            _ => panic!("Expected Setup command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_all_flags() {
+        let cli = Cli::parse_from([
+            "voxtype",
+            "setup",
+            "--quiet",
+            "--no-post-install",
+            "--download",
+        ]);
+        match cli.command {
+            Some(Commands::Setup {
+                quiet,
+                no_post_install,
+                download,
+                ..
+            }) => {
+                assert!(quiet, "should have quiet=true");
+                assert!(no_post_install, "should have no_post_install=true");
+                assert!(download, "should have download=true");
+            }
+            _ => panic!("Expected Setup command"),
+        }
+    }
+
+    #[test]
+    fn test_model_set_restart_flags() {
+        let cli = Cli::parse_from([
+            "voxtype",
+            "setup",
+            "model",
+            "--set",
+            "large-v3",
+            "--restart",
+        ]);
+        match cli.command {
+            Some(Commands::Setup {
+                action: Some(SetupAction::Model { set, restart, .. }),
+                ..
+            }) => {
+                assert_eq!(set, Some("large-v3".to_string()));
+                assert!(restart, "should have restart=true");
+            }
+            _ => panic!("Expected Setup Model command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_download_with_model() {
+        let cli = Cli::parse_from([
+            "voxtype",
+            "setup",
+            "--download",
+            "--model",
+            "large-v3-turbo",
+        ]);
+        match cli.command {
+            Some(Commands::Setup {
+                download, model, ..
+            }) => {
+                assert!(download, "should have download=true");
+                assert_eq!(model, Some("large-v3-turbo".to_string()));
+            }
+            _ => panic!("Expected Setup command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_model_without_download() {
+        // --model can be specified without --download (for validation/config update of existing model)
+        let cli = Cli::parse_from(["voxtype", "setup", "--model", "small.en"]);
+        match cli.command {
+            Some(Commands::Setup {
+                download, model, ..
+            }) => {
+                assert!(!download, "download should be false");
+                assert_eq!(model, Some("small.en".to_string()));
+            }
+            _ => panic!("Expected Setup command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_download_model_quiet() {
+        // Full non-interactive setup command
+        let cli = Cli::parse_from([
+            "voxtype",
+            "setup",
+            "--download",
+            "--model",
+            "large-v3-turbo",
+            "--quiet",
+        ]);
+        match cli.command {
+            Some(Commands::Setup {
+                download,
+                model,
+                quiet,
+                ..
+            }) => {
+                assert!(download, "should have download=true");
+                assert_eq!(model, Some("large-v3-turbo".to_string()));
+                assert!(quiet, "should have quiet=true");
+            }
+            _ => panic!("Expected Setup command"),
+        }
+    }
+
+    // =========================================================================
+    // DMS setup tests
+    // =========================================================================
+
+    #[test]
+    fn test_setup_dms_install() {
+        let cli = Cli::parse_from(["voxtype", "setup", "dms", "--install"]);
+        match cli.command {
+            Some(Commands::Setup {
+                action:
+                    Some(SetupAction::Dms {
+                        install,
+                        uninstall,
+                        qml,
+                    }),
+                ..
+            }) => {
+                assert!(install, "should have install=true");
+                assert!(!uninstall, "should have uninstall=false");
+                assert!(!qml, "should have qml=false");
+            }
+            _ => panic!("Expected Setup Dms command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_dms_uninstall() {
+        let cli = Cli::parse_from(["voxtype", "setup", "dms", "--uninstall"]);
+        match cli.command {
+            Some(Commands::Setup {
+                action:
+                    Some(SetupAction::Dms {
+                        install,
+                        uninstall,
+                        qml,
+                    }),
+                ..
+            }) => {
+                assert!(!install, "should have install=false");
+                assert!(uninstall, "should have uninstall=true");
+                assert!(!qml, "should have qml=false");
+            }
+            _ => panic!("Expected Setup Dms command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_dms_qml() {
+        let cli = Cli::parse_from(["voxtype", "setup", "dms", "--qml"]);
+        match cli.command {
+            Some(Commands::Setup {
+                action:
+                    Some(SetupAction::Dms {
+                        install,
+                        uninstall,
+                        qml,
+                    }),
+                ..
+            }) => {
+                assert!(!install, "should have install=false");
+                assert!(!uninstall, "should have uninstall=false");
+                assert!(qml, "should have qml=true");
+            }
+            _ => panic!("Expected Setup Dms command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_dms_default() {
+        let cli = Cli::parse_from(["voxtype", "setup", "dms"]);
+        match cli.command {
+            Some(Commands::Setup {
+                action:
+                    Some(SetupAction::Dms {
+                        install,
+                        uninstall,
+                        qml,
+                    }),
+                ..
+            }) => {
+                assert!(!install, "should have install=false");
+                assert!(!uninstall, "should have uninstall=false");
+                assert!(!qml, "should have qml=false");
+            }
+            _ => panic!("Expected Setup Dms command"),
+        }
+    }
+}

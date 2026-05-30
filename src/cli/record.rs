@@ -284,3 +284,536 @@ impl RecordAction {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_record_cancel() {
+        let cli = Cli::parse_from(["voxtype", "record", "cancel"]);
+        match cli.command {
+            Some(Commands::Record {
+                action: RecordAction::Cancel,
+            }) => {
+                // Success - cancel action parsed correctly
+            }
+            _ => panic!("Expected Record Cancel command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_no_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "start"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.output_mode_override(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_paste_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--paste"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::Paste)
+                );
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_clipboard_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--clipboard"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::Clipboard)
+                );
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_type_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--type"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::Type)
+                );
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_stop_paste_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "stop", "--paste"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::Paste)
+                );
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_toggle_paste_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "toggle", "--paste"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::Paste)
+                );
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_file_with_path() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--file=out.txt"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::File)
+                );
+                assert_eq!(action.file_path(), Some("out.txt"));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_model_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--model", "large-v3-turbo"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.model_override(), Some("large-v3-turbo"));
+                assert_eq!(action.output_mode_override(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_file_without_path() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--file"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::File)
+                );
+                assert_eq!(action.file_path(), Some("")); // Empty string means use config path
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_model_and_output_override() {
+        let cli = Cli::parse_from([
+            "voxtype",
+            "record",
+            "start",
+            "--model",
+            "large-v3-turbo",
+            "--clipboard",
+        ]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.model_override(), Some("large-v3-turbo"));
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::Clipboard)
+                );
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_file_with_absolute_path() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--file=/tmp/output.txt"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::File)
+                );
+                assert_eq!(action.file_path(), Some("/tmp/output.txt"));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_toggle_model_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "toggle", "--model", "medium.en"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.model_override(), Some("medium.en"));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_toggle_file_with_path() {
+        let cli = Cli::parse_from(["voxtype", "record", "toggle", "--file=out.txt"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::File)
+                );
+                assert_eq!(action.file_path(), Some("out.txt"));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_toggle_file_without_path() {
+        let cli = Cli::parse_from(["voxtype", "record", "toggle", "--file"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::File)
+                );
+                assert_eq!(action.file_path(), Some("")); // Empty string means use config path
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_toggle_file_mutually_exclusive_with_clipboard() {
+        let result = Cli::try_parse_from([
+            "voxtype",
+            "record",
+            "toggle",
+            "--file=out.txt",
+            "--clipboard",
+        ]);
+        assert!(
+            result.is_err(),
+            "Should not allow both --file and --clipboard on toggle"
+        );
+    }
+
+    #[test]
+    fn test_record_start_file_mutually_exclusive_with_paste() {
+        let result =
+            Cli::try_parse_from(["voxtype", "record", "start", "--file=out.txt", "--paste"]);
+        assert!(result.is_err(), "Should not allow both --file and --paste");
+    }
+
+    #[test]
+    fn test_record_start_file_mutually_exclusive_with_clipboard() {
+        let result = Cli::try_parse_from([
+            "voxtype",
+            "record",
+            "start",
+            "--file=out.txt",
+            "--clipboard",
+        ]);
+        assert!(
+            result.is_err(),
+            "Should not allow both --file and --clipboard"
+        );
+    }
+
+    #[test]
+    fn test_record_start_file_mutually_exclusive_with_type() {
+        let result =
+            Cli::try_parse_from(["voxtype", "record", "start", "--file=out.txt", "--type"]);
+        assert!(result.is_err(), "Should not allow both --file and --type");
+    }
+
+    #[test]
+    fn test_record_cancel_no_model() {
+        let cli = Cli::parse_from(["voxtype", "record", "cancel"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.model_override(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_with_profile() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--profile", "slack"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.profile(), Some("slack"));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    // =========================================================================
+    // Profile flag tests
+    // =========================================================================
+
+    #[test]
+    fn test_record_toggle_with_profile() {
+        let cli = Cli::parse_from(["voxtype", "record", "toggle", "--profile", "code"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.profile(), Some("code"));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_without_profile() {
+        let cli = Cli::parse_from(["voxtype", "record", "start"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.profile(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_stop_has_no_profile() {
+        // Stop command doesn't have --profile flag
+        let cli = Cli::parse_from(["voxtype", "record", "stop"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.profile(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_cancel_has_no_profile() {
+        let cli = Cli::parse_from(["voxtype", "record", "cancel"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.profile(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_profile_with_output_mode() {
+        // Profile can be used together with output mode overrides
+        let cli = Cli::parse_from([
+            "voxtype",
+            "record",
+            "start",
+            "--profile",
+            "slack",
+            "--clipboard",
+        ]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.profile(), Some("slack"));
+                assert_eq!(
+                    action.output_mode_override(),
+                    Some(OutputModeOverride::Clipboard)
+                );
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_auto_submit() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--auto-submit"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.auto_submit_override(), Some(true));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_no_auto_submit() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--no-auto-submit"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.auto_submit_override(), Some(false));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_auto_submit_default() {
+        let cli = Cli::parse_from(["voxtype", "record", "start"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.auto_submit_override(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_toggle_auto_submit() {
+        let cli = Cli::parse_from(["voxtype", "record", "toggle", "--auto-submit"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.auto_submit_override(), Some(true));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_shift_enter_newlines() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--shift-enter-newlines"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.shift_enter_newlines_override(), Some(true));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_no_shift_enter_newlines() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--no-shift-enter-newlines"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.shift_enter_newlines_override(), Some(false));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_shift_enter_default() {
+        let cli = Cli::parse_from(["voxtype", "record", "start"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.shift_enter_newlines_override(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_stop_has_no_auto_submit() {
+        let cli = Cli::parse_from(["voxtype", "record", "stop"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.auto_submit_override(), None);
+                assert_eq!(action.shift_enter_newlines_override(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    // =========================================================================
+    // Smart auto-submit flag tests
+    // =========================================================================
+
+    #[test]
+    fn test_record_start_smart_auto_submit_enable() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--smart-auto-submit"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.smart_auto_submit_override(), Some(true));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_no_smart_auto_submit() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--no-smart-auto-submit"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.smart_auto_submit_override(), Some(false));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_smart_auto_submit_mutual_exclusion() {
+        let result = Cli::try_parse_from([
+            "voxtype",
+            "record",
+            "start",
+            "--smart-auto-submit",
+            "--no-smart-auto-submit",
+        ]);
+        assert!(
+            result.is_err(),
+            "Should not allow both flags simultaneously"
+        );
+    }
+
+    #[test]
+    fn test_record_start_smart_auto_submit_no_flags_returns_none() {
+        let cli = Cli::parse_from(["voxtype", "record", "start"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.smart_auto_submit_override(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_toggle_smart_auto_submit_enable() {
+        let cli = Cli::parse_from(["voxtype", "record", "toggle", "--smart-auto-submit"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.smart_auto_submit_override(), Some(true));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_toggle_no_smart_auto_submit() {
+        let cli = Cli::parse_from(["voxtype", "record", "toggle", "--no-smart-auto-submit"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.smart_auto_submit_override(), Some(false));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_stop_has_no_smart_auto_submit_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "stop"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.smart_auto_submit_override(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+}

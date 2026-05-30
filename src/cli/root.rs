@@ -532,3 +532,113 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::*;
+    use clap::Parser;
+
+    // =========================================================================
+    // Engine flag tests
+    // =========================================================================
+
+    #[test]
+    fn test_engine_flag_whisper() {
+        let cli = Cli::parse_from(["voxtype", "--engine", "whisper"]);
+        assert_eq!(cli.engine, Some("whisper".to_string()));
+    }
+
+    #[test]
+    fn test_engine_flag_parakeet() {
+        let cli = Cli::parse_from(["voxtype", "--engine", "parakeet"]);
+        assert_eq!(cli.engine, Some("parakeet".to_string()));
+    }
+
+    #[test]
+    fn test_engine_flag_not_set() {
+        let cli = Cli::parse_from(["voxtype"]);
+        assert!(cli.engine.is_none());
+    }
+
+    #[test]
+    fn test_engine_flag_with_daemon_command() {
+        let cli = Cli::parse_from(["voxtype", "--engine", "parakeet", "daemon"]);
+        assert_eq!(cli.engine, Some("parakeet".to_string()));
+        assert!(matches!(cli.command, Some(Commands::Daemon)));
+    }
+
+    #[test]
+    fn test_engine_flag_with_model_flag() {
+        let cli = Cli::parse_from(["voxtype", "--engine", "whisper", "--model", "large-v3"]);
+        assert_eq!(cli.engine, Some("whisper".to_string()));
+        assert_eq!(cli.model, Some("large-v3".to_string()));
+    }
+
+    #[test]
+    fn test_engine_flag_case_preserved() {
+        // The CLI should preserve case as-is; main.rs handles case-insensitive matching
+        let cli = Cli::parse_from(["voxtype", "--engine", "PARAKEET"]);
+        assert_eq!(cli.engine, Some("PARAKEET".to_string()));
+    }
+
+    // =========================================================================
+    // Driver flag tests
+    // =========================================================================
+
+    #[test]
+    fn test_driver_flag() {
+        let cli = Cli::parse_from(["voxtype", "--driver=ydotool,wtype"]);
+        assert_eq!(cli.driver, Some("ydotool,wtype".to_string()));
+    }
+
+    #[test]
+    fn test_driver_flag_single() {
+        let cli = Cli::parse_from(["voxtype", "--driver=ydotool"]);
+        assert_eq!(cli.driver, Some("ydotool".to_string()));
+    }
+
+    #[test]
+    fn test_driver_flag_not_set() {
+        let cli = Cli::parse_from(["voxtype"]);
+        assert!(cli.driver.is_none());
+    }
+
+    // =========================================================================
+    // Transcribe engine flag tests
+    // =========================================================================
+
+    #[test]
+    fn test_transcribe_engine_flag() {
+        let cli = Cli::parse_from(["voxtype", "transcribe", "test.wav", "--engine", "moonshine"]);
+        match cli.command {
+            Some(Commands::Transcribe { file, engine }) => {
+                assert_eq!(file, std::path::PathBuf::from("test.wav"));
+                assert_eq!(engine, Some("moonshine".to_string()));
+            }
+            _ => panic!("Expected Transcribe command"),
+        }
+    }
+
+    #[test]
+    fn test_transcribe_engine_flag_not_set() {
+        let cli = Cli::parse_from(["voxtype", "transcribe", "test.wav"]);
+        match cli.command {
+            Some(Commands::Transcribe { engine, .. }) => {
+                assert!(engine.is_none());
+            }
+            _ => panic!("Expected Transcribe command"),
+        }
+    }
+
+    #[test]
+    fn test_transcribe_engine_whisper() {
+        let cli = Cli::parse_from(["voxtype", "transcribe", "test.wav", "--engine", "whisper"]);
+        match cli.command {
+            Some(Commands::Transcribe { engine, .. }) => {
+                assert_eq!(engine, Some("whisper".to_string()));
+            }
+            _ => panic!("Expected Transcribe command"),
+        }
+    }
+}

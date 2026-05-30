@@ -105,3 +105,89 @@ pub enum MeetingAction {
         output: Option<std::path::PathBuf>,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_meeting_start_diarization_simple_flag() {
+        let cli = Cli::parse_from(["voxtype", "meeting", "start", "--diarization", "simple"]);
+        match cli.command {
+            Some(Commands::Meeting {
+                action: MeetingAction::Start { diarization, .. },
+            }) => {
+                assert_eq!(diarization.as_deref(), Some("simple"));
+            }
+            _ => panic!("Expected Meeting Start command"),
+        }
+    }
+
+    #[test]
+    fn test_meeting_start_diarization_ml_flag() {
+        let cli = Cli::parse_from([
+            "voxtype",
+            "meeting",
+            "start",
+            "--diarization",
+            "ml",
+            "--title",
+            "standup",
+        ]);
+        match cli.command {
+            Some(Commands::Meeting {
+                action: MeetingAction::Start { diarization, title },
+            }) => {
+                assert_eq!(diarization.as_deref(), Some("ml"));
+                assert_eq!(title.as_deref(), Some("standup"));
+            }
+            _ => panic!("Expected Meeting Start command"),
+        }
+    }
+
+    #[test]
+    fn test_meeting_start_diarization_rejects_invalid() {
+        let result = Cli::try_parse_from(["voxtype", "meeting", "start", "--diarization", "bogus"]);
+        assert!(
+            result.is_err(),
+            "clap should reject diarization values outside [\"simple\", \"ml\"]"
+        );
+    }
+
+    /// Env-var wiring is exercised together with the "no override" case in a
+    /// single test to avoid `VOXTYPE_MEETING_DIARIZATION` leaking between
+    /// tests that run in parallel — env vars are process-global, so two
+    /// independent #[test] functions would race.
+    #[test]
+    fn test_meeting_start_diarization_env_and_default() {
+        // Make sure no stale value is set from the host or a sibling test.
+        std::env::remove_var("VOXTYPE_MEETING_DIARIZATION");
+
+        // No flag, no env var → no override.
+        let cli = Cli::parse_from(["voxtype", "meeting", "start"]);
+        match cli.command {
+            Some(Commands::Meeting {
+                action: MeetingAction::Start { diarization, title },
+            }) => {
+                assert_eq!(diarization, None);
+                assert_eq!(title, None);
+            }
+            _ => panic!("Expected Meeting Start command"),
+        }
+
+        // Env var alone should be picked up by clap's #[arg(env = ...)].
+        std::env::set_var("VOXTYPE_MEETING_DIARIZATION", "ml");
+        let cli = Cli::parse_from(["voxtype", "meeting", "start"]);
+        std::env::remove_var("VOXTYPE_MEETING_DIARIZATION");
+        match cli.command {
+            Some(Commands::Meeting {
+                action: MeetingAction::Start { diarization, .. },
+            }) => {
+                assert_eq!(diarization.as_deref(), Some("ml"));
+            }
+            _ => panic!("Expected Meeting Start command"),
+        }
+    }
+}
