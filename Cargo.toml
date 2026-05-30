@@ -151,6 +151,8 @@ tray-icon = "0.21.3"
 evdev = "0.12"
 inotify = "0.10"  # Watch /dev/input for device hotplug
 nix = { version = "0.29", features = ["signal", "process"] }  # Unix signals for IPC
+# StatusNotifierItem (SNI) tray icon + dbusmenu context menu
+ksni = { version = "0.3", features = ["tokio"] }
 
 [features]
 default = []

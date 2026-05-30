@@ -576,6 +576,15 @@ async fn main() -> anyhow::Result<()> {
                         setup::waybar::print_config();
                     }
                 }
+                #[cfg(target_os = "linux")]
+                Some(SetupAction::Icons { uninstall }) => {
+                    warn_if_root("icons");
+                    if uninstall {
+                        setup::icons::uninstall()?;
+                    } else {
+                        setup::icons::install()?;
+                    }
+                }
                 Some(SetupAction::Dms {
                     install,
                     uninstall,

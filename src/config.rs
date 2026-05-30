@@ -427,6 +427,10 @@ pub struct Config {
     #[serde(default)]
     pub osd: crate::osd::config::OsdConfig,
 
+    /// System tray icon via StatusNotifierItem (Linux only at runtime).
+    #[serde(default)]
+    pub tray: TrayConfig,
+
     /// Meeting transcription configuration
     #[serde(default)]
     pub meeting: MeetingConfig,
@@ -1888,6 +1892,26 @@ impl Default for MeetingConfig {
     }
 }
 
+/// System tray configuration (StatusNotifierItem protocol, Linux only at runtime).
+///
+/// The field is present on all platforms so that config files round-trip
+/// cleanly between Linux and macOS. The tray is only started at runtime when
+/// the target is Linux and `enabled` is true.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TrayConfig {
+    /// Enable the system tray icon. When true, the daemon registers an SNI
+    /// tray icon that shows recording state. Requires compatible icons to be
+    /// installed (run `voxtype setup icons`).
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+impl Default for TrayConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 /// Notification configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NotificationConfig {
@@ -2446,6 +2470,7 @@ impl Default for Config {
             vad: VadConfig::default(),
             status: StatusConfig::default(),
             osd: crate::osd::config::OsdConfig::default(),
+            tray: TrayConfig::default(),
             meeting: MeetingConfig::default(),
             state_file: Some("auto".to_string()),
             profiles: HashMap::new(),

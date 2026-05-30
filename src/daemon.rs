@@ -628,6 +628,12 @@ pub struct Daemon {
     /// OSD child supervisor task. Holds the JoinHandle so dropping it (on
     /// daemon shutdown) kill_on_drop's the spawned voxtype-osd process.
     osd_supervisor_task: Option<tokio::task::JoinHandle<()>>,
+    /// Linux system tray task (SNI). Dropped on daemon shutdown.
+    #[cfg(target_os = "linux")]
+    tray_task: Option<tokio::task::JoinHandle<()>>,
+    /// Sends state updates to the tray task.
+    #[cfg(target_os = "linux")]
+    tray_tx: Option<tokio::sync::watch::Sender<crate::tray::TrayState>>,
     // Model manager for multi-model support
     model_manager: Option<ModelManager>,
     // Background task for loading model on-demand
@@ -757,6 +763,10 @@ impl Daemon {
             level_emitter_task: None,
             streaming_drain_pump: None,
             osd_supervisor_task: None,
+            #[cfg(target_os = "linux")]
+            tray_task: None,
+            #[cfg(target_os = "linux")]
+            tray_tx: None,
             model_manager: None,
             model_load_task: None,
             whisper_prepare_task: None,
@@ -802,6 +812,10 @@ impl Daemon {
     fn update_state(&self, state_name: &str) {
         if let Some(ref path) = self.state_file_path {
             write_state_file(path, state_name);
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(ref tx) = self.tray_tx {
+            let _ = tx.send(crate::tray::TrayState::from_state_name(state_name));
         }
     }
 
@@ -2408,6 +2422,21 @@ impl Daemon {
         // rather than burning a slot in the launcher's restart logic.
         if self.config.osd.enabled && self.level_hub.is_some() {
             self.osd_supervisor_task = Some(crate::osd::supervisor::spawn());
+        }
+
+        // Spawn the system tray icon if enabled (Linux, StatusNotifierItem).
+        #[cfg(target_os = "linux")]
+        if self.config.tray.enabled {
+            // Ensure icons are installed — silently installs on first run.
+            // Run in spawn_blocking so filesystem I/O doesn't stall the async runtime.
+            match tokio::task::spawn_blocking(crate::setup::icons::install).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::debug!("Tray icon install skipped: {}", e),
+                Err(e) => tracing::debug!("Tray icon install task panicked: {}", e),
+            }
+            let (tx, rx) = tokio::sync::watch::channel(crate::tray::TrayState::Idle);
+            self.tray_tx = Some(tx);
+            self.tray_task = Some(crate::tray::spawn(rx));
         }
 
         // Check if another instance is already running (single-instance safeguard)

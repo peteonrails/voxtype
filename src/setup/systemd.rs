@@ -101,6 +101,27 @@ pub async fn install() -> anyhow::Result<()> {
         println!("    Check logs with: journalctl --user -u voxtype");
     }
 
+    // Install tray icons if tray is enabled (default).
+    #[cfg(target_os = "linux")]
+    {
+        let tray_enabled = match crate::config::load_config(None) {
+            Ok(config) => config.tray.enabled,
+            Err(e) => {
+                println!("  Warning: could not read config to check tray setting: {e}");
+                println!("  Falling back to defaults (tray enabled).");
+                crate::config::Config::default().tray.enabled
+            }
+        };
+        if tray_enabled {
+            println!("\nInstalling tray icons...");
+            match tokio::task::spawn_blocking(super::icons::install).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => println!("  Warning: could not install tray icons: {e}"),
+                Err(e) => println!("  Warning: tray icon install task panicked: {e}"),
+            }
+        }
+    }
+
     // Show status
     println!("\n---");
     println!("Service installed successfully!\n");
