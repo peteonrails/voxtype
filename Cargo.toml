@@ -73,6 +73,9 @@ which = "7"
 # Temp files (for CLI backend audio)
 tempfile = "3"
 
+# SHA-256 integrity check for R2 model downloads
+sha2 = "0.10"
+
 # Audio playback (for feedback sounds)
 rodio = { version = "0.19", default-features = false, features = ["wav"] }
 

@@ -20,6 +20,7 @@ pub mod hammerspoon;
 pub mod launchd;
 #[cfg(target_os = "macos")]
 pub mod macos;
+pub mod manifest;
 pub mod model;
 pub mod parakeet;
 pub mod quickshell;
