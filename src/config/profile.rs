@@ -67,3 +67,181 @@ pub struct Profile {
 fn default_post_process_timeout() -> u64 {
     30000 // 30 seconds - generous for LLM processing
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::config::{Config, OutputMode};
+
+    #[test]
+    fn test_profiles_default_empty() {
+        let config = Config::default();
+        assert!(config.profiles.is_empty());
+        assert!(config.profile_names().is_empty());
+        assert!(config.get_profile("slack").is_none());
+    }
+
+    #[test]
+    fn test_parse_profiles_from_toml() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [profiles.slack]
+            post_process_command = "cleanup-for-slack.sh"
+
+            [profiles.code]
+            post_process_command = "cleanup-for-code.sh"
+            output_mode = "clipboard"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.profiles.len(), 2);
+
+        let slack = config.get_profile("slack").unwrap();
+        assert_eq!(
+            slack.post_process_command,
+            Some("cleanup-for-slack.sh".to_string())
+        );
+        assert!(slack.output_mode.is_none());
+
+        let code = config.get_profile("code").unwrap();
+        assert_eq!(
+            code.post_process_command,
+            Some("cleanup-for-code.sh".to_string())
+        );
+        assert_eq!(code.output_mode, Some(OutputMode::Clipboard));
+    }
+
+    #[test]
+    fn test_parse_profile_with_timeout() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [profiles.slow]
+            post_process_command = "slow-llm-command"
+            post_process_timeout_ms = 60000
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let slow = config.get_profile("slow").unwrap();
+        assert_eq!(
+            slow.post_process_command,
+            Some("slow-llm-command".to_string())
+        );
+        assert_eq!(slow.post_process_timeout_ms, Some(60000));
+    }
+
+    #[test]
+    fn test_profile_names() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [profiles.alpha]
+            post_process_command = "alpha-cmd"
+
+            [profiles.beta]
+            post_process_command = "beta-cmd"
+
+            [profiles.gamma]
+            post_process_command = "gamma-cmd"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let names: Vec<&str> = config.profile_names().iter().map(|s| s.as_str()).collect();
+        assert_eq!(names.len(), 3);
+        assert!(names.contains(&"alpha"));
+        assert!(names.contains(&"beta"));
+        assert!(names.contains(&"gamma"));
+    }
+
+    #[test]
+    fn test_profile_without_post_process_command() {
+        // A profile can have only output_mode override without post_process_command
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [profiles.clipboard_only]
+            output_mode = "clipboard"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let profile = config.get_profile("clipboard_only").unwrap();
+        assert!(profile.post_process_command.is_none());
+        assert_eq!(profile.output_mode, Some(OutputMode::Clipboard));
+    }
+
+    #[test]
+    fn test_config_without_profiles_section() {
+        // Config without [profiles] section should work (backwards compatibility)
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.profiles.is_empty());
+    }
+}

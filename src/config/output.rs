@@ -406,3 +406,464 @@ pub enum FileMode {
     /// Append to the file on each transcription
     Append,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    #[test]
+    fn test_parse_auto_submit() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+            auto_submit = true
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.output.auto_submit);
+    }
+
+    #[test]
+    fn test_parse_auto_submit_defaults_false() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(!config.output.auto_submit);
+    }
+
+    #[test]
+    fn test_output_driver_from_str() {
+        assert_eq!(
+            "wtype".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Wtype
+        );
+        assert_eq!(
+            "dotool".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Dotool
+        );
+        assert_eq!(
+            "ydotool".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Ydotool
+        );
+        assert_eq!(
+            "clipboard".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Clipboard
+        );
+        assert_eq!(
+            "xclip".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Xclip
+        );
+        // Case insensitive
+        assert_eq!(
+            "WTYPE".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Wtype
+        );
+        assert_eq!(
+            "Ydotool".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Ydotool
+        );
+        assert_eq!(
+            "XCLIP".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Xclip
+        );
+        // Invalid
+        assert!("invalid".parse::<OutputDriver>().is_err());
+    }
+
+    #[test]
+    fn test_output_driver_display() {
+        assert_eq!(OutputDriver::Wtype.to_string(), "wtype");
+        assert_eq!(OutputDriver::Dotool.to_string(), "dotool");
+        assert_eq!(OutputDriver::Ydotool.to_string(), "ydotool");
+        assert_eq!(OutputDriver::Clipboard.to_string(), "clipboard");
+        assert_eq!(OutputDriver::Xclip.to_string(), "xclip");
+    }
+
+    #[test]
+    fn test_parse_driver_order_from_toml() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+            driver_order = ["ydotool", "wtype", "clipboard"]
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let driver_order = config.output.driver_order.unwrap();
+        assert_eq!(driver_order.len(), 3);
+        assert_eq!(driver_order[0], OutputDriver::Ydotool);
+        assert_eq!(driver_order[1], OutputDriver::Wtype);
+        assert_eq!(driver_order[2], OutputDriver::Clipboard);
+    }
+
+    #[test]
+    fn test_restore_clipboard_defaults() {
+        let config = Config::default();
+        assert!(!config.output.restore_clipboard);
+        assert_eq!(config.output.restore_clipboard_delay_ms, 200);
+    }
+
+    #[test]
+    fn test_restore_clipboard_deserialization() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 30
+
+            [whisper]
+            model = "base.en"
+
+            [output]
+            mode = "paste"
+            restore_clipboard = true
+            restore_clipboard_delay_ms = 500
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.output.restore_clipboard);
+        assert_eq!(config.output.restore_clipboard_delay_ms, 500);
+    }
+
+    #[test]
+    fn test_restore_clipboard_missing_uses_defaults() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 30
+
+            [whisper]
+            model = "base.en"
+
+            [output]
+            mode = "paste"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(!config.output.restore_clipboard);
+        assert_eq!(config.output.restore_clipboard_delay_ms, 200);
+    }
+
+    #[test]
+    fn test_parse_driver_order_from_config() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+            driver_order = ["ydotool", "wtype", "clipboard"]
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let driver_order = config.output.driver_order.unwrap();
+        assert_eq!(driver_order.len(), 3);
+        assert_eq!(driver_order[0], OutputDriver::Ydotool);
+        assert_eq!(driver_order[1], OutputDriver::Wtype);
+        assert_eq!(driver_order[2], OutputDriver::Clipboard);
+    }
+
+    #[test]
+    fn test_driver_order_not_set_by_default() {
+        let config = Config::default();
+        assert!(config.output.driver_order.is_none());
+    }
+
+    #[test]
+    fn test_parse_config_without_driver_order() {
+        // Ensure backwards compatibility - config without driver_order should work
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.output.driver_order.is_none());
+    }
+
+    #[test]
+    fn test_parse_single_driver_order() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+            driver_order = ["ydotool"]
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let driver_order = config.output.driver_order.unwrap();
+        assert_eq!(driver_order.len(), 1);
+        assert_eq!(driver_order[0], OutputDriver::Ydotool);
+    }
+
+    #[test]
+    fn test_default_language_to_layout_common_cases() {
+        let map = default_language_to_layout();
+        // English maps to "us", the XKB convention.
+        assert_eq!(map.get("en"), Some(&"us".to_string()));
+        // Russian, German, French, Spanish are direct passthroughs.
+        assert_eq!(map.get("ru"), Some(&"ru".to_string()));
+        assert_eq!(map.get("de"), Some(&"de".to_string()));
+        assert_eq!(map.get("fr"), Some(&"fr".to_string()));
+        assert_eq!(map.get("es"), Some(&"es".to_string()));
+        // Greek uses "gr", not "el".
+        assert_eq!(map.get("el"), Some(&"gr".to_string()));
+        // Japanese / Korean map to common XKB names.
+        assert_eq!(map.get("ja"), Some(&"jp".to_string()));
+        assert_eq!(map.get("ko"), Some(&"kr".to_string()));
+    }
+
+    #[test]
+    fn test_output_config_default_includes_language_layout_map() {
+        let cfg = Config::default();
+        assert!(!cfg.output.language_to_layout.is_empty());
+        assert_eq!(
+            cfg.output.language_to_layout.get("en"),
+            Some(&"us".to_string())
+        );
+        assert!(cfg.output.language_to_variant.is_empty());
+        // New eitype layout fields are unset by default; the layout is
+        // inferred from the detected language only when both fields are
+        // empty (see daemon::handle_transcription_result).
+        assert!(cfg.output.eitype_xkb_layout.is_none());
+        assert!(cfg.output.eitype_xkb_variant.is_none());
+    }
+
+    #[test]
+    fn test_parse_eitype_layout_from_toml() {
+        let toml_str = r#"
+            [hotkey]
+            key = "PAUSE"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+            eitype_xkb_layout = "ru"
+            eitype_xkb_variant = "phonetic"
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.output.eitype_xkb_layout, Some("ru".to_string()));
+        assert_eq!(
+            config.output.eitype_xkb_variant,
+            Some("phonetic".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_language_to_layout_override() {
+        // User can override individual mappings (e.g. Brazilian Portuguese
+        // typically needs the `br` layout, not `pt`). Providing the field
+        // replaces the built-in defaults; users are expected to copy
+        // entries they want to keep (documented in CONFIGURATION.md).
+        let toml_str = r#"
+            [hotkey]
+            key = "PAUSE"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [output.language_to_layout]
+            pt = "br"
+            en = "dvorak"
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.output.language_to_layout.get("pt"),
+            Some(&"br".to_string())
+        );
+        assert_eq!(
+            config.output.language_to_layout.get("en"),
+            Some(&"dvorak".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_language_to_variant() {
+        let toml_str = r#"
+            [hotkey]
+            key = "PAUSE"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = ["en", "ru"]
+
+            [output]
+            mode = "type"
+
+            [output.language_to_layout]
+            en = "us"
+            ru = "ru"
+
+            [output.language_to_variant]
+            ru = "phonetic"
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.output.language_to_variant.get("ru"),
+            Some(&"phonetic".to_string())
+        );
+        assert!(!config.output.language_to_variant.contains_key("en"));
+    }
+
+    #[test]
+    fn test_apply_language_xkb_hint_applies_layout_and_variant() {
+        let mut output = Config::default().output;
+        output
+            .language_to_variant
+            .insert("ru".to_string(), "phonetic".to_string());
+
+        let applied = output.apply_language_xkb_hint("ru");
+
+        assert_eq!(applied.layout, Some("ru".to_string()));
+        assert_eq!(applied.variant, Some("phonetic".to_string()));
+        assert!(applied.eitype_layout_applied);
+        assert!(applied.dotool_layout_applied);
+        assert!(applied.eitype_variant_applied);
+        assert!(applied.dotool_variant_applied);
+        assert_eq!(output.eitype_xkb_layout, Some("ru".to_string()));
+        assert_eq!(output.dotool_xkb_layout, Some("ru".to_string()));
+        assert_eq!(output.eitype_xkb_variant, Some("phonetic".to_string()));
+        assert_eq!(output.dotool_xkb_variant, Some("phonetic".to_string()));
+    }
+
+    #[test]
+    fn test_apply_language_xkb_hint_does_not_leak_variant_between_languages() {
+        let mut output = Config::default().output;
+        output
+            .language_to_variant
+            .insert("ru".to_string(), "phonetic".to_string());
+
+        let applied = output.apply_language_xkb_hint("en");
+
+        assert_eq!(applied.layout, Some("us".to_string()));
+        assert_eq!(applied.variant, None);
+        assert_eq!(output.eitype_xkb_layout, Some("us".to_string()));
+        assert_eq!(output.dotool_xkb_layout, Some("us".to_string()));
+        assert_eq!(output.eitype_xkb_variant, None);
+        assert_eq!(output.dotool_xkb_variant, None);
+    }
+
+    #[test]
+    fn test_apply_language_xkb_hint_preserves_explicit_variant() {
+        let mut output = Config::default().output;
+        output.eitype_xkb_variant = Some("explicit-eitype".to_string());
+        output.dotool_xkb_variant = Some("explicit-dotool".to_string());
+        output
+            .language_to_variant
+            .insert("ru".to_string(), "phonetic".to_string());
+
+        let applied = output.apply_language_xkb_hint("ru");
+
+        assert_eq!(applied.variant, Some("phonetic".to_string()));
+        assert!(!applied.eitype_variant_applied);
+        assert!(!applied.dotool_variant_applied);
+        assert_eq!(
+            output.eitype_xkb_variant,
+            Some("explicit-eitype".to_string())
+        );
+        assert_eq!(
+            output.dotool_xkb_variant,
+            Some("explicit-dotool".to_string())
+        );
+    }
+}

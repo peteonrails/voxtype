@@ -200,3 +200,231 @@ fn load_custom_icon_theme(path: &str) -> Result<ResolvedIcons, String> {
         stopped: theme.stopped.unwrap_or(base.stopped),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    #[test]
+    fn test_builtin_icon_themes() {
+        // Test all built-in themes load correctly
+        let themes = [
+            "emoji",
+            "nerd-font",
+            "material",
+            "phosphor",
+            "codicons",
+            "omarchy",
+            "minimal",
+            "dots",
+            "arrows",
+            "text",
+        ];
+
+        for theme in themes {
+            let icons = load_icon_theme(theme);
+            assert!(
+                !icons.idle.is_empty() || theme == "emoji",
+                "Theme {} should have idle icon",
+                theme
+            );
+            assert!(
+                !icons.recording.is_empty(),
+                "Theme {} should have recording icon",
+                theme
+            );
+            assert!(
+                !icons.transcribing.is_empty(),
+                "Theme {} should have transcribing icon",
+                theme
+            );
+            // stopped can be empty for some themes
+        }
+    }
+
+    #[test]
+    fn test_emoji_theme_icons() {
+        let icons = load_icon_theme("emoji");
+        assert!(icons.idle.contains("🎙"));
+        assert!(icons.recording.contains("🎤"));
+        assert!(icons.transcribing.contains("⏳"));
+        assert!(icons.stopped.is_empty());
+    }
+
+    #[test]
+    fn test_text_theme_icons() {
+        let icons = load_icon_theme("text");
+        assert_eq!(icons.idle, "[MIC]");
+        assert_eq!(icons.recording, "[REC]");
+        assert_eq!(icons.transcribing, "[...]");
+        assert_eq!(icons.stopped, "[OFF]");
+    }
+
+    #[test]
+    fn test_minimal_theme_icons() {
+        let icons = load_icon_theme("minimal");
+        assert_eq!(icons.idle, "○");
+        assert_eq!(icons.recording, "●");
+        assert_eq!(icons.transcribing, "◐");
+        assert_eq!(icons.stopped, "×");
+    }
+
+    #[test]
+    fn test_status_config_default() {
+        let status = StatusConfig::default();
+        assert_eq!(status.icon_theme, "emoji");
+        assert!(status.icons.idle.is_none());
+        assert!(status.icons.recording.is_none());
+    }
+
+    #[test]
+    fn test_status_config_resolve_icons() {
+        let status = StatusConfig {
+            icon_theme: "text".to_string(),
+            icons: StatusIconOverrides::default(),
+        };
+        let icons = status.resolve_icons();
+        assert_eq!(icons.idle, "[MIC]");
+        assert_eq!(icons.recording, "[REC]");
+    }
+
+    #[test]
+    fn test_status_config_icon_overrides() {
+        let status = StatusConfig {
+            icon_theme: "emoji".to_string(),
+            icons: StatusIconOverrides {
+                idle: None,
+                recording: Some("🔴".to_string()),
+                streaming: None,
+                transcribing: None,
+                stopped: Some("⚫".to_string()),
+            },
+        };
+        let icons = status.resolve_icons();
+        // idle should be from emoji theme
+        assert!(icons.idle.contains("🎙"));
+        // recording should be overridden
+        assert_eq!(icons.recording, "🔴");
+        // transcribing should be from emoji theme
+        assert!(icons.transcribing.contains("⏳"));
+        // stopped should be overridden
+        assert_eq!(icons.stopped, "⚫");
+    }
+
+    #[test]
+    fn test_parse_status_config_from_toml() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [status]
+            icon_theme = "nerd-font"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.status.icon_theme, "nerd-font");
+    }
+
+    #[test]
+    fn test_parse_status_icon_overrides_from_toml() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [status]
+            icon_theme = "emoji"
+
+            [status.icons]
+            recording = "🔴"
+            stopped = "⚫"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.status.icon_theme, "emoji");
+        assert!(config.status.icons.idle.is_none());
+        assert_eq!(config.status.icons.recording, Some("🔴".to_string()));
+        assert!(config.status.icons.transcribing.is_none());
+        assert_eq!(config.status.icons.stopped, Some("⚫".to_string()));
+
+        let icons = config.status.resolve_icons();
+        assert_eq!(icons.recording, "🔴");
+        assert_eq!(icons.stopped, "⚫");
+    }
+
+    #[test]
+    fn test_invalid_theme_falls_back_to_emoji() {
+        // Non-existent file path should fall back to emoji
+        let icons = load_icon_theme("/nonexistent/path/theme.toml");
+        assert!(icons.idle.contains("🎙"));
+    }
+
+    #[test]
+    fn test_custom_theme_file() {
+        use std::io::Write;
+
+        // Create a temporary theme file
+        let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            temp_file,
+            r#"
+            idle = "IDLE"
+            recording = "REC"
+            transcribing = "BUSY"
+            stopped = "OFF"
+        "#
+        )
+        .unwrap();
+
+        let icons = load_icon_theme(temp_file.path().to_str().unwrap());
+        assert_eq!(icons.idle, "IDLE");
+        assert_eq!(icons.recording, "REC");
+        assert_eq!(icons.transcribing, "BUSY");
+        assert_eq!(icons.stopped, "OFF");
+    }
+
+    #[test]
+    fn test_custom_theme_file_partial() {
+        use std::io::Write;
+
+        // Create a theme file with only some icons (others should default to emoji)
+        let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            temp_file,
+            r#"
+            recording = "🔴"
+        "#
+        )
+        .unwrap();
+
+        let icons = load_icon_theme(temp_file.path().to_str().unwrap());
+        // Only recording is overridden, others fall back to emoji
+        assert!(icons.idle.contains("🎙"));
+        assert_eq!(icons.recording, "🔴");
+        assert!(icons.transcribing.contains("⏳"));
+    }
+}

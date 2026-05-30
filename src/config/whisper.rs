@@ -238,3 +238,267 @@ fn default_eager_overlap_secs() -> f32 {
 fn default_whisper_model() -> String {
     "base.en".to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Config, TranscriptionEngine};
+
+    #[test]
+    fn test_context_window_optimization_default_false() {
+        // Default config should have context_window_optimization disabled
+        // (disabled by default due to repetition issues with some models)
+        let config = Config::default();
+        assert!(!config.whisper.context_window_optimization);
+    }
+
+    #[test]
+    fn test_context_window_optimization_can_be_enabled() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+            context_window_optimization = true
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.whisper.context_window_optimization);
+    }
+
+    #[test]
+    fn test_context_window_optimization_defaults_when_omitted() {
+        // When not specified in config, should default to false
+        // (disabled by default due to repetition issues with some models)
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(!config.whisper.context_window_optimization);
+    }
+
+    #[test]
+    fn test_whisper_section_is_optional() {
+        // The [whisper] section should be optional for Parakeet users
+        // See: https://github.com/peteonrails/voxtype/issues/137
+        //
+        // We test this by deserializing into a struct that mirrors Config
+        // but only has the fields we want to test (avoiding all required fields)
+        #[derive(Debug, Deserialize)]
+        struct PartialConfig {
+            engine: TranscriptionEngine,
+            #[serde(default)]
+            whisper: WhisperConfig,
+        }
+
+        let toml = r#"
+            engine = "parakeet"
+        "#;
+
+        let config: PartialConfig =
+            toml::from_str(toml).expect("whisper section should be optional");
+        assert_eq!(config.engine, TranscriptionEngine::Parakeet);
+        assert_eq!(config.whisper.model, "base.en"); // Default value
+    }
+
+    #[test]
+    fn test_parse_whisper_mode_local() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            mode = "local"
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.whisper.mode, Some(WhisperMode::Local));
+        assert_eq!(config.whisper.effective_mode(), WhisperMode::Local);
+    }
+
+    #[test]
+    fn test_parse_whisper_mode_remote() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            mode = "remote"
+            model = "base.en"
+            language = "en"
+            remote_endpoint = "http://localhost:8080"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.whisper.mode, Some(WhisperMode::Remote));
+        assert_eq!(config.whisper.effective_mode(), WhisperMode::Remote);
+    }
+
+    #[test]
+    fn test_whisper_backend_alias_local() {
+        // Test that deprecated 'backend' field still works
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            backend = "local"
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.whisper.backend, Some(WhisperMode::Local));
+        assert!(config.whisper.mode.is_none());
+        // effective_mode should return the backend value
+        assert_eq!(config.whisper.effective_mode(), WhisperMode::Local);
+    }
+
+    #[test]
+    fn test_whisper_backend_alias_remote() {
+        // Test that deprecated 'backend' field still works for remote
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            backend = "remote"
+            model = "base.en"
+            language = "en"
+            remote_endpoint = "http://localhost:8080"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.whisper.backend, Some(WhisperMode::Remote));
+        assert!(config.whisper.mode.is_none());
+        // effective_mode should return the backend value
+        assert_eq!(config.whisper.effective_mode(), WhisperMode::Remote);
+    }
+
+    #[test]
+    fn test_whisper_mode_takes_precedence_over_backend() {
+        // When both mode and backend are set, mode should take precedence
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            mode = "local"
+            backend = "remote"
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.whisper.mode, Some(WhisperMode::Local));
+        assert_eq!(config.whisper.backend, Some(WhisperMode::Remote));
+        // mode takes precedence
+        assert_eq!(config.whisper.effective_mode(), WhisperMode::Local);
+    }
+
+    #[test]
+    fn test_whisper_effective_mode_defaults_to_local() {
+        // When neither mode nor backend is set, effective_mode defaults to Local
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.whisper.mode.is_none());
+        assert!(config.whisper.backend.is_none());
+        assert_eq!(config.whisper.effective_mode(), WhisperMode::Local);
+    }
+
+    #[test]
+    fn test_config_on_demand_loading_whisper() {
+        let config = Config::default();
+        assert_eq!(config.engine, TranscriptionEngine::Whisper);
+        // on_demand_loading method should return whisper's value
+        assert!(!config.on_demand_loading());
+    }
+
+    #[test]
+    fn test_config_model_name_whisper() {
+        let config = Config::default();
+        assert_eq!(config.model_name(), "base.en");
+    }
+}

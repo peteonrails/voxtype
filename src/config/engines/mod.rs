@@ -77,3 +77,90 @@ impl TranscriptionEngine {
         self.into()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    #[test]
+    fn test_parse_engine_whisper() {
+        let toml_str = r#"
+            engine = "whisper"
+
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.engine, TranscriptionEngine::Whisper);
+    }
+
+    #[test]
+    fn test_parse_engine_parakeet() {
+        let toml_str = r#"
+            engine = "parakeet"
+
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [parakeet]
+            model = "parakeet-tdt-0.6b-v3"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.engine, TranscriptionEngine::Parakeet);
+        assert!(config.parakeet.is_some());
+        assert_eq!(
+            config.parakeet.as_ref().unwrap().model,
+            "parakeet-tdt-0.6b-v3"
+        );
+    }
+
+    #[test]
+    fn test_engine_defaults_to_whisper() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.engine, TranscriptionEngine::Whisper);
+    }
+}

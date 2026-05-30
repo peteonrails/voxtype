@@ -65,3 +65,110 @@ impl LanguageConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::WhisperConfig;
+    use serde::Deserialize;
+
+    #[test]
+    fn test_language_config_single() {
+        let toml_str = r#"
+            [whisper]
+            model = "base.en"
+            language = "fr"
+        "#;
+
+        #[derive(Deserialize)]
+        struct TestConfig {
+            whisper: WhisperConfig,
+        }
+
+        let config: TestConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.whisper.language,
+            LanguageConfig::Single("fr".to_string())
+        );
+        assert!(!config.whisper.language.is_auto());
+        assert!(!config.whisper.language.is_multiple());
+        assert_eq!(config.whisper.language.primary(), "fr");
+        assert_eq!(config.whisper.language.as_vec(), vec!["fr"]);
+    }
+
+    #[test]
+    fn test_language_config_auto() {
+        let toml_str = r#"
+            [whisper]
+            model = "large-v3"
+            language = "auto"
+        "#;
+
+        #[derive(Deserialize)]
+        struct TestConfig {
+            whisper: WhisperConfig,
+        }
+
+        let config: TestConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.whisper.language,
+            LanguageConfig::Single("auto".to_string())
+        );
+        assert!(config.whisper.language.is_auto());
+        assert!(!config.whisper.language.is_multiple());
+        assert_eq!(config.whisper.language.primary(), "auto");
+    }
+
+    #[test]
+    fn test_language_config_array() {
+        let toml_str = r#"
+            [whisper]
+            model = "large-v3-turbo"
+            language = ["en", "fr", "de"]
+        "#;
+
+        #[derive(Deserialize)]
+        struct TestConfig {
+            whisper: WhisperConfig,
+        }
+
+        let config: TestConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.whisper.language,
+            LanguageConfig::Multiple(vec!["en".to_string(), "fr".to_string(), "de".to_string()])
+        );
+        assert!(!config.whisper.language.is_auto());
+        assert!(config.whisper.language.is_multiple());
+        assert_eq!(config.whisper.language.primary(), "en");
+        assert_eq!(config.whisper.language.as_vec(), vec!["en", "fr", "de"]);
+    }
+
+    #[test]
+    fn test_language_config_single_element_array() {
+        // A single-element array should not be considered "multiple"
+        let toml_str = r#"
+            [whisper]
+            model = "base.en"
+            language = ["en"]
+        "#;
+
+        #[derive(Deserialize)]
+        struct TestConfig {
+            whisper: WhisperConfig,
+        }
+
+        let config: TestConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.whisper.language.is_multiple());
+        assert_eq!(config.whisper.language.primary(), "en");
+    }
+
+    #[test]
+    fn test_language_config_default() {
+        // Default should be "en"
+        let config = LanguageConfig::default();
+        assert_eq!(config, LanguageConfig::Single("en".to_string()));
+        assert!(!config.is_auto());
+        assert!(!config.is_multiple());
+        assert_eq!(config.primary(), "en");
+    }
+}

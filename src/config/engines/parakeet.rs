@@ -83,3 +83,115 @@ impl Default for ParakeetConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    #[test]
+    fn test_parse_parakeet_model_type_tdt() {
+        let toml_str = r#"
+            engine = "parakeet"
+
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [parakeet]
+            model = "parakeet-tdt-0.6b-v3"
+            model_type = "tdt"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let parakeet = config.parakeet.unwrap();
+        assert_eq!(parakeet.model, "parakeet-tdt-0.6b-v3");
+        assert_eq!(parakeet.model_type, Some(ParakeetModelType::Tdt));
+    }
+
+    #[test]
+    fn test_parse_parakeet_model_type_ctc() {
+        let toml_str = r#"
+            engine = "parakeet"
+
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [parakeet]
+            model = "parakeet-ctc-0.6b"
+            model_type = "ctc"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let parakeet = config.parakeet.unwrap();
+        assert_eq!(parakeet.model, "parakeet-ctc-0.6b");
+        assert_eq!(parakeet.model_type, Some(ParakeetModelType::Ctc));
+    }
+
+    #[test]
+    fn test_parakeet_model_type_defaults_to_none_for_auto_detection() {
+        let toml_str = r#"
+            engine = "parakeet"
+
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [parakeet]
+            model = "parakeet-tdt-0.6b-v3"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let parakeet = config.parakeet.unwrap();
+        // model_type should be None (will be auto-detected at runtime)
+        assert!(parakeet.model_type.is_none());
+    }
+
+    #[test]
+    fn test_parakeet_config_default() {
+        let config = ParakeetConfig::default();
+        assert_eq!(config.model, "parakeet-tdt-0.6b-v3");
+        assert!(config.model_type.is_none());
+        assert!(!config.on_demand_loading);
+    }
+
+    #[test]
+    fn test_parakeet_model_type_enum_default() {
+        // ParakeetModelType defaults to Tdt
+        assert_eq!(ParakeetModelType::default(), ParakeetModelType::Tdt);
+    }
+}
