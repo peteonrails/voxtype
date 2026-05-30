@@ -39,6 +39,12 @@ set -euo pipefail
 DRY_RUN=0
 TARGET=""
 
+# Models that hit a per-file 404 (or transient fetch failure) during mirroring
+# and got skipped. Reported as a non-fatal summary at the end so the operator
+# knows which registry entries need follow-up cleanup. See the warn branch in
+# `mirror_one` and the registry-cleanup TODO.
+SKIPPED_MODELS=()
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run)
@@ -126,7 +132,18 @@ mirror_one() {
         mkdir -p "$(dirname "$dest")"
         echo "  fetching $upstream_path -> $local_path" >&2
         # `--fail` so a 404 doesn't quietly produce an HTML error page.
-        curl -fsSL --retry 3 -o "$dest" "$url"
+        # Use `if !` to opt out of `set -e` for this one call — a single
+        # missing file should skip the model and continue with the next,
+        # not abort the whole run. The registry has stale entries (e.g.
+        # Moonshine language variants that expect decoder_model_merged.onnx
+        # while the upstream HF repo only ships decoder_model.onnx); their
+        # fix is a separate registry-cleanup PR, not blocking the mirror.
+        if ! curl -fsSL --retry 3 -o "$dest" "$url"; then
+            echo "  WARN: HF 404 (or transient failure) on $upstream_path" >&2
+            echo "  WARN: skipping model $engine/$name; will not be mirrored" >&2
+            SKIPPED_MODELS+=("$engine/$name (missing: $upstream_path)")
+            return 0
+        fi
 
         size="$(stat -c %s "$dest")"
         sha="$(sha256sum "$dest" | awk '{print $1}')"
@@ -160,13 +177,16 @@ mirror_one() {
 }
 
 if [[ "$TARGET" == "--all" ]]; then
-    echo "$REGISTRY_JSON" | jq -c '.[]' | while read -r entry; do
+    # Process-substitution rather than `... | while` so SKIPPED_MODELS+=
+    # inside mirror_one persists past the loop body (a pipe would put the
+    # whole while-loop in a subshell and lose the array on exit).
+    while read -r entry; do
         engine="$(echo "$entry" | jq -r '.engine_prefix')"
         name="$(echo "$entry" | jq -r '.name')"
         upstream="$(echo "$entry" | jq -r '.upstream_repo')"
         files_json="$(echo "$entry" | jq -c '.files')"
         mirror_one "$engine" "$name" "$upstream" "$files_json"
-    done
+    done < <(echo "$REGISTRY_JSON" | jq -c '.[]')
 else
     entry="$(echo "$REGISTRY_JSON" | jq -c --arg n "$TARGET" '.[] | select(.name == $n)')"
     if [[ -z "$entry" ]]; then
@@ -184,3 +204,15 @@ fi
 
 echo "" >&2
 echo "[mirror] done." >&2
+
+if [[ ${#SKIPPED_MODELS[@]} -gt 0 ]]; then
+    echo "" >&2
+    echo "[mirror] WARNING: ${#SKIPPED_MODELS[@]} model(s) skipped due to upstream 404 or fetch failure:" >&2
+    for entry in "${SKIPPED_MODELS[@]}"; do
+        echo "  - $entry" >&2
+    done
+    echo "" >&2
+    echo "[mirror] These registry entries point at upstream HuggingFace files that do not exist (or" >&2
+    echo "         changed). Audit them in src/setup/model.rs and either fix the file list or" >&2
+    echo "         remove the entry. The remaining models were mirrored successfully." >&2
+fi
