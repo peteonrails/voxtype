@@ -1,5 +1,6 @@
 //! Interactive model selection and download
 
+use super::manifest::{ExpectedFile, ModelArtifact};
 use super::{print_failure, print_info, print_success, print_warning};
 use crate::config::{Config, TranscriptionEngine};
 use crate::transcribe::whisper::{get_model_filename, get_model_url};
@@ -666,6 +667,169 @@ const COHERE_MODELS: &[CohereModelInfo] = &[
         huggingface_repo: "onnx-community/cohere-transcribe-03-2026-ONNX",
     },
 ];
+
+// =============================================================================
+// ModelArtifact implementations
+// =============================================================================
+//
+// Each ONNX engine's model-info struct implements `ModelArtifact` so the
+// unified `download_artifact` consumes them uniformly. The trait's
+// `name()` is the URL segment + on-disk directory name; for engines that
+// historically used a `dir_name` distinct from `name` (Moonshine,
+// SenseVoice, Paraformer, Dolphin, Omnilingual, Cohere), we return
+// `dir_name` so the R2 layout matches what's on disk. For Parakeet the
+// model `name` was always the directory name; nothing to translate.
+
+impl ModelArtifact for ParakeetModelInfo {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn engine_prefix(&self) -> &'static str {
+        "parakeet"
+    }
+    fn upstream_repo(&self) -> &str {
+        self.huggingface_repo
+    }
+    fn expected_files(&self) -> Vec<ExpectedFile> {
+        self.files
+            .iter()
+            .map(|(path, size)| ExpectedFile {
+                path: (*path).to_string(),
+                size: *size,
+            })
+            .collect()
+    }
+}
+
+impl ModelArtifact for MoonshineModelInfo {
+    fn name(&self) -> &str {
+        self.dir_name
+    }
+    fn engine_prefix(&self) -> &'static str {
+        "moonshine"
+    }
+    fn upstream_repo(&self) -> &str {
+        self.huggingface_repo
+    }
+    fn expected_files(&self) -> Vec<ExpectedFile> {
+        // Moonshine's upstream files live under `onnx/...` paths but we
+        // rewrite them to canonical local names. The mirror script flattens
+        // the directory layout in R2 to the local-canonical names, so we
+        // report the local name as the expected path.
+        self.files
+            .iter()
+            .map(|(_repo, local)| ExpectedFile {
+                path: (*local).to_string(),
+                size: 0,
+            })
+            .collect()
+    }
+}
+
+impl ModelArtifact for SenseVoiceModelInfo {
+    fn name(&self) -> &str {
+        self.dir_name
+    }
+    fn engine_prefix(&self) -> &'static str {
+        "sensevoice"
+    }
+    fn upstream_repo(&self) -> &str {
+        self.huggingface_repo
+    }
+    fn expected_files(&self) -> Vec<ExpectedFile> {
+        self.files
+            .iter()
+            .map(|(_repo, local)| ExpectedFile {
+                path: (*local).to_string(),
+                size: 0,
+            })
+            .collect()
+    }
+}
+
+impl ModelArtifact for ParaformerModelInfo {
+    fn name(&self) -> &str {
+        self.dir_name
+    }
+    fn engine_prefix(&self) -> &'static str {
+        "paraformer"
+    }
+    fn upstream_repo(&self) -> &str {
+        self.huggingface_repo
+    }
+    fn expected_files(&self) -> Vec<ExpectedFile> {
+        self.files
+            .iter()
+            .map(|(_repo, local)| ExpectedFile {
+                path: (*local).to_string(),
+                size: 0,
+            })
+            .collect()
+    }
+}
+
+impl ModelArtifact for DolphinModelInfo {
+    fn name(&self) -> &str {
+        self.dir_name
+    }
+    fn engine_prefix(&self) -> &'static str {
+        "dolphin"
+    }
+    fn upstream_repo(&self) -> &str {
+        self.huggingface_repo
+    }
+    fn expected_files(&self) -> Vec<ExpectedFile> {
+        self.files
+            .iter()
+            .map(|(_repo, local)| ExpectedFile {
+                path: (*local).to_string(),
+                size: 0,
+            })
+            .collect()
+    }
+}
+
+impl ModelArtifact for OmnilingualModelInfo {
+    fn name(&self) -> &str {
+        self.dir_name
+    }
+    fn engine_prefix(&self) -> &'static str {
+        "omnilingual"
+    }
+    fn upstream_repo(&self) -> &str {
+        self.huggingface_repo
+    }
+    fn expected_files(&self) -> Vec<ExpectedFile> {
+        self.files
+            .iter()
+            .map(|(_repo, local)| ExpectedFile {
+                path: (*local).to_string(),
+                size: 0,
+            })
+            .collect()
+    }
+}
+
+impl ModelArtifact for CohereModelInfo {
+    fn name(&self) -> &str {
+        self.dir_name
+    }
+    fn engine_prefix(&self) -> &'static str {
+        "cohere"
+    }
+    fn upstream_repo(&self) -> &str {
+        self.huggingface_repo
+    }
+    fn expected_files(&self) -> Vec<ExpectedFile> {
+        self.files
+            .iter()
+            .map(|(_repo, local)| ExpectedFile {
+                path: (*local).to_string(),
+                size: 0,
+            })
+            .collect()
+    }
+}
 
 // =============================================================================
 // Whisper Model Functions
@@ -3620,5 +3784,72 @@ mode = "type"
         let msg = err.to_string();
         assert!(msg.contains("encoder_model.onnx"), "got: {}", msg);
         assert!(msg.contains("tokenizer.json"), "got: {}", msg);
+    }
+
+    // =========================================================================
+    // ModelArtifact trait impl coverage
+    // =========================================================================
+    //
+    // The runtime downloader and the mirror script both route off
+    // `engine_prefix()`. A typo in one impl would silently send downloads to
+    // the wrong R2 namespace, so we lock the value of each impl in.
+
+    #[test]
+    fn parakeet_engine_prefix() {
+        for m in PARAKEET_MODELS {
+            assert_eq!(m.engine_prefix(), "parakeet");
+            assert_eq!(m.name(), m.name); // sanity
+            assert_eq!(m.upstream_repo(), m.huggingface_repo);
+            assert_eq!(m.expected_files().len(), m.files.len());
+        }
+    }
+
+    #[test]
+    fn moonshine_engine_prefix() {
+        for m in MOONSHINE_MODELS {
+            assert_eq!(m.engine_prefix(), "moonshine");
+            assert_eq!(m.name(), m.dir_name);
+            assert_eq!(m.expected_files().len(), m.files.len());
+        }
+    }
+
+    #[test]
+    fn sensevoice_engine_prefix() {
+        for m in SENSEVOICE_MODELS {
+            assert_eq!(m.engine_prefix(), "sensevoice");
+            assert_eq!(m.name(), m.dir_name);
+        }
+    }
+
+    #[test]
+    fn paraformer_engine_prefix() {
+        for m in PARAFORMER_MODELS {
+            assert_eq!(m.engine_prefix(), "paraformer");
+            assert_eq!(m.name(), m.dir_name);
+        }
+    }
+
+    #[test]
+    fn dolphin_engine_prefix() {
+        for m in DOLPHIN_MODELS {
+            assert_eq!(m.engine_prefix(), "dolphin");
+            assert_eq!(m.name(), m.dir_name);
+        }
+    }
+
+    #[test]
+    fn omnilingual_engine_prefix() {
+        for m in OMNILINGUAL_MODELS {
+            assert_eq!(m.engine_prefix(), "omnilingual");
+            assert_eq!(m.name(), m.dir_name);
+        }
+    }
+
+    #[test]
+    fn cohere_engine_prefix() {
+        for m in COHERE_MODELS {
+            assert_eq!(m.engine_prefix(), "cohere");
+            assert_eq!(m.name(), m.dir_name);
+        }
     }
 }
