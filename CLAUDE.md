@@ -360,7 +360,7 @@ Based on open issues and project direction.
 
 ### Non-Goals
 
-- Windows/macOS support (Linux-first, Wayland-native)
+- Windows support (Linux-first, Wayland-native)
 - GUI configuration (GTK/Qt/web). A TUI (`voxtype configure`) is supported and
   surfaced as a desktop-file launcher entry; CLI and config file remain the
   primary interfaces for scripting and headless setups.

@@ -2487,10 +2487,9 @@ impl Config {
     /// System-wide config path used as a fallback when no user config exists.
     pub const SYSTEM_PATH: &'static str = "/etc/voxtype/config.toml";
 
-    /// Get the default user config file path (XDG)
+    /// Default user config file path: `<config_dir>/config.toml`.
     pub fn default_path() -> Option<PathBuf> {
-        directories::ProjectDirs::from("", "", "voxtype")
-            .map(|dirs| dirs.config_dir().join("config.toml"))
+        Self::config_dir().map(|dir| dir.join("config.toml"))
     }
 
     /// Get the system-wide config file path.
@@ -2540,17 +2539,46 @@ impl Config {
             })
     }
 
-    /// Get the config directory path
+    /// Voxtype's user config directory, honoring `$XDG_CONFIG_HOME` (default
+    /// `~/.config`) on every platform including macOS, where the `directories`
+    /// crate would use `~/Library/Application Support` and ignore XDG (#448).
     pub fn config_dir() -> Option<PathBuf> {
-        directories::ProjectDirs::from("", "", "voxtype")
-            .map(|dirs| dirs.config_dir().to_path_buf())
+        Self::xdg_dir(
+            "XDG_CONFIG_HOME",
+            ".config",
+            directories::ProjectDirs::from("", "", "voxtype").map(|d| d.config_dir().to_path_buf()),
+        )
     }
 
-    /// Get the data directory path (for models)
+    /// Voxtype's user data directory (parent of the models dir), honoring
+    /// `$XDG_DATA_HOME` (default `~/.local/share`); same scheme as [`Config::config_dir`].
     pub fn data_dir() -> PathBuf {
-        directories::ProjectDirs::from("", "", "voxtype")
-            .map(|dirs| dirs.data_dir().to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."))
+        Self::xdg_dir(
+            "XDG_DATA_HOME",
+            ".local/share",
+            directories::ProjectDirs::from("", "", "voxtype").map(|d| d.data_dir().to_path_buf()),
+        )
+        .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// Resolve a `voxtype` user dir. An explicit absolute `$xdg_var` wins;
+    /// otherwise `$HOME/<default_rel>/voxtype`. Falls back to an existing
+    /// `legacy` platform-native dir so an upgrade never orphans a prior install.
+    fn xdg_dir(xdg_var: &str, default_rel: &str, legacy: Option<PathBuf>) -> Option<PathBuf> {
+        if let Some(base) = std::env::var_os(xdg_var)
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+        {
+            return Some(base.join("voxtype"));
+        }
+        let xdg = std::env::var_os("HOME")
+            .filter(|h| !h.is_empty())
+            .map(|h| PathBuf::from(h).join(default_rel).join("voxtype"));
+        match (xdg, legacy) {
+            (Some(x), Some(l)) if x != l && !x.exists() && l.exists() => Some(l),
+            (Some(x), _) => Some(x),
+            (None, l) => l,
+        }
     }
 
     /// Get the models directory path
@@ -4728,5 +4756,42 @@ mod tests {
             output.dotool_xkb_variant,
             Some("explicit-dotool".to_string())
         );
+    }
+
+    #[test]
+    fn xdg_dir_resolution() {
+        // Mutates $HOME / $XDG_CONFIG_HOME, like the other env tests here.
+        let prev_home = std::env::var_os("HOME");
+        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", tmp.path());
+        let xdg = tmp.path().join(".config/voxtype");
+        let legacy = tmp.path().join("Library/Application Support/voxtype");
+        let resolve = || Config::xdg_dir("XDG_CONFIG_HOME", ".config", Some(legacy.clone()));
+
+        // Fresh install: XDG path, even before it exists.
+        assert_eq!(resolve(), Some(xdg.clone()));
+        // Only the legacy dir exists (upgrade): keep it, do not orphan config.
+        std::fs::create_dir_all(&legacy).unwrap();
+        assert_eq!(resolve(), Some(legacy.clone()));
+        // Once the XDG dir exists too, it wins.
+        std::fs::create_dir_all(&xdg).unwrap();
+        assert_eq!(resolve(), Some(xdg));
+        // Explicit absolute XDG_CONFIG_HOME overrides everything.
+        std::env::set_var("XDG_CONFIG_HOME", "/tmp/voxtype-xdg-abs");
+        assert_eq!(
+            Config::config_dir(),
+            Some(PathBuf::from("/tmp/voxtype-xdg-abs/voxtype"))
+        );
+
+        match prev_xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
     }
 }

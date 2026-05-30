@@ -19,6 +19,12 @@ Voxtype looks for configuration in the following locations (in order):
 3. `/etc/voxtype/config.toml` (system-wide default)
 4. Built-in defaults
 
+`$XDG_CONFIG_HOME` overrides `~/.config` on every platform, macOS included.
+Models follow the same scheme under `$XDG_DATA_HOME` (default `~/.local/share`).
+A macOS install that predates this and stored files under
+`~/Library/Application Support/voxtype` keeps working until you move them into
+`~/.config/voxtype` and `~/.local/share/voxtype`.
+
 ## Configuration Sections
 
 ---

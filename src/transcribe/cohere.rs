@@ -542,12 +542,7 @@ fn resolve_model_path(name: &str) -> Result<PathBuf, TranscribeError> {
     if let Ok(env) = std::env::var("VOXTYPE_COHERE_MODEL_DIR") {
         return Ok(PathBuf::from(env));
     }
-    let dirs = directories::ProjectDirs::from("io", "voxtype", "voxtype").ok_or_else(|| {
-        TranscribeError::ModelNotFound(
-            "Could not resolve model directory (no ProjectDirs)".to_string(),
-        )
-    })?;
-    Ok(dirs.data_dir().join("models").join(name))
+    Ok(crate::config::Config::models_dir().join(name))
 }
 
 fn build_session(
