@@ -77,6 +77,92 @@
 
             <!-- v0.7.x Era Posts -->
 
+            <article class="news-article" id="v075">
+                <div class="article-meta">
+                    <time datetime="2026-05-28">May 28, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v0.7.5: Quickshell OSD, Soniox streaming, meeting-mode rework</h2>
+                <div class="article-body">
+                    <p>A larger feature release that bundles work queued behind three hotfix cycles. Three themes: an opt-in Quickshell OSD frontend, a Soniox cloud streaming backend, and a rebuild of meeting mode around source diarization. Release artifacts are now signed end-to-end in CI by a dedicated release key, removing the manual signing step from every cut.</p>
+
+                    <h3>Quickshell OSD frontend (opt-in)</h3>
+                    <p>A QML-native on-screen display that replaces the GTK4 surface for users who already run a Quickshell-based desktop. Three composed surfaces ship with the package: a waveform overlay during recording, an engine picker overlay for switching transcription backends without leaving the keyboard, and a meeting controls overlay for starting and stopping meeting captures. A new <code>voxtype-audio-bridge</code> sidecar streams audio levels to the QML side as NDJSON over a UNIX socket.</p>
+
+                    <p><strong>Why use it:</strong> if you already run Quickshell, the OSD blends into your existing shell instead of pulling in a GTK4 surface. The QML stack composes with Hyprland / Niri layer-shell rules cleanly, and the waveform renders at full compositor refresh rate.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[osd]
+frontend = "quickshell"</code></pre>
+                    </div>
+
+                    <p>The default frontend stays <code>gtk4</code>. Run <code>voxtype setup quickshell</code> to install the QML files and the sidecar binary into the right Quickshell config paths. Known issue: the Quickshell overlay captures pointer events across the whole screen (<a href="https://github.com/peteonrails/voxtype/issues/440">#440</a>). v0.7.6 will fix.</p>
+
+                    <h3>Soniox cloud streaming backend (<a href="https://github.com/peteonrails/voxtype/issues/411">#411</a>)</h3>
+                    <p>A new engine that streams audio over a WebSocket to Soniox and types each partial transcript at the cursor as it arrives. Lower end-to-end latency than the local Parakeet streaming pipeline, at the cost of network dependence and a third-party API key.</p>
+
+                    <p><strong>Why use it:</strong> the lowest-latency option when you can tolerate cloud transcription. Good for live captioning, long-form interview dictation, or any case where the half-second cost of local Parakeet streaming feels too long.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>engine = "soniox"
+
+[soniox]
+api_key = "your-soniox-api-key"</code></pre>
+                    </div>
+
+                    <h3>Meeting mode: source diarization and VAD sub-windows</h3>
+                    <p>Three changes converge: a source-diarization path that attributes each speaker by which input device they came from (<a href="https://github.com/peteonrails/voxtype/issues/341">#341</a>, contributed by sjug), VAD sub-windows that let the ECAPA-TDNN ML diarizer run on shorter chunks for better turn-by-turn accuracy (<a href="https://github.com/peteonrails/voxtype/issues/418">#418</a>), and a per-meeting <code>--diarization</code> CLI flag so you can switch backends without editing the config file (<a href="https://github.com/peteonrails/voxtype/issues/420">#420</a>).</p>
+
+                    <p><strong>Why use it:</strong> meetings with a clear host-plus-remote structure (loopback for remote audio, mic for the host) now get correct speaker labels without any ML cost. The per-meeting flag means you can run one meeting with full ML diarization and the next with cheap source diarization without restarting the daemon.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>per-meeting override</span></div>
+                        <pre><code><span class="comment"># Source-based (fast, works when speakers are on different input devices)</span>
+voxtype meeting start --diarization source
+
+<span class="comment"># ML-based (slower, works on a single mixed audio stream)</span>
+voxtype meeting start --diarization ml</code></pre>
+                    </div>
+
+                    <h3>Release signing migrated to a dedicated CI key (<a href="https://github.com/peteonrails/voxtype/issues/437">#437</a>)</h3>
+                    <p>Every release artifact (binaries, companion <code>.so</code> files, <code>SHA256SUMS.txt</code>, <code>.deb</code>, <code>.rpm</code>, and the GitHub source archive) is now signed in CI by a dedicated release primary key (<code>9CCF7915...</code>) that is cross-signed by the offline maintainer key. Both fingerprints are in <code>voxtype-bin</code>'s <code>validpgpkeys</code>, so <code>yay</code> auto-fetches the new key from a keyserver on first upgrade with no manual <code>gpg --recv-keys</code> step.</p>
+
+                    <p><strong>Why this matters:</strong> v0.7.4 used a back-signed signing subkey that <code>yay</code> could not auto-fetch by keyid, which broke <code>yay -Syu voxtype-bin</code> for every user with a stale local keyring. v0.7.5's standalone primary keyserver-resolves correctly on every keyserver implementation. The signing step itself is also now fully in CI, removing the maintainer-laptop step between tag and release.</p>
+
+                    <h3>Variant safety improvements</h3>
+                    <p>Two changes around the <code>/usr/bin/voxtype</code> dispatcher wrapper:</p>
+                    <ul>
+                        <li><strong>Wrapper decision uses basename, not canonicalize</strong> (<a href="https://github.com/peteonrails/voxtype/issues/443">#443</a>). The previous logic followed symlinks and could pick the wrong dispatch shape when <code>/usr/bin/voxtype</code> already pointed at a non-canonical path. Closed-set basename match is more reliable and doesn't depend on filesystem state.</li>
+                        <li><strong>TUI surfaces engine-vs-binary mismatch</strong> (<a href="https://github.com/peteonrails/voxtype/issues/450">#450</a>). A persistent banner appears across every section when the configured engine cannot be served by the running binary. <code>F2</code> jumps to the General section's variant picker. The daemon also fires a desktop notification at startup so users who do not open the TUI still see the warning.</li>
+                    </ul>
+
+                    <h3>Smaller fixes</h3>
+                    <ul>
+                        <li>Streaming Parakeet validator accepts the <code>bobNight</code> naming convention (closes the v0.7.4 known issue).</li>
+                        <li>Per-language XKB variants for <code>eitype</code> (<a href="https://github.com/peteonrails/voxtype/issues/424">#424</a>, contributed by AlexCzar).</li>
+                        <li>Cohere ONNX remote-path prefix fix for the new <code>onnx/</code> subdirectory layout (<a href="https://github.com/peteonrails/voxtype/issues/363">#363</a>, contributed by jpds).</li>
+                        <li>CPU <code>__cpuid</code> wrapped in <code>unsafe</code> block for rustc 1.91+ (<a href="https://github.com/peteonrails/voxtype/issues/419">#419</a>, contributed by materemias).</li>
+                        <li>NixOS CI workflow now builds on every PR (closes <a href="https://github.com/peteonrails/voxtype/issues/369">#369</a>).</li>
+                        <li><code>wl-copy</code> fallback under X11 sessions (<a href="https://github.com/peteonrails/voxtype/issues/346">#346</a>).</li>
+                        <li><code>dotool</code> daemon fast path (<a href="https://github.com/peteonrails/voxtype/issues/410">#410</a>).</li>
+                        <li>Audio socket listener watchdog (<a href="https://github.com/peteonrails/voxtype/issues/391">#391</a>, <a href="https://github.com/peteonrails/voxtype/issues/392">#392</a>).</li>
+                    </ul>
+
+                    <h3>Acknowledgments</h3>
+                    <ul>
+                        <li><strong>sjug</strong> for the source-diarization patch (<a href="https://github.com/peteonrails/voxtype/issues/341">#341</a>).</li>
+                        <li><strong>AlexCzar</strong> for the per-language XKB variants (<a href="https://github.com/peteonrails/voxtype/issues/424">#424</a>).</li>
+                        <li><strong>jpds</strong> for the Cohere ONNX path fix (<a href="https://github.com/peteonrails/voxtype/issues/363">#363</a>).</li>
+                        <li><strong>materemias</strong> for the rustc 1.91 <code>__cpuid</code> fix (<a href="https://github.com/peteonrails/voxtype/issues/419">#419</a>).</li>
+                    </ul>
+
+                    <h3>Downloads</h3>
+                    <p>Full changelog, signed binaries, and SHA256 sums: <a href="https://github.com/peteonrails/voxtype/releases/tag/v0.7.5">v0.7.5 on GitHub</a>.</p>
+                </div>
+            </article>
+
             <article class="news-article" id="v073">
                 <div class="article-meta">
                     <time datetime="2026-05-19">May 19, 2026</time>
