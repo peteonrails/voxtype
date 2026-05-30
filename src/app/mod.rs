@@ -11,7 +11,6 @@ use voxtype::{config, Cli};
 
 mod config_set_engine;
 mod config_show;
-mod daemon_pid;
 mod dispatch;
 mod info;
 #[cfg(target_os = "macos")]

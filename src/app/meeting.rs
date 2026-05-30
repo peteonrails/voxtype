@@ -1,8 +1,7 @@
 //! `voxtype meeting <action>` — start/stop/pause/resume/status/list/export/show/delete/label/summarize.
 
-use super::daemon_pid::check_daemon_running;
 use std::path::PathBuf;
-use voxtype::{config, meeting, setup, MeetingAction};
+use voxtype::{config, daemon_status::check_daemon_running, meeting, setup, MeetingAction};
 
 /// Run a meeting command
 pub(crate) async fn run_meeting_command(

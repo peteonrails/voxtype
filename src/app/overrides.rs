@@ -17,6 +17,19 @@ fn parse_driver_order(s: &str) -> Result<Vec<config::OutputDriver>, String> {
         .collect()
 }
 
+/// Apply a paired `--foo` / `--no-foo` flag set onto a boolean config field.
+/// `enable` wins over `disable`; both unset leaves the field untouched.
+///
+/// Mirrors the `override_from_flags` helper that landed in the cli.rs split
+/// (commit dece381) — same fact, expressed once.
+fn apply_bool_override(target: &mut bool, enable: bool, disable: bool) {
+    if enable {
+        *target = true;
+    } else if disable {
+        *target = false;
+    }
+}
+
 /// Apply every `cli.<flag>` onto `config` in place. Returns `top_level_model`
 /// (a clone of `cli.model`) which is consumed downstream by
 /// `send_record_command` so a subcommand-level `--model` can still defer to
@@ -54,20 +67,13 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         }
     }
     if let Some(ref engine) = cli.engine {
-        match engine.to_lowercase().as_str() {
-            "whisper" => config.engine = config::TranscriptionEngine::Whisper,
-            "parakeet" => config.engine = config::TranscriptionEngine::Parakeet,
-            "moonshine" => config.engine = config::TranscriptionEngine::Moonshine,
-            "sensevoice" => config.engine = config::TranscriptionEngine::SenseVoice,
-            "paraformer" => config.engine = config::TranscriptionEngine::Paraformer,
-            "dolphin" => config.engine = config::TranscriptionEngine::Dolphin,
-            "omnilingual" => config.engine = config::TranscriptionEngine::Omnilingual,
-            "cohere" => config.engine = config::TranscriptionEngine::Cohere,
-            "soniox" => config.engine = config::TranscriptionEngine::Soniox,
-            _ => {
+        match engine.parse::<config::TranscriptionEngine>() {
+            Ok(e) => config.engine = e,
+            Err(_) => {
                 eprintln!(
-                    "Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere, soniox",
-                    engine
+                    "Error: Invalid engine '{}'. Valid options: {}",
+                    engine,
+                    voxtype::cli::ENGINE_NAMES_CSV
                 );
                 std::process::exit(1);
             }
@@ -171,12 +177,11 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if let Some(max_dur) = cli.max_duration {
         config.audio.max_duration_secs = max_dur;
     }
-    if cli.audio_feedback {
-        config.audio.feedback.enabled = true;
-    }
-    if cli.no_audio_feedback {
-        config.audio.feedback.enabled = false;
-    }
+    apply_bool_override(
+        &mut config.audio.feedback.enabled,
+        cli.audio_feedback,
+        cli.no_audio_feedback,
+    );
     if cli.pause_media {
         config.audio.pause_media = true;
     }
@@ -199,42 +204,37 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
             }
         }
     }
-    if cli.auto_submit {
-        config.output.auto_submit = true;
-    }
-    if cli.no_auto_submit {
-        config.output.auto_submit = false;
-    }
-    if cli.shift_enter_newlines {
-        config.output.shift_enter_newlines = true;
-    }
-    if cli.no_shift_enter_newlines {
-        config.output.shift_enter_newlines = false;
-    }
-    if cli.smart_auto_submit {
-        config.text.smart_auto_submit = true;
-    }
-    if cli.no_smart_auto_submit {
-        config.text.smart_auto_submit = false;
-    }
+    apply_bool_override(
+        &mut config.output.auto_submit,
+        cli.auto_submit,
+        cli.no_auto_submit,
+    );
+    apply_bool_override(
+        &mut config.output.shift_enter_newlines,
+        cli.shift_enter_newlines,
+        cli.no_shift_enter_newlines,
+    );
+    apply_bool_override(
+        &mut config.text.smart_auto_submit,
+        cli.smart_auto_submit,
+        cli.no_smart_auto_submit,
+    );
     if let Some(delay) = cli.type_delay {
         config.output.type_delay_ms = delay;
     }
-    if cli.fallback_to_clipboard {
-        config.output.fallback_to_clipboard = true;
-    }
-    if cli.no_fallback_to_clipboard {
-        config.output.fallback_to_clipboard = false;
-    }
+    apply_bool_override(
+        &mut config.output.fallback_to_clipboard,
+        cli.fallback_to_clipboard,
+        cli.no_fallback_to_clipboard,
+    );
     if cli.spoken_punctuation {
         config.text.spoken_punctuation = true;
     }
-    if cli.filter_fillers {
-        config.text.filter_filler_words = true;
-    }
-    if cli.no_filter_fillers {
-        config.text.filter_filler_words = false;
-    }
+    apply_bool_override(
+        &mut config.text.filter_filler_words,
+        cli.filter_fillers,
+        cli.no_filter_fillers,
+    );
     if let Some(ref keys) = cli.paste_keys {
         config.output.paste_keys = Some(keys.clone());
     }
@@ -275,12 +275,11 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if let Some(ref cmd) = cli.pre_recording_command {
         config.output.pre_recording_command = Some(cmd.clone());
     }
-    if cli.wait_for_modifier_release {
-        config.output.wait_for_modifier_release = true;
-    }
-    if cli.no_wait_for_modifier_release {
-        config.output.wait_for_modifier_release = false;
-    }
+    apply_bool_override(
+        &mut config.output.wait_for_modifier_release,
+        cli.wait_for_modifier_release,
+        cli.no_wait_for_modifier_release,
+    );
     if let Some(ms) = cli.modifier_release_timeout_ms {
         config.output.modifier_release_timeout_ms = ms;
     }

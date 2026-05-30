@@ -121,18 +121,14 @@ pub(crate) async fn dispatch(
 
         Commands::Transcribe { file, engine } => {
             if let Some(engine_name) = engine {
-                match engine_name.to_lowercase().as_str() {
-                    "whisper" => config.engine = config::TranscriptionEngine::Whisper,
-                    "parakeet" => config.engine = config::TranscriptionEngine::Parakeet,
-                    "moonshine" => config.engine = config::TranscriptionEngine::Moonshine,
-                    "sensevoice" => config.engine = config::TranscriptionEngine::SenseVoice,
-                    "paraformer" => config.engine = config::TranscriptionEngine::Paraformer,
-                    "dolphin" => config.engine = config::TranscriptionEngine::Dolphin,
-                    "omnilingual" => config.engine = config::TranscriptionEngine::Omnilingual,
-                    "cohere" => config.engine = config::TranscriptionEngine::Cohere,
-                    "soniox" => config.engine = config::TranscriptionEngine::Soniox,
-                    _ => {
-                        eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere, soniox", engine_name);
+                match engine_name.parse::<config::TranscriptionEngine>() {
+                    Ok(e) => config.engine = e,
+                    Err(_) => {
+                        eprintln!(
+                            "Error: Invalid engine '{}'. Valid options: {}",
+                            engine_name,
+                            voxtype::cli::ENGINE_NAMES_CSV
+                        );
                         std::process::exit(1);
                     }
                 }

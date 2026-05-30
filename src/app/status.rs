@@ -1,8 +1,7 @@
 //! `voxtype status` — read the daemon's state file, optionally render as
 //! Waybar-flavoured JSON, optionally follow with inotify.
 
-use super::daemon_pid::is_daemon_running;
-use voxtype::{config, setup};
+use voxtype::{config, daemon_status::is_daemon_running, setup};
 
 /// Extended status info for JSON output
 pub(crate) struct ExtendedStatusInfo {
@@ -209,8 +208,16 @@ pub(crate) async fn run_status(
     Ok(())
 }
 
-/// Format state as JSON for Waybar consumption
-/// The `alt` field enables Waybar's format-icons feature for custom icon mapping
+/// Format state as JSON for Waybar consumption.
+///
+/// The `alt` field enables Waybar's format-icons feature for custom icon
+/// mapping. The output format (key order, space-after-colon, embedded `\n`
+/// in the tooltip) is part of the contract with waybar consumers; the
+/// `format_state_json_pins_byte_exact_output` test locks it.
+///
+/// Values are escaped via `serde_json::to_string` so a device name or model
+/// containing `"` or `\` can't produce malformed JSON. The outer template
+/// stays hand-rolled to preserve the existing whitespace shape.
 pub(crate) fn format_state_json(
     state: &str,
     icons: &config::ResolvedIcons,
@@ -232,23 +239,39 @@ pub(crate) fn format_state_json(
 
     match extended {
         Some(info) => {
-            // Extended format includes model, device, backend
+            // Use real newlines in the tooltip — serde_json encodes each as
+            // the two-byte `\n` escape, which is what waybar expects.
             let tooltip = format!(
-                "{}\\nModel: {}\\nDevice: {}\\nBackend: {}",
+                "{}\nModel: {}\nDevice: {}\nBackend: {}",
                 base_tooltip, info.model, info.device, info.backend
             );
             format!(
-                r#"{{"text": "{}", "alt": "{}", "class": "{}", "tooltip": "{}", "model": "{}", "device": "{}", "backend": "{}"}}"#,
-                text, alt, class, tooltip, info.model, info.device, info.backend
+                r#"{{"text": {}, "alt": {}, "class": {}, "tooltip": {}, "model": {}, "device": {}, "backend": {}}}"#,
+                json_str(text),
+                json_str(alt),
+                json_str(class),
+                json_str(&tooltip),
+                json_str(&info.model),
+                json_str(&info.device),
+                json_str(&info.backend),
             )
         }
-        None => {
-            format!(
-                r#"{{"text": "{}", "alt": "{}", "class": "{}", "tooltip": "{}"}}"#,
-                text, alt, class, base_tooltip
-            )
-        }
+        None => format!(
+            r#"{{"text": {}, "alt": {}, "class": {}, "tooltip": {}}}"#,
+            json_str(text),
+            json_str(alt),
+            json_str(class),
+            json_str(base_tooltip),
+        ),
     }
+}
+
+/// JSON-encode a single string value, returning it with the surrounding
+/// double-quotes (e.g. `foo` → `"foo"`, `a"b` → `"a\"b"`). Used by
+/// `format_state_json` so the outer template can keep its hand-rolled
+/// whitespace shape while still getting correct escaping for free.
+fn json_str(s: &str) -> String {
+    serde_json::to_string(s).expect("serde_json never fails on &str")
 }
 
 #[cfg(test)]
@@ -280,5 +303,70 @@ mod tests {
         // collapse the two states in the other direction.
         let stopped_json = format_state_json("stopped", &icons, None);
         assert!(stopped_json.contains("\"alt\": \"stopped\""));
+    }
+
+    /// Pin the exact byte output of `format_state_json` for every state,
+    /// with and without extended info. Waybar consumers parse this JSON via
+    /// `jq` / `format-icons`; key order, the literal `\n` escape in tooltips
+    /// (NOT a real newline), and the space-after-colon style are part of the
+    /// contract. If you switch the implementation (e.g. to serde_json), this
+    /// test must still pass byte-for-byte.
+    #[test]
+    fn format_state_json_pins_byte_exact_output() {
+        // Deterministic icons so the test doesn't depend on which theme is
+        // currently the default. Use ASCII placeholders to keep the literal
+        // strings readable.
+        let icons = config::ResolvedIcons {
+            idle: "I".to_string(),
+            recording: "R".to_string(),
+            streaming: "S".to_string(),
+            transcribing: "T".to_string(),
+            stopped: "X".to_string(),
+        };
+
+        // --- Without extended info ---
+        assert_eq!(
+            format_state_json("recording", &icons, None),
+            r#"{"text": "R", "alt": "recording", "class": "recording", "tooltip": "Recording..."}"#,
+        );
+        assert_eq!(
+            format_state_json("streaming", &icons, None),
+            r#"{"text": "S", "alt": "streaming", "class": "streaming", "tooltip": "Streaming live..."}"#,
+        );
+        assert_eq!(
+            format_state_json("transcribing", &icons, None),
+            r#"{"text": "T", "alt": "transcribing", "class": "transcribing", "tooltip": "Transcribing..."}"#,
+        );
+        assert_eq!(
+            format_state_json("idle", &icons, None),
+            r#"{"text": "I", "alt": "idle", "class": "idle", "tooltip": "Voxtype ready - hold hotkey to record"}"#,
+        );
+        assert_eq!(
+            format_state_json("stopped", &icons, None),
+            r#"{"text": "X", "alt": "stopped", "class": "stopped", "tooltip": "Voxtype not running"}"#,
+        );
+        // Unknown state falls back to the idle icon but keeps the literal
+        // alt/class for the consumer to inspect.
+        assert_eq!(
+            format_state_json("bogus", &icons, None),
+            r#"{"text": "I", "alt": "bogus", "class": "bogus", "tooltip": "Unknown state"}"#,
+        );
+
+        // --- With extended info ---
+        // The tooltip embeds literal `\n` characters (the two-byte escape,
+        // not 0x0a). Waybar renders these as newlines client-side.
+        let ext = ExtendedStatusInfo {
+            model: "base.en".to_string(),
+            device: "default".to_string(),
+            backend: "CPU (AVX2)".to_string(),
+        };
+        assert_eq!(
+            format_state_json("recording", &icons, Some(&ext)),
+            r#"{"text": "R", "alt": "recording", "class": "recording", "tooltip": "Recording...\nModel: base.en\nDevice: default\nBackend: CPU (AVX2)", "model": "base.en", "device": "default", "backend": "CPU (AVX2)"}"#,
+        );
+        assert_eq!(
+            format_state_json("idle", &icons, Some(&ext)),
+            r#"{"text": "I", "alt": "idle", "class": "idle", "tooltip": "Voxtype ready - hold hotkey to record\nModel: base.en\nDevice: default\nBackend: CPU (AVX2)", "model": "base.en", "device": "default", "backend": "CPU (AVX2)"}"#,
+        );
     }
 }

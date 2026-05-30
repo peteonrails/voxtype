@@ -5,8 +5,7 @@
 //! would invent write-race surface that doesn't exist today (see
 //! `docs/REFACTORING.md`).
 
-use super::daemon_pid::daemon_pid_file_path;
-use voxtype::{config, RecordAction};
+use voxtype::{config, daemon_status, RecordAction};
 
 /// Send a record command to the running daemon via Unix signals or file triggers
 pub(crate) fn send_record_command(
@@ -16,31 +15,11 @@ pub(crate) fn send_record_command(
 ) -> anyhow::Result<()> {
     use voxtype::OutputModeOverride;
 
-    // Read PID from the lock file (daemon writes PID to voxtype.lock)
-    let pid_file = daemon_pid_file_path();
-
-    if !pid_file.exists() {
-        eprintln!("Error: Voxtype daemon is not running.");
-        eprintln!("Start it with: voxtype daemon");
-        std::process::exit(1);
-    }
-
-    let pid_str = std::fs::read_to_string(&pid_file)
-        .map_err(|e| anyhow::anyhow!("Failed to read PID file: {}", e))?;
-
-    let pid: i32 = pid_str
-        .trim()
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Invalid PID in file: {}", e))?;
-
-    // Check if the process is actually running (signal 0 = check existence)
-    if unsafe { libc::kill(pid, 0) } != 0 {
-        // Process doesn't exist, clean up stale PID file
-        let _ = std::fs::remove_file(&pid_file);
-        eprintln!("Error: Voxtype daemon is not running (stale PID file removed).");
-        eprintln!("Start it with: voxtype daemon");
-        std::process::exit(1);
-    }
+    // Verify the daemon is alive before writing any override files; the
+    // process-existence check (and stale-lockfile cleanup) lives in
+    // `daemon_status::check_daemon_running`, so this stays in sync with the
+    // checks in `voxtype meeting` and `voxtype status`.
+    let pid = daemon_status::check_daemon_running()?;
 
     // Handle cancel separately (uses file trigger instead of signal)
     if matches!(action, RecordAction::Cancel) {
