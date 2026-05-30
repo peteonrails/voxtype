@@ -1470,6 +1470,35 @@ pub enum TranscriptionEngine {
     Soniox,
 }
 
+impl TranscriptionEngine {
+    /// Canonical lowercase name, matching this enum's serde representation.
+    /// Use this for any user-visible label, config-file value, log key, or
+    /// Cargo feature reference (every non-Whisper engine's feature flag is
+    /// the same string as its name). Centralising the mapping keeps the
+    /// TUI banner, the daemon notification, the menubar engine writer, and
+    /// `variant_check`'s required-feature lookup from drifting out of sync
+    /// when a new engine is added — they all call `.name()`.
+    pub const fn name(&self) -> &'static str {
+        match self {
+            TranscriptionEngine::Whisper => "whisper",
+            TranscriptionEngine::Parakeet => "parakeet",
+            TranscriptionEngine::Moonshine => "moonshine",
+            TranscriptionEngine::SenseVoice => "sensevoice",
+            TranscriptionEngine::Paraformer => "paraformer",
+            TranscriptionEngine::Dolphin => "dolphin",
+            TranscriptionEngine::Omnilingual => "omnilingual",
+            TranscriptionEngine::Cohere => "cohere",
+            TranscriptionEngine::Soniox => "soniox",
+        }
+    }
+}
+
+impl std::fmt::Display for TranscriptionEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// VAD backend selection
 ///
 /// Determines which voice activity detection algorithm to use.

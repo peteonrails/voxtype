@@ -77,33 +77,12 @@ pub enum Remediation {
 ///
 /// Whisper is unconditional in every variant (the engine itself is the
 /// reason whisper-rs is a non-optional dependency). Every other engine is
-/// behind a feature flag of the same name.
+/// behind a feature flag of the same name — so once Whisper is excluded
+/// the feature name is just the engine's canonical name.
 pub fn required_feature(engine: TranscriptionEngine) -> Option<&'static str> {
     match engine {
         TranscriptionEngine::Whisper => None,
-        TranscriptionEngine::Parakeet => Some("parakeet"),
-        TranscriptionEngine::Moonshine => Some("moonshine"),
-        TranscriptionEngine::SenseVoice => Some("sensevoice"),
-        TranscriptionEngine::Paraformer => Some("paraformer"),
-        TranscriptionEngine::Dolphin => Some("dolphin"),
-        TranscriptionEngine::Omnilingual => Some("omnilingual"),
-        TranscriptionEngine::Cohere => Some("cohere"),
-        TranscriptionEngine::Soniox => Some("soniox"),
-    }
-}
-
-/// Human-facing name for the engine, used in banner text and notifications.
-fn engine_display_name(engine: TranscriptionEngine) -> &'static str {
-    match engine {
-        TranscriptionEngine::Whisper => "whisper",
-        TranscriptionEngine::Parakeet => "parakeet",
-        TranscriptionEngine::Moonshine => "moonshine",
-        TranscriptionEngine::SenseVoice => "sensevoice",
-        TranscriptionEngine::Paraformer => "paraformer",
-        TranscriptionEngine::Dolphin => "dolphin",
-        TranscriptionEngine::Omnilingual => "omnilingual",
-        TranscriptionEngine::Cohere => "cohere",
-        TranscriptionEngine::Soniox => "soniox",
+        other => Some(other.name()),
     }
 }
 
@@ -140,7 +119,7 @@ pub fn detect_mismatch(config: &Config, inventory: &Inventory) -> Option<Variant
     };
 
     Some(VariantMismatch {
-        configured_engine: engine_display_name(engine),
+        configured_engine: engine.name(),
         required_feature: feature,
         active_variant_name,
         remediation,

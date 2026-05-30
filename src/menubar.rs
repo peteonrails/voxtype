@@ -176,17 +176,7 @@ fn set_engine(engine: TranscriptionEngine) -> bool {
 
     let content = std::fs::read_to_string(&config_path).unwrap_or_default();
 
-    let engine_str = match engine {
-        TranscriptionEngine::Parakeet => "parakeet",
-        TranscriptionEngine::Whisper => "whisper",
-        TranscriptionEngine::Moonshine => "moonshine",
-        TranscriptionEngine::SenseVoice => "sensevoice",
-        TranscriptionEngine::Paraformer => "paraformer",
-        TranscriptionEngine::Dolphin => "dolphin",
-        TranscriptionEngine::Omnilingual => "omnilingual",
-        TranscriptionEngine::Cohere => "cohere",
-        TranscriptionEngine::Soniox => "soniox",
-    };
+    let engine_str = engine.name();
 
     // Check if engine line exists
     let new_content = if content.contains("engine =") {
