@@ -365,4 +365,53 @@ mod tests {
         ed.set_string("hotkey", "key", "PAUSE");
         assert!(ed.is_dirty());
     }
+
+    #[test]
+    fn set_float_writes_toml_number_not_string() {
+        // Regression for #451: the TUI audio + vad sections used `set_string`
+        // with `format!("{:.2}", f32)` to write floats, producing
+        // `volume = "0.70"`. The daemon's serde config expects `f32` and
+        // rejects the string with "invalid type: string \"0.70\", expected f32".
+        // `set_float` must emit a TOML number so deserialization works on next
+        // load, and `get_float` must round-trip it back.
+        let (_dir, path) = temp_config("");
+        let mut ed = ConfigEditor::load_from(path.clone()).unwrap();
+        ed.set_float("audio.feedback", "volume", 0.70);
+        ed.set_float("vad", "threshold", 0.5);
+        let serialized = ed.document.to_string();
+
+        assert!(
+            serialized.contains("volume = 0.7"),
+            "expected bare TOML float, got: {}",
+            serialized
+        );
+        assert!(
+            !serialized.contains("volume = \"0.7"),
+            "volume must not be quoted as a string: {}",
+            serialized
+        );
+        assert!(
+            serialized.contains("threshold = 0.5"),
+            "expected bare TOML float, got: {}",
+            serialized
+        );
+
+        // Write the serialized form to disk directly and reload — bypasses
+        // ConfigEditor::save() which validates the full schema (the partial
+        // doc here has no [audio] device etc., which validation would reject).
+        // We just want to prove that set_float -> file -> get_float preserves
+        // the value as a float.
+        fs::write(&path, &serialized).unwrap();
+        let reloaded = ConfigEditor::load_from(path).unwrap();
+        assert_eq!(
+            reloaded.get_float("audio.feedback", "volume"),
+            Some(0.70),
+            "volume must round-trip as a float"
+        );
+        assert_eq!(
+            reloaded.get_float("vad", "threshold"),
+            Some(0.5),
+            "threshold must round-trip as a float"
+        );
+    }
 }
