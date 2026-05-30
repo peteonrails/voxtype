@@ -101,7 +101,11 @@ pub struct MeetingDiarizationConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
-    /// Diarization backend: "simple", "ml", or "remote"
+    /// Diarization backend: "simple" or "ml".
+    /// The match arms in `src/meeting/diarization/mod.rs` are the source of
+    /// truth for what the daemon actually dispatches on; the CLI's
+    /// `--diarization` value parser is pinned to the same set via
+    /// `crate::cli::DIARIZATION_BACKENDS` and a test in this file.
     #[serde(default = "default_diarization_backend")]
     pub backend: String,
 

@@ -8,6 +8,7 @@
 use clap::Parser;
 
 use super::Commands;
+use super::ENGINE_NAMES_CSV;
 
 #[derive(Parser)]
 #[command(name = "voxtype")]
@@ -75,7 +76,7 @@ pub struct Cli {
         long,
         value_name = "ENGINE",
         help_heading = "Transcription",
-        long_help = "Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere, soniox"
+        long_help = format!("Override transcription engine: {}", ENGINE_NAMES_CSV),
     )]
     pub engine: Option<String>,
 
