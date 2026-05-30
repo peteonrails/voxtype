@@ -115,6 +115,36 @@ Fixes #123
 
 Types: `fix`, `feat`, `docs`, `style`, `refactor`, `test`, `chore`
 
+## Refactoring while contributing
+
+If you're already inside a file to fix a bug or add a feature, it's fine to
+clean up what you're touching. The rules are short.
+
+Stay inside the files your change already touches. If you notice something
+ugly in a neighbouring module, open an issue and link it from your PR; don't
+expand the diff. Adjacent cleanup is how PRs grow until they don't ship.
+
+Wait for the third call site before extracting a helper. Two might be a
+coincidence. The same shape happening to recur in places that answer
+different questions is also a coincidence; don't merge those. Genuine
+duplication of a fact across files (the same name spelled out repeatedly, the
+same parse logic copy-pasted) is the case worth fixing.
+
+Put the cleanup in its own commit, separate from the behaviour change. It
+makes the PR easier to review and easier to revert in pieces if needed. If
+you're refactoring something with no test coverage, write a small test that
+pins current behaviour before you change anything.
+
+If your cleanup is going to add more than half a day of work, stop and split.
+Ship the feature; do the refactor as a follow-up PR. Don't invent abstractions
+for a single implementation, and don't split a file just because it's long.
+File splits and other structural decisions are
+[the maintainer's call](docs/REFACTORING.md).
+
+If you're not sure whether a cleanup belongs in your PR, ask in the
+description before doing it. Skipping a refactor is always cheaper than
+reverting one.
+
 ## Code of Conduct
 
 Please read our [Code of Conduct](CODE_OF_CONDUCT.md) before contributing. We are committed to providing a welcoming and positive experience for everyone.
