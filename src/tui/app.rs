@@ -1,6 +1,7 @@
 //! TUI application state.
 
 use crate::setup::binary::{self, Acceleration, EngineFamily, InstallKind, Inventory, Variant};
+use crate::setup::variant_check::{self, VariantMismatch};
 use std::path::Path;
 
 use super::advanced_section::AdvancedState;
@@ -89,6 +90,13 @@ pub struct App {
     /// model name so the General banner can prompt the user to fetch it.
     /// Computed at load time and on `refresh_inventory()`.
     pub missing_model: Option<MissingModel>,
+    /// `Some` when the configured engine isn't available in the running
+    /// binary's compiled features (e.g. config says `engine = "parakeet"`
+    /// but `/usr/bin/voxtype` dispatches to the CPU Whisper variant). When
+    /// present, every section renders a persistent red banner above its
+    /// content pointing the user at the recovery path. Computed at load
+    /// time and on `refresh_inventory()`. See #450.
+    pub variant_mismatch: Option<VariantMismatch>,
     /// Lazily loaded Hotkey section state. None until the user opens Hotkey
     /// for the first time (or load fails).
     pub hotkey: Option<HotkeyState>,
@@ -159,6 +167,7 @@ impl App {
     pub fn new(force_package_mode: bool) -> Self {
         let inventory = build_inventory(force_package_mode);
         let cursor = initial_cursor(&inventory);
+        let variant_mismatch = detect_variant_mismatch(&inventory);
         Self {
             inventory,
             cursor,
@@ -172,6 +181,7 @@ impl App {
             help_open: false,
             quit_pending: false,
             missing_model: detect_missing_model(),
+            variant_mismatch,
             hotkey: None,
             audio: None,
             engine: None,
@@ -272,6 +282,7 @@ impl App {
         self.inventory = build_inventory(self.force_package_mode);
         self.daemon_running = is_daemon_running();
         self.missing_model = detect_missing_model();
+        self.variant_mismatch = detect_variant_mismatch(&self.inventory);
     }
 
     /// True when at least one section state has been loaded — the user has
@@ -414,6 +425,17 @@ fn initial_cursor(inv: &Inventory) -> (usize, usize) {
     } else {
         (0, 0)
     }
+}
+
+/// Compute the engine-vs-running-binary mismatch (see #450). Loads the
+/// config from its default path; returns `None` if config can't be loaded
+/// (we don't want a config parse error to prevent the TUI from opening,
+/// since the user opened it specifically to fix configuration). The
+/// inventory is borrowed from `App` so the call doesn't re-walk
+/// `/usr/lib/voxtype/` on every refresh.
+fn detect_variant_mismatch(inventory: &Inventory) -> Option<VariantMismatch> {
+    let cfg = crate::config::load_config(None).ok()?;
+    variant_check::detect_mismatch(&cfg, inventory)
 }
 
 /// Detect whether the configured engine's active model file is on disk.

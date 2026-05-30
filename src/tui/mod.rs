@@ -366,26 +366,37 @@ fn handle_section_key(app: &mut App, key: KeyEvent) -> Action {
 }
 
 fn draw(f: &mut Frame, app: &App) {
+    // Reserve a row for the variant-mismatch banner when it's active. Slotting
+    // it between the title and the sidebar/content split means it stays
+    // visible no matter which section the user is on, which is the whole
+    // point — the General section's existing model-missing banner sits
+    // *inside* its section pane and disappears when the user navigates
+    // away. See #450.
+    let banner_height = if app.variant_mismatch.is_some() { 2 } else { 0 };
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // title bar
-            Constraint::Min(0),    // body (sidebar + content)
-            Constraint::Length(1), // footer / help
+            Constraint::Length(1),             // title bar
+            Constraint::Length(banner_height), // variant-mismatch banner (0 when absent)
+            Constraint::Min(0),                // body (sidebar + content)
+            Constraint::Length(1),             // footer / help
         ])
         .split(f.area());
 
     render_title(f, outer[0]);
+    if app.variant_mismatch.is_some() {
+        render_variant_mismatch_banner(f, outer[1], app);
+    }
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(sidebar::WIDTH), Constraint::Min(0)])
-        .split(outer[1]);
+        .split(outer[2]);
 
     sidebar::render(f, body[0], app);
     render_section(f, body[1], app);
 
-    render_footer(f, outer[2], app);
+    render_footer(f, outer[3], app);
 
     if app.help_open {
         render_help_overlay(f);
@@ -513,6 +524,55 @@ fn render_title(f: &mut Frame, area: Rect) {
         ),
     ]);
     f.render_widget(Paragraph::new(line), area);
+}
+
+/// Persistent two-line banner shown at the top of every section when the
+/// running binary can't service the configured engine (see #450). The
+/// emoji-free, monochrome-bright style matches the existing TUI feedback
+/// banners (yellow accent, plain ASCII glyphs) so it renders the same in
+/// any palette.
+fn render_variant_mismatch_banner(f: &mut Frame, area: Rect, app: &App) {
+    use crate::setup::variant_check::Remediation;
+    let Some(m) = app.variant_mismatch.as_ref() else {
+        return;
+    };
+    let warn = Style::default().fg(Color::Yellow);
+    let dim = Style::default().fg(Color::DarkGray);
+    let bold = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(ratatui::style::Modifier::BOLD);
+
+    let active = m
+        .active_variant_name
+        .as_deref()
+        .unwrap_or("the running binary");
+
+    let line1 = Line::from(vec![
+        Span::styled(" ! ", bold),
+        Span::styled("engine = ", warn),
+        Span::styled(m.configured_engine, bold),
+        Span::styled(" but ", warn),
+        Span::styled(active, bold),
+        Span::styled(" was built without ", warn),
+        Span::styled(format!("--features {}", m.required_feature), bold),
+    ]);
+
+    let line2 = match &m.remediation {
+        Remediation::SwitchToVariant { target } => Line::from(vec![
+            Span::styled("   Fix: ", dim),
+            Span::styled("sudo voxtype setup onnx --enable", warn),
+            Span::styled(
+                format!("  (recommended variant: {})", target.binary_name()),
+                dim,
+            ),
+        ]),
+        Remediation::Rebuild { feature } => Line::from(vec![
+            Span::styled("   Fix: rebuild voxtype with ", dim),
+            Span::styled(format!("--features {}", feature), warn),
+        ]),
+    };
+
+    f.render_widget(Paragraph::new(vec![line1, line2]), area);
 }
 
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {
