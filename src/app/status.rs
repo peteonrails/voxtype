@@ -369,4 +369,43 @@ mod tests {
             r#"{"text": "I", "alt": "idle", "class": "idle", "tooltip": "Voxtype ready - hold hotkey to record\nModel: base.en\nDevice: default\nBackend: CPU (AVX2)", "model": "base.en", "device": "default", "backend": "CPU (AVX2)"}"#,
         );
     }
+
+    /// The whole point of the serde_json switch in `format_state_json` is
+    /// that a device name or model string containing `"` or `\` can't
+    /// break the JSON output. Pin the escaping: round-trip the output
+    /// through `serde_json::Value` and assert the raw payload survives.
+    #[test]
+    fn format_state_json_escapes_quotes_and_backslashes() {
+        let icons = config::ResolvedIcons {
+            idle: "I".to_string(),
+            recording: "R".to_string(),
+            streaming: "S".to_string(),
+            transcribing: "T".to_string(),
+            stopped: "X".to_string(),
+        };
+        let ext = ExtendedStatusInfo {
+            model: r#"large-v3-"turbo""#.to_string(),
+            device: r#"PulseAudio "Main" \ Loopback"#.to_string(),
+            backend: r#"GPU \\ CUDA"#.to_string(),
+        };
+
+        let json = format_state_json("recording", &icons, Some(&ext));
+
+        // Must be valid JSON.
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("format_state_json must emit valid JSON");
+
+        // Each round-tripped value must equal the original input byte-for-byte.
+        assert_eq!(parsed["model"], r#"large-v3-"turbo""#);
+        assert_eq!(parsed["device"], r#"PulseAudio "Main" \ Loopback"#);
+        assert_eq!(parsed["backend"], r#"GPU \\ CUDA"#);
+
+        // And the tooltip — built by splicing newlines into the same
+        // strings — must still parse as one well-formed JSON string.
+        let tooltip = parsed["tooltip"]
+            .as_str()
+            .expect("tooltip must be a JSON string");
+        assert!(tooltip.contains(r#"large-v3-"turbo""#));
+        assert!(tooltip.contains(r#"PulseAudio "Main" \ Loopback"#));
+    }
 }

@@ -228,7 +228,12 @@ pub struct Cli {
     pub audio_feedback: bool,
 
     /// Disable audio feedback sounds
-    #[arg(long, help_heading = "Audio", hide_short_help = true)]
+    #[arg(
+        long,
+        help_heading = "Audio",
+        hide_short_help = true,
+        conflicts_with = "audio_feedback"
+    )]
     pub no_audio_feedback: bool,
 
     /// Pause MPRIS media players during recording (requires playerctl)

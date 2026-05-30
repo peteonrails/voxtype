@@ -28,14 +28,24 @@ pub fn pid_file_path() -> std::path::PathBuf {
 }
 
 /// Read the daemon's PID from the lockfile, returning `None` if the file
-/// is missing, unreadable, or doesn't contain a valid integer.
+/// is missing, unreadable, doesn't contain a valid integer, or contains a
+/// PID that cannot legally identify another process to signal.
+///
+/// `kill(2)` overloads non-positive PIDs: `0` signals the caller's process
+/// group, `-1` broadcasts to every signalable process, and `< -1` signals
+/// a process group by negated PID. A corrupted lockfile reading `0` or
+/// `-1` must therefore NOT be returned — passing such a value to
+/// `libc::kill` from a record/meeting command would mass-signal the
+/// user's session. PID `1` is `init` (or systemd) which a user-mode
+/// voxtype daemon could never legitimately be, so reject it too.
 ///
 /// Note: this only proves a PID was *written*; the process may have died
 /// since. Pair with `is_running` (or call `read_pid_if_alive`) when you
 /// need a liveness guarantee.
 pub fn read_pid() -> Option<i32> {
     let pid_str = std::fs::read_to_string(pid_file_path()).ok()?;
-    pid_str.trim().parse().ok()
+    let pid: i32 = pid_str.trim().parse().ok()?;
+    (pid > 1).then_some(pid)
 }
 
 /// Check whether `pid` corresponds to a live process. Uses signal 0
@@ -86,6 +96,17 @@ pub fn check_daemon_running() -> anyhow::Result<i32> {
         .trim()
         .parse()
         .map_err(|e| anyhow::anyhow!("Invalid PID in file: {}", e))?;
+
+    // Reject pids that overload kill(2)'s signal-delivery semantics
+    // (0 = process group, -1 = broadcast, <-1 = signal a process group).
+    // PID 1 is init/systemd which a user-mode voxtype daemon could never
+    // legitimately be. See the rationale on `read_pid`.
+    if pid <= 1 {
+        let _ = std::fs::remove_file(&pid_file);
+        eprintln!("Error: Voxtype daemon is not running (lockfile held an invalid PID, removed).");
+        eprintln!("Start it with: voxtype daemon");
+        std::process::exit(1);
+    }
 
     if !is_running(pid) {
         // Process doesn't exist, clean up stale PID file

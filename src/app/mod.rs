@@ -2,9 +2,15 @@
 //! handlers, sets up logging, parses CLI, loads config, then hands off to
 //! `app::run(cli, config_path, config).await`.
 //!
-//! The rest of this module is organised by subcommand. Each long handler
-//! lives in its own file (`record.rs`, `status.rs`, `meeting.rs`, …); shared
-//! plumbing lives in `daemon_pid.rs` and `dispatch.rs`.
+//! The rest of this module is organised by subcommand — each long handler
+//! lives in its own file (`record.rs`, `status.rs`, `meeting.rs`,
+//! `transcribe_file.rs`, `info.rs`, `config_show.rs`, `config_set_engine.rs`,
+//! `updates.rs`, `macos.rs`). Shared binary-side plumbing lives in
+//! `dispatch.rs` (the top-level subcommand router), `overrides.rs` (CLI →
+//! Config layering), and `sigpipe.rs`. Cross-binary helpers like daemon
+//! liveness sit in the library at `voxtype::daemon_status`, so the TUI and
+//! any future external caller resolve to the same lockfile path and
+//! liveness check.
 
 use std::path::PathBuf;
 use voxtype::{config, Cli};
