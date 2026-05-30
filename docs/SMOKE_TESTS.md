@@ -93,6 +93,18 @@ verification.
 |------|----------------|
 | [Meeting Mode](smoke_tests/meeting-mode.md) | Lifecycle, list, show, export, delete, speaker labels, AI summary, error handling, dual audio, diarization backends |
 
+## v0.7.6 release verification
+
+Tests for bug fixes and tweaks introduced in v0.7.6.
+
+| Test | Issue |
+|------|-------|
+| [TUI Audio/VAD float serialization](smoke_tests/v076/tui-audio-vad-float-serialization.md) | [#451](https://github.com/peteonrails/voxtype/issues/451) |
+| [Engine vs binary mismatch detection](smoke_tests/v076/engine-binary-mismatch-detection.md) | [#450](https://github.com/peteonrails/voxtype/issues/450) |
+| [Setup retry-hint](smoke_tests/v076/setup-retry-hint.md) | [#449](https://github.com/peteonrails/voxtype/issues/449) |
+| [Streaming + non-streaming model fail-fast](smoke_tests/v076/streaming-model-fail-fast.md) | [#442](https://github.com/peteonrails/voxtype/issues/442) |
+| [Model downloads via Cloudflare R2](smoke_tests/v076/models-cdn-r2.md) | (CDN rollout) |
+
 ## v0.6.6 release verification
 
 Tests for bug fixes and enhancements introduced in v0.6.6.
