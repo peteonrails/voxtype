@@ -420,9 +420,16 @@ mod tests {
     }
 
     #[test]
-    fn detect_available_backends_returns_vec() {
-        let backends = detect_available_backends();
-        assert!(backends.len() <= 5);
+    fn detect_available_backends_does_not_panic() {
+        // Smoke test only — the function walks /usr/lib/voxtype/ on
+        // package installs and inspects /proc/self/exe on source builds,
+        // and the count of returned backends is bounded by whatever the
+        // host actually has installed (0 on a minimal CI runner, up to
+        // every ParakeetBackend variant on a fully-provisioned dev box).
+        // An earlier `len() <= 5` upper bound dated from before the v0.7.0
+        // CUDA 12/13 split and MIGraphX rename and started failing on
+        // dev boxes with the full variant set installed.
+        let _ = detect_available_backends();
     }
 
     #[test]
