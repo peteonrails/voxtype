@@ -252,6 +252,19 @@ impl App {
         }
     }
 
+    /// Direct-navigate to a specific section, bypassing the sidebar cursor.
+    /// Used by F2 (jump to General to fix a variant mismatch), and a fine
+    /// hook for future "Press X to fix" cross-section affordances. Focuses
+    /// the content pane so the user can act immediately on arrival.
+    pub fn jump_to_section(&mut self, section: Section) {
+        self.current_section = section;
+        if let Some(idx) = Section::ALL.iter().position(|s| *s == section) {
+            self.sidebar_cursor = idx;
+        }
+        self.sidebar_focused = false;
+        self.ensure_section_loaded();
+    }
+
     pub fn focus_sidebar(&mut self) {
         self.sidebar_focused = true;
         // Keep cursor in sync with the active section so the user lands on the

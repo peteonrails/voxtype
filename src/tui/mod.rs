@@ -278,6 +278,14 @@ fn handle_global_key(app: &mut App, key: KeyEvent) -> Option<Action> {
     match (key.code, key.modifiers) {
         (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Action::Quit),
         (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => Some(Action::Quit),
+        // F2 jumps to the General section, where the variant-matrix picker
+        // lives. Mentioned in the variant-mismatch banner so a user landing
+        // on (say) Audio can fix the engine/binary mismatch without
+        // navigating the sidebar by hand. See #450.
+        (KeyCode::F(2), _) => {
+            app.jump_to_section(Section::General);
+            Some(Action::None)
+        }
         (KeyCode::Tab, _) => {
             if app.sidebar_focused {
                 app.focus_content();
@@ -479,6 +487,7 @@ fn render_help_overlay(f: &mut Frame) {
         Line::from("  Esc          Sidebar focus / quit from sidebar"),
         Line::from("  q, Ctrl-C    Quit"),
         Line::from("  ?            Toggle this help"),
+        Line::from("  F2           Jump to General (variant picker)"),
         Line::from(""),
         Line::from(Span::styled("Sidebar", bold)),
         Line::from("  ↑↓ / jk      Navigate sections"),
@@ -559,12 +568,11 @@ fn render_variant_mismatch_banner(f: &mut Frame, area: Rect, app: &App) {
 
     let line2 = match &m.remediation {
         Remediation::SwitchToVariant { target } => Line::from(vec![
-            Span::styled("   Fix: ", dim),
+            Span::styled("   Fix: press ", dim),
+            Span::styled("F2", warn),
+            Span::styled(" to open the variant picker, or run ", dim),
             Span::styled("sudo voxtype setup onnx --enable", warn),
-            Span::styled(
-                format!("  (recommended variant: {})", target.binary_name()),
-                dim,
-            ),
+            Span::styled(format!("  (recommended: {})", target.binary_name()), dim),
         ]),
         Remediation::Rebuild { feature } => Line::from(vec![
             Span::styled("   Fix: rebuild voxtype with ", dim),
