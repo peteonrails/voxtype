@@ -95,15 +95,7 @@ impl AudioState {
             feedback_theme: ed
                 .get_string("audio.feedback", "theme")
                 .unwrap_or_else(|| "default".to_string()),
-            feedback_volume: ed
-                .get_float("audio.feedback", "volume")
-                .map(|f| f as f32)
-                .or_else(|| ed.get_int("audio.feedback", "volume").map(|n| n as f32))
-                .or_else(|| {
-                    ed.get_string("audio.feedback", "volume")
-                        .and_then(|s| s.parse().ok())
-                })
-                .unwrap_or(0.7),
+            feedback_volume: ed.get_f32_or("audio.feedback", "volume", 0.7),
             field: Field::Device,
             feedback: None,
             dirty_since_load: false,
@@ -156,7 +148,7 @@ impl AudioState {
         ed.set_bool("audio", "pause_media", self.pause_media);
         ed.set_bool("audio.feedback", "enabled", self.feedback_enabled);
         ed.set_string("audio.feedback", "theme", &self.feedback_theme);
-        ed.set_float("audio.feedback", "volume", self.feedback_volume as f64);
+        ed.set_f32("audio.feedback", "volume", self.feedback_volume);
 
         match ed.save() {
             Ok(()) => {
