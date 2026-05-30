@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::super::whisper::default_on_demand_loading;
+use super::super::default_on_demand_loading;
 
 /// Cohere Transcribe speech-to-text configuration (ONNX-based, encoder-decoder).
 /// Requires: cargo build --features cohere

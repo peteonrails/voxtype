@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::super::whisper::default_on_demand_loading;
+use super::super::default_on_demand_loading;
 
 /// Parakeet model architecture type
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]

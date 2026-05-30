@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::super::whisper::default_on_demand_loading;
+use super::super::default_on_demand_loading;
 
 /// Dolphin speech-to-text configuration (ONNX-based CTC encoder, dictation-optimized)
 /// Requires: cargo build --features dolphin

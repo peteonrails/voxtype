@@ -8,7 +8,7 @@
 
 mod audio;
 mod default_config;
-pub mod engines;
+mod engines;
 mod hotkey;
 mod language;
 mod load;
@@ -40,7 +40,6 @@ pub use output::{
     default_language_to_layout, AppliedLanguageXkbHint, FileMode, OutputConfig, OutputDriver,
     OutputMode,
 };
-pub use parse::parse_config_with_defaults;
 pub use profile::{PostProcessConfig, Profile};
 pub use root::Config;
 pub use status::{ResolvedIcons, StatusConfig, StatusIconOverrides};
@@ -50,4 +49,8 @@ pub use whisper::{WhisperConfig, WhisperMode};
 
 pub(super) fn default_true() -> bool {
     true
+}
+
+pub(super) fn default_on_demand_loading() -> bool {
+    false
 }

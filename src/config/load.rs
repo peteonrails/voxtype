@@ -222,7 +222,6 @@ pub fn save_config(config: &Config, path: &Path) -> Result<(), VoxtypeError> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::OutputMode;
     use super::*;
 
     #[test]

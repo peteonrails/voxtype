@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::LanguageConfig;
+use super::{default_on_demand_loading, LanguageConfig};
 
 /// Whisper execution mode (how whisper runs)
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
@@ -209,10 +209,6 @@ impl Default for WhisperConfig {
             whisper_cli_path: None,
         }
     }
-}
-
-pub(crate) fn default_on_demand_loading() -> bool {
-    false
 }
 
 fn default_context_window_optimization() -> bool {

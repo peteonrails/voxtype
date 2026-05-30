@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::super::whisper::default_on_demand_loading;
+use super::super::default_on_demand_loading;
 
 /// Paraformer speech-to-text configuration (FunASR ONNX-based CTC encoder)
 /// Requires: cargo build --features paraformer

@@ -1,6 +1,5 @@
 use super::Config;
 
-/// Load configuration from file, with defaults for missing values
 /// Parse a TOML config string by layering it over default values.
 ///
 /// Renders `Config::default()` to a TOML `Value`, deep-merges the user's TOML

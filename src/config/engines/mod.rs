@@ -2,14 +2,14 @@
 
 use serde::{Deserialize, Serialize};
 
-pub mod cohere;
-pub mod dolphin;
-pub mod moonshine;
-pub mod omnilingual;
-pub mod paraformer;
-pub mod parakeet;
-pub mod sensevoice;
-pub mod soniox;
+mod cohere;
+mod dolphin;
+mod moonshine;
+mod omnilingual;
+mod paraformer;
+mod parakeet;
+mod sensevoice;
+mod soniox;
 
 pub use cohere::CohereConfig;
 pub use dolphin::DolphinConfig;
