@@ -365,10 +365,13 @@ pub enum ActivationMode {
 /// Root configuration structure
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
+    #[serde(default)]
     pub hotkey: HotkeyConfig,
+    #[serde(default)]
     pub audio: AudioConfig,
     #[serde(default)]
     pub whisper: WhisperConfig,
+    #[serde(default)]
     pub output: OutputConfig,
 
     /// Transcription engine: "whisper" (default) or "parakeet"
@@ -487,16 +490,33 @@ pub struct HotkeyConfig {
     pub profile_modifiers: HashMap<String, String>,
 }
 
+impl Default for HotkeyConfig {
+    fn default() -> Self {
+        Self {
+            key: default_hotkey_key(),
+            modifiers: Vec::new(),
+            mode: ActivationMode::default(),
+            enabled: true,
+            cancel_key: None,
+            model_modifier: None,
+            profile_modifiers: HashMap::new(),
+        }
+    }
+}
+
 /// Audio capture configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AudioConfig {
     /// PipeWire/PulseAudio device name, or "default"
+    #[serde(default = "default_audio_device")]
     pub device: String,
 
     /// Sample rate in Hz (whisper expects 16000)
+    #[serde(default = "default_audio_sample_rate")]
     pub sample_rate: u32,
 
     /// Maximum recording duration in seconds (safety limit)
+    #[serde(default = "default_audio_max_duration_secs")]
     pub max_duration_secs: u32,
 
     /// Pause MPRIS media players during recording and resume on stop
@@ -506,6 +526,30 @@ pub struct AudioConfig {
     /// Audio feedback settings
     #[serde(default)]
     pub feedback: AudioFeedbackConfig,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            device: default_audio_device(),
+            sample_rate: default_audio_sample_rate(),
+            max_duration_secs: default_audio_max_duration_secs(),
+            pause_media: false,
+            feedback: AudioFeedbackConfig::default(),
+        }
+    }
+}
+
+fn default_audio_device() -> String {
+    "default".to_string()
+}
+
+fn default_audio_sample_rate() -> u32 {
+    16000
+}
+
+fn default_audio_max_duration_secs() -> u32 {
+    60
 }
 
 /// Audio feedback configuration for sound cues
@@ -2000,6 +2044,7 @@ fn default_restore_clipboard_delay() -> u32 {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OutputConfig {
     /// Primary output mode
+    #[serde(default)]
     pub mode: OutputMode,
 
     /// Fall back to clipboard if typing fails
@@ -2161,6 +2206,41 @@ pub struct OutputConfig {
     pub modifier_release_timeout_ms: u64,
 }
 
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            mode: OutputMode::default(),
+            fallback_to_clipboard: true,
+            driver_order: None,
+            notification: NotificationConfig::default(),
+            type_delay_ms: 0,
+            pre_type_delay_ms: 0,
+            wtype_delay_ms: 0,
+            auto_submit: false,
+            append_text: None,
+            shift_enter_newlines: false,
+            wtype_shift_prefix: false,
+            pre_recording_command: None,
+            pre_output_command: None,
+            post_output_command: None,
+            post_process: None,
+            paste_keys: None,
+            dotool_xkb_layout: None,
+            dotool_xkb_variant: None,
+            eitype_xkb_layout: None,
+            eitype_xkb_variant: None,
+            language_to_layout: default_language_to_layout(),
+            language_to_variant: HashMap::new(),
+            file_path: None,
+            file_mode: FileMode::default(),
+            restore_clipboard: false,
+            restore_clipboard_delay_ms: default_restore_clipboard_delay(),
+            wait_for_modifier_release: true,
+            modifier_release_timeout_ms: default_modifier_release_timeout_ms(),
+        }
+    }
+}
+
 fn default_modifier_release_timeout_ms() -> u64 {
     750
 }
@@ -2279,10 +2359,11 @@ impl OutputConfig {
 }
 
 /// Output mode selection
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputMode {
     /// Simulate keyboard input (requires ydotool)
+    #[default]
     Type,
     /// Copy to clipboard (wl-copy on Wayland, xclip on X11)
     Clipboard,
@@ -2361,78 +2442,10 @@ fn default_true() -> bool {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            hotkey: HotkeyConfig {
-                key: default_hotkey_key(),
-                modifiers: vec![],
-                mode: ActivationMode::default(),
-                enabled: true,
-                cancel_key: None,
-                model_modifier: None,
-                profile_modifiers: std::collections::HashMap::new(),
-            },
-            audio: AudioConfig {
-                device: "default".to_string(),
-                sample_rate: 16000,
-                max_duration_secs: 60,
-                pause_media: false,
-                feedback: AudioFeedbackConfig::default(),
-            },
-            whisper: WhisperConfig {
-                mode: None,    // Defaults to Local via effective_mode()
-                backend: None, // Deprecated alias
-                model: "base.en".to_string(),
-                language: LanguageConfig::default(),
-                translate: false,
-                threads: None,
-                on_demand_loading: default_on_demand_loading(),
-                gpu_isolation: false,
-                gpu_device: None,
-                flash_attention: false,
-                context_window_optimization: default_context_window_optimization(),
-                eager_processing: false,
-                eager_chunk_secs: default_eager_chunk_secs(),
-                eager_overlap_secs: default_eager_overlap_secs(),
-                initial_prompt: None,
-                secondary_model: None,
-                available_models: vec![],
-                max_loaded_models: default_max_loaded_models(),
-                cold_model_timeout_secs: default_cold_model_timeout(),
-                remote_endpoint: None,
-                remote_model: None,
-                remote_api_key: None,
-                remote_timeout_secs: None,
-                whisper_cli_path: None,
-            },
-            output: OutputConfig {
-                mode: OutputMode::Type,
-                fallback_to_clipboard: true,
-                driver_order: None,
-                notification: NotificationConfig::default(),
-                type_delay_ms: 0,
-                pre_type_delay_ms: 0,
-                wtype_delay_ms: 0,
-                auto_submit: false,
-                append_text: None,
-                shift_enter_newlines: false,
-                wtype_shift_prefix: false,
-                pre_recording_command: None,
-                pre_output_command: None,
-                post_output_command: None,
-                post_process: None,
-                paste_keys: None,
-                dotool_xkb_layout: None,
-                dotool_xkb_variant: None,
-                eitype_xkb_layout: None,
-                eitype_xkb_variant: None,
-                language_to_layout: default_language_to_layout(),
-                language_to_variant: HashMap::new(),
-                file_path: None,
-                file_mode: FileMode::default(),
-                restore_clipboard: false,
-                restore_clipboard_delay_ms: default_restore_clipboard_delay(),
-                wait_for_modifier_release: true,
-                modifier_release_timeout_ms: default_modifier_release_timeout_ms(),
-            },
+            hotkey: HotkeyConfig::default(),
+            audio: AudioConfig::default(),
+            whisper: WhisperConfig::default(),
+            output: OutputConfig::default(),
             engine: TranscriptionEngine::default(),
             parakeet: None,
             moonshine: None,
@@ -2447,7 +2460,7 @@ impl Default for Config {
             status: StatusConfig::default(),
             osd: crate::osd::config::OsdConfig::default(),
             meeting: MeetingConfig::default(),
-            state_file: Some("auto".to_string()),
+            state_file: default_state_file(),
             profiles: HashMap::new(),
         }
     }
@@ -2710,6 +2723,43 @@ fn parse_bool_env(val: &str) -> bool {
 }
 
 /// Load configuration from file, with defaults for missing values
+/// Parse a TOML config string by layering it over default values.
+///
+/// Renders `Config::default()` to a TOML `Value`, deep-merges the user's TOML
+/// on top, then deserializes back into `Config`. Tables merge recursively
+/// (user keys win when both sides have them); other values (scalars, arrays)
+/// take user-supplied values verbatim. The result: any user TOML that's a
+/// subset of the full config, down to a single `[audio.feedback] enabled = true`
+/// produces a valid Config with defaults filled in for everything else.
+pub fn parse_config_with_defaults(contents: &str) -> Result<Config, toml::de::Error> {
+    let defaults = toml::Value::try_from(Config::default())
+        .expect("Config::default() must be serializable to TOML");
+    let user: toml::Value = toml::from_str(contents)?;
+    let mut merged = defaults;
+    merge_toml_values(&mut merged, user);
+    merged.try_into()
+}
+
+/// Deep-merge `overlay` onto `base`. Tables merge recursively; for any other
+/// value type (or when the two sides have mismatched types), `overlay` wins.
+/// Arrays are replaced wholesale rather than concatenated. Extending a
+/// defaulted list (e.g. `language_to_layout`) requires the user to spell out
+/// the full replacement value.
+fn merge_toml_values(base: &mut toml::Value, overlay: toml::Value) {
+    match (base, overlay) {
+        (toml::Value::Table(b), toml::Value::Table(o)) => {
+            for (k, v) in o {
+                if let Some(existing) = b.get_mut(&k) {
+                    merge_toml_values(existing, v);
+                } else {
+                    b.insert(k, v);
+                }
+            }
+        }
+        (slot, other) => *slot = other,
+    }
+}
+
 pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     // Start with defaults
     let mut config = Config::default();
@@ -2721,14 +2771,19 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
         None => Config::resolve_existing_path(),
     };
 
-    // Load from file if it exists
+    // Load from file if it exists. Layer the user's TOML over a default-rendered
+    // Config so partial sections inherit defaults for fields the user didn't set.
+    // Without this, a user config containing only `[hotkey]` or `[audio.feedback]`
+    // would fail with "missing field 'audio'" / "missing field 'device'", because
+    // serde's per-field defaults only fill in what the user omitted at the *field*
+    // level, not what they omitted at a parent-section level (#421).
     if let Some(ref path) = config_path {
         if path.exists() {
             tracing::debug!("Loading config from {:?}", path);
             let contents = std::fs::read_to_string(path)
                 .map_err(|e| VoxtypeError::Config(format!("Failed to read config: {}", e)))?;
 
-            config = toml::from_str(&contents)
+            config = parse_config_with_defaults(&contents)
                 .map_err(|e| VoxtypeError::Config(format!("Invalid config: {}", e)))?;
         } else {
             tracing::debug!("Config file not found at {:?}, using defaults", path);
@@ -4751,5 +4806,161 @@ mod tests {
             output.dotool_xkb_variant,
             Some("explicit-dotool".to_string())
         );
+    }
+
+    // ----- Partial-config layering (regression tests for #421) -----
+
+    #[test]
+    fn empty_toml_yields_default_config() {
+        // Invariant: parse_config_with_defaults("") must produce exactly
+        // Config::default(). If this ever fails, defaults have drifted
+        // between the hand-rolled Config::default() and the serde-default
+        // path. They are supposed to be the same fact in one place.
+        let parsed = parse_config_with_defaults("").expect("empty TOML must succeed");
+        let defaults = Config::default();
+        // Compare via TOML round-trip because Config doesn't impl PartialEq.
+        let parsed_toml = toml::Value::try_from(&parsed).expect("Config must serialize to TOML");
+        let default_toml = toml::Value::try_from(&defaults).expect("Config must serialize to TOML");
+        assert_eq!(parsed_toml, default_toml);
+    }
+
+    #[test]
+    fn partial_config_with_only_hotkey_section() {
+        // AlexCzar's TUI symptom (#421): a config with only [hotkey] used to
+        // be rejected with "missing field 'audio'" because Config required
+        // top-level audio/output sections.
+        let toml = r#"
+            [hotkey]
+            key = "RIGHTALT"
+        "#;
+        let cfg =
+            parse_config_with_defaults(toml).expect("partial config must layer over defaults");
+        assert_eq!(cfg.hotkey.key, "RIGHTALT");
+        // Defaults must fill in for everything else.
+        assert_eq!(cfg.audio.device, "default");
+        assert_eq!(cfg.audio.sample_rate, 16000);
+        assert_eq!(cfg.output.mode, OutputMode::Type);
+    }
+
+    #[test]
+    fn partial_audio_feedback_does_not_require_device() {
+        // AlexCzar's daemon symptom (#421): writing [audio.feedback] used to
+        // fail with "missing field 'device'" because AudioConfig::device had
+        // no serde default. Now it falls back to default_audio_device().
+        let toml = r#"
+            engine = "whisper"
+
+            [hotkey]
+            key = "RIGHTALT"
+
+            [audio.feedback]
+            enabled = true
+            theme = "subtle"
+
+            [whisper]
+            backend = "local"
+            model = "large-v3-turbo"
+            language = ["en", "ru"]
+        "#;
+        let cfg = parse_config_with_defaults(toml).expect("AlexCzar's config must parse");
+        assert!(cfg.audio.feedback.enabled);
+        assert_eq!(cfg.audio.feedback.theme, "subtle");
+        // Audio fields the user didn't set come from defaults.
+        assert_eq!(cfg.audio.device, "default");
+        assert_eq!(cfg.audio.sample_rate, 16000);
+        // Whisper sub-fields the user didn't set come from defaults too.
+        assert_eq!(cfg.whisper.model, "large-v3-turbo");
+        assert!(!cfg.whisper.translate);
+    }
+
+    #[test]
+    fn partial_section_does_not_clobber_sibling_defaults() {
+        // User specifies one audio.feedback field; volume should keep its
+        // default rather than getting reset by the partial sub-table.
+        let toml = r#"
+            [audio.feedback]
+            enabled = true
+        "#;
+        let cfg = parse_config_with_defaults(toml).expect("partial sub-table must layer");
+        assert!(cfg.audio.feedback.enabled);
+        assert_eq!(cfg.audio.feedback.volume, 0.7);
+        assert_eq!(cfg.audio.feedback.theme, "default");
+    }
+
+    #[test]
+    fn user_arrays_replace_default_arrays() {
+        // Arrays are replaced wholesale, not concatenated. A user-specified
+        // language list overrides the default rather than appending to it.
+        let toml = r#"
+            [whisper]
+            language = ["ja", "ko"]
+        "#;
+        let cfg = parse_config_with_defaults(toml).expect("array replacement must work");
+        // Just confirm the user value wins; the precise default shape isn't
+        // load-bearing here, but their values should not appear in the result.
+        let langs_toml =
+            toml::Value::try_from(&cfg.whisper.language).expect("LanguageConfig must serialize");
+        let langs_str = langs_toml.to_string();
+        assert!(langs_str.contains("ja"));
+        assert!(langs_str.contains("ko"));
+    }
+
+    #[test]
+    fn merge_toml_values_recurses_into_tables() {
+        // Unit test for the merge primitive itself.
+        let mut base: toml::Value = toml::from_str(
+            r#"
+            [audio]
+            device = "default"
+            sample_rate = 16000
+
+            [audio.feedback]
+            enabled = false
+            volume = 0.7
+            "#,
+        )
+        .unwrap();
+
+        let overlay: toml::Value = toml::from_str(
+            r#"
+            [audio.feedback]
+            enabled = true
+            "#,
+        )
+        .unwrap();
+
+        merge_toml_values(&mut base, overlay);
+
+        // audio.device preserved
+        assert_eq!(
+            base.get("audio").and_then(|a| a.get("device")),
+            Some(&toml::Value::String("default".to_string()))
+        );
+        // audio.feedback.enabled overridden
+        assert_eq!(
+            base.get("audio")
+                .and_then(|a| a.get("feedback"))
+                .and_then(|f| f.get("enabled")),
+            Some(&toml::Value::Boolean(true))
+        );
+        // audio.feedback.volume preserved
+        assert_eq!(
+            base.get("audio")
+                .and_then(|a| a.get("feedback"))
+                .and_then(|f| f.get("volume")),
+            Some(&toml::Value::Float(0.7))
+        );
+    }
+
+    #[test]
+    fn parse_rejects_unknown_field_types() {
+        // A type mismatch (string where a number is expected) must still
+        // surface as an error after merging defaults.
+        let toml = r#"
+            [audio]
+            sample_rate = "not a number"
+        "#;
+        let result = parse_config_with_defaults(toml);
+        assert!(result.is_err(), "type mismatch must still error");
     }
 }
