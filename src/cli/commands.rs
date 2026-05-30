@@ -23,8 +23,12 @@ pub enum Commands {
         /// Path to audio file
         file: std::path::PathBuf,
 
-        /// Override transcription engine: whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere
-        #[arg(long, value_name = "ENGINE")]
+        /// Override transcription engine
+        #[arg(
+            long,
+            value_name = "ENGINE",
+            long_help = format!("Override transcription engine: {}", super::ENGINE_NAMES_CSV),
+        )]
         engine: Option<String>,
     },
 

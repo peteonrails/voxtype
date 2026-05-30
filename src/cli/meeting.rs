@@ -1,6 +1,9 @@
 //! Meeting-mode subcommand actions.
 
+use clap::builder::PossibleValuesParser;
 use clap::Subcommand;
+
+use super::DIARIZATION_BACKENDS;
 
 /// Meeting mode actions
 #[derive(Subcommand)]
@@ -18,7 +21,11 @@ pub enum MeetingAction {
         /// the `ml-diarization` feature and the ECAPA-TDNN model).
         ///
         /// When omitted, falls back to `[meeting.diarization].backend` in config.
-        #[arg(long, value_parser = ["simple", "ml"], env = "VOXTYPE_MEETING_DIARIZATION")]
+        #[arg(
+            long,
+            value_parser = PossibleValuesParser::new(DIARIZATION_BACKENDS),
+            env = "VOXTYPE_MEETING_DIARIZATION",
+        )]
         diarization: Option<String>,
     },
     /// Stop the current meeting

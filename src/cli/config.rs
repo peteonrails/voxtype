@@ -18,18 +18,21 @@ pub enum ConfigAction {
 #[derive(Subcommand)]
 pub enum ConfigSetKey {
     /// Set the active transcription engine
-    ///
-    /// Valid engines: whisper, parakeet, moonshine, sensevoice, paraformer,
-    /// dolphin, omnilingual, cohere. The engine must be compiled into this
-    /// binary; check `voxtype info variants` if unsure.
-    ///
-    /// Examples:
-    ///   voxtype config set engine whisper
-    ///   voxtype config set engine parakeet
+    #[command(long_about = format!(
+        "Set the active transcription engine\n\n\
+         Valid engines: {names}. The engine must be compiled into this binary; \
+         check `voxtype info variants` if unsure.\n\n\
+         Examples:\n  \
+         voxtype config set engine whisper\n  \
+         voxtype config set engine parakeet",
+        names = super::ENGINE_NAMES_CSV,
+    ))]
     Engine {
-        /// Engine name (one of: whisper, parakeet, moonshine, sensevoice,
-        /// paraformer, dolphin, omnilingual, cohere)
-        #[arg(value_name = "NAME")]
+        /// Engine name
+        #[arg(
+            value_name = "NAME",
+            long_help = format!("Engine name (one of: {})", super::ENGINE_NAMES_CSV),
+        )]
         name: String,
     },
 }

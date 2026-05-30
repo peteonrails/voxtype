@@ -32,6 +32,7 @@ pub use soniox::SonioxConfig;
     Default,
     strum::IntoStaticStr,
     strum::Display,
+    strum::EnumIter,
 )]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
@@ -82,6 +83,26 @@ impl TranscriptionEngine {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use strum::IntoEnumIterator;
+
+    /// Pin `crate::cli::ENGINE_NAMES_CSV` to the `TranscriptionEngine` enum.
+    ///
+    /// The constant lives in `src/cli/mod.rs` (not here) because `build.rs`
+    /// includes the CLI tree via `#[path]` and cannot see `crate::config`.
+    /// This test enforces that whenever a new engine variant is added to
+    /// the enum, the CLI string is updated too. Otherwise the help text
+    /// drifts (the bug that motivated this test: `soniox` was missing from
+    /// two CLI help strings for a release because the lists were hand-maintained).
+    #[test]
+    fn cli_engine_names_csv_lists_every_variant() {
+        let from_enum: Vec<&str> = TranscriptionEngine::iter().map(|e| e.name()).collect();
+        let from_const: Vec<&str> = crate::cli::ENGINE_NAMES_CSV.split(", ").collect();
+        assert_eq!(
+            from_enum, from_const,
+            "src/cli/mod.rs::ENGINE_NAMES_CSV is out of sync with TranscriptionEngine. \
+             Update the constant to match every variant's name() in declaration order."
+        );
+    }
 
     #[test]
     fn test_parse_engine_whisper() {
