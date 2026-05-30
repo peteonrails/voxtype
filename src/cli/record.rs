@@ -195,7 +195,7 @@ impl RecordAction {
     pub fn file_path(&self) -> Option<&str> {
         match self {
             RecordAction::Start { file, .. } | RecordAction::Toggle { file, .. } => file.as_deref(),
-            _ => None,
+            RecordAction::Stop { .. } | RecordAction::Cancel => None,
         }
     }
 
@@ -206,7 +206,7 @@ impl RecordAction {
             RecordAction::Start { model, .. } | RecordAction::Toggle { model, .. } => {
                 model.as_deref()
             }
-            _ => None,
+            RecordAction::Stop { .. } | RecordAction::Cancel => None,
         }
     }
 
@@ -217,7 +217,7 @@ impl RecordAction {
             RecordAction::Start { profile, .. } | RecordAction::Toggle { profile, .. } => {
                 profile.as_deref()
             }
-            _ => None,
+            RecordAction::Stop { .. } | RecordAction::Cancel => None,
         }
     }
 
@@ -235,7 +235,7 @@ impl RecordAction {
                 no_auto_submit,
                 ..
             } => override_from_flags(*auto_submit, *no_auto_submit),
-            _ => None,
+            RecordAction::Stop { .. } | RecordAction::Cancel => None,
         }
     }
 
@@ -253,7 +253,7 @@ impl RecordAction {
                 no_shift_enter_newlines,
                 ..
             } => override_from_flags(*shift_enter_newlines, *no_shift_enter_newlines),
-            _ => None,
+            RecordAction::Stop { .. } | RecordAction::Cancel => None,
         }
     }
 
@@ -271,7 +271,7 @@ impl RecordAction {
                 no_smart_auto_submit,
                 ..
             } => override_from_flags(*smart_auto_submit, *no_smart_auto_submit),
-            _ => None,
+            RecordAction::Stop { .. } | RecordAction::Cancel => None,
         }
     }
 }
