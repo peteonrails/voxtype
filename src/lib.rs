@@ -74,6 +74,7 @@ pub mod config;
 pub mod config_set;
 pub mod cpu;
 pub mod daemon;
+pub mod daemon_status;
 pub mod eager;
 pub mod error;
 #[cfg(target_os = "linux")]
@@ -89,6 +90,7 @@ pub mod osd;
 pub mod output;
 pub mod setup;
 pub mod state;
+pub mod status_json;
 pub mod text;
 pub mod transcribe;
 pub mod tui;

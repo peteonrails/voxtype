@@ -31,7 +31,7 @@ pub use setup::{CompositorType, SetupAction};
 /// context. The constant is pinned to the enum by a test in
 /// `src/config/engines/mod.rs` so a new engine variant forces this string
 /// to update or the build breaks.
-pub(crate) const ENGINE_NAMES_CSV: &str =
+pub const ENGINE_NAMES_CSV: &str =
     "whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere, soniox";
 
 /// Diarization backends the daemon dispatches on. Used by the CLI's
