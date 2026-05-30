@@ -58,17 +58,9 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
         config.whisper.model = model;
     }
     if let Ok(engine) = std::env::var("VOXTYPE_ENGINE") {
-        match engine.to_lowercase().as_str() {
-            "whisper" => config.engine = TranscriptionEngine::Whisper,
-            "parakeet" => config.engine = TranscriptionEngine::Parakeet,
-            "moonshine" => config.engine = TranscriptionEngine::Moonshine,
-            "sensevoice" => config.engine = TranscriptionEngine::SenseVoice,
-            "paraformer" => config.engine = TranscriptionEngine::Paraformer,
-            "dolphin" => config.engine = TranscriptionEngine::Dolphin,
-            "omnilingual" => config.engine = TranscriptionEngine::Omnilingual,
-            "cohere" => config.engine = TranscriptionEngine::Cohere,
-            "soniox" => config.engine = TranscriptionEngine::Soniox,
-            _ => tracing::warn!("Unknown VOXTYPE_ENGINE value: {}", engine),
+        match engine.parse::<TranscriptionEngine>() {
+            Ok(e) => config.engine = e,
+            Err(_) => tracing::warn!("Unknown VOXTYPE_ENGINE value: {}", engine),
         }
     }
     if let Ok(lang) = std::env::var("VOXTYPE_LANGUAGE") {

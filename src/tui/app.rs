@@ -537,21 +537,7 @@ fn detect_missing_model() -> Option<MissingModel> {
         })
     }
 }
-
-/// Mirrors the check in main.rs; we duplicate it here to avoid a circular
-/// dependency on a private helper.
-fn is_daemon_running() -> bool {
-    let pid_path = crate::config::Config::runtime_dir().join("pid");
-    let pid_str = match std::fs::read_to_string(&pid_path) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    let pid: u32 = match pid_str.trim().parse() {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    std::path::Path::new(&format!("/proc/{}", pid)).exists()
-}
+use crate::daemon_status::is_daemon_running;
 
 #[cfg(test)]
 mod tests {

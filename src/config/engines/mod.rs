@@ -33,9 +33,10 @@ pub use soniox::SonioxConfig;
     strum::IntoStaticStr,
     strum::Display,
     strum::EnumIter,
+    strum::EnumString,
 )]
 #[serde(rename_all = "lowercase")]
-#[strum(serialize_all = "lowercase")]
+#[strum(serialize_all = "lowercase", ascii_case_insensitive)]
 pub enum TranscriptionEngine {
     /// Use Whisper (whisper.cpp via whisper-rs)
     #[default]

@@ -23,10 +23,6 @@ use crate::output::TextOutput;
 use crate::state::{ChunkResult, State};
 use crate::text::TextProcessor;
 use crate::transcribe::{StreamHandle, StreamingEvent, Transcriber};
-#[cfg(target_os = "linux")]
-use nix::sys::signal::{kill, Signal};
-#[cfg(target_os = "linux")]
-use nix::unistd::Pid;
 use pidlock::Pidlock;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -134,26 +130,20 @@ fn write_pid_file() -> Option<PathBuf> {
     Some(pid_path)
 }
 
-/// Check if a PID is still running (Linux version using nix)
-#[cfg(target_os = "linux")]
-fn is_pid_running(pid: i32) -> bool {
-    // kill with signal 0 checks if process exists without sending a signal
-    kill(Pid::from_raw(pid), Signal::SIGCONT).is_ok() || kill(Pid::from_raw(pid), None).is_ok()
-}
-
-/// Check if a PID is still running (macOS version using libc)
-#[cfg(target_os = "macos")]
-fn is_pid_running(pid: i32) -> bool {
-    // kill with signal 0 checks if process exists without sending a signal
-    unsafe { libc::kill(pid, 0) == 0 }
-}
-
-/// Check if lockfile is stale (PID no longer running) and remove it if so
+/// Check if lockfile is stale (PID no longer running) and remove it if so.
+///
+/// Liveness goes through `crate::daemon_status::is_running` so the daemon
+/// agrees with every external caller (CLI, TUI) on what counts as a live
+/// process. Previously this used a `kill(SIGCONT).is_ok() || kill(0).is_ok()`
+/// pattern on Linux which delivered a real signal to whatever process held
+/// the recycled PID; the unified helper uses signal 0 only.
 #[cfg(unix)]
 fn cleanup_stale_lockfile(lock_path: &std::path::Path) -> bool {
     if let Ok(contents) = std::fs::read_to_string(lock_path) {
         if let Ok(pid) = contents.trim().parse::<i32>() {
-            if pid > 0 && !is_pid_running(pid) {
+            // pid > 1 also rejects 0 (process-group), -1 (broadcast), and
+            // init/systemd's PID 1 — none of which a user daemon could be.
+            if pid > 1 && !crate::daemon_status::is_running(pid) {
                 tracing::info!("Removing stale lockfile (PID {} is no longer running)", pid);
                 if std::fs::remove_file(lock_path).is_ok() {
                     return true;
