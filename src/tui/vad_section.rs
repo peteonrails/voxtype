@@ -42,11 +42,7 @@ impl VadState {
             backend: ed
                 .get_string("vad", "backend")
                 .unwrap_or_else(|| "auto".to_string()),
-            threshold: ed
-                .get_string("vad", "threshold")
-                .and_then(|s| s.parse().ok())
-                .or_else(|| ed.get_int("vad", "threshold").map(|n| n as f32))
-                .unwrap_or(0.5),
+            threshold: ed.get_f32_or("vad", "threshold", 0.5),
             field: Field::Enabled,
             feedback: None,
             dirty_since_load: false,
@@ -63,7 +59,7 @@ impl VadState {
         };
         ed.set_bool("vad", "enabled", self.enabled);
         ed.set_string("vad", "backend", &self.backend);
-        ed.set_string("vad", "threshold", &format!("{:.2}", self.threshold));
+        ed.set_f32("vad", "threshold", self.threshold);
         match ed.save() {
             Ok(()) => {
                 self.dirty_since_load = false;

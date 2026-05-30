@@ -148,6 +148,31 @@ impl ConfigEditor {
         self.dirty = true;
     }
 
+    /// Write an `f32` as a TOML float. Convenience wrapper over `set_float`
+    /// so callers working with `f32`-typed config fields don't need to
+    /// repeat the widening cast at every call site (the missing `as f64`
+    /// is exactly how the audio.feedback.volume and vad.threshold fields
+    /// ended up serialized as quoted strings — see #451).
+    pub fn set_f32(&mut self, table: &str, key: &str, value: f32) {
+        self.set_float(table, key, value as f64);
+    }
+
+    /// Read an `f32`, tolerating older TOML representations where the TUI
+    /// wrote the value as a quoted string (`volume = "0.70"`) or as an
+    /// int. Returns `default` if the key is absent or none of the fallback
+    /// parses succeed. The string fallback exists for a transitional
+    /// window after the v0.7.6 fix to #451 — every reload through this
+    /// helper migrates the user's config to a proper TOML float on next
+    /// save. Can be retired once we're confident no fielded config still
+    /// carries the legacy form.
+    pub fn get_f32_or(&self, table: &str, key: &str, default: f32) -> f32 {
+        self.get_float(table, key)
+            .map(|f| f as f32)
+            .or_else(|| self.get_int(table, key).map(|n| n as f32))
+            .or_else(|| self.get_string(table, key).and_then(|s| s.parse().ok()))
+            .unwrap_or(default)
+    }
+
     /// Remove a key from a table (no-op if absent).
     pub fn unset(&mut self, table: &str, key: &str) {
         if let Some(t) = self.table_mut(table) {
@@ -364,5 +389,67 @@ mod tests {
         assert!(!ed.is_dirty());
         ed.set_string("hotkey", "key", "PAUSE");
         assert!(ed.is_dirty());
+    }
+
+    #[test]
+    fn set_f32_writes_toml_number_not_string() {
+        // Regression for #451: the TUI audio + vad sections used `set_string`
+        // with `format!("{:.2}", f32)` to write floats, producing
+        // `volume = "0.70"`. The daemon's serde config expects `f32` and
+        // rejects the string with "invalid type: string \"0.70\", expected f32".
+        // `set_f32` must emit a TOML number so deserialization works on next
+        // load, and `get_f32_or` must round-trip it back.
+        let (_dir, path) = temp_config("");
+        let mut ed = ConfigEditor::load_from(path.clone()).unwrap();
+        // 0.5 and 0.25 are exact in IEEE-754 so the f32 -> f64 widening
+        // doesn't decorate the serialized form with a long mantissa.
+        ed.set_f32("audio.feedback", "volume", 0.5);
+        ed.set_f32("vad", "threshold", 0.25);
+        let serialized = ed.document.to_string();
+
+        // The critical invariant from #451: no quoted string form.
+        assert!(
+            !serialized.contains("\"0."),
+            "no value should be quoted as a string, got: {}",
+            serialized
+        );
+        // Loose sanity check on the bare-number form.
+        assert!(
+            serialized.contains("volume = 0.5"),
+            "expected bare TOML float, got: {}",
+            serialized
+        );
+        assert!(
+            serialized.contains("threshold = 0.25"),
+            "expected bare TOML float, got: {}",
+            serialized
+        );
+
+        // Write to disk and reload — bypasses ConfigEditor::save()'s schema
+        // validation (the partial doc here lacks required [audio].device etc.).
+        // We just want to prove set_f32 -> file -> get_f32_or preserves the
+        // value as a float.
+        fs::write(&path, &serialized).unwrap();
+        let reloaded = ConfigEditor::load_from(path).unwrap();
+        assert_eq!(reloaded.get_f32_or("audio.feedback", "volume", -1.0), 0.5);
+        assert_eq!(reloaded.get_f32_or("vad", "threshold", -1.0), 0.25);
+    }
+
+    #[test]
+    fn get_f32_or_recovers_legacy_string_and_int_forms() {
+        // Users running fielded v0.7.5 had their audio.feedback.volume and
+        // vad.threshold written as quoted strings by the buggy TUI. After
+        // the fix, the loader must still read those legacy values so the
+        // user isn't reset to the default — and the next save will migrate
+        // them to a proper TOML float.
+        let (_dir, path) = temp_config(concat!(
+            "[audio.feedback]\nvolume = \"0.70\"\n",
+            "[vad]\nthreshold = 1\n", // legacy int form
+            "[other]\n",              // missing key uses default
+        ));
+        let ed = ConfigEditor::load_from(path).unwrap();
+        assert_eq!(ed.get_f32_or("audio.feedback", "volume", -1.0), 0.70);
+        assert_eq!(ed.get_f32_or("vad", "threshold", -1.0), 1.0);
+        assert_eq!(ed.get_f32_or("other", "missing", 0.42), 0.42);
     }
 }
