@@ -1436,9 +1436,20 @@ impl Default for OmnilingualConfig {
 }
 
 /// Transcription engine selection (which ASR technology to use)
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Deserialize,
+    Serialize,
+    PartialEq,
+    Eq,
+    Default,
+    strum::IntoStaticStr,
+    strum::Display,
+)]
 #[serde(rename_all = "lowercase")]
-#[derive(Default)]
+#[strum(serialize_all = "lowercase")]
 pub enum TranscriptionEngine {
     /// Use Whisper (whisper.cpp via whisper-rs)
     #[default]
@@ -1468,6 +1479,18 @@ pub enum TranscriptionEngine {
     /// Use Soniox (cloud streaming WebSocket STT).
     /// Requires: cargo build --features soniox
     Soniox,
+}
+
+impl TranscriptionEngine {
+    /// Canonical lowercase name, matching this enum's serde representation.
+    /// Backed by `strum::IntoStaticStr` so a new variant added to the enum
+    /// picks up its `serialize_all = "lowercase"` name automatically — no
+    /// match block to keep in sync. The hand-written `name()` method
+    /// remains as a stable public API so call sites read `engine.name()`
+    /// rather than the less-obvious `(*engine).into()`.
+    pub fn name(self) -> &'static str {
+        self.into()
+    }
 }
 
 /// VAD backend selection
