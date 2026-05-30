@@ -352,7 +352,7 @@ fn switch_backend_tiered(backend: Backend) -> anyhow::Result<()> {
         );
     }
 
-    install_active_binary(active_bin, &binary_path)
+    install_active_binary(active_bin, &binary_path, "setup gpu --enable")
 }
 
 /// Enable GPU in simple mode (switch symlink from native to vulkan)
@@ -990,5 +990,5 @@ fn switch_backend_tiered_parakeet(binary_name: &str) -> anyhow::Result<()> {
         );
     }
 
-    install_active_binary(active_bin, &binary_path)
+    install_active_binary(active_bin, &binary_path, "setup onnx --enable")
 }

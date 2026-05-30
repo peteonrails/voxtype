@@ -60,7 +60,17 @@ fn variant_subdir(basename: &str) -> Option<&'static str> {
     }
 }
 
-pub fn install_active_binary(active_bin: &str, binary_path: &Path) -> anyhow::Result<()> {
+/// `retry_hint` is the subcommand fragment to suggest in error messages when
+/// the write fails (typically because the user forgot `sudo`). Callers pass
+/// the command they were invoked under so the user can retry exactly what
+/// they ran — e.g. `setup gpu --enable` for a Vulkan switch, or `setup onnx
+/// --enable` for a Parakeet switch. The function emits the full retry as
+/// `Try: sudo voxtype <retry_hint>`.
+pub fn install_active_binary(
+    active_bin: &str,
+    binary_path: &Path,
+    retry_hint: &str,
+) -> anyhow::Result<()> {
     // Decide whether this variant needs a wrapper script (vs a plain symlink)
     // from the BASENAME, not from the canonicalized parent dir. The previous
     // implementation looked at `fs::canonicalize(binary_path).parent()`,
@@ -94,9 +104,10 @@ pub fn install_active_binary(active_bin: &str, binary_path: &Path) -> anyhow::Re
         fs::remove_file(active_bin).map_err(|e| {
             anyhow::anyhow!(
                 "Failed to remove existing {} (need sudo?): {}\n\
-                 Try: sudo voxtype setup onnx --enable",
+                 Try: sudo voxtype {}",
                 active_bin,
-                e
+                e,
+                retry_hint
             )
         })?;
     }
@@ -130,9 +141,10 @@ pub fn install_active_binary(active_bin: &str, binary_path: &Path) -> anyhow::Re
         let mut f = fs::File::create(active_bin).map_err(|e| {
             anyhow::anyhow!(
                 "Failed to create {} (need sudo?): {}\n\
-                 Try: sudo voxtype setup onnx --enable",
+                 Try: sudo voxtype {}",
                 active_bin,
-                e
+                e,
+                retry_hint
             )
         })?;
         f.write_all(wrapper.as_bytes())?;
@@ -144,8 +156,9 @@ pub fn install_active_binary(active_bin: &str, binary_path: &Path) -> anyhow::Re
         symlink(binary_path, active_bin).map_err(|e| {
             anyhow::anyhow!(
                 "Failed to create symlink (need sudo?): {}\n\
-                 Try: sudo voxtype setup onnx --enable",
-                e
+                 Try: sudo voxtype {}",
+                e,
+                retry_hint
             )
         })?;
     }
@@ -791,7 +804,16 @@ pub fn switch_to(variant: Variant) -> anyhow::Result<()> {
         );
     }
 
-    install_active_binary(SYSTEM_BIN, &binary_path)?;
+    // Whisper variants live behind `setup gpu`; ONNX variants behind
+    // `setup onnx`. Pick the retry hint matching the user's destination
+    // so a permission failure points them at the same subcommand they'd
+    // normally use to install this variant directly.
+    let retry_hint = match variant.family() {
+        EngineFamily::Whisper => "setup gpu --enable",
+        EngineFamily::Onnx => "setup onnx --enable",
+    };
+
+    install_active_binary(SYSTEM_BIN, &binary_path, retry_hint)?;
 
     Ok(())
 }
