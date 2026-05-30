@@ -1,31 +1,13 @@
 //! Engine-vs-running-binary mismatch detection.
 //!
-//! The wrapper at `/usr/bin/voxtype` can dispatch to any of the installed
-//! variants (CPU Whisper, GPU Whisper, or one of the ONNX variants). When
-//! the variant the wrapper points at doesn't ship the engine the user has
-//! configured, the daemon fails with `TranscribeError::InitFailed` at
-//! startup and `voxtype models` lists "rebuild with --features X" for every
-//! engine the binary lacks.
+//! `/usr/bin/voxtype` dispatches to one installed variant (CPU Whisper,
+//! GPU Whisper, or an ONNX variant). When that variant lacks the engine
+//! the user configured, the daemon fails to initialize the transcriber
+//! and `voxtype models` lists "rebuild with --features X" for every
+//! engine the binary doesn't have.
 //!
-//! Two failure modes converge here:
-//!
-//! 1. A user upgraded from 0.6.x to 0.7.0 before the rename map landed in
-//!    voxtype-bin's post-upgrade hook (#446 / Discord/Ryan). Their saved
-//!    backend path `voxtype-parakeet-avx2` no longer existed, the hook
-//!    fell through to `_set_default_backend`, and they've been silently
-//!    running CPU Whisper despite `engine = "parakeet"` in their config.
-//!
-//! 2. A new user followed the AUR install instructions, kept the default
-//!    CPU variant, then edited `engine = "parakeet"` in their config. They
-//!    get the same end state without realizing they also need
-//!    `voxtype setup onnx --enable`.
-//!
-//! Both cases were invisible — `voxtype configure` opened cleanly to
-//! whichever section the user was after, and the engine-section warning
-//! sat behind a navigation away from the section the user opened. This
-//! module exposes the detection as a pure function so it can drive a
-//! global TUI banner, a daemon startup notification, and the Active
-//! Variant TUI switcher screen — all reading the same truth.
+//! Exposed as a pure function so the TUI banner, the daemon startup
+//! notification, and any future surface read the same truth.
 
 use crate::config::{Config, TranscriptionEngine};
 use crate::setup::binary::{Inventory, Variant};
