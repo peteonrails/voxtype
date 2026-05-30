@@ -135,6 +135,19 @@ pub enum RecordAction {
     Cancel,
 }
 
+/// Resolve a paired enable/disable flag set into a tri-state override.
+/// `enable` wins over `disable`; both unset returns `None`. Used by every
+/// `--foo / --no-foo` style override on RecordAction.
+fn override_from_flags(enable: bool, disable: bool) -> Option<bool> {
+    if enable {
+        Some(true)
+    } else if disable {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 impl RecordAction {
     /// Extract the output mode override from the action flags
     /// Returns (mode_override, optional_file_path)
@@ -146,19 +159,19 @@ impl RecordAction {
                 paste,
                 file,
                 ..
-            } => (*type_mode, *clipboard, *paste, file.as_ref()),
-            RecordAction::Stop {
-                type_mode,
-                clipboard,
-                paste,
-            } => (*type_mode, *clipboard, *paste, None),
-            RecordAction::Toggle {
+            }
+            | RecordAction::Toggle {
                 type_mode,
                 clipboard,
                 paste,
                 file,
                 ..
             } => (*type_mode, *clipboard, *paste, file.as_ref()),
+            RecordAction::Stop {
+                type_mode,
+                clipboard,
+                paste,
+            } => (*type_mode, *clipboard, *paste, None),
             RecordAction::Cancel => return None,
         };
 
@@ -182,7 +195,7 @@ impl RecordAction {
     pub fn file_path(&self) -> Option<&str> {
         match self {
             RecordAction::Start { file, .. } | RecordAction::Toggle { file, .. } => file.as_deref(),
-            RecordAction::Stop { .. } | RecordAction::Cancel => None,
+            _ => None,
         }
     }
 
@@ -190,9 +203,10 @@ impl RecordAction {
     /// Note: --model is only available on start/toggle, not stop (model is selected at recording start)
     pub fn model_override(&self) -> Option<&str> {
         match self {
-            RecordAction::Start { model, .. } => model.as_deref(),
-            RecordAction::Toggle { model, .. } => model.as_deref(),
-            RecordAction::Stop { .. } | RecordAction::Cancel => None,
+            RecordAction::Start { model, .. } | RecordAction::Toggle { model, .. } => {
+                model.as_deref()
+            }
+            _ => None,
         }
     }
 
@@ -200,87 +214,64 @@ impl RecordAction {
     /// Returns the profile name if specified on start or toggle commands
     pub fn profile(&self) -> Option<&str> {
         match self {
-            RecordAction::Start { profile, .. } => profile.as_deref(),
-            RecordAction::Toggle { profile, .. } => profile.as_deref(),
-            RecordAction::Stop { .. } | RecordAction::Cancel => None,
+            RecordAction::Start { profile, .. } | RecordAction::Toggle { profile, .. } => {
+                profile.as_deref()
+            }
+            _ => None,
         }
     }
 
     /// Get the auto_submit override from --auto-submit / --no-auto-submit flags
     /// Returns Some(true) for --auto-submit, Some(false) for --no-auto-submit, None if unset
     pub fn auto_submit_override(&self) -> Option<bool> {
-        let (auto_submit, no_auto_submit) = match self {
+        match self {
             RecordAction::Start {
                 auto_submit,
                 no_auto_submit,
                 ..
-            } => (*auto_submit, *no_auto_submit),
-            RecordAction::Toggle {
+            }
+            | RecordAction::Toggle {
                 auto_submit,
                 no_auto_submit,
                 ..
-            } => (*auto_submit, *no_auto_submit),
-            RecordAction::Stop { .. } | RecordAction::Cancel => return None,
-        };
-
-        if auto_submit {
-            Some(true)
-        } else if no_auto_submit {
-            Some(false)
-        } else {
-            None
+            } => override_from_flags(*auto_submit, *no_auto_submit),
+            _ => None,
         }
     }
 
     /// Get the shift_enter_newlines override from --shift-enter-newlines / --no-shift-enter-newlines flags
     /// Returns Some(true) to enable, Some(false) to disable, None if unset
     pub fn shift_enter_newlines_override(&self) -> Option<bool> {
-        let (shift_enter, no_shift_enter) = match self {
+        match self {
             RecordAction::Start {
                 shift_enter_newlines,
                 no_shift_enter_newlines,
                 ..
-            } => (*shift_enter_newlines, *no_shift_enter_newlines),
-            RecordAction::Toggle {
+            }
+            | RecordAction::Toggle {
                 shift_enter_newlines,
                 no_shift_enter_newlines,
                 ..
-            } => (*shift_enter_newlines, *no_shift_enter_newlines),
-            RecordAction::Stop { .. } | RecordAction::Cancel => return None,
-        };
-
-        if shift_enter {
-            Some(true)
-        } else if no_shift_enter {
-            Some(false)
-        } else {
-            None
+            } => override_from_flags(*shift_enter_newlines, *no_shift_enter_newlines),
+            _ => None,
         }
     }
 
     /// Get the smart auto-submit override from --smart-auto-submit / --no-smart-auto-submit flags
     /// Returns Some(true) to enable, Some(false) to disable, None if not specified
     pub fn smart_auto_submit_override(&self) -> Option<bool> {
-        let (enable, disable) = match self {
+        match self {
             RecordAction::Start {
                 smart_auto_submit,
                 no_smart_auto_submit,
                 ..
-            } => (*smart_auto_submit, *no_smart_auto_submit),
-            RecordAction::Toggle {
+            }
+            | RecordAction::Toggle {
                 smart_auto_submit,
                 no_smart_auto_submit,
                 ..
-            } => (*smart_auto_submit, *no_smart_auto_submit),
-            RecordAction::Stop { .. } | RecordAction::Cancel => return None,
-        };
-
-        if enable {
-            Some(true)
-        } else if disable {
-            Some(false)
-        } else {
-            None
+            } => override_from_flags(*smart_auto_submit, *no_smart_auto_submit),
+            _ => None,
         }
     }
 }
