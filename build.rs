@@ -9,8 +9,18 @@ use std::fs::{self, File};
 use std::io::Error;
 use std::path::PathBuf;
 
-// Include the CLI module
-include!("src/cli.rs");
+// Include the CLI module tree. The CLI lives under src/cli/, with mod.rs as
+// its entry; we attach it to the build-script's own crate via #[path] so
+// `Cli::command()` below resolves through the normal module system.
+//
+// The build script only needs `Cli` for man-page generation, but the module
+// re-exports several subcommand enums and impl methods that go with it. They
+// are intentionally unused here; suppress dead-code warnings so the build
+// script does not pollute `cargo clippy --all-targets -- -D warnings`.
+#[path = "src/cli/mod.rs"]
+#[allow(dead_code, unused_imports)]
+mod cli;
+use cli::Cli;
 
 fn main() -> Result<(), Error> {
     // Only generate man pages for release builds or when explicitly requested
@@ -58,7 +68,7 @@ fn main() -> Result<(), Error> {
     }
 
     // Tell cargo to rerun if CLI definitions change
-    println!("cargo:rerun-if-changed=src/cli.rs");
+    println!("cargo:rerun-if-changed=src/cli");
 
     // Print location of generated man pages
     println!(
