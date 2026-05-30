@@ -201,6 +201,14 @@ pub fn is_streaming_compatible_parakeet(name: &str) -> bool {
         .any(|m| m.name == name && m.streaming_compatible)
 }
 
+/// Returns true when the named model is one this build's registry knows about.
+/// Lets callers distinguish "known model that doesn't support streaming"
+/// (error case) from "unknown custom model" (warn-but-proceed case) when
+/// gating the streaming pipeline at load time.
+pub fn is_known_parakeet_model(name: &str) -> bool {
+    PARAKEET_MODELS.iter().any(|m| m.name == name)
+}
+
 /// Canonical Parakeet model name that the TUI auto-switches to when the user
 /// enables streaming on top of an incompatible model. Stable string identifier
 /// rather than a struct lookup so config writers and feedback messages can

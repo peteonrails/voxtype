@@ -56,6 +56,41 @@ pub struct ParakeetStreamingTranscriber {
 
 impl ParakeetStreamingTranscriber {
     pub fn new(config: &ParakeetConfig) -> Result<Self, TranscribeError> {
+        // Streaming-capability gate. The cache-aware streaming pipeline
+        // needs both `tokenizer.model` at load time and a decoder graph
+        // sized for the streaming inference loop. Models in the registry
+        // that don't meet both (e.g. istupakov's TDT-v3) hit either a
+        // tokenizer-not-found at load or an ONNX Gather shape error at
+        // first chunk — neither is a useful diagnostic. Fail fast here
+        // with a message that names the model and the known-good
+        // alternative. Unknown model names (custom user directories)
+        // fall through with a warning since we can't validate them.
+        if crate::setup::model::is_known_parakeet_model(&config.model)
+            && !crate::setup::model::is_streaming_compatible_parakeet(&config.model)
+        {
+            return Err(TranscribeError::InitFailed(format!(
+                "Parakeet streaming is enabled but model `{}` does not support \
+                 cache-aware streaming.\n\n\
+                 Fix one of:\n\n  \
+                 - Disable streaming in config.toml under [parakeet]:\n\n      \
+                 streaming = false\n\n  \
+                 - Or switch to the streaming-compatible model:\n\n      \
+                 voxtype setup model {streaming_model}\n\n    \
+                 and set [parakeet] model = \"{streaming_model}\" in config.toml.",
+                config.model,
+                streaming_model = crate::setup::model::DEFAULT_PARAKEET_STREAMING_MODEL,
+            )));
+        }
+        if !crate::setup::model::is_known_parakeet_model(&config.model) {
+            tracing::warn!(
+                model = %config.model,
+                "Parakeet streaming requested with a model not in the registry; \
+                 cannot validate streaming compatibility ahead of time. If load \
+                 fails below, switch [parakeet] model to {} or set streaming = false.",
+                crate::setup::model::DEFAULT_PARAKEET_STREAMING_MODEL
+            );
+        }
+
         let model_path = resolve_model_path(&config.model)?;
 
         tracing::info!(
@@ -282,5 +317,38 @@ mod tests {
     fn streaming_config_validation_accepts_defaults() {
         let cfg = UnifiedStreamingConfig::default();
         assert!(cfg.validate().is_ok());
+    }
+
+    /// Regression for #442: enabling streaming on a known non-streaming model
+    /// (e.g. `parakeet-tdt-0.6b-v3`) must fail early in `new()` with a
+    /// message that names the model and points the user at the
+    /// streaming-compatible alternative, instead of falling through to an
+    /// opaque ONNX Gather shape error at the first audio chunk.
+    #[test]
+    fn new_rejects_streaming_on_known_incompatible_model() {
+        let cfg = ParakeetConfig {
+            model: "parakeet-tdt-0.6b-v3".to_string(),
+            streaming: true,
+            ..ParakeetConfig::default()
+        };
+        // Can't use `.expect_err`: ParakeetStreamingTranscriber wraps
+        // parakeet-rs types that don't derive Debug.
+        let err = match ParakeetStreamingTranscriber::new(&cfg) {
+            Ok(_) => panic!("streaming on a non-streaming model should error before model load"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("parakeet-tdt-0.6b-v3"),
+            "error must name the configured model: {msg}"
+        );
+        assert!(
+            msg.contains(crate::setup::model::DEFAULT_PARAKEET_STREAMING_MODEL),
+            "error must name the streaming-compatible alternative: {msg}"
+        );
+        assert!(
+            msg.contains("streaming = false") || msg.contains("voxtype setup model"),
+            "error must offer at least one concrete fix: {msg}"
+        );
     }
 }
