@@ -34,6 +34,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1"
 anyhow = "1"
 
+# Compile-time enum -> &'static str (replaces hand-written match blocks for
+# TranscriptionEngine::name and similar lookup-by-variant patterns; new enum
+# variants pick up the lowercase name automatically via serialize_all).
+strum = { version = "0.26", default-features = false, features = ["derive"] }
+
 # Text processing
 regex = "1"
 

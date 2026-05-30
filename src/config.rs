@@ -1436,9 +1436,20 @@ impl Default for OmnilingualConfig {
 }
 
 /// Transcription engine selection (which ASR technology to use)
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Deserialize,
+    Serialize,
+    PartialEq,
+    Eq,
+    Default,
+    strum::IntoStaticStr,
+    strum::Display,
+)]
 #[serde(rename_all = "lowercase")]
-#[derive(Default)]
+#[strum(serialize_all = "lowercase")]
 pub enum TranscriptionEngine {
     /// Use Whisper (whisper.cpp via whisper-rs)
     #[default]
@@ -1472,30 +1483,13 @@ pub enum TranscriptionEngine {
 
 impl TranscriptionEngine {
     /// Canonical lowercase name, matching this enum's serde representation.
-    /// Use this for any user-visible label, config-file value, log key, or
-    /// Cargo feature reference (every non-Whisper engine's feature flag is
-    /// the same string as its name). Centralising the mapping keeps the
-    /// TUI banner, the daemon notification, the menubar engine writer, and
-    /// `variant_check`'s required-feature lookup from drifting out of sync
-    /// when a new engine is added — they all call `.name()`.
-    pub const fn name(&self) -> &'static str {
-        match self {
-            TranscriptionEngine::Whisper => "whisper",
-            TranscriptionEngine::Parakeet => "parakeet",
-            TranscriptionEngine::Moonshine => "moonshine",
-            TranscriptionEngine::SenseVoice => "sensevoice",
-            TranscriptionEngine::Paraformer => "paraformer",
-            TranscriptionEngine::Dolphin => "dolphin",
-            TranscriptionEngine::Omnilingual => "omnilingual",
-            TranscriptionEngine::Cohere => "cohere",
-            TranscriptionEngine::Soniox => "soniox",
-        }
-    }
-}
-
-impl std::fmt::Display for TranscriptionEngine {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.name())
+    /// Backed by `strum::IntoStaticStr` so a new variant added to the enum
+    /// picks up its `serialize_all = "lowercase"` name automatically — no
+    /// match block to keep in sync. The hand-written `name()` method
+    /// remains as a stable public API so call sites read `engine.name()`
+    /// rather than the less-obvious `(*engine).into()`.
+    pub fn name(self) -> &'static str {
+        self.into()
     }
 }
 
