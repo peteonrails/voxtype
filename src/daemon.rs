@@ -2281,9 +2281,59 @@ impl Daemon {
         }
     }
 
+    /// Fire a desktop notification when the running binary can't service
+    /// the configured engine (e.g. `engine = "parakeet"` but the wrapper
+    /// dispatches to a CPU Whisper variant — the Ryan case from #450).
+    /// Logged at WARN regardless, so journalctl users see it too.
+    fn warn_on_variant_mismatch(&self) {
+        let inventory = crate::setup::binary::inventory();
+        let Some(mismatch) = crate::setup::variant_check::detect_mismatch(&self.config, &inventory)
+        else {
+            return;
+        };
+
+        let active = mismatch
+            .active_variant_name
+            .as_deref()
+            .unwrap_or("the running binary");
+        let title = format!("Voxtype: {} unavailable", mismatch.configured_engine);
+        let body = match &mismatch.remediation {
+            crate::setup::variant_check::Remediation::SwitchToVariant { target } => format!(
+                "{} was built without --features {}. \
+                 Run `sudo voxtype setup onnx --enable` (or open `voxtype configure` and press F2) \
+                 to switch to {}.",
+                active,
+                mismatch.required_feature,
+                target.binary_name(),
+            ),
+            crate::setup::variant_check::Remediation::Rebuild { feature } => format!(
+                "This source build was compiled without --features {}. \
+                 Rebuild voxtype with that feature to enable the {} engine.",
+                feature, mismatch.configured_engine,
+            ),
+        };
+
+        tracing::warn!(
+            engine = mismatch.configured_engine,
+            feature = mismatch.required_feature,
+            active = active,
+            "Variant mismatch at daemon startup: {}",
+            body
+        );
+        crate::notification::send_sync(&title, &body);
+    }
+
     /// Run the daemon main loop
     pub async fn run(&mut self) -> Result<()> {
         tracing::info!("Starting voxtype daemon");
+
+        // Engine-vs-binary mismatch check at startup so users see a desktop
+        // notification before the first transcription attempt would fail.
+        // create_transcriber() below will surface the same error in logs,
+        // but logs go to journald and most users never see them. A
+        // notify-send pops up where the user is actually looking. See
+        // #450 — the silent v0.6.x to v0.7.0 wrapper-flip incident.
+        self.warn_on_variant_mismatch();
 
         // Streaming dictation types characters at the cursor while the user is
         // still holding the PTT key. On Wayland compositors backed by libinput
