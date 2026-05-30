@@ -90,6 +90,7 @@ pub mod osd;
 pub mod output;
 pub mod setup;
 pub mod state;
+pub mod status_json;
 pub mod text;
 pub mod transcribe;
 pub mod tui;
