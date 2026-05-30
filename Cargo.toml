@@ -73,6 +73,9 @@ which = "7"
 # Temp files (for CLI backend audio)
 tempfile = "3"
 
+# SHA-256 integrity check for R2 model downloads
+sha2 = "0.10"
+
 # Audio playback (for feedback sounds)
 rodio = { version = "0.19", default-features = false, features = ["wav"] }
 
@@ -301,6 +304,13 @@ path = "src/bin/voxtype_audio_bridge.rs"
 [[bin]]
 name = "voxtype-osd-quickshell"
 path = "src/bin/voxtype_osd_quickshell.rs"
+
+# Internal helper that dumps the ONNX model registry as JSON for the
+# `scripts/mirror-models-to-r2.sh` script. Not shipped in releases; it's
+# a build-tree-only utility for populating R2 from upstream HF.
+[[bin]]
+name = "voxtype-mirror-registry"
+path = "src/bin/voxtype_mirror_registry.rs"
 
 [[example]]
 name = "inspect_cohere_onnx"
