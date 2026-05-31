@@ -20,26 +20,11 @@ use std::path::PathBuf;
 use crate::config::TranscriptionEngine;
 use crate::tui::{ConfigEditor, EditorError};
 
-/// All engine identifiers accepted by `voxtype config set engine`.
-///
-/// Kept in sync with [`TranscriptionEngine`] and with `ENGINE_CHOICES` in
-/// `src/tui/engine.rs`. If a new engine is added there, add it here too.
-pub const ENGINE_NAMES: &[&str] = &[
-    "whisper",
-    "parakeet",
-    "moonshine",
-    "sensevoice",
-    "paraformer",
-    "dolphin",
-    "omnilingual",
-    "cohere",
-];
-
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigSetError {
     #[error(
-        "unknown engine '{0}'. Valid engines: whisper, parakeet, moonshine, \
-         sensevoice, paraformer, dolphin, omnilingual, cohere"
+        "unknown engine '{0}'. Valid engines: {}",
+        TranscriptionEngine::names_csv()
     )]
     UnknownEngine(String),
 
@@ -58,21 +43,13 @@ pub enum ConfigSetError {
 
 /// Is the engine name one we recognize at all?
 ///
-/// Equivalent to parsing through [`TranscriptionEngine`]'s serde
-/// representation but avoids deserializing a whole config to check one
-/// field.
+/// Iterates the [`TranscriptionEngine`] variants and matches the exact
+/// canonical lowercase name. Case-sensitive (so callers can detect typos
+/// like `"Whisper"` before applying them to config). New engine variants
+/// are picked up automatically via `strum::EnumIter`.
 pub fn parse_engine(name: &str) -> Option<TranscriptionEngine> {
-    match name {
-        "whisper" => Some(TranscriptionEngine::Whisper),
-        "parakeet" => Some(TranscriptionEngine::Parakeet),
-        "moonshine" => Some(TranscriptionEngine::Moonshine),
-        "sensevoice" => Some(TranscriptionEngine::SenseVoice),
-        "paraformer" => Some(TranscriptionEngine::Paraformer),
-        "dolphin" => Some(TranscriptionEngine::Dolphin),
-        "omnilingual" => Some(TranscriptionEngine::Omnilingual),
-        "cohere" => Some(TranscriptionEngine::Cohere),
-        _ => None,
-    }
+    use strum::IntoEnumIterator;
+    TranscriptionEngine::iter().find(|e| e.name() == name)
 }
 
 /// Was this binary compiled with the feature needed to run the given engine?
@@ -123,6 +100,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::io::Write;
+    use strum::IntoEnumIterator;
 
     fn temp_config(contents: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
@@ -134,8 +112,25 @@ mod tests {
 
     #[test]
     fn parse_engine_accepts_known_names() {
-        for name in ENGINE_NAMES {
+        for engine in TranscriptionEngine::iter() {
+            let name = engine.name();
             assert!(parse_engine(name).is_some(), "should accept '{}'", name);
+        }
+    }
+
+    /// Pins the user-facing error message to the enum so a new variant can't
+    /// land without showing up in `voxtype config set engine <bogus>` output.
+    /// Caught the post-#476 drift where `soniox` was missing from this list.
+    #[test]
+    fn unknown_engine_error_lists_every_variant() {
+        let display = format!("{}", ConfigSetError::UnknownEngine("bogus".to_string()));
+        for engine in TranscriptionEngine::iter() {
+            assert!(
+                display.contains(engine.name()),
+                "ConfigSetError::UnknownEngine display is missing variant '{}': {}",
+                engine.name(),
+                display
+            );
         }
     }
 
@@ -245,9 +240,9 @@ mod tests {
         // Pick the first non-whisper engine whose feature is NOT compiled
         // into this test binary. Skip the test entirely if every engine is
         // compiled in (e.g. a maximalist CI build).
-        let target = ENGINE_NAMES
-            .iter()
-            .find(|n| **n != "whisper" && !engine_feature_compiled(n));
+        let target = TranscriptionEngine::iter()
+            .map(|e| e.name())
+            .find(|n| *n != "whisper" && !engine_feature_compiled(n));
         let Some(name) = target else {
             eprintln!("skipping: all engine features are compiled in this build");
             return;
@@ -255,7 +250,7 @@ mod tests {
         let (_dir, path) = temp_config("");
         let err = set_engine(path, name).unwrap_err();
         match err {
-            ConfigSetError::FeatureNotCompiled(n) => assert_eq!(&n, *name),
+            ConfigSetError::FeatureNotCompiled(n) => assert_eq!(n, name),
             other => panic!("expected FeatureNotCompiled, got {:?}", other),
         }
     }

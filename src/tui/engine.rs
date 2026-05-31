@@ -19,8 +19,10 @@ use super::common::{
     self, FeedbackLevel as CommonFeedback, FormRowSpec, TextInput, TextInputResult,
 };
 use super::config_editor::{ConfigEditor, EditorError};
+use crate::config::TranscriptionEngine;
 use crate::setup::binary::{self, EngineFamily, InstallKind, Variant};
 use crate::setup::model;
+use strum::IntoEnumIterator;
 
 #[derive(Debug, Clone)]
 pub struct EngineState {
@@ -223,17 +225,6 @@ pub enum FieldId {
     CoThreads,
     CoOnDemandLoading,
 }
-
-const ENGINE_CHOICES: &[&str] = &[
-    "whisper",
-    "parakeet",
-    "moonshine",
-    "sensevoice",
-    "paraformer",
-    "dolphin",
-    "omnilingual",
-    "cohere",
-];
 
 /// Cohere Transcribe officially supports these 14 languages. Token IDs are
 /// looked up by name from tokens.txt at runtime, so the TUI only needs to
@@ -787,9 +778,8 @@ impl EngineState {
                 // matching feature; on a source build it means the running
                 // binary was compiled with that feature flag.
                 let installed = installed_engine_choices();
-                let filtered: Vec<&'static str> = ENGINE_CHOICES
-                    .iter()
-                    .copied()
+                let filtered: Vec<&'static str> = TranscriptionEngine::iter()
+                    .map(|e| e.name())
                     .filter(|e| installed.contains(e))
                     .collect();
                 if filtered.is_empty() {

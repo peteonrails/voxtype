@@ -78,6 +78,27 @@ impl TranscriptionEngine {
     pub fn name(self) -> &'static str {
         self.into()
     }
+
+    /// Comma-separated list of every variant's canonical name. Cached behind
+    /// a `OnceLock` so callers get a `&'static str` without rebuilding it
+    /// each time. Use this in any user-facing string that lists engines so
+    /// a new variant added to the enum automatically appears everywhere
+    /// without a manual table to keep in sync.
+    ///
+    /// The `crate::cli::ENGINE_NAMES_CSV` constant intentionally duplicates
+    /// this value as a string literal because `build.rs` includes the CLI
+    /// module via `#[path]` and cannot reach into `crate::config`; a test
+    /// pins that constant against this method's output.
+    pub fn names_csv() -> &'static str {
+        use strum::IntoEnumIterator;
+        static NAMES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        NAMES.get_or_init(|| {
+            Self::iter()
+                .map(|e| e.name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+    }
 }
 
 #[cfg(test)]
