@@ -54,24 +54,32 @@ pub fn parse_engine(name: &str) -> Option<TranscriptionEngine> {
 
 /// Was this binary compiled with the feature needed to run the given engine?
 ///
-/// Whisper is always available; everything else is gated on the
-/// corresponding Cargo feature flag. This is the source-of-truth check that
-/// matches what the TUI shows on source builds (see
-/// `EngineState::refresh_binary_match` in `src/tui/engine.rs`). The TUI's
-/// `compiled_features()` list in `src/setup/binary.rs` is incomplete (it
-/// only enumerates parakeet + GPU features), so we evaluate `cfg!` directly
-/// here rather than going through that helper.
+/// Whisper and Soniox are unconditional (Soniox was un-feature-gated in
+/// #441); every other engine is gated on the corresponding Cargo feature.
+/// This is the source-of-truth check that matches what the TUI shows on
+/// source builds (see `EngineState::refresh_binary_match` in
+/// `src/tui/engine.rs`). The TUI's `compiled_features()` list in
+/// `src/setup/binary.rs` is incomplete (it only enumerates parakeet + GPU
+/// features), so we evaluate `cfg!` directly here rather than going
+/// through that helper.
+///
+/// Matches `TranscriptionEngine` exhaustively so adding a new variant
+/// produces a compile error here, not a silent `false` at runtime. The
+/// previous wildcard arm hid `soniox` from this check for several months.
 pub fn engine_feature_compiled(name: &str) -> bool {
-    match name {
-        "whisper" => true,
-        "parakeet" => cfg!(feature = "parakeet"),
-        "moonshine" => cfg!(feature = "moonshine"),
-        "sensevoice" => cfg!(feature = "sensevoice"),
-        "paraformer" => cfg!(feature = "paraformer"),
-        "dolphin" => cfg!(feature = "dolphin"),
-        "omnilingual" => cfg!(feature = "omnilingual"),
-        "cohere" => cfg!(feature = "cohere"),
-        _ => false,
+    let Some(engine) = parse_engine(name) else {
+        return false;
+    };
+    match engine {
+        TranscriptionEngine::Whisper => true,
+        TranscriptionEngine::Soniox => true,
+        TranscriptionEngine::Parakeet => cfg!(feature = "parakeet"),
+        TranscriptionEngine::Moonshine => cfg!(feature = "moonshine"),
+        TranscriptionEngine::SenseVoice => cfg!(feature = "sensevoice"),
+        TranscriptionEngine::Paraformer => cfg!(feature = "paraformer"),
+        TranscriptionEngine::Dolphin => cfg!(feature = "dolphin"),
+        TranscriptionEngine::Omnilingual => cfg!(feature = "omnilingual"),
+        TranscriptionEngine::Cohere => cfg!(feature = "cohere"),
     }
 }
 
