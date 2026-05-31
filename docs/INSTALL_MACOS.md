@@ -85,7 +85,10 @@ This shows:
 
 ## Configuration
 
-Config file: `~/Library/Application Support/voxtype/config.toml`
+Config file: `~/.config/voxtype/config.toml`, honoring `$XDG_CONFIG_HOME` if set.
+
+Older installs that wrote to `~/Library/Application Support/voxtype/config.toml`
+keep using it until you move the file to `~/.config/voxtype/`.
 
 ```toml
 # Transcription engine

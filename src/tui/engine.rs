@@ -965,10 +965,7 @@ fn installed_engine_choices() -> std::collections::HashSet<&'static str> {
 /// resolution path so the TUI's "is this downloaded?" check matches what
 /// the daemon will look for at load time.
 fn model_dir_on_disk(name: &str) -> std::path::PathBuf {
-    if let Some(dirs) = directories::ProjectDirs::from("io", "voxtype", "voxtype") {
-        return dirs.data_dir().join("models").join(name);
-    }
-    std::path::PathBuf::from(name)
+    crate::config::Config::models_dir().join(name)
 }
 
 /// True when the model directory exists with at least one file in it. We

@@ -53,9 +53,7 @@ impl Default for StorageConfig {
 impl StorageConfig {
     /// Get the default storage path
     pub fn default_storage_path() -> PathBuf {
-        directories::ProjectDirs::from("", "", "voxtype")
-            .map(|dirs| dirs.data_dir().join("meetings"))
-            .unwrap_or_else(|| PathBuf::from("~/.local/share/voxtype/meetings"))
+        crate::config::Config::data_dir().join("meetings")
     }
 
     /// Get the database path
