@@ -12,7 +12,7 @@
 set -eu
 
 # Order of preference. $TERMINAL wins if it's set and resolvable.
-candidates="${TERMINAL:-} ghostty alacritty kitty foot wezterm konsole gnome-terminal xterm"
+candidates="${TERMINAL:-} ghostty alacritty kitty foot wezterm konsole gnome-terminal xterm xfce4-terminal"
 
 term=""
 for c in $candidates; do
@@ -25,7 +25,7 @@ done
 
 if [ -z "$term" ]; then
     notify-send -a Voxtype "Voxtype Configuration" \
-        "No terminal emulator found. Install ghostty, alacritty, kitty, foot, wezterm, or xterm." \
+        "No terminal emulator found. Install ghostty, alacritty, kitty, foot, wezterm, xterm or xfce4-terminal." \
         2>/dev/null || true
     echo "voxtype-configure-launcher: no terminal emulator found" >&2
     exit 1
@@ -68,6 +68,9 @@ case "$term" in
         ;;
     gnome-terminal)
         exec "$term" -- voxtype configure
+        ;;
+    xfce4-terminal)
+        exec "$term" --geometry 110x34 --command="voxtype configure"
         ;;
     *)
         # Unknown but available terminal — fall through with -e.

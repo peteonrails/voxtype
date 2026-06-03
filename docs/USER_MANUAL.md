@@ -143,7 +143,7 @@ voxtype configure
 The TUI is also surfaced as a `.desktop` entry, so it shows up in Walker,
 fuzzel, rofi, KRunner, and GNOME Activities as **"Voxtype Configuration"**.
 The launcher script picks the first available terminal emulator (`$TERMINAL`,
-then ghostty / alacritty / kitty / foot / wezterm / konsole / xterm) and
+then ghostty / alacritty / kitty / foot / wezterm / konsole / xterm / xfce4-terminal) and
 sets the window class to `voxtype` so compositors can float it.
 
 #### Sections
