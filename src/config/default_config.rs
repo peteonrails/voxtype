@@ -50,8 +50,15 @@ sample_rate = 16000
 max_duration_secs = 60
 
 # Pause MPRIS media players (Spotify, Firefox, etc.) when recording starts,
-# resume them when recording stops. Requires playerctl.
+# resume them when recording stops. Talks D-Bus directly; no external
+# playerctl binary required.
 # pause_media = false
+
+# MPRIS player bus-name suffixes to skip when pausing. Matched against the
+# part after `org.mpris.MediaPlayer2.` either exactly or as a `<entry>.*`
+# prefix (e.g. "chromium" matches "chromium.instance1872063"). Useful for
+# ignoring browsers whose MPRIS status is unreliable.
+# pause_media_ignored_players = ["chromium", "firefox"]
 
 # [audio.feedback]
 # Enable audio feedback sounds (beeps when recording starts/stops)
