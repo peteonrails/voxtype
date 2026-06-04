@@ -21,6 +21,14 @@ pub struct AudioConfig {
     #[serde(default)]
     pub pause_media: bool,
 
+    /// MPRIS player bus-name suffixes to skip when pausing. Matched against
+    /// the part after `org.mpris.MediaPlayer2.` either exactly or as a
+    /// `<entry>.<instance>` prefix (e.g. `"chromium"` matches
+    /// `chromium.instance123`). Useful for ignoring browsers whose MPRIS
+    /// status is unreliable, or background players you never want paused.
+    #[serde(default)]
+    pub pause_media_ignored_players: Vec<String>,
+
     /// Audio feedback settings
     #[serde(default)]
     pub feedback: AudioFeedbackConfig,
@@ -33,6 +41,7 @@ impl Default for AudioConfig {
             sample_rate: default_audio_sample_rate(),
             max_duration_secs: default_audio_max_duration_secs(),
             pause_media: false,
+            pause_media_ignored_players: Vec::new(),
             feedback: AudioFeedbackConfig::default(),
         }
     }

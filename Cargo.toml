@@ -154,6 +154,10 @@ tray-icon = "0.21.3"
 evdev = "0.12"
 inotify = "0.10"  # Watch /dev/input for device hotplug
 nix = { version = "0.29", features = ["signal", "process"] }  # Unix signals for IPC
+# MPRIS media-player control over the session bus. Talking D-Bus directly
+# instead of shelling out to playerctl lets us see MPRIS-compliant players
+# that playerctl silently filters out, and surfaces real errors on resume.
+zbus = { version = "4", default-features = false, features = ["tokio"] }
 
 [features]
 default = []

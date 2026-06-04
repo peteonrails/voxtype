@@ -776,7 +776,9 @@ impl Daemon {
     /// Pause MPRIS media players if configured, storing which ones were paused
     async fn pause_media_players(&mut self) {
         if self.config.audio.pause_media {
-            self.paused_media_players = audio::media::pause_playing_players().await;
+            self.paused_media_players =
+                audio::media::pause_playing_players(&self.config.audio.pause_media_ignored_players)
+                    .await;
         }
     }
 
