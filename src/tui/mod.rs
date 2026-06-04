@@ -17,6 +17,7 @@ mod meeting_section;
 mod notifications_section;
 mod osd_section;
 mod output_section;
+mod recording_section;
 mod section;
 mod sidebar;
 mod text_section;
@@ -364,6 +365,7 @@ fn handle_section_key(app: &mut App, key: KeyEvent) -> Action {
         Section::Engine => engine::handle_key(app, key),
         Section::Output => output_section::handle_key(app, key),
         Section::Text => text_section::handle_key(app, key),
+        Section::Recording => recording_section::handle_key(app, key),
         Section::Vad => vad_section::handle_key(app, key),
         Section::Meeting => meeting_section::handle_key(app, key),
         Section::Notifications => notifications_section::handle_key(app, key),
@@ -622,6 +624,7 @@ fn render_section(f: &mut Frame, area: Rect, app: &App) {
         Section::Engine => engine::render(f, area, app),
         Section::Output => output_section::render(f, area, app),
         Section::Text => text_section::render(f, area, app),
+        Section::Recording => recording_section::render(f, area, app),
         Section::Vad => vad_section::render(f, area, app),
         Section::Meeting => meeting_section::render(f, area, app),
         Section::Notifications => notifications_section::render(f, area, app),

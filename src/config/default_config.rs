@@ -307,6 +307,15 @@ on_transcription = true
 # transcribing = "⏳"
 # stopped = ""
 
+# [recording]
+# Queue normal-batch recordings while a previous normal batch is transcribing or outputting.
+# queue_enabled = false
+# Maximum number of stopped recordings that can wait, transcribe, or output.
+# A live recording is not counted while active, but starting one requires one
+# available stopped slot so stopping can enqueue it.
+# Set to 0 or 1 to disable queueing. Minimum enabled value is 2.
+# queue_size = 5
+
 # [profiles]
 # Named profiles for context-specific post-processing
 # Use with: voxtype record start --profile slack

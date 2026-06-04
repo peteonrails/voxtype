@@ -18,6 +18,7 @@ Voxtype is a push-to-talk voice-to-text tool for Linux. Optimized for Wayland, w
 - [Remote Whisper Servers](#remote-whisper-servers)
 - [CLI Backend (whisper-cli)](#cli-backend-whisper-cli)
 - [Eager Processing](#eager-processing)
+- [Recording Queue](#recording-queue)
 - [Output Modes](#output-modes)
 - [Post-Processing with LLMs](#post-processing-with-llms)
 - [Profiles](#profiles)
@@ -159,6 +160,7 @@ sets the window class to `voxtype` so compositors can float it.
 | VAD | Silero VAD enable, backend (auto/energy/whisper), threshold |
 | Meeting | Meeting mode enable, speaker diarization, audio source (mic/system/both) |
 | Notifications | Desktop notifications for recording start/stop and transcription |
+| Recording | Queue normal batch recordings while transcribing or outputting |
 | Waybar | Status integration: icon theme + per-state icon overrides |
 | Advanced | GPU isolation, on-demand model loading, flash attention, eager processing, GPU device |
 
@@ -307,6 +309,8 @@ voxtype record start                # Start recording (sends SIGUSR1 to daemon)
 voxtype record start --file=out.txt # Write transcription to a file
 voxtype record start --file         # Write to file_path from config
 voxtype record stop                 # Stop recording and transcribe (sends SIGUSR2 to daemon)
+voxtype record stop --file=out.txt  # Write stopped recording to a file
+voxtype record stop --file          # Write to file_path from config
 voxtype record toggle               # Toggle recording state
 voxtype record cancel               # Cancel recording or transcription in progress
 ```
@@ -320,12 +324,16 @@ voxtype record stop                          # Transcribes with the model specif
 
 The model must be configured as `model`, `secondary_model`, or listed in `available_models` in your config. See [Multi-Model Configuration](CONFIGURATION.md#secondary_model) for setup.
 
-**Output mode override:** Use `--type`, `--clipboard`, or `--paste` to override the output mode:
+**Output mode override:** Use `--type`, `--clipboard`, `--paste`, or `--file` to override the output mode:
 
 ```bash
 voxtype record start --clipboard  # Output to clipboard instead of typing
 voxtype record toggle --paste     # Use paste mode for this recording
+voxtype record stop --file=out.txt # Override output path for this stopped recording
 ```
+
+When queueing is active, stop-time output overrides are applied before the
+stopped recording is queued.
 
 **File output:** The `--file` flag writes transcription to a file instead of typing or using clipboard. Use `--file=path.txt` for a specific file, or `--file` alone to use `file_path` from config. By default, the file is overwritten on each transcription. To append instead, set `file_mode = "append"` in your config file:
 
@@ -410,6 +418,17 @@ translate = false
 
 # Load model on-demand (saves memory/VRAM, slight delay per recording)
 # on_demand_loading = true
+
+[recording]
+# Queue normal batch recordings while a previous normal batch is transcribing or
+# outputting.
+# queue_enabled = false
+
+# Maximum stopped recordings waiting, transcribing, or outputting.
+# A live recording is not counted while active, but starting one requires one
+# available stopped slot so stopping can enqueue it.
+# 0 or 1 disables queueing; minimum enabled value is 2.
+# queue_size = 5
 
 [output]
 # Primary output mode
@@ -712,7 +731,13 @@ If you use a multi-key combination (e.g., `SUPER+CTRL+X`) and release keys slowl
 
 ## Canceling Transcription
 
-You can cancel recording or transcription at any time. When canceled, no text is output.
+You can cancel recording/transcription at any time.
+
+If a live recording is active, canceling removes only that live recording and lets
+previous queued or output-ready jobs continue.
+
+If no live recording is active, cancellation keeps the existing behavior for
+active transcription/output.
 
 ### With Compositor Keybindings
 
@@ -754,8 +779,10 @@ Any valid evdev key name works. Common choices:
 
 ### What Gets Canceled
 
-- **During recording**: Audio capture stops, recorded audio is discarded
-- **During transcription**: Transcription is aborted, no text is output
+- **During recording**: Active live audio capture stops and is discarded. Previous
+  queued or output-ready jobs can continue.
+- **With no live recording**: Cancellation keeps current behavior for active
+  transcription/output; transcription can be aborted before output.
 - **While idle**: No effect
 
 ---
@@ -1484,6 +1511,47 @@ Then record for 10+ seconds. You should see log messages like:
 [DEBUG] Chunk 0 completed: "This is the first part of my recording"
 [DEBUG] Chunk 1 completed: "the first part of my recording and here is more"
 [DEBUG] Combined eager chunks with deduplication
+```
+
+---
+## Recording Queue
+
+Queueing applies to **normal batch dictation** only (push-to-talk recordings that
+produce one transcript per trigger). It does not change eager or streaming modes.
+When queueing is enabled with eager/streaming, it is ignored and a startup warning
+is printed.
+
+### What It Does
+
+- Keep up with fast consecutive recordings when transcription or output falls behind.
+- Preserve order by processing queued recordings in FIFO order.
+- Use a fixed maximum queue length to avoid unbounded memory growth.
+
+### Behavior
+
+Set `queue_enabled = true` to allow queueing. When enabled:
+
+1. A recording that finishes while another is still transcribing or outputting is
+   enqueued.
+2. Up to `queue_size` stopped recordings can wait, transcribe, or output.
+3. If the queue is full, additional recordings are rejected until space is free.
+4. As each transcription/output finishes, the next queued recording is processed.
+
+The active live recording is not part of `queue_size` while it is still
+capturing, but starting it requires one available stopped slot so stopping can
+enqueue it.
+
+When eager processing or streaming mode is enabled, queueing is ignored and
+the daemon logs a startup warning.
+
+Setting `queue_size = 0` or `1` disables queueing even when `queue_enabled` is on.
+
+### Configuration
+
+```toml
+[recording]
+queue_enabled = true
+queue_size = 5
 ```
 
 ---
