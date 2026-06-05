@@ -9,7 +9,7 @@ pub const DEFAULT_CONFIG: &str = r#"# Voxtype Configuration
 # State file for external integrations (Waybar, polybar, etc.)
 # Use "auto" for default location ($XDG_RUNTIME_DIR/voxtype/state),
 # a custom path, or "disabled" to turn off. The daemon writes state
-# ("idle", "recording", "transcribing") to this file whenever it changes.
+# ("idle", "recording", "transcribing", "outputting") to this file whenever it changes.
 # Required for `voxtype record toggle` and `voxtype status` commands.
 state_file = "auto"
 
@@ -313,6 +313,31 @@ on_transcription = true
 # recording = "🎤"
 # transcribing = "⏳"
 # stopped = ""
+
+[osd]
+# Enable the floating on-screen visualizer.
+enabled = true
+
+# OSD frontend: "gtk4" (default), "native", or "quickshell".
+frontend = "gtk4"
+
+# Visual style: "waveform" (default) or "compact-pill".
+# "compact-pill" renders a smaller GTK4 pill with a centered voice glyph,
+# processing bar, and completion checkmark.
+style = "waveform"
+
+# Position and size.
+position = "bottom-center"
+width_px = 400
+height_px = 48
+margin_px = 24
+top_margin = 0.85
+
+# Visual tuning.
+opacity = 0.95
+waveform_window_secs = 3.0
+peak_decay_db_per_sec = 6.0
+waveform_gain = 10.0
 
 # [profiles]
 # Named profiles for context-specific post-processing

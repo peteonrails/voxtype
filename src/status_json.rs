@@ -113,6 +113,7 @@ pub fn format_state_json(
         "recording" => (&icons.recording, "Recording..."),
         "streaming" => (&icons.streaming, "Streaming live..."),
         "transcribing" => (&icons.transcribing, "Transcribing..."),
+        "outputting" => (&icons.transcribing, "Outputting..."),
         "idle" => (&icons.idle, "Voxtype ready - hold hotkey to record"),
         "stopped" => (&icons.stopped, "Voxtype not running"),
         _ => (&icons.idle, "Unknown state"),
@@ -221,6 +222,10 @@ mod tests {
         assert_eq!(
             format_state_json("transcribing", &icons, None),
             r#"{"text": "T", "alt": "transcribing", "class": "transcribing", "tooltip": "Transcribing..."}"#,
+        );
+        assert_eq!(
+            format_state_json("outputting", &icons, None),
+            r#"{"text": "T", "alt": "outputting", "class": "outputting", "tooltip": "Outputting..."}"#,
         );
         assert_eq!(
             format_state_json("idle", &icons, None),

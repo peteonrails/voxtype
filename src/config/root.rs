@@ -84,8 +84,8 @@ pub struct Config {
     pub meeting: MeetingConfig,
 
     /// Optional path to state file for external integrations (e.g., Waybar)
-    /// When set, the daemon writes current state ("idle", "recording", "transcribing")
-    /// to this file whenever state changes.
+    /// When set, the daemon writes current state ("idle", "recording",
+    /// "transcribing", "outputting") to this file whenever state changes.
     /// Example: "/run/user/1000/voxtype/state" or use "auto" for default location
     #[serde(default = "default_state_file")]
     pub state_file: Option<String>,

@@ -30,7 +30,7 @@ use anyhow::Context as _;
 use clap::Parser;
 
 use voxtype::audio::levels::{AudioFrame, FRAME_HZ};
-use voxtype::osd::config::OsdConfig;
+use voxtype::osd::config::{OsdConfig, OsdStyle};
 use voxtype::osd::ipc::{resolve_socket_path, run_ipc_loop, FrameRing, DEFAULT_RING_DEPTH};
 use voxtype::osd::theme::ThemeWatcher;
 use voxtype::osd::visual::PeakHold;
@@ -83,6 +83,12 @@ struct Args {
     /// Reduce for hot mics (e.g. 4.0); raise for quiet sources (e.g. 14.0).
     #[arg(long, env = "VOXTYPE_OSD_GAIN")]
     waveform_gain: Option<f32>,
+
+    /// Visual style to render. The native frontend currently supports
+    /// "waveform"; "compact-pill" is accepted for config parity but renders
+    /// as waveform.
+    #[arg(long, env = "VOXTYPE_OSD_STYLE")]
+    style: Option<String>,
 }
 
 /// Load the `[osd]` section from the voxtype config file, falling back to
@@ -140,17 +146,30 @@ fn main() -> anyhow::Result<()> {
     if let Some(g) = args.waveform_gain {
         osd_config.waveform_gain = g;
     }
+    if let Some(style) = args.style.as_deref() {
+        match OsdStyle::parse_str(style) {
+            Some(style) => osd_config.style = style,
+            None => tracing::warn!("Ignoring unknown OSD style '{style}'"),
+        }
+    }
 
     if !osd_config.enabled {
         tracing::info!("OSD disabled in config; exiting");
         return Ok(());
     }
 
+    if matches!(osd_config.style, OsdStyle::CompactPill) {
+        tracing::warn!(
+            "compact-pill style is currently implemented by the GTK4 frontend; native will render waveform"
+        );
+    }
+
     tracing::info!(
-        "voxtype-osd-native starting; socket={:?}, size={}x{}",
+        "voxtype-osd-native starting; socket={:?}, size={}x{} style={:?}",
         socket_path,
         osd_config.width_px,
-        osd_config.height_px
+        osd_config.height_px,
+        osd_config.style,
     );
 
     let theme = ThemeWatcher::new();
