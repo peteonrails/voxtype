@@ -29,6 +29,13 @@ pub struct AudioConfig {
     #[serde(default)]
     pub pause_media_ignored_players: Vec<String>,
 
+    /// Wait for the input device to deliver real audio before playing the
+    /// recording-start cue and showing the OSD. Devices resuming from idle
+    /// suspend produce ~0.5s of digital silence; without this gate, users
+    /// who speak as soon as they see/hear the cue lose their first word.
+    #[serde(default = "default_audio_wait_for_device")]
+    pub wait_for_device: bool,
+
     /// Audio feedback settings
     #[serde(default)]
     pub feedback: AudioFeedbackConfig,
@@ -42,6 +49,7 @@ impl Default for AudioConfig {
             max_duration_secs: default_audio_max_duration_secs(),
             pause_media: false,
             pause_media_ignored_players: Vec::new(),
+            wait_for_device: default_audio_wait_for_device(),
             feedback: AudioFeedbackConfig::default(),
         }
     }
@@ -57,6 +65,10 @@ fn default_audio_sample_rate() -> u32 {
 
 fn default_audio_max_duration_secs() -> u32 {
     60
+}
+
+fn default_audio_wait_for_device() -> bool {
+    true
 }
 
 /// Audio feedback configuration for sound cues
@@ -90,5 +102,24 @@ impl Default for AudioFeedbackConfig {
             theme: default_sound_theme(),
             volume: default_volume(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wait_for_device_defaults_to_true() {
+        assert!(AudioConfig::default().wait_for_device);
+        // Old configs without the field must keep the default
+        let cfg: AudioConfig = toml::from_str("").unwrap();
+        assert!(cfg.wait_for_device);
+    }
+
+    #[test]
+    fn wait_for_device_can_be_disabled() {
+        let cfg: AudioConfig = toml::from_str("wait_for_device = false").unwrap();
+        assert!(!cfg.wait_for_device);
     }
 }

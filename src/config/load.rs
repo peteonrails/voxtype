@@ -104,6 +104,9 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     if let Ok(val) = std::env::var("VOXTYPE_PAUSE_MEDIA") {
         config.audio.pause_media = parse_bool_env(&val);
     }
+    if let Ok(val) = std::env::var("VOXTYPE_WAIT_FOR_DEVICE") {
+        config.audio.wait_for_device = parse_bool_env(&val);
+    }
 
     // Output
     if let Ok(mode) = std::env::var("VOXTYPE_OUTPUT_MODE") {

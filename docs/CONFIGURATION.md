@@ -363,6 +363,24 @@ Maximum recording duration in seconds. Recording automatically stops after this 
 max_duration_secs = 120  # Allow 2-minute recordings
 ```
 
+### wait_for_device
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Wait for the input device to deliver real audio before playing the recording-start cue and showing the OSD (up to 1.5 seconds).
+
+Audio sources resuming from idle suspend (PipeWire suspends them after a few seconds without use) produce roughly half a second of digital silence before real samples flow. Anything spoken into that window is never captured. With this gate enabled, the "listening" signals only appear once the device is actually delivering audio, so speaking as soon as you see or hear the cue is safe.
+
+Disable this if your input source emits exact digital silence when the room is quiet (for example, some noise-suppression filters); with such sources the cue would otherwise always lag by the 1.5-second timeout.
+
+**Example:**
+```toml
+[audio]
+wait_for_device = false  # Signal recording start immediately
+```
+
 ---
 
 ## [audio.feedback]
@@ -3203,6 +3221,7 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_AUDIO_DEVICE` | string | `audio.device` |
 | `VOXTYPE_MAX_DURATION_SECS` | integer | `audio.max_duration_secs` |
 | `VOXTYPE_AUDIO_FEEDBACK` | bool | `audio.feedback.enabled` |
+| `VOXTYPE_WAIT_FOR_DEVICE` | bool | `audio.wait_for_device` |
 
 **Output:**
 

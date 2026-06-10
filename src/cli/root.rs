@@ -240,6 +240,23 @@ pub struct Cli {
     #[arg(long, help_heading = "Audio", hide_short_help = true)]
     pub pause_media: bool,
 
+    /// Wait for the input device to deliver audio before signaling recording start (default)
+    #[arg(long, help_heading = "Audio", hide_short_help = true)]
+    pub wait_for_device: bool,
+
+    /// Start immediately without waiting for input device warm-up
+    #[arg(
+        long,
+        help_heading = "Audio",
+        hide_short_help = true,
+        conflicts_with = "wait_for_device",
+        long_help = "Start immediately without waiting for input device warm-up.\n\
+        By default, voxtype delays the recording-start cue (sound, OSD, notification)\n\
+        until the input device delivers real audio, because devices resuming from\n\
+        idle suspend produce ~0.5s of silence in which speech is lost."
+    )]
+    pub no_wait_for_device: bool,
+
     // -- Output (delivery, timing, file output, hooks) --
     /// Force clipboard mode (don't try to type)
     #[arg(long, help_heading = "Output")]
