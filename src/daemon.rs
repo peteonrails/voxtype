@@ -1116,7 +1116,9 @@ impl Daemon {
                     // transcriber's audio input, and the chunk that proved
                     // the device warm may already hold the onset of speech
                     // (user talking during warm-up). Hand it on first so
-                    // nothing is clipped. Cannot fail: channel is empty.
+                    // nothing is clipped. The send cannot fail at this
+                    // point: the channel was just created and streaming_rx
+                    // is a local we still hold.
                     if let Some(chunk) = warm_chunk {
                         let _ = streaming_tx.try_send(chunk);
                     }

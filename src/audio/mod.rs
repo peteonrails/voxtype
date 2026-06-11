@@ -77,7 +77,11 @@ pub async fn wait_for_signal(
                 return None;
             }
             Err(_) => {
-                tracing::warn!(
+                // INFO, not WARN: this fires on every recording start for
+                // sources that emit exact digital silence (by design the
+                // gate must give up and start anyway), so WARN would be
+                // perpetual noise rather than something actionable.
+                tracing::info!(
                     "No signal from audio device within {}ms (suspended source still \
                      resuming, or a source that emits exact silence); starting anyway",
                     timeout.as_millis()

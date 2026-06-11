@@ -240,7 +240,7 @@ pub struct Cli {
     #[arg(long, help_heading = "Audio", hide_short_help = true)]
     pub pause_media: bool,
 
-    /// Wait for the input device to deliver audio before signaling recording start (default)
+    /// Wait for input device warm-up before signaling recording start (overrides a config that disables it; on by default)
     #[arg(long, help_heading = "Audio", hide_short_help = true)]
     pub wait_for_device: bool,
 
