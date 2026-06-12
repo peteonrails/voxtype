@@ -1,9 +1,9 @@
 # voxtype-shared
 
 Shared Quickshell QML modules used by every voxtype QML frontend: the
-OSD card, the engine picker menu, and (eventually) the meeting controls
-canvas. Extracted so the frontends don't each ship their own copy of
-theme constants, state file watcher, and audio bridge wrapper.
+waveform OSD, the engine picker, and the meeting controls panel.
+Extracted so the frontends don't each ship their own copy of theme
+constants, state file watcher, and audio bridge wrapper.
 
 ## Modules
 
@@ -103,7 +103,8 @@ user's Quickshell config tree.
 
 ## Scope
 
-These modules are the foundation for v0.7.3 Wave 2 work: the waveform
-OSD, the engine picker menu, and the meeting controls panel. None of
-those frontends ship yet; this commit only lands the shared modules
-plus a refactor of the existing OSD proof-of-concept to consume them.
+These modules back the three Quickshell widgets that ship with voxtype
+since v0.7.5: `OsdSurface`, `EnginePicker`, and `MeetingControls` (see
+[../README.md](../README.md)). `shell.qml` instantiates one `StateReader`
+and one `AudioBridge` and passes them to the widgets so only a single
+sidecar process runs.
