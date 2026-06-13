@@ -996,6 +996,17 @@ impl Daemon {
 
         self.play_feedback(SoundEvent::TranscriptionComplete);
 
+        if self.config.output.notification.on_recording_stop {
+            send_notification(
+                "Streaming Stopped",
+                "Streaming session ended",
+                self.config.output.notification.show_engine_icon,
+                self.config.engine,
+                &self.config.output.notification.urgency,
+            )
+            .await;
+        }
+
         if let Some(cmd) = &self.config.output.post_output_command {
             if let Err(e) = output::run_hook(cmd, "post_output").await {
                 tracing::warn!("{}", e);
@@ -3255,27 +3266,17 @@ impl Daemon {
                         }
                     }
 
-                    // Check for recording timeout. Skip when audio_capture is
-                    // already gone so we don't re-fire cleanup on every 100ms
-                    // tick while the streaming session drains server-side
-                    // (state stays Streaming until Ended arrives).
-                    let timeout_fired = audio_capture.is_some()
-                        && state.recording_duration().is_some_and(|d| d > max_duration);
-                    if timeout_fired {
-                        // Streaming has its own clean stop path: skip the
-                        // batch_transcribe branch below to avoid opening a
-                        // second WS session for audio already being processed
-                        // by the active streaming one.
-                        if state.is_streaming() {
+                    // Check for recording timeout. Skip entirely for streaming
+                    // — streaming sessions are user-terminated via toggle, so
+                    // the safety limit only applies to batch recording.
+                    if state.is_streaming() {
+                        // No-op: streaming has no hard duration limit.
+                        // The user controls session length via toggle.
+                    } else {
+                        let timeout_fired = audio_capture.is_some()
+                            && state.recording_duration().is_some_and(|d| d > max_duration);
+                        if timeout_fired {
                             tracing::warn!(
-                                "Recording timeout ({:.0}s limit) while streaming; closing capture",
-                                max_duration.as_secs_f32()
-                            );
-                            self.stop_streaming_capture(&mut audio_capture).await;
-                            continue;
-                        }
-
-                        tracing::warn!(
                             "Recording timeout ({:.0}s limit), transcribing captured audio",
                             max_duration.as_secs_f32()
                         );
@@ -3334,6 +3335,7 @@ impl Daemon {
                                 &mut audio_capture,
                                 transcriber,
                             ).await;
+                        }
                         }
                     }
                 }
