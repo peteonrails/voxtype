@@ -380,6 +380,12 @@ fn read_trimmed_nonempty(path: &std::path::Path) -> Option<String> {
 /// sync with the `value_parser` list on `MeetingAction::Start::diarization`.
 const ALLOWED_DIARIZATION_OVERRIDES: &[&str] = &["simple", "ml"];
 
+/// How long to wait for a resuming input device to deliver real samples
+/// before starting anyway. Suspended PipeWire/ALSA sources take ~0.5s to
+/// warm up; sources that emit exact digital silence (noise suppressors in
+/// a quiet room) would otherwise stall forever.
+const DEVICE_WARMUP_TIMEOUT: Duration = Duration::from_millis(1500);
+
 /// Validate a diarization backend override against the allowlist.
 ///
 /// The CLI's clap `value_parser` already rejects bad values at parse time, but
@@ -806,7 +812,20 @@ impl Daemon {
     async fn start_recording_capture(&mut self) -> std::result::Result<Box<dyn AudioCapture>, ()> {
         match audio::create_capture(&self.config.audio) {
             Ok(mut capture) => match capture.start().await {
-                Ok(chunk_rx) => {
+                Ok(mut chunk_rx) => {
+                    // Hold back the "listening" cues (start sound, OSD,
+                    // state change — all downstream of this return) until
+                    // the device delivers real samples, so users don't
+                    // speak into a suspended source's warm-up silence.
+                    // Discarding the consumed chunks (including the returned
+                    // signal chunk) is safe ONLY because CpalCapture
+                    // accumulates every sample in its internal buffer
+                    // independently of this channel — here the channel just
+                    // feeds the OSD level emitter. A capture backend without
+                    // that dual path must forward the returned chunk instead.
+                    if self.config.audio.wait_for_device {
+                        let _ = audio::wait_for_signal(&mut chunk_rx, DEVICE_WARMUP_TIMEOUT).await;
+                    }
                     if let Some(hub) = &self.level_hub {
                         // Cancel any prior emitter (defensive; should be idle).
                         if let Some(handle) = self.level_emitter_task.take() {
@@ -1080,10 +1099,29 @@ impl Daemon {
     {
         match audio::create_capture(&self.config.audio) {
             Ok(mut capture) => match capture.start().await {
-                Ok(chunk_rx) => {
+                Ok(mut chunk_rx) => {
+                    // Same warm-up gate as start_recording_capture; also
+                    // keeps a resuming device's leading zeros out of the
+                    // streaming backend.
+                    let warm_chunk = if self.config.audio.wait_for_device {
+                        audio::wait_for_signal(&mut chunk_rx, DEVICE_WARMUP_TIMEOUT).await
+                    } else {
+                        None
+                    };
                     // Bounded; backed-up streaming backend drops chunks
                     // rather than back-pressuring the capture.
                     let (streaming_tx, streaming_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(64);
+
+                    // Unlike the batch path, this channel IS the
+                    // transcriber's audio input, and the chunk that proved
+                    // the device warm may already hold the onset of speech
+                    // (user talking during warm-up). Hand it on first so
+                    // nothing is clipped. The send cannot fail at this
+                    // point: the channel was just created and streaming_rx
+                    // is a local we still hold.
+                    if let Some(chunk) = warm_chunk {
+                        let _ = streaming_tx.try_send(chunk);
+                    }
 
                     if let Some(handle) = self.level_emitter_task.take() {
                         handle.abort();

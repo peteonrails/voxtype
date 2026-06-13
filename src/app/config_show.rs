@@ -67,6 +67,7 @@ pub(crate) async fn show_config(config: &config::Config) -> anyhow::Result<()> {
     println!("  device = {:?}", config.audio.device);
     println!("  sample_rate = {}", config.audio.sample_rate);
     println!("  max_duration_secs = {}", config.audio.max_duration_secs);
+    println!("  wait_for_device = {}", config.audio.wait_for_device);
 
     println!("\n[audio.feedback]");
     println!("  enabled = {}", config.audio.feedback.enabled);

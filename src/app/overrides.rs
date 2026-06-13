@@ -185,6 +185,11 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if cli.pause_media {
         config.audio.pause_media = true;
     }
+    apply_bool_override(
+        &mut config.audio.wait_for_device,
+        cli.wait_for_device,
+        cli.no_wait_for_device,
+    );
 
     // Output overrides
     if let Some(ref append_text) = cli.append_text {

@@ -49,6 +49,13 @@ sample_rate = 16000
 # Maximum recording duration in seconds (safety limit)
 max_duration_secs = 60
 
+# Wait for the input device to deliver real audio before playing the
+# recording-start cue and showing the OSD (up to 1.5s). Input devices
+# resuming from idle suspend produce ~0.5s of silence; speaking into that
+# window loses the first word. Disable if your source emits exact digital
+# silence when quiet (e.g. some noise suppressors) and the cue feels late.
+# wait_for_device = true
+
 # Pause MPRIS media players (Spotify, Firefox, etc.) when recording starts,
 # resume them when recording stops. Talks D-Bus directly; no external
 # playerctl binary required.

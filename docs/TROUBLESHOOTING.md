@@ -300,6 +300,24 @@ aplay test.wav
 max_duration_secs = 120  # 2 minutes
 ```
 
+### First word missing when dictation starts
+
+**Symptom:** The first word (or first syllable) of an utterance is lost, but only when you start dictating after a few seconds of not using the microphone. Dictating again right away works fine.
+
+**Cause:** The audio server suspends idle capture devices to save power (PipeWire/WirePlumber does this after about 5 seconds by default). A resuming device delivers around half a second of digital silence before real samples flow, so speech in that window is never captured.
+
+Voxtype works around this with the `wait_for_device` gate (enabled by default): the recording-start sound, notification, and OSD are held back until the device delivers real audio. Wait for the cue before speaking and nothing is lost.
+
+**If you still lose the first word:**
+- Make sure `wait_for_device` has not been disabled in your config
+- Wait for the start cue (sound or OSD) before speaking; enable audio feedback with `[audio.feedback] enabled = true` if you have no visible indicator
+
+**If the start cue feels delayed instead:** your source may emit exact digital silence when the room is quiet (some noise-suppression filters do), which makes the gate wait its full 1.5-second timeout. Disable it:
+```toml
+[audio]
+wait_for_device = false
+```
+
 ---
 
 ## Transcription Issues
