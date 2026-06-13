@@ -104,6 +104,7 @@ impl EitypeOutput {
         tracing::debug!("Running: {}", debug_args.join(" "));
 
         let output = cmd
+            .arg("--")
             .arg(text)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
