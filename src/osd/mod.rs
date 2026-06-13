@@ -15,6 +15,7 @@
 
 pub mod config;
 pub mod ipc;
+pub mod style;
 pub mod supervisor;
 pub mod theme;
 pub mod visual;

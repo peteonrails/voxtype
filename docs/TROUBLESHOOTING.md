@@ -16,6 +16,7 @@ Solutions to common issues when using Voxtype.
   - [Wrong characters on non-US keyboard layouts](#wrong-characters-on-non-us-keyboard-layouts-yz-swapped-qwertz-azerty)
 - [Performance Issues](#performance-issues)
 - [Soniox Backend Issues](#soniox-backend-issues)
+- [Quickshell OSD Issues](#quickshell-osd-issues)
 - [Systemd Service Issues](#systemd-service-issues)
 - [Debug Mode](#debug-mode)
 
@@ -1108,6 +1109,57 @@ async_max_wait_secs = 300
 ### Post-stop "Streaming Error: Soniox server error (408): Request timeout"
 
 This notification used to appear when you released the hotkey and Soniox's server-side timer fired before the connection fully closed. Voxtype now suppresses 408s that arrive **after** you've signalled end-of-audio, so this should be silent. If you still see it, your build predates the fix (any release after v0.7.2 + soniox).
+
+---
+
+## Quickshell OSD Issues
+
+These apply when `[osd] frontend = "quickshell"`. See the
+[configuration guide](CONFIGURATION.md#quickshell-osd-customization) for the
+full set of style, palette, layout, and recipe options.
+
+### OSD exits with "OSD style '...' not found"
+
+The `[osd] style` value names a package that isn't installed. The error lists
+every directory that was searched. Install the style package into one of
+those directories (typically `~/.config/voxtype/osd/<name>/`), or set
+`style = "default"`. A package directory must contain a `voxtype-osd.toml`
+manifest.
+
+### OSD exits with "plugin_path ... is not an OSD package directory"
+
+`[osd] plugin_path` must point at a directory containing `voxtype-osd.toml`.
+Fix the path (a leading `~` is allowed) or remove `plugin_path` from
+config.toml.
+
+### OSD exits with "OSD package qml_entry not found"
+
+The selected package's manifest names a `qml_entry` file that doesn't exist
+in the package directory. Fix or remove `qml_entry` in the package's
+`voxtype-osd.toml`; without it the package uses the built-in renderer.
+
+### Custom package selected but the default card renders instead
+
+If a package's custom QML fails to load, the OSD logs a warning and falls
+back to the built-in surface rather than rendering nothing. Run the launcher
+in the foreground to see the QML error:
+
+```bash
+voxtype-osd-quickshell --no-daemonize
+```
+
+### Style or recipe changes don't show up
+
+The launcher resolves `[osd]` config once at startup and writes the result to
+`$XDG_RUNTIME_DIR/voxtype/quickshell-style.json`. After editing config.toml
+or a package manifest, restart the daemon (or the OSD) to re-resolve:
+
+```bash
+systemctl --user restart voxtype
+```
+
+Omarchy theme switches are picked up without a restart only if the style file
+is rewritten; re-launching the OSD refreshes the palette.
 
 ---
 

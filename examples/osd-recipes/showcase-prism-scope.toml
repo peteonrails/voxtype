@@ -1,0 +1,122 @@
+# Prism scope showcase.
+#
+# Design intent:
+# - square instrument panel instead of a strip or circular badge
+# - solid host background so the panel reads against any wallpaper,
+#   with the surface layer adding inner depth on top
+# - layered "scope" composition using only no-code recipe layers
+# - central ring for peak response, lower bars for recent motion, meter rail for level
+# - one margin system: the waveform, bars, and meter share a 0.10 content
+#   inset, and each instrument gets its own vertical lane (ring above 0.50,
+#   waveform 0.50-0.66, bars 0.68-0.86, meter 0.90-0.955)
+# - both rings share a center so the inner tracker reads as concentric
+
+[osd]
+frontend = "quickshell"
+style = "default"
+palette = "omarchy"
+layout = "tile"
+position = "bottom-center"
+top_margin = 0.74
+
+[osd.frame]
+background = "background"
+border = "none"
+glow = true
+halo = false
+
+[[osd.visual.layers]]
+type = "background"
+source = "state"
+color = "surface"
+order = 0
+x = 0.0
+y = 0.0
+width = 1.0
+height = 1.0
+gain = 1.0
+opacity = 0.45
+radius = 18
+
+[[osd.visual.layers]]
+type = "pulse"
+source = "rms"
+color = "accent"
+order = 10
+x = 0.06
+y = 0.06
+width = 0.88
+height = 0.88
+gain = 1.5
+opacity = 0.16
+radius = 16
+
+# Hero ring, centered at (0.50, 0.29) above the waveform lane.
+[[osd.visual.layers]]
+type = "ring"
+source = "peak"
+color = "accent"
+order = 20
+x = 0.10
+y = 0.04
+width = 0.80
+height = 0.50
+gain = 2.4
+opacity = 0.92
+radius = 4
+speed = 0.8
+
+# Concentric inner tracker: same center, smaller rect keeps it inside.
+[[osd.visual.layers]]
+type = "ring"
+source = "rms"
+color = "foreground"
+order = 30
+x = 0.15
+y = 0.09
+width = 0.70
+height = 0.40
+gain = 1.6
+opacity = 0.34
+radius = 2
+speed = 1.35
+
+[[osd.visual.layers]]
+type = "waveform"
+source = "peak"
+color = "muted"
+order = 40
+x = 0.10
+y = 0.50
+width = 0.80
+height = 0.16
+gain = 0.58
+opacity = 0.62
+mirror = true
+
+[[osd.visual.layers]]
+type = "bars"
+source = "peak"
+color = "accent"
+order = 50
+x = 0.10
+y = 0.68
+width = 0.80
+height = 0.18
+gain = 0.86
+opacity = 0.92
+radius = 2
+mirror = false
+
+[[osd.visual.layers]]
+type = "meter"
+source = "peak"
+color = "success"
+secondary_color = "foreground"
+order = 60
+x = 0.10
+y = 0.90
+width = 0.80
+height = 0.055
+opacity = 0.95
+radius = 3

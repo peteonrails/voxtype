@@ -298,6 +298,31 @@ files under `$XDG_RUNTIME_DIR/voxtype/`. The OSD itself does not need a
 keybinding; it activates automatically when the daemon enters the
 recording state.
 
+Quickshell also supports OSD customization through `[osd]`:
+
+```toml
+[osd]
+frontend = "quickshell"
+style = "default"      # built-in style, package name, or package path
+# palette = "omarchy" # omit for auto, or force active Omarchy theme colors
+layout = "compact"    # compact, wide, minimal, tile, orb, custom
+
+[osd.frame]
+background = "none"   # semantic role, literal color, or none
+border = "none"       # state, semantic role, literal color, or none
+glow = true
+```
+
+No-code visual recipes live under `[[osd.visual.layers]]` and can combine
+layers such as `shadow`, `pulse`, `bars`, `waveform`, `ring`, `meter`, `icon`,
+and `label`. Colors are
+semantic Omarchy tokens by default (`accent`, `background`, `foreground`,
+`success`, `warning`, `error`). `layout` changes the outer frame: strip-style
+layouts use `compact`, `wide`, or `minimal`, while `tile` and `orb` create
+non-strip OSD frames. `[osd.frame]` can remove or recolor the host background
+and border without changing QML. Advanced users can select a trusted package
+directory with `plugin_path`; package QML is not sandboxed.
+
 ### `voxtype record`
 
 Control recording from external sources (compositor keybindings, scripts).

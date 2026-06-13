@@ -119,6 +119,8 @@ source=(
     "quickshell-voxtype-shared-Theme-${pkgname}-${pkgver}.qml::${_raw}/quickshell/voxtype-shared/Theme.qml"
     "quickshell-voxtype-shared-StateReader-${pkgname}-${pkgver}.qml::${_raw}/quickshell/voxtype-shared/StateReader.qml"
     "quickshell-voxtype-shared-AudioBridge-${pkgname}-${pkgver}.qml::${_raw}/quickshell/voxtype-shared/AudioBridge.qml"
+    "quickshell-voxtype-shared-StyleLoader-${pkgname}-${pkgver}.qml::${_raw}/quickshell/voxtype-shared/StyleLoader.qml"
+    "quickshell-voxtype-shared-RecipeRenderer-${pkgname}-${pkgver}.qml::${_raw}/quickshell/voxtype-shared/RecipeRenderer.qml"
     "quickshell-voxtype-shared-qmldir-${pkgname}-${pkgver}::${_raw}/quickshell/voxtype-shared/qmldir"
 )
 
@@ -180,6 +182,8 @@ sha256sums=(
     'SKIP'  # quickshell/voxtype-shared/Theme.qml
     'SKIP'  # quickshell/voxtype-shared/StateReader.qml
     'SKIP'  # quickshell/voxtype-shared/AudioBridge.qml
+    'SKIP'  # quickshell/voxtype-shared/StyleLoader.qml
+    'SKIP'  # quickshell/voxtype-shared/RecipeRenderer.qml
     'SKIP'  # quickshell/voxtype-shared/qmldir
 )
 
@@ -294,6 +298,10 @@ package() {
         "$pkgdir/usr/share/voxtype/quickshell/voxtype-shared/StateReader.qml"
     install -Dm644 "$srcdir/quickshell-voxtype-shared-AudioBridge-${pkgname}-${pkgver}.qml" \
         "$pkgdir/usr/share/voxtype/quickshell/voxtype-shared/AudioBridge.qml"
+    install -Dm644 "$srcdir/quickshell-voxtype-shared-StyleLoader-${pkgname}-${pkgver}.qml" \
+        "$pkgdir/usr/share/voxtype/quickshell/voxtype-shared/StyleLoader.qml"
+    install -Dm644 "$srcdir/quickshell-voxtype-shared-RecipeRenderer-${pkgname}-${pkgver}.qml" \
+        "$pkgdir/usr/share/voxtype/quickshell/voxtype-shared/RecipeRenderer.qml"
     install -Dm644 "$srcdir/quickshell-voxtype-shared-qmldir-${pkgname}-${pkgver}" \
         "$pkgdir/usr/share/voxtype/quickshell/voxtype-shared/qmldir"
 }

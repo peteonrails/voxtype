@@ -1,0 +1,45 @@
+name = "aegis-hud"
+version = "0.1.0"
+description = "A cinematic circular AI-assistant HUD showcase for the Quickshell OSD package system."
+compatibility = "voxtype quickshell style packages"
+palette = "package"
+layout = "custom"
+qml_entry = "AegisHud.qml"
+
+[colors]
+accent = "#38D8FF"
+background = "rgba(3, 11, 18, 0.72)"
+surface = "rgba(8, 24, 35, 0.68)"
+foreground = "#D8FAFF"
+muted = "rgba(154, 221, 232, 0.62)"
+success = "#53FFBD"
+warning = "#FFB84A"
+error = "#FF5F72"
+recording = "#38D8FF"
+streaming = "#4A8DFF"
+transcribing = "#FFB84A"
+idle = "rgba(154, 221, 232, 0.58)"
+grid = "rgba(73, 213, 255, 0.20)"
+glow = "rgba(56, 216, 255, 0.36)"
+core = "rgba(143, 243, 255, 0.96)"
+amber = "#FFB84A"
+
+[frame]
+background = "none"
+border = "none"
+glow = false
+halo = false
+
+[[visual.layers]]
+type = "ring"
+source = "peak"
+color = "accent"
+order = 10
+gain = 3.0
+
+[[visual.layers]]
+type = "meter"
+source = "rms"
+color = "success"
+secondary_color = "foreground"
+order = 20

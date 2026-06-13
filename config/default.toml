@@ -212,6 +212,49 @@ on_transcription = true
 # Custom word replacements (case-insensitive)
 # replacements = { "vox type" = "voxtype" }
 
+[osd]
+# On-screen display frontend.
+# - gtk4: Default toolkit frontend
+# - native: SCTK + wgpu + egui frontend
+# - quickshell: QML frontend with recipe/style customization
+frontend = "gtk4"
+
+# Quickshell style customization. These fields are ignored by gtk4/native.
+# style can be "default", an installed package name, or a package path.
+style = "default"
+
+# Palette source for Quickshell recipes. Leave unset to let a selected
+# package manifest choose its palette, falling back to Omarchy.
+# - omarchy: inherit colors from ~/.config/omarchy/current/theme/colors.toml
+# - fallback: use VoxType's built-in palette
+# - package: use package colors when a style package provides them
+# - custom: use literal recipe colors
+# palette = "omarchy"
+
+# Quickshell host layout: compact, wide, minimal, tile, orb, or custom.
+layout = "compact"
+
+# Quickshell host frame. Background/border accept semantic color roles,
+# literal CSS colors, or "none".
+# [osd.frame]
+# background = "background"
+# border = "state"
+# glow = true
+# halo = true
+
+# Explicit trusted QML/style package path. Custom QML is trusted code.
+# plugin_path = "/path/to/voxtype-osd-package"
+
+# Declarative Quickshell visual recipe. Layers render in order.
+# [[osd.visual.layers]]
+# type = "bars"       # shadow, waveform, bars, pulse, ring, meter, background, icon, label
+# source = "peak"     # peak, rms, vad, state
+# color = "accent"    # Omarchy token or literal color
+# order = 10
+# gain = 1.0
+# opacity = 1.0
+# mirror = true
+
 [status]
 # Status display icons for Waybar/tray integrations
 #
