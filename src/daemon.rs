@@ -892,7 +892,7 @@ impl Daemon {
 
         *audio_capture = Some(capture);
         *streaming_handle = Some(handle);
-        *streaming_session = Some(StreamingSession::new());
+        *streaming_session = Some(StreamingSession::new(self.config.output.type_delay_ms));
         *streaming_chain = Some(output::create_output_chain(&self.config.output));
         *state = State::Streaming {
             started_at: std::time::Instant::now(),

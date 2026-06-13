@@ -67,15 +67,26 @@ pub struct StreamingSession {
     typed_chars: usize,
     /// Most recent partial text (for status only; never typed).
     partial: String,
+    /// Inter-key delay (ms) applied to backspace bursts, mirroring the
+    /// type path's `type_delay_ms`. Without it, revision backspaces fire
+    /// with dotool's tiny default `keydelay` (~2ms) — well under one
+    /// display frame — so KWin coalesces them and drops events. That
+    /// corrupts self-corrections two ways: a dropped backspace leaves a
+    /// stray character, and the un-spaced last backspace lets the
+    /// following retype's leading character (often a space) coalesce too.
+    type_delay_ms: u32,
 }
 
 impl StreamingSession {
-    /// Create a new empty session.
-    pub fn new() -> Self {
+    /// Create a new empty session. `type_delay_ms` is the configured
+    /// inter-key delay; it is applied to backspace bursts so they match
+    /// the type path's compositor-safe pacing.
+    pub fn new(type_delay_ms: u32) -> Self {
         Self {
             finalized_text: String::new(),
             typed_chars: 0,
             partial: String::new(),
+            type_delay_ms,
         }
     }
 
@@ -218,7 +229,7 @@ impl StreamingSession {
         // Cap backspace at what we've actually typed.
         let n = backspace.min(self.typed_chars);
         if n > 0 {
-            let emitted = emit_backspaces(n).await;
+            let emitted = emit_backspaces(n, self.type_delay_ms).await;
             if emitted == 0 {
                 // No backspace-capable backend ran. The cursor still
                 // shows the old partial — DO NOT touch our bookkeeping,
@@ -271,7 +282,7 @@ impl StreamingSession {
             return Ok(());
         }
 
-        if emit_backspaces(count).await > 0 {
+        if emit_backspaces(count, self.type_delay_ms).await > 0 {
             self.typed_chars = 0;
             return Ok(());
         }
@@ -286,42 +297,56 @@ impl StreamingSession {
     }
 }
 
-impl Default for StreamingSession {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Backspace `count` chars using the first available method.
-/// Returns the actual number of backspaces emitted.
-async fn emit_backspaces(count: usize) -> usize {
+/// Returns the actual number of backspaces emitted. `type_delay_ms`
+/// paces the key events so the compositor doesn't coalesce them (see
+/// [`StreamingSession::type_delay_ms`]).
+async fn emit_backspaces(count: usize, type_delay_ms: u32) -> usize {
     if count == 0 {
         return 0;
     }
-    if try_wtype_backspaces(count).await {
+    if try_wtype_backspaces(count, type_delay_ms).await {
         return count;
     }
-    if try_dotool_backspaces(count).await {
+    if try_dotool_backspaces(count, type_delay_ms).await {
         return count;
     }
-    if try_ydotool_backspaces(count).await {
+    if try_ydotool_backspaces(count, type_delay_ms).await {
         return count;
     }
     0
 }
 
-async fn try_wtype_backspaces(count: usize) -> bool {
-    // wtype invocation: `wtype -k BackSpace` repeated. Build args
-    // dynamically to send N keypresses in a single subprocess.
+async fn try_wtype_backspaces(count: usize, type_delay_ms: u32) -> bool {
+    // wtype invocation: `wtype -k BackSpace` repeated, sent as a single
+    // subprocess. See `build_wtype_backspace_args` for the `-s` pacing.
     let mut cmd = Command::new("wtype");
-    for _ in 0..count {
-        cmd.arg("-k").arg("BackSpace");
-    }
+    cmd.args(build_wtype_backspace_args(count, type_delay_ms));
     cmd.stdout(Stdio::null()).stderr(Stdio::null());
     matches!(cmd.status().await, Ok(s) if s.success())
 }
 
-async fn try_dotool_backspaces(count: usize) -> bool {
+/// Build the wtype argument list for `count` backspaces.
+///
+/// wtype's `-d` only paces inter-keystroke delay *when typing text*; it
+/// has NO effect on discrete `-k` key presses. The right knob is `-s
+/// TIME` ("sleep before interpreting the following options"), placed
+/// before each `-k` so the BackSpace presses are spaced out and the
+/// compositor doesn't coalesce them.
+fn build_wtype_backspace_args(count: usize, type_delay_ms: u32) -> Vec<String> {
+    let mut args = Vec::with_capacity(count * 4);
+    for _ in 0..count {
+        if type_delay_ms > 0 {
+            args.push("-s".to_string());
+            args.push(type_delay_ms.to_string());
+        }
+        args.push("-k".to_string());
+        args.push("BackSpace".to_string());
+    }
+    args
+}
+
+async fn try_dotool_backspaces(count: usize, type_delay_ms: u32) -> bool {
     // Prefer `dotoolc` whenever dotoold is actually accepting input.
     // Spawning raw `dotool` creates a *new* uinput keyboard per call;
     // KDE Plasma can drop events on the typing keyboard while these
@@ -344,10 +369,7 @@ async fn try_dotool_backspaces(count: usize) -> bool {
         Err(_) => return false,
     };
     if let Some(mut stdin) = child.stdin.take() {
-        let mut buf = String::with_capacity(count * "key backspace\n".len());
-        for _ in 0..count {
-            buf.push_str("key backspace\n");
-        }
+        let buf = build_dotool_backspace_commands(count, type_delay_ms);
         if stdin.write_all(buf.as_bytes()).await.is_err() {
             return false;
         }
@@ -356,11 +378,40 @@ async fn try_dotool_backspaces(count: usize) -> bool {
     matches!(child.wait().await, Ok(s) if s.success())
 }
 
-async fn try_ydotool_backspaces(count: usize) -> bool {
+/// Build the dotool command stream for `count` backspaces.
+///
+/// `key` events obey dotool's `keydelay`/`keyhold` (NOT `typedelay`/
+/// `typehold`, which only apply to `type`). The defaults (~2ms) are far
+/// below one display frame, so without pacing KWin coalesces the
+/// backspaces and drops some — leaving a stray character after a
+/// self-correction. Match the type path's `type_delay_ms`.
+fn build_dotool_backspace_commands(count: usize, type_delay_ms: u32) -> String {
+    if count == 0 {
+        // No keys to send — don't emit bare keydelay/keyhold that would
+        // mutate dotool's persistent state for nothing.
+        return String::new();
+    }
+    let mut buf = String::with_capacity(count * "key backspace\n".len() + 32);
+    if type_delay_ms > 0 {
+        buf.push_str(&format!("keydelay {}\n", type_delay_ms));
+        buf.push_str(&format!("keyhold {}\n", type_delay_ms));
+    }
+    for _ in 0..count {
+        buf.push_str("key backspace\n");
+    }
+    buf
+}
+
+async fn try_ydotool_backspaces(count: usize, type_delay_ms: u32) -> bool {
     // ydotool key 14:1 14:0 sends BackSpace press+release. Linux key
-    // codes: BackSpace = 14.
+    // codes: BackSpace = 14. `-d` paces key events like the dotool/wtype
+    // paths; ydotool's own default (12ms) wouldn't track the user's
+    // configured type_delay_ms.
     let mut cmd = Command::new("ydotool");
     cmd.arg("key");
+    if type_delay_ms > 0 {
+        cmd.arg("-d").arg(type_delay_ms.to_string());
+    }
     for _ in 0..count {
         cmd.arg("14:1").arg("14:0");
     }
@@ -427,7 +478,7 @@ mod tests {
     async fn commits_segment_and_tracks_typed_chars() {
         let rec = std::sync::Arc::new(RecordingOutput::new());
         let chain = chain_with(rec.clone());
-        let mut session = StreamingSession::new();
+        let mut session = StreamingSession::new(0);
 
         session
             .commit_segment(&chain, "hello", None, None, None)
@@ -451,7 +502,7 @@ mod tests {
         // must use scalars to send one BackSpace per visible char.
         let rec = std::sync::Arc::new(RecordingOutput::new());
         let chain = chain_with(rec.clone());
-        let mut session = StreamingSession::new();
+        let mut session = StreamingSession::new(0);
         session
             .commit_segment(&chain, "你好世", None, None, None)
             .await
@@ -463,7 +514,7 @@ mod tests {
     async fn empty_segment_is_noop() {
         let rec = std::sync::Arc::new(RecordingOutput::new());
         let chain = chain_with(rec.clone());
-        let mut session = StreamingSession::new();
+        let mut session = StreamingSession::new(0);
         session
             .commit_segment(&chain, "", None, None, None)
             .await
@@ -474,7 +525,7 @@ mod tests {
 
     #[tokio::test]
     async fn partial_buffer_is_replaced_not_appended() {
-        let mut session = StreamingSession::new();
+        let mut session = StreamingSession::new(0);
         session.observe_partial("hel".into());
         assert_eq!(session.partial(), "hel");
         session.observe_partial("hell".into());
@@ -490,7 +541,7 @@ mod tests {
     async fn finalize_clears_partial() {
         let rec = std::sync::Arc::new(RecordingOutput::new());
         let chain = chain_with(rec.clone());
-        let mut session = StreamingSession::new();
+        let mut session = StreamingSession::new(0);
         session.observe_partial("hel".into());
         session
             .commit_segment(&chain, "hello", None, None, None)
@@ -501,9 +552,57 @@ mod tests {
 
     #[tokio::test]
     async fn rewind_with_zero_chars_is_ok() {
-        let mut session = StreamingSession::new();
+        let mut session = StreamingSession::new(0);
         // Should succeed without spawning anything.
         session.rewind().await.unwrap();
         assert_eq!(session.typed_chars(), 0);
+    }
+
+    #[test]
+    fn dotool_backspaces_set_keydelay_and_keyhold_not_typedelay() {
+        // `key backspace` is paced by keydelay/keyhold; typedelay only
+        // affects `type`. Setting the wrong knob would leave backspaces
+        // at dotool's ~2ms default and let KWin coalesce them.
+        let cmds = build_dotool_backspace_commands(3, 17);
+        assert_eq!(
+            cmds,
+            "keydelay 17\nkeyhold 17\nkey backspace\nkey backspace\nkey backspace\n"
+        );
+        assert!(!cmds.contains("typedelay"));
+        assert!(!cmds.contains("typehold"));
+    }
+
+    #[test]
+    fn dotool_backspaces_omit_pacing_when_delay_is_zero() {
+        // type_delay_ms == 0 means the user opted out of delays (e.g. a
+        // compositor without the coalescing bug); don't force any.
+        let cmds = build_dotool_backspace_commands(2, 0);
+        assert_eq!(cmds, "key backspace\nkey backspace\n");
+    }
+
+    #[test]
+    fn dotool_backspaces_zero_count_emits_nothing() {
+        // No keys → no commands, so a stray call can't mutate dotool's
+        // persistent keydelay/keyhold for nothing.
+        assert_eq!(build_dotool_backspace_commands(0, 17), "");
+        assert_eq!(build_dotool_backspace_commands(0, 0), "");
+    }
+
+    #[test]
+    fn wtype_backspaces_sleep_before_each_key() {
+        // `-s TIME` (sleep before the next option) paces discrete `-k`
+        // presses; wtype's `-d` would be a no-op here (it only spaces
+        // keystrokes when typing text). One `-s` precedes each `-k`.
+        let args = build_wtype_backspace_args(2, 17);
+        assert_eq!(
+            args,
+            vec!["-s", "17", "-k", "BackSpace", "-s", "17", "-k", "BackSpace"]
+        );
+    }
+
+    #[test]
+    fn wtype_backspaces_omit_delay_when_zero() {
+        let args = build_wtype_backspace_args(2, 0);
+        assert_eq!(args, vec!["-k", "BackSpace", "-k", "BackSpace"]);
     }
 }
