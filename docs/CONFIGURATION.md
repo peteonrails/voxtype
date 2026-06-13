@@ -70,7 +70,7 @@ config changes; restart it with `systemctl --user restart voxtype` for the
 new engine to take effect.
 
 **Notes:**
-- All engines except Whisper require an ONNX-enabled binary (`voxtype-*-onnx-*`)
+- Whisper, Remote Whisper, and Soniox run in every binary. The other engines (Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual, Cohere) require an ONNX-enabled binary (`voxtype-*-onnx-*`)
 - Each ONNX engine reads its own `[<engine>]` section (e.g. `[parakeet]`, `[cohere]`)
 - See [PARAKEET.md](PARAKEET.md) for detailed Parakeet setup instructions
 - See [MOONSHINE.md](MOONSHINE.md) for detailed Moonshine setup instructions
@@ -1576,13 +1576,13 @@ language_hints = ["hu", "en"]
 
 ### Building from Source
 
-Source builds need the `soniox` Cargo feature:
+Soniox is built unconditionally; no Cargo feature flag is required:
 
 ```bash
-cargo build --release --features soniox
+cargo build --release
 ```
 
-The `soniox` feature is independent of the other engine features and adds a small WebSocket client (tokio-tungstenite + rustls) plus an async HTTP client (reqwest) for the async API. It can be combined with any local engine feature, e.g. `--features "soniox parakeet"` for a binary that runs Parakeet locally and Soniox in the cloud depending on the `engine` setting.
+The Soniox backend pulls in a small WebSocket client (tokio-tungstenite + rustls) and an async HTTP client (reqwest) for the async API. They ship in every release binary so the engine surface stays uniform across flavors.
 
 ---
 

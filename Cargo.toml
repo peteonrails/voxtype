@@ -55,11 +55,11 @@ hound = "3"  # WAV file reading/writing
 # HTTP client for remote transcription
 ureq = { version = "2", features = ["json"] }
 
-# WebSocket client for Soniox streaming backend (optional)
-tokio-tungstenite = { version = "0.24", optional = true, features = ["rustls-tls-webpki-roots"] }
-futures-util = { version = "0.3", optional = true }
+# WebSocket client for Soniox streaming backend
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
 # Async HTTP client for Soniox async transcription API (multipart upload + poll)
-reqwest = { version = "0.12", optional = true, default-features = false, features = ["json", "multipart", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 
 # JSON parsing (for CLI backend)
 serde_json = "1"
@@ -242,8 +242,10 @@ omnilingual-tensorrt = ["omnilingual", "onnx-tensorrt-enabled"]
 cohere = ["onnx-common", "dep:half", "dep:tokenizers"]
 cohere-cuda = ["cohere", "onnx-cuda-enabled"]
 cohere-tensorrt = ["cohere", "onnx-tensorrt-enabled"]
-# Soniox cloud streaming WebSocket STT backend (no local model, just a network client)
-soniox = ["dep:tokio-tungstenite", "dep:futures-util", "dep:reqwest"]
+# Soniox is unconditional. Its deps (tokio-tungstenite, futures-util, reqwest)
+# add ~1-2 MB after LTO+strip and ride alongside ureq, which every binary
+# already ships for model downloads. Treating it like remote.rs (also always
+# compiled) keeps the engine surface uniform across release flavors.
 # No cohere-migraphx feature: MIGraphX 7.2 still fails on the
 # onnx-community q4 export. Original blocker was MatMulNBits bits=8
 # (cstr int8); q4 has bits=4 which is supported, but its zero_points

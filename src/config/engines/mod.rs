@@ -64,7 +64,6 @@ pub enum TranscriptionEngine {
     /// Requires: cargo build --features cohere
     Cohere,
     /// Use Soniox (cloud streaming WebSocket STT).
-    /// Requires: cargo build --features soniox
     Soniox,
 }
 

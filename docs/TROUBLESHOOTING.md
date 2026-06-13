@@ -1107,7 +1107,7 @@ async_max_wait_secs = 300
 
 ### Post-stop "Streaming Error: Soniox server error (408): Request timeout"
 
-This notification used to appear when you released the hotkey and Soniox's server-side timer fired before the connection fully closed. Voxtype now suppresses 408s that arrive **after** you've signalled end-of-audio, so this should be silent. If you still see it, your build predates the fix (any release after v0.7.2 + soniox).
+This notification used to appear when you released the hotkey and Soniox's server-side timer fired before the connection fully closed. Voxtype now suppresses 408s that arrive **after** you've signalled end-of-audio, so this should be silent. If you still see it, your build predates the fix (any release v0.7.5 or later includes it).
 
 ---
 

@@ -16,7 +16,6 @@ pub mod cli;
 #[cfg(feature = "parakeet")]
 pub mod parakeet_streaming;
 pub mod remote;
-#[cfg(feature = "soniox")]
 pub mod soniox;
 pub mod streaming;
 pub mod subprocess;
@@ -269,7 +268,6 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
             "Cohere engine requested but voxtype was not compiled with --features cohere"
                 .to_string(),
         )),
-        #[cfg(feature = "soniox")]
         TranscriptionEngine::Soniox => {
             let cfg = config.soniox.as_ref().ok_or_else(|| {
                 TranscribeError::InitFailed(
@@ -278,11 +276,6 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
             })?;
             Ok(Box::new(soniox::SonioxTranscriber::new(cfg.clone())?))
         }
-        #[cfg(not(feature = "soniox"))]
-        TranscriptionEngine::Soniox => Err(TranscribeError::InitFailed(
-            "Soniox engine requested but voxtype was not compiled with --features soniox"
-                .to_string(),
-        )),
     }
 }
 

@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use super::super::default_true;
 
 /// Soniox cloud streaming WebSocket STT configuration
-/// Requires: cargo build --features soniox
 ///
 /// Soniox is a paid cloud STT provider. API key required:
 /// either set `api_key` here or via the `SONIOX_API_KEY` env var.

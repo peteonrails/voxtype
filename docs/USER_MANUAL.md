@@ -440,7 +440,7 @@ on_transcription = true
 
 For a cloud streaming alternative to the local engines above, voxtype supports [Soniox](https://soniox.com). Different trade-off space: paid SaaS, no local model, 60+ languages with strong Hungarian/EU coverage, sub-second partials at the cursor.
 
-Build with `--features soniox`, set `SONIOX_API_KEY`, and:
+Soniox ships in every release binary. Set `SONIOX_API_KEY` and:
 
 ```toml
 engine = "soniox"
