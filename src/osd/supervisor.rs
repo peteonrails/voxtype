@@ -28,6 +28,7 @@
 //! `kill_on_drop` would have nothing to kill, and the supervisor would
 //! respawn in a loop thinking the child died (see issue #395).
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::task::JoinHandle;
@@ -38,6 +39,18 @@ const RESTART_MAX: Duration = Duration::from_secs(30);
 const HEALTHY_RUN: Duration = Duration::from_secs(60);
 const RAPID_FAIL_THRESHOLD: u32 = 3;
 const RAPID_FAIL_WINDOW: Duration = Duration::from_secs(5);
+
+fn resolve_osd_binary() -> PathBuf {
+    if let Ok(current) = std::env::current_exe() {
+        if let Some(dir) = current.parent() {
+            let sibling = dir.join(OSD_BINARY);
+            if sibling.is_file() {
+                return sibling;
+            }
+        }
+    }
+    PathBuf::from(OSD_BINARY)
+}
 
 /// Spawn a tokio task that supervises `voxtype-osd`. The returned handle's
 /// drop kills the child via `kill_on_drop`. Holding the handle keeps the
@@ -53,7 +66,8 @@ async fn supervise() {
 
     loop {
         let started = Instant::now();
-        let mut cmd = Command::new(OSD_BINARY);
+        let osd_binary = resolve_osd_binary();
+        let mut cmd = Command::new(&osd_binary);
         cmd.kill_on_drop(true);
         // Tell the dispatcher this child is supervised. The dispatcher
         // uses this to suppress qs's daemonize fork when handing off to
@@ -67,7 +81,7 @@ async fn supervise() {
                 tracing::warn!(
                     "Failed to spawn `{}`: {}. OSD will not be displayed. \
                      Install the OSD frontend or set `[osd] enabled = false`.",
-                    OSD_BINARY,
+                    osd_binary.display(),
                     e
                 );
                 return;

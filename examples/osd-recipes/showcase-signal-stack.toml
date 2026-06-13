@@ -1,0 +1,92 @@
+# Signal-stack showcase.
+#
+# Design intent:
+# - close to the default waveform language
+# - visible panel background behind the signal
+# - richer layered waveform presence for demos/screenshots: the muted
+#   trace rides above the accent trace as a ghost echo
+# - still inherits Omarchy colors rather than hardcoding a palette
+# - meter inset from the edges so its held-peak tick and corners stay
+#   clear of the panel's rounded edge
+
+[osd]
+frontend = "quickshell"
+style = "default"
+palette = "omarchy"
+layout = "wide"
+position = "bottom-center"
+top_margin = 0.74
+
+[osd.frame]
+background = "background"
+border = "none"
+glow = true
+halo = false
+
+[[osd.visual.layers]]
+type = "background"
+source = "state"
+color = "surface"
+order = -10
+x = 0.0
+y = 0.0
+width = 1.0
+height = 1.0
+gain = 1.0
+opacity = 0.62
+radius = 12
+
+# Subtle accent breathing behind the traces. An accent tint stays
+# visible over the dark surface where a background-colored pulse
+# would disappear into it.
+[[osd.visual.layers]]
+type = "pulse"
+source = "rms"
+color = "accent"
+order = 0
+x = 0.03
+y = 0.08
+width = 0.94
+height = 0.64
+gain = 1.2
+opacity = 0.14
+radius = 10
+
+[[osd.visual.layers]]
+type = "waveform"
+source = "peak"
+color = "muted"
+order = 10
+x = 0.03
+y = 0.04
+width = 0.94
+height = 0.48
+gain = 0.62
+opacity = 0.70
+mirror = true
+
+[[osd.visual.layers]]
+type = "waveform"
+source = "peak"
+color = "accent"
+order = 20
+x = 0.03
+y = 0.18
+width = 0.94
+height = 0.52
+gain = 0.9
+opacity = 1.0
+mirror = true
+
+[[osd.visual.layers]]
+type = "meter"
+source = "peak"
+color = "success"
+secondary_color = "foreground"
+order = 30
+x = 0.03
+y = 0.82
+width = 0.94
+height = 0.11
+opacity = 1.0
+radius = 2

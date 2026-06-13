@@ -1,0 +1,95 @@
+# Wide bar-meter showcase.
+#
+# Design intent:
+# - obvious live movement from vertical bars
+# - visible panel background behind the meter
+# - layered glow hierarchy: faint full-panel ambience, then a tighter
+#   accent pulse that hugs the bar zone instead of washing the whole card
+# - clear peak meter at the bottom, inset so its held-peak tick and
+#   corners stay clear of the panel's rounded edge
+
+[osd]
+frontend = "quickshell"
+style = "default"
+palette = "omarchy"
+layout = "wide"
+position = "bottom-center"
+top_margin = 0.74
+
+[osd.frame]
+background = "background"
+border = "none"
+glow = true
+halo = false
+
+# Stable surface panel.
+[[osd.visual.layers]]
+type = "background"
+source = "state"
+color = "surface"
+order = -10
+x = 0.0
+y = 0.0
+width = 1.0
+height = 1.0
+gain = 1.0
+opacity = 0.62
+radius = 12
+
+# Faint full-panel ambience that brightens with the signal.
+[[osd.visual.layers]]
+type = "background"
+source = "rms"
+color = "accent"
+order = 0
+x = 0.0
+y = 0.0
+width = 1.0
+height = 1.0
+gain = 1.25
+opacity = 0.12
+radius = 12
+
+# Focused pulse behind the bar zone only, so the flash tracks the
+# signal instead of flattening contrast across the whole panel.
+[[osd.visual.layers]]
+type = "pulse"
+source = "rms"
+color = "accent"
+order = 5
+x = 0.03
+y = 0.06
+width = 0.94
+height = 0.70
+gain = 1.4
+opacity = 0.26
+radius = 10
+
+[[osd.visual.layers]]
+type = "bars"
+source = "peak"
+color = "accent"
+order = 20
+x = 0.03
+y = 0.06
+width = 0.94
+height = 0.70
+gain = 0.9
+opacity = 1.0
+radius = 2
+mirror = true
+
+# Inset from the edges: the held-peak tick draws slightly taller than
+# the meter rail, so a flush-bottom meter would clip it.
+[[osd.visual.layers]]
+type = "meter"
+source = "peak"
+color = "success"
+secondary_color = "foreground"
+order = 30
+x = 0.03
+y = 0.82
+width = 0.94
+height = 0.11
+opacity = 1.0
+radius = 2

@@ -23,6 +23,9 @@ use super::config_editor::{ConfigEditor, EditorError};
 pub struct OsdState {
     pub enabled: bool,
     pub frontend: String,
+    pub style: String,
+    pub palette: String,
+    pub layout: String,
     pub position: String,
     pub width_px: i64,
     pub height_px: i64,
@@ -46,6 +49,9 @@ pub struct OsdState {
 pub enum Field {
     Enabled,
     Frontend,
+    Style,
+    Palette,
+    Layout,
     Position,
     WidthPx,
     HeightPx,
@@ -61,6 +67,9 @@ impl Field {
     const ALL: &'static [Field] = &[
         Field::Enabled,
         Field::Frontend,
+        Field::Style,
+        Field::Palette,
+        Field::Layout,
         Field::Position,
         Field::WidthPx,
         Field::HeightPx,
@@ -75,7 +84,10 @@ impl Field {
 
 const TABLE: &str = "osd";
 
-const FRONTEND_CHOICES: &[&str] = &["gtk4", "native"];
+const FRONTEND_CHOICES: &[&str] = &["gtk4", "native", "quickshell"];
+const STYLE_CHOICES: &[&str] = &["default"];
+const PALETTE_CHOICES: &[&str] = &["auto", "omarchy", "fallback", "package", "custom"];
+const LAYOUT_CHOICES: &[&str] = &["compact", "wide", "minimal", "tile", "orb", "custom"];
 const POSITION_CHOICES: &[&str] = &[
     "bottom-center",
     "top-center",
@@ -107,6 +119,15 @@ impl OsdState {
             frontend: ed
                 .get_string(TABLE, "frontend")
                 .unwrap_or_else(|| "gtk4".to_string()),
+            style: ed
+                .get_string(TABLE, "style")
+                .unwrap_or_else(|| "default".to_string()),
+            palette: ed
+                .get_string(TABLE, "palette")
+                .unwrap_or_else(|| "auto".to_string()),
+            layout: ed
+                .get_string(TABLE, "layout")
+                .unwrap_or_else(|| "compact".to_string()),
             position: ed
                 .get_string(TABLE, "position")
                 .unwrap_or_else(|| "bottom-center".to_string()),
@@ -135,6 +156,13 @@ impl OsdState {
         };
         ed.set_bool(TABLE, "enabled", self.enabled);
         ed.set_string(TABLE, "frontend", &self.frontend);
+        ed.set_string(TABLE, "style", &self.style);
+        if self.palette == "auto" {
+            ed.unset(TABLE, "palette");
+        } else {
+            ed.set_string(TABLE, "palette", &self.palette);
+        }
+        ed.set_string(TABLE, "layout", &self.layout);
         ed.set_string(TABLE, "position", &self.position);
         ed.set_int(TABLE, "width_px", self.width_px);
         ed.set_int(TABLE, "height_px", self.height_px);
@@ -180,6 +208,16 @@ impl OsdState {
         match self.field {
             Field::Enabled => self.enabled = !self.enabled,
             Field::Frontend => self.frontend = cycle_str(FRONTEND_CHOICES, &self.frontend, delta),
+            Field::Style => {
+                // Only cycle between built-in names. A custom package
+                // name/path isn't in STYLE_CHOICES, and cycling would
+                // replace it with no way to get it back.
+                if STYLE_CHOICES.contains(&self.style.as_str()) {
+                    self.style = cycle_str(STYLE_CHOICES, &self.style, delta);
+                }
+            }
+            Field::Palette => self.palette = cycle_str(PALETTE_CHOICES, &self.palette, delta),
+            Field::Layout => self.layout = cycle_str(LAYOUT_CHOICES, &self.layout, delta),
             Field::Position => self.position = cycle_str(POSITION_CHOICES, &self.position, delta),
             Field::WidthPx => self.width_px = cycle_int(WIDTH_CHOICES, self.width_px, delta),
             Field::HeightPx => self.height_px = cycle_int(HEIGHT_CHOICES, self.height_px, delta),
@@ -217,10 +255,13 @@ fn osd_binary_available() -> bool {
     const CANDIDATES: &[&str] = &[
         "/usr/bin/voxtype-osd-gtk4",
         "/usr/bin/voxtype-osd-native",
+        "/usr/bin/voxtype-osd-quickshell",
         "/usr/lib/voxtype/voxtype-osd-gtk4",
         "/usr/lib/voxtype/voxtype-osd-native",
+        "/usr/lib/voxtype/voxtype-osd-quickshell",
         "/usr/local/bin/voxtype-osd-gtk4",
         "/usr/local/bin/voxtype-osd-native",
+        "/usr/local/bin/voxtype-osd-quickshell",
     ];
     if CANDIDATES.iter().any(|p| Path::new(p).exists()) {
         return true;
@@ -234,6 +275,7 @@ fn osd_binary_available() -> bool {
             }
             if Path::new(dir).join("voxtype-osd-gtk4").exists()
                 || Path::new(dir).join("voxtype-osd-native").exists()
+                || Path::new(dir).join("voxtype-osd-quickshell").exists()
             {
                 return true;
             }
@@ -300,6 +342,13 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             "Frontend",
             state.frontend.clone(),
         ),
+        FormRowSpec::new(state.field == Field::Style, "Style", state.style.clone()),
+        FormRowSpec::new(
+            state.field == Field::Palette,
+            "Palette",
+            state.palette.clone(),
+        ),
+        FormRowSpec::new(state.field == Field::Layout, "Layout", state.layout.clone()),
         FormRowSpec::new(
             state.field == Field::Position,
             "Position",
@@ -352,8 +401,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     // save/error feedback wins if the user has interacted, so this only
     // shows on first render of an unconfigured install.
     let missing_msg = "OSD binaries not installed. Saving the config will work but \
-                       nothing will render until voxtype-osd-gtk4 (Arch: gtk4-layer-shell) \
-                       or voxtype-osd-native is installed.";
+                       nothing will render until voxtype-osd-gtk4 (Arch: gtk4-layer-shell), \
+                       voxtype-osd-native, or voxtype-osd-quickshell is installed.";
     let feedback_pair = match state.feedback.as_ref() {
         Some((lvl, msg)) => Some((*lvl, msg.as_str())),
         None if state.binary_missing => Some((FeedbackLevel::Warn, missing_msg)),
@@ -395,7 +444,7 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
             Line::from(""),
             Line::from(
                 "Master switch for the floating OSD. When off, both \
-                 voxtype-osd-gtk4 and voxtype-osd-native exit immediately at \
+                 voxtype-osd-gtk4, voxtype-osd-native, and voxtype-osd-quickshell exit immediately at \
                  launch and the daemon doesn't render anything on screen.",
             ),
             Line::from(""),
@@ -406,7 +455,7 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
             Line::from(""),
             Line::from(
                 "Which OSD binary the voxtype-osd wrapper launches. Both \
-                 frontends render the same waveform and level meter; the \
+                 frontends render the same waveform and level meter by default; the \
                  difference is the underlying toolkit.",
             ),
             Line::from(""),
@@ -416,7 +465,45 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
             Line::from("  native  SCTK + wgpu + egui. Skips GTK4 entirely if you want to"),
             Line::from("          avoid GTK in your stack. Slightly heavier first-paint."),
             Line::from(""),
+            Line::from("  quickshell  QML frontend. Supports style packages, Omarchy palette"),
+            Line::from("              inheritance, recipe layers, and explicit custom QML."),
+            Line::from(""),
             dim("If the chosen binary isn't on PATH, the wrapper falls back to whichever it finds and logs a warning."),
+        ],
+        Field::Style => vec![
+            heading("Style"),
+            Line::from(""),
+            Line::from(
+                "Quickshell OSD style name or package path. The TUI only cycles \
+                 built-in names; set a package name/path by editing config.toml.",
+            ),
+            Line::from(""),
+            dim("Default: default. Package manifests live in voxtype-osd.toml."),
+        ],
+        Field::Palette => vec![
+            heading("Palette"),
+            Line::from(""),
+            Line::from("Color source for Quickshell OSD recipes."),
+            Line::from(""),
+            Line::from("  auto      let the selected style package choose, else Omarchy"),
+            Line::from("  omarchy   inherit semantic colors from the active Omarchy theme"),
+            Line::from("  fallback  use VoxType's built-in dark palette"),
+            Line::from("  package   use package colors when a style package provides them"),
+            Line::from("  custom    use literal recipe colors"),
+            Line::from(""),
+            dim("Default: auto."),
+        ],
+        Field::Layout => vec![
+            heading("Layout"),
+            Line::from(""),
+            Line::from("Quickshell OSD host layout preset."),
+            Line::from(""),
+            Line::from("  compact  current default card"),
+            Line::from("  wide     wider card for denser layer recipes"),
+            Line::from("  minimal  smaller state/meter surface"),
+            Line::from("  tile     square card for centered visualizations"),
+            Line::from("  orb      circular frame for ring-focused recipes"),
+            Line::from("  custom   reserved for package-provided QML layouts"),
         ],
         Field::Position => vec![
             heading("Position"),

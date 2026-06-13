@@ -3486,6 +3486,101 @@ symlink is what puts the sidecar on PATH where the QML expects it. Pass
 `--skip-bridge` if your install already has the bridge on PATH. See the
 [user manual](USER_MANUAL.md#voxtype-setup-quickshell) for details.
 
+### Quickshell OSD customization
+
+The Quickshell frontend can customize the whole OSD without editing VoxType's
+packaged QML. Normal users configure declarative recipes; advanced users can
+explicitly opt into trusted custom QML packages.
+
+```toml
+[osd]
+frontend = "quickshell"
+style = "default"      # Built-in style, package name, or package path
+# palette = "omarchy" # omit for auto, or use omarchy, fallback, package, custom
+layout = "compact"    # compact, wide, minimal, tile, orb, custom
+
+# Explicit trusted package path. Custom QML is not sandboxed.
+# plugin_path = "~/.config/voxtype/osd/my-style"
+
+[osd.frame]
+background = "background" # semantic role, literal color, or "none"
+border = "state"          # state, semantic role, literal color, or "none"
+glow = true               # voice-reactive soft glow around the frame
+halo = true               # outline halo, used most visibly by orb recipes
+
+[[osd.visual.layers]]
+type = "pulse"
+source = "rms"
+color = "accent"
+order = 0
+opacity = 0.25
+radius = 12
+
+[[osd.visual.layers]]
+type = "bars"
+source = "peak"
+color = "accent"
+order = 10
+gain = 1.2
+mirror = true
+```
+
+When `palette` is omitted, a selected package manifest may choose the palette;
+otherwise VoxType falls back to Omarchy colors. With `palette = "omarchy"`,
+recipe colors such as `accent`, `background`,
+`foreground`, `success`, `warning`, and `error` resolve from the active
+Omarchy theme at `~/.config/omarchy/current/theme/colors.toml`. Literal colors
+such as `"#ff6600"` are allowed when a recipe needs to override the theme.
+
+Recipe layer `type` can be `shadow`, `background`, `waveform`, `bars`,
+`pulse`, `ring`, `meter`, `icon`, or `label`. Layer `source` can be `peak`,
+`rms`, `vad`, `state`, or `none`. Layer tunables you don't set use each
+layer type's own defaults; explicit values, including `0.0`, are honored.
+On `meter` layers, `color` sets the low-zone color while the mid/high
+gradient stops keep the `warning`/`error` roles; on `shadow` layers,
+`color` tints the backdrop (default black).
+
+`layout` controls the outer OSD frame. `compact`, `wide`, and `minimal` are
+strip layouts; `tile` is a square card; `orb` is a circular frame intended for
+ring-focused recipes.
+
+`[osd.frame]` controls the host frame around the recipe. Set
+`background = "none"` or `border = "none"` for frameless recipes; the visual
+layers continue to render normally.
+
+Shareable style packages are directories containing `voxtype-osd.toml`, optional
+assets under `assets/`, and optionally a QML entry file. Package QML is trusted
+code and only loads when the package is selected through `style` or
+`plugin_path`. A manifest only overrides the `[osd]` fields it explicitly
+sets: a package that ships only `[colors]` keeps your configured `layout`,
+`[osd.frame]`, and `[[osd.visual.layers]]` recipe, and an explicit `palette`
+in your config always beats the manifest's.
+
+If `style` names a package that isn't installed, `plugin_path` doesn't point
+at a package directory, or the manifest's `qml_entry` file is missing, the
+Quickshell launcher exits with an error explaining what to fix instead of
+silently falling back to the default style. `style` and `plugin_path` paths
+may start with `~`.
+
+```toml
+# ~/.config/voxtype/osd/bars-plus/voxtype-osd.toml
+name = "bars-plus"
+version = "1.0.0"
+palette = "package"      # Optional; host config can override it
+layout = "wide"
+# qml_entry = "CustomOsd.qml"
+
+[colors]
+accent = "#8BD5CA"
+background = "rgba(20, 22, 26, 0.82)"
+
+[[visual.layers]]
+type = "bars"
+source = "peak"
+color = "accent"
+order = 10
+```
+
 ---
 
 ## Deprecated Options

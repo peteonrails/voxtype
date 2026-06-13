@@ -45,10 +45,15 @@ ShellRoot {
         id: audio
     }
 
+    VT.StyleLoader {
+        id: osdStyle
+    }
+
     OsdSurface {
         id: osd
         daemonState: stateReader.state
         audio: audio
+        style: osdStyle
     }
 
     EnginePicker {
