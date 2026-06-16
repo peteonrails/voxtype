@@ -1,8 +1,8 @@
 use super::{
-    AudioConfig, CohereConfig, DolphinConfig, HotkeyConfig, MeetingConfig, MoonshineConfig,
-    OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig, ParakeetConfig, Profile,
-    SenseVoiceConfig, SonioxConfig, StatusConfig, StreamingConfig, TextConfig, TranscriptionEngine,
-    VadConfig, VocabularyConfig, WhisperConfig,
+    AudioConfig, CohereConfig, DeepgramConfig, DolphinConfig, HotkeyConfig, MeetingConfig,
+    MoonshineConfig, OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig,
+    ParakeetConfig, Profile, SenseVoiceConfig, SonioxConfig, StatusConfig, StreamingConfig,
+    TextConfig, TranscriptionEngine, VadConfig, VocabularyConfig, WhisperConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -65,6 +65,11 @@ pub struct Config {
     /// (optional, only used when engine = "soniox")
     #[serde(default)]
     pub soniox: Option<SonioxConfig>,
+
+    /// Deepgram cloud streaming WebSocket STT configuration
+    /// (optional, only used when engine = "deepgram")
+    #[serde(default)]
+    pub deepgram: Option<DeepgramConfig>,
 
     /// Shared sliding-window streaming engine tuning, used by every batch
     /// backend wrapped in `transcribe::sliding_window` (currently `whisper`
@@ -133,6 +138,7 @@ impl Default for Config {
             cohere: None,
             openvino: None,
             soniox: None,
+            deepgram: None,
             streaming: None,
             text: TextConfig::default(),
             vocabulary: VocabularyConfig::default(),
@@ -184,6 +190,16 @@ impl Config {
             TranscriptionEngine::OpenVino => {
                 self.openvino.as_ref().map(|o| o.streaming).unwrap_or(false)
             }
+            // Deepgram types finalized segments during recording in
+            // commit-only mode (libinput breaks if chars are typed while
+            // the PTT key is held), so auto-promote to toggle then. In
+            // buffer_output mode nothing is typed until release, so PTT
+            // stays safe and we don't force toggle.
+            TranscriptionEngine::Deepgram => self
+                .deepgram
+                .as_ref()
+                .map(|d| d.streaming && !self.output.streaming_buffer_output)
+                .unwrap_or(false),
             _ => false,
         }
     }
@@ -383,6 +399,8 @@ impl Config {
                 .unwrap_or(false),
             // Soniox is a cloud backend; nothing to load on demand.
             TranscriptionEngine::Soniox => false,
+            // Deepgram is a cloud backend; nothing to load on demand.
+            TranscriptionEngine::Deepgram => false,
         }
     }
 
@@ -467,6 +485,11 @@ impl Config {
                 .as_ref()
                 .map(|s| s.model.as_str())
                 .unwrap_or("soniox (not configured)"),
+            TranscriptionEngine::Deepgram => self
+                .deepgram
+                .as_ref()
+                .map(|d| d.model.as_str())
+                .unwrap_or("deepgram (not configured)"),
         }
     }
 
