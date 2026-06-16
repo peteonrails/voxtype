@@ -58,6 +58,28 @@ impl OsdFrontend {
     }
 }
 
+/// Visual style rendered inside the OSD surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OsdStyle {
+    /// Original scrolling waveform with a segmented peak meter.
+    #[default]
+    Waveform,
+    /// Compact status pill with a centered voice glyph, processing bar, and
+    /// completion checkmark. Implemented by the GTK4 frontend.
+    CompactPill,
+}
+
+impl OsdStyle {
+    pub fn parse_str(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "waveform" => Some(OsdStyle::Waveform),
+            "compact-pill" | "compact" | "pill" => Some(OsdStyle::CompactPill),
+            _ => None,
+        }
+    }
+}
+
 /// All user-facing OSD options. Defaults match BRIEF.md.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -99,6 +121,8 @@ pub struct OsdConfig {
     /// Which OSD frontend the `voxtype-osd` wrapper launches. Defaults to
     /// `Gtk4` since GTK4 ships with most Hyprland setups already.
     pub frontend: OsdFrontend,
+    /// Visual style to draw inside the OSD. Defaults to the original waveform.
+    pub style: OsdStyle,
 }
 
 impl Default for OsdConfig {
@@ -115,6 +139,7 @@ impl Default for OsdConfig {
             peak_decay_db_per_sec: 6.0,
             waveform_gain: 10.0,
             frontend: OsdFrontend::default(),
+            style: OsdStyle::default(),
         }
     }
 }
@@ -135,6 +160,7 @@ mod tests {
         assert!((c.waveform_window_secs - 3.0).abs() < 1e-6);
         assert!((c.peak_decay_db_per_sec - 6.0).abs() < 1e-6);
         assert!((c.waveform_gain - 10.0).abs() < 1e-6);
+        assert_eq!(c.style, OsdStyle::Waveform);
     }
 
     #[test]
@@ -185,6 +211,32 @@ mod tests {
         assert_eq!(v, OsdFrontend::Native);
         let v: OsdFrontend = serde_json::from_str("\"quickshell\"").unwrap();
         assert_eq!(v, OsdFrontend::Quickshell);
+    }
+
+    #[test]
+    fn style_default_is_waveform() {
+        assert_eq!(OsdStyle::default(), OsdStyle::Waveform);
+        assert_eq!(OsdConfig::default().style, OsdStyle::Waveform);
+    }
+
+    #[test]
+    fn style_parse_str_accepts_aliases() {
+        assert_eq!(OsdStyle::parse_str("waveform"), Some(OsdStyle::Waveform));
+        assert_eq!(
+            OsdStyle::parse_str("compact-pill"),
+            Some(OsdStyle::CompactPill)
+        );
+        assert_eq!(OsdStyle::parse_str("compact"), Some(OsdStyle::CompactPill));
+        assert_eq!(OsdStyle::parse_str("pill"), Some(OsdStyle::CompactPill));
+        assert_eq!(OsdStyle::parse_str("nope"), None);
+    }
+
+    #[test]
+    fn style_serde_kebab_case() {
+        let v: OsdStyle = serde_json::from_str("\"waveform\"").unwrap();
+        assert_eq!(v, OsdStyle::Waveform);
+        let v: OsdStyle = serde_json::from_str("\"compact-pill\"").unwrap();
+        assert_eq!(v, OsdStyle::CompactPill);
     }
 
     #[test]

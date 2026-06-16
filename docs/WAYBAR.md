@@ -212,13 +212,14 @@ Voxtype outputs an `alt` field in JSON that enables Waybar's native `format-icon
         "idle": "",
         "recording": "",
         "transcribing": "",
+        "outputting": "",
         "stopped": ""
     },
     "tooltip": true
 }
 ```
 
-The `alt` field values are: `idle`, `recording`, `transcribing`, `stopped`.
+The `alt` field values are: `idle`, `recording`, `transcribing`, `outputting`, `stopped`.
 
 **Nerd Font example:**
 ```json
@@ -310,7 +311,7 @@ The `--follow` flag keeps a persistent connection and updates instantly. If you 
    ```bash
    cat $XDG_RUNTIME_DIR/voxtype/state
    ```
-   Should show `idle`, `recording`, or `transcribing`.
+   Should show `idle`, `recording`, `transcribing`, or `outputting`.
 
 3. Test the status command manually:
    ```bash
