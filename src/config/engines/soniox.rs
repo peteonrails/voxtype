@@ -171,6 +171,9 @@ mod tests {
         // None must not write a `model = ...` line, so meeting mode keeps
         // resolving to the async default for default configs.
         let toml = toml::to_string(&SonioxConfig::default()).unwrap();
-        assert!(!toml.contains("model"), "unexpected model key in:\n{toml}");
+        assert!(
+            !toml.contains("model ="),
+            "unexpected model key in:\n{toml}"
+        );
     }
 }

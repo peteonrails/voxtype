@@ -1739,7 +1739,7 @@ terms_file = "/home/me/dotfiles/voxtype-terms.json"
 **Default:** `false`
 **Required:** No
 
-Use the Soniox **async transcription API** (file upload + poll) instead of the realtime WebSocket. Different model (`stt-async-v6`), different accuracy profile, batch only — no live partials, no flicker, push-to-talk compatible.
+Use the Soniox **async transcription API** (file upload + poll) instead of the realtime WebSocket. Different model (`stt-async-v6` by default, unless `model` is set explicitly), different accuracy profile, batch only — no live partials, no flicker, push-to-talk compatible.
 
 When `true`:
 - Audio buffered while recording. On release, voxtype uploads the WAV to `https://api.soniox.com/v1/files`, creates a transcription job, polls until complete, fetches the transcript, then types it at the cursor in one shot.
