@@ -1409,10 +1409,10 @@ export SONIOX_API_KEY="your-key-here"
 ### model
 
 **Type:** String
-**Default:** `"stt-rt-v5"`
+**Default:** unset (auto-selected per mode)
 **Required:** No
 
-Soniox model identifier. The current realtime model is `stt-rt-v5`. When `async_api = true`, a `model` left at a realtime default (`stt-rt-v4` or `stt-rt-v5`) is swapped to `stt-async-v5`; set `model` to any other value to override.
+Soniox model identifier. Leave it unset (the default) and voxtype picks the model for the active mode: `stt-rt-v5` for the realtime WebSocket, or `stt-async-v5` when `async_api = true` (including meeting mode, which always uses the async API). Set an explicit value to override — an explicit `model` is used verbatim in both modes, with no auto-swap, so only pin it if you specifically want that exact model in whichever mode runs.
 
 ### language_hints
 
@@ -1508,12 +1508,12 @@ terms_file = "/home/me/dotfiles/voxtype-terms.json"
 **Default:** `false`
 **Required:** No
 
-Use the Soniox **async transcription API** (file upload + poll) instead of the realtime WebSocket. Different model (`stt-async-v5`), different accuracy profile, batch only — no live partials, no flicker, push-to-talk compatible.
+Use the Soniox **async transcription API** (file upload + poll) instead of the realtime WebSocket. Different model (`stt-async-v5` by default, unless `model` is set explicitly), different accuracy profile, batch only — no live partials, no flicker, push-to-talk compatible.
 
 When `true`:
 - Audio buffered while recording. On release, voxtype uploads the WAV to `https://api.soniox.com/v1/files`, creates a transcription job, polls until complete, fetches the transcript, then types it at the cursor in one shot.
 - `streaming` and `type_partials` are ignored.
-- `model` defaults to `stt-async-v5`. A `model` left at a realtime default (`stt-rt-v4` or `stt-rt-v5`) is also swapped to `stt-async-v5`; any other explicit `model` is used as-is (override only if you know what you're doing).
+- `model` resolves to `stt-async-v5` when left unset; an explicit `model` is used verbatim (override only if you know what you're doing).
 - Push-to-talk is **not** auto-promoted to toggle (no live cursor typing means no compositor-state clobbering).
 
 Latency: typical 15s recording → ~1s upload + 2-5s processing = 3-6s total wait after release. Compare to realtime which streams partials as you speak.
@@ -1533,7 +1533,7 @@ Maximum total wait time (seconds) for an async API job to complete. If exceeded,
 | Option | CLI Flag | Environment Variable | Default | Description |
 |--------|----------|---------------------|---------|-------------|
 | `api_key` | `--soniox-api-key` | `SONIOX_API_KEY` | none (required) | Soniox API key |
-| `model` | - | - | realtime: `"stt-rt-v5"`; async: `"stt-async-v5"` | Soniox model identifier |
+| `model` | - | - | unset → realtime `stt-rt-v5`, async `stt-async-v5` | Explicit value used verbatim in both modes |
 | `language_hints` | - | - | `["hu", "en"]` | Language preference |
 | `language_hints_strict` | - | - | `true` | Restrict output to hinted languages (ignored if empty) |
 | `streaming` | - | - | `true` | Live WebSocket vs batch-on-release (realtime only) |

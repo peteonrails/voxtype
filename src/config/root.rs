@@ -357,7 +357,7 @@ impl Config {
             TranscriptionEngine::Soniox => self
                 .soniox
                 .as_ref()
-                .map(|s| s.model.as_str())
+                .map(|s| s.resolved_model())
                 .unwrap_or("soniox (not configured)"),
         }
     }

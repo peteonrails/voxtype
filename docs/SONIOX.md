@@ -145,7 +145,7 @@ See [CONFIGURATION.md → [soniox]](CONFIGURATION.md#soniox) for the full field-
 | Field | Default | Notes |
 |---|---|---|
 | `api_key` | env: `SONIOX_API_KEY` | Required |
-| `model` | realtime: `stt-rt-v5`; async: `stt-async-v5` | Advanced override |
+| `model` | unset → realtime `stt-rt-v5`, async `stt-async-v5` | Explicit value used verbatim in both modes |
 | `language_hints` | `["hu", "en"]` | Empty = auto-detect |
 | `language_hints_strict` | `true` | Restrict output to hinted languages (no-op if hints empty) |
 | `streaming` | `true` | Realtime live; ignored if `async_api` |
