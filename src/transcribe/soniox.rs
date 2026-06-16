@@ -202,7 +202,7 @@ fn load_context_terms(config: &SonioxConfig) -> Result<Vec<String>, TranscribeEr
 }
 
 impl SonioxTranscriber {
-    pub fn new(mut config: SonioxConfig) -> Result<Self, TranscribeError> {
+    pub fn new(config: SonioxConfig) -> Result<Self, TranscribeError> {
         let api_key = config
             .api_key
             .clone()
@@ -213,13 +213,6 @@ impl SonioxTranscriber {
                 )
             })?;
 
-        // User left the default realtime model with async_api enabled —
-        // swap to the async-default model. `stt-rt-v4` was the documented
-        // default before v6, so configs that pinned it keep the swap.
-        if config.async_api && matches!(config.model.as_str(), "stt-rt-v6" | "stt-rt-v4") {
-            config.model = "stt-async-v6".to_string();
-        }
-
         let context_terms = load_context_terms(&config)?;
         let endpoints = SonioxEndpoints::for_region(&config.region)?;
 
@@ -227,7 +220,7 @@ impl SonioxTranscriber {
             tracing::info!(
                 "Soniox backend configured: mode=async, host={}, model={}, language_hints={:?} (strict={}), context_terms={}",
                 url_host(&endpoints.rest),
-                config.model,
+                config.resolved_model(),
                 config.language_hints,
                 config.language_hints_strict,
                 context_terms.len(),
@@ -236,7 +229,7 @@ impl SonioxTranscriber {
             tracing::info!(
                 "Soniox backend configured: mode=realtime, host={}, model={}, streaming={}, language_hints={:?} (strict={}), context_terms={}",
                 url_host(&endpoints.ws),
-                config.model,
+                config.resolved_model(),
                 config.streaming,
                 config.language_hints,
                 config.language_hints_strict,
@@ -296,7 +289,7 @@ impl SonioxTranscriber {
         // Authorization header (see `ws_request`), so the frame carries no
         // secret and can be logged verbatim.
         let mut obj = serde_json::json!({
-            "model": self.config.model,
+            "model": self.config.resolved_model(),
             "audio_format": AUDIO_FORMAT,
             "sample_rate": SAMPLE_RATE,
             "num_channels": 1,
@@ -820,7 +813,7 @@ impl SonioxTranscriber {
 
         // 2. Create transcription job.
         let mut body = serde_json::json!({
-            "model": self.config.model,
+            "model": self.config.resolved_model(),
             "file_id": file_id,
         });
         if !self.config.language_hints.is_empty() {
@@ -1337,7 +1330,7 @@ mod tests {
         SonioxConfig {
             api_key: key.map(|s| s.to_string()),
             region: "us".into(),
-            model: "stt-rt-v6".into(),
+            model: None,
             language_hints: vec!["hu".into(), "en".into()],
             language_hints_strict: true,
             streaming: true,
@@ -1356,25 +1349,24 @@ mod tests {
         cfg.async_api = true;
         let t = SonioxTranscriber::new(cfg).unwrap();
         assert!(t.as_streaming().is_none());
-        assert_eq!(t.config.model, "stt-async-v6");
+        // Unset model resolves to the async default under async_api.
+        assert_eq!(t.config.resolved_model(), "stt-async-v6");
     }
 
     #[test]
-    fn async_api_swaps_legacy_v4_default() {
-        let mut cfg = cfg_with_key(Some("k"));
-        cfg.async_api = true;
-        cfg.model = "stt-rt-v4".into();
-        let t = SonioxTranscriber::new(cfg).unwrap();
-        assert_eq!(t.config.model, "stt-async-v6");
+    fn unset_model_resolves_to_realtime_default() {
+        let t = SonioxTranscriber::new(cfg_with_key(Some("k"))).unwrap();
+        assert_eq!(t.config.resolved_model(), "stt-rt-v6");
     }
 
     #[test]
-    fn async_api_keeps_explicit_model_override() {
+    fn explicit_model_is_used_verbatim_under_async_api() {
+        // No auto-swap: a pinned model is sent as-is to whichever API is active.
         let mut cfg = cfg_with_key(Some("k"));
         cfg.async_api = true;
-        cfg.model = "stt-async-experimental".into();
+        cfg.model = Some("stt-async-experimental".into());
         let t = SonioxTranscriber::new(cfg).unwrap();
-        assert_eq!(t.config.model, "stt-async-experimental");
+        assert_eq!(t.config.resolved_model(), "stt-async-experimental");
     }
 
     #[test]
