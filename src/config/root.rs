@@ -473,7 +473,7 @@ impl Config {
             TranscriptionEngine::Soniox => self
                 .soniox
                 .as_ref()
-                .map(|s| s.model.as_str())
+                .map(|s| s.resolved_model())
                 .unwrap_or("soniox (not configured)"),
         }
     }
@@ -516,7 +516,7 @@ impl Config {
                 self.openvino.get_or_insert_with(Default::default).model = model
             }
             TranscriptionEngine::Soniox => {
-                self.soniox.get_or_insert_with(Default::default).model = model
+                self.soniox.get_or_insert_with(Default::default).model = Some(model)
             }
         }
     }
