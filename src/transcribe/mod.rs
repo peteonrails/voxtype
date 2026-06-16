@@ -13,6 +13,8 @@
 //! - Optionally Omnilingual via ONNX Runtime (when `omnilingual` feature is enabled)
 
 pub mod cli;
+#[cfg(feature = "deepgram")]
+pub mod deepgram;
 #[cfg(feature = "parakeet")]
 pub mod parakeet_streaming;
 pub mod remote;
@@ -320,6 +322,20 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
         #[cfg(not(feature = "soniox"))]
         TranscriptionEngine::Soniox => Err(TranscribeError::InitFailed(
             "Soniox engine requested but voxtype was not compiled with --features soniox"
+                .to_string(),
+        )),
+        #[cfg(feature = "deepgram")]
+        TranscriptionEngine::Deepgram => {
+            let cfg = config.deepgram.as_ref().ok_or_else(|| {
+                TranscribeError::InitFailed(
+                    "Deepgram engine selected but [deepgram] config section is missing".to_string(),
+                )
+            })?;
+            Ok(Box::new(deepgram::DeepgramTranscriber::new(cfg.clone())?))
+        }
+        #[cfg(not(feature = "deepgram"))]
+        TranscriptionEngine::Deepgram => Err(TranscribeError::InitFailed(
+            "Deepgram engine requested but voxtype was not compiled with --features deepgram"
                 .to_string(),
         )),
     }

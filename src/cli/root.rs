@@ -317,6 +317,20 @@ pub struct Cli {
     )]
     pub no_fallback_to_clipboard: bool,
 
+    /// Buffer the full streaming transcript and emit it once when recording
+    /// stops, instead of typing each segment as it arrives (Deepgram/Soniox)
+    #[arg(long, help_heading = "Output")]
+    pub streaming_buffer_output: bool,
+
+    /// Disable streaming buffered output (emit segments as they arrive)
+    #[arg(
+        long,
+        conflicts_with = "streaming_buffer_output",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
+    pub no_streaming_buffer_output: bool,
+
     /// Keystroke for paste mode (e.g., ctrl+v, shift+insert, ctrl+shift+v)
     #[arg(
         long,

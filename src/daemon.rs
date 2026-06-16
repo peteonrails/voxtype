@@ -917,7 +917,9 @@ impl Daemon {
 
         *audio_capture = Some(capture);
         *streaming_handle = Some(handle);
-        *streaming_session = Some(StreamingSession::new());
+        *streaming_session = Some(StreamingSession::with_buffer_only(
+            self.config.output.streaming_buffer_output,
+        ));
         *streaming_chain = Some(output::create_output_chain(&self.config.output));
         *state = State::Streaming {
             started_at: std::time::Instant::now(),
@@ -1008,6 +1010,7 @@ impl Daemon {
         streaming_handle: &mut Option<StreamHandle>,
         streaming_session: &mut Option<StreamingSession>,
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
+        flush_buffer: bool,
     ) {
         if let Some(mut c) = audio_capture.take() {
             let _ = c.stop().await;
@@ -1017,6 +1020,27 @@ impl Daemon {
             // Don't error on join failure; the task may have already
             // completed. We drop events implicitly here.
             let _ = h.task.await;
+        }
+
+        // In buffered output mode the finalized transcript was accumulated
+        // but never typed; emit it once now that the backend has flushed all
+        // finals. No-op in incremental mode. Skipped when flush_buffer is
+        // false (backend error: the transcript is known incomplete) and on
+        // cancel (which discards the session before calling this).
+        if flush_buffer {
+            if let (Some(s), Some(chain)) = (streaming_session.as_mut(), streaming_chain.as_ref()) {
+                if let Err(e) = s
+                    .flush(
+                        chain,
+                        self.post_processor.as_ref(),
+                        self.config.output.pre_output_command.as_deref(),
+                        self.config.output.post_output_command.as_deref(),
+                    )
+                    .await
+                {
+                    tracing::error!("Streaming buffered flush failed: {}", e);
+                }
+            }
         }
         self.stop_streaming_drain_pump();
         *streaming_session = None;
@@ -1197,7 +1221,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Deepgram => {
                     if let Some(ref t) = transcriber_preloaded {
                         Ok(t.clone())
                     } else {
@@ -2585,7 +2610,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Deepgram => {
                     // Non-Whisper engines do their own setup; Soniox just validates
                     // API key + endpoint at construction (no model to download).
                     transcriber_preloaded = Some(Arc::from(crate::transcribe::create_transcriber(
@@ -2705,7 +2731,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Deepgram => {
                                             let config = self.config.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                                 crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -2735,7 +2762,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Deepgram => {
                                             if let Some(ref t) = transcriber_preloaded {
                                                 let transcriber = t.clone();
                                                 tokio::task::spawn_blocking(move || {
@@ -2809,12 +2837,19 @@ impl Daemon {
                             if state.is_streaming() {
                                 tracing::debug!("Streaming push-to-talk released; closing audio capture and disowning session");
                                 self.stop_streaming_capture(&mut audio_capture).await;
-                                // Drop session/chain so the backend's
-                                // post-stop flush emission is dropped at
-                                // the event pump instead of typed.
-                                // Matches the SIGUSR2 stop path.
-                                streaming_session = None;
-                                streaming_chain = None;
+                                // Acknowledge the stop immediately; the
+                                // buffered transcript pastes a beat later.
+                                self.play_feedback(SoundEvent::RecordingStop);
+                                // In incremental mode, drop session/chain so
+                                // the backend's post-stop flush emission is
+                                // discarded at the event pump instead of typed.
+                                // In buffer mode the whole transcript lives in
+                                // the session and is emitted once on `Ended`,
+                                // so keep it. Matches the SIGUSR2 stop path.
+                                if !self.config.output.streaming_buffer_output {
+                                    streaming_session = None;
+                                    streaming_chain = None;
+                                }
                             } else if let State::Recording { model_override, .. } = &state {
                                 let transcriber = match self.get_transcriber_for_recording(
                                     model_override.as_deref(),
@@ -2928,7 +2963,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Deepgram => {
                                             let config = self.config.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                                 crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -2958,7 +2994,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Deepgram => {
                                             if let Some(ref t) = transcriber_preloaded {
                                                 let transcriber = t.clone();
                                                 tokio::task::spawn_blocking(move || {
@@ -3022,6 +3059,7 @@ impl Daemon {
                             } else if state.is_streaming() {
                                 tracing::info!("Toggle stop while streaming; closing capture");
                                 self.stop_streaming_capture(&mut audio_capture).await;
+                                self.play_feedback(SoundEvent::RecordingStop);
                             } else if let State::Recording { model_override: current_model_override, .. } = &state {
                                 let transcriber = match self.get_transcriber_for_recording(
                                     current_model_override.as_deref(),
@@ -3422,7 +3460,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Deepgram => {
                                     let config = self.config.clone();
                                     self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                         crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -3451,7 +3490,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Deepgram => {
                                     if let Some(ref t) = transcriber_preloaded {
                                         let transcriber = t.clone();
                                         tokio::task::spawn_blocking(move || {
@@ -3520,14 +3560,23 @@ impl Daemon {
                     if state.is_streaming() {
                         tracing::info!("SIGUSR2 stop while streaming; closing capture and disowning session");
                         self.stop_streaming_capture(&mut audio_capture).await;
+                        // Acknowledge the stop immediately so the user knows
+                        // it registered; the buffered transcript pastes a
+                        // beat later (which plays TranscriptionComplete).
+                        self.play_feedback(SoundEvent::RecordingStop);
                         // Drop the typing surface synchronously so any
                         // Final/Partial events the backend emits while
                         // draining its internal buffer reach the event-pump
                         // arm with `streaming_session = None` and get
                         // discarded instead of typed into whatever window
-                        // has focus by then.
-                        streaming_session = None;
-                        streaming_chain = None;
+                        // has focus by then. In buffer mode nothing was typed
+                        // during recording; the whole transcript lives in the
+                        // session and must be emitted once on `Ended`, so keep
+                        // it alive.
+                        if !self.config.output.streaming_buffer_output {
+                            streaming_session = None;
+                            streaming_chain = None;
+                        }
                     } else if let State::Recording { model_override, .. } = &state {
                         let transcriber = match self.get_transcriber_for_recording(
                             model_override.as_deref(),
@@ -3694,6 +3743,7 @@ impl Daemon {
                                 &mut streaming_handle,
                                 &mut streaming_session,
                                 &mut streaming_chain,
+                                false,
                             ).await;
                         }
                         Some(StreamingEvent::Ended) | None => {
@@ -3703,6 +3753,7 @@ impl Daemon {
                                 &mut streaming_handle,
                                 &mut streaming_session,
                                 &mut streaming_chain,
+                                true,
                             ).await;
                         }
                     }

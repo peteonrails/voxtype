@@ -233,6 +233,11 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         cli.fallback_to_clipboard,
         cli.no_fallback_to_clipboard,
     );
+    apply_bool_override(
+        &mut config.output.streaming_buffer_output,
+        cli.streaming_buffer_output,
+        cli.no_streaming_buffer_output,
+    );
     if cli.spoken_punctuation {
         config.text.spoken_punctuation = true;
     }

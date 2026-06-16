@@ -67,6 +67,11 @@ pub struct StreamingSession {
     typed_chars: usize,
     /// Most recent partial text (for status only; never typed).
     partial: String,
+    /// When true, finalized segments are accumulated into `finalized_text`
+    /// and never typed during the session; the daemon calls `flush` once at
+    /// graceful end to emit the whole transcript. Set from
+    /// `[output] streaming_buffer_output`.
+    buffer_only: bool,
 }
 
 impl StreamingSession {
@@ -76,6 +81,19 @@ impl StreamingSession {
             finalized_text: String::new(),
             typed_chars: 0,
             partial: String::new(),
+            buffer_only: false,
+        }
+    }
+
+    /// Create a session in buffered mode: finalized segments are not typed
+    /// as they arrive; call [`flush`](Self::flush) once at end of session to
+    /// emit the whole transcript at once.
+    pub fn with_buffer_only(buffer_only: bool) -> Self {
+        Self {
+            finalized_text: String::new(),
+            typed_chars: 0,
+            partial: String::new(),
+            buffer_only,
         }
     }
 
@@ -107,6 +125,11 @@ impl StreamingSession {
         pre_output_command: Option<&str>,
         post_output_command: Option<&str>,
     ) -> Result<(), OutputError> {
+        // Buffered mode never types partials; the whole transcript is
+        // emitted once at end of session via `flush`.
+        if self.buffer_only {
+            return Ok(());
+        }
         if new_partial.is_empty() {
             return Ok(());
         }
@@ -172,6 +195,14 @@ impl StreamingSession {
             return Ok(());
         }
 
+        if self.buffer_only {
+            // Accumulate only; flushed once at graceful end of session.
+            // No typing and no typed_chars bump (nothing is on the cursor
+            // to rewind if the user cancels).
+            self.finalized_text.push_str(text);
+            return Ok(());
+        }
+
         // Like `transcribe_chunk`, `ParakeetUnified::flush` returns only
         // the newly-emitted tail buffered when the stream closed — it is
         // a delta, not a cumulative transcript. So type it directly,
@@ -215,6 +246,13 @@ impl StreamingSession {
         pre_output_command: Option<&str>,
         post_output_command: Option<&str>,
     ) -> Result<(), OutputError> {
+        if self.buffer_only {
+            // Nothing was typed, so there is nothing to backspace; just
+            // accumulate the final text for the end-of-session flush.
+            self.finalized_text.push_str(text);
+            return Ok(());
+        }
+
         // Cap backspace at what we've actually typed.
         let n = backspace.min(self.typed_chars);
         if n > 0 {
@@ -254,6 +292,42 @@ impl StreamingSession {
             self.finalized_text.push_str(&finalized_tail);
         }
         self.clear_partial();
+        Ok(())
+    }
+
+    /// Emit the entire buffered transcript once. Used in buffered mode
+    /// (`[output] streaming_buffer_output`) at graceful end of session.
+    /// Runs post-processing on the full transcript when configured —
+    /// unlike the incremental path, which skips it to avoid operating on
+    /// fragments. No-op when nothing was buffered.
+    pub async fn flush(
+        &mut self,
+        chain: &[Box<dyn TextOutput>],
+        post_process: Option<&PostProcessor>,
+        pre_output_command: Option<&str>,
+        post_output_command: Option<&str>,
+    ) -> Result<(), OutputError> {
+        // Only buffered sessions defer output to flush. In incremental mode
+        // `finalized_text` mirrors already-typed text; re-emitting it here
+        // would duplicate the whole transcript.
+        if !self.buffer_only {
+            return Ok(());
+        }
+        if self.finalized_text.is_empty() {
+            return Ok(());
+        }
+        let text = match post_process {
+            Some(pp) => pp.process_with_context(&self.finalized_text, None).await,
+            None => self.finalized_text.clone(),
+        };
+        let opts = OutputOptions {
+            pre_output_command,
+            post_output_command,
+            wait_for_modifier_release: false,
+            modifier_release_timeout: std::time::Duration::from_millis(0),
+        };
+        output_with_fallback(chain, &text, opts).await?;
+        self.typed_chars += text.chars().count();
         Ok(())
     }
 
@@ -505,5 +579,43 @@ mod tests {
         // Should succeed without spawning anything.
         session.rewind().await.unwrap();
         assert_eq!(session.typed_chars(), 0);
+    }
+
+    #[tokio::test]
+    async fn buffer_mode_accumulates_finals_without_typing() {
+        let mut session = StreamingSession::with_buffer_only(true);
+        // commit_segment in buffer mode returns before touching the output
+        // chain, so an empty chain is safe here.
+        session
+            .commit_segment(&[], "hello", None, None, None)
+            .await
+            .unwrap();
+        session
+            .commit_segment(&[], " world", None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(session.finalized_text(), "hello world");
+        // Nothing was typed, so a cancel-rewind would be a no-op.
+        assert_eq!(session.typed_chars(), 0);
+    }
+
+    #[tokio::test]
+    async fn buffer_mode_skips_partials() {
+        let mut session = StreamingSession::with_buffer_only(true);
+        session
+            .type_partial_delta(&[], "in progress".into(), None, None)
+            .await
+            .unwrap();
+        assert_eq!(session.typed_chars(), 0);
+        assert_eq!(session.finalized_text(), "");
+    }
+
+    #[tokio::test]
+    async fn flush_is_noop_outside_buffer_mode() {
+        // A non-buffered session mirrors typed text in finalized_text; flush
+        // must not re-emit it. With an empty chain this would error if it
+        // tried to output, so Ok proves it short-circuited.
+        let mut session = StreamingSession::new();
+        session.flush(&[], None, None, None).await.unwrap();
     }
 }
