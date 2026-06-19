@@ -303,6 +303,19 @@ fn create_driver_output(
     }
 }
 
+#[cfg(not(target_os = "macos"))]
+fn create_paste_output(config: &OutputConfig, pre_type_delay_ms: u32) -> Box<dyn TextOutput> {
+    Box::new(paste::PasteOutput::new(
+        config.auto_submit,
+        config.append_text.clone(),
+        config.paste_keys.clone(),
+        config.type_delay_ms,
+        pre_type_delay_ms,
+        config.restore_clipboard,
+        config.restore_clipboard_delay_ms,
+    ))
+}
+
 /// Factory function that returns a fallback chain of output methods
 pub fn create_output_chain(config: &OutputConfig) -> Vec<Box<dyn TextOutput>> {
     create_output_chain_with_override(config, None)
@@ -365,7 +378,15 @@ pub fn create_output_chain_with_override(
                     );
                 }
 
+                let mut paste_fallback_inserted = false;
                 for driver in driver_order.iter() {
+                    if config.fallback_to_clipboard
+                        && !paste_fallback_inserted
+                        && matches!(driver, OutputDriver::Clipboard | OutputDriver::Xclip)
+                    {
+                        chain.push(create_paste_output(config, pre_type_delay_ms));
+                        paste_fallback_inserted = true;
+                    }
                     chain.push(create_driver_output(*driver, config, pre_type_delay_ms));
                 }
 
@@ -374,6 +395,9 @@ pub fn create_output_chain_with_override(
                     && config.driver_order.is_some()
                     && !driver_order.contains(&OutputDriver::Clipboard)
                 {
+                    if !paste_fallback_inserted {
+                        chain.push(create_paste_output(config, pre_type_delay_ms));
+                    }
                     chain.push(Box::new(clipboard::ClipboardOutput::new(
                         config.append_text.clone(),
                     )));
@@ -465,6 +489,18 @@ fn is_keystroke_method(name: &str) -> bool {
     matches!(name, "wtype" | "eitype" | "dotool" | "ydotool") || name.starts_with("paste")
 }
 
+/// dotool/ydotool synthesize key events through the active keyboard layout.
+/// They can exit successfully while non-ASCII text is not inserted when the
+/// active layout cannot produce those characters. Prefer layout-independent
+/// methods (wtype/eitype/paste) for Unicode text.
+fn needs_layout_independent_output(text: &str) -> bool {
+    text.chars().any(|c| !c.is_ascii())
+}
+
+fn is_layout_dependent_text_method(name: &str) -> bool {
+    matches!(name, "dotool" | "ydotool")
+}
+
 /// Try each output method in the chain until one succeeds
 /// Pre/post output commands are run before and after typing (for compositor integration).
 pub async fn output_with_fallback(
@@ -474,6 +510,7 @@ pub async fn output_with_fallback(
 ) -> Result<(), OutputError> {
     // Normalize curly quotes to ASCII to prevent line break issues with keyboard tools
     let normalized_text = normalize_quotes(text);
+    let needs_layout_independent_output = needs_layout_independent_output(normalized_text.as_ref());
 
     // If the modifier guard is enabled, snapshot kernel-level key state and
     // wait for any held modifiers to be released. This prevents typed letters
@@ -529,6 +566,14 @@ pub async fn output_with_fallback(
             continue;
         }
 
+        if needs_layout_independent_output && is_layout_dependent_text_method(output.name()) {
+            tracing::debug!(
+                "{} skipped for non-ASCII text; trying layout-independent output",
+                output.name()
+            );
+            continue;
+        }
+
         if !output.is_available().await {
             tracing::debug!("{} not available, trying next", output.name());
             continue;
@@ -560,6 +605,37 @@ pub async fn output_with_fallback(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    struct FakeOutput {
+        name: &'static str,
+        calls: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl TextOutput for FakeOutput {
+        async fn output(&self, _text: &str) -> Result<(), OutputError> {
+            self.calls.lock().unwrap().push(self.name);
+            Ok(())
+        }
+
+        async fn is_available(&self) -> bool {
+            true
+        }
+
+        fn name(&self) -> &'static str {
+            self.name
+        }
+    }
+
+    fn output_options_without_hooks() -> OutputOptions<'static> {
+        OutputOptions {
+            pre_output_command: None,
+            post_output_command: None,
+            wait_for_modifier_release: false,
+            modifier_release_timeout: std::time::Duration::from_millis(0),
+        }
+    }
 
     #[test]
     fn test_normalize_quotes_no_change() {
@@ -622,6 +698,75 @@ mod tests {
         assert!(is_keystroke_method("paste (clipboard + keystroke)"));
         assert!(!is_keystroke_method("clipboard (wl-copy)"));
         assert!(!is_keystroke_method("clipboard (xclip/xsel)"));
+    }
+
+    #[tokio::test]
+    async fn test_non_ascii_text_skips_layout_dependent_dotool() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let chain: Vec<Box<dyn TextOutput>> = vec![
+            Box::new(FakeOutput {
+                name: "dotool",
+                calls: calls.clone(),
+            }),
+            Box::new(FakeOutput {
+                name: "paste (clipboard + keystroke)",
+                calls: calls.clone(),
+            }),
+        ];
+
+        output_with_fallback(&chain, "السلام عليكم", output_options_without_hooks())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["paste (clipboard + keystroke)"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ascii_text_can_use_dotool() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let chain: Vec<Box<dyn TextOutput>> = vec![
+            Box::new(FakeOutput {
+                name: "dotool",
+                calls: calls.clone(),
+            }),
+            Box::new(FakeOutput {
+                name: "paste (clipboard + keystroke)",
+                calls: calls.clone(),
+            }),
+        ];
+
+        output_with_fallback(&chain, "hello", output_options_without_hooks())
+            .await
+            .unwrap();
+
+        assert_eq!(calls.lock().unwrap().as_slice(), ["dotool"]);
+    }
+
+    #[test]
+    fn test_type_chain_adds_paste_before_clipboard_fallback() {
+        let config = OutputConfig {
+            mode: crate::config::OutputMode::Type,
+            driver_order: Some(vec![OutputDriver::Dotool, OutputDriver::Clipboard]),
+            fallback_to_clipboard: true,
+            ..OutputConfig::default()
+        };
+
+        let names: Vec<&str> = create_output_chain(&config)
+            .iter()
+            .map(|output| output.name())
+            .collect();
+
+        assert_eq!(
+            names,
+            vec![
+                "dotool",
+                "paste (clipboard + keystroke)",
+                "clipboard (wl-copy)"
+            ]
+        );
     }
 
     #[test]
