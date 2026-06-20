@@ -227,6 +227,23 @@ impl DeviceManager {
     fn try_open_device(&mut self, path: &PathBuf) {
         match Device::open(path) {
             Ok(device) => {
+                // Skip virtual keyboards created by text-injection tools
+                // (dotool, ydotool, xdotool). voxtype types its transcription out
+                // through one of these; grabbing it back is pointless and, when the
+                // tool tears down its short-lived uinput device, leaves a stale fd
+                // that spins fetch_events() at 100% CPU. See issue #445.
+                let is_injection_device = device
+                    .name()
+                    .map(|n| {
+                        let n = n.to_ascii_lowercase();
+                        n.contains("dotool") || n.contains("wtype") || n.contains("xdotool")
+                    })
+                    .unwrap_or(false);
+                if is_injection_device {
+                    tracing::debug!("Skipping virtual injection keyboard: {:?}", device.name());
+                    return;
+                }
+
                 // Check if device has keyboard capabilities
                 let has_keys = device
                     .supported_keys()
@@ -355,6 +372,23 @@ impl DeviceManager {
         let mut error_paths = Vec::new();
 
         for (path, device) in &mut self.devices {
+            // Detect a hung-up / disconnected fd before reading. When a uinput
+            // device (e.g. dotool's virtual keyboard) is destroyed, its fd can be
+            // left in a state where fetch_events() never returns ENODEV and instead
+            // spins at 100% CPU. poll() reliably reports POLLHUP/POLLERR/POLLNVAL for
+            // such a dead fd, so we drop it before ever calling fetch_events().
+            let mut pfd = libc::pollfd {
+                fd: device.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let pret = unsafe { libc::poll(&mut pfd, 1, 0) };
+            if pret > 0 && (pfd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL)) != 0 {
+                tracing::debug!("Device hung up (POLLHUP/POLLERR): {:?}", path);
+                error_paths.push(path.clone());
+                continue;
+            }
+
             match device.fetch_events() {
                 Ok(device_events) => {
                     for event in device_events {
@@ -363,15 +397,14 @@ impl DeviceManager {
                         }
                     }
                 }
-                Err(ref e) if e.raw_os_error() == Some(libc::ENODEV) => {
-                    tracing::debug!("Device gone (ENODEV): {:?}", path);
-                    error_paths.push(path.clone());
-                }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     // No events available, this is normal for non-blocking
                 }
                 Err(e) => {
-                    tracing::trace!("Device read error on {:?}: {}", path, e);
+                    // Any other error (ENODEV, EIO, ...) means the device is gone or
+                    // unusable - drop it rather than retrying forever.
+                    tracing::debug!("Device read error on {:?}: {} - removing", path, e);
+                    error_paths.push(path.clone());
                 }
             }
         }
