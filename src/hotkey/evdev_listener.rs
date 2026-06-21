@@ -234,10 +234,7 @@ impl DeviceManager {
                 // that spins fetch_events() at 100% CPU. See issue #445.
                 let is_injection_device = device
                     .name()
-                    .map(|n| {
-                        let n = n.to_ascii_lowercase();
-                        n.contains("dotool") || n.contains("wtype") || n.contains("xdotool")
-                    })
+                    .map(is_injection_keyboard)
                     .unwrap_or(false);
                 if is_injection_device {
                     tracing::debug!("Skipping virtual injection keyboard: {:?}", device.name());
@@ -818,9 +815,40 @@ fn parse_prefixed_keycode(s: &str) -> Result<Option<Key>, HotkeyError> {
     Ok(Some(Key::new(kernel_code)))
 }
 
+/// Returns true if a device name belongs to a text-injection virtual keyboard
+/// (dotool, ydotool, wtype, xdotool). voxtype types its transcription out through
+/// one of these; grabbing it back is pointless and, when the tool tears down its
+/// short-lived uinput device, leaves a stale fd that spins fetch_events() at 100%
+/// CPU. See issue #445.
+fn is_injection_keyboard(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.contains("dotool") || n.contains("wtype") || n.contains("xdotool")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn injection_keyboards_are_skipped() {
+        // "dotool" substring also covers ydotool
+        assert!(is_injection_keyboard("dotool"));
+        assert!(is_injection_keyboard("ydotool"));
+        assert!(is_injection_keyboard("ydotool virtual keyboard"));
+        assert!(is_injection_keyboard("wtype"));
+        assert!(is_injection_keyboard("xdotool"));
+        // case-insensitive
+        assert!(is_injection_keyboard("YDOTOOL Virtual Device"));
+    }
+
+    #[test]
+    fn real_keyboards_are_not_skipped() {
+        assert!(!is_injection_keyboard("AT Translated Set 2 keyboard"));
+        assert!(!is_injection_keyboard("Logitech USB Keyboard"));
+        assert!(!is_injection_keyboard("Apple Inc. Magic Keyboard"));
+        assert!(!is_injection_keyboard("Keychron K2"));
+        assert!(!is_injection_keyboard("Power Button"));
+    }
 
     #[test]
     fn test_parse_key_name() {
