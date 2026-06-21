@@ -14,7 +14,7 @@ use crate::error::HotkeyError;
 use evdev::{Device, InputEventKind, Key};
 use inotify::{Inotify, WatchMask};
 use std::collections::{HashMap, HashSet};
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
@@ -374,13 +374,7 @@ impl DeviceManager {
             // left in a state where fetch_events() never returns ENODEV and instead
             // spins at 100% CPU. poll() reliably reports POLLHUP/POLLERR/POLLNVAL for
             // such a dead fd, so we drop it before ever calling fetch_events().
-            let mut pfd = libc::pollfd {
-                fd: device.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let pret = unsafe { libc::poll(&mut pfd, 1, 0) };
-            if pret > 0 && (pfd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL)) != 0 {
+            if fd_is_hung_up(device.as_raw_fd()) {
                 tracing::debug!("Device hung up (POLLHUP/POLLERR): {:?}", path);
                 error_paths.push(path.clone());
                 continue;
@@ -825,6 +819,23 @@ fn is_injection_keyboard(name: &str) -> bool {
     n.contains("dotool") || n.contains("wtype") || n.contains("xdotool")
 }
 
+/// Return true if `fd` is hung up, errored, or invalid according to poll().
+///
+/// When a uinput device (e.g. dotool's virtual keyboard) is destroyed, its
+/// still-open fd can stop returning ENODEV from fetch_events() and instead spin
+/// one thread at 100% CPU. poll() reliably reports POLLHUP/POLLERR/POLLNVAL for
+/// such a dead fd, so poll_events() drops it before ever calling fetch_events().
+/// See issue #445.
+fn fd_is_hung_up(fd: RawFd) -> bool {
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let pret = unsafe { libc::poll(&mut pfd, 1, 0) };
+    pret > 0 && (pfd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL)) != 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -848,6 +859,122 @@ mod tests {
         assert!(!is_injection_keyboard("Apple Inc. Magic Keyboard"));
         assert!(!is_injection_keyboard("Keychron K2"));
         assert!(!is_injection_keyboard("Power Button"));
+    }
+
+    // --- poll-guard (anti-spin) coverage for issue #445 --------------------
+
+    #[test]
+    fn poll_guard_ignores_live_fd_but_flags_hangup() {
+        // A live pipe (write end open, no data) must NOT be flagged: poll()
+        // returns no revents, so poll_events() still calls fetch_events().
+        let mut fds = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe() failed");
+        let (rd, wr) = (fds[0], fds[1]);
+        assert!(!fd_is_hung_up(rd), "live fd must not be reported hung up");
+
+        // Closing the write end hangs up the read end -> POLLHUP -> flagged,
+        // which is exactly the condition poll_events() drops to avoid spinning.
+        assert_eq!(unsafe { libc::close(wr) }, 0);
+        assert!(fd_is_hung_up(rd), "hung-up fd must be flagged for removal");
+        unsafe { libc::close(rd) };
+    }
+
+    #[test]
+    fn poll_guard_drops_real_torn_down_evdev_device() {
+        use evdev::{uinput::VirtualDeviceBuilder, AttributeSet};
+        use std::thread::sleep;
+        use std::time::Duration;
+
+        // Build a NON-keyboard virtual device (one media key, no A/Z/Enter) so a
+        // real voxtype instance's keyboard filter ignores it and is unaffected by
+        // this test. The poll() guard is key-agnostic, so this still exercises it
+        // against a genuine evdev fd torn down by UI_DEV_DESTROY.
+        let mut keys = AttributeSet::<Key>::new();
+        keys.insert(Key::KEY_PLAYPAUSE);
+        let builder = match VirtualDeviceBuilder::new() {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("skipping: uinput unavailable ({e})");
+                return;
+            }
+        };
+        let builder = builder.name("voxtype-test-nonkbd");
+        let builder = match builder.with_keys(&keys) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("skipping: with_keys failed ({e})");
+                return;
+            }
+        };
+        let mut vdev = match builder.build() {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("skipping: build failed ({e})");
+                return;
+            }
+        };
+
+        // Resolve the /dev/input/eventN node the kernel created for it.
+        let node = match vdev.enumerate_dev_nodes_blocking() {
+            Ok(mut it) => match it.next() {
+                Some(Ok(p)) => p,
+                _ => {
+                    eprintln!("skipping: no dev node for virtual device");
+                    return;
+                }
+            },
+            Err(e) => {
+                eprintln!("skipping: enumerate_dev_nodes failed ({e})");
+                return;
+            }
+        };
+
+        // The kernel creates the event node before udev relabels it to group
+        // `input`; retry briefly to beat that race before giving up.
+        let mut opened = None;
+        for _ in 0..50 {
+            match Device::open(&node) {
+                Ok(d) => {
+                    opened = Some(d);
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    sleep(Duration::from_millis(20));
+                }
+                Err(e) => {
+                    eprintln!("skipping: cannot open {node:?} ({e})");
+                    return;
+                }
+            }
+        }
+        let dev = match opened {
+            Some(d) => d,
+            None => {
+                eprintln!("skipping: {node:?} never became readable (udev perms)");
+                return;
+            }
+        };
+        let fd = dev.as_raw_fd();
+
+        // While the device is alive the guard must NOT flag it.
+        assert!(!fd_is_hung_up(fd), "live evdev device wrongly flagged hung up");
+
+        // Tear it down (UI_DEV_DESTROY on drop) and wait briefly for the kernel
+        // to mark the now-orphaned fd. Without the guard, poll_events() would
+        // spin on this fd at 100% CPU; with it, the fd is detected and dropped.
+        drop(vdev);
+        let mut flagged = false;
+        for _ in 0..50 {
+            if fd_is_hung_up(fd) {
+                flagged = true;
+                break;
+            }
+            sleep(Duration::from_millis(20));
+        }
+        assert!(
+            flagged,
+            "guard failed to flag a torn-down evdev fd; poll_events would spin"
+        );
     }
 
     #[test]
