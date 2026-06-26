@@ -17,6 +17,7 @@ mod notification;
 mod output;
 mod parse;
 mod profile;
+mod recording;
 mod root;
 mod status;
 mod text;
@@ -41,6 +42,7 @@ pub use output::{
     OutputMode,
 };
 pub use profile::{PostProcessConfig, Profile};
+pub use recording::{RecordingConfig, MIN_ENABLED_RECORDING_QUEUE_SIZE};
 pub use root::Config;
 pub use status::{ResolvedIcons, StatusConfig, StatusIconOverrides};
 pub use text::TextConfig;

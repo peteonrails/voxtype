@@ -1,7 +1,8 @@
 use super::{
     AudioConfig, CohereConfig, DolphinConfig, HotkeyConfig, MeetingConfig, MoonshineConfig,
-    OmnilingualConfig, OutputConfig, ParaformerConfig, ParakeetConfig, Profile, SenseVoiceConfig,
-    SonioxConfig, StatusConfig, TextConfig, TranscriptionEngine, VadConfig, WhisperConfig,
+    OmnilingualConfig, OutputConfig, ParaformerConfig, ParakeetConfig, Profile, RecordingConfig,
+    SenseVoiceConfig, SonioxConfig, StatusConfig, TextConfig, TranscriptionEngine, VadConfig,
+    WhisperConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -74,6 +75,10 @@ pub struct Config {
     #[serde(default)]
     pub status: StatusConfig,
 
+    /// Recording queue configuration for overlapping normal-batch recordings.
+    #[serde(default)]
+    pub recording: RecordingConfig,
+
     /// On-screen display visualizer configuration. Controls whether the
     /// daemon spawns the `voxtype-osd` child and how it renders.
     #[serde(default)]
@@ -116,6 +121,7 @@ impl Default for Config {
             text: TextConfig::default(),
             vad: VadConfig::default(),
             status: StatusConfig::default(),
+            recording: RecordingConfig::default(),
             osd: crate::osd::config::OsdConfig::default(),
             meeting: MeetingConfig::default(),
             state_file: default_state_file(),
@@ -430,6 +436,9 @@ mod tests {
         assert_eq!(config.whisper.model, "base.en");
         assert_eq!(config.output.mode, OutputMode::Type);
         assert!(!config.output.auto_submit);
+        assert!(!config.recording.queue_enabled);
+        assert_eq!(config.recording.queue_size, 5);
+        assert!(!config.recording.effective_enabled());
     }
 
     #[test]

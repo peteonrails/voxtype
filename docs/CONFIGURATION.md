@@ -1586,6 +1586,53 @@ The `soniox` feature is independent of the other engine features and adds a smal
 
 ---
 
+## [recording]
+
+Controls queue behavior for normal batch dictation.
+
+### queue_enabled
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+When `true`, voxtype buffers completed normal-batch recordings that finish while
+a previous normal batch is transcribing or outputting. New recordings are
+transcribed in FIFO order.
+
+### queue_size
+
+**Type:** Integer
+**Default:** `5`
+**Required:** No
+
+Maximum number of stopped normal-batch recordings that can wait, transcribe, or
+output. The active live recording is not counted while it is still capturing,
+but starting it requires one available stopped slot so stopping can enqueue it.
+Set `queue_size` to `0` or `1` to disable queueing. Queueing is active only when
+`queue_enabled` is `true` and `queue_size >= 2`.
+
+When the queue reaches capacity, additional normal-batch recordings are rejected
+until space is available.
+
+### Scope
+
+Queueing applies only to normal batch dictation. It is not used by eager
+processing (`eager_processing`) or streaming modes.
+
+When enabled with eager processing or streaming mode, queueing is ignored and the
+daemon logs a startup warning.
+
+### Example
+
+```toml
+[recording]
+queue_enabled = true
+queue_size = 3
+```
+
+---
+
 ## [output]
 
 Controls how transcribed text is delivered.
