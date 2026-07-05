@@ -94,7 +94,7 @@ The main key to hold for recording. Must be a valid Linux evdev key name.
 - `SCROLLLOCK` - Scroll Lock key (recommended)
 - `PAUSE` - Pause/Break key
 - `RIGHTALT` - Right Alt key
-- `F13` through `F24` - Extended function keys
+- `F13` through `F24` - Extended function keys (on macOS, `F13`–`F20` are supported; `F21`–`F24` are Linux-only; PC keyboards' PrintScreen/ScrollLock/Pause keys arrive as `F13`/`F14`/`F15`, so both F-key names and `PRINTSCREEN`/`SCROLLLOCK`/`PAUSE` work for them)
 - `MEDIA` - Media key (often a dedicated button on multimedia keyboards)
 - `RECORD` - Record key
 - `INSERT` - Insert key
