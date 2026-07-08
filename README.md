@@ -24,7 +24,7 @@ Hold a hotkey (default: ScrollLock) while speaking, release to transcribe and ou
 - **Hyprland, Niri, Sway, River, GNOME, KDE.** Compositor keybindings everywhere, evdev fallback for X11, Wayland-first typing via wtype with full CJK support. Falls back through dotool → ydotool → clipboard if any layer is unavailable.
 - **Pauses your music.** Auto-pauses Spotify, Plasma media players, anything that speaks MPRIS the moment you start dictating. Resumes on release.
 - **Floating waveform OSD.** Matches your swayosd band by default — same vertical position as volume and brightness — so the level meter sits where you already look for system feedback.
-- **Interactive TUI configure.** `voxtype configure` (also surfaces in Walker / fuzzel / rofi) edits every option in `~/.config/voxtype/config.toml` for you — no hand-editing TOML. Auto-downloads missing models, swaps GPU binaries via pkexec, restarts the daemon when needed.
+- **Interactive TUI and GUI configure.** `voxtype configure` (also surfaces in Walker / fuzzel / rofi) edits every option in `~/.config/voxtype/config.toml` for you — no hand-editing TOML. Auto-downloads missing models, swaps GPU binaries via pkexec, restarts the daemon when needed. A dark-themed graphical settings app (`voxtype-configure`) built with Tauri + Svelte 5 is also available for users who prefer a GUI.
 - **Push-to-talk or toggle.** Hold to record, or press once to start/stop. Optional audio cues when recording starts/stops.
 
 ### Trust
@@ -264,6 +264,46 @@ The command receives text on stdin and outputs cleaned text on stdout. On any
 failure (timeout, error), Voxtype gracefully falls back to the original transcription.
 
 See [CONFIGURATION.md](docs/CONFIGURATION.md#outputpost_process) for more examples including scripts for LM Studio, Ollama, and llama.cpp.
+
+## GUI Settings App
+
+Voxtype ships an optional graphical settings application (`voxtype-configure`) built with Tauri v2 and Svelte 5. It covers all 12 configuration sections that the TUI covers, with dark-mode-only design and per-section save/revert workflow.
+
+### Features
+
+- **12 configuration sections** grouped into collapsible categories (Dictation, Engine, Output, Visual, Advanced)
+- **Custom Words editor** — inline tag editor for filler words and key-value table for text replacements, modeled after MacWhisper's Custom Vocabulary interface
+- **Daemon management** — start, stop, and restart the voxtype daemon from within the GUI
+- **Per-section save** with atomic writes to `config.toml` (comments and formatting preserved)
+- **Apply bar** — after saving, a floating bar prompts to restart the daemon for changes to take effect
+- **Dynamic data** — shells out to the `voxtype` CLI for variant lists, audio devices, and daemon status
+
+### Installing
+
+The GUI is a separate binary and optional — it does not replace or gate the main `voxtype` binary. Pre-built packages include it.
+
+**Building from source:**
+
+```bash
+# Prerequisites
+# Fedora:
+sudo dnf install webkit2gtk4.1-devel
+# Arch:
+sudo pacman -S webkit2gtk-4.1
+# Ubuntu/Debian:
+sudo apt install libwebkit2gtk-4.1-dev
+
+# Install bun (JavaScript runtime)
+curl -fsSL https://bun.sh/install | bash
+
+# Build
+cd gui
+bun install
+bun run tauri build
+# Binary at: gui/src-tauri/target/release/voxtype-configure
+```
+
+**Runtime requirement:** WebKit2GTK 4.1. The `voxtype` CLI must be on your PATH for dynamic data.
 
 ## CLI Options
 
@@ -505,6 +545,8 @@ cargo build --release --features parakeet
 ONNX engines require the corresponding Cargo feature at build time. Without it, setting
 `engine = "parakeet"` in your config will fail with an error. The prebuilt release binaries
 (`-onnx-avx2`, `-onnx-cuda`, etc.) include all ONNX engines.
+
+To build the GUI settings app, see [GUI Settings App](#gui-settings-app) above.
 
 ## AppImage (Universal)
 
