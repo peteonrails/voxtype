@@ -1611,8 +1611,12 @@ impl Daemon {
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
         notification_body: &str,
     ) {
-        let backend_task = streaming_handle.take().map(|h| {
+        let backend_task = streaming_handle.take().map(|mut h| {
             let _ = h.cancel.send(());
+            // Cutting the audio pump only closes the backend's input side.
+            // Close its output receiver too so a saturated event channel
+            // cannot keep the backend task blocked during cancellation.
+            h.events.close();
             h.task
         });
         self.cut_streaming_audio();
@@ -3429,14 +3433,8 @@ impl Daemon {
                         (HotkeyEvent::Released, ActivationMode::PushToTalk) => {
                             tracing::debug!("Received HotkeyEvent::Released (push-to-talk), state.is_recording() = {}", state.is_recording());
                             if state.is_streaming() {
-                                tracing::debug!("Streaming push-to-talk released; closing audio capture and disowning session");
+                                tracing::debug!("Streaming push-to-talk released; closing audio capture and draining final events");
                                 self.stop_streaming_capture(&mut audio_capture).await;
-                                // Drop session/chain so the backend's
-                                // post-stop flush emission is dropped at
-                                // the event pump instead of typed.
-                                // Matches the SIGUSR2 stop path.
-                                streaming_session = None;
-                                streaming_chain = None;
                             } else if let State::Recording { model_override, .. } = &state {
                                 let model_override = model_override.clone();
 
@@ -3790,6 +3788,19 @@ impl Daemon {
                     // Check for cancel request first
                     if check_cancel_requested() {
                         tracing::info!("Recording cancelled");
+
+                        if state.is_streaming() {
+                            self.cancel_streaming_to_idle(
+                                &mut state,
+                                &mut audio_capture,
+                                &mut streaming_handle,
+                                &mut streaming_session,
+                                &mut streaming_chain,
+                                "Recording discarded",
+                            )
+                            .await;
+                            continue;
+                        }
 
                         // Stop recording and discard audio
                         if let Some(mut capture) = audio_capture.take() {

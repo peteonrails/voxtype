@@ -33,6 +33,21 @@ pub(crate) fn send_record_command(
         return Ok(());
     }
 
+    // Streaming uses a model preloaded by the daemon, so a model supplied on
+    // this one record command cannot take effect without restarting it. Reject
+    // before writing any other override files that could leak into the next
+    // recording after this command fails.
+    let model_override = action.model_override().or(top_level_model);
+    if model_override.is_some()
+        && config.engine == config::TranscriptionEngine::Parakeet
+        && config.streaming_active()
+    {
+        anyhow::bail!(
+            "Per-record model overrides are not supported during Parakeet streaming. \
+             Set [parakeet] model in config.toml and restart the daemon instead."
+        );
+    }
+
     // Write output mode override file if specified
     // For file mode, format is "file" or "file:/path/to/file"
     if let Some(mode_override) = action.output_mode_override() {
@@ -54,7 +69,6 @@ pub(crate) fn send_record_command(
     }
 
     // Write model override file if specified (subcommand --model takes priority over top-level --model)
-    let model_override = action.model_override().or(top_level_model);
     if let Some(model) = model_override {
         let override_file = config::Config::runtime_dir().join("model_override");
         std::fs::write(&override_file, model)
