@@ -92,6 +92,7 @@ pub(crate) async fn show_config(config: &config::Config) -> anyhow::Result<()> {
     println!("\n[parakeet]");
     if let Some(ref parakeet_config) = config.parakeet {
         println!("  model = {:?}", parakeet_config.model);
+        println!("  language = {:?}", parakeet_config.language);
         if let Some(ref model_type) = parakeet_config.model_type {
             println!("  model_type = {:?}", model_type);
         }

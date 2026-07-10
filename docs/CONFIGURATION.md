@@ -1096,6 +1096,7 @@ The model architecture type. Usually auto-detected based on files present in the
 **Values:**
 - `tdt` - Token-Duration-Transducer (recommended, proper punctuation)
 - `ctc` - Connectionist Temporal Classification (faster, character-level)
+- `nemotron` - Cache-aware RNNT streaming model. Registered Nemotron models are detected automatically.
 
 **Example:**
 ```toml
@@ -1103,6 +1104,16 @@ The model architecture type. Usually auto-detected based on files present in the
 model = "parakeet-tdt-0.6b-v3"
 model_type = "tdt"
 ```
+
+### language
+
+**Type:** String
+**Default:** `"auto"`
+**Required:** No
+
+Target locale for multilingual Nemotron models. A specific locale such as
+`"en-US"` gives better accuracy than automatic language detection. This setting
+is ignored by TDT, CTC, and English-only Nemotron models.
 
 ### on_demand_loading
 
@@ -1126,8 +1137,11 @@ on_demand_loading = true  # Free memory when not transcribing
 **Required:** No
 
 When `true`, voxtype types text incrementally while you are still speaking
-instead of waiting for hotkey release. Uses the parakeet-rs cache-aware
-streaming pipeline and a TDT v3 family model with `tokenizer.model`.
+instead of waiting for hotkey release. Uses a cache-aware Parakeet Unified or
+Nemotron model with `tokenizer.model`.
+
+Streaming requires `on_demand_loading = false` so the model is already loaded
+when recording starts.
 
 **Requires toggle activation.** Streaming output types characters at the
 cursor while you dictate. On Wayland compositors backed by libinput
@@ -1144,7 +1158,8 @@ a warning to the log.
 engine = "parakeet"
 
 [parakeet]
-model = "parakeet-tdt-0.6b-v3"
+model = "nemotron-3.5-asr-streaming-0.6b-int8"
+language = "en-US"
 streaming = true
 
 [hotkey]

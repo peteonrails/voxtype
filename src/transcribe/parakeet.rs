@@ -73,6 +73,11 @@ impl ParakeetTranscriber {
                     })?;
                 ParakeetModel::Tdt(Mutex::new(parakeet))
             }
+            ParakeetModelType::Nemotron => {
+                return Err(TranscribeError::InitFailed(
+                    "Nemotron models must use the Nemotron transcriber".to_string(),
+                ));
+            }
         };
 
         tracing::info!(

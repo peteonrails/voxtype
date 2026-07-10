@@ -54,17 +54,27 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     }
 
     // Whisper / engine
-    if let Ok(model) = std::env::var("VOXTYPE_MODEL") {
-        config.whisper.model = model;
-    }
     if let Ok(engine) = std::env::var("VOXTYPE_ENGINE") {
         match engine.parse::<TranscriptionEngine>() {
             Ok(e) => config.engine = e,
             Err(_) => tracing::warn!("Unknown VOXTYPE_ENGINE value: {}", engine),
         }
     }
+    if let Ok(model) = std::env::var("VOXTYPE_MODEL") {
+        if config.engine == TranscriptionEngine::Parakeet {
+            let parakeet = config
+                .parakeet
+                .get_or_insert_with(super::ParakeetConfig::default);
+            parakeet.model = model;
+        } else {
+            config.whisper.model = model;
+        }
+    }
     if let Ok(lang) = std::env::var("VOXTYPE_LANGUAGE") {
         config.whisper.language = LanguageConfig::from_comma_separated(&lang);
+        if let Some(parakeet) = config.parakeet.as_mut() {
+            parakeet.language = lang;
+        }
     }
     if let Ok(val) = std::env::var("VOXTYPE_TRANSLATE") {
         config.whisper.translate = parse_bool_env(&val);
@@ -86,7 +96,15 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
         config.whisper.flash_attention = parse_bool_env(&val);
     }
     if let Ok(val) = std::env::var("VOXTYPE_ON_DEMAND_LOADING") {
-        config.whisper.on_demand_loading = parse_bool_env(&val);
+        let enabled = parse_bool_env(&val);
+        if config.engine == TranscriptionEngine::Parakeet {
+            config
+                .parakeet
+                .get_or_insert_with(super::ParakeetConfig::default)
+                .on_demand_loading = enabled;
+        } else {
+            config.whisper.on_demand_loading = enabled;
+        }
     }
 
     // Audio

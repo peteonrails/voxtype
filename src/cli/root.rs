@@ -67,7 +67,8 @@ pub struct Cli {
         help_heading = "Transcription",
         long_help = "Override model for transcription.\n\
         Whisper: tiny, base, small, medium, large-v3, large-v3-turbo (and .en variants).\n\
-        Parakeet: parakeet-tdt-0.6b-v3, parakeet-tdt-0.6b-v3-int8"
+        Parakeet: parakeet-tdt-0.6b-v3, parakeet-tdt-0.6b-v3-int8, \
+        nemotron-3.5-asr-streaming-0.6b-int8, or an absolute model directory"
     )]
     pub model: Option<String>,
 

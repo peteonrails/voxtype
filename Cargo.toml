@@ -83,7 +83,7 @@ rodio = { version = "0.19", default-features = false, features = ["wav"] }
 whisper-rs = "0.16.0"
 
 # Parakeet speech-to-text (optional, ONNX-based)
-parakeet-rs = { version = "0.3.5", optional = true }
+parakeet-rs = { version = "0.3.6", optional = true }
 
 # ONNX-based ASR engines (Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual)
 ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "api-24", "half"] }

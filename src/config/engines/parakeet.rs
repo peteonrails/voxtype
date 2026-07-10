@@ -13,6 +13,8 @@ pub enum ParakeetModelType {
     /// TDT (Token-Duration-Transducer) - recommended, proper punctuation and word boundaries
     #[default]
     Tdt,
+    /// Nemotron cache-aware RNNT streaming model
+    Nemotron,
 }
 
 /// Parakeet speech-to-text configuration (ONNX-based, alternative to Whisper)
@@ -24,10 +26,15 @@ pub struct ParakeetConfig {
     /// For CTC: model.onnx, tokenizer.json
     pub model: String,
 
-    /// Model architecture type: "tdt" (default, recommended) or "ctc"
+    /// Model architecture type: "tdt", "ctc", or "nemotron"
     /// Auto-detected from model directory structure if not specified
     #[serde(default)]
     pub model_type: Option<ParakeetModelType>,
+
+    /// Target language for multilingual Nemotron models.
+    /// Use "auto" for automatic language detection.
+    #[serde(default = "default_language")]
+    pub language: String,
 
     /// Load model on-demand when recording starts (true) or keep loaded (false)
     #[serde(default = "default_on_demand_loading")]
@@ -62,6 +69,10 @@ fn default_streaming_chunk_secs() -> f32 {
     0.5
 }
 
+fn default_language() -> String {
+    "auto".to_string()
+}
+
 fn default_streaming_left_context_secs() -> f32 {
     1.5
 }
@@ -75,6 +86,7 @@ impl Default for ParakeetConfig {
         Self {
             model: "parakeet-tdt-0.6b-v3".to_string(),
             model_type: None, // Auto-detect
+            language: default_language(),
             on_demand_loading: false,
             streaming: false,
             streaming_chunk_secs: default_streaming_chunk_secs(),
@@ -152,6 +164,25 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_nemotron_language() {
+        let toml_str = r#"
+            engine = "parakeet"
+
+            [parakeet]
+            model = "nemotron-3.5-asr-streaming-0.6b-int8"
+            model_type = "nemotron"
+            language = "en-US"
+            streaming = true
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let parakeet = config.parakeet.unwrap();
+        assert_eq!(parakeet.model_type, Some(ParakeetModelType::Nemotron));
+        assert_eq!(parakeet.language, "en-US");
+        assert!(parakeet.streaming);
+    }
+
+    #[test]
     fn test_parakeet_model_type_defaults_to_none_for_auto_detection() {
         let toml_str = r#"
             engine = "parakeet"
@@ -186,6 +217,7 @@ mod tests {
         let config = ParakeetConfig::default();
         assert_eq!(config.model, "parakeet-tdt-0.6b-v3");
         assert!(config.model_type.is_none());
+        assert_eq!(config.language, "auto");
         assert!(!config.on_demand_loading);
     }
 

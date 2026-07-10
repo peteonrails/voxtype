@@ -889,6 +889,16 @@ so a held PTT key never fires its release event. The daemon auto-promotes
 push-to-talk to toggle at startup when streaming is enabled and logs a
 warning.
 
+For multilingual streaming with native punctuation, select the quantized
+Nemotron 3.5 model:
+
+```toml
+[parakeet]
+model = "nemotron-3.5-asr-streaming-0.6b-int8"
+language = "en-US" # or "auto"
+streaming = true
+```
+
 See [PARAKEET.md](PARAKEET.md) for detailed setup instructions.
 
 ### Moonshine

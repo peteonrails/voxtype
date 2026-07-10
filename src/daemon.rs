@@ -1020,8 +1020,12 @@ impl Daemon {
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
         notification_body: &str,
     ) {
-        if let Some(h) = streaming_handle.take() {
+        if let Some(mut h) = streaming_handle.take() {
             let _ = h.cancel.send(());
+            // Cancellation no longer needs backend events. Closing the
+            // receiver also prevents a saturated producer from blocking while
+            // the daemon waits for its task to exit.
+            h.events.close();
             let _ = h.task.await;
         }
         if let Some(mut c) = audio_capture.take() {
@@ -2773,14 +2777,8 @@ impl Daemon {
                         (HotkeyEvent::Released, ActivationMode::PushToTalk) => {
                             tracing::debug!("Received HotkeyEvent::Released (push-to-talk), state.is_recording() = {}", state.is_recording());
                             if state.is_streaming() {
-                                tracing::debug!("Streaming push-to-talk released; closing audio capture and disowning session");
+                                tracing::debug!("Streaming push-to-talk released; closing audio capture and draining final events");
                                 self.stop_streaming_capture(&mut audio_capture).await;
-                                // Drop session/chain so the backend's
-                                // post-stop flush emission is dropped at
-                                // the event pump instead of typed.
-                                // Matches the SIGUSR2 stop path.
-                                streaming_session = None;
-                                streaming_chain = None;
                             } else if let State::Recording { model_override, .. } = &state {
                                 let transcriber = match self.get_transcriber_for_recording(
                                     model_override.as_deref(),
@@ -3148,6 +3146,19 @@ impl Daemon {
                     if check_cancel_requested() {
                         tracing::info!("Recording cancelled");
 
+                        if state.is_streaming() {
+                            self.cancel_streaming_to_idle(
+                                &mut state,
+                                &mut audio_capture,
+                                &mut streaming_handle,
+                                &mut streaming_session,
+                                &mut streaming_chain,
+                                "Recording discarded",
+                            )
+                            .await;
+                            continue;
+                        }
+
                         // Stop recording and discard audio
                         if let Some(mut capture) = audio_capture.take() {
                             let _ = capture.stop().await;
@@ -3465,16 +3476,8 @@ impl Daemon {
                 _ = sigusr2.recv() => {
                     tracing::debug!("Received SIGUSR2 (stop recording)");
                     if state.is_streaming() {
-                        tracing::info!("SIGUSR2 stop while streaming; closing capture and disowning session");
+                        tracing::info!("SIGUSR2 stop while streaming; closing capture and draining final events");
                         self.stop_streaming_capture(&mut audio_capture).await;
-                        // Drop the typing surface synchronously so any
-                        // Final/Partial events the backend emits while
-                        // draining its internal buffer reach the event-pump
-                        // arm with `streaming_session = None` and get
-                        // discarded instead of typed into whatever window
-                        // has focus by then.
-                        streaming_session = None;
-                        streaming_chain = None;
                     } else if let State::Recording { model_override, .. } = &state {
                         let transcriber = match self.get_transcriber_for_recording(
                             model_override.as_deref(),

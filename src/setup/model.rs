@@ -112,6 +112,8 @@ struct ParakeetModelInfo {
     /// handler auto-switches the configured model to one of these when the
     /// user enables streaming on top of an incompatible model. See #423.
     streaming_compatible: bool,
+    /// Whether this entry uses the Nemotron cache-aware RNNT architecture.
+    nemotron: bool,
 }
 
 const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
@@ -128,6 +130,7 @@ const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
         ],
         huggingface_repo: "istupakov/parakeet-tdt-0.6b-v2-onnx",
         streaming_compatible: false,
+        nemotron: false,
     },
     ParakeetModelInfo {
         name: "parakeet-tdt-0.6b-v2-int8",
@@ -141,6 +144,7 @@ const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
         ],
         huggingface_repo: "istupakov/parakeet-tdt-0.6b-v2-onnx",
         streaming_compatible: false,
+        nemotron: false,
     },
     ParakeetModelInfo {
         name: "parakeet-tdt-0.6b-v3",
@@ -155,6 +159,7 @@ const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
         ],
         huggingface_repo: "istupakov/parakeet-tdt-0.6b-v3-onnx",
         streaming_compatible: false,
+        nemotron: false,
     },
     ParakeetModelInfo {
         name: "parakeet-tdt-0.6b-v3-int8",
@@ -168,6 +173,7 @@ const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
         ],
         huggingface_repo: "istupakov/parakeet-tdt-0.6b-v3-onnx",
         streaming_compatible: false,
+        nemotron: false,
     },
     // Streaming-capable Parakeet model. Ships `tokenizer.model` alongside the
     // encoder/decoder, which `parakeet-rs::ParakeetUnified::load` requires for
@@ -188,6 +194,22 @@ const PARAKEET_MODELS: &[ParakeetModelInfo] = &[
         ],
         huggingface_repo: "bobNight/parakeet-unified-en-0.6b-onnx",
         streaming_compatible: true,
+        nemotron: false,
+    },
+    ParakeetModelInfo {
+        name: "nemotron-3.5-asr-streaming-0.6b-int8",
+        size_mb: 651,
+        description: "Nemotron 3.5 multilingual streaming, int8 (40 locales)",
+        files: &[
+            ("encoder.onnx", 42_963_073),
+            ("encoder.onnx.data", 614_649_600),
+            ("decoder_joint.onnx", 24_483_962),
+            ("tokenizer.model", 406_554),
+            ("config.json", 2_970),
+        ],
+        huggingface_repo: "smcleod/nemotron-3.5-asr-streaming-0.6b-int8",
+        streaming_compatible: true,
+        nemotron: true,
     },
 ];
 
@@ -208,6 +230,36 @@ pub fn is_streaming_compatible_parakeet(name: &str) -> bool {
 /// gating the streaming pipeline at load time.
 pub fn is_known_parakeet_model(name: &str) -> bool {
     PARAKEET_MODELS.iter().any(|m| m.name == name)
+}
+
+/// Returns true when the named registry model uses the Nemotron backend, or a
+/// custom directory contains Nemotron model metadata. Custom exports without
+/// `config.json` can select the backend explicitly with
+/// `[parakeet] model_type = "nemotron"`.
+pub fn is_nemotron_parakeet_model(name: &str) -> bool {
+    if PARAKEET_MODELS.iter().any(|m| m.name == name && m.nemotron) {
+        return true;
+    }
+
+    let path = Path::new(name);
+    if !path.is_dir()
+        || !path.join("encoder.onnx").exists()
+        || !path.join("decoder_joint.onnx").exists()
+        || !path.join("tokenizer.model").exists()
+    {
+        return false;
+    }
+
+    std::fs::read_to_string(path.join("config.json"))
+        .ok()
+        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
+        .and_then(|config| {
+            config
+                .get("model_name")
+                .and_then(serde_json::Value::as_str)
+                .map(|name| name.to_ascii_lowercase().contains("nemotron"))
+        })
+        .unwrap_or(false)
 }
 
 /// Canonical Parakeet model name that the TUI auto-switches to when the user
@@ -2134,7 +2186,7 @@ pub fn validate_parakeet_model(path: &Path) -> anyhow::Result<()> {
     let has_decoder = path.join("decoder_joint-model.onnx").exists()
         || path.join("decoder_joint-model.int8.onnx").exists()
         || path.join("decoder_joint.onnx").exists();
-    let has_vocab = path.join("vocab.txt").exists();
+    let has_vocab = path.join("vocab.txt").exists() || path.join("tokenizer.model").exists();
 
     if has_encoder && has_decoder && has_vocab {
         Ok(())
@@ -2147,7 +2199,7 @@ pub fn validate_parakeet_model(path: &Path) -> anyhow::Result<()> {
             missing.push("decoder model");
         }
         if !has_vocab {
-            missing.push("vocab.txt");
+            missing.push("vocab.txt or tokenizer.model");
         }
         anyhow::bail!("Incomplete Parakeet model, missing: {}", missing.join(", "))
     }
@@ -3362,6 +3414,7 @@ language = "en"
         let model_names: Vec<&str> = PARAKEET_MODELS.iter().map(|m| m.name).collect();
         assert!(model_names.contains(&"parakeet-tdt-0.6b-v3"));
         assert!(model_names.contains(&"parakeet-tdt-0.6b-v3-int8"));
+        assert!(model_names.contains(&"nemotron-3.5-asr-streaming-0.6b-int8"));
     }
 
     #[test]
@@ -3387,10 +3440,13 @@ language = "en"
                 "Model {} should have file definitions",
                 model.name
             );
-            // All TDT models should have vocab.txt
+            // Every model needs either the TDT vocabulary or SentencePiece tokenizer.
             assert!(
-                model.files.iter().any(|(f, _)| *f == "vocab.txt"),
-                "Model {} should have vocab.txt",
+                model
+                    .files
+                    .iter()
+                    .any(|(f, _)| matches!(*f, "vocab.txt" | "tokenizer.model")),
+                "Model {} should have a tokenizer",
                 model.name
             );
         }
@@ -3401,6 +3457,10 @@ language = "en"
         // Valid Parakeet models
         assert!(is_parakeet_model("parakeet-tdt-0.6b-v3"));
         assert!(is_parakeet_model("parakeet-tdt-0.6b-v3-int8"));
+        assert!(is_parakeet_model("nemotron-3.5-asr-streaming-0.6b-int8"));
+        assert!(is_nemotron_parakeet_model(
+            "nemotron-3.5-asr-streaming-0.6b-int8"
+        ));
 
         // Invalid models
         assert!(!is_parakeet_model("base.en"));
@@ -3410,10 +3470,41 @@ language = "en"
     }
 
     #[test]
+    fn test_detects_custom_nemotron_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("encoder.onnx"), []).unwrap();
+        std::fs::write(tmp.path().join("decoder_joint.onnx"), []).unwrap();
+        std::fs::write(tmp.path().join("tokenizer.model"), []).unwrap();
+        std::fs::write(
+            tmp.path().join("config.json"),
+            r#"{"model_name":"nemotron-3.5-asr-streaming-0.6b"}"#,
+        )
+        .unwrap();
+
+        assert!(is_nemotron_parakeet_model(tmp.path().to_str().unwrap()));
+    }
+
+    #[test]
+    fn test_does_not_misdetect_custom_unified_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("encoder.onnx"), []).unwrap();
+        std::fs::write(tmp.path().join("decoder_joint.onnx"), []).unwrap();
+        std::fs::write(tmp.path().join("tokenizer.model"), []).unwrap();
+        std::fs::write(
+            tmp.path().join("config.json"),
+            r#"{"model_name":"parakeet-unified-en-0.6b"}"#,
+        )
+        .unwrap();
+
+        assert!(!is_nemotron_parakeet_model(tmp.path().to_str().unwrap()));
+    }
+
+    #[test]
     fn test_valid_parakeet_model_names() {
         let names = valid_parakeet_model_names();
         assert!(names.contains(&"parakeet-tdt-0.6b-v3"));
         assert!(names.contains(&"parakeet-tdt-0.6b-v3-int8"));
+        assert!(names.contains(&"nemotron-3.5-asr-streaming-0.6b-int8"));
         assert_eq!(names.len(), PARAKEET_MODELS.len());
     }
 
