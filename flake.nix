@@ -405,6 +405,8 @@
             rust-analyzer
             rustfmt
             clippy
+            gtk4-layer-shell
+            gtk4
           ] ++ runtimeDeps;
         };
       }) // {

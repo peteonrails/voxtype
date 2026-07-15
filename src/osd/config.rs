@@ -60,6 +60,51 @@ impl OsdFrontend {
     }
 }
 
+/// Visual variant rendered by the GTK4 frontend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Gtk4Variant {
+    #[default]
+    Classic,
+    Pill,
+}
+
+/// Geometry defaults associated with a GTK4 visual variant.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Gtk4VariantDefaults {
+    pub width_px: u32,
+    pub height_px: u32,
+    pub margin_px: u32,
+    pub opacity: f32,
+}
+
+impl Gtk4Variant {
+    pub const fn defaults(self) -> Gtk4VariantDefaults {
+        match self {
+            Self::Classic => Gtk4VariantDefaults {
+                width_px: 400,
+                height_px: 48,
+                margin_px: 24,
+                opacity: 0.95,
+            },
+            Self::Pill => Gtk4VariantDefaults {
+                width_px: 196,
+                height_px: 58,
+                margin_px: 59,
+                opacity: 1.0,
+            },
+        }
+    }
+
+    pub fn parse_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "classic" => Some(Self::Classic),
+            "pill" => Some(Self::Pill),
+            _ => None,
+        }
+    }
+}
+
 /// Palette source for Quickshell OSD recipes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -338,6 +383,8 @@ pub struct OsdConfig {
     /// Which OSD frontend the `voxtype-osd` wrapper launches. Defaults to
     /// `Gtk4` since GTK4 ships with most Hyprland setups already.
     pub frontend: OsdFrontend,
+    /// Visual variant for the GTK4 frontend. Ignored by other frontends.
+    pub gtk4_variant: Gtk4Variant,
     /// Quickshell style name, package name, or package path.
     pub style: String,
     /// Palette source for Quickshell OSD recipes.
@@ -357,18 +404,21 @@ pub struct OsdConfig {
 
 impl Default for OsdConfig {
     fn default() -> Self {
+        let gtk4_variant = Gtk4Variant::default();
+        let gtk4_defaults = gtk4_variant.defaults();
         Self {
             enabled: true,
-            width_px: 400,
-            height_px: 48,
+            width_px: gtk4_defaults.width_px,
+            height_px: gtk4_defaults.height_px,
             position: OsdPosition::BottomCenter,
-            margin_px: 24,
+            margin_px: gtk4_defaults.margin_px,
             top_margin: 0.85,
-            opacity: 0.95,
+            opacity: gtk4_defaults.opacity,
             waveform_window_secs: 3.0,
             peak_decay_db_per_sec: 6.0,
             waveform_gain: 10.0,
             frontend: OsdFrontend::default(),
+            gtk4_variant,
             style: "default".to_string(),
             palette: None,
             layout: OsdLayout::default(),
@@ -396,6 +446,7 @@ mod tests {
         assert!((c.peak_decay_db_per_sec - 6.0).abs() < 1e-6);
         assert!((c.waveform_gain - 10.0).abs() < 1e-6);
         assert_eq!(c.style, "default");
+        assert_eq!(c.gtk4_variant, Gtk4Variant::Classic);
         assert_eq!(c.palette, None);
         assert_eq!(c.layout, OsdLayout::Compact);
         assert!(c.plugin_path.is_none());
@@ -457,12 +508,25 @@ mod tests {
     }
 
     #[test]
+    fn gtk4_variant_serde_and_parsing() {
+        let v: Gtk4Variant = serde_json::from_str("\"pill\"").unwrap();
+        assert_eq!(v, Gtk4Variant::Pill);
+        assert_eq!(
+            Gtk4Variant::parse_str("classic"),
+            Some(Gtk4Variant::Classic)
+        );
+        assert_eq!(Gtk4Variant::parse_str("pill"), Some(Gtk4Variant::Pill));
+        assert_eq!(Gtk4Variant::parse_str("unknown"), None);
+    }
+
+    #[test]
     fn config_partial_toml_uses_defaults() {
         let toml_src = "width_px = 800\n";
         let c: OsdConfig = toml::from_str(toml_src).unwrap();
         assert_eq!(c.width_px, 800);
         // All other fields default
         assert_eq!(c.height_px, 48);
+        assert_eq!(c.gtk4_variant, Gtk4Variant::Classic);
         assert!(c.enabled);
     }
 

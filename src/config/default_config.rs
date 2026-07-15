@@ -295,6 +295,11 @@ on_transcription = true
 # - quickshell: QML frontend with recipe/style customization
 frontend = "gtk4"
 
+# GTK4 visual variant: classic waveform + peak meter, or GNOME-style pill.
+# Each variant supplies defaults for size, margin, and opacity.
+# Ignored by native and quickshell.
+gtk4_variant = "classic"
+
 # Quickshell style customization. These fields are ignored by gtk4/native.
 # style can be "default", an installed package name, or a package path.
 style = "default"

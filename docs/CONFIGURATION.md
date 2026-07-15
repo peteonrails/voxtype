@@ -3506,9 +3506,16 @@ the `voxtype-osd` wrapper launches via `[osd] frontend`.
 ```toml
 [osd]
 frontend = "gtk4"           # Default. Uses voxtype-osd-gtk4.
+gtk4_variant = "classic"    # Or "pill" for the GNOME-style pill.
 # frontend = "native"       # wgpu/egui-based (voxtype-osd-native).
 # frontend = "quickshell"   # QML/Quickshell launcher (voxtype-osd-quickshell).
 ```
+
+When geometry is omitted, `classic` defaults to 400x48, margin 24, and opacity
+0.95; `pill` defaults to 196x58, margin 59, and opacity 1.0. Explicit size,
+margin, and opacity values override those defaults. Pill center positions use
+the corresponding screen edge and `margin_px`; classic center positions retain
+the existing fractional `top_margin` placement.
 
 If you pick `"quickshell"`, install the QML tree first so the launcher can
 find it:

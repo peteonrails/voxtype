@@ -298,6 +298,18 @@ files under `$XDG_RUNTIME_DIR/voxtype/`. The OSD itself does not need a
 keybinding; it activates automatically when the daemon enters the
 recording state.
 
+The GTK4 frontend can use a GNOME-style pill instead of the classic waveform
+and peak meter:
+
+```toml
+[osd]
+frontend = "gtk4"
+gtk4_variant = "pill"
+```
+
+The pill defaults to 196x58 with a 59-pixel edge margin. Existing `width_px`,
+`height_px`, `margin_px`, and `opacity` values remain explicit overrides.
+
 Quickshell also supports OSD customization through `[osd]`:
 
 ```toml
