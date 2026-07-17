@@ -21,6 +21,7 @@ mod root;
 mod status;
 mod text;
 mod vad;
+mod vocabulary;
 mod whisper;
 
 pub use audio::{AudioConfig, AudioFeedbackConfig};
@@ -45,6 +46,7 @@ pub use root::Config;
 pub use status::{ResolvedIcons, StatusConfig, StatusIconOverrides};
 pub use text::TextConfig;
 pub use vad::{VadBackend, VadConfig};
+pub use vocabulary::VocabularyConfig;
 pub use whisper::{WhisperConfig, WhisperMode};
 
 pub(super) fn default_true() -> bool {

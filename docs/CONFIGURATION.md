@@ -2723,6 +2723,31 @@ Multi-word entries like "you know" are matched as a single phrase. Adding aggres
 
 ---
 
+## Vocabulary
+
+Unified vocabulary: one list of proper nouns, product names, and jargon that
+transcription engines frequently get wrong. Terms are injected into each
+engine's biasing mechanism and exposed to the post-processing command.
+
+```toml
+[vocabulary]
+terms = ["voxtype", "Hyprland", "Wayland"]
+terms_file = "~/.config/voxtype/vocabulary.json"  # optional JSON array
+```
+
+| Engine | Mechanism |
+|--------|-----------|
+| Whisper (local and remote) | Appended to `initial_prompt` |
+| Soniox | Merged into `context.terms` after `[soniox] terms` |
+| Post-process command | `VOXTYPE_VOCABULARY` environment variable (newline-separated) |
+
+`terms` and `terms_file` are merged (inline first), trimmed, and
+deduplicated. A configured but missing or malformed `terms_file` is a
+startup error. Engine-specific fields (`[whisper] initial_prompt`,
+`[soniox] terms`) keep working; vocabulary terms are added on top.
+
+---
+
 ## [vad]
 
 Voice Activity Detection configuration. When enabled, VAD filters silence-only recordings before transcription, preventing Whisper hallucinations when processing silence.

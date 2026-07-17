@@ -151,10 +151,47 @@ pub trait Transcriber: Send + Sync {
     }
 }
 
+/// Merge unified vocabulary terms into a whisper config's initial_prompt.
+/// Local whisper passes this to whisper.cpp; remote whisper sends it as the
+/// `prompt` form field. Returns a clone; the original config is untouched.
+pub fn apply_vocabulary_to_whisper(config: &WhisperConfig, terms: &[String]) -> WhisperConfig {
+    if terms.is_empty() {
+        return config.clone();
+    }
+    let joined = terms.join(", ");
+    let mut cfg = config.clone();
+    cfg.initial_prompt = Some(match cfg.initial_prompt.as_deref() {
+        Some(p) if !p.trim().is_empty() => format!("{p} {joined}"),
+        _ => joined,
+    });
+    cfg
+}
+
+/// Merge unified vocabulary terms into a Soniox terms list: engine terms
+/// first, vocabulary appended. Dedup happens downstream in
+/// soniox::load_context_terms.
+#[cfg(any(test, feature = "soniox"))]
+fn merge_soniox_terms(engine: Option<Vec<String>>, vocab: &[String]) -> Option<Vec<String>> {
+    if vocab.is_empty() {
+        return engine;
+    }
+    let mut merged = engine.unwrap_or_default();
+    merged.extend(vocab.iter().cloned());
+    Some(merged)
+}
+
 /// Factory function to create transcriber based on configured engine
 pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, TranscribeError> {
+    let vocab_terms = config
+        .vocabulary
+        .resolve_terms()
+        .map_err(TranscribeError::ConfigError)?;
+
     match config.engine {
-        TranscriptionEngine::Whisper => create_whisper_transcriber(&config.whisper),
+        TranscriptionEngine::Whisper => {
+            let whisper_config = apply_vocabulary_to_whisper(&config.whisper, &vocab_terms);
+            create_whisper_transcriber(&whisper_config)
+        }
         #[cfg(feature = "parakeet")]
         TranscriptionEngine::Parakeet => {
             let parakeet_config = config.parakeet.as_ref().ok_or_else(|| {
@@ -276,7 +313,9 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
                     "Soniox engine selected but [soniox] config section is missing".to_string(),
                 )
             })?;
-            Ok(Box::new(soniox::SonioxTranscriber::new(cfg.clone())?))
+            let mut soniox_config = cfg.clone();
+            soniox_config.terms = merge_soniox_terms(soniox_config.terms.take(), &vocab_terms);
+            Ok(Box::new(soniox::SonioxTranscriber::new(soniox_config)?))
         }
         #[cfg(not(feature = "soniox"))]
         TranscriptionEngine::Soniox => Err(TranscribeError::InitFailed(
@@ -331,5 +370,78 @@ pub fn create_transcriber_with_config_path(
             tracing::info!("Using whisper-cli subprocess backend");
             Ok(Box::new(cli::CliTranscriber::new(config)?))
         }
+    }
+}
+
+#[cfg(test)]
+mod vocabulary_tests {
+    use super::*;
+    use crate::config::WhisperConfig;
+
+    #[test]
+    fn vocab_appended_to_existing_initial_prompt() {
+        let mut cfg = WhisperConfig::default();
+        cfg.initial_prompt = Some("Technical discussion.".into());
+        let out = apply_vocabulary_to_whisper(&cfg, &["voxtype".into(), "jj".into()]);
+        assert_eq!(
+            out.initial_prompt.as_deref(),
+            Some("Technical discussion. voxtype, jj")
+        );
+    }
+
+    #[test]
+    fn vocab_becomes_prompt_when_none_set() {
+        let cfg = WhisperConfig::default();
+        let out = apply_vocabulary_to_whisper(&cfg, &["voxtype".into()]);
+        assert_eq!(out.initial_prompt.as_deref(), Some("voxtype"));
+    }
+
+    #[test]
+    fn empty_vocab_leaves_config_untouched() {
+        let mut cfg = WhisperConfig::default();
+        cfg.initial_prompt = Some("keep me".into());
+        let out = apply_vocabulary_to_whisper(&cfg, &[]);
+        assert_eq!(out.initial_prompt.as_deref(), Some("keep me"));
+    }
+
+    #[test]
+    fn vocab_prompt_survives_cli_model_override() {
+        let cfg = WhisperConfig::default();
+        let mut out = apply_vocabulary_to_whisper(&cfg, &["voxtype".into()]);
+
+        out.model = "cli-model.bin".into();
+
+        assert_eq!(out.initial_prompt.as_deref(), Some("voxtype"));
+        assert_eq!(out.model, "cli-model.bin");
+    }
+
+    #[test]
+    fn soniox_merge_puts_engine_terms_first() {
+        let merged = merge_soniox_terms(
+            Some(vec!["troponin".to_string()]),
+            &["voxtype".to_string(), "troponin".to_string()],
+        );
+        // Downstream load_context_terms dedupes; here we assert order only.
+        assert_eq!(
+            merged,
+            Some(vec![
+                "troponin".to_string(),
+                "voxtype".to_string(),
+                "troponin".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn soniox_merge_creates_terms_when_engine_has_none() {
+        let merged = merge_soniox_terms(None, &["voxtype".to_string()]);
+        assert_eq!(merged, Some(vec!["voxtype".to_string()]));
+    }
+
+    #[test]
+    fn soniox_merge_is_noop_for_empty_vocab() {
+        assert_eq!(merge_soniox_terms(None, &[]), None);
+        let engine = Some(vec!["keep".to_string()]);
+        assert_eq!(merge_soniox_terms(engine.clone(), &[]), engine);
     }
 }

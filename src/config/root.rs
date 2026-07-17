@@ -1,7 +1,8 @@
 use super::{
     AudioConfig, CohereConfig, DolphinConfig, HotkeyConfig, MeetingConfig, MoonshineConfig,
     OmnilingualConfig, OutputConfig, ParaformerConfig, ParakeetConfig, Profile, SenseVoiceConfig,
-    SonioxConfig, StatusConfig, TextConfig, TranscriptionEngine, VadConfig, WhisperConfig,
+    SonioxConfig, StatusConfig, TextConfig, TranscriptionEngine, VadConfig, VocabularyConfig,
+    WhisperConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -65,6 +66,12 @@ pub struct Config {
     #[serde(default)]
     pub text: TextConfig,
 
+    /// Unified vocabulary: terms injected into every transcription engine's
+    /// biasing mechanism and exposed to the post-process command via the
+    /// VOXTYPE_VOCABULARY environment variable.
+    #[serde(default)]
+    pub vocabulary: VocabularyConfig,
+
     /// Voice Activity Detection configuration
     /// When enabled, filters silence-only recordings before transcription
     #[serde(default)]
@@ -114,6 +121,7 @@ impl Default for Config {
             cohere: None,
             soniox: None,
             text: TextConfig::default(),
+            vocabulary: VocabularyConfig::default(),
             vad: VadConfig::default(),
             status: StatusConfig::default(),
             osd: crate::osd::config::OsdConfig::default(),
