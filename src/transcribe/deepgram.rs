@@ -42,6 +42,60 @@ const SILENCE_PRIMER_MS: u64 = 300;
 /// stalled connect can't pin the daemon in `State::Streaming` forever.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Deepgram's hard limit: 500 tokens total across all keyterms.
+/// https://developers.deepgram.com/docs/keyterm
+const KEYTERM_TOKEN_BUDGET: usize = 500;
+
+/// nova-3 and flux models take `keyterm` params; older models
+/// (nova-2/nova-1/enhanced/base) take `keywords`. nova-3 rejects
+/// `keywords` with a 400 — never send both.
+fn uses_keyterms(model: &str) -> bool {
+    model.starts_with("nova-3") || model.starts_with("flux")
+}
+
+/// Legacy `keywords` param: hard limit 100 keywords per request.
+/// https://developers.deepgram.com/docs/keywords
+const KEYWORDS_TERM_LIMIT: usize = 100;
+
+/// Enforce the model-appropriate vocabulary limit: keyterm mode uses the
+/// 500-token budget (whitespace-token approximation); keywords mode caps
+/// at 100 terms. Drops trailing terms and warns with their names.
+fn budget_terms(terms: &[String], keyterm_mode: bool) -> Vec<String> {
+    let mut used = 0usize;
+    let mut kept: Vec<String> = Vec::new();
+    let mut dropped: Vec<&str> = Vec::new();
+    for term in terms {
+        let fits = if keyterm_mode {
+            let cost = term.split_whitespace().count().max(1);
+            if used + cost <= KEYTERM_TOKEN_BUDGET {
+                used += cost;
+                true
+            } else {
+                false
+            }
+        } else {
+            kept.len() < KEYWORDS_TERM_LIMIT
+        };
+        if fits {
+            kept.push(term.clone());
+        } else {
+            dropped.push(term.as_str());
+        }
+    }
+    if !dropped.is_empty() {
+        tracing::warn!(
+            "Deepgram vocabulary exceeds the {} limit; dropped: {}",
+            if keyterm_mode {
+                format!("{KEYTERM_TOKEN_BUDGET}-token keyterm")
+            } else {
+                format!("{KEYWORDS_TERM_LIMIT}-keyword")
+            },
+            dropped.join(", ")
+        );
+    }
+    kept
+}
+
 /// Install a default rustls `CryptoProvider` for this process.
 ///
 /// The `deepgram` crate's dependency tree enables both the `aws-lc-rs`
@@ -61,10 +115,12 @@ fn ensure_crypto_provider() {
 /// A Deepgram streaming transcriber.
 pub struct DeepgramTranscriber {
     config: DeepgramConfig,
+    /// Unified vocabulary terms, already resolved by the factory.
+    vocabulary: Vec<String>,
 }
 
 impl DeepgramTranscriber {
-    pub fn new(config: DeepgramConfig) -> Result<Self, TranscribeError> {
+    pub fn new(config: DeepgramConfig, vocabulary: Vec<String>) -> Result<Self, TranscribeError> {
         let key_present = config
             .api_key
             .as_deref()
@@ -80,7 +136,7 @@ impl DeepgramTranscriber {
         // deepgram's deps make rustls' provider ambiguous; pin it before
         // any TLS handshake happens.
         ensure_crypto_provider();
-        Ok(Self { config })
+        Ok(Self { config, vocabulary })
     }
 
     /// Build a Deepgram client from the configured endpoint + key.
@@ -100,11 +156,25 @@ impl DeepgramTranscriber {
     }
 
     fn options(&self) -> Options {
-        Options::builder()
+        let mut builder = Options::builder()
             .model(Model::from(self.config.model.clone()))
             .language(Language::from(self.config.language.clone()))
-            .smart_format(self.config.smart_format)
-            .build()
+            .smart_format(self.config.smart_format);
+        if !self.vocabulary.is_empty() {
+            let keyterm_mode = uses_keyterms(&self.config.model);
+            let kept = budget_terms(&self.vocabulary, keyterm_mode);
+            tracing::debug!(
+                terms = kept.len(),
+                model = %self.config.model,
+                "Applying vocabulary to Deepgram request"
+            );
+            if keyterm_mode {
+                builder = builder.keyterms(kept.iter().map(String::as_str));
+            } else {
+                builder = builder.keywords(kept.iter().map(String::as_str));
+            }
+        }
+        builder.build()
     }
 
     /// One-shot batch transcription: open a stream, send all samples, close,
@@ -304,6 +374,8 @@ async fn run_streaming_session(
 
     let mut next_segment: SegmentId = 0;
     let mut samples_closed = false;
+    let mut eof_at: Option<tokio::time::Instant> = None;
+    let mut finals_after_stop: u32 = 0;
     // After end-of-audio we wait for Deepgram to flush trailing finals and
     // close. If it never closes cleanly, this deadline stops us from waiting
     // (and, in buffer mode, never flushing) forever.
@@ -351,6 +423,7 @@ async fn run_streaming_session(
                         // flushes remaining finals, then keep reading until
                         // the server closes the socket or the drain deadline.
                         samples_closed = true;
+                        eof_at = Some(tokio::time::Instant::now());
                         if let Err(e) = handle.close_stream().await {
                             tracing::warn!("Deepgram close_stream failed: {e}");
                         }
@@ -363,6 +436,14 @@ async fn run_streaming_session(
             response = handle.receive() => {
                 match response {
                     Some(Ok(resp)) => {
+                        if samples_closed {
+                            if let StreamResponse::TerminalResponse { .. } = &resp {
+                                tracing::debug!(
+                                    "Deepgram terminal metadata received; ending drain early"
+                                );
+                                break;
+                            }
+                        }
                         if let Some(text) = extract_final_transcript(&resp) {
                             if !text.is_empty() {
                                 let segment_id = next_segment;
@@ -377,6 +458,9 @@ async fn run_streaming_session(
                                     text
                                 };
                                 next_segment += 1;
+                                if samples_closed {
+                                    finals_after_stop += 1;
+                                }
                                 if events_tx
                                     .send(StreamingEvent::Final { text, segment_id })
                                     .await
@@ -402,6 +486,13 @@ async fn run_streaming_session(
         }
     }
 
+    if let Some(t) = eof_at {
+        tracing::info!(
+            drain_ms = t.elapsed().as_millis() as u64,
+            finals_after_stop,
+            "Deepgram drain complete"
+        );
+    }
     let _ = events_tx.send(StreamingEvent::Ended).await;
     Ok(())
 }
@@ -549,6 +640,41 @@ mod tests {
     }
 
     #[test]
+    fn keyterm_models_selected_by_prefix() {
+        assert!(uses_keyterms("nova-3"));
+        assert!(uses_keyterms("nova-3-medical"));
+        assert!(uses_keyterms("flux-general-en"));
+        assert!(!uses_keyterms("nova-2"));
+        assert!(!uses_keyterms("enhanced"));
+        assert!(!uses_keyterms("base"));
+    }
+
+    #[test]
+    fn budget_keeps_keyterms_within_500_tokens() {
+        // 260 two-word terms = 520 tokens; only 250 fit in keyterm mode.
+        let terms: Vec<String> = (0..260).map(|i| format!("term number{i}")).collect();
+        let kept = budget_terms(&terms, true);
+        assert_eq!(kept.len(), 250);
+        assert_eq!(kept[0], "term number0");
+    }
+
+    #[test]
+    fn budget_caps_keywords_at_100_terms() {
+        // Legacy keywords param: hard limit 100 keywords per request.
+        let terms: Vec<String> = (0..150).map(|i| format!("term{i}")).collect();
+        let kept = budget_terms(&terms, false);
+        assert_eq!(kept.len(), 100);
+        assert_eq!(kept[0], "term0");
+    }
+
+    #[test]
+    fn budget_passes_small_lists_through() {
+        let terms = vec!["voxtype".to_string(), "Hyprland".to_string()];
+        assert_eq!(budget_terms(&terms, true), terms);
+        assert_eq!(budget_terms(&terms, false), terms);
+    }
+
+    #[test]
     fn pcm_silence_is_zero() {
         let bytes = f32_to_pcm_bytes(&[0.0; 4]);
         assert_eq!(bytes.len(), 8);
@@ -594,6 +720,6 @@ mod tests {
     #[test]
     fn new_rejects_missing_key() {
         let cfg = DeepgramConfig::default();
-        assert!(DeepgramTranscriber::new(cfg).is_err());
+        assert!(DeepgramTranscriber::new(cfg, Vec::new()).is_err());
     }
 }

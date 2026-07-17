@@ -810,6 +810,7 @@ pub struct Daemon {
     text_processor: TextProcessor,
     post_processor: Option<PostProcessor>,
     vocabulary_terms: Vec<String>,
+    streaming_stopped_at: Option<std::time::Instant>,
     /// Last post-processed text and when it was produced, for context in subsequent dictations
     last_dictation: Option<(String, Instant)>,
     /// Audio level broadcaster for the OSD (None when disabled or bind failed)
@@ -980,6 +981,7 @@ impl Daemon {
             text_processor,
             post_processor,
             vocabulary_terms,
+            streaming_stopped_at: None,
             last_dictation: None,
             level_hub: None,
             level_emitter_task: None,
@@ -1413,6 +1415,7 @@ impl Daemon {
             } else {
                 tracing::info!("Stopping streaming session; closing capture and disowning session");
             }
+            self.streaming_stopped_at = Some(std::time::Instant::now());
             self.stop_streaming_capture(audio_capture).await;
             // Acknowledge the stop immediately so the user knows it
             // registered; a buffered transcript pastes a beat later
@@ -1552,6 +1555,8 @@ impl Daemon {
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
         flush_buffer: bool,
     ) {
+        let drain_elapsed = self.streaming_stopped_at.take().map(|t| t.elapsed());
+        let finish_started = std::time::Instant::now();
         if let Some(mut c) = audio_capture.take() {
             let _ = c.stop().await;
         }
@@ -1645,7 +1650,15 @@ impl Daemon {
                 }
             }
         }
-
+        if let Some(drain) = drain_elapsed {
+            let flush_ms = finish_started.elapsed().as_millis() as u64;
+            tracing::info!(
+                drain_ms = drain.as_millis() as u64,
+                flush_ms,
+                total_ms = drain.as_millis() as u64 + flush_ms,
+                "Streaming finish"
+            );
+        }
         *streaming_session = None;
         *streaming_chain = None;
 
@@ -1674,6 +1687,7 @@ impl Daemon {
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
         notification_body: &str,
     ) {
+        self.streaming_stopped_at = None;
         let backend_task = streaming_handle.take().map(|h| {
             let _ = h.cancel.send(());
             h.task
@@ -3751,6 +3765,7 @@ impl Daemon {
                                 }
                             } else if state.is_streaming() {
                                 tracing::info!("Toggle stop while streaming; closing capture");
+                                self.streaming_stopped_at = Some(std::time::Instant::now());
                                 self.stop_streaming_capture(&mut audio_capture).await;
                                 self.play_feedback(SoundEvent::RecordingStop);
                             } else if let State::Recording { model_override: current_model_override, .. } = &state {
