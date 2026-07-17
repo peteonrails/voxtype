@@ -331,7 +331,10 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
                     "Deepgram engine selected but [deepgram] config section is missing".to_string(),
                 )
             })?;
-            Ok(Box::new(deepgram::DeepgramTranscriber::new(cfg.clone())?))
+            Ok(Box::new(deepgram::DeepgramTranscriber::new(
+                cfg.clone(),
+                vocab_terms.clone(),
+            )?))
         }
         #[cfg(not(feature = "deepgram"))]
         TranscriptionEngine::Deepgram => Err(TranscribeError::InitFailed(

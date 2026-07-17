@@ -316,17 +316,25 @@ impl StreamingSession {
         if self.finalized_text.is_empty() {
             return Ok(());
         }
+        let pp_started = std::time::Instant::now();
         let text = match post_process {
             Some(pp) => pp.process_with_context(&self.finalized_text, None).await,
             None => self.finalized_text.clone(),
         };
+        let post_process_ms = pp_started.elapsed().as_millis() as u64;
         let opts = OutputOptions {
             pre_output_command,
             post_output_command,
             wait_for_modifier_release: false,
             modifier_release_timeout: std::time::Duration::from_millis(0),
         };
+        let out_started = std::time::Instant::now();
         output_with_fallback(chain, &text, opts).await?;
+        tracing::info!(
+            post_process_ms,
+            output_ms = out_started.elapsed().as_millis() as u64,
+            "Buffered flush timing"
+        );
         self.typed_chars += text.chars().count();
         Ok(())
     }
