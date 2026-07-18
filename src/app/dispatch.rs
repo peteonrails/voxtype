@@ -370,8 +370,15 @@ pub(crate) async fn dispatch(
             run_info_command(action)?;
         }
 
-        Commands::Configure { force_package_mode } => {
-            voxtype::tui::run(force_package_mode)?;
+        Commands::Configure {
+            force_package_mode,
+            probe_audio_devices,
+        } => {
+            if probe_audio_devices {
+                voxtype::tui::probe_audio_devices();
+            } else {
+                voxtype::tui::run(force_package_mode)?;
+            }
         }
 
         Commands::Status {
