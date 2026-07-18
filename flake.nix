@@ -47,5 +47,14 @@
         # NixOS module for system-level configuration
         # Provides typing backend selection, input group management, and ydotool daemon
         nixosModules.default = import ./nix/nixos-module.nix;
+
+        # Builds the package set against the consumer's nixpkgs, so their
+        # overlays and config apply instead of this flake's locked input.
+        overlays.default = final: _prev: {
+          voxtypePackages = (import ./nix/packages.nix {
+            pkgs = final;
+            src = self;
+          }).packages;
+        };
       };
 }
