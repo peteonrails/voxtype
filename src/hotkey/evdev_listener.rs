@@ -232,10 +232,7 @@ impl DeviceManager {
                 // through one of these; grabbing it back is pointless and, when the
                 // tool tears down its short-lived uinput device, leaves a stale fd
                 // that spins fetch_events() at 100% CPU. See issue #445.
-                let is_injection_device = device
-                    .name()
-                    .map(is_injection_keyboard)
-                    .unwrap_or(false);
+                let is_injection_device = device.name().map(is_injection_keyboard).unwrap_or(false);
                 if is_injection_device {
                     tracing::debug!("Skipping virtual injection keyboard: {:?}", device.name());
                     return;
@@ -957,7 +954,10 @@ mod tests {
         let fd = dev.as_raw_fd();
 
         // While the device is alive the guard must NOT flag it.
-        assert!(!fd_is_hung_up(fd), "live evdev device wrongly flagged hung up");
+        assert!(
+            !fd_is_hung_up(fd),
+            "live evdev device wrongly flagged hung up"
+        );
 
         // Tear it down (UI_DEV_DESTROY on drop) and wait briefly for the kernel
         // to mark the now-orphaned fd. Without the guard, poll_events() would
