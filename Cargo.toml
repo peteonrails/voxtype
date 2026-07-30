@@ -151,7 +151,7 @@ tray-icon = "0.21.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Input handling (evdev for kernel-level key events)
-evdev = "0.12"
+evdev = "0.13.2"
 inotify = "0.10"  # Watch /dev/input for device hotplug
 nix = { version = "0.29", features = ["signal", "process"] }  # Unix signals for IPC
 # MPRIS media-player control over the session bus. Talking D-Bus directly

@@ -16,7 +16,7 @@
 //! in mid-session) is handled implicitly without needing inotify watchers in
 //! the output path.
 
-use evdev::{AttributeSet, Device, Key};
+use evdev::{AttributeSet, Device, KeyCode as Key};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 

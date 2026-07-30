@@ -11,7 +11,7 @@
 use super::{HotkeyEvent, HotkeyListener};
 use crate::config::HotkeyConfig;
 use crate::error::HotkeyError;
-use evdev::{Device, InputEventKind, Key};
+use evdev::{Device, EventType, KeyCode as Key};
 use inotify::{Inotify, WatchMask};
 use std::collections::{HashMap, HashSet};
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -380,8 +380,8 @@ impl DeviceManager {
             match device.fetch_events() {
                 Ok(device_events) => {
                     for event in device_events {
-                        if let InputEventKind::Key(key) = event.kind() {
-                            events.push((key, event.value()));
+                        if event.event_type() == EventType::KEY {
+                            events.push((Key::new(event.code()), event.value()));
                         }
                     }
                 }
@@ -878,7 +878,7 @@ mod tests {
 
     #[test]
     fn poll_guard_drops_real_torn_down_evdev_device() {
-        use evdev::{uinput::VirtualDeviceBuilder, AttributeSet};
+        use evdev::{uinput::VirtualDevice, AttributeSet};
         use std::thread::sleep;
         use std::time::Duration;
 
@@ -888,7 +888,7 @@ mod tests {
         // against a genuine evdev fd torn down by UI_DEV_DESTROY.
         let mut keys = AttributeSet::<Key>::new();
         keys.insert(Key::KEY_PLAYPAUSE);
-        let builder = match VirtualDeviceBuilder::new() {
+        let builder = match VirtualDevice::builder() {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("skipping: uinput unavailable ({e})");
@@ -975,6 +975,105 @@ mod tests {
             flagged,
             "guard failed to flag a torn-down evdev fd; poll_events would spin"
         );
+    }
+
+    #[test]
+    fn synced_fetch_recovers_multiple_held_keys_after_overflow() {
+        use evdev::{uinput::VirtualDevice, AttributeSet, InputEvent};
+        use std::thread::sleep;
+        use std::time::Duration;
+
+        // evdev 0.12 loses the absolute key-code offset while compensating after
+        // SYN_DROPPED. Multiple held keys can then make fetch_events() loop forever.
+        // Create enough key traffic to overflow the kernel ring and require that
+        // both held keys are restored by the next synchronized fetch.
+        let mut keys = AttributeSet::<Key>::new();
+        for code in 1..59 {
+            keys.insert(Key::new(code));
+        }
+
+        let builder = match VirtualDevice::builder() {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("skipping: uinput unavailable ({e})");
+                return;
+            }
+        };
+        let builder = builder.name("voxtype-test-dotool-sync-overflow");
+        let builder = match builder.with_keys(&keys) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("skipping: with_keys failed ({e})");
+                return;
+            }
+        };
+        let mut output = match builder.build() {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("skipping: build failed ({e})");
+                return;
+            }
+        };
+
+        let node = match output.enumerate_dev_nodes_blocking() {
+            Ok(mut nodes) => match nodes.next() {
+                Some(Ok(path)) => path,
+                _ => {
+                    eprintln!("skipping: no event node for virtual device");
+                    return;
+                }
+            },
+            Err(e) => {
+                eprintln!("skipping: enumerate_dev_nodes failed ({e})");
+                return;
+            }
+        };
+
+        let mut input = None;
+        for _ in 0..50 {
+            match Device::open(&node) {
+                Ok(device) => {
+                    input = Some(device);
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    sleep(Duration::from_millis(20));
+                }
+                Err(e) => {
+                    eprintln!("skipping: cannot open {node:?} ({e})");
+                    return;
+                }
+            }
+        }
+        let Some(mut input) = input else {
+            eprintln!("skipping: {node:?} never became readable");
+            return;
+        };
+
+        let key_event = |key: Key, value| InputEvent::new(EventType::KEY.0, key.code(), value);
+        let key_click = |key: Key| [key_event(key, 1), key_event(key, 0)];
+
+        output.emit(&[key_event(Key::KEY_A, 1)]).unwrap();
+        output.emit(&[key_event(Key::KEY_B, 1)]).unwrap();
+        for _ in 0..30 {
+            output.emit(&key_click(Key::KEY_DOT)).unwrap();
+        }
+
+        // The overflow batch is discarded and marks the reader for state recovery.
+        assert_eq!(input.fetch_events().unwrap().count(), 0);
+        output.emit(&key_click(Key::KEY_DOT)).unwrap();
+
+        let recovered: Vec<_> = input.fetch_events().unwrap().collect();
+        for key in [Key::KEY_A, Key::KEY_B] {
+            assert!(
+                recovered.iter().any(|event| {
+                    event.event_type() == EventType::KEY
+                        && event.code() == key.code()
+                        && event.value() == 1
+                }),
+                "missing recovered press for {key:?}: {recovered:?}"
+            );
+        }
     }
 
     #[test]
