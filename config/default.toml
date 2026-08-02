@@ -157,6 +157,8 @@ fallback_to_clipboard = true
 
 # Delay between typed characters in milliseconds
 # 0 = fastest possible, increase if characters are dropped
+# On KDE, eitype uses an effective minimum of 1ms when this is 0 to prevent
+# long dictations from being silently truncated by KWin.
 type_delay_ms = 0
 
 # Delay before typing starts (ms)

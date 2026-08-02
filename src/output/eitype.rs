@@ -13,6 +13,26 @@ use crate::error::OutputError;
 use std::process::Stdio;
 use tokio::process::Command;
 
+const KDE_MIN_TYPE_DELAY_MS: u32 = 1;
+
+/// KDE can acknowledge a zero-delay eitype process even when KWin has dropped
+/// the tail of a large key-event burst. Keep explicit pacing choices intact,
+/// but use the smallest working delay when KDE users leave the generic delay
+/// at its default of zero.
+fn effective_type_delay_ms(configured_delay_ms: u32, current_desktop: Option<&str>) -> u32 {
+    let is_kde = current_desktop.is_some_and(|desktop| {
+        desktop
+            .split(':')
+            .any(|component| component.eq_ignore_ascii_case("kde"))
+    });
+
+    if is_kde && configured_delay_ms == 0 {
+        KDE_MIN_TYPE_DELAY_MS
+    } else {
+        configured_delay_ms
+    }
+}
+
 /// eitype-based text output
 pub struct EitypeOutput {
     /// Whether to send Enter key after output
@@ -49,10 +69,20 @@ impl EitypeOutput {
         if let Some(ref layout) = xkb_layout {
             tracing::debug!("eitype: using keyboard layout '{}'", layout);
         }
+        let current_desktop = std::env::var("XDG_CURRENT_DESKTOP").ok();
+        let effective_type_delay_ms =
+            effective_type_delay_ms(type_delay_ms, current_desktop.as_deref());
+        if effective_type_delay_ms != type_delay_ms {
+            tracing::debug!(
+                configured_delay_ms = type_delay_ms,
+                effective_delay_ms = effective_type_delay_ms,
+                "Applying safe eitype pacing on KDE"
+            );
+        }
         Self {
             auto_submit,
             append_text,
-            type_delay_ms,
+            type_delay_ms: effective_type_delay_ms,
             pre_type_delay_ms,
             shift_enter_newlines,
             xkb_layout,
@@ -235,10 +265,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_kde_zero_delay_uses_safe_minimum() {
+        assert_eq!(effective_type_delay_ms(0, Some("KDE")), 1);
+        assert_eq!(effective_type_delay_ms(0, Some("KDE:Plasma")), 1);
+    }
+
+    #[test]
+    fn test_kde_explicit_delay_is_preserved() {
+        assert_eq!(effective_type_delay_ms(2, Some("KDE")), 2);
+    }
+
+    #[test]
+    fn test_other_desktops_keep_zero_delay() {
+        assert_eq!(effective_type_delay_ms(0, Some("GNOME")), 0);
+        assert_eq!(effective_type_delay_ms(0, None), 0);
+    }
+
+    #[test]
     fn test_new() {
         let output = EitypeOutput::new(false, None, 0, 0, false, None, None);
         assert!(!output.auto_submit);
-        assert_eq!(output.type_delay_ms, 0);
+        let current_desktop = std::env::var("XDG_CURRENT_DESKTOP").ok();
+        assert_eq!(
+            output.type_delay_ms,
+            effective_type_delay_ms(0, current_desktop.as_deref())
+        );
         assert_eq!(output.pre_type_delay_ms, 0);
         assert!(!output.shift_enter_newlines);
         assert!(output.xkb_layout.is_none());
@@ -261,7 +312,11 @@ mod tests {
     #[test]
     fn test_new_with_pre_type_delay() {
         let output = EitypeOutput::new(false, None, 0, 200, false, None, None);
-        assert_eq!(output.type_delay_ms, 0);
+        let current_desktop = std::env::var("XDG_CURRENT_DESKTOP").ok();
+        assert_eq!(
+            output.type_delay_ms,
+            effective_type_delay_ms(0, current_desktop.as_deref())
+        );
         assert_eq!(output.pre_type_delay_ms, 200);
     }
 

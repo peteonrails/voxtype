@@ -2164,6 +2164,11 @@ urgency = "normal"  # "low" | "normal" | "critical"
 
 Delay in milliseconds between each typed character. Increase if characters are being dropped.
 
+On KDE Plasma, the `eitype` driver applies an effective minimum of 1 ms when
+this value is `0`. KWin can otherwise accept a zero-delay event burst while
+silently dropping the tail of a long dictation. Explicit nonzero values are
+preserved, and other output drivers and desktops keep the configured value.
+
 **Example:**
 ```toml
 [output]
