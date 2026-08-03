@@ -5,6 +5,9 @@
 
 use crate::config::{ActivationMode, Config, OutputMode, TranscriptionEngine};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use objc2::AnyThread;
+use objc2_app_kit::{NSBitmapImageRep, NSDeviceRGBColorSpace, NSGraphicsContext, NSImage};
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use pidlock::Pidlock;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,7 +16,7 @@ use std::time::{Duration, Instant};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::{
     menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu},
-    TrayIconBuilder,
+    Icon, TrayIconBuilder,
 };
 
 /// Current voxtype state
@@ -35,12 +38,24 @@ impl VoxtypeState {
         }
     }
 
+    /// Emoji glyph, used as the tray *title* when SF Symbols are unavailable.
     fn icon(&self) -> &'static str {
         match self {
             VoxtypeState::Idle => "🎙",
             VoxtypeState::Recording => "🔴",
             VoxtypeState::Transcribing => "⏳",
             VoxtypeState::Stopped => "⬛",
+        }
+    }
+
+    /// SF Symbol name for this state, drawn as a template image so the icon
+    /// picks up the menu bar's tint in both light and dark mode.
+    fn sf_symbol(&self) -> &'static str {
+        match self {
+            VoxtypeState::Idle => "mic",
+            VoxtypeState::Recording => "waveform.circle.fill",
+            VoxtypeState::Transcribing => "hourglass",
+            VoxtypeState::Stopped => "mic.slash",
         }
     }
 
@@ -475,6 +490,58 @@ fn build_menu(config: &Config) -> (Menu, MenuItem) {
     (menu, status_item)
 }
 
+/// Rasterize an SF Symbol into a `tray_icon::Icon`.
+///
+/// The result is drawn as a template image: only the alpha channel matters, so
+/// AppKit tints it to match the menu bar in light mode, dark mode, and while
+/// the menu is highlighted. Returns `None` if the symbol doesn't exist on this
+/// macOS version or the bitmap can't be allocated, letting callers fall back to
+/// the emoji title.
+fn sf_symbol_icon(name: &str) -> Option<Icon> {
+    // Menu bar icons are 18pt; rasterize at 2x so they stay sharp on Retina.
+    const POINTS: f64 = 18.0;
+    const PX: usize = 36;
+
+    unsafe {
+        let symbol = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            &NSString::from_str(name),
+            None,
+        )?;
+        symbol.setTemplate(true);
+        symbol.setSize(NSSize::new(POINTS, POINTS));
+
+        let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+            NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            PX as isize,
+            PX as isize,
+            8,
+            4,
+            true,
+            false,
+            NSDeviceRGBColorSpace,
+            (PX * 4) as isize,
+            32,
+        )?;
+
+        let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)?;
+        NSGraphicsContext::saveGraphicsState_class();
+        NSGraphicsContext::setCurrentContext(Some(&context));
+        symbol.drawInRect(NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(PX as f64, PX as f64),
+        ));
+        NSGraphicsContext::restoreGraphicsState_class();
+
+        let bitmap = rep.bitmapData();
+        if bitmap.is_null() {
+            return None;
+        }
+        let rgba = std::slice::from_raw_parts(bitmap as *const u8, PX * PX * 4).to_vec();
+        Icon::from_rgba(rgba, PX as u32, PX as u32).ok()
+    }
+}
+
 /// Run the menu bar application
 /// This should be called from the main thread
 /// Note: This function never returns (runs the macOS event loop)
@@ -516,12 +583,16 @@ pub fn run(state_file: PathBuf) -> ! {
     let _ = status_item.set_text(initial_state.status_text());
 
     // Create tray icon
-    let tray = TrayIconBuilder::new()
+    // Prefer a native SF Symbol; fall back to the emoji title if the symbol
+    // isn't available (older macOS, renamed symbol, allocation failure).
+    let mut tray_builder = TrayIconBuilder::new()
         .with_tooltip("Voxtype")
-        .with_title(initial_state.icon())
-        .with_menu(Box::new(menu))
-        .build()
-        .expect("Failed to create tray icon");
+        .with_menu(Box::new(menu));
+    tray_builder = match sf_symbol_icon(initial_state.sf_symbol()) {
+        Some(icon) => tray_builder.with_icon(icon).with_icon_as_template(true),
+        None => tray_builder.with_title(initial_state.icon()),
+    };
+    let tray = tray_builder.build().expect("Failed to create tray icon");
 
     println!("Menu bar is running. Look for the icon in your menu bar.");
     println!("Press Ctrl+C to stop.\n");
@@ -695,7 +766,15 @@ pub fn run(state_file: PathBuf) -> ! {
             let new_state = read_state_from_file(&state_file);
 
             if new_state != last_state {
-                let _ = tray.set_title(Some(new_state.icon()));
+                match sf_symbol_icon(new_state.sf_symbol()) {
+                    Some(icon) => {
+                        let _ = tray.set_icon(Some(icon));
+                        tray.set_icon_as_template(true);
+                    }
+                    None => {
+                        tray.set_title(Some(new_state.icon()));
+                    }
+                }
                 let _ = status_item.set_text(new_state.status_text());
                 last_state = new_state;
             }
