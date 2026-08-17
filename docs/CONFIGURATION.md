@@ -46,6 +46,7 @@ Selects which speech-to-text engine to use for transcription.
 - `dolphin` - Dictation-optimized CTC via ONNX Runtime (Chinese + English)
 - `omnilingual` - FunASR Omnilingual CTC via ONNX Runtime (50+ languages)
 - `cohere` - Cohere Transcribe encoder-decoder via ONNX Runtime (#1 Open ASR Leaderboard, 14 languages, ~3 GB model)
+- `deepgram` - Deepgram cloud WebSocket speech-to-text (requires the `deepgram` feature)
 
 **Example:**
 ```toml
@@ -1633,6 +1634,131 @@ The `soniox` feature is independent of the other engine features and adds a smal
 
 ---
 
+## [deepgram]
+
+Configuration for the Deepgram cloud WebSocket STT engine. This section is only used when `engine = "deepgram"`.
+
+Deepgram is a paid cloud STT provider. Audio is sent to Deepgram over WebSocket and finalized transcript segments arrive while recording.
+
+**Privacy:** Audio is sent to a third-party service. Use the local engines (Whisper, Parakeet, etc.) if you cannot send dictation off-device.
+
+### api_key
+
+**Type:** String (optional)
+**Default:** unset (uses `VOXTYPE_DEEPGRAM_API_KEY`, then falls back to `DEEPGRAM_API_KEY`)
+**Required:** Yes (via this field or an environment variable)
+
+Deepgram API key. Prefer an environment variable so the key never lands in shell history or a checked-in config file. When both variables are set, `VOXTYPE_DEEPGRAM_API_KEY` takes precedence.
+
+```bash
+export VOXTYPE_DEEPGRAM_API_KEY="your-key-here"
+# Or use Deepgram's standard environment variable:
+export DEEPGRAM_API_KEY="your-key-here"
+```
+
+### model
+
+**Type:** String
+**Default:** `"nova-3"`
+**Required:** No
+
+Deepgram model identifier.
+
+Vocabulary terms from `[vocabulary]` are applied according to the selected model. `nova-3` and `flux` models receive `keyterm` parameters within a 500-token budget, using a whitespace-token approximation. Older models receive `keywords` and are capped at 100 terms. Terms beyond the applicable limit are dropped from the end with a warning.
+
+### language
+
+**Type:** String
+**Default:** `"en"`
+**Required:** No
+
+Language code in BCP-47 form, for example `"en"` or `"en-US"`.
+
+### endpoint
+
+**Type:** String
+**Default:** `"wss://api.deepgram.com/v1/listen"`
+**Required:** No
+
+Deepgram's production realtime WebSocket endpoint. Override it for a self-hosted or on-prem Deepgram instance.
+
+Voxtype uses only the endpoint's scheme and host. A trailing `/v1/listen` is stripped, and custom path prefixes and query parameters are not preserved.
+
+### smart_format
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Enables Deepgram smart formatting, including punctuation and numerals.
+
+### endpointing_ms
+
+**Type:** Integer (optional)
+**Default:** unset (uses Deepgram's default)
+**Required:** No
+
+How long Deepgram waits after silence before finalizing a transcript segment, in milliseconds. Use 300-500ms for conversational speech or 100-200ms for snappier finalization.
+
+### streaming
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Activation mode for the Deepgram backend:
+
+- `true` - Live WebSocket session. Deepgram finalizes and returns segments while recording. With `[output] streaming_buffer_output = false`, finalized segments are typed as they arrive and push-to-talk is automatically promoted to toggle. With buffered output enabled, nothing is typed until recording stops, so push-to-talk remains safe.
+- `false` - Batch mode. Audio is buffered while the hotkey is held. On release, voxtype opens one WebSocket session, sends the full buffer, waits for finalization, and types the complete transcript. Push-to-talk compatible.
+
+### finish_timeout_secs
+
+**Type:** Integer
+**Default:** `15`
+**Required:** No
+
+Maximum seconds to wait for Deepgram to finalize transcription after recording stops. Increase this for longer recordings that need more time to flush remaining segments.
+
+### Configuration Summary
+
+| Option | CLI Flag | Environment Variable | Default | Description |
+|--------|----------|---------------------|---------|-------------|
+| `api_key` | - | `VOXTYPE_DEEPGRAM_API_KEY`, then `DEEPGRAM_API_KEY` | none (required) | Deepgram API key |
+| `model` | - | - | `"nova-3"` | Deepgram model identifier |
+| `language` | - | - | `"en"` | BCP-47 language code |
+| `endpoint` | - | - | `"wss://api.deepgram.com/v1/listen"` | Deepgram WebSocket endpoint |
+| `smart_format` | - | - | `true` | Enable punctuation and numeral formatting |
+| `endpointing_ms` | - | - | none (Deepgram default) | Silence duration before finalizing a segment |
+| `streaming` | - | - | `true` | Live WebSocket session vs batch on release |
+| `finish_timeout_secs` | - | - | `15` | Finalization timeout in seconds |
+
+### Complete Example - Buffered Live Output with Push-to-Talk
+
+```toml
+engine = "deepgram"
+
+[hotkey]
+mode = "push_to_talk"
+
+[deepgram]
+model = "nova-3"
+language = "en"
+# api_key set via VOXTYPE_DEEPGRAM_API_KEY or DEEPGRAM_API_KEY
+
+[output]
+streaming_buffer_output = true
+```
+
+### Building from Source
+
+Source builds need the `deepgram` Cargo feature:
+
+```bash
+cargo build --release --features deepgram
+```
+
+---
+
 ## [output]
 
 Controls how transcribed text is delivered.
@@ -1763,6 +1889,27 @@ When `true` and `mode = "type"`, falls back to clipboard if typing fails.
 [output]
 mode = "type"
 fallback_to_clipboard = true  # Use clipboard if typing drivers fail
+```
+
+### streaming_buffer_output
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+For streaming engines (Deepgram and Soniox), buffer finalized transcript segments during recording and emit the full transcript once recording stops. Audio is still transcribed live, so the final output is near-instant. Buffered output also enables post-processing for the complete transcript, which incremental streaming output skips.
+
+For Deepgram with `streaming = true`, enabling this option keeps push-to-talk safe because no text is typed while the key is held. Voxtype therefore does not automatically promote push-to-talk to toggle.
+
+**CLI overrides:**
+```bash
+voxtype --streaming-buffer-output daemon
+voxtype --no-streaming-buffer-output daemon
+```
+
+**Environment override:**
+```bash
+export VOXTYPE_STREAMING_BUFFER_OUTPUT=true
 ```
 
 ### driver_order
@@ -2726,6 +2873,33 @@ filler_words = ["uh", "um", "er", "like", "you know"]
 ```
 
 Multi-word entries like "you know" are matched as a single phrase. Adding aggressive entries (such as "like") may strip legitimate uses of the word; keep the list conservative or disable the filter for technical writing.
+
+---
+
+## Vocabulary
+
+Unified vocabulary: one list of proper nouns, product names, and jargon that
+transcription engines frequently get wrong. Terms are injected into each
+engine's biasing mechanism and exposed to the post-processing command.
+
+```toml
+[vocabulary]
+terms = ["voxtype", "Hyprland", "Wayland"]
+terms_file = "~/.config/voxtype/vocabulary.json"  # optional JSON array
+```
+
+| Engine | Mechanism |
+|--------|-----------|
+| Whisper (local and remote) | Appended to `initial_prompt` |
+| Soniox | Merged into `context.terms` after `[soniox] terms` |
+| Deepgram (nova-3, flux) | Repeated `keyterm` query params (500-token budget) |
+| Deepgram (nova-2 and older) | Repeated `keywords` query params |
+| Post-process command | `VOXTYPE_VOCABULARY` environment variable (newline-separated) |
+
+`terms` and `terms_file` are merged (inline first), trimmed, and
+deduplicated. A configured but missing or malformed `terms_file` is a
+startup error. Engine-specific fields (`[whisper] initial_prompt`,
+`[soniox] terms`) keep working; vocabulary terms are added on top.
 
 ---
 

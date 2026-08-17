@@ -176,6 +176,16 @@ pub struct OutputConfig {
     /// indefinitely blocking transcription delivery.
     #[serde(default = "default_modifier_release_timeout_ms")]
     pub modifier_release_timeout_ms: u64,
+
+    /// For streaming engines (Deepgram, Soniox): buffer all finalized
+    /// transcript segments and emit them once when recording stops,
+    /// instead of typing each segment incrementally as it arrives.
+    /// The audio is still transcribed live during recording (so the
+    /// final output is near-instant), but nothing reaches the cursor
+    /// until you stop. Also re-enables post-processing on the full
+    /// transcript, which incremental streaming output skips.
+    #[serde(default)]
+    pub streaming_buffer_output: bool,
 }
 
 impl Default for OutputConfig {
@@ -209,6 +219,7 @@ impl Default for OutputConfig {
             restore_clipboard_delay_ms: default_restore_clipboard_delay(),
             wait_for_modifier_release: true,
             modifier_release_timeout_ms: default_modifier_release_timeout_ms(),
+            streaming_buffer_output: false,
         }
     }
 }

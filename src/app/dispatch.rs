@@ -68,7 +68,11 @@ pub(crate) async fn dispatch(
     // Run the appropriate command
     match cli.command.unwrap_or(default_command) {
         Commands::Daemon => {
-            let mut daemon = daemon::Daemon::new(config, config_path);
+            let vocabulary_terms = config
+                .vocabulary
+                .resolve_terms()
+                .map_err(|e| anyhow::anyhow!("Invalid [vocabulary] config: {e}"))?;
+            let mut daemon = daemon::Daemon::new(config, config_path, vocabulary_terms);
             daemon.run().await?;
         }
         #[cfg(target_os = "macos")]
@@ -145,7 +149,12 @@ pub(crate) async fn dispatch(
             // Internal command: run transcription worker process
             // This is spawned by the daemon when gpu_isolation is enabled
             // Use command-line overrides if provided, otherwise use config
-            let mut whisper_config = config.whisper.clone();
+            let vocab_terms = config
+                .vocabulary
+                .resolve_terms()
+                .map_err(|e| anyhow::anyhow!("Invalid [vocabulary] config: {e}"))?;
+            let mut whisper_config =
+                transcribe::apply_vocabulary_to_whisper(&config.whisper, &vocab_terms);
             if let Some(m) = model {
                 whisper_config.model = m;
             }

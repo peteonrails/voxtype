@@ -515,6 +515,8 @@ fn detect_missing_model() -> Option<MissingModel> {
         config::TranscriptionEngine::Cohere => return None,
         // Soniox is cloud-only, no local model to probe.
         config::TranscriptionEngine::Soniox => return None,
+        // Deepgram is cloud-only, no local model to probe.
+        config::TranscriptionEngine::Deepgram => return None,
     };
 
     if model.is_empty() {

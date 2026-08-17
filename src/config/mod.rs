@@ -21,13 +21,15 @@ mod root;
 mod status;
 mod text;
 mod vad;
+mod vocabulary;
 mod whisper;
 
 pub use audio::{AudioConfig, AudioFeedbackConfig};
 pub use default_config::{default_config_content, DEFAULT_CONFIG};
 pub use engines::{
-    CohereConfig, DolphinConfig, MoonshineConfig, OmnilingualConfig, ParaformerConfig,
-    ParakeetConfig, ParakeetModelType, SenseVoiceConfig, SonioxConfig, TranscriptionEngine,
+    CohereConfig, DeepgramConfig, DolphinConfig, MoonshineConfig, OmnilingualConfig,
+    ParaformerConfig, ParakeetConfig, ParakeetModelType, SenseVoiceConfig, SonioxConfig,
+    TranscriptionEngine, DEFAULT_DEEPGRAM_ENDPOINT,
 };
 pub use hotkey::{ActivationMode, HotkeyConfig};
 pub use language::LanguageConfig;
@@ -45,6 +47,7 @@ pub use root::Config;
 pub use status::{ResolvedIcons, StatusConfig, StatusIconOverrides};
 pub use text::TextConfig;
 pub use vad::{VadBackend, VadConfig};
+pub use vocabulary::VocabularyConfig;
 pub use whisper::{WhisperConfig, WhisperMode};
 
 pub(super) fn default_true() -> bool {

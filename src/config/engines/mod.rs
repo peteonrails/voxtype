@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 mod cohere;
+mod deepgram;
 mod dolphin;
 mod moonshine;
 mod omnilingual;
@@ -12,6 +13,7 @@ mod sensevoice;
 mod soniox;
 
 pub use cohere::CohereConfig;
+pub use deepgram::{DeepgramConfig, DEFAULT_DEEPGRAM_ENDPOINT};
 pub use dolphin::DolphinConfig;
 pub use moonshine::MoonshineConfig;
 pub use omnilingual::OmnilingualConfig;
@@ -66,6 +68,9 @@ pub enum TranscriptionEngine {
     /// Use Soniox (cloud streaming WebSocket STT).
     /// Requires: cargo build --features soniox
     Soniox,
+    /// Use Deepgram (cloud streaming WebSocket STT).
+    /// Requires: cargo build --features deepgram
+    Deepgram,
 }
 
 impl TranscriptionEngine {
