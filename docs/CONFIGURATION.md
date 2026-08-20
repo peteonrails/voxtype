@@ -410,6 +410,24 @@ applied to each stream's current per-channel volume, not to a fixed 100% base:
 original per-channel volumes are restored when recording stops. Values above
 `150` are clamped by the CLI override.
 
+### duck_media_fade_ms
+
+**Type:** Integer
+**Default:** `150`
+**Required:** No
+
+Fade duration in milliseconds for the ducking ramp. The same duration is used
+going down at recording start and coming back up when recording ends, so media
+slides out of the way instead of jumping. `0` restores the previous instant
+behaviour. Durations shorter than one 20 ms step are treated as `0`.
+
+```toml
+[audio]
+duck_media = true
+duck_media_volume_percent = 70
+duck_media_fade_ms = 150
+```
+
 ---
 
 ## [audio.feedback]

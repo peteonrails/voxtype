@@ -65,6 +65,11 @@ max_duration_secs = 60
 # the other depending on whether you want media paused or only quieter.
 # duck_media = false
 # duck_media_volume_percent = 70
+#
+# Fade the ducking ramp instead of jumping straight to the target volume. The
+# same duration is used going down and coming back up; 0 keeps the previous
+# instant behavior.
+# duck_media_fade_ms = 150
 
 # [audio.feedback]
 # Enable audio feedback sounds (beeps when recording starts/stops)

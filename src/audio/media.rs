@@ -120,7 +120,61 @@ mod imp {
     /// enabled alongside `pause_media`, but when both are enabled the pause
     /// feature keeps its existing start/stop behavior and ducking only manages
     /// stream volume.
-    pub async fn duck_playing_audio(volume_percent: u8) -> Vec<DuckedMediaStream> {
+    /// Interval between ramp steps. Short enough to sound continuous, long
+    /// enough to keep the number of `pactl` invocations per fade small.
+    const FADE_STEP_MS: u64 = 20;
+
+    /// Ramp all `streams` from `from_percent` to `to_percent` of their
+    /// original volume over `fade_ms`, leaving the final value to the caller
+    /// (which keeps the existing per-stream error handling in one place).
+    ///
+    /// Best effort: a step that fails is ignored, because the caller sets the
+    /// exact target right afterwards anyway.
+    /// Intermediate scaling factors for a fade, excluding the final target.
+    ///
+    /// The caller sets `to_percent` itself, which keeps the exact target and
+    /// its error handling in a single place. Returns an empty vector when the
+    /// fade is too short to produce a step, so `fade_ms = 0` means "instant".
+    fn ramp_factors(from_percent: u8, to_percent: u8, fade_ms: u32) -> Vec<u8> {
+        let steps = u64::from(fade_ms).div_ceil(FADE_STEP_MS);
+        if steps <= 1 {
+            return Vec::new();
+        }
+
+        let from = f32::from(from_percent);
+        let span = f32::from(to_percent) - from;
+        (1..steps)
+            .map(|step| {
+                let factor = from + span * (step as f32 / steps as f32);
+                factor.round().clamp(0.0, f32::from(u8::MAX)) as u8
+            })
+            .collect()
+    }
+
+    async fn ramp_streams(
+        streams: &[DuckedMediaStream],
+        from_percent: u8,
+        to_percent: u8,
+        fade_ms: u32,
+    ) {
+        if streams.is_empty() {
+            return;
+        }
+
+        for factor in ramp_factors(from_percent, to_percent, fade_ms) {
+            for stream in streams {
+                let _ = Command::new("pactl")
+                    .arg("set-sink-input-volume")
+                    .arg(stream.index.to_string())
+                    .args(scaled_volumes(&stream.volumes, factor))
+                    .status()
+                    .await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(FADE_STEP_MS)).await;
+        }
+    }
+
+    pub async fn duck_playing_audio(volume_percent: u8, fade_ms: u32) -> Vec<DuckedMediaStream> {
         let streams = match list_active_sink_inputs().await {
             Ok(streams) => streams,
             Err(e) => {
@@ -135,6 +189,7 @@ mod imp {
         }
 
         let factor = volume_percent.min(150);
+        ramp_streams(&streams, 100, factor, fade_ms).await;
         let mut ducked = Vec::new();
         for stream in streams {
             let target = scaled_volumes(&stream.volumes, factor);
@@ -168,10 +223,16 @@ mod imp {
     }
 
     /// Restore stream volumes captured by `duck_playing_audio`.
-    pub async fn restore_ducked_audio(streams: Vec<DuckedMediaStream>) {
+    pub async fn restore_ducked_audio(
+        streams: Vec<DuckedMediaStream>,
+        ducked_percent: u8,
+        fade_ms: u32,
+    ) {
         if streams.is_empty() {
             return;
         }
+
+        ramp_streams(&streams, ducked_percent.min(150), 100, fade_ms).await;
 
         let total = streams.len();
         let mut restored = 0usize;
@@ -350,6 +411,36 @@ mod imp {
         }
 
         #[test]
+        fn ramp_is_skipped_when_the_fade_is_shorter_than_one_step() {
+            assert!(ramp_factors(100, 55, 0).is_empty());
+            assert!(ramp_factors(100, 55, FADE_STEP_MS as u32).is_empty());
+        }
+
+        #[test]
+        fn ramp_walks_down_towards_the_target_without_reaching_it() {
+            // 100 ms at a 20 ms step is 5 slices, so 4 intermediate factors;
+            // the exact target is set by the caller, not by the ramp.
+            let factors = ramp_factors(100, 50, 100);
+            assert_eq!(factors, vec![90, 80, 70, 60]);
+        }
+
+        #[test]
+        fn ramp_walks_up_when_restoring() {
+            let factors = ramp_factors(50, 100, 100);
+            assert_eq!(factors, vec![60, 70, 80, 90]);
+        }
+
+        #[test]
+        fn ramp_stays_monotonic_and_inside_the_endpoints() {
+            let factors = ramp_factors(100, 33, 250);
+            assert!(!factors.is_empty());
+            for pair in factors.windows(2) {
+                assert!(pair[1] <= pair[0], "not monotonic: {factors:?}");
+            }
+            assert!(factors.iter().all(|&f| (33..=100).contains(&f)));
+        }
+
+        #[test]
         fn parses_active_sink_inputs_with_channel_volumes() {
             let value: Value = serde_json::json!([
                 {
@@ -405,9 +496,14 @@ pub async fn pause_playing_players(_ignored: &[String]) -> Vec<String> {
 pub async fn resume_players(_players: Vec<String>) {}
 
 #[cfg(not(target_os = "linux"))]
-pub async fn duck_playing_audio(_volume_percent: u8) -> Vec<DuckedMediaStream> {
+pub async fn duck_playing_audio(_volume_percent: u8, _fade_ms: u32) -> Vec<DuckedMediaStream> {
     Vec::new()
 }
 
 #[cfg(not(target_os = "linux"))]
-pub async fn restore_ducked_audio(_streams: Vec<DuckedMediaStream>) {}
+pub async fn restore_ducked_audio(
+    _streams: Vec<DuckedMediaStream>,
+    _ducked_percent: u8,
+    _fade_ms: u32,
+) {
+}

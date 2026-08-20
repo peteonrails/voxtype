@@ -788,8 +788,11 @@ impl Daemon {
     /// Duck active audio streams if configured, storing original volumes
     async fn duck_media_streams(&mut self) {
         if self.config.audio.duck_media {
-            self.ducked_media_streams =
-                audio::media::duck_playing_audio(self.config.audio.duck_media_volume_percent).await;
+            self.ducked_media_streams = audio::media::duck_playing_audio(
+                self.config.audio.duck_media_volume_percent,
+                self.config.audio.duck_media_fade_ms,
+            )
+            .await;
         }
     }
 
@@ -797,7 +800,11 @@ impl Daemon {
     fn restore_ducked_media_streams(&mut self) {
         if !self.ducked_media_streams.is_empty() {
             let streams = std::mem::take(&mut self.ducked_media_streams);
-            tokio::spawn(audio::media::restore_ducked_audio(streams));
+            tokio::spawn(audio::media::restore_ducked_audio(
+                streams,
+                self.config.audio.duck_media_volume_percent,
+                self.config.audio.duck_media_fade_ms,
+            ));
         }
     }
 
