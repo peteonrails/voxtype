@@ -325,7 +325,17 @@ mod imp {
             .collect()
     }
 
-    fn scaled_volumes(volumes: &[String], factor_percent: u8) -> Vec<String> {
+    /// Scale each channel's `value_percent` so the stream keeps
+    /// `amplitude_percent` of its current amplitude.
+    ///
+    /// PulseAudio's percentage scale is cubic (`amplitude = (percent /
+    /// 100)^3`), so keeping half the amplitude does NOT mean halving the
+    /// percentage: the percentage only shrinks by the cube root of the
+    /// requested fraction. Scaling the percentage directly instead — the
+    /// previous behaviour — cubed the reduction, so a configured 50 left
+    /// 12.5% of the amplitude (-18 dB) and 30 was effectively mute.
+    fn scaled_volumes(volumes: &[String], amplitude_percent: u8) -> Vec<String> {
+        let gain = (f32::from(amplitude_percent) / 100.0).cbrt();
         volumes
             .iter()
             .map(|volume| {
@@ -333,7 +343,7 @@ mod imp {
                 let Ok(value) = numeric.parse::<f32>() else {
                     return volume.clone();
                 };
-                let scaled = value * f32::from(factor_percent) / 100.0;
+                let scaled = value * gain;
                 format!("{scaled:.0}%")
             })
             .collect()
@@ -470,14 +480,37 @@ mod imp {
 
         #[test]
         fn scales_stream_volumes_relative_to_current_values() {
+            // 70% of the amplitude = cube root of 0.7 on the cubic
+            // percentage scale, applied per channel.
             assert_eq!(
                 scaled_volumes(&["100%".to_string(), "80%".to_string()], 70),
-                vec!["70%", "56%"]
+                vec!["89%", "71%"]
             );
             assert_eq!(
                 scaled_volumes(&["50%".to_string(), "25%".to_string()], 30),
-                vec!["15%", "8%"]
+                vec!["33%", "17%"]
             );
+        }
+
+        #[test]
+        fn full_amplitude_leaves_volumes_unchanged() {
+            assert_eq!(
+                scaled_volumes(&["100%".to_string(), "37%".to_string()], 100),
+                vec!["100%", "37%"]
+            );
+        }
+
+        #[test]
+        fn zero_amplitude_mutes() {
+            assert_eq!(scaled_volumes(&["100%".to_string()], 0), vec!["0%"]);
+        }
+
+        #[test]
+        fn half_amplitude_is_six_db_not_eighteen() {
+            // 0.5^(1/3) = 0.7937: half the amplitude keeps ~79% of the cubic
+            // percentage. The pre-change behaviour would have produced "50%",
+            // which is only 12.5% of the amplitude.
+            assert_eq!(scaled_volumes(&["100%".to_string()], 50), vec!["79%"]);
         }
     }
 }

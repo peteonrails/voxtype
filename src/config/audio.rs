@@ -33,7 +33,9 @@ pub struct AudioConfig {
     #[serde(default)]
     pub duck_media: bool,
 
-    /// Target volume percentage for media ducking
+    /// Fraction of its current amplitude a ducked stream keeps, in percent
+    /// (50 = half the amplitude, -6 dB). Converted internally to PulseAudio's
+    /// cubic percentage scale.
     #[serde(default = "default_duck_media_volume_percent")]
     pub duck_media_volume_percent: u8,
 

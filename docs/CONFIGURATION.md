@@ -404,11 +404,18 @@ duck_media_volume_percent = 70
 **Default:** `70`
 **Required:** No
 
-Relative volume percentage for streams affected by `duck_media`. The value is
-applied to each stream's current per-channel volume, not to a fixed 100% base:
-`70` keeps media at 70% of its current volume, `50` keeps it at half, and the
-original per-channel volumes are restored when recording stops. Values above
-`150` are clamped by the CLI override.
+Fraction of its current amplitude that a stream affected by `duck_media`
+keeps, in percent: `70` keeps media at 70% of its current amplitude (-3.1 dB),
+`50` keeps it at half (-6 dB). The value is relative to each stream's current
+per-channel volume, not to a fixed 100% base, and the original volumes are
+restored when recording stops. Values above `150` are clamped by the CLI
+override.
+
+voxtype converts the value internally to PulseAudio's cubic percentage scale,
+so what you configure is what you hear. (Earlier development builds scaled the
+cubic percentage directly, which cubed the reduction — `50` left only 12.5% of
+the amplitude and `30` was effectively mute. If you tuned the value against
+such a build, expect ducking to be noticeably louder now.)
 
 ### duck_media_fade_ms
 
