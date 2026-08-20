@@ -438,9 +438,9 @@ fn render_role(comp: Compositor, role: Role, key: &str, second_key: Option<&str>
             "{} {{ spawn \"voxtype\" \"record\" \"start\"; }}",
             canonical_to_niri(key)
         )],
-        (Compositor::Niri, Role::Stop) => vec![format!(
-            "// Niri does not bind on key release; consider Role::Toggle instead."
-        )],
+        (Compositor::Niri, Role::Stop) => vec![
+            "// Niri does not bind on key release; consider Role::Toggle instead.".to_string(),
+        ],
         (Compositor::Niri, Role::PttPair) => vec![
             format!(
                 "{} {{ spawn \"voxtype\" \"record\" \"toggle\"; }}",
