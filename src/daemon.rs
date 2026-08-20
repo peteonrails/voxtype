@@ -3131,6 +3131,8 @@ impl Daemon {
                                 cleanup_model_override();
                                 cleanup_profile_override();
                                 cleanup_bool_override("smart_auto_submit");
+                                self.restore_ducked_media_streams();
+                                self.resume_media_players();
                                 state = State::Idle;
                                 self.update_state("idle");
                                 self.play_feedback(SoundEvent::Cancelled);
@@ -3160,6 +3162,8 @@ impl Daemon {
                                 cleanup_model_override();
                                 cleanup_profile_override();
                                 cleanup_bool_override("smart_auto_submit");
+                                self.restore_ducked_media_streams();
+                                self.resume_media_players();
                                 state = State::Idle;
                                 self.update_state("idle");
                                 self.play_feedback(SoundEvent::Cancelled);
@@ -3221,6 +3225,8 @@ impl Daemon {
                         cleanup_model_override();
                         cleanup_profile_override();
                         cleanup_bool_override("smart_auto_submit");
+                        self.restore_ducked_media_streams();
+                        self.resume_media_players();
                         state = State::Idle;
                         eager_transcriber = None;
                         self.update_state("idle");
