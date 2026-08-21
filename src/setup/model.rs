@@ -668,6 +668,54 @@ const COHERE_MODELS: &[CohereModelInfo] = &[
     },
 ];
 
+/// OpenVINO IR whisper model variants (Intel NPU/GPU/CPU via OpenVINO GenAI).
+///
+/// These are the OpenVINO org's pre-converted whisper models on HuggingFace
+/// (`OpenVINO/whisper-*-int8-ov`). Unlike the ONNX engines, they are NOT yet
+/// mirrored to the voxtype R2 CDN, so `download_openvino_model` shells out
+/// to `huggingface-cli` (snapshot download) rather than `download_artifact`.
+/// The on-disk layout is `<models_dir>/openvino/<name>/` with the standard
+/// OpenVINO GenAI files (`openvino_encoder_model.xml`, ...).
+struct OpenVinoModelInfo {
+    name: &'static str,
+    size_mb: u32,
+    description: &'static str,
+    huggingface_repo: &'static str,
+}
+
+const OPENVINO_MODELS: &[OpenVinoModelInfo] = &[
+    OpenVinoModelInfo {
+        name: "tiny.en",
+        size_mb: 40,
+        description: "English-only, smallest and fastest",
+        huggingface_repo: "OpenVINO/whisper-tiny.en-int8-ov",
+    },
+    OpenVinoModelInfo {
+        name: "base.en",
+        size_mb: 75,
+        description: "English-only, balanced (default)",
+        huggingface_repo: "OpenVINO/whisper-base.en-int8-ov",
+    },
+    OpenVinoModelInfo {
+        name: "small.en",
+        size_mb: 240,
+        description: "English-only, higher accuracy",
+        huggingface_repo: "OpenVINO/whisper-small.en-int8-ov",
+    },
+    OpenVinoModelInfo {
+        name: "base",
+        size_mb: 75,
+        description: "Multilingual",
+        huggingface_repo: "OpenVINO/whisper-base-int8-ov",
+    },
+    OpenVinoModelInfo {
+        name: "small",
+        size_mb: 240,
+        description: "Multilingual, higher accuracy",
+        huggingface_repo: "OpenVINO/whisper-small-int8-ov",
+    },
+];
+
 // =============================================================================
 // ModelArtifact implementations
 // =============================================================================
@@ -1203,6 +1251,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let is_dolphin_engine = matches!(config.engine, TranscriptionEngine::Dolphin);
     let is_omnilingual_engine = matches!(config.engine, TranscriptionEngine::Omnilingual);
     let is_cohere_engine = matches!(config.engine, TranscriptionEngine::Cohere);
+    let is_openvino_engine = matches!(config.engine, TranscriptionEngine::OpenVino);
     let current_whisper_model = &config.whisper.model;
     let current_parakeet_model = config.parakeet.as_ref().map(|p| p.model.as_str());
     let current_moonshine_model = config.moonshine.as_ref().map(|m| m.model.as_str());
@@ -1211,6 +1260,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let current_dolphin_model = config.dolphin.as_ref().map(|d| d.model.as_str());
     let current_omnilingual_model = config.omnilingual.as_ref().map(|o| o.model.as_str());
     let current_cohere_model = config.cohere.as_ref().map(|c| c.model.as_str());
+    let current_openvino_model = config.openvino.as_ref().map(|o| o.model.as_str());
     let parakeet_available = cfg!(feature = "parakeet");
     let moonshine_available = cfg!(feature = "moonshine");
     let sensevoice_available = cfg!(feature = "sensevoice");
@@ -1218,6 +1268,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let dolphin_available = cfg!(feature = "dolphin");
     let omnilingual_available = cfg!(feature = "omnilingual");
     let cohere_available = cfg!(feature = "cohere");
+    let openvino_available = cfg!(feature = "openvino");
     let whisper_count = MODELS.len();
     let parakeet_count = PARAKEET_MODELS.len();
     let moonshine_count = MOONSHINE_MODELS.len();
@@ -1226,6 +1277,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let dolphin_count = DOLPHIN_MODELS.len();
     let omnilingual_count = OMNILINGUAL_MODELS.len();
     let cohere_count = COHERE_MODELS.len();
+    let openvino_count = OPENVINO_MODELS.len();
 
     let available_count = |available: bool, count: usize| if available { count } else { 0 };
     let total_count = whisper_count
@@ -1235,7 +1287,8 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         + available_count(paraformer_available, paraformer_count)
         + available_count(dolphin_available, dolphin_count)
         + available_count(omnilingual_available, omnilingual_count)
-        + available_count(cohere_available, cohere_count);
+        + available_count(cohere_available, cohere_count)
+        + available_count(openvino_available, openvino_count);
 
     // --- Whisper Section ---
     println!("--- Whisper (OpenAI, 99+ languages) ---\n");
@@ -1535,6 +1588,41 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         println!("  \x1b[90m(not available - rebuild with --features cohere)\x1b[0m");
     }
 
+    // --- OpenVINO Section ---
+    let openvino_offset = cohere_offset + available_count(cohere_available, cohere_count);
+    println!(
+        "\n--- OpenVINO GenAI Whisper (Intel NPU/GPU/CPU){} ---\n",
+        AMD_CPU_ONLY_TAG
+    );
+
+    if openvino_available {
+        for (i, model) in OPENVINO_MODELS.iter().enumerate() {
+            let model_path = models_dir.join("openvino").join(model.name);
+            let installed = model_path.join("openvino_encoder_model.xml").exists();
+
+            let is_current = is_openvino_engine && current_openvino_model == Some(model.name);
+            let star = if is_current { "*" } else { " " };
+
+            let status = if installed {
+                "\x1b[32m[installed]\x1b[0m"
+            } else {
+                ""
+            };
+
+            println!(
+                " {}[{:>2}] {:<28} ({:>4} MB) - {} {}",
+                star,
+                openvino_offset + i + 1,
+                model.name,
+                model.size_mb,
+                model.description,
+                status
+            );
+        }
+    } else {
+        println!("  \x1b[90m(not available - rebuild with --features openvino)\x1b[0m");
+    }
+
     println!("\n  [ 0] Cancel\n");
 
     // Get user selection
@@ -1581,6 +1669,9 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     } else if cohere_available && selection <= cohere_offset + cohere_count {
         let idx = selection - cohere_offset;
         handle_cohere_selection(idx).await
+    } else if openvino_available && selection <= openvino_offset + openvino_count {
+        let idx = selection - openvino_offset;
+        handle_openvino_selection(idx).await
     } else {
         println!("\nInvalid selection.");
         Ok(())
@@ -2457,6 +2548,143 @@ pub fn download_cohere_model(model_name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Validate that an OpenVINO IR model directory has the files the GenAI
+/// WhisperPipeline needs.
+pub fn validate_openvino_model(path: &Path) -> anyhow::Result<()> {
+    if !path.exists() {
+        anyhow::bail!("Model directory does not exist: {:?}", path);
+    }
+    let required = [
+        "openvino_encoder_model.xml",
+        "openvino_decoder_model.xml",
+        "tokenizer.json",
+    ];
+    let missing: Vec<&str> = required
+        .iter()
+        .copied()
+        .filter(|f| !path.join(f).exists())
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("Incomplete OpenVINO model, missing: {}", missing.join(", "))
+    }
+}
+
+/// True if `name` is a known OpenVINO model short name.
+pub fn is_openvino_model(name: &str) -> bool {
+    OPENVINO_MODELS.iter().any(|m| m.name == name)
+}
+
+/// Download an OpenVINO IR whisper model from HuggingFace into
+/// `<models_dir>/openvino/<name>/`.
+///
+/// OpenVINO models are not yet on the voxtype R2 CDN, so this shells out to
+/// `huggingface-cli` (snapshot download). A local directory path can always
+/// be used instead by setting `[openvino] model` to an absolute path.
+pub fn download_openvino_model(model_name: &str) -> anyhow::Result<()> {
+    let model = OPENVINO_MODELS
+        .iter()
+        .find(|m| m.name == model_name)
+        .ok_or_else(|| anyhow::anyhow!("Unknown OpenVINO model: {}", model_name))?;
+    let models_dir = Config::models_dir();
+    let model_path = models_dir.join("openvino").join(model.name);
+
+    if model_path.join("openvino_encoder_model.xml").exists() {
+        println!(
+            "OpenVINO model '{}' already installed at {:?}",
+            model.name,
+            model_path.display()
+        );
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(&model_path)?;
+    println!(
+        "\nDownloading OpenVINO model '{}' ({} MB) from {} ...",
+        model.name, model.size_mb, model.huggingface_repo
+    );
+
+    let status = std::process::Command::new("huggingface-cli")
+        .args(["download", model.huggingface_repo, "--local-dir"])
+        .arg(&model_path)
+        .status()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Could not run huggingface-cli ({}). Install it with:\n  \
+                 pip install huggingface_hub\n\n\
+                 or download manually:\n  \
+                 huggingface-cli download {} --local-dir {}",
+                e,
+                model.huggingface_repo,
+                model_path.display()
+            )
+        })?;
+
+    if !status.success() {
+        anyhow::bail!(
+            "huggingface-cli download failed. Try again, or download manually:\n  \
+             huggingface-cli download {} --local-dir {}",
+            model.huggingface_repo,
+            model_path.display()
+        );
+    }
+
+    validate_openvino_model(&model_path)?;
+    println!(
+        "OpenVINO model '{}' installed at {:?}",
+        model.name,
+        model_path.display()
+    );
+    Ok(())
+}
+
+/// Handle OpenVINO model selection (download + config update).
+async fn handle_openvino_selection(selection: usize) -> anyhow::Result<()> {
+    let models_dir = Config::models_dir();
+
+    if selection == 0 || selection > OPENVINO_MODELS.len() {
+        println!("\nCancelled.");
+        return Ok(());
+    }
+
+    let model = &OPENVINO_MODELS[selection - 1];
+    let model_path = models_dir.join("openvino").join(model.name);
+
+    if model_path.join("openvino_encoder_model.xml").exists() {
+        println!("\nOpenVINO model '{}' is already installed.\n", model.name);
+        println!("  [1] Set as default model (update config)");
+        println!("  [2] Re-download");
+        println!("  [0] Cancel\n");
+
+        print!("Select option [1]: ");
+        io::stdout().flush()?;
+
+        let mut choice = String::new();
+        io::stdin().read_line(&mut choice)?;
+        let choice = choice.trim().parse::<usize>().unwrap_or(1);
+
+        match choice {
+            1 => {
+                update_config_openvino(model.name)?;
+                restart_daemon_if_running().await;
+                println!("\nOpenVINO model '{}' set as default.\n", model.name);
+            }
+            2 => {
+                download_openvino_model(model.name)?;
+            }
+            _ => println!("\nCancelled."),
+        }
+    } else {
+        download_openvino_model(model.name)?;
+        update_config_openvino(model.name)?;
+        restart_daemon_if_running().await;
+        println!("\nOpenVINO model '{}' set as default.\n", model.name);
+    }
+
+    Ok(())
+}
+
 /// Handle Cohere model selection (download + config update).
 async fn handle_cohere_selection(selection: usize) -> anyhow::Result<()> {
     let models_dir = Config::models_dir();
@@ -2610,6 +2838,106 @@ fn update_cohere_in_config(config: &str, model_name: &str) -> String {
             result.push('\n');
         }
         result.push_str(&format!("\n[cohere]\nmodel = \"{}\"\n", model_name));
+    }
+
+    result
+}
+
+/// Update the config to use the OpenVINO engine with a specific model.
+fn update_config_openvino(model_name: &str) -> anyhow::Result<()> {
+    if let Some(config_path) = Config::default_path() {
+        if config_path.exists() {
+            let content = std::fs::read_to_string(&config_path)?;
+            let updated = update_engine_in_config(&content, "openvino", "openvino", model_name);
+            std::fs::write(&config_path, updated)?;
+            print_success(&format!(
+                "Config updated: engine = \"openvino\", model = \"{}\"",
+                model_name
+            ));
+            Ok(())
+        } else {
+            print_info("No config file found. Run 'voxtype setup' first.");
+            Ok(())
+        }
+    } else {
+        anyhow::bail!("Could not determine config path")
+    }
+}
+
+/// Generic engine/model config updater. Mirrors `update_cohere_in_config`
+/// with the engine name and section name parameterized.
+fn update_engine_in_config(
+    config: &str,
+    engine_name: &str,
+    section_name: &str,
+    model_name: &str,
+) -> String {
+    let mut result = String::new();
+    let mut has_engine_line = false;
+    let mut has_section = false;
+    let mut in_section = false;
+    let mut model_updated = false;
+
+    for line in config.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with('[') {
+            if in_section && !model_updated {
+                result.push_str(&format!("model = \"{}\"\n", model_name));
+                model_updated = true;
+            }
+            in_section = trimmed == format!("[{}]", section_name);
+            if in_section {
+                has_section = true;
+            }
+        }
+
+        if trimmed.starts_with("engine") && !trimmed.starts_with('[') {
+            result.push_str(&format!("engine = \"{}\"\n", engine_name));
+            has_engine_line = true;
+        } else if in_section && trimmed.starts_with("model") {
+            result.push_str(&format!("model = \"{}\"\n", model_name));
+            model_updated = true;
+        } else {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+
+    if in_section && !model_updated {
+        result.push_str(&format!("model = \"{}\"\n", model_name));
+    }
+
+    if !has_engine_line {
+        let mut new_result = String::new();
+        let mut engine_added = false;
+        for line in result.lines() {
+            let trimmed = line.trim();
+            if !engine_added
+                && !trimmed.is_empty()
+                && !trimmed.starts_with('#')
+                && !trimmed.starts_with("engine")
+            {
+                new_result.push_str(&format!("engine = \"{}\"\n", engine_name));
+                engine_added = true;
+            }
+            new_result.push_str(line);
+            new_result.push('\n');
+        }
+        if !engine_added {
+            new_result.push_str(&format!("engine = \"{}\"\n", engine_name));
+        }
+        result = new_result;
+    }
+
+    if !has_section {
+        if !result.ends_with('\n') {
+            result.push('\n');
+        }
+        result.push_str(&format!(
+            "\n[{}]\nmodel = \"{}\"\n",
+            section_name, model_name
+        ));
     }
 
     result
@@ -3116,7 +3444,7 @@ fn update_config_engine(engine_name: &str, model_name: &str) -> anyhow::Result<(
     if let Some(config_path) = Config::default_path() {
         if config_path.exists() {
             let content = std::fs::read_to_string(&config_path)?;
-            let updated = update_engine_in_config(&content, engine_name, model_name);
+            let updated = update_engine_in_config(&content, engine_name, engine_name, model_name);
             std::fs::write(&config_path, updated)?;
             print_success(&format!(
                 "Config updated: engine = \"{}\", model = \"{}\"",
@@ -3130,78 +3458,6 @@ fn update_config_engine(engine_name: &str, model_name: &str) -> anyhow::Result<(
     } else {
         anyhow::bail!("Could not determine config path")
     }
-}
-
-/// Update a config string to use a specific engine and model
-fn update_engine_in_config(config: &str, engine_name: &str, model_name: &str) -> String {
-    let section_name = format!("[{}]", engine_name);
-    let mut result = String::new();
-    let mut has_engine_line = false;
-    let mut has_section = false;
-    let mut in_section = false;
-    let mut model_updated = false;
-
-    for line in config.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.starts_with('[') {
-            if in_section && !model_updated {
-                result.push_str(&format!("model = \"{}\"\n", model_name));
-                model_updated = true;
-            }
-            in_section = trimmed == section_name;
-            if in_section {
-                has_section = true;
-            }
-        }
-
-        if trimmed.starts_with("engine") && !trimmed.starts_with('[') {
-            result.push_str(&format!("engine = \"{}\"\n", engine_name));
-            has_engine_line = true;
-        } else if in_section && trimmed.starts_with("model") {
-            result.push_str(&format!("model = \"{}\"\n", model_name));
-            model_updated = true;
-        } else {
-            result.push_str(line);
-            result.push('\n');
-        }
-    }
-
-    if in_section && !model_updated {
-        result.push_str(&format!("model = \"{}\"\n", model_name));
-    }
-
-    if !has_engine_line {
-        let mut new_result = String::new();
-        let mut engine_added = false;
-        for line in result.lines() {
-            let trimmed = line.trim();
-            if !engine_added
-                && !trimmed.is_empty()
-                && !trimmed.starts_with('#')
-                && !trimmed.starts_with("engine")
-            {
-                new_result.push_str(&format!("engine = \"{}\"\n\n", engine_name));
-                engine_added = true;
-            }
-            new_result.push_str(line);
-            new_result.push('\n');
-        }
-        result = new_result;
-    }
-
-    if !has_section {
-        result.push_str(&format!(
-            "\n[{}]\nmodel = \"{}\"\n",
-            engine_name, model_name
-        ));
-    }
-
-    if !config.ends_with('\n') && result.ends_with('\n') {
-        result.pop();
-    }
-
-    result
 }
 
 #[cfg(test)]

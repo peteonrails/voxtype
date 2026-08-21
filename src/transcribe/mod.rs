@@ -16,12 +16,14 @@ pub mod cli;
 #[cfg(feature = "parakeet")]
 pub mod parakeet_streaming;
 pub mod remote;
+pub mod sliding_window;
 pub mod soniox;
 pub mod streaming;
 pub mod subprocess;
 pub mod whisper;
 pub mod worker;
 
+pub use sliding_window::{SlidingWindowConfig, SlidingWindowStreamingTranscriber};
 pub use streaming::{SegmentId, StreamHandle, StreamingEvent, StreamingTranscriber};
 
 /// Shared log-mel filterbank feature extraction for ONNX-based ASR engines
@@ -71,13 +73,20 @@ pub mod omnilingual;
 #[cfg(feature = "cohere")]
 pub mod cohere;
 
+/// OpenVINO GenAI Whisper backend (Intel NPU/GPU/CPU).
+#[cfg(feature = "openvino")]
+pub mod openvino;
+
 /// Cohere-specific log-mel feature extractor (NeMo conventions, 128 mels).
 #[cfg(feature = "cohere")]
 pub mod cohere_fbank;
 
+#[cfg(feature = "openvino")]
+use crate::config::OpenVinoConfig;
 use crate::config::{Config, TranscriptionEngine, WhisperConfig, WhisperMode};
 use crate::error::TranscribeError;
 use crate::setup::gpu;
+use std::sync::Arc;
 
 /// A timed segment from transcription (word or sentence level)
 #[derive(Debug, Clone)]
@@ -153,7 +162,24 @@ pub trait Transcriber: Send + Sync {
 /// Factory function to create transcriber based on configured engine
 pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, TranscribeError> {
     match config.engine {
-        TranscriptionEngine::Whisper => create_whisper_transcriber(&config.whisper),
+        TranscriptionEngine::Whisper => {
+            let transcriber = create_whisper_transcriber(&config.whisper)?;
+            if config.whisper.streaming {
+                if config.whisper.effective_mode() != WhisperMode::Local {
+                    tracing::warn!(
+                        "[whisper] streaming requires mode = \"local\"; ignoring streaming"
+                    );
+                    Ok(transcriber)
+                } else {
+                    Ok(Box::new(SlidingWindowStreamingTranscriber::new(
+                        Arc::from(transcriber),
+                        sliding_window_config_from_whisper(config),
+                    )))
+                }
+            } else {
+                Ok(transcriber)
+            }
+        }
         #[cfg(feature = "parakeet")]
         TranscriptionEngine::Parakeet => {
             let parakeet_config = config.parakeet.as_ref().ok_or_else(|| {
@@ -268,6 +294,28 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
             "Cohere engine requested but voxtype was not compiled with --features cohere"
                 .to_string(),
         )),
+        #[cfg(feature = "openvino")]
+        TranscriptionEngine::OpenVino => {
+            let cfg = config.openvino.as_ref().ok_or_else(|| {
+                TranscribeError::InitFailed(
+                    "OpenVINO engine selected but [openvino] config section is missing".to_string(),
+                )
+            })?;
+            let transcriber = openvino::OpenVinoTranscriber::new(cfg)?;
+            if cfg.streaming {
+                Ok(Box::new(SlidingWindowStreamingTranscriber::new(
+                    Arc::from(Box::new(transcriber) as Box<dyn Transcriber>),
+                    sliding_window_config_from_openvino(config, cfg),
+                )))
+            } else {
+                Ok(Box::new(transcriber))
+            }
+        }
+        #[cfg(not(feature = "openvino"))]
+        TranscriptionEngine::OpenVino => Err(TranscribeError::InitFailed(
+            "OpenVINO engine requested but voxtype was not compiled with --features openvino"
+                .to_string(),
+        )),
         TranscriptionEngine::Soniox => {
             let cfg = config.soniox.as_ref().ok_or_else(|| {
                 TranscribeError::InitFailed(
@@ -284,6 +332,37 @@ pub fn create_whisper_transcriber(
     config: &WhisperConfig,
 ) -> Result<Box<dyn Transcriber>, TranscribeError> {
     create_transcriber_with_config_path(config, None)
+}
+
+/// Build the sliding-window engine config from `[whisper]` streaming settings.
+fn sliding_window_config_from_whisper(config: &Config) -> SlidingWindowConfig {
+    SlidingWindowConfig {
+        interval_s: config.whisper.streaming_interval_secs as f64,
+        max_buffer_s: config.whisper.streaming_max_buffer_secs,
+        // Streaming audio arrives at the configured [audio] sample rate.
+        sample_rate: config.audio.sample_rate,
+        min_speech_rms: config.whisper.streaming_min_speech_rms,
+        min_audio_s: config.whisper.streaming_min_audio_secs,
+        partial_min_words: config.whisper.streaming_partial_min_words,
+        type_partials: config.whisper.streaming_type_partials,
+    }
+}
+
+/// Build the sliding-window engine config from `[openvino]` streaming settings.
+#[cfg(feature = "openvino")]
+fn sliding_window_config_from_openvino(
+    config: &Config,
+    openvino: &OpenVinoConfig,
+) -> SlidingWindowConfig {
+    SlidingWindowConfig {
+        interval_s: openvino.streaming_interval_secs as f64,
+        max_buffer_s: openvino.streaming_max_buffer_secs,
+        sample_rate: config.audio.sample_rate,
+        min_speech_rms: openvino.streaming_min_speech_rms,
+        min_audio_s: openvino.streaming_min_audio_secs,
+        partial_min_words: openvino.streaming_partial_min_words,
+        type_partials: openvino.streaming_type_partials,
+    }
 }
 
 /// Factory function to create transcriber with optional config path

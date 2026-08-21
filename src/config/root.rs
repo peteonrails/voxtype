@@ -1,7 +1,8 @@
 use super::{
     AudioConfig, CohereConfig, DolphinConfig, HotkeyConfig, MeetingConfig, MoonshineConfig,
-    OmnilingualConfig, OutputConfig, ParaformerConfig, ParakeetConfig, Profile, SenseVoiceConfig,
-    SonioxConfig, StatusConfig, TextConfig, TranscriptionEngine, VadConfig, WhisperConfig,
+    OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig, ParakeetConfig, Profile,
+    SenseVoiceConfig, SonioxConfig, StatusConfig, TextConfig, TranscriptionEngine, VadConfig,
+    WhisperConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -55,6 +56,10 @@ pub struct Config {
     /// Cohere Transcribe configuration (optional, only used when engine = "cohere")
     #[serde(default)]
     pub cohere: Option<CohereConfig>,
+
+    /// OpenVINO GenAI configuration (optional, only used when engine = "openvino")
+    #[serde(default)]
+    pub openvino: Option<OpenVinoConfig>,
 
     /// Soniox cloud streaming WebSocket STT configuration
     /// (optional, only used when engine = "soniox")
@@ -112,6 +117,7 @@ impl Default for Config {
             dolphin: None,
             omnilingual: None,
             cohere: None,
+            openvino: None,
             soniox: None,
             text: TextConfig::default(),
             vad: VadConfig::default(),
@@ -146,6 +152,7 @@ impl Config {
                 .as_ref()
                 .map(|s| s.streaming && !s.async_api)
                 .unwrap_or(false),
+            TranscriptionEngine::Whisper => self.whisper.streaming,
             _ => false,
         }
     }
@@ -338,6 +345,11 @@ impl Config {
                 .as_ref()
                 .map(|c| c.on_demand_loading)
                 .unwrap_or(false),
+            TranscriptionEngine::OpenVino => self
+                .openvino
+                .as_ref()
+                .map(|o| o.on_demand_loading)
+                .unwrap_or(false),
             // Soniox is a cloud backend; nothing to load on demand.
             TranscriptionEngine::Soniox => false,
         }
@@ -382,6 +394,11 @@ impl Config {
                 .as_ref()
                 .map(|c| c.model.as_str())
                 .unwrap_or("cohere (not configured)"),
+            TranscriptionEngine::OpenVino => self
+                .openvino
+                .as_ref()
+                .map(|o| o.model.as_str())
+                .unwrap_or("openvino (not configured)"),
             TranscriptionEngine::Soniox => self
                 .soniox
                 .as_ref()

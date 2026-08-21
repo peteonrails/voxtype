@@ -80,6 +80,7 @@ pub fn engine_feature_compiled(name: &str) -> bool {
         TranscriptionEngine::Dolphin => cfg!(feature = "dolphin"),
         TranscriptionEngine::Omnilingual => cfg!(feature = "omnilingual"),
         TranscriptionEngine::Cohere => cfg!(feature = "cohere"),
+        TranscriptionEngine::OpenVino => cfg!(feature = "openvino"),
     }
 }
 

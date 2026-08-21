@@ -1205,6 +1205,7 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox => {
                     if let Some(ref t) = transcriber_preloaded {
                         Ok(t.clone())
@@ -2587,10 +2588,25 @@ impl Daemon {
             tracing::info!("Loading transcription model: {}", self.config.model_name());
             match self.config.engine {
                 crate::config::TranscriptionEngine::Whisper => {
-                    // Use model manager for Whisper
-                    if let Err(e) = model_manager.preload_primary() {
-                        tracing::error!("Failed to preload model: {}", e);
-                        return Err(crate::error::VoxtypeError::Transcribe(e));
+                    if self.config.whisper.streaming {
+                        // Streaming needs the transcriber in `transcriber_preloaded`
+                        // so try_start_streaming can find it. The factory returns
+                        // the sliding-window wrapper when [whisper] streaming = true.
+                        if self.config.whisper.on_demand_loading {
+                            tracing::warn!(
+                                "[whisper] streaming requires on_demand_loading = false; \
+                                 streaming will be unavailable"
+                            );
+                        }
+                        transcriber_preloaded = Some(Arc::from(
+                            crate::transcribe::create_transcriber(&self.config)?,
+                        ));
+                    } else {
+                        // Use model manager for Whisper
+                        if let Err(e) = model_manager.preload_primary() {
+                            tracing::error!("Failed to preload model: {}", e);
+                            return Err(crate::error::VoxtypeError::Transcribe(e));
+                        }
                     }
                 }
                 crate::config::TranscriptionEngine::Parakeet
@@ -2600,6 +2616,7 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox => {
                     // Non-Whisper engines do their own setup; Soniox just validates
                     // API key + endpoint at construction (no model to download).
@@ -2720,6 +2737,7 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox => {
                                             let config = self.config.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
@@ -2750,6 +2768,7 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox => {
                                             if let Some(ref t) = transcriber_preloaded {
                                                 let transcriber = t.clone();
@@ -2933,6 +2952,7 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox => {
                                             let config = self.config.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
@@ -2963,6 +2983,7 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox => {
                                             if let Some(ref t) = transcriber_preloaded {
                                                 let transcriber = t.clone();
@@ -3409,6 +3430,7 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox => {
                                     let config = self.config.clone();
                                     self.model_load_task = Some(tokio::task::spawn_blocking(move || {
@@ -3438,6 +3460,7 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Dolphin
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox => {
                                     if let Some(ref t) = transcriber_preloaded {
                                         let transcriber = t.clone();
