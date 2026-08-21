@@ -1589,11 +1589,11 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     }
 
     // --- OpenVINO Section ---
+    // No AMD_CPU_ONLY_TAG here: that tag flags ONNX graphs the MIGraphX EP
+    // can't compile on AMD GPUs. OpenVINO is an Intel-only backend (NPU/GPU/
+    // CPU via Intel's own runtime, not ONNX/MIGraphX) and is unaffected.
     let openvino_offset = cohere_offset + available_count(cohere_available, cohere_count);
-    println!(
-        "\n--- OpenVINO GenAI Whisper (Intel NPU/GPU/CPU){} ---\n",
-        AMD_CPU_ONLY_TAG
-    );
+    println!("\n--- OpenVINO GenAI Whisper (Intel NPU/GPU/CPU) ---\n");
 
     if openvino_available {
         for (i, model) in OPENVINO_MODELS.iter().enumerate() {
@@ -2574,6 +2574,11 @@ pub fn validate_openvino_model(path: &Path) -> anyhow::Result<()> {
 /// True if `name` is a known OpenVINO model short name.
 pub fn is_openvino_model(name: &str) -> bool {
     OPENVINO_MODELS.iter().any(|m| m.name == name)
+}
+
+/// Get list of valid OpenVINO model names
+pub fn valid_openvino_model_names() -> Vec<&'static str> {
+    OPENVINO_MODELS.iter().map(|m| m.name).collect()
 }
 
 /// Download an OpenVINO IR whisper model from HuggingFace into
