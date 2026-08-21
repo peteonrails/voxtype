@@ -398,7 +398,7 @@ pub fn create_output_chain_with_override(
             }
         }
         crate::config::OutputMode::Paste => {
-            // Only paste mode (no fallback as requested)
+            // Paste mode: clipboard + simulated paste keystroke.
             chain.push(Box::new(paste::PasteOutput::new(
                 config.auto_submit,
                 config.append_text.clone(),
@@ -408,6 +408,28 @@ pub fn create_output_chain_with_override(
                 config.restore_clipboard,
                 config.restore_clipboard_delay_ms,
             )));
+
+            // The modifier-release guard (wait_for_modifier_release) skips
+            // keystroke-synthesizing methods -- including paste -- when a
+            // modifier is still held after the timeout, falling through to
+            // clipboard-only methods. Without a clipboard fallback here the
+            // transcription would be dropped entirely even though the user is
+            // notified that it was "copied to clipboard". Mirror Type mode's
+            // fallback_to_clipboard behavior so the text still reaches the
+            // user's clipboard.
+            #[cfg(target_os = "macos")]
+            if config.fallback_to_clipboard {
+                chain.push(Box::new(pbcopy::PbcopyOutput::new(false)));
+            }
+            #[cfg(not(target_os = "macos"))]
+            if config.fallback_to_clipboard {
+                chain.push(Box::new(clipboard::ClipboardOutput::new(
+                    config.append_text.clone(),
+                )));
+                chain.push(Box::new(xclip::XclipOutput::new(
+                    config.append_text.clone(),
+                )));
+            }
         }
         crate::config::OutputMode::File => {
             // File output is handled in the daemon before reaching the output chain.
@@ -650,6 +672,39 @@ mod tests {
         std::env::remove_var("YDOTOOL_SOCKET");
 
         assert_eq!(result, Some(sock_path));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn test_paste_chain_includes_clipboard_fallback_when_enabled() {
+        let mut config = OutputConfig::default();
+        config.mode = crate::config::OutputMode::Paste;
+        config.fallback_to_clipboard = true;
+        let names: Vec<&str> = create_output_chain(&config)
+            .iter()
+            .map(|o| o.name())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "paste (clipboard + keystroke)",
+                "clipboard (wl-copy)",
+                "clipboard (xclip/xsel)",
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn test_paste_chain_no_clipboard_fallback_when_disabled() {
+        let mut config = OutputConfig::default();
+        config.mode = crate::config::OutputMode::Paste;
+        config.fallback_to_clipboard = false;
+        let names: Vec<&str> = create_output_chain(&config)
+            .iter()
+            .map(|o| o.name())
+            .collect();
+        assert_eq!(names, vec!["paste (clipboard + keystroke)"]);
     }
 
     #[test]
