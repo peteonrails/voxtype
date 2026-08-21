@@ -344,8 +344,16 @@ impl Session {
                     let last_emitted = self.full_text_parts.last();
                     let not_repeat = last_emitted.map(|s| s != &new).unwrap_or(true);
                     if !new.is_empty() && not_repeat {
-                        self.full_text_parts.push(new.clone());
-                        deltas.push(new);
+                        // `new` is a bare word-join with no leading space.
+                        // The daemon types deltas verbatim at the cursor, so
+                        // separate it from whatever was already committed.
+                        let typed = if self.full_text_parts.is_empty() {
+                            new.clone()
+                        } else {
+                            format!(" {new}")
+                        };
+                        self.full_text_parts.push(new);
+                        deltas.push(typed);
                         // Re-diff so last_delta_words reflects the remaining
                         // unconfirmed words only.
                         let already_emitted = self.full_text_parts.join(" ");
@@ -367,9 +375,17 @@ impl Session {
                         let last_emitted = self.full_text_parts.last();
                         let not_repeat = last_emitted.map(|s| s != &new).unwrap_or(true);
                         if !new.is_empty() && not_repeat {
-                            self.full_text_parts.push(new.clone());
+                            // `new` is a bare word-join with no leading space.
+                            // The daemon types deltas verbatim at the cursor,
+                            // so separate it from whatever was already committed.
+                            let typed = if self.full_text_parts.is_empty() {
+                                new.clone()
+                            } else {
+                                format!(" {new}")
+                            };
+                            self.full_text_parts.push(new);
                             self.confirmed_words.extend(confirmed_new.iter().cloned());
-                            deltas.push(new);
+                            deltas.push(typed);
                         }
                     }
                 }
@@ -394,8 +410,15 @@ impl Session {
         if delta.is_empty() {
             None
         } else {
-            self.full_text_parts.push(delta.clone());
-            Some(delta)
+            // `delta` has no leading space (see `on_tick`); separate it from
+            // whatever was already committed before typing it at the cursor.
+            let typed = if self.full_text_parts.is_empty() {
+                delta.clone()
+            } else {
+                format!(" {delta}")
+            };
+            self.full_text_parts.push(delta);
+            Some(typed)
         }
     }
 }
@@ -686,12 +709,15 @@ mod tests {
         assert!(events.len() >= 3, "expected partials + final + ended");
 
         let parts = emitted_text(&events);
-        // Concatenated deltas reproduce the full transcript.
-        assert_eq!(parts.join(" "), "alpha beta gamma delta");
+        // Deltas are typed verbatim at the cursor (see `on_tick`), each
+        // carrying its own separating leading space — so plain
+        // concatenation, not `join(" ")`, is what the daemon actually
+        // produces and what must reproduce the full transcript.
+        assert_eq!(parts.concat(), "alpha beta gamma delta");
         // Each delta is strictly new text — no duplicates at boundaries.
         for i in 1..parts.len() {
-            let tail = parts[..i].join(" ");
-            assert!(!tail.contains(parts[i]), "repeated text: {parts:?}");
+            let tail = parts[..i].concat();
+            assert!(!tail.contains(parts[i].trim()), "repeated text: {parts:?}");
         }
     }
 
@@ -702,7 +728,7 @@ mod tests {
         let events = run_session(cfg).await;
 
         let parts = emitted_text(&events);
-        assert_eq!(parts.join(" "), "alpha beta gamma delta");
+        assert_eq!(parts.concat(), "alpha beta gamma delta");
         assert!(events
             .iter()
             .all(|ev| !matches!(ev, StreamingEvent::Partial { .. })));
