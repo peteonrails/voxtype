@@ -440,6 +440,31 @@ fn reset_for_device_change(
     was_pressed.then_some(HotkeyEvent::Released)
 }
 
+/// Hotkey state transition for a target-key event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HotkeyTransition {
+    /// The hotkey key was pressed with the required modifiers held.
+    Pressed,
+    /// The hotkey key was released while the hotkey was engaged.
+    Released,
+}
+
+/// Classify a target-key event as a hotkey press, release, or neither.
+///
+/// Presses engage only when the required modifiers are currently held.
+/// Releases always disengage an engaged hotkey — even when a modifier was
+/// already released. Lifting a chord (e.g. Meta+V) commonly delivers the
+/// modifier's release event before the hotkey key's; gating the release on
+/// the modifier state would leave the recording stuck until the next
+/// engaged press or the recording-length cap.
+fn hotkey_event(value: i32, is_pressed: bool, modifiers_satisfied: bool) -> Option<HotkeyTransition> {
+    match value {
+        1 if !is_pressed && modifiers_satisfied => Some(HotkeyTransition::Pressed),
+        0 if is_pressed => Some(HotkeyTransition::Released),
+        _ => None,
+    }
+}
+
 /// Main listener loop running in a blocking task
 #[allow(clippy::too_many_arguments)]
 fn evdev_listener_loop(
@@ -608,56 +633,52 @@ fn evdev_listener_loop(
                 let modifiers_satisfied =
                     modifier_keys.iter().all(|m| active_modifiers.contains(m));
 
-                if modifiers_satisfied {
-                    match value {
-                        1 if !is_pressed => {
-                            // Key press (not repeat)
-                            is_pressed = true;
+                match hotkey_event(value, is_pressed, modifiers_satisfied) {
+                    Some(HotkeyTransition::Pressed) => {
+                        // Key press (not repeat)
+                        is_pressed = true;
 
-                            // Determine model override based on model_modifier state
-                            let model_override = if model_modifier_held {
-                                secondary_model.clone()
-                            } else {
-                                None
-                            };
+                        // Determine model override based on model_modifier state
+                        let model_override = if model_modifier_held {
+                            secondary_model.clone()
+                        } else {
+                            None
+                        };
 
-                            // Determine profile override from held profile modifier keys
-                            // If multiple are held, the most recently pressed wins
-                            let profile_override = last_pressed_profile.clone();
+                        // Determine profile override from held profile modifier keys
+                        // If multiple are held, the most recently pressed wins
+                        let profile_override = last_pressed_profile.clone();
 
-                            if model_override.is_some() || profile_override.is_some() {
-                                tracing::debug!(
-                                    "Hotkey pressed with model_override: {:?}, profile_override: {:?}",
-                                    model_override,
-                                    profile_override
-                                );
-                            } else {
-                                tracing::debug!("Hotkey pressed");
-                            }
-
-                            if tx
-                                .blocking_send(HotkeyEvent::Pressed {
-                                    model_override,
-                                    profile_override,
-                                })
-                                .is_err()
-                            {
-                                return Ok(()); // Channel closed
-                            }
+                        if model_override.is_some() || profile_override.is_some() {
+                            tracing::debug!(
+                                "Hotkey pressed with model_override: {:?}, profile_override: {:?}",
+                                model_override,
+                                profile_override
+                            );
+                        } else {
+                            tracing::debug!("Hotkey pressed");
                         }
-                        0 if is_pressed => {
-                            // Key release
-                            is_pressed = false;
-                            tracing::debug!("Hotkey released");
-                            if tx.blocking_send(HotkeyEvent::Released).is_err() {
-                                return Ok(()); // Channel closed
-                            }
+
+                        if tx
+                            .blocking_send(HotkeyEvent::Pressed {
+                                model_override,
+                                profile_override,
+                            })
+                            .is_err()
+                        {
+                            return Ok(()); // Channel closed
                         }
-                        2 => {
-                            // Key repeat - ignore
-                        }
-                        _ => {}
                     }
+                    Some(HotkeyTransition::Released) => {
+                        // Key release — honored regardless of the current
+                        // modifier state (see `hotkey_event`).
+                        is_pressed = false;
+                        tracing::debug!("Hotkey released");
+                        if tx.blocking_send(HotkeyEvent::Released).is_err() {
+                            return Ok(()); // Channel closed
+                        }
+                    }
+                    None => {}
                 }
             }
         }
@@ -1169,6 +1190,47 @@ mod tests {
                 "missing recovered press for {key:?}: {recovered:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_hotkey_event_press_requires_modifiers() {
+        assert_eq!(
+            hotkey_event(1, false, true),
+            Some(HotkeyTransition::Pressed)
+        );
+        // Pressing the hotkey key without the required modifiers does nothing.
+        assert_eq!(hotkey_event(1, false, false), None);
+        // A press while already engaged (repeat key-down) does nothing.
+        assert_eq!(hotkey_event(1, true, true), None);
+    }
+
+    #[test]
+    fn test_hotkey_event_repeat_ignored() {
+        assert_eq!(hotkey_event(2, false, true), None);
+        assert_eq!(hotkey_event(2, true, true), None);
+    }
+
+    #[test]
+    fn test_hotkey_event_release_does_not_require_modifiers() {
+        // Normal chord release: modifiers still held.
+        assert_eq!(
+            hotkey_event(0, true, true),
+            Some(HotkeyTransition::Released)
+        );
+        // The fix: release is honored even when the modifier was released
+        // first (common when lifting a chord). Previously this event was
+        // dropped, leaving `is_pressed` true and the recording stuck.
+        assert_eq!(
+            hotkey_event(0, true, false),
+            Some(HotkeyTransition::Released)
+        );
+    }
+
+    #[test]
+    fn test_hotkey_event_stray_release_ignored() {
+        // A release with no engaged hotkey does nothing.
+        assert_eq!(hotkey_event(0, false, true), None);
+        assert_eq!(hotkey_event(0, false, false), None);
     }
 
     #[test]
