@@ -12,7 +12,7 @@
 use super::Transcriber;
 use crate::config::OpenVinoConfig;
 use crate::error::TranscribeError;
-use openvino_genai::{WhisperGenerationConfig, WhisperPipeline};
+use openvino_genai::WhisperPipeline;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -25,6 +25,14 @@ pub struct OpenVinoTranscriber {
     device: String,
     /// Language passed to the generation config.
     language: String,
+    /// True for English-only checkpoints (tiny.en/base.en/small.en/...).
+    /// Their vocabulary has no task/language special tokens at all, so
+    /// calling `set_language`/`set_task` on them looks up a token that
+    /// doesn't exist. CPU/GPU tolerate this (silently ignored); the NPU
+    /// backend throws (surfaces as a bare "unknown exception" through the
+    /// C API — this is what nova-npu's OpenVINOTranscriber works around
+    /// by skipping both calls for `.en` models; ported the same rule).
+    english_only: bool,
 }
 
 impl OpenVinoTranscriber {
@@ -73,6 +81,7 @@ impl OpenVinoTranscriber {
             pipeline: Mutex::new(pipeline),
             device: config.device.clone(),
             language: config.language.clone(),
+            english_only: config.model.ends_with(".en"),
         })
     }
 }
@@ -83,15 +92,25 @@ impl Transcriber for OpenVinoTranscriber {
             TranscribeError::InferenceFailed("OpenVINO pipeline lock poisoned".to_string())
         })?;
 
-        let mut gen_cfg = WhisperGenerationConfig::new().map_err(|e| {
+        // Start from the pipeline's OWN generation config (derived from the
+        // loaded model's generation_config.json: EOS/decoder-start token
+        // ids, is_multilingual, etc.), not a bare `::new()` default — a
+        // disconnected default config is missing that model-specific state
+        // entirely, which is what the official C sample's
+        // `ov_genai_whisper_pipeline_get_generation_config` pattern avoids.
+        let mut gen_cfg = pipeline.get_generation_config().map_err(|e| {
             TranscribeError::InferenceFailed(format!("OpenVINO generation config: {}", e))
         })?;
-        gen_cfg.set_language(&self.language).map_err(|e| {
-            TranscribeError::InferenceFailed(format!("OpenVINO set_language: {}", e))
-        })?;
-        gen_cfg
-            .set_task("transcribe")
-            .map_err(|e| TranscribeError::InferenceFailed(format!("OpenVINO set_task: {}", e)))?;
+        // English-only checkpoints have no task/language tokens in their
+        // vocabulary at all — see the `english_only` field doc.
+        if !self.english_only {
+            gen_cfg.set_language(&self.language).map_err(|e| {
+                TranscribeError::InferenceFailed(format!("OpenVINO set_language: {}", e))
+            })?;
+            gen_cfg.set_task("transcribe").map_err(|e| {
+                TranscribeError::InferenceFailed(format!("OpenVINO set_task: {}", e))
+            })?;
+        }
 
         let results = pipeline.generate(samples, Some(&gen_cfg)).map_err(|e| {
             TranscribeError::InferenceFailed(format!("OpenVINO generate failed: {}", e))

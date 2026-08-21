@@ -153,6 +153,9 @@ impl Config {
                 .map(|s| s.streaming && !s.async_api)
                 .unwrap_or(false),
             TranscriptionEngine::Whisper => self.whisper.streaming,
+            TranscriptionEngine::OpenVino => {
+                self.openvino.as_ref().map(|o| o.streaming).unwrap_or(false)
+            }
             _ => false,
         }
     }
