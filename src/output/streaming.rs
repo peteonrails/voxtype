@@ -132,6 +132,17 @@ impl StreamingSession {
         self.partial.clear();
     }
 
+    /// File-output counterpart to `type_partial_delta`: accumulate the
+    /// delta into the partial buffer without typing anything. File-mode
+    /// sessions have no cursor to type into, but the delta still has to
+    /// be held until the next commit — partials are deltas, not a
+    /// cumulative transcript (see `type_partial_delta`), so dropping
+    /// this would silently lose whatever text was only ever seen as an
+    /// unfinalized partial.
+    pub fn observe_partial_delta(&mut self, new_partial: &str) {
+        self.partial.push_str(new_partial);
+    }
+
     /// Current partial buffer.
     pub fn partial(&self) -> &str {
         &self.partial
@@ -199,6 +210,20 @@ impl StreamingSession {
         Ok(())
     }
 
+    /// File-output counterpart to `commit_segment`: same finalized_text
+    /// bookkeeping, but skips `output_with_fallback` entirely — there's
+    /// no cursor/focused window to type into when the session's target
+    /// is a file.
+    pub fn commit_segment_silent(&mut self, text: &str) {
+        if text.is_empty() {
+            self.clear_partial();
+            return;
+        }
+        let finalized_tail = format!("{}{}", self.partial, text);
+        self.finalized_text.push_str(&finalized_tail);
+        self.clear_partial();
+    }
+
     /// Backspace `backspace` chars then commit `text`. Used by streaming
     /// backends that revise the previously-typed partial tail when
     /// finalizing (e.g. Soniox punctuation flips).
@@ -255,6 +280,18 @@ impl StreamingSession {
         }
         self.clear_partial();
         Ok(())
+    }
+
+    /// File-output counterpart to `replace_and_commit`: no backspaces —
+    /// there's nothing typed to revise — just fold the (now-superseded)
+    /// partial tail plus `text` into `finalized_text`, matching what the
+    /// typed path's accounting would produce.
+    pub fn replace_and_commit_silent(&mut self, text: &str) {
+        if !text.is_empty() {
+            let finalized_tail = format!("{}{}", self.partial, text);
+            self.finalized_text.push_str(&finalized_tail);
+        }
+        self.clear_partial();
     }
 
     /// Best-effort rewind: emit `typed_chars` BackSpace key events via

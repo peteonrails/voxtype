@@ -877,6 +877,38 @@ impl Daemon {
         }
     }
 
+    /// Resolve the file-output target path for a recording, if any.
+    ///
+    /// Priority: 1. CLI `--file=path`, 2. CLI `--file` (config's
+    /// `file_path`), 3. profile `output_mode = "file"`, 4. config
+    /// `mode = "file"`. Shared by the classic (batch) transcription path
+    /// and the streaming path so a `--file=` override behaves the same
+    /// regardless of which one `[whisper] streaming` selects — before
+    /// this was factored out, only the classic path consulted it, so a
+    /// streaming session silently ignored `--file=` and typed at the
+    /// cursor instead.
+    fn resolve_file_output_path(
+        &self,
+        output_override: &Option<OutputOverride>,
+        profile_output_mode: Option<OutputMode>,
+    ) -> Option<PathBuf> {
+        match output_override {
+            // CLI --file=path.txt
+            Some(OutputOverride::FileWithPath(path)) => Some(path.clone()),
+            // CLI --file (no path) - use config's file_path
+            Some(OutputOverride::Mode(OutputMode::File)) => self.config.output.file_path.clone(),
+            // Profile specifies file mode
+            None if profile_output_mode == Some(OutputMode::File) => {
+                self.config.output.file_path.clone()
+            }
+            // Config mode = "file" (no CLI override)
+            None if self.config.output.mode == OutputMode::File => {
+                self.config.output.file_path.clone()
+            }
+            _ => None,
+        }
+    }
+
     /// Attempt to start a streaming transcription session.
     ///
     /// Returns `true` and populates the streaming locals on success. Returns
@@ -924,6 +956,14 @@ impl Daemon {
             }
         };
 
+        // A `--file=path` (or config/`mode = "file"`) override means this
+        // session accumulates into `finalized_text` instead of typing —
+        // see the Partial/Final/Replace arms in the event pump, gated on
+        // `file_output_path`. The chain is still built normally; it's
+        // simply unused for a file-output session.
+        let output_override = read_output_mode_override();
+        let file_output_path = self.resolve_file_output_path(&output_override, None);
+
         *audio_capture = Some(capture);
         *streaming_handle = Some(handle);
         *streaming_session = Some(StreamingSession::new());
@@ -934,6 +974,7 @@ impl Daemon {
             partial_buffer: String::new(),
             finalized_text: String::new(),
             typed_chars: 0,
+            file_output_path,
         };
         self.update_state("streaming");
         self.play_feedback(SoundEvent::RecordingStart);
@@ -1026,6 +1067,52 @@ impl Daemon {
             let _ = h.task.await;
         }
         self.stop_streaming_drain_pump();
+
+        // File-output sessions (`--file=path`) never typed anything as
+        // they went — see the event pump's `file_output` branch — so the
+        // accumulated text only exists in the session. Write it out now,
+        // before the session is dropped below. Mirrors the classic
+        // (non-streaming) path's file handling, including skipping
+        // post_output_command: file mode is a batch dump, not a
+        // live-typing operation the hook is meant to wrap around.
+        let file_output_path = match &state {
+            State::Streaming {
+                file_output_path, ..
+            } => file_output_path.clone(),
+            _ => None,
+        };
+        if let Some(output_path) = file_output_path {
+            let final_text = streaming_session
+                .as_ref()
+                .map(|s| s.finalized_text().to_string())
+                .unwrap_or_default();
+            *streaming_session = None;
+            *streaming_chain = None;
+
+            let file_mode = &self.config.output.file_mode;
+            match write_transcription_to_file(&output_path, &final_text, file_mode).await {
+                Ok(()) => {
+                    let mode_str = match file_mode {
+                        FileMode::Overwrite => "wrote",
+                        FileMode::Append => "appended",
+                    };
+                    tracing::info!("{} streamed transcription to {:?}", mode_str, output_path);
+                    self.play_feedback(SoundEvent::TranscriptionComplete);
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to write streamed transcription to {:?}: {}",
+                        output_path,
+                        e
+                    );
+                }
+            }
+
+            *state = State::Idle;
+            self.update_state("idle");
+            return;
+        }
+
         *streaming_session = None;
         *streaming_chain = None;
 
@@ -2123,26 +2210,8 @@ impl Daemon {
                     let profile_output_mode = active_profile.and_then(|p| p.output_mode.clone());
 
                     // Determine file output path (if file mode)
-                    // Priority: 1. CLI --file=path, 2. CLI --file (config path), 3. profile output_mode, 4. config mode=file
-                    let file_output_path: Option<PathBuf> = match &output_override {
-                        Some(OutputOverride::FileWithPath(path)) => {
-                            // CLI --file=path.txt
-                            Some(path.clone())
-                        }
-                        Some(OutputOverride::Mode(OutputMode::File)) => {
-                            // CLI --file (no path) - use config's file_path
-                            self.config.output.file_path.clone()
-                        }
-                        None if profile_output_mode == Some(OutputMode::File) => {
-                            // Profile specifies file mode
-                            self.config.output.file_path.clone()
-                        }
-                        None if self.config.output.mode == OutputMode::File => {
-                            // Config mode = "file" (no CLI override)
-                            self.config.output.file_path.clone()
-                        }
-                        _ => None,
-                    };
+                    let file_output_path = self
+                        .resolve_file_output_path(&output_override, profile_output_mode.clone());
 
                     if let Some(output_path) = file_output_path {
                         *state = State::Outputting {
@@ -3529,16 +3598,34 @@ impl Daemon {
                 _ = sigusr2.recv() => {
                     tracing::debug!("Received SIGUSR2 (stop recording)");
                     if state.is_streaming() {
-                        tracing::info!("SIGUSR2 stop while streaming; closing capture and disowning session");
+                        // File-output sessions (`--file=path`) have nowhere
+                        // to leak into — they accumulate text instead of
+                        // typing it (see the event pump) — so the
+                        // disown-on-SIGUSR2 protection below doesn't apply;
+                        // disowning here would just silently drop whatever
+                        // the backend was still draining, and end_streaming
+                        // would then write an empty file. Let it drain
+                        // normally so end_streaming can write the real text.
+                        let file_output = matches!(
+                            &state,
+                            State::Streaming { file_output_path: Some(_), .. }
+                        );
+                        if file_output {
+                            tracing::info!("SIGUSR2 stop while streaming (file output); closing capture");
+                        } else {
+                            tracing::info!("SIGUSR2 stop while streaming; closing capture and disowning session");
+                        }
                         self.stop_streaming_capture(&mut audio_capture).await;
-                        // Drop the typing surface synchronously so any
-                        // Final/Partial events the backend emits while
-                        // draining its internal buffer reach the event-pump
-                        // arm with `streaming_session = None` and get
-                        // discarded instead of typed into whatever window
-                        // has focus by then.
-                        streaming_session = None;
-                        streaming_chain = None;
+                        if !file_output {
+                            // Drop the typing surface synchronously so any
+                            // Final/Partial events the backend emits while
+                            // draining its internal buffer reach the event-pump
+                            // arm with `streaming_session = None` and get
+                            // discarded instead of typed into whatever window
+                            // has focus by then.
+                            streaming_session = None;
+                            streaming_chain = None;
+                        }
                     } else if let State::Recording { model_override, .. } = &state {
                         let model_override = model_override.clone();
 
@@ -3617,18 +3704,30 @@ impl Daemon {
                         None => std::future::pending().await,
                     }
                 }, if state.is_streaming() && streaming_handle.is_some() => {
+                    // File-output sessions (`--file=path`) accumulate into
+                    // finalized_text via the `_silent` session methods
+                    // instead of typing through `chain` — there's no
+                    // cursor/focused window to type into, and doing so
+                    // anyway is exactly the leak this branch exists to
+                    // avoid (see the SIGUSR2 handler below).
+                    let file_output = matches!(
+                        &state,
+                        State::Streaming { file_output_path: Some(_), .. }
+                    );
                     match event {
                         Some(StreamingEvent::Partial { text, .. }) => {
-                            if let (Some(s), Some(chain)) =
-                                (streaming_session.as_mut(), streaming_chain.as_ref())
-                            {
-                                if let Err(e) = s.type_partial_delta(
-                                    chain,
-                                    text,
-                                    self.config.output.pre_output_command.as_deref(),
-                                    self.config.output.post_output_command.as_deref(),
-                                ).await {
-                                    tracing::warn!("Streaming partial delta type failed: {}", e);
+                            if let Some(s) = streaming_session.as_mut() {
+                                if file_output {
+                                    s.observe_partial_delta(&text);
+                                } else if let Some(chain) = streaming_chain.as_ref() {
+                                    if let Err(e) = s.type_partial_delta(
+                                        chain,
+                                        text,
+                                        self.config.output.pre_output_command.as_deref(),
+                                        self.config.output.post_output_command.as_deref(),
+                                    ).await {
+                                        tracing::warn!("Streaming partial delta type failed: {}", e);
+                                    }
                                 }
                                 if let State::Streaming { typed_chars, .. } = &mut state {
                                     *typed_chars = s.typed_chars();
@@ -3636,18 +3735,20 @@ impl Daemon {
                             }
                         }
                         Some(StreamingEvent::Final { text, .. }) => {
-                            if let (Some(s), Some(chain)) =
-                                (streaming_session.as_mut(), streaming_chain.as_ref())
-                            {
-                                let pp = self.post_processor.as_ref();
-                                if let Err(e) = s.commit_segment(
-                                    chain,
-                                    &text,
-                                    pp,
-                                    self.config.output.pre_output_command.as_deref(),
-                                    self.config.output.post_output_command.as_deref(),
-                                ).await {
-                                    tracing::error!("Streaming commit_segment failed: {}", e);
+                            if let Some(s) = streaming_session.as_mut() {
+                                if file_output {
+                                    s.commit_segment_silent(&text);
+                                } else if let Some(chain) = streaming_chain.as_ref() {
+                                    let pp = self.post_processor.as_ref();
+                                    if let Err(e) = s.commit_segment(
+                                        chain,
+                                        &text,
+                                        pp,
+                                        self.config.output.pre_output_command.as_deref(),
+                                        self.config.output.post_output_command.as_deref(),
+                                    ).await {
+                                        tracing::error!("Streaming commit_segment failed: {}", e);
+                                    }
                                 }
                                 // Mirror typed_chars onto the state for cancel-rewind.
                                 if let State::Streaming { typed_chars, finalized_text, .. } = &mut state {
@@ -3658,17 +3759,19 @@ impl Daemon {
                             }
                         }
                         Some(StreamingEvent::Replace { backspace, text, .. }) => {
-                            if let (Some(s), Some(chain)) =
-                                (streaming_session.as_mut(), streaming_chain.as_ref())
-                            {
-                                if let Err(e) = s.replace_and_commit(
-                                    chain,
-                                    backspace,
-                                    &text,
-                                    self.config.output.pre_output_command.as_deref(),
-                                    self.config.output.post_output_command.as_deref(),
-                                ).await {
-                                    tracing::error!("Streaming replace_and_commit failed: {}", e);
+                            if let Some(s) = streaming_session.as_mut() {
+                                if file_output {
+                                    s.replace_and_commit_silent(&text);
+                                } else if let Some(chain) = streaming_chain.as_ref() {
+                                    if let Err(e) = s.replace_and_commit(
+                                        chain,
+                                        backspace,
+                                        &text,
+                                        self.config.output.pre_output_command.as_deref(),
+                                        self.config.output.post_output_command.as_deref(),
+                                    ).await {
+                                        tracing::error!("Streaming replace_and_commit failed: {}", e);
+                                    }
                                 }
                                 if let State::Streaming { typed_chars, finalized_text, .. } = &mut state {
                                     *typed_chars = s.typed_chars();
