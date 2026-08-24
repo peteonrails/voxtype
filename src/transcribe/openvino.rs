@@ -16,6 +16,17 @@ use openvino_genai::WhisperPipeline;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+/// Directory OpenVINO persists compiled device blobs to (`CACHE_DIR`
+/// property), so NPU/GPU graph compilation isn't repeated on every
+/// pipeline init. Same `$XDG_CACHE_HOME/voxtype/<name>` convention as the
+/// MIGraphX model cache in `setup/binary.rs`.
+fn openvino_cache_dir() -> PathBuf {
+    dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("voxtype")
+        .join("openvino")
+}
+
 /// OpenVINO GenAI Whisper transcriber.
 pub struct OpenVinoTranscriber {
     /// The GenAI pipeline. `!Sync`, hence the mutex.
@@ -49,7 +60,17 @@ impl OpenVinoTranscriber {
         );
         let start = std::time::Instant::now();
 
-        let pipeline = match WhisperPipeline::new(model_str, &config.device) {
+        // CACHE_DIR persists the device's compiled model blob to disk so
+        // subsequent pipeline inits skip recompilation. This matters most
+        // on NPU (compiling the graph to NPU-ISA) and GPU (OpenCL kernel
+        // compilation) — both are expensive on cold start and otherwise
+        // pay that cost on every daemon restart. CPU accepts the property
+        // too but has little to gain from it (its compile step is cheap).
+        let cache_dir = openvino_cache_dir();
+        let cache_dir_str = cache_dir.to_string_lossy();
+        let props: &[(&str, &str)] = &[("CACHE_DIR", &cache_dir_str)];
+
+        let pipeline = match WhisperPipeline::with_properties(model_str, &config.device, props) {
             Ok(p) => p,
             Err(e) if config.device != "CPU" => {
                 tracing::warn!(
@@ -57,7 +78,7 @@ impl OpenVinoTranscriber {
                     config.device,
                     e
                 );
-                WhisperPipeline::new(model_str, "CPU").map_err(|e2| {
+                WhisperPipeline::with_properties(model_str, "CPU", props).map_err(|e2| {
                     TranscribeError::InitFailed(format!(
                         "OpenVINO pipeline init failed on CPU: {}",
                         e2

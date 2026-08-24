@@ -1431,6 +1431,95 @@ The prebuilt `voxtype-*-onnx-*` release binaries already include `cohere`, so us
 
 ---
 
+## [openvino]
+
+Configuration for the OpenVINO GenAI Whisper speech-to-text engine. This section is only used when `engine = "openvino"`.
+
+Runs Whisper through Intel's OpenVINO GenAI `WhisperPipeline` on the NPU, integrated GPU, or CPU. Automatically falls back to CPU if the requested device fails to initialize. There is no prebuilt binary for this engine — see "Building from Source" below.
+
+### model
+
+**Type:** String
+**Default:** `"base.en"`
+**Required:** No
+
+Model name (looked up under `~/.local/share/voxtype/models/openvino/<name>/`) or an absolute path to an OpenVINO IR directory (`openvino_encoder_model.xml`, `openvino_decoder_model.xml`, ...).
+
+**Available models:** `tiny.en`, `base.en`, `small.en`, `base`, `small`. `.en` variants are English-only, faster, and skip the language/task token setup entirely. Download via `voxtype setup model` or directly:
+
+```bash
+huggingface-cli download OpenVINO/whisper-base.en-int8-ov \
+  --local-dir ~/.local/share/voxtype/models/openvino/base.en
+```
+
+### device
+
+**Type:** String
+**Default:** `"NPU"`
+**Required:** No
+
+Inference device: `"NPU"`, `"GPU"`, or `"CPU"`. Falls back to CPU automatically if the requested device fails to initialize (missing hardware, driver not loaded, etc.) — a bad or unavailable value here degrades rather than crashes.
+
+**Example:**
+```toml
+[openvino]
+device = "GPU"
+```
+
+### language
+
+**Type:** String
+**Default:** `"en"`
+**Required:** No
+
+Language for transcription. Ignored for `.en` model checkpoints, whose vocabulary has no task/language tokens at all.
+
+### on_demand_loading
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Same behavior as `[whisper].on_demand_loading`. Combined with the model-blob caching below, on-demand loading is viable on all three devices — a cached reload is well under a second even on NPU/GPU, not just CPU.
+
+### Compiled model caching
+
+Not a config field — always on. OpenVINO compiles the model graph into a device-specific blob before first inference on NPU (graph compiled to NPU-ISA) and GPU (OpenCL kernel compilation), and both are slow: NPU compiled cold in ~17s, GPU in a few seconds, measured on Meteor Lake with `base.en`. voxtype passes `CACHE_DIR` pointing at `$XDG_CACHE_HOME/voxtype/openvino` (falls back to `$HOME/.cache/voxtype/openvino`) so that compiled blob persists to disk and subsequent pipeline inits skip recompilation entirely — cached reload measured at 0.5-0.6s on both NPU and GPU. CPU has no comparable compile step and sees no meaningful change either way.
+
+Safe to delete (`rm -rf ~/.cache/voxtype/openvino`) if you switch models/devices often and want to reclaim the space; it repopulates on the next cold load.
+
+### Complete Example
+
+```toml
+engine = "openvino"
+
+[openvino]
+model = "base.en"
+device = "NPU"
+language = "en"
+on_demand_loading = false
+```
+
+### Building from Source
+
+There is no prebuilt binary for this engine. Source builds need the `openvino` Cargo feature, plus two runtime dependencies that must be installed separately (Arch example):
+
+```bash
+pacman -S openvino openvino-intel-npu-plugin openvino-intel-gpu-plugin \
+          intel-npu-driver level-zero-loader intel-compute-runtime
+```
+
+Those packages provide the OpenVINO runtime and device plugins, but *not* the C API library the Rust crate links against (`libopenvino_genai_c.so`) — that only ships in Intel's separate GenAI SDK archive (not the AUR `openvino-genai-bin` package or the pip wheel, both Python-bindings-only). Download the matching archive from `storage.openvinotoolkit.org/repositories/openvino_genai/packages/<version>/linux/` (version-matched to the installed core `openvino` package) and point `LD_LIBRARY_PATH` at its `runtime/lib/intel64`:
+
+```bash
+cargo build --release --features openvino
+export LD_LIBRARY_PATH=/path/to/openvino_genai_sdk/runtime/lib/intel64
+```
+
+See PR #592 for the full setup story, including two real bugs found only through NPU hardware testing.
+
+---
+
 ## [soniox]
 
 Configuration for the Soniox cloud streaming WebSocket STT engine. This section is only used when `engine = "soniox"`.

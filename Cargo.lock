@@ -3907,8 +3907,7 @@ dependencies = [
 [[package]]
 name = "openvino-finder"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a527e1414732f5bcad520b9febf29fd92ef4bba100588b4591cba8370ab6cbda"
+source = "git+https://github.com/tslove923/openvino-rs?branch=whisper-pipeline-with-properties#8109638cfc78eb16953316627bf194d59ca521ab"
 dependencies = [
  "cfg-if",
  "log",
@@ -3917,8 +3916,7 @@ dependencies = [
 [[package]]
 name = "openvino-genai"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58748dc7c7eb98f2706152eb9e3ce0f4023359e54a9607656d653f8b7af689a8"
+source = "git+https://github.com/tslove923/openvino-rs?branch=whisper-pipeline-with-properties#8109638cfc78eb16953316627bf194d59ca521ab"
 dependencies = [
  "openvino-finder",
  "openvino-genai-sys",
@@ -3927,8 +3925,7 @@ dependencies = [
 [[package]]
 name = "openvino-genai-sys"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce904847ba3b9328e412dd95741e432f75db3177e21742f80b22eb9dcef4cafe"
+source = "git+https://github.com/tslove923/openvino-rs?branch=whisper-pipeline-with-properties#8109638cfc78eb16953316627bf194d59ca521ab"
 dependencies = [
  "env_logger",
  "libloading 0.8.9",
@@ -3939,8 +3936,7 @@ dependencies = [
 [[package]]
 name = "openvino-sys"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "637459f74d22a7bb772af9d3a5df61c88608d8daaa6fefe950849c7aabf891c3"
+source = "git+https://github.com/tslove923/openvino-rs?branch=whisper-pipeline-with-properties#8109638cfc78eb16953316627bf194d59ca521ab"
 dependencies = [
  "env_logger",
  "libloading 0.8.9",
