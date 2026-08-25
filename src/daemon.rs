@@ -611,6 +611,17 @@ pub struct Daemon {
     level_hub: Option<audio::levels::LevelHub>,
     /// Active per-recording level emitter task; aborted when recording stops
     level_emitter_task: Option<tokio::task::JoinHandle<()>>,
+    /// Tracks time-since-last-speech for the active recording, when
+    /// silence-based auto-stop is armed (external-trigger sessions only —
+    /// see `new_speech_tracker`). `None` when idle or not armed for this
+    /// session. Read by the periodic silence check in the main loop.
+    silence_tracker: Option<audio::levels::SpeechTracker>,
+    /// Whether the currently-active recording was started via an external
+    /// trigger (SIGUSR1 / `record start`) rather than the hotkey. Set in
+    /// `start_recording_capture`/`start_streaming_capture`, read (and
+    /// cleared) by `stop_active_recording` to decide whether to run
+    /// `external_trigger_stop_command`.
+    is_external_trigger: bool,
     /// Synthetic zero-level publisher that keeps the OSD visible while a
     /// streaming session is draining server-side after the mic stopped.
     /// Aborted in `end_streaming`.
@@ -747,6 +758,8 @@ impl Daemon {
             last_dictation: None,
             level_hub: None,
             level_emitter_task: None,
+            silence_tracker: None,
+            is_external_trigger: false,
             streaming_drain_pump: None,
             osd_supervisor_task: None,
             model_manager: None,
@@ -837,20 +850,67 @@ impl Daemon {
     /// capture is plumbed into the level hub so the OSD sees audio frames
     /// at 100 Hz during recording. The emitter task is tracked so it can
     /// be cleanly aborted when recording stops.
-    async fn start_recording_capture(&mut self) -> std::result::Result<Box<dyn AudioCapture>, ()> {
+    /// Build a `SpeechTracker` for silence-based auto-stop, if `armed` and
+    /// the feature is configured. `armed` should be `true` only for
+    /// external-trigger (wake-word) sessions — see the doc comment on
+    /// `silence_tracker` — never for hotkey-driven push-to-talk/toggle
+    /// recordings, which already have an explicit user-driven stop.
+    fn new_speech_tracker(&self, armed: bool) -> Option<audio::levels::SpeechTracker> {
+        if !armed {
+            return None;
+        }
+        self.config
+            .audio
+            .external_trigger_silence_timeout_secs
+            .map(|timeout| {
+                tracing::info!(
+                    "Silence auto-stop armed for this session (timeout={:.1}s, threshold={:.1}dBFS)",
+                    timeout,
+                    self.config.audio.external_trigger_speech_threshold_dbfs,
+                );
+                audio::levels::SpeechTracker::new(
+                    self.config.audio.external_trigger_speech_threshold_dbfs,
+                )
+            })
+    }
+
+    /// Start a batch (non-streaming) audio capture. `track_silence` arms
+    /// silence-based auto-stop when the session is external-trigger and the
+    /// feature is configured (see `new_speech_tracker`) — pass `false` for
+    /// hotkey-driven recordings.
+    async fn start_recording_capture(
+        &mut self,
+        track_silence: bool,
+    ) -> std::result::Result<Box<dyn AudioCapture>, ()> {
         match audio::create_capture(&self.config.audio) {
             Ok(mut capture) => match capture.start().await {
                 Ok(chunk_rx) => {
-                    if let Some(hub) = &self.level_hub {
-                        // Cancel any prior emitter (defensive; should be idle).
-                        if let Some(handle) = self.level_emitter_task.take() {
-                            handle.abort();
-                        }
-                        let handle = audio::levels::spawn_emitter(chunk_rx, hub.frame_sink());
+                    self.is_external_trigger = track_silence;
+                    let speech_tracker = self.new_speech_tracker(track_silence);
+                    self.silence_tracker = speech_tracker.clone();
+
+                    // Cancel any prior emitter (defensive; should be idle).
+                    if let Some(handle) = self.level_emitter_task.take() {
+                        handle.abort();
+                    }
+                    let handle = if let Some(hub) = &self.level_hub {
+                        Some(audio::levels::spawn_emitter_with_streaming_tap(
+                            chunk_rx,
+                            hub.frame_sink(),
+                            None,
+                            speech_tracker,
+                        ))
+                    } else {
+                        // No OSD sink. If silence tracking is armed it still
+                        // needs a consumer for chunk_rx — otherwise it'd
+                        // just be dropped, matching the pre-tracking
+                        // behaviour when tracking isn't armed either.
+                        speech_tracker
+                            .map(|tracker| audio::levels::spawn_silence_tracker(chunk_rx, tracker))
+                    };
+                    if let Some(handle) = handle {
                         self.level_emitter_task = Some(handle);
                     }
-                    // If level_hub is None we still return Ok; the chunk_rx
-                    // is dropped here, matching previous behaviour.
                     Ok(capture)
                 }
                 Err(e) => {
@@ -930,6 +990,7 @@ impl Daemon {
         streaming_session: &mut Option<StreamingSession>,
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
         model_override: Option<String>,
+        track_silence: bool,
     ) -> bool {
         let Some(transcriber) = transcriber_preloaded.as_ref() else {
             return false;
@@ -938,7 +999,7 @@ impl Daemon {
             return false;
         }
 
-        let (capture, samples_rx) = match self.start_streaming_capture().await {
+        let (capture, samples_rx) = match self.start_streaming_capture(track_silence).await {
             Ok(v) => v,
             Err(()) => return false,
         };
@@ -997,6 +1058,158 @@ impl Daemon {
         }
 
         true
+    }
+
+    /// End an external-trigger (SIGUSR1 / `record start`) session that is
+    /// being stopped on *any* path — the caller's own `record stop`, the
+    /// silence timeout, the hard `max_duration_secs` cap, or a cancel — so
+    /// the integration that started the recording is told it ended (it may
+    /// not be the one that decided to stop it). Disarms the silence tracker
+    /// and clears `is_external_trigger` unconditionally.
+    ///
+    /// `was_recording` gates whether the hook fires: pass `state.is_recording()`
+    /// captured *before* mutating state. A stale `is_external_trigger` from an
+    /// already-ended session (e.g. one cancelled outside
+    /// `stop_active_recording`) must not fire the hook for an unrelated later
+    /// SIGUSR2 that arrives while idle.
+    async fn end_external_session(&mut self, was_recording: bool) {
+        self.silence_tracker = None;
+        let was_external = self.is_external_trigger && was_recording;
+        self.is_external_trigger = false;
+        if was_external {
+            if let Some(cmd) = self.config.audio.external_trigger_stop_command.clone() {
+                if let Err(e) = output::run_hook(&cmd, "external_trigger_stop").await {
+                    tracing::warn!("{}", e);
+                }
+            }
+        }
+    }
+
+    /// Stop whatever recording is currently active — streaming, batch
+    /// (`State::Recording`), or eager — and hand it off to transcription.
+    /// Shared by the SIGUSR2 handler (explicit `record stop` / compositor
+    /// keybinding) and the silence-timeout auto-stop, which need identical
+    /// per-state-variant stop behavior; the only difference between them is
+    /// *why* the stop fired, not what happens next.
+    #[allow(clippy::too_many_arguments)]
+    async fn stop_active_recording(
+        &mut self,
+        state: &mut State,
+        audio_capture: &mut Option<Box<dyn AudioCapture>>,
+        streaming_session: &mut Option<StreamingSession>,
+        streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
+        eager_transcriber: &mut Option<Arc<dyn Transcriber>>,
+        transcriber_preloaded: &Option<Arc<dyn Transcriber>>,
+    ) {
+        // Notify an external-trigger caller that this session is ending,
+        // regardless of why (stop, silence timeout, hard timeout) — it may
+        // not be the one that decided to stop it — and disarm silence
+        // tracking for the next session. Gated on the recording actually
+        // being active: SIGUSR2 can arrive while idle, and a stale
+        // `is_external_trigger` from an earlier session must not fire the
+        // hook for an unrelated later signal.
+        self.end_external_session(state.is_recording()).await;
+
+        if state.is_streaming() {
+            // File-output sessions (`--file=path`) have nowhere to leak
+            // into — they accumulate text instead of typing it (see the
+            // event pump) — so the disown-on-stop protection below
+            // doesn't apply; disowning here would just silently drop
+            // whatever the backend was still draining, and end_streaming
+            // would then write an empty file. Let it drain normally so
+            // end_streaming can write the real text.
+            let file_output = matches!(
+                &*state,
+                State::Streaming {
+                    file_output_path: Some(_),
+                    ..
+                }
+            );
+            if file_output {
+                tracing::info!("Stopping streaming session (file output); closing capture");
+            } else {
+                tracing::info!("Stopping streaming session; closing capture and disowning session");
+            }
+            self.stop_streaming_capture(audio_capture).await;
+            if !file_output {
+                // Drop the typing surface synchronously so any
+                // Final/Partial events the backend emits while
+                // draining its internal buffer reach the event-pump
+                // arm with `streaming_session = None` and get
+                // discarded instead of typed into whatever window
+                // has focus by then.
+                *streaming_session = None;
+                *streaming_chain = None;
+            }
+        } else if let State::Recording { model_override, .. } = &*state {
+            let model_override = model_override.clone();
+
+            self.start_transcription_task(
+                state,
+                audio_capture,
+                model_override,
+                transcriber_preloaded,
+            )
+            .await;
+        } else if state.is_eager_recording() {
+            // Handle eager recording stop via external trigger - extract model_override first
+            let model_override = match &*state {
+                State::EagerRecording { model_override, .. } => model_override.clone(),
+                _ => None,
+            };
+
+            let duration = state.recording_duration().unwrap_or_default();
+            tracing::info!("Eager recording stopped ({:.1}s)", duration.as_secs_f32());
+
+            // Stop audio capture and get remaining samples
+            if let Some(mut capture) = audio_capture.take() {
+                if let Ok(final_samples) = capture.stop().await {
+                    if let State::EagerRecording {
+                        accumulated_audio, ..
+                    } = state
+                    {
+                        accumulated_audio.extend(final_samples);
+                    }
+                }
+            }
+            self.restore_recording_media();
+
+            self.play_feedback(SoundEvent::RecordingStop);
+
+            if self.config.output.notification.on_recording_stop {
+                send_notification(
+                    "Recording Stopped",
+                    "Transcribing...",
+                    self.config.output.notification.show_engine_icon,
+                    self.config.engine,
+                    &self.config.output.notification.urgency,
+                )
+                .await;
+            }
+
+            let transcriber = match self
+                .get_transcriber_for_recording(model_override.as_deref(), transcriber_preloaded)
+                .await
+            {
+                Ok(t) => t,
+                Err(()) => {
+                    *state = State::Idle;
+                    self.update_state("idle");
+                    return;
+                }
+            };
+
+            self.update_state("transcribing");
+
+            if let Some(text) = self.finish_eager_recording(state, transcriber).await {
+                *state = State::Transcribing { audio: Vec::new() };
+                self.handle_transcription_result(state, Ok(Ok(text))).await;
+            } else {
+                tracing::debug!("Eager recording produced empty result");
+                self.reset_to_idle(state).await;
+            }
+            *eager_transcriber = None;
+        }
     }
 
     /// End a streaming session gracefully (called when the backend emits
@@ -1201,6 +1414,7 @@ impl Daemon {
     /// Returns `(capture, streaming_samples_rx)` on success.
     async fn start_streaming_capture(
         &mut self,
+        track_silence: bool,
     ) -> std::result::Result<(Box<dyn AudioCapture>, tokio::sync::mpsc::Receiver<Vec<f32>>), ()>
     {
         match audio::create_capture(&self.config.audio) {
@@ -1213,17 +1427,31 @@ impl Daemon {
                     if let Some(handle) = self.level_emitter_task.take() {
                         handle.abort();
                     }
+                    self.is_external_trigger = track_silence;
+                    let speech_tracker = self.new_speech_tracker(track_silence);
+                    self.silence_tracker = speech_tracker.clone();
                     let handle = if let Some(hub) = &self.level_hub {
                         audio::levels::spawn_emitter_with_streaming_tap(
                             chunk_rx,
                             hub.frame_sink(),
                             Some(streaming_tx),
+                            speech_tracker,
                         )
                     } else {
-                        // No OSD: still need to drive chunk_rx → streaming_tx.
+                        // No OSD: still need to drive chunk_rx → streaming_tx,
+                        // and optionally bucket for silence tracking too.
                         tokio::spawn(async move {
                             let mut rx = chunk_rx;
+                            let mut bucketer = audio::levels::LevelBucketer::new();
+                            let mut out = Vec::with_capacity(8);
                             while let Some(chunk) = rx.recv().await {
+                                if let Some(tracker) = &speech_tracker {
+                                    out.clear();
+                                    bucketer.push(&chunk, &mut out);
+                                    for frame in out.drain(..) {
+                                        tracker.observe(frame.peak_dbfs).await;
+                                    }
+                                }
                                 if streaming_tx.try_send(chunk).is_err() {
                                     // Backend slow or gone; drop and keep going.
                                 }
@@ -2863,12 +3091,13 @@ impl Daemon {
                                     &mut streaming_session,
                                     &mut streaming_chain,
                                     model_override.clone(),
+                                    false,
                                 ).await {
                                     tracing::info!("Streaming session started (push-to-talk)");
                                 } else {
                                     // Create and start audio capture
                                     tracing::debug!("Creating audio capture with device: {}", self.config.audio.device);
-                                    match self.start_recording_capture().await {
+                                    match self.start_recording_capture(false).await {
                                         Ok(capture) => {
                                             tracing::debug!("Audio capture started successfully");
                                             audio_capture = Some(capture);
@@ -3074,10 +3303,11 @@ impl Daemon {
                                     &mut streaming_session,
                                     &mut streaming_chain,
                                     model_override.clone(),
+                                    false,
                                 ).await {
                                     tracing::info!("Streaming session started (toggle)");
                                 } else {
-                                    match self.start_recording_capture().await {
+                                    match self.start_recording_capture(false).await {
                                         Ok(capture) => {
                                             audio_capture = Some(capture);
 
@@ -3201,6 +3431,11 @@ impl Daemon {
                             } else if state.is_recording() {
                                 tracing::info!("Recording cancelled via hotkey");
 
+                                // A cancelled external-trigger session is
+                                // still an ended session — tell the caller
+                                // and disarm tracking.
+                                self.end_external_session(state.is_recording()).await;
+
                                 // Stop recording and discard audio
                                 if let Some(mut capture) = audio_capture.take() {
                                     let _ = capture.stop().await;
@@ -3311,6 +3546,9 @@ impl Daemon {
                         cleanup_model_override();
                         cleanup_profile_override();
                         cleanup_bool_override("smart_auto_submit");
+                        // A cancelled external-trigger session is still an
+                        // ended session — tell the caller and disarm tracking.
+                        self.end_external_session(state.is_recording()).await;
                         state = State::Idle;
                         eager_transcriber = None;
                         self.update_state("idle");
@@ -3385,6 +3623,40 @@ impl Daemon {
                         }
                     }
 
+                    // Silence-based auto-stop for external-trigger
+                    // (wake-word) sessions. Checked from this tick rather
+                    // than a standalone sleep arm: `loop { select! }` rebuilds
+                    // every arm future each iteration, so a 300 ms sleep arm
+                    // here was permanently starved by this same 100 ms tick
+                    // and never fired. 100 ms granularity is plenty for a
+                    // multi-second threshold.
+                    if self.is_external_trigger && state.is_recording() {
+                        if let Some(tracker) = &self.silence_tracker {
+                            if let Some(timeout_secs) =
+                                self.config.audio.external_trigger_silence_timeout_secs
+                            {
+                                let elapsed = tracker.silence_elapsed().await;
+                                if elapsed.as_secs_f32() >= timeout_secs {
+                                    tracing::info!(
+                                        "Silence timeout ({:.1}s >= {:.1}s), auto-stopping",
+                                        elapsed.as_secs_f32(),
+                                        timeout_secs
+                                    );
+                                    self.stop_active_recording(
+                                        &mut state,
+                                        &mut audio_capture,
+                                        &mut streaming_session,
+                                        &mut streaming_chain,
+                                        &mut eager_transcriber,
+                                        &transcriber_preloaded,
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+
                     // Check for recording timeout. Skip when audio_capture is
                     // already gone so we don't re-fire cleanup on every 100ms
                     // tick while the streaming session drains server-side
@@ -3392,6 +3664,12 @@ impl Daemon {
                     let timeout_fired = audio_capture.is_some()
                         && state.recording_duration().is_some_and(|d| d > max_duration);
                     if timeout_fired {
+                        // A hard-capped session is ending on voxtype's own
+                        // initiative (not the caller's `record stop`) — end
+                        // it as an external-trigger session so the caller is
+                        // told, and the silence tracker is disarmed.
+                        self.end_external_session(state.is_recording()).await;
+
                         // Streaming has its own clean stop path: skip the
                         // batch_transcribe branch below to avoid opening a
                         // second WS session for audio already being processed
@@ -3551,10 +3829,11 @@ impl Daemon {
                             &mut streaming_session,
                             &mut streaming_chain,
                             model_override.clone(),
+                            true,
                         ).await {
                             tracing::info!("Streaming session started (SIGUSR1)");
                         } else {
-                            match self.start_recording_capture().await {
+                            match self.start_recording_capture(true).await {
                                 Ok(capture) => {
                                     audio_capture = Some(capture);
 
@@ -3597,93 +3876,14 @@ impl Daemon {
                 // Handle SIGUSR2 - stop recording (for compositor keybindings)
                 _ = sigusr2.recv() => {
                     tracing::debug!("Received SIGUSR2 (stop recording)");
-                    if state.is_streaming() {
-                        // File-output sessions (`--file=path`) have nowhere
-                        // to leak into — they accumulate text instead of
-                        // typing it (see the event pump) — so the
-                        // disown-on-SIGUSR2 protection below doesn't apply;
-                        // disowning here would just silently drop whatever
-                        // the backend was still draining, and end_streaming
-                        // would then write an empty file. Let it drain
-                        // normally so end_streaming can write the real text.
-                        let file_output = matches!(
-                            &state,
-                            State::Streaming { file_output_path: Some(_), .. }
-                        );
-                        if file_output {
-                            tracing::info!("SIGUSR2 stop while streaming (file output); closing capture");
-                        } else {
-                            tracing::info!("SIGUSR2 stop while streaming; closing capture and disowning session");
-                        }
-                        self.stop_streaming_capture(&mut audio_capture).await;
-                        if !file_output {
-                            // Drop the typing surface synchronously so any
-                            // Final/Partial events the backend emits while
-                            // draining its internal buffer reach the event-pump
-                            // arm with `streaming_session = None` and get
-                            // discarded instead of typed into whatever window
-                            // has focus by then.
-                            streaming_session = None;
-                            streaming_chain = None;
-                        }
-                    } else if let State::Recording { model_override, .. } = &state {
-                        let model_override = model_override.clone();
-
-                        self.start_transcription_task(
-                            &mut state,
-                            &mut audio_capture,
-                            model_override,
-                            &transcriber_preloaded,
-                        ).await;
-                    } else if state.is_eager_recording() {
-                        // Handle eager recording stop via external trigger - extract model_override first
-                        let model_override = match &state {
-                            State::EagerRecording { model_override, .. } => model_override.clone(),
-                            _ => None,
-                        };
-
-                        let duration = state.recording_duration().unwrap_or_default();
-                        tracing::info!("Eager recording stopped ({:.1}s)", duration.as_secs_f32());
-
-                        // Stop audio capture and get remaining samples
-                        if let Some(mut capture) = audio_capture.take() {
-                            if let Ok(final_samples) = capture.stop().await {
-                                if let State::EagerRecording { accumulated_audio, .. } = &mut state {
-                                    accumulated_audio.extend(final_samples);
-                                }
-                            }
-                        }
-                        self.restore_recording_media();
-
-                        self.play_feedback(SoundEvent::RecordingStop);
-
-                        if self.config.output.notification.on_recording_stop {
-                            send_notification("Recording Stopped", "Transcribing...", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency).await;
-                        }
-
-                        let transcriber = match self.get_transcriber_for_recording(
-                            model_override.as_deref(),
-                            &transcriber_preloaded,
-                        ).await {
-                            Ok(t) => t,
-                            Err(()) => {
-                                state = State::Idle;
-                                self.update_state("idle");
-                                continue;
-                            }
-                        };
-
-                        self.update_state("transcribing");
-
-                        if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
-                            state = State::Transcribing { audio: Vec::new() };
-                            self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
-                        } else {
-                            tracing::debug!("Eager recording produced empty result");
-                            self.reset_to_idle(&mut state).await;
-                        }
-                        eager_transcriber = None;
-                    }
+                    self.stop_active_recording(
+                        &mut state,
+                        &mut audio_capture,
+                        &mut streaming_session,
+                        &mut streaming_chain,
+                        &mut eager_transcriber,
+                        &transcriber_preloaded,
+                    ).await;
                 }
 
                 // Handle transcription task completion

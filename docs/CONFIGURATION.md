@@ -398,6 +398,50 @@ duck_media = true
 duck_media_volume_percent = 70
 ```
 
+### external_trigger_silence_timeout_secs
+
+**Type:** Float
+**Default:** unset (disabled)
+**Required:** No
+
+Auto-stops an external-trigger recording (started via `voxtype record start`
+— SIGUSR1 — the mechanism a wake-word integration uses, since it has no
+physical key to hold or press again) after this many seconds of continuous
+silence following any detected speech. Unset by default: an external-trigger
+recording only ends on an explicit `voxtype record stop`/`record toggle`,
+matching behavior from before this option existed.
+
+This never applies to hotkey-driven push-to-talk or toggle recordings —
+those already have an explicit user-driven stop (release the key, or press
+it again), and don't need a silence timer.
+
+Speech detection uses `external_trigger_speech_threshold_dbfs` (below) on
+the same 10 ms level frames the OSD visualizer already computes — no extra
+audio processing.
+
+```toml
+[audio]
+external_trigger_silence_timeout_secs = 2.0  # stop 2s after the user stops talking
+```
+
+### external_trigger_speech_threshold_dbfs
+
+**Type:** Float
+**Default:** `-40.0`
+**Required:** No
+
+Peak level, in dBFS, at or above which a frame counts as speech for
+`external_trigger_silence_timeout_secs`. Only meaningful when that option is
+set. `-40.0` is a reasonable quiet-room default; raise it (toward `0.0`) on
+a noisy mic that never reads as silent, or lower it (more negative) if soft
+speech isn't resetting the silence timer.
+
+```toml
+[audio]
+external_trigger_silence_timeout_secs = 2.0
+external_trigger_speech_threshold_dbfs = -35.0  # less sensitive, noisier room
+```
+
 ### duck_media_volume_percent
 
 **Type:** Integer
