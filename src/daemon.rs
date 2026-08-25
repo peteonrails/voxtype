@@ -1295,6 +1295,15 @@ impl Daemon {
             _ => None,
         };
         if let Some(output_path) = file_output_path {
+            // Fold any leftover `partial` in first: the sliding-window
+            // engine can confirm a whole short utterance as a single
+            // Partial mid-session and leave nothing for `final_flush` to
+            // send as Final, which would otherwise strand that text in
+            // `partial` and write an empty file despite a correct
+            // transcription. See `finalize_pending_partial`.
+            if let Some(s) = streaming_session.as_mut() {
+                s.finalize_pending_partial();
+            }
             let final_text = streaming_session
                 .as_ref()
                 .map(|s| s.finalized_text().to_string())
