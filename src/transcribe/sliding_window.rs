@@ -308,6 +308,10 @@ impl Session {
         }
         let text = self.base.transcribe(&self.buffer)?;
         let text = text.trim().to_string();
+        tracing::trace!(
+            "[sliding] tick transcribe -> {text:?} ({} samples)",
+            self.buffer.len()
+        );
         if text.is_empty() || is_hallucination(&text) {
             return Ok(None);
         }
