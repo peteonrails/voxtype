@@ -165,6 +165,12 @@ translate = false
 #
 # Timeout for remote requests in seconds (default: 30)
 # remote_timeout_secs = 30
+#
+# Send an explicit "language=auto" field when language = "auto" (default: false)
+# By default the language field is omitted in auto mode, which OpenAI-compatible
+# endpoints treat as auto-detect. whisper.cpp's server instead falls back to its
+# own -l setting (default "en"); enable this so "auto" is sent explicitly.
+# remote_send_auto_language = true
 
 [output]
 # Primary output mode: "type" or "clipboard"

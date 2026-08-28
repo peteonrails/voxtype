@@ -1070,6 +1070,28 @@ remote_endpoint = "http://192.168.1.100:8080"
 remote_timeout_secs = 60  # 60 second timeout for long recordings
 ```
 
+### remote_send_auto_language
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Controls what happens to the `language` field of the request when `language = "auto"`.
+
+By default the field is omitted, which OpenAI-compatible endpoints treat as auto-detect (OpenAI rejects non-ISO-639-1 values such as `"auto"`). whisper.cpp's server instead falls back to its own `-l` setting (default `"en"`) when the field is missing, so auto-detection configured in voxtype is silently ignored. Enable this option to send `language=auto` explicitly.
+
+- For **whisper.cpp server**: Set to `true` (it accepts `"auto"`)
+- For **OpenAI API**: Leave `false` (omitting the field means auto-detect)
+
+**Example:**
+```toml
+[whisper]
+mode = "remote"
+remote_endpoint = "http://192.168.1.100:8080"
+language = "auto"
+remote_send_auto_language = true
+```
+
 ### whisper_cli_path
 
 **Type:** String

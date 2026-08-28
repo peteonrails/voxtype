@@ -28,6 +28,8 @@ pub struct RemoteTranscriber {
     api_key: Option<String>,
     /// Optional initial prompt for transcription context
     initial_prompt: Option<String>,
+    /// Send an explicit `language=auto` field instead of omitting it
+    send_auto_language: bool,
     /// Request timeout
     timeout: Duration,
 }
@@ -106,6 +108,7 @@ impl RemoteTranscriber {
             translate: config.translate,
             api_key,
             initial_prompt,
+            send_auto_language: config.remote_send_auto_language,
             timeout,
         })
     }
@@ -167,9 +170,11 @@ impl RemoteTranscriber {
         body.extend_from_slice(self.model.as_bytes());
         body.extend_from_slice(b"\r\n");
 
-        // Add language field (if not auto-detect mode)
+        // Add language field (omitted in auto-detect mode unless the server
+        // needs an explicit "auto", e.g. whisper.cpp server which otherwise
+        // falls back to its own -l default)
         // For language arrays, use the primary language since remote APIs don't support arrays
-        if !self.language.is_auto() {
+        if !self.language.is_auto() || self.send_auto_language {
             body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
             body.extend_from_slice(b"Content-Disposition: form-data; name=\"language\"\r\n\r\n");
             body.extend_from_slice(self.language.primary().as_bytes());
@@ -360,6 +365,43 @@ mod tests {
         assert!(body_str.contains("name=\"language\""));
         assert!(body_str.contains("name=\"response_format\""));
         assert!(body_str.contains("json"));
+    }
+
+    #[test]
+    fn test_multipart_body_omits_language_when_auto() {
+        let config = WhisperConfig {
+            mode: Some(crate::config::WhisperMode::Remote),
+            remote_endpoint: Some("http://localhost:8080".to_string()),
+            language: LanguageConfig::Single("auto".to_string()),
+            ..Default::default()
+        };
+
+        let transcriber = RemoteTranscriber::new(&config).unwrap();
+        let wav_data = vec![0u8; 100];
+
+        let (_boundary, body) = transcriber.build_multipart_body(&wav_data);
+        let body_str = String::from_utf8_lossy(&body);
+
+        assert!(!body_str.contains("name=\"language\""));
+    }
+
+    #[test]
+    fn test_multipart_body_sends_auto_language_when_enabled() {
+        let config = WhisperConfig {
+            mode: Some(crate::config::WhisperMode::Remote),
+            remote_endpoint: Some("http://localhost:8080".to_string()),
+            language: LanguageConfig::Single("auto".to_string()),
+            remote_send_auto_language: true,
+            ..Default::default()
+        };
+
+        let transcriber = RemoteTranscriber::new(&config).unwrap();
+        let wav_data = vec![0u8; 100];
+
+        let (_boundary, body) = transcriber.build_multipart_body(&wav_data);
+        let body_str = String::from_utf8_lossy(&body);
+
+        assert!(body_str.contains("name=\"language\"\r\n\r\nauto\r\n"));
     }
 
     #[test]

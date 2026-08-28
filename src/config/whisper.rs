@@ -144,6 +144,15 @@ pub struct WhisperConfig {
     #[serde(default)]
     pub remote_timeout_secs: Option<u64>,
 
+    /// Send an explicit `language=auto` field when language = "auto" (default: false)
+    /// OpenAI-compatible endpoints treat a missing language field as auto-detect
+    /// (and reject non-ISO-639-1 values like "auto"), but whisper.cpp's server
+    /// falls back to its own `-l` setting (default "en") when the field is
+    /// missing, silently ignoring voxtype's auto-detect configuration.
+    /// Enable this when using a whisper.cpp server so "auto" is sent explicitly.
+    #[serde(default)]
+    pub remote_send_auto_language: bool,
+
     // --- CLI backend settings ---
     /// Path to whisper-cli binary (optional, searches PATH if not set)
     /// Used when mode = "cli"
@@ -206,6 +215,7 @@ impl Default for WhisperConfig {
             remote_model: None,
             remote_api_key: None,
             remote_timeout_secs: None,
+            remote_send_auto_language: false,
             whisper_cli_path: None,
         }
     }
