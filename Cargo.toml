@@ -92,6 +92,10 @@ half = { version = "2", optional = true }
 tokenizers = { version = "0.20", optional = true, default-features = false, features = ["onig"] }
 rustfft = { version = "6", optional = true }
 
+# OpenVINO GenAI (optional, Intel NPU/GPU/CPU via OpenVINO GenAI WhisperPipeline)
+# `runtime-linking` loads libopenvino_genai.so at runtime via openvino-finder.
+openvino-genai = { version = "0.11", optional = true, features = ["runtime-linking"] }
+
 # CPU count for thread detection
 num_cpus = "1.16"
 
@@ -242,6 +246,11 @@ omnilingual-tensorrt = ["omnilingual", "onnx-tensorrt-enabled"]
 cohere = ["onnx-common", "dep:half", "dep:tokenizers"]
 cohere-cuda = ["cohere", "onnx-cuda-enabled"]
 cohere-tensorrt = ["cohere", "onnx-tensorrt-enabled"]
+# OpenVINO GenAI backend (Intel NPU/GPU/CPU). Standalone — does not pull
+# onnx-common. Loads libopenvino_genai.so at runtime via the crate's
+# `runtime-linking` feature. Requires the OpenVINO runtime + NPU plugin
+# (e.g. `openvino-intel-npu-plugin` on Arch) at runtime.
+openvino = ["dep:openvino-genai"]
 # Soniox is unconditional. Its deps (tokio-tungstenite, futures-util, reqwest)
 # add ~1-2 MB after LTO+strip and ride alongside ureq, which every binary
 # already ships for model downloads. Treating it like remote.rs (also always
@@ -321,3 +330,13 @@ path = "src/bin/voxtype_mirror_registry.rs"
 [[example]]
 name = "inspect_cohere_onnx"
 required-features = ["cohere"]
+
+# TEMPORARY: openvino-genai 0.11.0's WhisperPipeline has no way to pass
+# device properties (CACHE_DIR etc.), unlike LlmPipeline/VlmPipeline in
+# the same crate which already expose with_properties(). Pinned to a fork
+# branch that adds the same method for Whisper, pending upstream review:
+# https://github.com/intel/openvino-rs/pull/196
+# Drop this patch (and bump the openvino-genai version requirement below
+# if needed) once that PR merges and ships in a crates.io release.
+[patch.crates-io]
+openvino-genai = { git = "https://github.com/tslove923/openvino-rs", branch = "whisper-pipeline-with-properties" }

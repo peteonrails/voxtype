@@ -132,6 +132,17 @@ impl StreamingSession {
         self.partial.clear();
     }
 
+    /// File-output counterpart to `type_partial_delta`: accumulate the
+    /// delta into the partial buffer without typing anything. File-mode
+    /// sessions have no cursor to type into, but the delta still has to
+    /// be held until the next commit — partials are deltas, not a
+    /// cumulative transcript (see `type_partial_delta`), so dropping
+    /// this would silently lose whatever text was only ever seen as an
+    /// unfinalized partial.
+    pub fn observe_partial_delta(&mut self, new_partial: &str) {
+        self.partial.push_str(new_partial);
+    }
+
     /// Current partial buffer.
     pub fn partial(&self) -> &str {
         &self.partial
@@ -199,6 +210,37 @@ impl StreamingSession {
         Ok(())
     }
 
+    /// Fold any still-pending `partial` into `finalized_text` without a
+    /// trailing Final segment. For file-output sessions, `commit_segment_silent`
+    /// only runs when the engine happens to emit a `Final` event — but the
+    /// sliding-window engine can legitimately confirm an entire utterance as
+    /// a single `Partial` mid-session (e.g. a short phrase transcribed
+    /// identically on back-to-back ticks) and then have nothing left for
+    /// `final_flush` to send as `Final` at end-of-stream. Without this, that
+    /// text sits in `partial` forever and the session ends with an empty
+    /// `finalized_text`, silently discarding a correct transcription. Call
+    /// this once, at stream end, before reading `finalized_text()`.
+    pub fn finalize_pending_partial(&mut self) {
+        if !self.partial.is_empty() {
+            self.finalized_text.push_str(&self.partial);
+            self.partial.clear();
+        }
+    }
+
+    /// File-output counterpart to `commit_segment`: same finalized_text
+    /// bookkeeping, but skips `output_with_fallback` entirely — there's
+    /// no cursor/focused window to type into when the session's target
+    /// is a file.
+    pub fn commit_segment_silent(&mut self, text: &str) {
+        if text.is_empty() {
+            self.clear_partial();
+            return;
+        }
+        let finalized_tail = format!("{}{}", self.partial, text);
+        self.finalized_text.push_str(&finalized_tail);
+        self.clear_partial();
+    }
+
     /// Backspace `backspace` chars then commit `text`. Used by streaming
     /// backends that revise the previously-typed partial tail when
     /// finalizing (e.g. Soniox punctuation flips).
@@ -255,6 +297,18 @@ impl StreamingSession {
         }
         self.clear_partial();
         Ok(())
+    }
+
+    /// File-output counterpart to `replace_and_commit`: no backspaces —
+    /// there's nothing typed to revise — just fold the (now-superseded)
+    /// partial tail plus `text` into `finalized_text`, matching what the
+    /// typed path's accounting would produce.
+    pub fn replace_and_commit_silent(&mut self, text: &str) {
+        if !text.is_empty() {
+            let finalized_tail = format!("{}{}", self.partial, text);
+            self.finalized_text.push_str(&finalized_tail);
+        }
+        self.clear_partial();
     }
 
     /// Best-effort rewind: emit `typed_chars` BackSpace key events via
@@ -497,6 +551,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(session.partial(), "");
+    }
+
+    #[test]
+    fn finalize_pending_partial_folds_leftover_partial() {
+        // Reproduces the empty-transcript bug: the sliding-window engine
+        // can confirm an entire short utterance as a single Partial
+        // mid-session (see `on_tick`'s growing-mode branch) and then have
+        // nothing left for `final_flush` to send as a terminal Final. A
+        // file-output session that only ever calls `commit_segment_silent`
+        // on a Final event would strand that text in `partial` forever and
+        // write an empty file despite a correct transcription.
+        let mut session = StreamingSession::new();
+        session.observe_partial_delta("turn on Sophie's room.");
+        assert_eq!(session.finalized_text(), "");
+
+        session.finalize_pending_partial();
+
+        assert_eq!(session.finalized_text(), "turn on Sophie's room.");
+        assert_eq!(session.partial(), "");
+    }
+
+    #[test]
+    fn finalize_pending_partial_is_noop_when_already_final() {
+        let mut session = StreamingSession::new();
+        session.commit_segment_silent("hello");
+        session.finalize_pending_partial();
+        assert_eq!(session.finalized_text(), "hello");
     }
 
     #[tokio::test]

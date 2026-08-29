@@ -97,6 +97,41 @@ pub struct WhisperConfig {
     #[serde(default = "default_eager_overlap_secs")]
     pub eager_overlap_secs: f32,
 
+    // --- Sliding-window streaming settings ---
+    /// Enable live streaming transcription (sliding-window re-transcription,
+    /// ported from nova-npu). When true, text lands at the cursor incrementally
+    /// as you speak (via the streaming pipeline) instead of only after the
+    /// hotkey is released. Only applies to `mode = "local"`.
+    #[serde(default)]
+    pub streaming: bool,
+
+    /// Seconds between re-transcriptions of the rolling buffer.
+    /// Lower = more responsive partials, higher CPU/NPU cost.
+    #[serde(default = "default_streaming_interval_secs")]
+    pub streaming_interval_secs: f32,
+
+    /// Maximum buffered audio (seconds) before the window slides (drops old
+    /// samples to respect the Whisper context limit).
+    #[serde(default = "default_streaming_max_buffer_secs")]
+    pub streaming_max_buffer_secs: f32,
+
+    /// Skip transcription while whole-buffer RMS is below this.
+    #[serde(default = "default_streaming_min_speech_rms")]
+    pub streaming_min_speech_rms: f32,
+
+    /// Minimum buffered audio (seconds) before the first partial is attempted.
+    #[serde(default = "default_streaming_min_audio_secs")]
+    pub streaming_min_audio_secs: f32,
+
+    /// Minimum number of new stable words before a delta is committed/typed.
+    #[serde(default = "default_streaming_partial_min_words")]
+    pub streaming_partial_min_words: usize,
+
+    /// Type committed deltas live at the cursor (`true`) or only commit whole
+    /// segments at once (`false`). Live typing is the faithful nova behavior.
+    #[serde(default = "default_streaming_type_partials")]
+    pub streaming_type_partials: bool,
+
     /// Initial prompt to provide context for transcription
     /// Use this to hint at terminology, proper nouns, or formatting conventions.
     /// Example: "Technical discussion about Rust, TypeScript, and Kubernetes."
@@ -197,6 +232,13 @@ impl Default for WhisperConfig {
             eager_processing: false,
             eager_chunk_secs: default_eager_chunk_secs(),
             eager_overlap_secs: default_eager_overlap_secs(),
+            streaming: false,
+            streaming_interval_secs: default_streaming_interval_secs(),
+            streaming_max_buffer_secs: default_streaming_max_buffer_secs(),
+            streaming_min_speech_rms: default_streaming_min_speech_rms(),
+            streaming_min_audio_secs: default_streaming_min_audio_secs(),
+            streaming_partial_min_words: default_streaming_partial_min_words(),
+            streaming_type_partials: default_streaming_type_partials(),
             initial_prompt: None,
             secondary_model: None,
             available_models: vec![],
@@ -229,6 +271,30 @@ fn default_eager_chunk_secs() -> f32 {
 
 fn default_eager_overlap_secs() -> f32 {
     0.5
+}
+
+fn default_streaming_interval_secs() -> f32 {
+    0.8
+}
+
+fn default_streaming_max_buffer_secs() -> f32 {
+    29.0
+}
+
+fn default_streaming_min_speech_rms() -> f32 {
+    0.005
+}
+
+fn default_streaming_min_audio_secs() -> f32 {
+    1.0
+}
+
+fn default_streaming_partial_min_words() -> usize {
+    1
+}
+
+fn default_streaming_type_partials() -> bool {
+    true
 }
 
 fn default_whisper_model() -> String {

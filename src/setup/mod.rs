@@ -544,21 +544,25 @@ pub async fn run_setup(
 
     let models_dir = Config::models_dir();
 
-    // Check if model_override is a Parakeet or SenseVoice model
+    // Check if model_override is a Parakeet, SenseVoice, or OpenVINO model
     let is_parakeet = model_override
         .map(model::is_parakeet_model)
         .unwrap_or(false);
     let is_sensevoice = model_override
         .map(model::is_sensevoice_model)
         .unwrap_or(false);
+    let is_openvino = model_override
+        .map(model::is_openvino_model)
+        .unwrap_or(false);
 
     // Validate model_override if provided (variable unused after this, each branch re-defines)
     let _model_name: &str = match model_override {
         Some(name) => {
-            // Validate the model name (check Whisper, Parakeet, and SenseVoice)
+            // Validate the model name (check Whisper, Parakeet, SenseVoice, and OpenVINO)
             if !model::is_valid_model(name)
                 && !model::is_parakeet_model(name)
                 && !model::is_sensevoice_model(name)
+                && !model::is_openvino_model(name)
             {
                 let valid = model::valid_model_names().join(", ");
                 anyhow::bail!("Unknown model '{}'. Valid models are: {}", name, valid);
@@ -674,6 +678,44 @@ pub async fn run_setup(
                         model_name
                     ));
                 }
+            } else if !quiet {
+                print_info(&format!("Model '{}' not downloaded yet", model_name));
+                println!(
+                    "       Run: voxtype setup --download --model {}",
+                    model_name
+                );
+            }
+        }
+    } else if is_openvino {
+        // Handle OpenVINO model
+        #[allow(unused_variables)]
+        let model_name = model_override.unwrap(); // Safe: is_openvino implies Some
+
+        if !quiet {
+            println!("\nOpenVINO model...");
+        }
+
+        #[cfg(not(feature = "openvino"))]
+        {
+            print_failure(&format!(
+                "OpenVINO model '{}' requires the 'openvino' feature",
+                model_name
+            ));
+            println!("       Rebuild with: cargo build --features openvino");
+            anyhow::bail!("OpenVINO feature not enabled");
+        }
+
+        #[cfg(feature = "openvino")]
+        {
+            let model_path = models_dir.join("openvino").join(model_name);
+            let model_valid = model_path.join("openvino_encoder_model.xml").exists();
+
+            if model_valid {
+                if !quiet {
+                    print_success(&format!("Model ready: {}", model_name));
+                }
+            } else if download {
+                model::download_openvino_model(model_name)?;
             } else if !quiet {
                 print_info(&format!("Model '{}' not downloaded yet", model_name));
                 println!(
