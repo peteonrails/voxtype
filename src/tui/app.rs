@@ -291,6 +291,14 @@ impl App {
         }
     }
 
+    /// Give sections with background work a chance to fold results in.
+    /// Called once per event-loop tick (so at least every poll interval).
+    pub fn poll_background(&mut self) {
+        if let Some(audio) = self.audio.as_mut() {
+            audio.poll_device_scan();
+        }
+    }
+
     pub fn refresh_inventory(&mut self) {
         self.inventory = build_inventory(self.force_package_mode);
         self.daemon_running = is_daemon_running();

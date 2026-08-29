@@ -98,6 +98,12 @@ pub enum Commands {
         /// Render as if installed from a package (for testing source builds).
         #[arg(long, hide = true)]
         force_package_mode: bool,
+
+        /// Print detected audio input devices (one per line) and exit.
+        /// Used internally by the TUI to probe devices in a subprocess, so
+        /// an ALSA hang or crash during probing can't take the TUI with it.
+        #[arg(long, hide = true)]
+        probe_audio_devices: bool,
     },
 
     /// Show daemon status (for Waybar/polybar integration)
