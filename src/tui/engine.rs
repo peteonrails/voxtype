@@ -590,7 +590,7 @@ impl EngineState {
                 let active_model = active_model_for_engine(&self.engine, &self.fields);
                 let download_needed = active_model
                     .as_deref()
-                    .map(|m| !model_present_on_disk(m))
+                    .map(|m| !model_present_on_disk(&self.engine, m))
                     .unwrap_or(false);
 
                 let next_action = match (pending_switch, download_needed, active_model.clone()) {
@@ -916,16 +916,21 @@ fn installed_engine_choices() -> std::collections::HashSet<&'static str> {
 /// Resolve where on disk a model directory lives. Mirrors the daemon's
 /// resolution path so the TUI's "is this downloaded?" check matches what
 /// the daemon will look for at load time.
-fn model_dir_on_disk(name: &str) -> std::path::PathBuf {
-    crate::config::Config::models_dir().join(name)
+///
+/// `name` is the raw config value, which for some engines (moonshine,
+/// sensevoice) is a short name that differs from the directory the
+/// downloader actually wrote to. `model_catalog::model_dir_name` resolves
+/// that mapping; see its docs for why.
+fn model_dir_on_disk(engine: &str, name: &str) -> std::path::PathBuf {
+    crate::config::Config::models_dir().join(crate::model_catalog::model_dir_name(engine, name))
 }
 
 /// True when the model directory exists with at least one file in it. We
 /// don't validate the file list — the daemon will surface specific missing
 /// pieces — but a fully empty or missing directory definitely needs a
 /// download before save.
-fn model_present_on_disk(name: &str) -> bool {
-    let dir = model_dir_on_disk(name);
+fn model_present_on_disk(engine: &str, name: &str) -> bool {
+    let dir = model_dir_on_disk(engine, name);
     match std::fs::read_dir(&dir) {
         Ok(mut iter) => iter.next().is_some(),
         Err(_) => false,
