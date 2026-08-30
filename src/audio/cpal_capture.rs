@@ -9,24 +9,240 @@
 use super::AudioCapture;
 use crate::config::AudioConfig;
 use crate::error::AudioError;
+use rubato::{FftFixedIn, Resampler};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use tokio::sync::{mpsc, oneshot};
 
+/// Input block size presented to the FFT resampler. This bounds buffering to
+/// about 21-64 ms for the input rates Voxtype commonly encounters while
+/// Rubato internally chooses exact FFT sizes for the rate ratio.
+const RESAMPLER_INPUT_FRAMES: usize = 1024;
+const RESAMPLER_SUB_CHUNKS: usize = 2;
+
 /// Commands sent to the audio capture thread
 enum CaptureCommand {
-    Stop(oneshot::Sender<Vec<f32>>),
+    Stop(oneshot::Sender<Result<Vec<f32>, AudioError>>),
     /// Get current samples and clear the buffer (for continuous recording)
     GetSamples(oneshot::Sender<Vec<f32>>),
 }
 
 /// Parameters for building an audio input stream
 struct StreamBuildParams {
-    samples: Arc<Mutex<Vec<f32>>>,
+    pipeline: Arc<Mutex<CapturePipeline>>,
     tx: mpsc::Sender<Vec<f32>>,
-    source_rate: u32,
-    target_rate: u32,
     source_channels: usize,
+}
+
+/// Converts a continuous mono input stream without resetting filter state at
+/// CPAL callback boundaries. A new instance is created for every recording,
+/// so overlap samples can never leak into the next session.
+struct BandlimitedResampler {
+    processor: Option<FftFixedIn<f32>>,
+    pending: Vec<f32>,
+    source_rate: usize,
+    target_rate: usize,
+    delay_remaining: usize,
+    input_frames: usize,
+    output_frames: usize,
+    finished: bool,
+}
+
+impl BandlimitedResampler {
+    fn new(source_rate: u32, target_rate: u32) -> Result<Self, AudioError> {
+        if source_rate == 0 || target_rate == 0 {
+            return Err(AudioError::StreamError(
+                "Sample rates must be greater than zero".to_string(),
+            ));
+        }
+
+        let mut processor = if source_rate == target_rate {
+            None
+        } else {
+            Some(
+                FftFixedIn::<f32>::new(
+                    source_rate as usize,
+                    target_rate as usize,
+                    RESAMPLER_INPUT_FRAMES,
+                    RESAMPLER_SUB_CHUNKS,
+                    1,
+                )
+                .map_err(|error| AudioError::StreamError(error.to_string()))?,
+            )
+        };
+        let delay_remaining = processor
+            .as_mut()
+            .map(|resampler| resampler.output_delay())
+            .unwrap_or(0);
+
+        Ok(Self {
+            processor,
+            pending: Vec::with_capacity(RESAMPLER_INPUT_FRAMES * 2),
+            source_rate: source_rate as usize,
+            target_rate: target_rate as usize,
+            delay_remaining,
+            input_frames: 0,
+            output_frames: 0,
+            finished: false,
+        })
+    }
+
+    /// Add an arbitrary input chunk and return all target-rate frames that
+    /// became available. The initial FFT filter delay is removed once across
+    /// the entire recording, not once per callback.
+    fn push(&mut self, samples: &[f32]) -> Result<Vec<f32>, AudioError> {
+        if self.finished {
+            return Err(AudioError::StreamError(
+                "Cannot add samples after resampling has finished".to_string(),
+            ));
+        }
+
+        self.input_frames += samples.len();
+        let Some(processor) = self.processor.as_mut() else {
+            self.output_frames += samples.len();
+            return Ok(samples.to_vec());
+        };
+
+        self.pending.extend_from_slice(samples);
+        let mut consumed = 0;
+        let mut output = Vec::new();
+        let input_frames_next = processor.input_frames_next();
+
+        while self.pending.len() - consumed >= input_frames_next {
+            let input = [&self.pending[consumed..consumed + input_frames_next]];
+            let processed = processor
+                .process(&input, None)
+                .map_err(|error| AudioError::StreamError(error.to_string()))?;
+            Self::append_after_delay(&mut output, &processed[0], &mut self.delay_remaining);
+            consumed += input_frames_next;
+        }
+
+        if consumed > 0 {
+            self.pending.drain(..consumed);
+        }
+        self.output_frames += output.len();
+        Ok(output)
+    }
+
+    /// Flush the partial input block and filter overlap, returning exactly the
+    /// number of frames implied by the recording duration.
+    fn finish(&mut self) -> Result<Vec<f32>, AudioError> {
+        if self.finished {
+            return Ok(Vec::new());
+        }
+        self.finished = true;
+
+        let Some(processor) = self.processor.as_mut() else {
+            return Ok(Vec::new());
+        };
+
+        let expected_frames =
+            expected_output_frames(self.input_frames, self.source_rate, self.target_rate);
+        let frames_needed = expected_frames.saturating_sub(self.output_frames);
+        let mut output = Vec::with_capacity(frames_needed);
+
+        if !self.pending.is_empty() {
+            let input = [self.pending.as_slice()];
+            let processed = processor
+                .process_partial(Some(&input), None)
+                .map_err(|error| AudioError::StreamError(error.to_string()))?;
+            Self::append_after_delay(&mut output, &processed[0], &mut self.delay_remaining);
+        }
+
+        // When the source length lands exactly on an input block boundary,
+        // or the final partial block does not contain the complete overlap,
+        // feed zero padding until the delayed tail is available.
+        while output.len() < frames_needed {
+            let no_input: Option<&[&[f32]]> = None;
+            let processed = processor
+                .process_partial(no_input, None)
+                .map_err(|error| AudioError::StreamError(error.to_string()))?;
+            let before = output.len();
+            Self::append_after_delay(&mut output, &processed[0], &mut self.delay_remaining);
+            if output.len() == before {
+                break;
+            }
+        }
+
+        if output.len() < frames_needed {
+            return Err(AudioError::StreamError(format!(
+                "Resampler produced {} of {} required tail frames",
+                output.len(),
+                frames_needed
+            )));
+        }
+
+        output.truncate(frames_needed);
+        self.output_frames += output.len();
+        self.pending.clear();
+        processor.reset();
+        Ok(output)
+    }
+
+    fn append_after_delay(output: &mut Vec<f32>, processed: &[f32], delay: &mut usize) {
+        let skip = (*delay).min(processed.len());
+        *delay -= skip;
+        output.extend_from_slice(&processed[skip..]);
+    }
+}
+
+/// Number of target frames needed to preserve the full input duration. Use
+/// integer arithmetic so long recordings do not accumulate floating-point
+/// rounding error.
+// Keep compatibility with the project's Rust 1.70 MSRV. Integer `div_ceil`
+// stabilized later.
+#[allow(clippy::manual_div_ceil)]
+fn expected_output_frames(input_frames: usize, source_rate: usize, target_rate: usize) -> usize {
+    let numerator = input_frames as u128 * target_rate as u128;
+    ((numerator + source_rate as u128 - 1) / source_rate as u128) as usize
+}
+
+struct CapturePipeline {
+    resampler: BandlimitedResampler,
+    samples: Vec<f32>,
+    error: Option<String>,
+}
+
+impl CapturePipeline {
+    fn new(source_rate: u32, target_rate: u32) -> Result<Self, AudioError> {
+        Ok(Self {
+            resampler: BandlimitedResampler::new(source_rate, target_rate)?,
+            samples: Vec::new(),
+            error: None,
+        })
+    }
+
+    fn push(&mut self, input: &[f32]) -> Option<Vec<f32>> {
+        if self.error.is_some() {
+            return None;
+        }
+
+        match self.resampler.push(input) {
+            Ok(output) => {
+                self.samples.extend_from_slice(&output);
+                Some(output)
+            }
+            Err(error) => {
+                tracing::error!("Audio resampling failed: {}", error);
+                self.error = Some(error.to_string());
+                None
+            }
+        }
+    }
+
+    fn take_samples(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.samples)
+    }
+
+    fn finish(&mut self) -> Result<(Vec<f32>, Vec<f32>), AudioError> {
+        if let Some(error) = self.error.take() {
+            return Err(AudioError::StreamError(error));
+        }
+
+        let tail = self.resampler.finish()?;
+        self.samples.extend_from_slice(&tail);
+        Ok((self.take_samples(), tail))
+    }
 }
 
 /// cpal-based audio capture implementation
@@ -185,9 +401,15 @@ impl AudioCapture for CpalCapture {
         let (chunk_tx, chunk_rx) = mpsc::channel(64);
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<CaptureCommand>();
 
-        // Shared state
-        let samples = Arc::new(Mutex::new(Vec::<f32>::new()));
-        let samples_clone = samples.clone();
+        // Shared resampling and collection state. The processor is created
+        // once per recording so FFT overlap remains continuous across CPAL
+        // callbacks but cannot cross a recording boundary.
+        let pipeline = Arc::new(Mutex::new(CapturePipeline::new(
+            source_sample_rate,
+            target_sample_rate,
+        )?));
+        let pipeline_for_thread = Arc::clone(&pipeline);
+        let tail_tx = chunk_tx.clone();
 
         // Spawn audio capture thread
         let thread_handle = thread::spawn(move || {
@@ -202,10 +424,8 @@ impl AudioCapture for CpalCapture {
 
             // Create the input stream based on sample format
             let make_params = || StreamBuildParams {
-                samples: samples_clone.clone(),
+                pipeline: Arc::clone(&pipeline_for_thread),
                 tx: chunk_tx.clone(),
-                source_rate: source_sample_rate,
-                target_rate: target_sample_rate,
                 source_channels,
             };
 
@@ -247,21 +467,33 @@ impl AudioCapture for CpalCapture {
                         // Stop the stream (drop it)
                         drop(stream);
 
-                        // Get collected samples
-                        let collected = {
-                            let guard = samples_clone.lock().unwrap();
-                            guard.clone()
+                        // Flush the resampler's delayed tail before returning
+                        // the final target-rate recording.
+                        let collected = match pipeline_for_thread.lock() {
+                            Ok(mut pipeline) => pipeline.finish(),
+                            Err(_) => Err(AudioError::StreamError(
+                                "Audio pipeline lock poisoned".to_string(),
+                            )),
                         };
 
+                        if let Ok((_, tail)) = &collected {
+                            if !tail.is_empty() {
+                                let _ = tail_tx.try_send(tail.clone());
+                            }
+                        }
+
                         // Send samples back
-                        let _ = response_tx.send(collected);
+                        let _ = response_tx.send(collected.map(|(samples, _)| samples));
                         break;
                     }
                     Ok(CaptureCommand::GetSamples(response_tx)) => {
                         // Get and clear current samples (for continuous recording)
-                        let samples = {
-                            let mut guard = samples_clone.lock().unwrap();
-                            std::mem::take(&mut *guard)
+                        let samples = match pipeline_for_thread.lock() {
+                            Ok(mut pipeline) => pipeline.take_samples(),
+                            Err(_) => {
+                                tracing::error!("Audio pipeline lock poisoned");
+                                Vec::new()
+                            }
                         };
                         let _ = response_tx.send(samples);
                     }
@@ -290,7 +522,8 @@ impl AudioCapture for CpalCapture {
             if cmd_tx.send(CaptureCommand::Stop(response_tx)).is_ok() {
                 // Wait for response (with timeout)
                 match tokio::time::timeout(std::time::Duration::from_secs(2), response_rx).await {
-                    Ok(Ok(samples)) => samples,
+                    Ok(Ok(Ok(samples))) => samples,
+                    Ok(Ok(Err(error))) => return Err(error),
                     Ok(Err(_)) => {
                         return Err(AudioError::StreamError("Channel closed".to_string()))
                     }
@@ -359,10 +592,8 @@ where
     use cpal::traits::DeviceTrait;
 
     let StreamBuildParams {
-        samples,
+        pipeline,
         tx,
-        source_rate,
-        target_rate,
         source_channels,
     } = params;
 
@@ -382,20 +613,22 @@ where
                     })
                     .collect();
 
-                // Resample if needed
-                let resampled = if source_rate != target_rate {
-                    resample(&mono_f32, source_rate, target_rate)
-                } else {
-                    mono_f32
+                // Preserve filter state across callback boundaries. This is
+                // important because CPAL is free to vary callback sizes.
+                let resampled = match pipeline.lock() {
+                    Ok(mut pipeline) => pipeline.push(&mono_f32),
+                    Err(_) => {
+                        tracing::error!("Audio pipeline lock poisoned");
+                        None
+                    }
                 };
 
-                // Store samples
-                if let Ok(mut guard) = samples.lock() {
-                    guard.extend_from_slice(&resampled);
-                }
-
                 // Send chunk for streaming (ignore errors - receiver might be gone)
-                let _ = tx.try_send(resampled);
+                if let Some(resampled) = resampled {
+                    if !resampled.is_empty() {
+                        let _ = tx.try_send(resampled);
+                    }
+                }
             },
             err_fn,
             None,
@@ -405,32 +638,12 @@ where
     Ok(stream)
 }
 
-/// Linear interpolation resampling
-/// For better quality, consider using the `rubato` crate
-fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
-    if from_rate == to_rate || samples.is_empty() {
-        return samples.to_vec();
-    }
-
-    let ratio = to_rate as f64 / from_rate as f64;
-    let new_len = (samples.len() as f64 * ratio).ceil() as usize;
-    let mut output = Vec::with_capacity(new_len);
-
-    for i in 0..new_len {
-        let src_idx = i as f64 / ratio;
-        let idx = src_idx.floor() as usize;
-        let frac = (src_idx - idx as f64) as f32;
-
-        let sample = if idx + 1 < samples.len() {
-            samples[idx] * (1.0 - frac) + samples[idx + 1] * frac
-        } else {
-            samples.get(idx).copied().unwrap_or(0.0)
-        };
-
-        output.push(sample);
-    }
-
-    output
+#[cfg(test)]
+fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32>, AudioError> {
+    let mut resampler = BandlimitedResampler::new(from_rate, to_rate)?;
+    let mut output = resampler.push(samples)?;
+    output.extend(resampler.finish()?);
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -440,30 +653,135 @@ mod tests {
     #[test]
     fn test_resample_same_rate() {
         let samples = vec![1.0, 2.0, 3.0, 4.0];
-        let result = resample(&samples, 16000, 16000);
+        let result = resample(&samples, 16000, 16000).unwrap();
         assert_eq!(result, samples);
     }
 
     #[test]
     fn test_resample_downsample() {
-        let samples = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-        let result = resample(&samples, 48000, 16000);
-        // 48000 -> 16000 is 3:1 ratio, so 8 samples -> ~3 samples
-        assert!(result.len() >= 2 && result.len() <= 4);
+        let samples = vec![0.0; 48_000];
+        let result = resample(&samples, 48_000, 16_000).unwrap();
+        assert_eq!(result.len(), 16_000);
+    }
+
+    #[test]
+    fn test_resample_downsample_44100_has_exact_duration() {
+        let samples = vec![0.0; 44_100];
+        let result = resample(&samples, 44_100, 16_000).unwrap();
+        assert_eq!(result.len(), 16_000);
     }
 
     #[test]
     fn test_resample_upsample() {
-        let samples = vec![1.0, 2.0];
-        let result = resample(&samples, 8000, 16000);
-        // 8000 -> 16000 is 1:2 ratio, so 2 samples -> 4 samples
-        assert_eq!(result.len(), 4);
+        let samples = vec![0.0; 8_000];
+        let result = resample(&samples, 8_000, 16_000).unwrap();
+        assert_eq!(result.len(), 16_000);
     }
 
     #[test]
     fn test_resample_empty() {
         let samples: Vec<f32> = vec![];
-        let result = resample(&samples, 48000, 16000);
+        let result = resample(&samples, 48000, 16000).unwrap();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_resample_very_short_clip_preserves_duration() {
+        let samples = vec![1.0; 7];
+        let result = resample(&samples, 48_000, 16_000).unwrap();
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_resample_suppresses_frequencies_above_target_nyquist() {
+        let source_rate = 48_000;
+        let samples: Vec<f32> = (0..source_rate)
+            .map(|sample| {
+                (2.0 * std::f32::consts::PI * 12_000.0 * sample as f32 / source_rate as f32).sin()
+            })
+            .collect();
+
+        let result = resample(&samples, source_rate, 16_000).unwrap();
+        let steady_state = &result[1_000..result.len() - 1_000];
+        let rms = (steady_state
+            .iter()
+            .map(|sample| sample * sample)
+            .sum::<f32>()
+            / steady_state.len() as f32)
+            .sqrt();
+
+        assert!(rms < 0.01, "out-of-band RMS was {rms}");
+    }
+
+    #[test]
+    fn test_resample_preserves_speech_band_amplitude() {
+        let source_rate = 48_000;
+        let samples: Vec<f32> = (0..source_rate)
+            .map(|sample| {
+                (2.0 * std::f32::consts::PI * 1_000.0 * sample as f32 / source_rate as f32).sin()
+            })
+            .collect();
+
+        let result = resample(&samples, source_rate, 16_000).unwrap();
+        let steady_state = &result[1_000..result.len() - 1_000];
+        let rms = (steady_state
+            .iter()
+            .map(|sample| sample * sample)
+            .sum::<f32>()
+            / steady_state.len() as f32)
+            .sqrt();
+
+        assert!((rms - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_resample_is_independent_of_callback_boundaries() {
+        let source_rate = 44_100;
+        let samples: Vec<f32> = (0..source_rate)
+            .map(|sample| {
+                (2.0 * std::f32::consts::PI * 1_300.0 * sample as f32 / source_rate as f32).sin()
+            })
+            .collect();
+        let expected = resample(&samples, source_rate, 16_000).unwrap();
+
+        let mut streaming = BandlimitedResampler::new(source_rate, 16_000).unwrap();
+        let mut actual = Vec::new();
+        let chunk_sizes = [1, 127, 480, 997, 64, 2_048];
+        let mut offset = 0;
+        let mut chunk_index = 0;
+        while offset < samples.len() {
+            let end = (offset + chunk_sizes[chunk_index % chunk_sizes.len()]).min(samples.len());
+            actual.extend(streaming.push(&samples[offset..end]).unwrap());
+            offset = end;
+            chunk_index += 1;
+        }
+        actual.extend(streaming.finish().unwrap());
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_resampler_state_does_not_cross_recordings() {
+        let mut first = vec![0.0; 48_000];
+        first[24_000] = 1.0;
+        let first_output = resample(&first, 48_000, 16_000).unwrap();
+        assert!(first_output.iter().any(|sample| sample.abs() > 0.01));
+
+        let second = vec![0.0; 48_000];
+        let second_output = resample(&second, 48_000, 16_000).unwrap();
+        assert!(second_output.iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn test_resample_keeps_audio_near_both_boundaries() {
+        let mut samples = vec![0.0; 48_000];
+        samples[300] = 1.0;
+        samples[47_700] = 1.0;
+
+        let result = resample(&samples, 48_000, 16_000).unwrap();
+        assert!(result[..200].iter().any(|sample| sample.abs() > 0.01));
+        assert!(result[result.len() - 200..]
+            .iter()
+            .any(|sample| sample.abs() > 0.01));
     }
 }
