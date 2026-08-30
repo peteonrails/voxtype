@@ -508,7 +508,26 @@ pub fn apply_gpu_selection() -> Option<GpuVendor> {
 
 /// Check if Vulkan runtime is available
 pub fn check_vulkan_runtime() -> bool {
-    // Check for vulkan ICD loader
+    // Ask the dynamic loader, which answers the question we actually care
+    // about — can this process load Vulkan — rather than guessing at paths.
+    //
+    // The previous implementation checked three FHS locations. NixOS is not
+    // FHS-compliant and keeps libvulkan in the store, so it reported "Vulkan
+    // runtime not found" on machines where Vulkan worked perfectly well
+    // (#430). Guix, and anyone using a non-standard prefix or
+    // LD_LIBRARY_PATH, had the same problem.
+    unsafe {
+        let name = c"libvulkan.so.1";
+        let handle = libc::dlopen(name.as_ptr(), libc::RTLD_LAZY);
+        if !handle.is_null() {
+            libc::dlclose(handle);
+            return true;
+        }
+    }
+
+    // Fall back to the path check. dlopen can fail in a sandbox that permits
+    // the file but not the mapping, and a present library is still worth
+    // reporting as available.
     let vulkan_paths = [
         "/usr/lib/libvulkan.so.1",
         "/usr/lib64/libvulkan.so.1",
@@ -1237,6 +1256,29 @@ fn switch_backend_tiered_parakeet(binary_name: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// #430: detection must agree with the loader, not with FHS layout.
+    /// This machine has Vulkan, so the probe must find it; the value of the
+    /// test is that it fails loudly if the probe regresses to path guessing
+    /// on a system where the paths happen to be absent.
+    #[test]
+    fn vulkan_detection_matches_the_loader() {
+        let via_loader = unsafe {
+            let name = c"libvulkan.so.1";
+            let h = libc::dlopen(name.as_ptr(), libc::RTLD_LAZY);
+            let found = !h.is_null();
+            if found {
+                libc::dlclose(h);
+            }
+            found
+        };
+        if via_loader {
+            assert!(
+                check_vulkan_runtime(),
+                "the loader can open libvulkan but check_vulkan_runtime says otherwise"
+            );
+        }
+    }
 
     /// #577: the vendor must resolve to the index whisper actually uses.
     /// Parsing is pinned against real `vulkaninfo --summary` output.
