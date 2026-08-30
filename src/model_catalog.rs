@@ -523,6 +523,35 @@ mod tests {
         }
     }
 
+    /// Regression (#662): sensevoice's config value is a short name and the
+    /// downloader writes a differently-named directory. A caller asking "is
+    /// the configured model installed?" passes the config value, so the
+    /// lookup has to resolve it. The configure TUI probed the raw value and
+    /// told users a working model was not downloaded.
+    ///
+    /// Pinned end to end rather than on the name mapping alone, because the
+    /// mapping was always correct — it was the lookup that skipped it.
+    #[test]
+    fn an_installed_sensevoice_model_is_found_by_its_short_config_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_onnx_model(
+            tmp.path(),
+            "sensevoice",
+            "sensevoice-small",
+            &[("model.onnx", b"weights"), ("tokens.txt", b"tokens")],
+        );
+
+        assert!(
+            model_installed_in(tmp.path(), "sensevoice", "small"),
+            "the short config value must resolve to the directory on disk"
+        );
+        assert!(
+            model_installed_in(tmp.path(), "sensevoice", "sensevoice-small"),
+            "the directory name itself must keep working"
+        );
+        assert!(!model_installed_in(tmp.path(), "sensevoice", "medium"));
+    }
+
     /// The catalog covers every engine `config set engine` accepts, minus
     /// cloud engines that have no downloadable model.
     #[test]
