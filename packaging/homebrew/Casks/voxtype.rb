@@ -12,7 +12,7 @@ cask "voxtype" do
     strategy :github_latest
   end
 
-  depends_on macos: ">= :ventura"
+  depends_on macos: :ventura
   depends_on formula: "terminal-notifier"
 
   app "Voxtype.app"

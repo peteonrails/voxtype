@@ -74,7 +74,7 @@ max_duration_secs = 60
 # recording stops. This is separate from pause_media; enable one behavior or
 # the other depending on whether you want media paused or only quieter.
 # duck_media = false
-# duck_media_volume_percent = 70
+# duck_media_volume_percent = 34
 
 # [audio.feedback]
 # Enable audio feedback sounds (beeps when recording starts/stops)

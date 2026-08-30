@@ -66,7 +66,16 @@ max_duration_secs = 60
 # recording stops. This is separate from pause_media; enable one behavior or
 # the other depending on whether you want media paused or only quieter.
 # duck_media = false
-# duck_media_volume_percent = 70
+#
+# Percent of its current amplitude a ducked stream keeps: 70 keeps media at
+# 70% (-3.1 dB), 50 at half (-6 dB). Converted internally to PulseAudio's
+# cubic scale, so what you configure is what you hear.
+# duck_media_volume_percent = 34
+#
+# Fade the ducking ramp instead of jumping straight to the target volume. The
+# same duration is used going down and coming back up; 0 keeps the previous
+# instant behavior.
+# duck_media_fade_ms = 150
 
 # [audio.feedback]
 # Enable audio feedback sounds (beeps when recording starts/stops)
