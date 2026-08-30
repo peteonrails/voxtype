@@ -27,6 +27,7 @@ pub struct PostProcessor {
     timeout: Duration,
     trim: bool,
     fallback_on_empty: bool,
+    vocabulary: Vec<String>,
 }
 
 impl PostProcessor {
@@ -37,7 +38,15 @@ impl PostProcessor {
             timeout: Duration::from_millis(config.timeout_ms),
             trim: config.trim,
             fallback_on_empty: config.fallback_on_empty,
+            vocabulary: Vec::new(),
         }
+    }
+
+    /// Attach unified vocabulary terms; exported to the command as the
+    /// newline-separated VOXTYPE_VOCABULARY environment variable.
+    pub fn with_vocabulary(mut self, terms: Vec<String>) -> Self {
+        self.vocabulary = terms;
+        self
     }
 
     /// Process text with optional context from a previous chunk
@@ -96,6 +105,12 @@ impl PostProcessor {
         cmd.env_remove("VOXTYPE_CONTEXT");
         if let Some(ctx) = context {
             cmd.env("VOXTYPE_CONTEXT", ctx);
+        }
+
+        // Same hygiene as VOXTYPE_CONTEXT: never inherit a stale value.
+        cmd.env_remove("VOXTYPE_VOCABULARY");
+        if !self.vocabulary.is_empty() {
+            cmd.env("VOXTYPE_VOCABULARY", self.vocabulary.join("\n"));
         }
 
         let mut child = cmd
@@ -181,6 +196,10 @@ impl std::error::Error for PostProcessError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serializes tests that mutate process env (cargo runs tests on
+    /// parallel threads in one process; set_var/remove_var race otherwise).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn make_config(command: &str, timeout_ms: u64) -> PostProcessConfig {
         PostProcessConfig {
@@ -404,6 +423,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_context_env_not_inherited_from_parent() {
+        let _guard = ENV_LOCK.lock().unwrap();
         // Even if VOXTYPE_CONTEXT is set in parent env, it should be cleared when context is None.
         // Uses current_thread runtime because std::env::set_var is not thread-safe
         // and will become unsafe in Rust edition 2024.
@@ -412,6 +432,26 @@ mod tests {
         let processor = PostProcessor::new(&config);
         let result = processor.process_with_context("text", None).await;
         std::env::remove_var("VOXTYPE_CONTEXT");
+        assert_eq!(result, "unset");
+    }
+
+    #[tokio::test]
+    async fn test_vocabulary_passed_via_env_var() {
+        let config = make_config("printf '%s' \"$VOXTYPE_VOCABULARY\"", 5000);
+        let processor =
+            PostProcessor::new(&config).with_vocabulary(vec!["voxtype".into(), "Hyprland".into()]);
+        let result = processor.process("ignored").await;
+        assert_eq!(result, "voxtype\nHyprland");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_vocabulary_env_cleared_when_unset() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("VOXTYPE_VOCABULARY", "stale");
+        let config = make_config("echo \"${VOXTYPE_VOCABULARY:-unset}\"", 5000);
+        let processor = PostProcessor::new(&config);
+        let result = processor.process("ignored").await;
+        std::env::remove_var("VOXTYPE_VOCABULARY");
         assert_eq!(result, "unset");
     }
 }

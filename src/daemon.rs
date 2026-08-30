@@ -742,6 +742,7 @@ pub struct Daemon {
     audio_feedback: Option<AudioFeedback>,
     text_processor: TextProcessor,
     post_processor: Option<PostProcessor>,
+    vocabulary_terms: Vec<String>,
     /// Last post-processed text and when it was produced, for context in subsequent dictations
     last_dictation: Option<(String, Instant)>,
     /// Audio level broadcaster for the OSD (None when disabled or bind failed)
@@ -803,7 +804,11 @@ pub struct Daemon {
 
 impl Daemon {
     /// Create a new daemon with the given configuration
-    pub fn new(config: Config, config_path: Option<PathBuf>) -> Self {
+    pub fn new(
+        config: Config,
+        config_path: Option<PathBuf>,
+        vocabulary_terms: Vec<String>,
+    ) -> Self {
         let state_file_path = config.resolve_state_file();
 
         // Initialize audio feedback if enabled
@@ -845,7 +850,7 @@ impl Daemon {
                 cfg.command,
                 cfg.timeout_ms
             );
-            PostProcessor::new(cfg)
+            PostProcessor::new(cfg).with_vocabulary(vocabulary_terms.clone())
         });
 
         // Initialize Voice Activity Detection if enabled
@@ -881,6 +886,7 @@ impl Daemon {
             audio_feedback,
             text_processor,
             post_processor,
+            vocabulary_terms,
             last_dictation: None,
             level_hub: None,
             level_emitter_task: None,
@@ -2206,7 +2212,8 @@ impl Daemon {
                                 trim: true,
                                 fallback_on_empty: true,
                             };
-                            let profile_processor = PostProcessor::new(&profile_config);
+                            let profile_processor = PostProcessor::new(&profile_config)
+                                .with_vocabulary(self.vocabulary_terms.clone());
                             tracing::info!(
                                 "Post-processing with profile: {:?}, has_context: {}",
                                 profile_override.as_ref().unwrap(),
