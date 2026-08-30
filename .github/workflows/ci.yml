@@ -77,6 +77,10 @@ jobs:
   macos-check:
     name: macos-check
     runs-on: macos-14
+    env:
+      # Match build-macos.yml so PR checks compile against the same floor the
+      # release binary is built for. See the long note there (#452).
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
     steps:
       - uses: actions/checkout@v4
 

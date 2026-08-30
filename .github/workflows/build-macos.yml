@@ -29,6 +29,18 @@ jobs:
     env:
       HAS_SIGNING_CERT: ${{ secrets.APPLE_DEVELOPER_ID_CERT != '' }}
       HAS_NOTARY_CREDS: ${{ secrets.APPLE_ID != '' }}
+      # Every Info.plist we ship says LSMinimumSystemVersion 13.0, the cask
+      # says `>= :ventura`, and the docs say Ventura or later — but nothing
+      # told the compiler, so clang defaulted the deployment target to the
+      # runner's own OS version. Symbols newer than the declared floor then
+      # got linked strongly instead of weakly, and the binary aborted at
+      # launch on the systems we claim to support: #452 is a dyld failure
+      # for `_OBJC_CLASS_$_MTLResidencySetDescriptor`, a Metal class that
+      # ggml uses and that only exists on macOS 15, on a user running 14.8.
+      #
+      # Pinning it here makes the build honor the floor we advertise, and
+      # makes it independent of which image GitHub maps `macos-14` to.
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
     steps:
       - uses: actions/checkout@v4
 
@@ -79,9 +91,34 @@ jobs:
 
       - name: Verify universal binary
         run: |
+          set -euo pipefail
           VERSION=${{ steps.version.outputs.version }}
-          lipo -info releases/${VERSION}/voxtype-${VERSION}-macos-universal
-          releases/${VERSION}/voxtype-${VERSION}-macos-universal --version
+          BIN=releases/${VERSION}/voxtype-${VERSION}-macos-universal
+          lipo -info "$BIN"
+          "$BIN" --version
+
+          # The env var above is an instruction; this is the check that it
+          # was obeyed. A binary whose LC_BUILD_VERSION minos is newer than
+          # the floor in our Info.plist and cask will abort at launch for
+          # exactly the users we told it would work (#452), and nothing else
+          # in this workflow would notice.
+          EXPECTED=13.0
+          for ARCH in x86_64 arm64; do
+            MINOS=$(vtool -arch "$ARCH" -show-build "$BIN" \
+              | awk '/minos/ {print $2; exit}')
+            echo "$ARCH minos=$MINOS (expected <= $EXPECTED)"
+            if [[ -z "$MINOS" ]]; then
+              echo "::error::could not read minos for $ARCH"
+              exit 1
+            fi
+            # tail -1, not head -1: a floor *below* 13.0 is more compatible,
+            # not less. Only a minos above it is a regression.
+            if [[ "$(printf '%s\n' "$EXPECTED" "$MINOS" | sort -V | tail -1)" \
+                  != "$EXPECTED" ]]; then
+              echo "::error::$ARCH targets macOS $MINOS but we ship a $EXPECTED floor"
+              exit 1
+            fi
+          done
 
       - name: Import certificate
         if: env.HAS_SIGNING_CERT == 'true'
