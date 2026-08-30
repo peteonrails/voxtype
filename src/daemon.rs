@@ -872,6 +872,36 @@ impl Daemon {
             );
         }
 
+        // Streaming types text at the cursor as it is decoded, so there is
+        // never a finished transcript for these settings to run against, and
+        // none of them are applied on that path. Say so at startup: the
+        // report in #581 was not that the feature was missing, it was that
+        // the daemon logged "Word replacements configured: 3 rules" and then
+        // silently ignored them, which is indistinguishable from a bad config.
+        if config.streaming_enabled() {
+            let mut ignored = Vec::new();
+            if !config.text.replacements.is_empty() {
+                ignored.push("text.replacements");
+            }
+            if config.text.spoken_punctuation {
+                ignored.push("text.spoken_punctuation");
+            }
+            if config.text.filter_filler_words {
+                ignored.push("text.filter_filler_words");
+            }
+            if config.output.post_process.is_some() {
+                ignored.push("output.post_process");
+            }
+            if !ignored.is_empty() {
+                tracing::warn!(
+                    "Streaming is enabled, so {} will NOT be applied to output. \
+                     These run on the completed transcript, which streaming never \
+                     produces. Disable streaming to use them (see #581).",
+                    ignored.join(", ")
+                );
+            }
+        }
+
         // Initialize post-processor if configured
         let post_processor = config.output.post_process.as_ref().map(|cfg| {
             tracing::info!(
