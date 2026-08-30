@@ -1,0 +1,386 @@
+# Package set parameterized over the caller's package set, so overlay
+# consumers build against their own nixpkgs (with their overlays applied)
+# instead of this flake's locked one.
+{
+  pkgs,
+  # CUDA has a non-free license (CUDA EULA), so the CUDA variants need an
+  # allowUnfree package set. The flake passes a separate unfree import;
+  # overlay consumers whose nixpkgs already allows unfree can leave the
+  # default. See: https://github.com/peteonrails/voxtype/issues/135
+  pkgsUnfree ? pkgs,
+  src,
+}:
+let
+  version = (builtins.fromTOML (builtins.readFile (src + "/Cargo.toml"))).package.version;
+
+  # Common build inputs for all variants
+  commonNativeBuildInputs = with pkgs; [
+    cmake
+    pkg-config
+    clang
+    llvmPackages.libclang
+    git  # Required by whisper.cpp cmake
+  ];
+
+  commonBuildInputs = with pkgs; [
+    alsa-lib
+    openssl
+  ];
+
+  # Runtime dependencies wrapped into PATH
+  runtimeDeps = with pkgs; [
+    wtype         # Wayland typing
+    dotool        # Universal typing backend via uinput
+    wl-clipboard  # Wayland clipboard (wl-copy, wl-paste)
+    ydotool       # Alternative typing backend (X11 and Wayland)
+    xdotool       # X11 typing fallback
+    xclip         # X11 clipboard fallback
+    libnotify     # Desktop notifications
+    pciutils      # GPU detection (lspci)
+  ];
+
+  # ONNX engine feature sets
+  # All ONNX engines: Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual
+  onnxCpuFeatures = [
+    "parakeet-load-dynamic"
+    "moonshine"
+    "sensevoice"
+    "paraformer"
+    "dolphin"
+    "omnilingual"
+    "cohere"
+  ];
+
+  onnxCudaFeatures = [
+    "parakeet-load-dynamic"
+    "parakeet-cuda"
+    "moonshine-cuda"
+    "sensevoice-cuda"
+    "paraformer-cuda"
+    "dolphin-cuda"
+    "omnilingual-cuda"
+    "cohere-cuda"
+  ];
+
+  # Only Parakeet has AMD GPU support (via MIGraphX); other engines run on CPU
+  onnxMigraphxFeatures = [
+    "parakeet-load-dynamic"
+    "parakeet-migraphx"
+    "moonshine"
+    "sensevoice"
+    "paraformer"
+    "dolphin"
+    "omnilingual"
+  ];
+
+  # Wrap a package with runtime dependencies
+  wrapVoxtype = pkg: pkgs.symlinkJoin {
+    name = "${pkg.pname or "voxtype"}-wrapped-${pkg.version}";
+    paths = [ pkg ];
+    buildInputs = [ pkgs.makeWrapper ];
+    postBuild = ''
+      wrapProgram $out/bin/voxtype \
+        --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps}
+    '';
+    inherit (pkg) meta;
+  };
+
+  # Wrap an ONNX package with runtime dependencies and ORT_DYLIB_PATH
+  # ONNX engines need ONNX Runtime at runtime for inference
+  libExt = if pkgs.stdenv.isDarwin then "dylib" else "so";
+  wrapOnnx = { onnxruntime ? pkgs.onnxruntime, pkg, extraWrapperArgs ? "" }: pkgs.symlinkJoin {
+    name = "${pkg.pname or "voxtype"}-wrapped-${pkg.version}";
+    paths = [ pkg ];
+    buildInputs = [ pkgs.makeWrapper ];
+    postBuild = ''
+      wrapProgram $out/bin/voxtype \
+        --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps} \
+        --set ORT_DYLIB_PATH "${onnxruntime}/lib/libonnxruntime.${libExt}" \
+        --prefix LD_LIBRARY_PATH : "${onnxruntime}/lib" \
+        ${extraWrapperArgs}
+    '';
+    inherit (pkg) meta;
+  };
+
+  # Extra wrapper args for MIGraphX (ROCm) to set cache directory
+  migraphxWrapperArgs = ''
+    --run '
+      : "''${ORT_MIGRAPHX_MODEL_CACHE_PATH:=''${XDG_CACHE_HOME:-$HOME/.cache}/voxtype/migraphx}"
+      export ORT_MIGRAPHX_MODEL_CACHE_PATH
+      mkdir -p "$ORT_MIGRAPHX_MODEL_CACHE_PATH"
+    '
+  '';
+
+  # ONNX Runtime variants for different GPU backends
+  onnxruntimeCuda = pkgsUnfree.onnxruntime.override { cudaSupport = true; };
+  onnxruntimeRocm = pkgs.onnxruntime.override { rocmSupport = true; };
+
+
+  # Base derivation for voxtype (unwrapped)
+  mkVoxtypeUnwrapped = { pname ? "voxtype", features ? [], extraNativeBuildInputs ? [], extraBuildInputs ? [] }:
+    pkgs.rustPlatform.buildRustPackage {
+      inherit pname version src;
+      cargoLock.lockFile = src + "/Cargo.lock";
+
+      nativeBuildInputs = commonNativeBuildInputs ++ extraNativeBuildInputs;
+      buildInputs = commonBuildInputs ++ extraBuildInputs;
+
+      # Required for whisper-rs bindgen
+      LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+
+      # Build with specified features
+      buildFeatures = features;
+
+      # Ensure reproducible builds targeting AVX2-capable CPUs (x86-64-v3)
+      # This matches the portable AVX2 binaries we ship for other distros
+      RUSTFLAGS = pkgs.lib.optionalString (pkgs.stdenv.hostPlatform.system == "x86_64-linux")
+        "-C target-cpu=x86-64-v3";
+
+      # whisper.cpp cmake needs some help in sandbox
+      preBuild = ''
+        export CMAKE_BUILD_PARALLEL_LEVEL=$NIX_BUILD_CORES
+      '';
+
+      # Install shell completions and default config
+      # Note: systemd service is NOT installed here because it contains
+      # hardcoded FHS paths (/usr/bin/voxtype) that don't work on NixOS.
+      # Use the Home Manager module with service.enable = true instead,
+      # which generates a service with the correct Nix store path.
+      postInstall = ''
+        # Shell completions
+        install -Dm644 packaging/completions/voxtype.bash \
+          $out/share/bash-completion/completions/voxtype
+        install -Dm644 packaging/completions/voxtype.zsh \
+          $out/share/zsh/site-functions/_voxtype
+        install -Dm644 packaging/completions/voxtype.fish \
+          $out/share/fish/vendor_completions.d/voxtype.fish
+
+        # Default config
+        install -Dm644 config/default.toml \
+          $out/share/voxtype/default-config.toml
+      '';
+
+      meta = with pkgs.lib; {
+        description = "Push-to-talk voice-to-text for Linux";
+        longDescription = ''
+          Voxtype is a push-to-talk voice-to-text daemon for Linux.
+          Hold a hotkey while speaking, release to transcribe and output
+          text at your cursor position. Supports Whisper, Parakeet,
+          SenseVoice, Moonshine, Paraformer, Dolphin, and Omnilingual engines.
+        '';
+        homepage = "https://voxtype.io";
+        license = licenses.mit;
+        maintainers = []; # Add NixOS maintainers when upstreaming
+        platforms = [ "x86_64-linux" "aarch64-linux" ];
+        mainProgram = "voxtype";
+      };
+    };
+
+  # Build the Vulkan variant (unwrapped)
+  vulkanUnwrapped = let
+    pkg = mkVoxtypeUnwrapped {
+      pname = "voxtype-vulkan";
+      features = [ "gpu-vulkan" ];
+      extraNativeBuildInputs = with pkgs; [
+        shaderc
+        vulkan-headers
+        vulkan-loader
+      ];
+      extraBuildInputs = with pkgs; [
+        vulkan-headers
+        vulkan-loader
+      ];
+    };
+  in pkg.overrideAttrs (old: {
+    # Help cmake find Vulkan SDK components
+    preBuild = (old.preBuild or "") + ''
+      export CMAKE_BUILD_PARALLEL_LEVEL=$NIX_BUILD_CORES
+      export VULKAN_SDK="${pkgs.vulkan-loader}"
+      export Vulkan_INCLUDE_DIR="${pkgs.vulkan-headers}/include"
+      export Vulkan_LIBRARY="${pkgs.vulkan-loader}/lib/libvulkan.so"
+    '';
+  });
+
+  # Build the ROCm/HIP variant for AMD GPUs (unwrapped, Whisper only)
+  rocmUnwrapped = let
+    pkg = mkVoxtypeUnwrapped {
+      pname = "voxtype-rocm";
+      features = [ "gpu-hipblas" ];
+      extraNativeBuildInputs = with pkgs; [
+        rocmPackages.clr
+        rocmPackages.hipblas
+        rocmPackages.rocblas
+      ];
+      extraBuildInputs = with pkgs; [
+        rocmPackages.clr
+        rocmPackages.hipblas
+        rocmPackages.rocblas
+      ];
+    };
+  in pkg.overrideAttrs (old: {
+    # Help cmake find ROCm/HIP components
+    preBuild = (old.preBuild or "") + ''
+      export CMAKE_BUILD_PARALLEL_LEVEL=$NIX_BUILD_CORES
+      export HIP_PATH="${pkgs.rocmPackages.clr}"
+      export ROCM_PATH="${pkgs.rocmPackages.clr}"
+    '';
+  });
+
+  # Build the ONNX variant (CPU, all engines)
+  # Uses load-dynamic for Parakeet, ort for other engines
+  onnxUnwrapped = let
+    pkg = mkVoxtypeUnwrapped {
+      pname = "voxtype-onnx";
+      features = onnxCpuFeatures;
+      extraBuildInputs = with pkgs; [ onnxruntime ];
+    };
+  in pkg.overrideAttrs (old: {
+    # Tell ort-sys where to find ONNX Runtime (avoids sandbox download)
+    ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
+  });
+
+  # Build the ONNX + CUDA variant for NVIDIA GPUs
+  # Uses pkgsUnfree because CUDA has a non-free license (CUDA EULA)
+  onnxCudaUnwrapped = let
+    pkg = mkVoxtypeUnwrapped {
+      pname = "voxtype-onnx-cuda";
+      features = onnxCudaFeatures;
+      extraNativeBuildInputs = [ pkgsUnfree.cudaPackages.cuda_nvcc ];
+      extraBuildInputs = [
+        onnxruntimeCuda
+        pkgsUnfree.cudaPackages.cudatoolkit
+        pkgsUnfree.cudaPackages.cudnn
+      ];
+    };
+  in pkg.overrideAttrs (old: {
+    ORT_LIB_LOCATION = "${onnxruntimeCuda}/lib";
+  });
+
+  # Build the ONNX + MIGraphX variant for AMD GPUs
+  # Only Parakeet gets AMD GPU acceleration; other engines run on CPU
+  onnxMigraphxUnwrapped = let
+    pkg = mkVoxtypeUnwrapped {
+      pname = "voxtype-onnx-migraphx";
+      features = onnxMigraphxFeatures;
+      extraNativeBuildInputs = with pkgs; [
+        rocmPackages.clr
+      ];
+      extraBuildInputs = [
+        onnxruntimeRocm
+        pkgs.rocmPackages.clr
+        pkgs.rocmPackages.rocblas
+      ];
+    };
+  in pkg.overrideAttrs (old: {
+    ORT_LIB_LOCATION = "${onnxruntimeRocm}/lib";
+  });
+
+  # OSD frontend packages. The launcher binary (`voxtype-osd`) ships
+  # with every main voxtype package, these provide the GUI frontend
+  # the launcher execs into.
+  osdNative = pkgs.rustPlatform.buildRustPackage {
+    pname = "voxtype-osd-native";
+    inherit version src;
+    cargoLock.lockFile = src + "/Cargo.lock";
+
+    nativeBuildInputs = commonNativeBuildInputs ++ [ pkgs.makeWrapper ];
+    buildInputs = commonBuildInputs ++ [ pkgs.libxkbcommon ];
+
+    LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+
+    buildFeatures = [ "osd-native" ];
+    cargoBuildFlags = [ "--bin" "voxtype-osd-native" ];
+
+    # Skip running the full lib test suite, this package only ships the OSD bin.
+    doCheck = false;
+
+    # wgpu dlopens libvulkan / libwayland-client at runtime.
+    postFixup = ''
+      wrapProgram $out/bin/voxtype-osd-native \
+        --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath (with pkgs; [
+          vulkan-loader
+          wayland
+        ])}"
+    '';
+
+    meta = with pkgs.lib; {
+      description = "Native (Wayland + wgpu + egui) on-screen display frontend for voxtype";
+      homepage = "https://voxtype.io";
+      license = licenses.mit;
+      maintainers = [];
+      platforms = [ "x86_64-linux" "aarch64-linux" ];
+      mainProgram = "voxtype-osd-native";
+    };
+  };
+
+  osdGtk4 = pkgs.rustPlatform.buildRustPackage {
+    pname = "voxtype-osd-gtk4";
+    inherit version src;
+    cargoLock.lockFile = src + "/Cargo.lock";
+
+    nativeBuildInputs = commonNativeBuildInputs ++ [ pkgs.wrapGAppsHook4 ];
+    buildInputs = commonBuildInputs ++ [ pkgs.gtk4-layer-shell ];
+
+    LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+
+    buildFeatures = [ "osd-gtk4" ];
+    cargoBuildFlags = [ "--bin" "voxtype-osd-gtk4" ];
+
+    # Skip running the full lib test suite, this package only ships the OSD bin.
+    doCheck = false;
+
+    meta = with pkgs.lib; {
+      description = "GTK4 on-screen display frontend for voxtype";
+      homepage = "https://voxtype.io";
+      license = licenses.mit;
+      maintainers = [];
+      platforms = [ "x86_64-linux" "aarch64-linux" ];
+      mainProgram = "voxtype-osd-gtk4";
+    };
+  };
+
+in {
+  inherit runtimeDeps;
+
+  packages = {
+    # Wrapped packages (ready to use, runtime deps in PATH)
+    # Use these for Home Manager module and direct installation
+    default = wrapVoxtype (mkVoxtypeUnwrapped {});
+    vulkan = wrapVoxtype vulkanUnwrapped;
+    rocm = wrapVoxtype rocmUnwrapped;
+
+    # ONNX variants (all ONNX engines: Parakeet, Moonshine, SenseVoice,
+    # Paraformer, Dolphin, Omnilingual)
+    onnx = wrapOnnx { pkg = onnxUnwrapped; };
+    onnx-cuda = wrapOnnx { onnxruntime = onnxruntimeCuda; pkg = onnxCudaUnwrapped; };
+    onnx-migraphx = wrapOnnx { onnxruntime = onnxruntimeRocm; pkg = onnxMigraphxUnwrapped; extraWrapperArgs = migraphxWrapperArgs; };
+
+    # Backwards-compatible aliases (parakeet → onnx, rocm → migraphx)
+    parakeet = wrapOnnx { pkg = onnxUnwrapped; };
+    parakeet-cuda = wrapOnnx { onnxruntime = onnxruntimeCuda; pkg = onnxCudaUnwrapped; };
+    parakeet-migraphx = wrapOnnx { onnxruntime = onnxruntimeRocm; pkg = onnxMigraphxUnwrapped; extraWrapperArgs = migraphxWrapperArgs; };
+    # Legacy: rocm → migraphx (drop in v0.8.0)
+    onnx-rocm = wrapOnnx { onnxruntime = onnxruntimeRocm; pkg = onnxMigraphxUnwrapped; extraWrapperArgs = migraphxWrapperArgs; };
+    parakeet-rocm = wrapOnnx { onnxruntime = onnxruntimeRocm; pkg = onnxMigraphxUnwrapped; extraWrapperArgs = migraphxWrapperArgs; };
+
+    # OSD frontends (installable alongside any voxtype package)
+    osd-native = osdNative;
+    osd-gtk4 = osdGtk4;
+
+    # Unwrapped packages (for custom wrapping scenarios)
+    voxtype-unwrapped = mkVoxtypeUnwrapped {};
+    voxtype-vulkan-unwrapped = vulkanUnwrapped;
+    voxtype-rocm-unwrapped = rocmUnwrapped;
+    voxtype-onnx-unwrapped = onnxUnwrapped;
+    voxtype-onnx-cuda-unwrapped = onnxCudaUnwrapped;
+    voxtype-onnx-migraphx-unwrapped = onnxMigraphxUnwrapped;
+
+    # Backwards-compatible aliases
+    voxtype-parakeet-unwrapped = onnxUnwrapped;
+    voxtype-parakeet-cuda-unwrapped = onnxCudaUnwrapped;
+    voxtype-parakeet-migraphx-unwrapped = onnxMigraphxUnwrapped;
+    # Legacy
+    voxtype-onnx-rocm-unwrapped = onnxMigraphxUnwrapped;
+    voxtype-parakeet-rocm-unwrapped = onnxMigraphxUnwrapped;
+  };
+}
