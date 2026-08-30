@@ -1213,6 +1213,26 @@ model = "parakeet-tdt-0.6b-v3"
 on_demand_loading = true  # Free memory when not transcribing
 ```
 
+### max_window_secs
+
+**Type:** Float
+**Default:** `240`
+**Required:** No
+
+Longest stretch of audio sent to the model in one pass. Longer recordings are split into overlapping windows and the transcripts are stitched back together.
+
+The TDT ONNX exports carry a fixed-size attention bias, and exceeding it does not degrade gracefully: ONNX Runtime aborts the run with `Attempting to broadcast an axis by a dimension other than 1` and the whole transcription is lost. An 11-minute file produced 8691 encoder frames against a bias sized for 3691, which is roughly 295 seconds at the 80ms frame rate these models use. The default of 240 stays under that with margin while leaving ordinary dictation in one piece.
+
+Set to `0` to send the whole buffer in one pass.
+
+### window_overlap_secs
+
+**Type:** Float
+**Default:** `5`
+**Required:** No
+
+Audio shared between consecutive windows. The stitcher uses the shared region to find where two passes agree, so it needs to be long enough to contain several words. If the two passes disagree there, voxtype concatenates rather than guessing at a join, which can repeat a few words but never drops speech.
+
 ### streaming
 
 **Type:** Boolean
