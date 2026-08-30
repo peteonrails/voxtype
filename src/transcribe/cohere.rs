@@ -103,6 +103,14 @@ const SUPPORTED_LANGUAGES: &[&str] = &[
     "ar", "de", "el", "en", "es", "fr", "it", "ja", "ko", "nl", "pl", "pt", "vi", "zh",
 ];
 
+/// The model's declared clip window and the overlap it expects between
+/// consecutive windows, from `max_audio_clip_s` and `overlap_chunk_second`
+/// in the checkpoint's processor_config.json. Like N_LAYERS and N_MELS
+/// above, these describe the graph we ship against rather than anything
+/// tunable.
+const MAX_AUDIO_CLIP_S: f32 = 35.0;
+const OVERLAP_S: f32 = 5.0;
+
 const MAX_TOKENS_PER_SECOND: f32 = 8.0;
 const ABSOLUTE_MAX_TOKENS: usize = 1024;
 
@@ -521,10 +529,104 @@ fn check_logits_shape(shape: &[i64]) -> Result<(), TranscribeError> {
     Ok(())
 }
 
+impl CohereTranscriber {
+    /// Transcribe audio of any length by bounding what reaches the encoder.
+    ///
+    /// The checkpoint declares a 35-second clip window. We were handing it
+    /// the whole recording in one fbank extraction and one encoder pass
+    /// regardless (#551). Past the window the model degenerates — the
+    /// opening of a 150-second take went missing and the tail repeated — and
+    /// peak RSS reached 3.56 GB because the attention activations scale with
+    /// the frame count we chose to give it.
+    ///
+    /// Audio that fits the window takes exactly the path it always did, so
+    /// short dictation, which is nearly all dictation, is unchanged.
+    fn transcribe_windowed(&self, samples: &[f32]) -> Result<String, TranscribeError> {
+        let window = (MAX_AUDIO_CLIP_S * SAMPLE_RATE as f32) as usize;
+        if samples.len() <= window {
+            return self.transcribe_samples(samples);
+        }
+
+        let overlap = (OVERLAP_S * SAMPLE_RATE as f32) as usize;
+        // Guaranteed forward progress even if the constants are ever edited
+        // into an overlap wider than the window.
+        let stride = window.saturating_sub(overlap).max(1);
+        let count = samples.len().div_ceil(stride);
+        tracing::info!(
+            "Cohere: {:.1}s exceeds the model's {:.0}s window; transcribing in \
+             {} overlapping passes",
+            samples.len() as f32 / SAMPLE_RATE as f32,
+            MAX_AUDIO_CLIP_S,
+            count
+        );
+
+        let mut merged = String::new();
+        let mut start = 0usize;
+        while start < samples.len() {
+            let end = (start + window).min(samples.len());
+            let text = self.transcribe_samples(&samples[start..end])?;
+            merged = merge_overlapping(&merged, text.trim());
+            if end == samples.len() {
+                break;
+            }
+            start += stride;
+        }
+        Ok(merged)
+    }
+}
+
+/// Join two consecutive window transcripts, dropping the text the overlap
+/// caused both of them to contain.
+///
+/// The windows share `OVERLAP_S` of audio, so the tail of one and the head of
+/// the next describe the same speech and usually decode to the same words.
+/// Take the longest run of words that agrees and keep it once.
+///
+/// Comparison ignores case and surrounding punctuation, since the two passes
+/// see different context and punctuate the shared region differently. When
+/// nothing agrees — the overlap fell in silence, or the passes genuinely
+/// disagree — fall back to plain concatenation, which repeats a few words
+/// rather than deleting speech. Losing words is the worse failure.
+fn merge_overlapping(acc: &str, next: &str) -> String {
+    if acc.is_empty() {
+        return next.to_string();
+    }
+    if next.is_empty() {
+        return acc.to_string();
+    }
+
+    let norm = |w: &str| {
+        w.trim_matches(|c: char| !c.is_alphanumeric())
+            .to_lowercase()
+    };
+    let acc_words: Vec<&str> = acc.split_whitespace().collect();
+    let next_words: Vec<&str> = next.split_whitespace().collect();
+
+    // An overlap longer than either side cannot be a real repeat, and the
+    // shared region is bounded by OVERLAP_S of speech in any case.
+    let max_k = acc_words.len().min(next_words.len()).min(64);
+    for k in (1..=max_k).rev() {
+        let tail = &acc_words[acc_words.len() - k..];
+        let head = &next_words[..k];
+        if tail
+            .iter()
+            .zip(head.iter())
+            .all(|(a, b)| norm(a) == norm(b) && !norm(a).is_empty())
+        {
+            let rest = next_words[k..].join(" ");
+            if rest.is_empty() {
+                return acc.to_string();
+            }
+            return format!("{acc} {rest}");
+        }
+    }
+    format!("{acc} {next}")
+}
+
 impl Transcriber for CohereTranscriber {
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         let start = std::time::Instant::now();
-        let text = self.transcribe_samples(samples)?;
+        let text = self.transcribe_windowed(samples)?;
         tracing::info!(
             "Cohere transcription completed in {:.2}s: {:?}",
             start.elapsed().as_secs_f32(),
@@ -569,4 +671,95 @@ fn build_session(
             path
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #551: consecutive windows share five seconds of audio, so both
+    /// transcribe the same speech. Keeping it once is the whole point of
+    /// windowing; keeping it twice reads as a stutter and keeping it zero
+    /// times deletes what the user said.
+    #[test]
+    fn overlapping_windows_keep_the_shared_words_once() {
+        let a = "the quick brown fox jumps over";
+        let b = "jumps over the lazy dog";
+        assert_eq!(
+            merge_overlapping(a, b),
+            "the quick brown fox jumps over the lazy dog"
+        );
+    }
+
+    /// The two passes see different context, so they punctuate and
+    /// capitalize the shared region differently. That must not defeat the
+    /// match, or every merge falls back to duplicating the overlap.
+    #[test]
+    fn overlap_matching_ignores_case_and_punctuation() {
+        let a = "we should ship it on friday,";
+        let b = "Friday we can cut the release";
+        assert_eq!(
+            merge_overlapping(a, b),
+            "we should ship it on friday, we can cut the release"
+        );
+    }
+
+    /// When the overlap lands in silence or the passes genuinely disagree,
+    /// there is nothing to match. Concatenating repeats a few words; the
+    /// alternative, guessing at a join, deletes speech. Repetition is the
+    /// recoverable failure.
+    #[test]
+    fn disagreeing_windows_concatenate_rather_than_drop_speech() {
+        let a = "first window ends here";
+        let b = "second window starts elsewhere";
+        assert_eq!(
+            merge_overlapping(a, b),
+            "first window ends here second window starts elsewhere"
+        );
+    }
+
+    /// A window that decodes to nothing (silence) must not erase what came
+    /// before it or introduce stray whitespace.
+    #[test]
+    fn empty_windows_are_absorbed() {
+        assert_eq!(merge_overlapping("", "opening words"), "opening words");
+        assert_eq!(merge_overlapping("kept text", ""), "kept text");
+        assert_eq!(merge_overlapping("", ""), "");
+    }
+
+    /// A window whose entire content already appeared in the previous one
+    /// adds nothing, and must not leave a trailing space behind.
+    #[test]
+    fn a_fully_contained_window_adds_nothing() {
+        assert_eq!(
+            merge_overlapping("alpha beta gamma", "beta gamma"),
+            "alpha beta gamma"
+        );
+    }
+
+    /// The matcher must not treat a run of pure punctuation as agreement:
+    /// "..." normalizes to the empty string and would otherwise match
+    /// anything, splicing two unrelated windows together.
+    #[test]
+    fn punctuation_only_tokens_do_not_count_as_a_match() {
+        let merged = merge_overlapping("the meeting ended ...", "... and then we left");
+        assert!(
+            merged.contains("the meeting ended") && merged.contains("and then we left"),
+            "both windows must survive, got {merged:?}"
+        );
+    }
+
+    /// The window arithmetic has to advance even in the degenerate case, or
+    /// a long recording spins forever. This pins the stride relationship the
+    /// loop depends on rather than the loop itself, which needs a model.
+    #[test]
+    fn window_stride_always_advances() {
+        let window = (MAX_AUDIO_CLIP_S * SAMPLE_RATE as f32) as usize;
+        let overlap = (OVERLAP_S * SAMPLE_RATE as f32) as usize;
+        assert!(overlap < window, "overlap must fit inside the window");
+        assert!(
+            window.saturating_sub(overlap).max(1) > 0,
+            "stride must be positive so the loop terminates"
+        );
+    }
 }
