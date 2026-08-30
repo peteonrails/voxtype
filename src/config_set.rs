@@ -639,4 +639,91 @@ mod tests {
         assert_eq!(cfg.osd.opacity, 0.5);
         assert_eq!(cfg.hotkey.key, "HOME", "existing settings must survive");
     }
+
+    /// The macOS menu bar (src/menubar.rs) routes its three settings through
+    /// this module. That file is behind `#[cfg(target_os = "macos")]`, so
+    /// nothing on a Linux CI runner compiles it and no test there can call
+    /// those functions. These cases stand in for it: they assert the exact
+    /// key/value pairs the menu sends are accepted, so a schema change that
+    /// would silently turn a menu item into a no-op fails here instead of on
+    /// a user's Mac.
+    ///
+    /// Before #576 the menu bar edited config.toml with regular expressions
+    /// and corrupted it. The fix was to delegate here; this is the part of
+    /// that fix a Linux runner can actually verify.
+    #[test]
+    fn menubar_settings_are_accepted() {
+        let original = r#"engine = "whisper"
+
+[hotkey]
+key = "SCROLLLOCK"
+mode = "push_to_talk"
+
+# How transcribed text reaches the focused window.
+[output]
+mode = "type"
+type_delay_ms = 5
+"#;
+
+        for (key, value) in [
+            ("output.mode", "type"),
+            ("output.mode", "clipboard"),
+            ("output.mode", "paste"),
+            ("output.mode", "file"),
+            ("hotkey.mode", "push_to_talk"),
+            ("hotkey.mode", "toggle"),
+        ] {
+            let (_dir, path) = temp_config(original);
+            set_key(path.clone(), key, value)
+                .unwrap_or_else(|e| panic!("the menu bar sets {key} = {value}, rejected: {e}"));
+
+            let text = fs::read_to_string(&path).unwrap();
+            assert!(
+                text.contains("[output]") && text.contains("[hotkey]"),
+                "setting {key} destroyed a section header:\n{text}"
+            );
+            assert!(
+                text.contains("# How transcribed text reaches the focused window."),
+                "setting {key} dropped comments:\n{text}"
+            );
+
+            let cfg = crate::config::load_config(Some(&path))
+                .unwrap_or_else(|e| panic!("config unloadable after setting {key}: {e}"));
+            assert_eq!(
+                cfg.output.type_delay_ms, 5,
+                "setting {key} disturbed an unrelated key"
+            );
+        }
+    }
+
+    /// The menu bar's engine picker uses the dedicated `set_engine` entry
+    /// point, and passes `TranscriptionEngine::name()` straight through.
+    #[test]
+    fn menubar_engine_names_are_accepted() {
+        for name in ENGINE_NAMES {
+            let (_dir, path) = temp_config("[hotkey]\nkey = \"HOME\"\n");
+
+            // An engine whose Cargo feature is absent is refused on purpose:
+            // writing it would leave a config the daemon cannot start with.
+            if !engine_feature_compiled(name) {
+                assert!(
+                    set_engine(path.clone(), name).is_err(),
+                    "{name} is not compiled in and must be refused, not written"
+                );
+                continue;
+            }
+
+            set_engine(path.clone(), name)
+                .unwrap_or_else(|e| panic!("menu bar offers engine {name}, rejected: {e}"));
+
+            let text = fs::read_to_string(&path).unwrap();
+            assert!(
+                !text.contains("[\"\"]"),
+                "engine must be a root key, not a table named \"\":\n{text}"
+            );
+
+            let cfg = crate::config::load_config(Some(&path)).unwrap();
+            assert_eq!(cfg.engine.name(), *name);
+        }
+    }
 }

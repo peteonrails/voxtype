@@ -169,100 +169,80 @@ fn get_downloaded_models() -> Vec<(String, bool)> {
 
 /// Update config file with new engine
 fn set_engine(engine: TranscriptionEngine) -> bool {
-    let config_path = match Config::default_path() {
+    let path = match Config::default_path() {
         Some(p) => p,
-        None => return false,
+        None => {
+            tracing::error!("menubar: no config path available");
+            return false;
+        }
     };
+    match crate::config_set::set_engine(path, engine.name()) {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::error!("menubar: could not set engine: {}", e);
+            false
+        }
+    }
+}
 
-    let content = std::fs::read_to_string(&config_path).unwrap_or_default();
-
-    let engine_str = engine.name();
-
-    // Check if engine line exists
-    let new_content = if content.contains("engine =") {
-        // Replace existing engine line
-        let re = regex::Regex::new(r#"engine\s*=\s*"[^"]*""#).unwrap();
-        re.replace(&content, format!(r#"engine = "{}""#, engine_str))
-            .to_string()
-    } else {
-        // Add engine line at the beginning
-        format!("engine = \"{}\"\n{}", engine_str, content)
+/// Write one key through `config_set`, the same schema-validated path that
+/// backs `voxtype config set` and the TUI.
+///
+/// These three settings used to rewrite config.toml with regular
+/// expressions, which corrupted files in two distinct ways (#576):
+///
+/// The output-mode replacement used `$1mode` in its replacement string. The
+/// regex crate reads that as a capture group *named* `1mode`, not group 1
+/// followed by literal text, so it expanded to nothing: the `[output]`
+/// header and its comments were replaced by a bare ` = "clipboard"` line,
+/// every key that had been under `[output]` fell into the preceding
+/// section, and the daemon would not start.
+///
+/// The hotkey-mode replacement matched `mode = "..."` across the whole file
+/// with no section scoping, so it rewrote whichever `mode` key came first,
+/// which in a normal config is the one under `[output]`.
+///
+/// `config_set` parses the document properly, checks the key against the
+/// schema, validates the result by loading it before the file is replaced,
+/// and renames atomically. Neither class of bug is expressible through it,
+/// and unlike this module it is compiled and tested on every platform.
+fn set_config_key(key: &str, value: &str) -> bool {
+    let path = match Config::default_path() {
+        Some(p) => p,
+        None => {
+            tracing::error!("menubar: no config path available");
+            return false;
+        }
     };
-
-    std::fs::write(&config_path, new_content).is_ok()
+    match crate::config_set::set_key(path, key, value) {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::error!("menubar: could not set {}: {}", key, e);
+            false
+        }
+    }
 }
 
 /// Update config file with new output mode
 fn set_output_mode(mode: OutputMode) -> bool {
-    let config_path = match Config::default_path() {
-        Some(p) => p,
-        None => return false,
-    };
-
-    let content = std::fs::read_to_string(&config_path).unwrap_or_default();
-
+    // Exhaustive on purpose: a new OutputMode variant should fail to compile
+    // here until the menu offers it, rather than silently falling through.
     let mode_str = match mode {
         OutputMode::Type => "type",
         OutputMode::Clipboard => "clipboard",
         OutputMode::Paste => "paste",
         OutputMode::File => "file",
     };
-
-    // Check if [output] section exists with mode
-    let new_content = if content.contains("[output]") {
-        // Check if mode line exists under [output]
-        if let Some(output_start) = content.find("[output]") {
-            let after_output = &content[output_start..];
-            if after_output.contains("mode =") {
-                // Replace existing mode line
-                let re = regex::Regex::new(r#"(\[output\][^\[]*?)mode\s*=\s*"[^"]*""#).unwrap();
-                re.replace(&content, format!(r#"$1mode = "{}""#, mode_str))
-                    .to_string()
-            } else {
-                // Add mode line after [output]
-                content.replace("[output]", &format!("[output]\nmode = \"{}\"", mode_str))
-            }
-        } else {
-            content.clone()
-        }
-    } else {
-        // Add [output] section
-        format!("{}\n[output]\nmode = \"{}\"\n", content, mode_str)
-    };
-
-    std::fs::write(&config_path, new_content).is_ok()
+    set_config_key("output.mode", mode_str)
 }
 
 /// Update config file with new hotkey mode
 fn set_hotkey_mode(mode: ActivationMode) -> bool {
-    let config_path = match Config::default_path() {
-        Some(p) => p,
-        None => return false,
-    };
-
-    let content = std::fs::read_to_string(&config_path).unwrap_or_default();
     let mode_str = match mode {
         ActivationMode::PushToTalk => "push_to_talk",
         ActivationMode::Toggle => "toggle",
     };
-
-    // Check if [hotkey] section exists
-    let new_content = if content.contains("[hotkey]") {
-        if content.contains("mode =") {
-            // Replace existing mode line
-            let re = regex::Regex::new(r#"mode\s*=\s*"[^"]*""#).unwrap();
-            re.replace(&content, format!(r#"mode = "{}""#, mode_str))
-                .to_string()
-        } else {
-            // Add mode line after [hotkey]
-            content.replace("[hotkey]", &format!("[hotkey]\nmode = \"{}\"", mode_str))
-        }
-    } else {
-        // Add [hotkey] section
-        format!("{}\n[hotkey]\nmode = \"{}\"\n", content, mode_str)
-    };
-
-    std::fs::write(&config_path, new_content).is_ok()
+    set_config_key("hotkey.mode", mode_str)
 }
 
 /// Update config to use a specific model
