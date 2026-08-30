@@ -221,6 +221,47 @@ pub fn project_envelope(frames: &[AudioFrame], n_columns: usize) -> Vec<Envelope
     out
 }
 
+/// Project audio history into evenly-spaced vertical bar levels.
+///
+/// Unlike [`project_envelope`], a partially-filled history remains aligned to
+/// the right. This lets a fresh recording visibly grow from right to left
+/// instead of stretching its first frame across the whole OSD.
+pub fn project_bar_levels(
+    frames: &[AudioFrame],
+    n_bars: usize,
+    history_capacity: usize,
+    gain: f32,
+) -> Vec<f32> {
+    let mut levels = vec![0.0; n_bars];
+    if frames.is_empty() || n_bars == 0 || history_capacity == 0 {
+        return levels;
+    }
+
+    let frames = if frames.len() > history_capacity {
+        &frames[frames.len() - history_capacity..]
+    } else {
+        frames
+    };
+    let history_start = history_capacity - frames.len();
+
+    for (bar, level) in levels.iter_mut().enumerate() {
+        let start = bar * history_capacity / n_bars;
+        let end = (((bar + 1) * history_capacity) / n_bars)
+            .max(start + 1)
+            .min(history_capacity);
+        if end <= history_start {
+            continue;
+        }
+
+        for frame in &frames[start.max(history_start) - history_start..end - history_start] {
+            let amplitude = frame.min.abs().max(frame.max.abs());
+            *level = level.max((amplitude * gain).clamp(0.0, 1.0));
+        }
+    }
+
+    levels
+}
+
 /// Map a dBFS peak to a normalized 0.0..=1.0 fill level for the meter.
 ///
 /// `floor_dbfs` is the dBFS value that maps to 0.0 (typically -60 dBFS for
@@ -350,5 +391,31 @@ mod tests {
         for c in cols {
             assert_eq!(c, EnvelopeColumn::SILENT);
         }
+    }
+
+    #[test]
+    fn bars_keep_partial_history_right_aligned() {
+        let frames = vec![frame(0, -0.1, 0.2, -20.0), frame(1, -0.3, 0.1, -10.0)];
+        let levels = project_bar_levels(&frames, 4, 4, 2.0);
+        assert_eq!(levels, vec![0.0, 0.0, 0.4, 0.6]);
+    }
+
+    #[test]
+    fn bars_aggregate_peaks_and_clamp_gain() {
+        let frames = vec![
+            frame(0, -0.1, 0.2, -20.0),
+            frame(1, -0.4, 0.1, -10.0),
+            frame(2, -0.2, 0.8, -3.0),
+            frame(3, -0.1, 0.2, -20.0),
+        ];
+        let levels = project_bar_levels(&frames, 2, 4, 2.0);
+        assert_eq!(levels, vec![0.8, 1.0]);
+    }
+
+    #[test]
+    fn bars_sample_short_history_without_gaps() {
+        let frames = vec![frame(0, -0.1, 0.2, -20.0), frame(1, -0.3, 0.1, -10.0)];
+        let levels = project_bar_levels(&frames, 4, 2, 2.0);
+        assert_eq!(levels, vec![0.4, 0.4, 0.6, 0.6]);
     }
 }

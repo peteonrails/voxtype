@@ -1,8 +1,8 @@
 //! `voxtype-osd-gtk4` — GTK4 + gtk4-layer-shell on-screen mic visualizer
 //! for the Voxtype daemon.
 //!
-//! Renders a click-through, layer-shell-anchored window containing the
-//! scrolling waveform plus a segmented peak meter. Audio frames arrive on
+//! Renders either the classic waveform + peak meter or a GNOME-style pill
+//! with voice-history bars. Audio frames arrive on
 //! the daemon's audio Unix socket via [`voxtype::osd::ipc::run_ipc_loop`],
 //! decoded into [`AudioFrame`]s by a tokio runtime on a worker thread, and
 //! pushed into a shared [`FrameRing`] + [`PeakHold`]. The GTK side polls a
@@ -16,6 +16,7 @@
 //! Run with `RUST_LOG=debug` for verbose logs.
 
 use std::cell::Cell;
+use std::f64::consts::PI;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -29,10 +30,12 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 use voxtype::audio::levels::{AudioFrame, FRAME_HZ};
 use voxtype::config::Config as VoxtypeConfig;
-use voxtype::osd::config::{OsdConfig, OsdPosition};
+use voxtype::osd::config::{Gtk4Variant, OsdConfig, OsdPosition};
 use voxtype::osd::ipc::{resolve_socket_path, run_ipc_loop, FrameRing, DEFAULT_RING_DEPTH};
 use voxtype::osd::theme::ThemeWatcher;
-use voxtype::osd::visual::{peak_meter_fraction, project_envelope, MeterZone, Palette, PeakHold};
+use voxtype::osd::visual::{
+    peak_meter_fraction, project_bar_levels, project_envelope, MeterZone, Palette, PeakHold,
+};
 
 /// Load the `[osd]` section from the voxtype config file, falling back to
 /// `OsdConfig::default()` on any error (file missing, unreadable, parse
@@ -42,16 +45,16 @@ use voxtype::osd::visual::{peak_meter_fraction, project_envelope, MeterZone, Pal
 /// is a side car, and a malformed config shouldn't prevent it from running
 /// with sensible defaults — the user will see the daemon complain about
 /// the same file separately.
-fn load_osd_config_from_file(explicit: Option<&std::path::Path>) -> OsdConfig {
+fn load_osd_config_from_file(explicit: Option<&std::path::Path>) -> (OsdConfig, GeometryOverrides) {
     let path = explicit
         .map(std::path::Path::to_path_buf)
         .or_else(VoxtypeConfig::default_path);
     let Some(path) = path else {
-        return OsdConfig::default();
+        return (OsdConfig::default(), GeometryOverrides::default());
     };
     let content = match std::fs::read_to_string(&path) {
         Ok(s) => s,
-        Err(_) => return OsdConfig::default(),
+        Err(_) => return (OsdConfig::default(), GeometryOverrides::default()),
     };
 
     #[derive(serde::Deserialize, Default)]
@@ -60,10 +63,21 @@ fn load_osd_config_from_file(explicit: Option<&std::path::Path>) -> OsdConfig {
         osd: Option<OsdConfig>,
     }
 
-    match toml::from_str::<PartialConfig>(&content) {
-        Ok(p) => p.osd.unwrap_or_default(),
-        Err(_) => OsdConfig::default(),
-    }
+    let document = match toml::from_str::<toml::Value>(&content) {
+        Ok(document) => document,
+        Err(_) => return (OsdConfig::default(), GeometryOverrides::default()),
+    };
+    let overrides = document
+        .get("osd")
+        .and_then(toml::Value::as_table)
+        .map(GeometryOverrides::from_table)
+        .unwrap_or_default();
+    let config = document
+        .try_into::<PartialConfig>()
+        .ok()
+        .and_then(|partial| partial.osd)
+        .unwrap_or_default();
+    (config, overrides)
 }
 
 /// Application id for the GTK4 frontend.
@@ -82,6 +96,31 @@ const METER_SEGMENTS: usize = 10;
 
 /// dBFS floor for the peak meter (maps to "empty bar").
 const METER_FLOOR_DBFS: f32 = -60.0;
+
+const PILL_HORIZONTAL_PADDING: f64 = 18.0;
+
+/// Geometry fields explicitly present in `[osd]`.
+///
+/// Serde fills omitted fields with `OsdConfig::default()`, so this mask lets
+/// variant defaults fill only omitted values without overriding user choices.
+#[derive(Default)]
+struct GeometryOverrides {
+    width_px: bool,
+    height_px: bool,
+    margin_px: bool,
+    opacity: bool,
+}
+
+impl GeometryOverrides {
+    fn from_table(table: &toml::map::Map<String, toml::Value>) -> Self {
+        Self {
+            width_px: table.contains_key("width_px"),
+            height_px: table.contains_key("height_px"),
+            margin_px: table.contains_key("margin_px"),
+            opacity: table.contains_key("opacity"),
+        }
+    }
+}
 
 #[derive(Parser, Debug, Clone)]
 #[command(
@@ -108,6 +147,14 @@ struct Args {
     #[arg(long, default_value = "0", env = "VOXTYPE_OSD_LOG_EVERY")]
     log_every: u32,
 
+    /// GTK4 visual variant.
+    #[arg(
+        long,
+        env = "VOXTYPE_OSD_GTK4_VARIANT",
+        value_parser = ["classic", "pill"]
+    )]
+    variant: Option<String>,
+
     /// Held-peak decay rate in dB/sec.
     #[arg(long, default_value = "6.0", env = "VOXTYPE_OSD_PEAK_DECAY")]
     peak_decay_db_per_sec: f32,
@@ -123,6 +170,10 @@ struct Args {
     /// Margin from the screen edge in physical pixels.
     #[arg(long, env = "VOXTYPE_OSD_MARGIN")]
     margin_px: Option<u32>,
+
+    /// Background opacity 0.0..=1.0.
+    #[arg(long, env = "VOXTYPE_OSD_OPACITY")]
+    opacity: Option<f32>,
 
     /// Visual gain applied to audio samples before drawing the waveform.
     /// Higher = waveform fills more of the vertical for quiet inputs.
@@ -162,7 +213,13 @@ fn main() -> anyhow::Result<()> {
     let socket_path = resolve_socket_path(args.socket.clone());
 
     // Layer config: defaults < config file [osd] < CLI/env overrides.
-    let mut osd_cfg = load_osd_config_from_file(args.config.as_deref());
+    let (mut osd_cfg, geometry_overrides) = load_osd_config_from_file(args.config.as_deref());
+    let variant = args
+        .variant
+        .as_deref()
+        .and_then(Gtk4Variant::parse_str)
+        .unwrap_or(osd_cfg.gtk4_variant);
+    apply_variant_defaults(&mut osd_cfg, variant, &geometry_overrides);
     if let Some(w) = args.width_px {
         osd_cfg.width_px = w;
     }
@@ -171,6 +228,9 @@ fn main() -> anyhow::Result<()> {
     }
     if let Some(m) = args.margin_px {
         osd_cfg.margin_px = m;
+    }
+    if let Some(o) = args.opacity {
+        osd_cfg.opacity = o.clamp(0.0, 1.0);
     }
     if let Some(g) = args.waveform_gain {
         osd_cfg.waveform_gain = g;
@@ -181,7 +241,8 @@ fn main() -> anyhow::Result<()> {
     osd_cfg.peak_decay_db_per_sec = args.peak_decay_db_per_sec;
 
     tracing::info!(
-        "voxtype-osd-gtk4 starting; socket={:?} size={}x{} margin={} pos={:?}",
+        "voxtype-osd-gtk4 starting; variant={:?} socket={:?} size={}x{} margin={} pos={:?}",
+        variant,
         socket_path,
         osd_cfg.width_px,
         osd_cfg.height_px,
@@ -200,6 +261,7 @@ fn main() -> anyhow::Result<()> {
         socket_path,
         args.reconnect_secs,
         args.log_every,
+        variant == Gtk4Variant::Pill,
     );
 
     // GTK application owns the main thread.
@@ -208,7 +270,7 @@ fn main() -> anyhow::Result<()> {
     let cfg = osd_cfg.clone();
     let state_for_activate = state.clone();
     app.connect_activate(move |app| {
-        build_window(app, &cfg, palette, state_for_activate.clone());
+        build_window(app, &cfg, palette, variant, state_for_activate.clone());
     });
 
     // GTK's run() consumes argv; we've already parsed via clap, so feed
@@ -221,12 +283,33 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn apply_variant_defaults(
+    config: &mut OsdConfig,
+    variant: Gtk4Variant,
+    overrides: &GeometryOverrides,
+) {
+    let defaults = variant.defaults();
+    if !overrides.width_px {
+        config.width_px = defaults.width_px;
+    }
+    if !overrides.height_px {
+        config.height_px = defaults.height_px;
+    }
+    if !overrides.margin_px {
+        config.margin_px = defaults.margin_px;
+    }
+    if !overrides.opacity {
+        config.opacity = defaults.opacity;
+    }
+}
+
 /// Spawn the tokio runtime + IPC loop on a dedicated thread.
 fn spawn_ipc_worker(
     state: Arc<SharedState>,
     socket_path: PathBuf,
     reconnect_secs: f32,
     log_every: u32,
+    reset_history_after_idle: bool,
 ) {
     std::thread::Builder::new()
         .name("voxtype-osd-ipc".into())
@@ -247,7 +330,20 @@ fn spawn_ipc_worker(
             let mut last_log = Instant::now();
 
             let on_frame = move |frame: AudioFrame| {
+                let now = Instant::now();
+                let new_recording = state
+                    .last_frame_at
+                    .lock()
+                    .map(|mut last_frame_at| {
+                        let was_idle = last_frame_at.elapsed().as_secs_f32() > IDLE_TIMEOUT_SECS;
+                        *last_frame_at = now;
+                        was_idle
+                    })
+                    .unwrap_or(false);
                 if let Ok(mut r) = state.ring.lock() {
+                    if reset_history_after_idle && new_recording {
+                        r.clear();
+                    }
                     r.push(frame);
                 }
                 if let Ok(mut p) = state.peak.lock() {
@@ -255,9 +351,6 @@ fn spawn_ipc_worker(
                 }
                 if let Ok(mut s) = state.last_seq.lock() {
                     *s = s.wrapping_add(1);
-                }
-                if let Ok(mut t) = state.last_frame_at.lock() {
-                    *t = Instant::now();
                 }
 
                 total += 1;
@@ -316,9 +409,26 @@ fn focused_monitor_height_px() -> Option<i32> {
     None
 }
 
+fn edge_anchors(position: OsdPosition) -> (bool, bool, bool, bool) {
+    match position {
+        OsdPosition::BottomCenter => (false, true, false, false),
+        OsdPosition::BottomLeft => (false, true, true, false),
+        OsdPosition::BottomRight => (false, true, false, true),
+        OsdPosition::TopCenter => (true, false, false, false),
+        OsdPosition::TopLeft => (true, false, true, false),
+        OsdPosition::TopRight => (true, false, false, true),
+    }
+}
+
 /// Build the GTK window, attach layer-shell config, mount the DrawingArea,
 /// and start the redraw tick.
-fn build_window(app: &Application, cfg: &OsdConfig, palette: Palette, state: Arc<SharedState>) {
+fn build_window(
+    app: &Application,
+    cfg: &OsdConfig,
+    palette: Palette,
+    variant: Gtk4Variant,
+    state: Arc<SharedState>,
+) {
     let window = ApplicationWindow::builder()
         .application(app)
         .default_width(cfg.width_px as i32)
@@ -326,6 +436,9 @@ fn build_window(app: &Application, cfg: &OsdConfig, palette: Palette, state: Arc
         .resizable(false)
         .decorated(false)
         .build();
+    if variant == Gtk4Variant::Pill {
+        install_transparent_window_style(&window);
+    }
 
     // Layer-shell setup: top layer, no keyboard, anchored per config.
     window.init_layer_shell();
@@ -346,7 +459,7 @@ fn build_window(app: &Application, cfg: &OsdConfig, palette: Palette, state: Arc
         OsdPosition::BottomCenter | OsdPosition::TopCenter
     );
 
-    if centered {
+    if centered && variant == Gtk4Variant::Classic {
         // Resolve monitor height to translate the fractional offset into
         // pixels. Falls back to a conservative 1080 if the display can't be
         // queried (extremely rare on Wayland-only systems where layer-shell
@@ -361,15 +474,9 @@ fn build_window(app: &Application, cfg: &OsdConfig, palette: Palette, state: Arc
         window.set_anchor(Edge::Right, false);
         window.set_margin(Edge::Top, top_px);
     } else {
-        // Corner positions: legacy anchor + uniform pixel margin behavior.
-        let (anchor_top, anchor_bottom, anchor_left, anchor_right) = match cfg.position {
-            OsdPosition::BottomLeft => (false, true, true, false),
-            OsdPosition::BottomRight => (false, true, false, true),
-            OsdPosition::TopLeft => (true, false, true, false),
-            OsdPosition::TopRight => (true, false, false, true),
-            // Centered branch is handled above; unreachable here.
-            OsdPosition::BottomCenter | OsdPosition::TopCenter => unreachable!(),
-        };
+        // Pill positions use direct edge anchoring; classic corner positions
+        // retain the same uniform margin behavior.
+        let (anchor_top, anchor_bottom, anchor_left, anchor_right) = edge_anchors(cfg.position);
         window.set_anchor(Edge::Top, anchor_top);
         window.set_anchor(Edge::Bottom, anchor_bottom);
         window.set_anchor(Edge::Left, anchor_left);
@@ -399,8 +506,10 @@ fn build_window(app: &Application, cfg: &OsdConfig, palette: Palette, state: Arc
     drawing_area.set_content_height(cfg.height_px as i32);
     let state_for_draw = state.clone();
     let gain = cfg.waveform_gain as f64;
-    drawing_area.set_draw_func(move |_area, cr, w, h| {
-        draw(cr, w, h, &palette, &state_for_draw, gain);
+    let opacity = cfg.opacity.clamp(0.0, 1.0);
+    drawing_area.set_draw_func(move |_area, cr, w, h| match variant {
+        Gtk4Variant::Classic => draw_classic(cr, w, h, &palette, &state_for_draw, gain, opacity),
+        Gtk4Variant::Pill => draw_pill(cr, w, h, &state_for_draw, gain, opacity),
     });
     window.set_child(Some(&drawing_area));
 
@@ -485,6 +594,22 @@ fn build_window(app: &Application, cfg: &OsdConfig, palette: Palette, state: Arc
     window.present();
 }
 
+fn install_transparent_window_style(window: &ApplicationWindow) {
+    let Some(display) = gtk4::gdk::Display::default() else {
+        return;
+    };
+    let provider = gtk4::CssProvider::new();
+    provider.load_from_data(
+        "window.voxtype-osd-pill { background-color: transparent; background-image: none; box-shadow: none; }",
+    );
+    gtk4::style_context_add_provider_for_display(
+        &display,
+        &provider,
+        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+    window.add_css_class("voxtype-osd-pill");
+}
+
 /// Set an empty input region on the GdkSurface so clicks pass through.
 fn apply_click_through(window: &ApplicationWindow) {
     let Some(surface) = window.surface() else {
@@ -496,13 +621,14 @@ fn apply_click_through(window: &ApplicationWindow) {
 }
 
 /// Render the waveform + peak meter into the given Cairo context.
-fn draw(
+fn draw_classic(
     cr: &Context,
     width: i32,
     height: i32,
     palette: &Palette,
     state: &Arc<SharedState>,
     gain: f64,
+    opacity: f32,
 ) {
     let w = width as f64;
     let h = height as f64;
@@ -515,7 +641,7 @@ fn draw(
         palette.background.r as f64,
         palette.background.g as f64,
         palette.background.b as f64,
-        palette.background.a as f64,
+        f64::from(opacity),
     );
     cr.set_operator(cairo::Operator::Source);
     cr.paint().ok();
@@ -527,14 +653,12 @@ fn draw(
     let gap = (w * 0.01).max(2.0);
     let wave_width = (w - meter_width - gap).max(0.0);
 
-    draw_waveform(cr, 0.0, 0.0, wave_width, h, palette, state, gain);
+    draw_waveform(cr, wave_width, h, palette, state, gain);
     draw_peak_meter(cr, wave_width + gap, 0.0, meter_width, h, palette, state);
 }
 
 fn draw_waveform(
     cr: &Context,
-    x: f64,
-    y: f64,
     w: f64,
     h: f64,
     palette: &Palette,
@@ -556,7 +680,7 @@ fn draw_waveform(
     };
     let cols = project_envelope(&frames, n_columns);
 
-    let mid = y + h * 0.5;
+    let mid = h * 0.5;
     let half = h * 0.5;
 
     // Mirrored envelope filled polygon. We trace the top edge left-to-right
@@ -571,7 +695,7 @@ fn draw_waveform(
     cr.new_path();
     // Top edge.
     for (i, col) in cols.iter().enumerate() {
-        let px = x + i as f64 + 0.5;
+        let px = i as f64 + 0.5;
         let py = mid - sample_to_pixels(col.max, half, gain);
         if i == 0 {
             cr.move_to(px, py);
@@ -581,7 +705,7 @@ fn draw_waveform(
     }
     // Bottom edge, right-to-left.
     for (i, col) in cols.iter().enumerate().rev() {
-        let px = x + i as f64 + 0.5;
+        let px = i as f64 + 0.5;
         let py = mid - sample_to_pixels(col.min, half, gain);
         cr.line_to(px, py);
     }
@@ -596,8 +720,8 @@ fn draw_waveform(
         0.15,
     );
     cr.set_line_width(1.0);
-    cr.move_to(x, mid);
-    cr.line_to(x + w, mid);
+    cr.move_to(0.0, mid);
+    cr.line_to(w, mid);
     cr.stroke().ok();
 }
 
@@ -687,5 +811,120 @@ fn draw_peak_meter(
         cr.move_to(x, py);
         cr.line_to(x + w, py);
         cr.stroke().ok();
+    }
+}
+
+fn draw_pill(
+    cr: &Context,
+    width: i32,
+    height: i32,
+    state: &Arc<SharedState>,
+    gain: f64,
+    opacity: f32,
+) {
+    let width = f64::from(width);
+    let height = f64::from(height);
+    if width <= 0.0 || height <= 0.0 {
+        return;
+    }
+
+    cr.set_operator(cairo::Operator::Source);
+    cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
+    cr.paint().ok();
+    cr.set_operator(cairo::Operator::Over);
+
+    rounded_rectangle(cr, 0.0, 0.0, width, height, height * 0.5);
+    cr.set_source_rgba(0.180, 0.180, 0.200, f64::from(opacity));
+    cr.fill().ok();
+
+    let bars_x = PILL_HORIZONTAL_PADDING;
+    let bars_width = (width - PILL_HORIZONTAL_PADDING * 2.0).max(1.0);
+    let bar_count = (bars_width / 8.0).round().clamp(12.0, 42.0) as usize;
+    let (frames, capacity) = match state.ring.lock() {
+        Ok(ring) => (ring.iter().collect::<Vec<_>>(), ring.capacity()),
+        Err(_) => return,
+    };
+    let levels = project_bar_levels(&frames, bar_count, capacity, gain as f32);
+    draw_history_bars(cr, bars_x, height * 0.5, bars_width, height, &levels);
+}
+
+fn draw_history_bars(cr: &Context, x: f64, center_y: f64, width: f64, height: f64, levels: &[f32]) {
+    if levels.is_empty() {
+        return;
+    }
+    let slot = width / levels.len() as f64;
+    let bar_width = (slot * 0.48).clamp(2.5, 5.0);
+    let min_height = (height * 0.075).max(3.0);
+    let max_height = height * 0.52;
+
+    for (index, level) in levels.iter().enumerate() {
+        let response = f64::from(*level).sqrt();
+        let bar_height = min_height + response * (max_height - min_height);
+        let age = (index + 1) as f64 / levels.len() as f64;
+        let alpha = if *level > 0.0 {
+            0.42 + age * 0.56
+        } else {
+            0.14
+        };
+        let bar_x = x + index as f64 * slot + (slot - bar_width) * 0.5;
+        rounded_rectangle(
+            cr,
+            bar_x,
+            center_y - bar_height * 0.5,
+            bar_width,
+            bar_height,
+            bar_width * 0.5,
+        );
+        cr.set_source_rgba(0.96, 0.96, 0.97, alpha);
+        cr.fill().ok();
+    }
+}
+
+fn rounded_rectangle(cr: &Context, x: f64, y: f64, width: f64, height: f64, radius: f64) {
+    let radius = radius.min(width * 0.5).min(height * 0.5).max(0.0);
+    cr.new_sub_path();
+    cr.arc(x + width - radius, y + radius, radius, -PI * 0.5, 0.0);
+    cr.arc(
+        x + width - radius,
+        y + height - radius,
+        radius,
+        0.0,
+        PI * 0.5,
+    );
+    cr.arc(x + radius, y + height - radius, radius, PI * 0.5, PI);
+    cr.arc(x + radius, y + radius, radius, PI, PI * 1.5);
+    cr.close_path();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pill_defaults_preserve_explicit_geometry_and_position() {
+        let mut config = OsdConfig {
+            width_px: 320,
+            position: OsdPosition::TopCenter,
+            ..OsdConfig::default()
+        };
+        let overrides = GeometryOverrides {
+            width_px: true,
+            ..GeometryOverrides::default()
+        };
+
+        apply_variant_defaults(&mut config, Gtk4Variant::Pill, &overrides);
+
+        assert_eq!(config.width_px, 320);
+        assert_eq!(config.height_px, 58);
+        assert_eq!(config.margin_px, 59);
+        assert_eq!(config.opacity, 1.0);
+        assert_eq!(config.position, OsdPosition::TopCenter);
+
+        // Pill center positions anchor to the requested edge rather than
+        // sharing classic's fractional top-margin path.
+        assert_eq!(
+            edge_anchors(OsdPosition::TopCenter),
+            (true, false, false, false)
+        );
     }
 }

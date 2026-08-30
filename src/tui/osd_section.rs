@@ -18,11 +18,13 @@ use ratatui::{
 use super::app::{Action, App};
 use super::common::{self, FeedbackLevel, FormRowSpec};
 use super::config_editor::{ConfigEditor, EditorError};
+use crate::osd::config::Gtk4Variant;
 
 #[derive(Debug, Clone)]
 pub struct OsdState {
     pub enabled: bool,
     pub frontend: String,
+    pub gtk4_variant: String,
     pub style: String,
     pub palette: String,
     pub layout: String,
@@ -49,6 +51,7 @@ pub struct OsdState {
 pub enum Field {
     Enabled,
     Frontend,
+    Gtk4Variant,
     Style,
     Palette,
     Layout,
@@ -67,6 +70,7 @@ impl Field {
     const ALL: &'static [Field] = &[
         Field::Enabled,
         Field::Frontend,
+        Field::Gtk4Variant,
         Field::Style,
         Field::Palette,
         Field::Layout,
@@ -85,6 +89,7 @@ impl Field {
 const TABLE: &str = "osd";
 
 const FRONTEND_CHOICES: &[&str] = &["gtk4", "native", "quickshell"];
+const GTK4_VARIANT_CHOICES: &[&str] = &["classic", "pill"];
 const STYLE_CHOICES: &[&str] = &["default"];
 const PALETTE_CHOICES: &[&str] = &["auto", "omarchy", "fallback", "package", "custom"];
 const LAYOUT_CHOICES: &[&str] = &["compact", "wide", "minimal", "tile", "orb", "custom"];
@@ -100,9 +105,9 @@ const POSITION_CHOICES: &[&str] = &[
 // Preset cycles for numeric fields. Picked to cover the common range
 // without forcing inline text edit; users who need a value off the cycle
 // list can still hand-edit ~/.config/voxtype/config.toml.
-const WIDTH_CHOICES: &[i64] = &[200, 300, 400, 500, 600, 800, 1000];
-const HEIGHT_CHOICES: &[i64] = &[32, 40, 48, 56, 64, 80, 96];
-const MARGIN_CHOICES: &[i64] = &[0, 8, 16, 24, 32, 48, 64];
+const WIDTH_CHOICES: &[i64] = &[196, 200, 300, 400, 500, 600, 800, 1000];
+const HEIGHT_CHOICES: &[i64] = &[32, 40, 48, 56, 58, 64, 80, 96];
+const MARGIN_CHOICES: &[i64] = &[0, 8, 16, 24, 32, 48, 59, 64];
 // Mirrors swayosd's `--top-margin` semantics. Default 0.85 matches the
 // position users already see for volume/brightness panels.
 const TOP_MARGIN_CHOICES: &[f64] = &[0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95];
@@ -114,11 +119,18 @@ const GAIN_CHOICES: &[f64] = &[1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 15.0, 20.0];
 impl OsdState {
     pub fn load() -> Result<Self, EditorError> {
         let ed = ConfigEditor::load()?;
+        let gtk4_variant = ed
+            .get_string(TABLE, "gtk4_variant")
+            .unwrap_or_else(|| "classic".to_string());
+        let defaults = Gtk4Variant::parse_str(&gtk4_variant)
+            .unwrap_or_default()
+            .defaults();
         Ok(Self {
             enabled: ed.get_bool(TABLE, "enabled").unwrap_or(true),
             frontend: ed
                 .get_string(TABLE, "frontend")
                 .unwrap_or_else(|| "gtk4".to_string()),
+            gtk4_variant,
             style: ed
                 .get_string(TABLE, "style")
                 .unwrap_or_else(|| "default".to_string()),
@@ -131,11 +143,19 @@ impl OsdState {
             position: ed
                 .get_string(TABLE, "position")
                 .unwrap_or_else(|| "bottom-center".to_string()),
-            width_px: ed.get_int(TABLE, "width_px").unwrap_or(400),
-            height_px: ed.get_int(TABLE, "height_px").unwrap_or(48),
-            margin_px: ed.get_int(TABLE, "margin_px").unwrap_or(24),
+            width_px: ed
+                .get_int(TABLE, "width_px")
+                .unwrap_or(i64::from(defaults.width_px)),
+            height_px: ed
+                .get_int(TABLE, "height_px")
+                .unwrap_or(i64::from(defaults.height_px)),
+            margin_px: ed
+                .get_int(TABLE, "margin_px")
+                .unwrap_or(i64::from(defaults.margin_px)),
             top_margin: ed.get_float(TABLE, "top_margin").unwrap_or(0.85),
-            opacity: ed.get_float(TABLE, "opacity").unwrap_or(0.95),
+            opacity: ed
+                .get_float(TABLE, "opacity")
+                .unwrap_or(f64::from(defaults.opacity)),
             waveform_window_secs: ed.get_float(TABLE, "waveform_window_secs").unwrap_or(3.0),
             peak_decay_db_per_sec: ed.get_float(TABLE, "peak_decay_db_per_sec").unwrap_or(6.0),
             waveform_gain: ed.get_float(TABLE, "waveform_gain").unwrap_or(10.0),
@@ -156,6 +176,7 @@ impl OsdState {
         };
         ed.set_bool(TABLE, "enabled", self.enabled);
         ed.set_string(TABLE, "frontend", &self.frontend);
+        ed.set_string(TABLE, "gtk4_variant", &self.gtk4_variant);
         ed.set_string(TABLE, "style", &self.style);
         if self.palette == "auto" {
             ed.unset(TABLE, "palette");
@@ -208,6 +229,16 @@ impl OsdState {
         match self.field {
             Field::Enabled => self.enabled = !self.enabled,
             Field::Frontend => self.frontend = cycle_str(FRONTEND_CHOICES, &self.frontend, delta),
+            Field::Gtk4Variant => {
+                self.gtk4_variant = cycle_str(GTK4_VARIANT_CHOICES, &self.gtk4_variant, delta);
+                let defaults = Gtk4Variant::parse_str(&self.gtk4_variant)
+                    .unwrap_or_default()
+                    .defaults();
+                self.width_px = i64::from(defaults.width_px);
+                self.height_px = i64::from(defaults.height_px);
+                self.margin_px = i64::from(defaults.margin_px);
+                self.opacity = f64::from(defaults.opacity);
+            }
             Field::Style => {
                 // Only cycle between built-in names. A custom package
                 // name/path isn't in STYLE_CHOICES, and cycling would
@@ -342,6 +373,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             "Frontend",
             state.frontend.clone(),
         ),
+        FormRowSpec::new(
+            state.field == Field::Gtk4Variant,
+            "GTK4 variant",
+            state.gtk4_variant.clone(),
+        ),
         FormRowSpec::new(state.field == Field::Style, "Style", state.style.clone()),
         FormRowSpec::new(
             state.field == Field::Palette,
@@ -470,6 +506,18 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
             Line::from(""),
             dim("If the chosen binary isn't on PATH, the wrapper falls back to whichever it finds and logs a warning."),
         ],
+        Field::Gtk4Variant => vec![
+            heading("GTK4 variant"),
+            Line::from(""),
+            Line::from("Visual treatment used when Frontend is gtk4."),
+            Line::from(""),
+            Line::from("  classic  scrolling waveform with segmented peak meter"),
+            Line::from("  pill     GNOME-style pill with vertical voice-history bars"),
+            Line::from(""),
+            dim("Changing the variant applies its default size, margin, and opacity."),
+            Line::from(""),
+            dim("Ignored by native and quickshell. Default: classic."),
+        ],
         Field::Style => vec![
             heading("Style"),
             Line::from(""),
@@ -524,7 +572,7 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
                  envelope, narrower compresses it.",
             ),
             Line::from(""),
-            dim("Default: 400. Cycles through 200/300/400/500/600/800/1000."),
+            dim("Defaults: classic 400; pill 196."),
         ],
         Field::HeightPx => vec![
             heading("Height (px)"),
@@ -535,19 +583,17 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
                  range.",
             ),
             Line::from(""),
-            dim("Default: 48. Cycles through 32/40/48/56/64/80/96."),
+            dim("Defaults: classic 48; pill 58."),
         ],
         Field::MarginPx => vec![
             heading("Margin (px)"),
             Line::from(""),
             Line::from(
-                "Distance from the screen edge for corner anchors \
-                 (top-left, bottom-right, etc.). Ignored for centered \
-                 positions — those use Top margin (fraction) instead, so \
-                 the OSD lands in the same band as swayosd.",
+                "Distance from the screen edge. Pill and corner placements use \
+                 this; classic centered positions use Top margin instead.",
             ),
             Line::from(""),
-            dim("Default: 24."),
+            dim("Defaults: classic 24; pill 59."),
         ],
         Field::TopMargin => vec![
             heading("Top margin (fraction)"),
@@ -560,8 +606,8 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
             ),
             Line::from(""),
             Line::from(
-                "Only used when Position is bottom-center or top-center. \
-                 Corner anchors keep using Margin (px).",
+                "Only used by classic when Position is bottom-center or \
+                 top-center. Pill and corner placements use Margin (px).",
             ),
             Line::from(""),
             dim("Default: 0.85 (matches swayosd). 0.0 = top of screen, 1.0 = bottom."),
@@ -574,7 +620,7 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
                  opaque). The waveform draws on top regardless.",
             ),
             Line::from(""),
-            dim("Default: 0.95."),
+            dim("Defaults: classic 0.95; pill 1.0."),
         ],
         Field::WaveformWindowSecs => vec![
             heading("Waveform window (seconds)"),
