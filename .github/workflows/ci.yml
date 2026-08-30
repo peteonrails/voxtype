@@ -64,12 +64,39 @@ jobs:
       - name: cargo test
         run: cargo test
 
+  # macOS-only modules (src/menubar.rs, src/hotkey_macos.rs) are behind
+  # `#[cfg(target_os = "macos")]`, so the three jobs above never compile a line
+  # of them. build-macos.yml does, but only on tags and rc/* branches, which
+  # means macOS code reaches a release branch without ever having been
+  # typechecked during review. #576 shipped that way: a config-rewriting bug in
+  # the menu bar that no Linux job could see.
+  #
+  # This is a check, not a build: no signing, no notarization, no universal
+  # binary, no packaging. It exists to make macOS-only code fail in the PR that
+  # writes it.
+  macos-check:
+    name: macos-check
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: cargo clippy (macOS)
+        run: cargo clippy --all-targets --no-deps -- -D warnings
+
+      - name: cargo test (macOS)
+        run: cargo test
+
   # Aggregator job — branch protection only needs to require `ci-success`.
   # Adding/removing parallel checks above just updates the `needs:` list;
   # the protection rule never needs to be touched.
   ci-success:
     name: ci-success
-    needs: [fmt, clippy, test]
+    needs: [fmt, clippy, test, macos-check]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -79,10 +106,13 @@ jobs:
           fmt='${{ needs.fmt.result }}'
           clippy='${{ needs.clippy.result }}'
           test='${{ needs.test.result }}'
-          echo "fmt:    $fmt"
-          echo "clippy: $clippy"
-          echo "test:   $test"
-          if [[ "$fmt" != success || "$clippy" != success || "$test" != success ]]; then
+          macos='${{ needs.macos-check.result }}'
+          echo "fmt:         $fmt"
+          echo "clippy:      $clippy"
+          echo "test:        $test"
+          echo "macos-check: $macos"
+          if [[ "$fmt" != success || "$clippy" != success || "$test" != success \
+                || "$macos" != success ]]; then
             echo "::error::One or more required jobs failed"
             exit 1
           fi
