@@ -329,30 +329,45 @@ Expanding distribution support is a current focus:
 
 Existing packages: Arch (AUR: `voxtype`, `voxtype-bin`), Debian (.deb), Fedora (.rpm)
 
+Known gaps as of 1.0.0: the Omarchy `edge` repo still ships `voxtype-bin` 0.7.5-1 (and `voxtype-bin-debug`), and the AUR *source* package `voxtype` is also still at 0.7.5-1, last updated 2026-05-29. Only `voxtype-bin` on AUR tracks 1.0.0. Both gaps went unnoticed because the maintainer's own machine installs from `voxtype-bin`.
+
 ### Feature Roadmap
 
-Based on open issues and project direction.
+Milestone-aligned with GitHub so the two don't drift. Based on the 29 Aug 2026 backlog triage.
 
-**v0.7.1 (confirmed):**
-- **voxtype-models CDN** - Host every ONNX engine model voxtype downloads (Cohere variants, Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual, ECAPA-TDNN diarization) on Cloudflare R2 behind `models.voxtype.io`. Removes the dependency on community HF accounts (`csukuangfj/*`, `istupakov/*`, `onnx-community/*`). Plumb a `models_base_url` indirection in `src/setup/model.rs`, ship per-model `manifest.json` with sha256s, validate downloads against the manifest, and write a mirror script that pulls upstream HF and pushes to R2 byte-identically. HF stays as a fallback so users behind firewalls keep working.
-- **Streaming transcription** ([#283](https://github.com/peteonrails/voxtype/issues/283)) - Parakeet-first, English-first push-to-stream mode. On a parallel agent's branch.
+**1.0.1 (fast follow-up):** Defects that shipped in 1.0.0 - SIGILL guidance on pre-AVX2 CPUs ([#612](https://github.com/peteonrails/voxtype/issues/612)), `configure --config` overwriting the real config ([#595](https://github.com/peteonrails/voxtype/issues/595)), impossible install instructions ([#604](https://github.com/peteonrails/voxtype/issues/604), [#622](https://github.com/peteonrails/voxtype/issues/622)), stuck push-to-talk ([#556](https://github.com/peteonrails/voxtype/issues/556)), and `voxtype info accel` reading a state file nothing writes. Plus docs corrections (#526, #528, #564).
 
-**Near Term:**
+**1.1.x (incremental):**
+- 1.1.1 GPU selection and display: #577, #611, #430, #578, #580
+- 1.1.2 Output drivers: #530, #538, #543, #507, #552
+- 1.1.3 macOS: #522, #576, #452, #632
+- 1.1.5 Compatibility: #612, #603
+
+**1.2.0 (architecture):** Model registry out of Rust structs into versioned data ([#648](https://github.com/peteonrails/voxtype/issues/648)), owning the model download transfer layer ([#647](https://github.com/peteonrails/voxtype/issues/647)), long-audio windowing for Cohere and Parakeet (#551, #288), Nemotron ([#47](https://github.com/peteonrails/voxtype/issues/47)).
+
+**1.3.0:** parakeet.cpp as a ggml/Vulkan Parakeet backend ([#483](https://github.com/peteonrails/voxtype/issues/483)) - 5-6x faster steady-state than ONNX/MIGraphX on AMD, and the only GPU path for AMD and Intel Arc since ORT has no Vulkan EP. Subprocess-isolated so whisper-rs's ggml and parakeet.cpp's ggml never share an address space. Unified profiles ([#519](https://github.com/peteonrails/voxtype/issues/519)) absorbing Dictation Intents and per-record language (#484).
+
+**1.3.1:** Internal cleanup (#477, #478, #470, #471) and xdotool as an opt-in driver (#559).
+
+**1.3.2:** kdotool as an opt-in driver (#509).
+
+**1.4.0:** OpenAI-compatible local STT API ([#244](https://github.com/peteonrails/voxtype/issues/244)) - single daemon serving hotkey dictation plus an HTTP API. GigaAM v3 as a Russian specialist (#544). ElevenLabs Scribe streaming (#545).
+
+**1.5.0:** Audio and output retention as one feature - caching (#28), history (#209), meeting file import (#489), and fixing `retain_audio`'s dead wiring (#529). Off by default.
+
+**Near Term (unscheduled):**
 - **Deterministic integration tests** - Automated smoke tests using pre-recorded audio files that can run in CI without LLM/human interaction
 - **Meeting echo cancellation edge trimming** - Remove residual bleed-through words at segment boundaries when loopback audio is active. GTCRN handles the bulk of echo removal, but 1-2 stray words can appear at the start/end of mic segments where the STFT window crosses a chunk boundary.
 
-**Medium Term:**
-- **Audio caching** ([#28](https://github.com/peteonrails/voxtype/issues/28)) - Save recordings for replay/re-transcription
-- **Audio + output history** ([#209](https://github.com/peteonrails/voxtype/issues/209)) - Companion to audio caching; surface past dictations
-- **Native StatusNotifierItem tray** ([#267](https://github.com/peteonrails/voxtype/issues/267)) - Replace XEmbed tray for KDE Plasma / GNOME compatibility
-- **OpenAI-compatible local STT API** ([#244](https://github.com/peteonrails/voxtype/issues/244)) - Single daemon serves hotkey dictation + HTTP API for other tools
-
 **Exploratory:**
-- **Consolidated release binaries** - Reduce from 8 binaries today (avx2, avx512, vulkan, onnx-avx2, onnx-avx512, onnx-cuda-12, onnx-cuda-13, onnx-migraphx) to 3 (cpu, cuda, migraphx) by combining Whisper + Vulkan + ONNX engines into each binary. Vulkan and CUDA/MIGraphX fall back to CPU when no GPU is present, and ONNX Runtime does runtime CPU dispatch. Trade-off is losing AVX-512 Whisper performance (~10-30%) and larger binaries. Blocked on whisper.cpp/ggml adding runtime SIMD dispatch if AVX-512 performance must be preserved; otherwise, AVX2-only Whisper is safe on all x86-64 CPUs.
-- **Nemotron Speech backend** ([#47](https://github.com/peteonrails/voxtype/issues/47)) - Alternative ASR engine
+- **Consolidated release binaries** - Reduce from 8 binaries today (avx2, avx512, vulkan, onnx-avx2, onnx-avx512, onnx-cuda-12, onnx-cuda-13, onnx-migraphx) to 3 (cpu, cuda, migraphx) by combining Whisper + Vulkan + ONNX engines into each binary. Vulkan and CUDA/MIGraphX fall back to CPU when no GPU is present, and ONNX Runtime does runtime CPU dispatch. Trade-off is losing AVX-512 Whisper performance (~10-30%) and larger binaries. Blocked on whisper.cpp/ggml adding runtime SIMD dispatch if AVX-512 performance must be preserved; otherwise, AVX2-only Whisper is safe on all x86-64 CPUs. This now interacts with #483: a shared-ggml refactor would serve both.
 - **Vibe Voice backend** ([#285](https://github.com/peteonrails/voxtype/issues/285)) - Microsoft's speech model
-- **Dictation Intents** ([#231](https://github.com/peteonrails/voxtype/issues/231)) - Configurable per-shortcut behavior (translate vs transcribe, custom prompts)
 - **Parakeet sortformer for meeting diarization** - Evaluate parakeet-rs's sortformer feature as alternative to the current ml-diarization ECAPA-TDNN pipeline
+- **Native StatusNotifierItem tray** ([#267](https://github.com/peteonrails/voxtype/issues/267)) - Awaiting a contributor rebase; two PRs (#291, #438) predate the `src/cli` and `src/main` refactors and no longer apply
+
+**Engine policy:** Ten engines ship today. New ones are accepted when they cover something the existing set doesn't, or when the ecosystem value is worth the surface on its own terms. Declined on packaging grounds: anything requiring a Python runtime, since voxtype ships as a single static binary ([#481](https://github.com/peteonrails/voxtype/issues/481), [#524](https://github.com/peteonrails/voxtype/issues/524)).
+
+**Output driver policy:** The default chain (wtype -> dotool -> ydotool -> clipboard) is onboarding, not a requirement - `driver_order` already pins a single driver, though `fallback_to_clipboard = false` is needed alongside it to suppress the clipboard append. New drivers are opt-in and never auto-inserted into the default chain, so an upgrade never silently changes which driver types a user's text.
 
 **Blocked/Waiting:**
 - **Nixpkgs onnxruntime MIGraphX support** - Verify the nixpkgs `onnxruntime` build (with `rocmSupport = true`) actually exposes the MIGraphX EP. The Nix flake's `parakeet-migraphx` output uses `onnxruntimeRocm` and sets `ORT_MIGRAPHX_MODEL_CACHE_PATH`; if MIGraphX isn't exposed in nixpkgs, ORT will fail to register the EP at runtime.

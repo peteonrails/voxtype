@@ -829,6 +829,10 @@ pub struct Daemon {
     paused_media_players: Vec<String>,
     // Audio streams that were ducked when recording started (for restore on recording stop)
     ducked_media_streams: Vec<audio::media::DuckedMediaStream>,
+    // In-flight media volume fade, down at recording start or up at stop. Held
+    // so the next duck/restore can serialize against it; see
+    // `duck_media_streams` for why capturing originals mid-fade is unsafe.
+    media_fade_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Daemon {
@@ -937,6 +941,7 @@ impl Daemon {
             speech_enhancer: None,
             paused_media_players: Vec::new(),
             ducked_media_streams: Vec::new(),
+            media_fade_task: None,
         }
     }
 
@@ -959,16 +964,41 @@ impl Daemon {
     /// Duck active audio streams if configured, storing original volumes
     async fn duck_media_streams(&mut self) {
         if self.config.audio.duck_media {
-            self.ducked_media_streams =
-                audio::media::duck_playing_audio(self.config.audio.duck_media_volume_percent).await;
+            // Wait out any restore still fading up. Its final write is what
+            // puts the streams back at their true original volumes, and
+            // enumerating before that lands would capture intermediate values
+            // as the new originals — every fast toggle cycle would then store
+            // a quieter baseline and media would drift down permanently.
+            // Normally already finished, so this costs nothing.
+            if let Some(task) = self.media_fade_task.take() {
+                let _ = task.await;
+            }
+            let (streams, fade) = audio::media::duck_playing_audio(
+                self.config.audio.duck_media_volume_percent,
+                self.config.audio.duck_media_fade_ms,
+            )
+            .await;
+            self.ducked_media_streams = streams;
+            self.media_fade_task = fade;
         }
     }
 
     /// Restore any audio streams that were ducked at recording start
     fn restore_ducked_media_streams(&mut self) {
         if !self.ducked_media_streams.is_empty() {
+            // Abort rather than await a fade still on its way down: this path
+            // is synchronous, and the restore we are about to spawn ends by
+            // writing the stored originals, so an interrupted duck ramp is
+            // corrected either way.
+            if let Some(task) = self.media_fade_task.take() {
+                task.abort();
+            }
             let streams = std::mem::take(&mut self.ducked_media_streams);
-            tokio::spawn(audio::media::restore_ducked_audio(streams));
+            self.media_fade_task = Some(tokio::spawn(audio::media::restore_ducked_audio(
+                streams,
+                self.config.audio.duck_media_volume_percent,
+                self.config.audio.duck_media_fade_ms,
+            )));
         }
     }
 

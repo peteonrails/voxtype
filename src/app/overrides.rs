@@ -191,6 +191,9 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if let Some(volume) = cli.duck_media_volume {
         config.audio.duck_media_volume_percent = volume.min(150);
     }
+    if let Some(fade_ms) = cli.duck_media_fade_ms {
+        config.audio.duck_media_fade_ms = fade_ms;
+    }
 
     // Output overrides
     if let Some(ref append_text) = cli.append_text {

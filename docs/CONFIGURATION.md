@@ -400,20 +400,48 @@ Use this as an alternative to `pause_media` when you want music or video to keep
 ```toml
 [audio]
 duck_media = true
-duck_media_volume_percent = 70
+duck_media_volume_percent = 34
 ```
 
 ### duck_media_volume_percent
 
 **Type:** Integer
-**Default:** `70`
+**Default:** `34`
 **Required:** No
 
-Relative volume percentage for streams affected by `duck_media`. The value is
-applied to each stream's current per-channel volume, not to a fixed 100% base:
-`70` keeps media at 70% of its current volume, `50` keeps it at half, and the
-original per-channel volumes are restored when recording stops. Values above
-`150` are clamped by the CLI override.
+Fraction of its current amplitude that a stream affected by `duck_media`
+keeps, in percent: `50` keeps it at half (-6 dB), `34` at roughly a third
+(-9.3 dB). The value is relative to each stream's current per-channel volume,
+not to a fixed 100% base, and the original volumes are restored when recording
+stops. Values above `150` are clamped by the CLI override.
+
+voxtype converts the value internally to PulseAudio's cubic percentage scale,
+so what you configure is what you hear.
+
+**Changed in 1.0.1.** Through v1.0.0 the configured percentage was applied
+directly to PulseAudio's cubic scale, which cubed the reduction: `50` left only
+12.5% of the amplitude and `30` was effectively mute. The default moved from
+`70` to `34` at the same time so the audible depth is unchanged (0.70³ ≈ 0.34).
+If you set this value yourself against an older build, cube your old number to
+get the equivalent — an old `50` is a new `13`.
+
+### duck_media_fade_ms
+
+**Type:** Integer
+**Default:** `150`
+**Required:** No
+
+Fade duration in milliseconds for the ducking ramp. The same duration is used
+going down at recording start and coming back up when recording ends, so media
+slides out of the way instead of jumping. `0` restores the previous instant
+behaviour. Durations shorter than one 20 ms step are treated as `0`.
+
+```toml
+[audio]
+duck_media = true
+duck_media_volume_percent = 34
+duck_media_fade_ms = 150
+```
 
 ---
 
