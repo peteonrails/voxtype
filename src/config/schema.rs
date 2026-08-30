@@ -1215,6 +1215,18 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
     )
     .for_engine("whisper"),
     spec(
+        "whisper.gpu_wait_secs",
+        "whisper",
+        "gpu_wait_secs",
+        KeyType::Int { min: 0, max: 120 },
+        "Advanced",
+        "GPU wait at startup",
+        "Seconds to wait for the graphics driver before loading the model. Only \
+         spent when no GPU is present yet; raise it if the daemon starts during \
+         login and lands on CPU.",
+    )
+    .for_engine("whisper"),
+    spec(
         "parakeet.streaming",
         "parakeet",
         "streaming",
@@ -1547,6 +1559,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             Some(n) => json!(n),
             None => Json::Null,
         },
+        "whisper.gpu_wait_secs" => json!(cfg.whisper.gpu_wait_secs),
 
         "parakeet.model" => json!(pk().model),
         "parakeet.model_type" => match pk().model_type {
