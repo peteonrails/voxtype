@@ -753,6 +753,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Target volume percentage for other streams while ducking.",
     ),
     spec(
+        "audio.duck_media_fade_ms",
+        "audio",
+        "duck_media_fade_ms",
+        KeyType::Int { min: 0, max: 5000 },
+        "Audio",
+        "Duck fade",
+        "Milliseconds to fade media volume down and back up. 0 is instant.",
+    ),
+    spec(
         "audio.feedback.enabled",
         "audio.feedback",
         "enabled",
@@ -1656,6 +1665,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "audio.pause_media" => json!(cfg.audio.pause_media),
         "audio.duck_media" => json!(cfg.audio.duck_media),
         "audio.duck_media_volume_percent" => json!(cfg.audio.duck_media_volume_percent),
+        "audio.duck_media_fade_ms" => json!(cfg.audio.duck_media_fade_ms),
         "audio.feedback.enabled" => json!(cfg.audio.feedback.enabled),
         "audio.feedback.theme" => json!(cfg.audio.feedback.theme),
         "audio.feedback.volume" => f32_json(cfg.audio.feedback.volume),
