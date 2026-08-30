@@ -78,6 +78,7 @@ pub mod cohere_fbank;
 use crate::config::{Config, TranscriptionEngine, WhisperConfig, WhisperMode};
 use crate::error::TranscribeError;
 use crate::setup::gpu;
+use std::time::Duration;
 
 /// A timed segment from transcription (word or sentence level)
 #[derive(Debug, Clone)]
@@ -299,6 +300,24 @@ pub fn create_transcriber_with_config_path(
             "GPU selection: {} (via VOXTYPE_VULKAN_DEVICE)",
             vendor.display_name()
         );
+    }
+
+    // Before anything touches ggml. Backends are registered once per process
+    // at first model load, so if the graphics driver has not finished binding
+    // its render node yet we are pinned to CPU for the life of the daemon —
+    // and on a login-started service that is the common case, not the rare
+    // one (#611). Costs nothing when the node is already there.
+    if cfg!(feature = "gpu-vulkan") && matches!(config.effective_mode(), WhisperMode::Local) {
+        let waited = gpu::wait_for_render_node(Duration::from_secs(config.gpu_wait_secs));
+        if !waited {
+            tracing::warn!(
+                "No GPU render node found under /dev/dri after waiting {}s. This \
+                 build has Vulkan support, so transcription will fall back to CPU \
+                 and stay there until the daemon restarts. If your GPU works but \
+                 appears late in boot, raise [whisper] gpu_wait_secs.",
+                config.gpu_wait_secs
+            );
+        }
     }
 
     match config.effective_mode() {

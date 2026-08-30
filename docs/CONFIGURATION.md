@@ -708,6 +708,26 @@ gpu_device = 1  # Use discrete GPU (skip integrated GPU at index 0)
 
 **How to find your GPU index:** Run `voxtype setup gpu` to see detected GPUs, or `vulkaninfo --summary` for Vulkan device indices.
 
+### gpu_wait_secs
+
+**Type:** Integer
+**Default:** `5`
+**Required:** No
+
+Seconds to wait at startup for the graphics driver to publish a DRM render node before loading the model anyway.
+
+whisper.cpp registers its compute backends once, at first model load, and never revisits that decision. A daemon started as part of your login session can win the race against the graphics driver: no GPU is enumerable yet, the model loads on CPU, and it stays on CPU for the life of the process even though the GPU is working a second later. The only recovery is `systemctl --user restart voxtype`.
+
+The wait is only spent when no render node exists, so a machine whose GPU is already up pays nothing. If the wait expires, voxtype logs a warning naming the fallback rather than failing over silently.
+
+Raise it if your GPU appears late in boot. Set it to `0` to skip the check entirely.
+
+**Example:**
+```toml
+[whisper]
+gpu_wait_secs = 15  # slow dGPU bind on this machine
+```
+
 ### context_window_optimization
 
 **Type:** Boolean

@@ -22,6 +22,7 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 const VOXTYPE_LIB_DIR: &str = "/usr/lib/voxtype";
 const VOXTYPE_BIN: &str = "/usr/bin/voxtype";
@@ -489,6 +490,64 @@ fn pick_vendor_index(devices: &[(i32, String)], vendor: GpuVendor) -> Option<i32
 /// same vendor gets the discrete one that Vulkan enumerates first.
 pub fn resolve_vulkan_device_index(vendor: GpuVendor) -> Option<i32> {
     pick_vendor_index(&enumerate_vulkan_devices(), vendor)
+}
+
+/// Whether the kernel has published a DRM render node yet.
+///
+/// This is the thing that is actually missing during the race in #611: the
+/// daemon starts as part of the login session and `amdgpu` has not finished
+/// binding `/dev/dri/renderD128`, so Vulkan enumerates zero devices. Checking
+/// for the node is cheap and needs nothing installed, unlike `vulkaninfo`,
+/// which many systems do not have and which costs a process spawn.
+///
+/// It is a proxy, not a proof: a present render node does not guarantee a
+/// working ICD. It is the right proxy for the reported failure, and being
+/// wrong in the optimistic direction just means behaving as we do today.
+pub fn render_node_present() -> bool {
+    let Ok(entries) = std::fs::read_dir("/dev/dri") else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        e.file_name()
+            .to_str()
+            .is_some_and(|n| n.starts_with("renderD"))
+    })
+}
+
+/// Block until a DRM render node appears, up to `timeout`.
+///
+/// Returns `true` if one is present by the time we give up waiting. Returns
+/// immediately when a node already exists, which is the normal case, so a
+/// machine whose GPU is up pays nothing for this.
+///
+/// Call before the first model load. whisper.cpp/ggml registers its compute
+/// backends once per process, so a GPU that shows up after that point cannot
+/// be used at all until the daemon restarts (#611).
+pub fn wait_for_render_node(timeout: Duration) -> bool {
+    if render_node_present() {
+        return true;
+    }
+    if timeout.is_zero() {
+        return false;
+    }
+
+    tracing::info!(
+        "No DRM render node yet; waiting up to {}s for the GPU driver before \
+         loading the model. ggml picks its backends once, so a GPU that \
+         appears after this point cannot be used until restart.",
+        timeout.as_secs()
+    );
+
+    let deadline = Instant::now() + timeout;
+    let poll = Duration::from_millis(100);
+    while Instant::now() < deadline {
+        std::thread::sleep(poll);
+        if render_node_present() {
+            tracing::info!("GPU render node appeared; continuing with model load");
+            return true;
+        }
+    }
+    false
 }
 
 /// Apply GPU selection environment variables based on VOXTYPE_VULKAN_DEVICE
@@ -1256,6 +1315,50 @@ fn switch_backend_tiered_parakeet(binary_name: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// #611: the wait exists to cover a driver that binds a second or two
+    /// after the daemon starts. It must not turn into a startup stall on a
+    /// machine that genuinely has no GPU, and it must cost nothing on a
+    /// machine whose GPU is already up.
+    #[test]
+    fn render_node_wait_returns_immediately_when_disabled() {
+        let start = Instant::now();
+        let found = wait_for_render_node(Duration::ZERO);
+        assert_eq!(
+            found,
+            render_node_present(),
+            "a zero timeout must report the current state, not a guess"
+        );
+        assert!(
+            start.elapsed() < Duration::from_millis(50),
+            "gpu_wait_secs = 0 must not sleep"
+        );
+    }
+
+    /// A present node short-circuits before any sleeping, so the common case
+    /// on a working desktop adds no startup latency at all.
+    #[test]
+    fn render_node_wait_is_free_when_the_gpu_is_already_up() {
+        if !render_node_present() {
+            // No GPU on this runner; the timing claim is only meaningful when
+            // there is a node to find.
+            return;
+        }
+        let start = Instant::now();
+        assert!(wait_for_render_node(Duration::from_secs(30)));
+        assert!(
+            start.elapsed() < Duration::from_millis(50),
+            "an existing render node must be detected without waiting"
+        );
+    }
+
+    /// The probe reads a directory that may not exist at all (containers, a
+    /// headless build box). It must answer false rather than propagate an
+    /// error into the startup path.
+    #[test]
+    fn render_node_probe_tolerates_a_missing_dev_dri() {
+        let _ = render_node_present();
+    }
 
     /// #430: detection must agree with the loader, not with FHS layout.
     /// This machine has Vulkan, so the probe must find it; the value of the

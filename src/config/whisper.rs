@@ -68,6 +68,21 @@ pub struct WhisperConfig {
     #[serde(default)]
     pub gpu_device: Option<i32>,
 
+    /// Seconds to wait at startup for a GPU render node to appear before
+    /// loading the model anyway (default: 5).
+    ///
+    /// whisper.cpp/ggml registers its compute backends once, at first model
+    /// load. A daemon started during login can beat the graphics driver to
+    /// the punch: no Vulkan device is enumerable yet, the model loads on CPU,
+    /// and it stays there for the life of the process even though the GPU
+    /// works a second later. Recovery requires a restart, and nothing tells
+    /// the user (#611).
+    ///
+    /// The wait is only spent when no render node is present, so a machine
+    /// whose GPU is already up pays nothing. Set to 0 to disable.
+    #[serde(default = "default_gpu_wait_secs")]
+    pub gpu_wait_secs: u64,
+
     /// Enable flash attention for GPU inference (default: false)
     /// Reduces memory bandwidth pressure in the attention layers.
     /// Requires a compatible GPU backend (CUDA or Vulkan).
@@ -201,6 +216,7 @@ impl Default for WhisperConfig {
             on_demand_loading: default_on_demand_loading(),
             gpu_isolation: false,
             gpu_device: None,
+            gpu_wait_secs: default_gpu_wait_secs(),
             flash_attention: false,
             context_window_optimization: default_context_window_optimization(),
             eager_processing: false,
@@ -219,6 +235,13 @@ impl Default for WhisperConfig {
             whisper_cli_path: None,
         }
     }
+}
+
+/// Five seconds covers the driver-bind race reported in #611 (about one
+/// second on the reporter's machine) without making a genuinely GPU-less
+/// system wait long. Only spent when no render node exists.
+fn default_gpu_wait_secs() -> u64 {
+    5
 }
 
 fn default_context_window_optimization() -> bool {
