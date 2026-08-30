@@ -476,7 +476,6 @@ fn detect_variant_mismatch(inventory: &Inventory) -> Option<VariantMismatch> {
 fn detect_missing_model() -> Option<MissingModel> {
     use crate::config;
     let cfg = config::load_config(None).ok()?;
-    let dir = config::Config::models_dir();
     let (engine_name, model, setup_command) = match cfg.engine {
         config::TranscriptionEngine::Whisper => (
             "whisper",
@@ -542,7 +541,7 @@ fn detect_missing_model() -> Option<MissingModel> {
         return None;
     }
 
-    if model_installed_on_disk(&dir, engine_name, &model) {
+    if crate::model_catalog::model_installed(engine_name, &model) {
         None
     } else {
         Some(MissingModel {
@@ -550,25 +549,6 @@ fn detect_missing_model() -> Option<MissingModel> {
             model,
             setup_command,
         })
-    }
-}
-
-/// Is the configured model actually on disk under `dir`?
-///
-/// Whisper stores a single `ggml-{model}.bin` file, so the raw config value
-/// is also the filename. Every other engine downloads into a subdirectory,
-/// and for some engines (sensevoice, moonshine) the config value is a short
-/// name that differs from the directory the downloader wrote to (e.g.
-/// sensevoice's "small" lives in "sensevoice-small"). Resolving through
-/// `model_catalog::model_dir_name` before probing keeps this in sync with
-/// what the daemon and downloader actually use, instead of reporting an
-/// installed model as missing.
-fn model_installed_on_disk(dir: &Path, engine_name: &str, model: &str) -> bool {
-    if engine_name == "whisper" {
-        dir.join(format!("ggml-{}.bin", model)).exists()
-    } else {
-        let dir_name = crate::model_catalog::model_dir_name(engine_name, model);
-        dir.join(&dir_name).exists()
     }
 }
 
@@ -653,39 +633,5 @@ mod tests {
         assert_eq!(app.cursor, (0, 0));
         app.move_cursor(10, 10);
         assert_eq!(app.cursor, (ROWS.len() - 1, COLS.len() - 1));
-    }
-
-    /// Regression (#662): the General section reported an installed
-    /// sensevoice model as missing because it probed `models_dir/{config
-    /// value}` directly instead of resolving the config's short name
-    /// ("small") to the directory the downloader actually wrote
-    /// ("sensevoice-small").
-    #[test]
-    fn model_installed_on_disk_resolves_short_names_to_their_directory() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        std::fs::create_dir_all(dir.join("sensevoice-small")).unwrap();
-
-        assert!(
-            model_installed_on_disk(dir, "sensevoice", "small"),
-            "the short config name must resolve to the on-disk directory"
-        );
-        assert!(
-            model_installed_on_disk(dir, "sensevoice", "sensevoice-small"),
-            "the directory name itself must also be recognized as installed"
-        );
-        assert!(!model_installed_on_disk(dir, "sensevoice", "medium"));
-    }
-
-    /// Whisper's on-disk layout is a single `ggml-{model}.bin` file, not a
-    /// directory, and must keep using the raw config value as the filename.
-    #[test]
-    fn model_installed_on_disk_whisper_uses_ggml_filename() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        std::fs::write(dir.join("ggml-base.en.bin"), b"stub").unwrap();
-
-        assert!(model_installed_on_disk(dir, "whisper", "base.en"));
-        assert!(!model_installed_on_disk(dir, "whisper", "tiny"));
     }
 }
