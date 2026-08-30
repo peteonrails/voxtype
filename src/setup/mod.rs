@@ -71,6 +71,9 @@ pub struct OutputChainStatus {
     pub display_server: DisplayServer,
     pub wtype: OutputToolStatus,
     pub eitype: OutputToolStatus,
+    /// dotool sits third in the runtime fallback chain but was absent here,
+    /// so `setup check` described a chain the daemon does not use (#507).
+    pub dotool: OutputToolStatus,
     pub ydotool: OutputToolStatus,
     pub ydotool_daemon: bool,
     pub wl_copy: OutputToolStatus,
@@ -199,16 +202,51 @@ pub async fn is_ydotool_daemon_running() -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the running compositor implements `zwp_virtual_keyboard_manager_v1`,
+/// which wtype requires.
+///
+/// KWin and Mutter do not, so wtype fails at runtime on KDE and GNOME however
+/// cleanly it installed. wlroots-based compositors (Sway, Hyprland, River,
+/// Niri) do. An unrecognised compositor is assumed to support it, because
+/// wlroots derivatives are numerous and a wrong "unavailable" is worse than a
+/// wrong "available" that still falls through the chain.
+pub fn compositor_supports_virtual_keyboard() -> bool {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    let lower = desktop.to_lowercase();
+    !(lower.contains("kde") || lower.contains("plasma") || lower.contains("gnome"))
+}
+
 /// Detect the full output chain status
 pub async fn detect_output_chain() -> OutputChainStatus {
     let display_server = detect_display_server();
 
-    // Check wtype
+    // Check wtype. Being on Wayland is not sufficient: wtype needs
+    // zwp_virtual_keyboard_manager_v1, which neither KWin nor Mutter
+    // implements, so on KDE and GNOME it installs cleanly and then silently
+    // fails at runtime. Reporting it as available there sent users chasing a
+    // driver that cannot work (#507, #650).
     let wtype_path = get_command_path("wtype").await;
     let wtype_installed = wtype_path.is_some();
-    let wtype_available = wtype_installed && display_server == DisplayServer::Wayland;
+    let compositor_supports_wtype = compositor_supports_virtual_keyboard();
+    let wtype_available =
+        wtype_installed && display_server == DisplayServer::Wayland && compositor_supports_wtype;
     let wtype_note = if wtype_installed && display_server != DisplayServer::Wayland {
         Some("Wayland only".to_string())
+    } else if wtype_installed && !compositor_supports_wtype {
+        Some("compositor lacks zwp_virtual_keyboard_v1".to_string())
+    } else {
+        None
+    };
+
+    // Check dotool
+    let dotool_path = get_command_path("dotool").await;
+    let dotool_installed = dotool_path.is_some();
+    // dotool drives uinput, so it is independent of the display server and
+    // works where wtype cannot. It does need write access to /dev/uinput.
+    let dotool_uinput = std::path::Path::new("/dev/uinput").exists();
+    let dotool_available = dotool_installed && dotool_uinput;
+    let dotool_note = if dotool_installed && !dotool_uinput {
+        Some("/dev/uinput not present".to_string())
     } else {
         None
     };
@@ -287,6 +325,8 @@ pub async fn detect_output_chain() -> OutputChainStatus {
         Some("wtype".to_string())
     } else if eitype_available {
         Some("eitype".to_string())
+    } else if dotool_available {
+        Some("dotool".to_string())
     } else if ydotool_available {
         Some("ydotool".to_string())
     } else if pbcopy_available {
@@ -312,6 +352,13 @@ pub async fn detect_output_chain() -> OutputChainStatus {
             available: eitype_available,
             path: eitype_path,
             note: eitype_note,
+        },
+        dotool: OutputToolStatus {
+            name: "dotool",
+            installed: dotool_installed,
+            available: dotool_available,
+            path: dotool_path,
+            note: dotool_note,
         },
         ydotool: OutputToolStatus {
             name: "ydotool",
@@ -390,6 +437,10 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
             &status.eitype,
             status.display_server == DisplayServer::Wayland,
         );
+
+        // dotool: third in the runtime chain, and the working answer on
+        // KDE and GNOME where wtype cannot be.
+        print_tool_status(&status.dotool, true);
 
         // ydotool
         if status.ydotool.installed {
@@ -1051,6 +1102,45 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// #507/#650: wtype needs zwp_virtual_keyboard_manager_v1, which KWin and
+    /// Mutter do not implement, so being on Wayland is not enough.
+    #[test]
+    fn wtype_support_depends_on_the_compositor() {
+        let cases = [
+            ("Hyprland", true),
+            ("sway", true),
+            ("river", true),
+            ("niri", true),
+            ("KDE", false),
+            ("plasma", false),
+            ("GNOME", false),
+            ("ubuntu:GNOME", false),
+        ];
+        for (desktop, expected) in cases {
+            std::env::set_var("XDG_CURRENT_DESKTOP", desktop);
+            assert_eq!(
+                compositor_supports_virtual_keyboard(),
+                expected,
+                "wrong answer for XDG_CURRENT_DESKTOP={desktop}"
+            );
+        }
+        std::env::remove_var("XDG_CURRENT_DESKTOP");
+    }
+
+    /// An unrecognised compositor is assumed to work: wlroots derivatives are
+    /// numerous, and a wrong "unavailable" hides a driver that would have
+    /// worked, while a wrong "available" still falls through the chain.
+    #[test]
+    fn unknown_compositor_is_assumed_capable() {
+        std::env::set_var("XDG_CURRENT_DESKTOP", "some-new-wlroots-thing");
+        assert!(compositor_supports_virtual_keyboard());
+        std::env::remove_var("XDG_CURRENT_DESKTOP");
+        assert!(
+            compositor_supports_virtual_keyboard(),
+            "unset must not disable"
+        );
+    }
     use super::*;
 
     /// `small` is in both the Whisper and SenseVoice tables. Whisper has to
