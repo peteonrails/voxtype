@@ -33,9 +33,15 @@ pub struct AudioConfig {
     #[serde(default)]
     pub duck_media: bool,
 
-    /// Target volume percentage for media ducking
+    /// Fraction of its current amplitude a ducked stream keeps, in percent
+    /// (50 = half the amplitude, -6 dB). Converted internally to PulseAudio's
+    /// cubic percentage scale.
     #[serde(default = "default_duck_media_volume_percent")]
     pub duck_media_volume_percent: u8,
+
+    /// Fade duration in milliseconds for the ducking ramp (0 = instant)
+    #[serde(default = "default_duck_media_fade_ms")]
+    pub duck_media_fade_ms: u32,
 
     /// Audio feedback settings
     #[serde(default)]
@@ -52,6 +58,7 @@ impl Default for AudioConfig {
             pause_media_ignored_players: Vec::new(),
             duck_media: false,
             duck_media_volume_percent: default_duck_media_volume_percent(),
+            duck_media_fade_ms: default_duck_media_fade_ms(),
             feedback: AudioFeedbackConfig::default(),
         }
     }
@@ -69,8 +76,18 @@ fn default_audio_max_duration_secs() -> u32 {
     60
 }
 
+/// 34 rather than 70 because the value now means amplitude directly. Before
+/// the cube-root correction the configured percentage was applied to
+/// PulseAudio's own cubic scale, so the shipped default of 70 actually left
+/// 0.70^3 = 0.343 of the amplitude. 34 reproduces that same audible depth
+/// under the corrected meaning; keeping 70 would have quietly turned a -9.3 dB
+/// duck into a -3.1 dB one for everyone on defaults.
 fn default_duck_media_volume_percent() -> u8 {
-    70
+    34
+}
+
+fn default_duck_media_fade_ms() -> u32 {
+    150
 }
 
 /// Audio feedback configuration for sound cues

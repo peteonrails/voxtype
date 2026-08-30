@@ -19,6 +19,7 @@ use super::common::{
 };
 use super::config_editor::{ConfigEditor, EditorError};
 use crate::audio::devices::enumerate_input_devices;
+use crate::config::AudioConfig;
 
 #[derive(Debug)]
 pub struct AudioState {
@@ -27,6 +28,7 @@ pub struct AudioState {
     pub pause_media: bool,
     pub duck_media: bool,
     pub duck_media_volume_percent: u8,
+    pub duck_media_fade_ms: u32,
     pub feedback_enabled: bool,
     pub feedback_theme: String,
     pub feedback_volume: f32,
@@ -76,6 +78,7 @@ pub enum Field {
     PauseMedia,
     DuckMedia,
     DuckMediaVolume,
+    DuckMediaFade,
     FeedbackEnabled,
     FeedbackTheme,
     FeedbackVolume,
@@ -88,6 +91,7 @@ impl Field {
         Field::PauseMedia,
         Field::DuckMedia,
         Field::DuckMediaVolume,
+        Field::DuckMediaFade,
         Field::FeedbackEnabled,
         Field::FeedbackTheme,
         Field::FeedbackVolume,
@@ -101,6 +105,10 @@ const DURATION_MIN: u32 = 30;
 const DURATION_MAX: u32 = 1800;
 const VOLUME_STEP: f32 = 0.1;
 const DUCK_VOLUME_STEP: i32 = 5;
+/// Step for the duck-fade cycler. A multiple of the 20 ms ramp interval in
+/// `audio::media`, so every stop lands on a value that produces whole steps.
+const DUCK_FADE_STEP: i32 = 50;
+const DUCK_FADE_MAX: u32 = 2000;
 
 impl AudioState {
     pub fn load() -> Result<Self, EditorError> {
@@ -118,7 +126,11 @@ impl AudioState {
             duck_media_volume_percent: ed
                 .get_int("audio", "duck_media_volume_percent")
                 .map(|n| n.clamp(0, 150) as u8)
-                .unwrap_or(70),
+                .unwrap_or_else(|| AudioConfig::default().duck_media_volume_percent),
+            duck_media_fade_ms: ed
+                .get_int("audio", "duck_media_fade_ms")
+                .map(|n| n.clamp(0, DUCK_FADE_MAX as i64) as u32)
+                .unwrap_or_else(|| AudioConfig::default().duck_media_fade_ms),
             feedback_enabled: ed.get_bool("audio.feedback", "enabled").unwrap_or(false),
             feedback_theme: ed
                 .get_string("audio.feedback", "theme")
@@ -208,6 +220,11 @@ impl AudioState {
             "duck_media_volume_percent",
             self.duck_media_volume_percent as i64,
         );
+        ed.set_int(
+            "audio",
+            "duck_media_fade_ms",
+            self.duck_media_fade_ms as i64,
+        );
         ed.set_bool("audio.feedback", "enabled", self.feedback_enabled);
         ed.set_string("audio.feedback", "theme", &self.feedback_theme);
         ed.set_f32("audio.feedback", "volume", self.feedback_volume);
@@ -296,6 +313,10 @@ impl AudioState {
             Field::DuckMediaVolume => {
                 let next = self.duck_media_volume_percent as i32 + delta * DUCK_VOLUME_STEP;
                 self.duck_media_volume_percent = next.clamp(0, 150) as u8;
+            }
+            Field::DuckMediaFade => {
+                let next = self.duck_media_fade_ms as i32 + delta * DUCK_FADE_STEP;
+                self.duck_media_fade_ms = next.clamp(0, DUCK_FADE_MAX as i32) as u32;
             }
             Field::FeedbackEnabled => {
                 self.feedback_enabled = !self.feedback_enabled;
@@ -458,6 +479,16 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         )
         .dimmed(!state.duck_media),
         FormRowSpec::new(
+            state.field == Field::DuckMediaFade,
+            "Duck fade",
+            if state.duck_media_fade_ms == 0 {
+                "instant".to_string()
+            } else {
+                format!("{} ms", state.duck_media_fade_ms)
+            },
+        )
+        .dimmed(!state.duck_media),
+        FormRowSpec::new(
             state.field == Field::FeedbackEnabled,
             "Audio feedback sounds",
             if state.feedback_enabled { "on" } else { "off" },
@@ -610,7 +641,22 @@ fn guidance_for_field(state: &AudioState) -> Vec<Line<'_>> {
             ),
             Line::from(""),
             Line::from(Span::styled(
-                "0% is silence; 70% keeps 70% of the current level; values above 100% amplify.",
+                "0% is silence; 34% is the default; values above 100% amplify.",
+                Style::default().fg(Color::Gray),
+            )),
+        ],
+        Field::DuckMediaFade => vec![
+            heading("Duck fade"),
+            Line::from(""),
+            Line::from(
+                "How long media takes to slide down when recording starts, \
+                 and back up when it stops. The same duration is used in both \
+                 directions, so music eases out of the way instead of jumping.",
+            ),
+            Line::from(""),
+            Line::from(Span::styled(
+                "0 restores the old instant behaviour. The fade runs alongside \
+                 capture, so it never delays the microphone.",
                 Style::default().fg(Color::Gray),
             )),
         ],
@@ -728,5 +774,75 @@ fn handle_edit_key(state: &mut AudioState, key: KeyEvent) -> Action {
             state.editing = None;
             Action::None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::schema::{scalar_keys, CONFIG_KEYS};
+
+    /// The Audio form is a hand-written transcription of the schema's `Audio`
+    /// section, so the two drift silently whenever a key is added in one place
+    /// and not the other. That is exactly how `audio.duck_media_fade_ms`
+    /// reached a release configurable by file, CLI, env var and the Omarchy
+    /// settings panel, but not by this form.
+    ///
+    /// Nothing here enforces a rendering style, only that every schema key in
+    /// the section is reachable. If a key genuinely does not belong in the TUI,
+    /// add it to `NOT_IN_TUI` with a reason rather than deleting the test.
+    #[test]
+    fn every_audio_schema_key_has_a_form_field() {
+        const NOT_IN_TUI: &[&str] = &[];
+
+        let expected: Vec<&str> = scalar_keys()
+            .filter(|s| s.section == "Audio")
+            .map(|s| s.key)
+            .filter(|k| !NOT_IN_TUI.contains(k))
+            .collect();
+
+        // Field -> the schema key it edits. Adding a Field without extending
+        // this map fails to compile, which is the point.
+        let covered: Vec<&str> = Field::ALL
+            .iter()
+            .map(|f| match f {
+                Field::Device => "audio.device",
+                Field::MaxDuration => "audio.max_duration_secs",
+                Field::PauseMedia => "audio.pause_media",
+                Field::DuckMedia => "audio.duck_media",
+                Field::DuckMediaVolume => "audio.duck_media_volume_percent",
+                Field::DuckMediaFade => "audio.duck_media_fade_ms",
+                Field::FeedbackEnabled => "audio.feedback.enabled",
+                Field::FeedbackTheme => "audio.feedback.theme",
+                Field::FeedbackVolume => "audio.feedback.volume",
+            })
+            .collect();
+
+        let missing: Vec<&&str> = expected.iter().filter(|k| !covered.contains(k)).collect();
+        assert!(
+            missing.is_empty(),
+            "schema keys in section Audio with no TUI field: {missing:?}"
+        );
+
+        // Guard the other direction too: a field editing a key the schema does
+        // not know about would be invisible to `config set` and the panel.
+        let unknown: Vec<&&str> = covered
+            .iter()
+            .filter(|k| !CONFIG_KEYS.iter().any(|s| s.key == **k))
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "TUI fields editing keys absent from the schema: {unknown:?}"
+        );
+    }
+
+    /// The form used to hardcode its own fallback for the ducked volume, which
+    /// went stale the moment the config default changed. Defaults belong to
+    /// `AudioConfig`, not to a second copy in the UI.
+    #[test]
+    fn form_defaults_track_the_config_defaults() {
+        let cfg = AudioConfig::default();
+        assert_eq!(cfg.duck_media_volume_percent, 34);
+        assert_eq!(cfg.duck_media_fade_ms, 150);
     }
 }

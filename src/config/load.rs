@@ -134,6 +134,11 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             config.audio.duck_media_volume_percent = n.min(150);
         }
     }
+    if let Ok(val) = std::env::var("VOXTYPE_DUCK_MEDIA_FADE_MS") {
+        if let Ok(n) = val.parse::<u32>() {
+            config.audio.duck_media_fade_ms = n;
+        }
+    }
 
     // Output
     if let Ok(mode) = std::env::var("VOXTYPE_OUTPUT_MODE") {

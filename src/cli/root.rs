@@ -244,7 +244,7 @@ pub struct Cli {
     #[arg(long, help_heading = "Audio", hide_short_help = true)]
     pub duck_media: bool,
 
-    /// Relative media volume percentage while ducking
+    /// Percent of its current amplitude ducked media keeps (50 = half, -6 dB)
     #[arg(
         long,
         value_name = "PERCENT",
@@ -252,6 +252,15 @@ pub struct Cli {
         hide_short_help = true
     )]
     pub duck_media_volume: Option<u8>,
+
+    /// Milliseconds to fade ducked media down and back up (0 = instant)
+    #[arg(
+        long,
+        value_name = "MS",
+        help_heading = "Audio",
+        hide_short_help = true
+    )]
+    pub duck_media_fade_ms: Option<u32>,
 
     // -- Output (delivery, timing, file output, hooks) --
     /// Force clipboard mode (don't try to type)
