@@ -1203,6 +1203,12 @@ When `true`, voxtype types text incrementally while you are still speaking
 instead of waiting for hotkey release. Uses the parakeet-rs cache-aware
 streaming pipeline and a TDT v3 family model with `tokenizer.model`.
 
+**Disables `[text]` processing and `post_process`.** Word replacements,
+spoken punctuation, filler-word filtering, and the `post_process` command all
+operate on a finished transcript, which streaming never produces. They are
+silently inactive while streaming, so the daemon warns at startup if you have
+configured any of them. Turn streaming off if you depend on them.
+
 **Requires toggle activation.** Streaming output types characters at the
 cursor while you dictate. On Wayland compositors backed by libinput
 (Hyprland, Sway, River), synthetic key events emitted by `wtype` and
@@ -1526,6 +1532,11 @@ language_hints_strict = false   # allow occasional third-language tokens
 **Type:** Boolean
 **Default:** `true`
 **Required:** No
+
+> While streaming, `[text]` processing (replacements, spoken punctuation,
+> filler filtering) and `[output.post_process]` do not run, because they
+> operate on a completed transcript. Set `async_api = true` or
+> `streaming = false` if you rely on them.
 
 Activation mode for the Soniox backend:
 
@@ -2383,6 +2394,12 @@ See [User Manual - Output Hooks](USER_MANUAL.md#output-hooks-compositor-integrat
 Optional post-processing command that runs after transcription. The command receives
 the transcribed text on stdin and should output the processed text on stdout.
 
+> **Not applied when streaming is enabled.** The command is deliberately
+> bypassed on the streaming path: it would see only the newest fragment rather
+> than the transcript visible at the cursor, and rewriting fragments in
+> isolation produces incoherent output. The daemon warns at startup when
+> streaming is on and this is configured. See also [`[text]`](#text).
+
 **Best use cases:**
 - **Translation**: Speak in one language, output in another
 - **Domain vocabulary**: Medical, legal, or technical term correction
@@ -2586,6 +2603,15 @@ post_process_timeout_ms = 60000
 ## [text]
 
 Controls text post-processing after transcription.
+
+> **Not applied when streaming is enabled.** Everything in this section runs
+> on the completed transcript. Streaming types text at the cursor as it is
+> decoded, so there is no completed transcript for these rules to run against
+> and none of them are applied. This affects `spoken_punctuation`,
+> `replacements`, and `filter_filler_words`, as well as
+> [`[output.post_process]`](#outputpost_process). The daemon logs a warning at
+> startup listing whichever of these you have configured. To use them, set
+> `streaming = false` for your engine.
 
 ### spoken_punctuation
 

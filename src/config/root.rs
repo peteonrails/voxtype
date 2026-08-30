@@ -375,6 +375,24 @@ impl Config {
         }
     }
 
+    /// Whether the active engine will run its streaming pipeline.
+    ///
+    /// Streaming types text at the cursor as it is decoded, which means the
+    /// end-of-utterance hooks that reshape a finished transcript never get a
+    /// finished transcript to work on. Callers use this to tell the user which
+    /// of their settings will not apply (#581) rather than letting them
+    /// silently do nothing.
+    pub fn streaming_enabled(&self) -> bool {
+        match self.engine {
+            TranscriptionEngine::Parakeet => self.parakeet.as_ref().is_some_and(|p| p.streaming),
+            TranscriptionEngine::Soniox => self
+                .soniox
+                .as_ref()
+                .is_some_and(|s| s.streaming && !s.async_api),
+            _ => false,
+        }
+    }
+
     /// Get the model name/path for the active engine (for logging)
     pub fn model_name(&self) -> &str {
         match self.engine {
@@ -478,6 +496,40 @@ mod tests {
         let meeting_cfg = cfg.with_meeting_mode_overrides();
         assert_eq!(meeting_cfg.engine, cfg.engine);
         assert_eq!(meeting_cfg.whisper.model, cfg.whisper.model);
+    }
+
+    /// #581: the daemon has to know whether the streaming path is active so
+    /// it can tell the user which of their `[text]` settings will be ignored.
+    /// Getting this predicate wrong is worse than not warning at all: a false
+    /// positive tells someone their working config is broken.
+    #[test]
+    fn streaming_enabled_tracks_the_engine_that_will_actually_run() {
+        // Whisper has no streaming pipeline.
+        assert!(!Config::default().streaming_enabled());
+
+        // Soniox streams by default, but the async API is batch: it uploads a
+        // finished recording and polls, so the completed-transcript hooks do
+        // run and must not be reported as ignored.
+        let soniox = |async_api: bool| Config {
+            engine: TranscriptionEngine::Soniox,
+            soniox: Some(SonioxConfig {
+                api_key: Some("k".into()),
+                streaming: true,
+                async_api,
+                ..SonioxConfig::default()
+            }),
+            ..Config::default()
+        };
+        assert!(soniox(false).streaming_enabled());
+        assert!(!soniox(true).streaming_enabled());
+
+        // An engine selected without its config section cannot stream.
+        let orphaned = Config {
+            engine: TranscriptionEngine::Soniox,
+            soniox: None,
+            ..Config::default()
+        };
+        assert!(!orphaned.streaming_enabled());
     }
 
     #[test]
