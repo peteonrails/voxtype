@@ -51,6 +51,7 @@ libc = "0.2"
 # Audio capture
 cpal = "0.15"
 hound = "3"  # WAV file reading/writing
+rubato = "0.16.2"  # Band-limited sample-rate conversion (MSRV 1.61)
 
 # HTTP client for remote transcription
 ureq = { version = "2", features = ["json"] }
