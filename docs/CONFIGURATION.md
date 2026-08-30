@@ -116,6 +116,25 @@ The main key to hold for recording. Must be a valid Linux evdev key name.
 key = "PAUSE"
 ```
 
+**Mouse buttons:**
+
+The spare buttons on a mouse are ordinary evdev keycodes and can be used as the hotkey:
+
+- `BTN_SIDE` - the rear thumb button on most mice
+- `BTN_EXTRA` - the forward thumb button
+- `BTN_FORWARD`, `BTN_BACK` - navigation buttons where the mouse reports them separately
+- `BTN_TASK` - present on some multi-button mice
+- `BTN_MIDDLE` - the scroll wheel click
+
+```toml
+[hotkey]
+key = "BTN_SIDE"
+```
+
+The `BTN_` prefix is optional, so `side` and `btn-extra` also work. Primary and secondary click (`BTN_LEFT`, `BTN_RIGHT`) are not accepted: binding push-to-talk to them makes the desktop unusable.
+
+Voxtype opens the mouse's event device automatically when the hotkey is a button, so no extra configuration is needed. Your user still needs to be in the `input` group, the same as for keyboard hotkeys. Run `evtest` to confirm which button your mouse reports; some mice send a keyboard keycode from a second interface rather than a `BTN_` event, in which case use that key name instead.
+
 **Numeric keycodes:**
 
 You can also specify keys by their numeric keycode if the key name isn't in the built-in list. Use a prefix to indicate the source tool, since different tools report different numbers for the same key:
