@@ -16,6 +16,12 @@ Item {
 
   property string title: "Voxtype Settings"
   property string voxtypeVersion: ""
+  // What the running daemon reports, which is not always what the CLI that
+  // rendered this panel is. An upgrade installed but never restarted leaves
+  // the two apart, and the daemon's number is the one that describes the
+  // behaviour the user is about to configure.
+  property string daemonVersionLabel: ""
+  property bool daemonVersionDiffers: false
   property string configPath: ""
   property bool restarting: false
 
@@ -60,7 +66,8 @@ Item {
 
   readonly property string subtitle: {
     var parts = []
-    if (root.voxtypeVersion !== "") parts.push("voxtype " + root.voxtypeVersion)
+    if (root.daemonVersionLabel !== "") parts.push("daemon " + root.daemonVersionLabel)
+    else if (root.voxtypeVersion !== "") parts.push("voxtype " + root.voxtypeVersion)
     if (root.displayConfigPath !== "") parts.push(root.displayConfigPath)
     return parts.join("  ·  ")
   }
