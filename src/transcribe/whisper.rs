@@ -45,7 +45,34 @@ impl WhisperTranscriber {
         let start = std::time::Instant::now();
 
         let mut ctx_params = WhisperContextParameters::default();
-        if let Some(device) = config.gpu_device {
+        // An explicit gpu_device always wins. Otherwise, if the user asked for
+        // a vendor with VOXTYPE_VULKAN_DEVICE, resolve that to an index and
+        // set it: the loader hint alone has been observed not to take effect,
+        // leaving a hybrid machine on its iGPU while reporting otherwise
+        // (#577).
+        let device_index = config.gpu_device.or_else(|| {
+            let vendor = crate::setup::gpu::get_selected_gpu_vendor()?;
+            match crate::setup::gpu::resolve_vulkan_device_index(vendor) {
+                Some(idx) => {
+                    tracing::info!(
+                        "VOXTYPE_VULKAN_DEVICE={:?} resolved to Vulkan device index {}",
+                        vendor,
+                        idx
+                    );
+                    Some(idx)
+                }
+                None => {
+                    tracing::warn!(
+                        "VOXTYPE_VULKAN_DEVICE={:?} could not be matched to a Vulkan \
+                         device (is vulkan-tools installed?); leaving device selection \
+                         to the loader. Set [whisper] gpu_device to pick one directly.",
+                        vendor
+                    );
+                    None
+                }
+            }
+        });
+        if let Some(device) = device_index {
             tracing::info!("Using GPU device index {}", device);
             ctx_params.gpu_device(device);
         }

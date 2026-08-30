@@ -419,6 +419,78 @@ pub fn get_selected_gpu_vendor() -> Option<GpuVendor> {
         })
 }
 
+/// Vulkan devices as ggml sees them: index and reported device name.
+///
+/// Shells out to `vulkaninfo --summary` because we have no Vulkan bindings of
+/// our own and adding some to answer one question would be a large dependency
+/// for a small job. Returns empty when vulkan-tools is not installed, which is
+/// common enough that callers must treat it as "unknown", never as "no GPU".
+pub fn enumerate_vulkan_devices() -> Vec<(i32, String)> {
+    let Ok(out) = Command::new("vulkaninfo").arg("--summary").output() else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    parse_vulkan_summary(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Pull `(index, deviceName)` pairs out of `vulkaninfo --summary` output.
+///
+/// Split from the command invocation so the parsing can be tested against
+/// captured output rather than whatever hardware the test happens to run on.
+fn parse_vulkan_summary(text: &str) -> Vec<(i32, String)> {
+    let mut devices = Vec::new();
+    let mut current: Option<i32> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("GPU") {
+            if let Ok(idx) = rest.trim_end_matches(':').parse::<i32>() {
+                current = Some(idx);
+            }
+        } else if let Some(name) = trimmed.strip_prefix("deviceName") {
+            if let Some(idx) = current.take() {
+                let name = name.trim_start_matches([' ', '=']).trim().to_string();
+                devices.push((idx, name));
+            }
+        }
+    }
+    devices
+}
+
+/// Lowest device index whose name matches `vendor`.
+fn pick_vendor_index(devices: &[(i32, String)], vendor: GpuVendor) -> Option<i32> {
+    let needles: &[&str] = match vendor {
+        GpuVendor::Nvidia => &["nvidia", "geforce", "rtx", "quadro"],
+        GpuVendor::Amd => &["amd", "radeon"],
+        GpuVendor::Intel => &["intel"],
+        GpuVendor::Other => return None,
+    };
+    devices
+        .iter()
+        .filter(|(_, name)| {
+            let lower = name.to_lowercase();
+            needles.iter().any(|n| lower.contains(n))
+        })
+        .map(|(idx, _)| *idx)
+        .min()
+}
+
+/// The Vulkan device index matching a vendor, if one can be identified.
+///
+/// `VOXTYPE_VULKAN_DEVICE` sets `VK_LOADER_DRIVERS_SELECT`, which asks the
+/// loader to expose only that vendor's driver. That does not work everywhere:
+/// it needs a recent loader, and on a hybrid machine whisper.cpp has still
+/// been observed initialising device 0 (the iGPU) regardless, while setting
+/// `gpu_device` by hand works. Resolving the vendor to an index lets us set
+/// the thing that actually takes effect (#577).
+///
+/// Returns the lowest matching index, so a machine with two devices from the
+/// same vendor gets the discrete one that Vulkan enumerates first.
+pub fn resolve_vulkan_device_index(vendor: GpuVendor) -> Option<i32> {
+    pick_vendor_index(&enumerate_vulkan_devices(), vendor)
+}
+
 /// Apply GPU selection environment variables based on VOXTYPE_VULKAN_DEVICE
 /// Call this before initializing Vulkan to ensure the correct GPU is selected.
 /// Returns the vendor that was selected, if any.
@@ -1165,6 +1237,66 @@ fn switch_backend_tiered_parakeet(binary_name: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// #577: the vendor must resolve to the index whisper actually uses.
+    /// Parsing is pinned against real `vulkaninfo --summary` output.
+    #[test]
+    fn vulkan_summary_parsing_pairs_index_with_name() {
+        // Shape taken verbatim from vulkaninfo on a two-device machine.
+        let sample = "\
+Devices:
+========
+GPU0:
+\tapiVersion         = 1.4.305
+\tdriverVersion      = 25.0.3
+\tdeviceName         = AMD Radeon RX 7800 XT (RADV NAVI32)
+\tdriverName         = radv
+GPU1:
+\tapiVersion         = 1.4.305
+\tdeviceName         = AMD Ryzen 9 9900X3D 12-Core Processor (RADV RAPHAEL_MENDOCINO)
+\tdriverName         = radv
+";
+        let devices = parse_vulkan_summary(sample);
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].0, 0);
+        assert!(devices[0].1.contains("RX 7800 XT"));
+        assert_eq!(devices[1].0, 1);
+    }
+
+    /// A hybrid machine: the vendor must map to its own device, not device 0.
+    #[test]
+    fn vendor_matches_the_right_device_on_a_hybrid_machine() {
+        let sample = "\
+GPU0:
+\tdeviceName         = Intel(R) UHD Graphics 630
+GPU1:
+\tdeviceName         = NVIDIA GeForce RTX 3060 Laptop GPU
+";
+        let devices = parse_vulkan_summary(sample);
+        assert_eq!(pick_vendor_index(&devices, GpuVendor::Nvidia), Some(1));
+        assert_eq!(pick_vendor_index(&devices, GpuVendor::Intel), Some(0));
+        assert_eq!(pick_vendor_index(&devices, GpuVendor::Amd), None);
+    }
+
+    /// Two devices from one vendor: take the first, which Vulkan enumerates
+    /// as the discrete one.
+    #[test]
+    fn same_vendor_twice_picks_the_lowest_index() {
+        let sample = "\
+GPU0:
+\tdeviceName         = AMD Radeon RX 7800 XT
+GPU1:
+\tdeviceName         = AMD Ryzen 9 Integrated Graphics
+";
+        let devices = parse_vulkan_summary(sample);
+        assert_eq!(pick_vendor_index(&devices, GpuVendor::Amd), Some(0));
+    }
+
+    /// vulkan-tools missing must read as "unknown", never as "no GPU".
+    #[test]
+    fn empty_enumeration_yields_no_selection() {
+        assert_eq!(pick_vendor_index(&[], GpuVendor::Nvidia), None);
+    }
     use super::*;
 
     #[test]
