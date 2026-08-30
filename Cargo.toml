@@ -148,6 +148,18 @@ mac-notification-sys = "0.6"  # Native macOS notifications
 # (Issue #352). Linux daemon doesn't use either, so they live here.
 rdev = "0.5.3"
 tray-icon = "0.21.3"
+# AppKit bindings for rendering SF Symbols into the tray icon
+# (src/menubar.rs::sf_symbol_icon). Versions match what tao/tray-icon
+# already pull in, so this adds no extra compilation.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry"] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSImage",
+    "NSImageRep",
+    "NSBitmapImageRep",
+    "NSGraphicsContext",
+    "NSGraphics",
+] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Input handling (evdev for kernel-level key events)
