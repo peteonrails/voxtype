@@ -1227,6 +1227,31 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
     )
     .for_engine("whisper"),
     spec(
+        "parakeet.max_window_secs",
+        "parakeet",
+        "max_window_secs",
+        KeyType::Float { min: 0.0, max: 3600.0 },
+        "Advanced",
+        "Max audio per pass",
+        "Longest stretch of audio sent to the model at once. Longer recordings are \
+         split into overlapping windows, because the TDT exports abort rather than \
+         degrade past their fixed attention size. 0 disables windowing.",
+    )
+    .for_engine("parakeet")
+    .gated("parakeet"),
+    spec(
+        "parakeet.window_overlap_secs",
+        "parakeet",
+        "window_overlap_secs",
+        KeyType::Float { min: 0.0, max: 60.0 },
+        "Advanced",
+        "Window overlap",
+        "Audio shared between consecutive windows, used to find where two passes \
+         agree so the join is not duplicated or cut short.",
+    )
+    .for_engine("parakeet")
+    .gated("parakeet"),
+    spec(
         "parakeet.streaming",
         "parakeet",
         "streaming",
@@ -1562,6 +1587,8 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "whisper.gpu_wait_secs" => json!(cfg.whisper.gpu_wait_secs),
 
         "parakeet.model" => json!(pk().model),
+        "parakeet.max_window_secs" => json!(pk().max_window_secs),
+        "parakeet.window_overlap_secs" => json!(pk().window_overlap_secs),
         "parakeet.model_type" => match pk().model_type {
             Some(t) => serde_json::to_value(t).ok()?,
             None => Json::Null,

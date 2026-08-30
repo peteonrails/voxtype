@@ -20,6 +20,9 @@ pub mod soniox;
 pub mod streaming;
 pub mod subprocess;
 pub mod whisper;
+/// Long-audio windowing shared by the engines with a bounded input length.
+/// Deliberately not feature-gated: see the module docs.
+pub mod window;
 pub mod worker;
 
 pub use streaming::{SegmentId, StreamHandle, StreamingEvent, StreamingTranscriber};
