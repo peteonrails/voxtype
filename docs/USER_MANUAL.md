@@ -363,6 +363,32 @@ For persistent file output without the CLI flag, use `mode = "file"` with `file_
 
 This command is designed for use with compositor keybindings (Hyprland, Sway) instead of the built-in hotkey detection. See [Compositor Keybindings](#compositor-keybindings) for setup instructions.
 
+### `voxtype learn`
+
+Teach `[text.replacements]` from an edited dictation. Dictate, fix the typed
+text, select the correction, and run:
+
+```bash
+voxtype learn                     # primary selection, clipboard fallback
+voxtype learn --from-selection    # same, explicit
+voxtype learn --from-clipboard
+echo 'Het Omarchy menu doet het niet.' | voxtype learn --from-stdin
+```
+
+The command diffs the corrected text against the last transcript (the file the
+daemon writes to `$XDG_RUNTIME_DIR/voxtype/last-transcript`, or the last
+`Transcribed: "..."` line in `journalctl --user -u voxtype`), keeps only
+replace-opcode phrases, and merges them into the config file while preserving
+comments. Identical text and insert/delete-only diffs exit 0 with a message.
+An empty selection, a missing transcript, or similarity below 0.35 exits 1 so
+a random highlight cannot poison the dictionary.
+
+Hyprland example:
+
+```hyprlang
+bind = SUPER SHIFT, F12, exec, voxtype learn --from-selection
+```
+
 ### `voxtype meeting`
 
 Continuous meeting transcription with chunked processing and speaker diarization. See [Meeting Mode](#meeting-mode) for full details.
@@ -660,6 +686,9 @@ bindr = SUPER, V, exec, voxtype record stop
 
 # Toggle mode (press to start/stop)
 bind = SUPER, V, exec, voxtype record toggle
+
+# Teach replacements from the current selection after fixing a dictation
+bind = SUPER SHIFT, F12, exec, voxtype learn --from-selection
 ```
 
 ### Sway

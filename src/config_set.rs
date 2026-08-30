@@ -241,6 +241,32 @@ pub fn unset_key(path: PathBuf, key: &str) -> Result<SetOutcome, ConfigSetError>
     })
 }
 
+/// Merge `(from, to)` pairs into `[text.replacements]`, overwriting existing
+/// keys with the same spoken form. One save, comments preserved.
+///
+/// Keys may contain spaces or punctuation (`"omaar gielen"`, `"niet."`);
+/// they are written as quoted TOML keys rather than dotted `config set`
+/// paths, which reject `.` in the map tail.
+pub fn merge_replacements(
+    path: PathBuf,
+    pairs: &[(String, String)],
+) -> Result<PathBuf, ConfigSetError> {
+    let spec = schema::CONFIG_KEYS
+        .iter()
+        .find(|s| s.table == schema::REPLACEMENTS_TABLE)
+        .expect("text.replacements is in the schema allowlist");
+    let mut editor = ConfigEditor::load_from_path(path)?;
+    for (from, to) in pairs {
+        let found = schema::Found::MapEntry {
+            spec,
+            entry: from.clone(),
+        };
+        schema::apply(&mut editor, &found, &schema::TypedValue::Str(to.clone()));
+    }
+    editor.save()?;
+    Ok(editor.path().to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -638,5 +664,46 @@ mod tests {
         let cfg = reload(&path);
         assert_eq!(cfg.osd.opacity, 0.5);
         assert_eq!(cfg.hotkey.key, "HOME", "existing settings must survive");
+    }
+
+    #[test]
+    fn merge_replacements_overwrites_existing_and_preserves_comments() {
+        let mut base = crate::config::default_config_content();
+        base.push_str(
+            "\n# keep this replacements comment\n[text.replacements]\n\"omaar gielen\" = \"old value\"\n\"btw\" = \"by the way\"\n",
+        );
+        let (_dir, path) = temp_config(&base);
+        merge_replacements(
+            path.clone(),
+            &[
+                ("omaar gielen".to_string(), "Omarchy menu".to_string()),
+                ("oh marky".to_string(), "Omarchy".to_string()),
+            ],
+        )
+        .unwrap();
+
+        let cfg = reload(&path);
+        assert_eq!(
+            cfg.text
+                .replacements
+                .get("omaar gielen")
+                .map(String::as_str),
+            Some("Omarchy menu"),
+            "existing key must be overwritten"
+        );
+        assert_eq!(
+            cfg.text.replacements.get("oh marky").map(String::as_str),
+            Some("Omarchy")
+        );
+        assert_eq!(
+            cfg.text.replacements.get("btw").map(String::as_str),
+            Some("by the way"),
+            "unrelated entries must survive"
+        );
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains("# keep this replacements comment"),
+            "comment lost: {after}"
+        );
     }
 }

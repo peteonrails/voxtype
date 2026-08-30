@@ -78,6 +78,7 @@ Voxtype works best with your compositor's native keybindings. Add these to your 
 ```
 bind = SUPER, V, exec, voxtype record start
 bindr = SUPER, V, exec, voxtype record stop
+bind = SUPER SHIFT, F12, exec, voxtype learn --from-selection
 ```
 
 **Sway** (`~/.config/sway/config`):
@@ -239,6 +240,8 @@ Voxtype can post-process transcribed text with word replacements and spoken punc
 [text]
 replacements = { "vox type" = "voxtype", "oh marky" = "Omarchy" }
 ```
+
+Or grow the table from a real correction: fix the typed text, select it, and run `voxtype learn --from-selection`.
 
 **Spoken punctuation** (opt-in) converts spoken words to symbols - useful for developers:
 
@@ -713,6 +716,7 @@ We want to hear from you! Voxtype is a young project and your feedback helps mak
 - [Sami Jawhar](https://github.com/sjawhar) - Eager input processing wiring
 - [KaiStarkk](https://github.com/KaiStarkk) - Post-process trim and fallback_on_empty options
 - [graysky](https://github.com/graysky2) - Flash attention config fix
+- [deaiafdeling](https://github.com/deaiafdeling) - `voxtype learn` to teach text replacements from an edited dictation
 - [OldJobobo](https://github.com/OldJobobo) - Quickshell OSD theming, Omarchy theme state path support, configurable media ducking, degenerate Whisper transcript retry; co-owns `quickshell/`
 - [Matthias Breddin](https://github.com/lunetics) - IBus non-ASCII reordering troubleshooting, Rust 1.98 clippy fix, media ducking fade, cubic-scale ducking volume correction
 

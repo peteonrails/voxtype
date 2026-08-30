@@ -160,6 +160,46 @@ pub enum Commands {
         action: MeetingAction,
     },
 
+    /// Teach [text.replacements] from an edited dictation
+    ///
+    /// Diffs the corrected text against the last transcript and merges
+    /// only word/phrase replacements into the config file. Inserts and
+    /// deletes are ignored. Low-similarity selections are refused so a
+    /// random highlight cannot poison the dictionary.
+    #[command(long_about = "\
+        Teach [text.replacements] from an edited dictation\n\n\
+        Reads the corrected text (Wayland primary selection by default, \
+        falling back to the clipboard), diffs it against the last \
+        transcript, and writes replace-opcode phrases into \
+        [text.replacements], preserving comments.\n\n\
+        The last transcript is the file the daemon writes after each \
+        dictation ($XDG_RUNTIME_DIR/voxtype/last-transcript). If that \
+        file is missing, the last tracing line `Transcribed: \"...\"` \
+        is parsed from `journalctl --user -u voxtype`.\n\n\
+        Exit codes: 0 on success (including identical text or \
+        insert/delete-only diffs), 1 when the selection is empty, no \
+        last transcript exists, or similarity is below 0.35.\n\n\
+        Examples:\n  \
+        voxtype learn\n  \
+        voxtype learn --from-selection\n  \
+        voxtype learn --from-clipboard\n  \
+        echo 'Het Omarchy menu doet het niet.' | voxtype learn --from-stdin\n\n\
+        Hyprland: bind = SUPER SHIFT, F12, exec, voxtype learn --from-selection")]
+    Learn {
+        /// Read corrected text from the Wayland primary selection (default).
+        /// Falls back to the clipboard if the selection is empty.
+        #[arg(long)]
+        from_selection: bool,
+
+        /// Read corrected text from the clipboard
+        #[arg(long, conflicts_with = "from_selection")]
+        from_clipboard: bool,
+
+        /// Read corrected text from stdin
+        #[arg(long, conflicts_with_all = ["from_selection", "from_clipboard"])]
+        from_stdin: bool,
+    },
+
     /// Check for updates
     CheckUpdate,
 }

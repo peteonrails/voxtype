@@ -286,6 +286,7 @@ on_transcription = true
 #
 # Custom word replacements (case-insensitive)
 # replacements = { "vox type" = "voxtype" }
+# Or grow this table from a real correction: voxtype learn --from-selection
 #
 # Smart auto-submit: say "submit" at the end of dictation to press Enter.
 # The word "submit" is stripped from the output text and Enter is pressed.

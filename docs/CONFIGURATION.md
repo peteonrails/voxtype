@@ -2665,6 +2665,14 @@ If Whisper transcribes "vox type" (or "Vox Type"), it will be replaced with "vox
 "omar key" = "Omarchy"
 ```
 
+You can also grow this table from a real correction instead of editing TOML by hand. After dictation, fix the typed text, select it, and run:
+
+```bash
+voxtype learn --from-selection
+```
+
+That diffs the selection against the last transcript, writes only word/phrase replacements (inserts and deletes are ignored), and restarts the daemon. A random selection that barely resembles the last transcript is refused. See [`voxtype learn`](USER_MANUAL.md#voxtype-learn).
+
 ### smart_auto_submit
 
 **Type:** Boolean
@@ -3450,6 +3458,9 @@ Then configure your compositor:
 ```hyprlang
 bind = SUPER, V, exec, voxtype record start
 bindr = SUPER, V, exec, voxtype record stop
+
+# After fixing a dictation, select the corrected text and teach replacements
+bind = SUPER SHIFT, F12, exec, voxtype learn --from-selection
 ```
 
 **Sway** (`~/.config/sway/config`):
