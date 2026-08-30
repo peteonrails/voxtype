@@ -913,28 +913,24 @@ fn installed_engine_choices() -> std::collections::HashSet<&'static str> {
     out
 }
 
-/// Resolve where on disk a model directory lives. Mirrors the daemon's
-/// resolution path so the TUI's "is this downloaded?" check matches what
-/// the daemon will look for at load time.
+/// Is the configured model usable, so a save does not need to download it?
 ///
-/// `name` is the raw config value, which for some engines (moonshine,
-/// sensevoice) is a short name that differs from the directory the
-/// downloader actually wrote to. `model_catalog::model_dir_name` resolves
-/// that mapping; see its docs for why.
-fn model_dir_on_disk(engine: &str, name: &str) -> std::path::PathBuf {
-    crate::config::Config::models_dir().join(crate::model_catalog::model_dir_name(engine, name))
-}
-
-/// True when the model directory exists with at least one file in it. We
-/// don't validate the file list — the daemon will surface specific missing
-/// pieces — but a fully empty or missing directory definitely needs a
-/// download before save.
+/// Delegates to `model_catalog::model_installed`, which is what the daemon
+/// and the downloader already resolve through. Asking it rather than probing
+/// the directory ourselves buys two things.
+///
+/// It handles the name mapping: `name` is the raw config value, and for
+/// moonshine and sensevoice that is a short name that differs from the
+/// directory the downloader wrote to. Getting that wrong is what made a
+/// working model report as absent (#662).
+///
+/// It also rejects a model that is present but damaged. The check here used
+/// to be "the directory exists and has at least one file in it", which calls
+/// an interrupted download complete and skips the re-download that would fix
+/// it. `model_installed` verifies against the recorded manifest, so a partial
+/// download is treated as needing a download.
 fn model_present_on_disk(engine: &str, name: &str) -> bool {
-    let dir = model_dir_on_disk(engine, name);
-    match std::fs::read_dir(&dir) {
-        Ok(mut iter) => iter.next().is_some(),
-        Err(_) => false,
-    }
+    crate::model_catalog::model_installed(engine, name)
 }
 
 fn cycle_str(choices: &[&'static str], current: &str, delta: i32) -> String {
