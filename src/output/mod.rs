@@ -289,6 +289,7 @@ fn create_driver_output(
             config.append_text.clone(),
             config.dotool_xkb_layout.clone(),
             config.dotool_xkb_variant.clone(),
+            config.shift_enter_newlines,
         )),
         OutputDriver::Ydotool => Box::new(ydotool::YdotoolOutput::new(
             config.type_delay_ms,
