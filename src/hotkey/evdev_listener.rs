@@ -154,6 +154,13 @@ impl HotkeyListener for EvdevListener {
 struct DeviceManager {
     /// Map of device path to opened device
     devices: HashMap<PathBuf, Device>,
+    /// Keys this listener is configured to watch.
+    ///
+    /// A device is worth opening if it reports one of these, even when it is
+    /// not a keyboard. Without this a mouse never gets opened, so a
+    /// `BTN_SIDE` hotkey parses correctly and then silently never fires
+    /// (#546).
+    watched_keys: HashSet<Key>,
     /// inotify instance watching /dev/input
     inotify: Inotify,
     /// Buffer for inotify events
@@ -164,7 +171,7 @@ struct DeviceManager {
 
 impl DeviceManager {
     /// Create a new device manager with inotify watcher
-    fn new() -> Result<Self, HotkeyError> {
+    fn new(watched_keys: HashSet<Key>) -> Result<Self, HotkeyError> {
         let inotify = Inotify::init().map_err(|e| {
             HotkeyError::DeviceAccess(format!("Failed to initialize inotify: {}", e))
         })?;
@@ -179,6 +186,7 @@ impl DeviceManager {
             devices: HashMap::new(),
             inotify,
             inotify_buffer: [0u8; 1024],
+            watched_keys,
             last_validation: Instant::now(),
         };
 
@@ -238,18 +246,24 @@ impl DeviceManager {
                     return;
                 }
 
-                // Check if device has keyboard capabilities
-                let has_keys = device
-                    .supported_keys()
-                    .map(|keys| {
-                        // A keyboard should have at least some letter keys
-                        keys.contains(Key::KEY_A)
-                            && keys.contains(Key::KEY_Z)
-                            && keys.contains(Key::KEY_ENTER)
+                // Open a device if it is a keyboard, or if it reports one of
+                // the keys we were actually asked to watch. The second case is
+                // what makes a mouse side button usable (#546): it carries no
+                // letter keys, so the keyboard test alone rejects it and the
+                // configured hotkey never fires.
+                let keys = device.supported_keys();
+                let is_keyboard = keys
+                    .map(|k| {
+                        k.contains(Key::KEY_A)
+                            && k.contains(Key::KEY_Z)
+                            && k.contains(Key::KEY_ENTER)
                     })
                     .unwrap_or(false);
+                let has_watched_key = keys
+                    .map(|k| self.watched_keys.iter().any(|w| k.contains(*w)))
+                    .unwrap_or(false);
 
-                if has_keys {
+                if is_keyboard || has_watched_key {
                     // Set device to non-blocking mode
                     let fd = device.as_raw_fd();
                     unsafe {
@@ -260,9 +274,14 @@ impl DeviceManager {
                     }
 
                     tracing::info!(
-                        "Opened keyboard: {:?} ({:?})",
+                        "Opened input device: {:?} ({:?}){}",
                         path,
-                        device.name().unwrap_or("unknown")
+                        device.name().unwrap_or("unknown"),
+                        if is_keyboard {
+                            ""
+                        } else {
+                            " [watched key only]"
+                        }
                     );
                     self.devices.insert(path.clone(), device);
                 }
@@ -452,7 +471,16 @@ fn evdev_listener_loop(
     tx: mpsc::Sender<HotkeyEvent>,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<(), HotkeyError> {
-    let mut manager = DeviceManager::new()?;
+    // Every key this loop reacts to, so a non-keyboard device carrying one
+    // of them (a mouse with the hotkey on a side button) gets opened too.
+    let mut watched_keys: HashSet<Key> = HashSet::new();
+    watched_keys.insert(target_key);
+    watched_keys.extend(modifier_keys.iter().copied());
+    watched_keys.extend(cancel_key);
+    watched_keys.extend(model_modifier);
+    watched_keys.extend(profile_modifiers.keys().copied());
+
+    let mut manager = DeviceManager::new(watched_keys)?;
 
     // Track currently held modifier keys
     let mut active_modifiers: HashSet<Key> = HashSet::new();
@@ -694,6 +722,14 @@ fn parse_key_name(name: &str) -> Result<Key, HotkeyError> {
         })
         .collect();
 
+    // Mouse and other non-keyboard buttons live in the same evdev keycode
+    // space under a BTN_ prefix, so they are usable as hotkeys once we stop
+    // assuming every name is a KEY_ (#546). Recognize the prefix with or
+    // without it, the way the KEY_ names already are.
+    if let Some(key) = parse_button_name(&normalized) {
+        return Ok(key);
+    }
+
     // Add KEY_ prefix if not present
     let key_name = if normalized.starts_with("KEY_") {
         normalized
@@ -776,13 +812,42 @@ fn parse_key_name(name: &str) -> Result<Key, HotkeyError> {
         // If not found, return error with suggestions
         _ => {
             return Err(HotkeyError::UnknownKey(format!(
-                "{}. Try: SCROLLLOCK, PAUSE, MEDIA, F13-F24, or a prefixed keycode (e.g. EVTEST_226, WEV_234). Run 'evtest' to find key names",
+                "{}. Try: SCROLLLOCK, PAUSE, MEDIA, F13-F24, a mouse button (BTN_SIDE, BTN_EXTRA, BTN_FORWARD, BTN_BACK), or a prefixed keycode (e.g. EVTEST_226, WEV_234). Run 'evtest' to find key names",
                 name
             )));
         }
     };
 
     Ok(key)
+}
+
+/// Resolve a `BTN_*` button name, with or without the prefix.
+///
+/// Mice report their side and thumb buttons as `BTN_SIDE`, `BTN_EXTRA`,
+/// `BTN_FORWARD`, `BTN_BACK` and `BTN_TASK`, which is what someone means by
+/// "the extra button on my mouse" (#546). They are ordinary keycodes to
+/// evdev, so once the name resolves the rest of the listener needs no
+/// special handling.
+///
+/// `BTN_LEFT` and `BTN_RIGHT` are deliberately absent. Binding push-to-talk
+/// to primary click makes the desktop unusable, and the request behind this
+/// was for the buttons that are otherwise going to waste.
+fn parse_button_name(normalized: &str) -> Option<Key> {
+    let name = if normalized.starts_with("BTN_") {
+        normalized.to_string()
+    } else {
+        format!("BTN_{}", normalized)
+    };
+
+    Some(match name.as_str() {
+        "BTN_SIDE" => Key::BTN_SIDE,
+        "BTN_EXTRA" => Key::BTN_EXTRA,
+        "BTN_FORWARD" => Key::BTN_FORWARD,
+        "BTN_BACK" => Key::BTN_BACK,
+        "BTN_TASK" => Key::BTN_TASK,
+        "BTN_MIDDLE" => Key::BTN_MIDDLE,
+        _ => return None,
+    })
 }
 
 /// XKB keycodes are offset by 8 from Linux kernel keycodes
@@ -873,6 +938,56 @@ fn fd_is_hung_up(fd: RawFd) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// #546: a mouse's spare buttons are ordinary evdev keycodes, and the
+    /// parser used to force a KEY_ prefix onto every name, so "BTN_SIDE"
+    /// became "KEY_BTN_SIDE" and failed to resolve.
+    #[test]
+    fn mouse_buttons_parse_as_hotkeys() {
+        assert_eq!(parse_key_name("BTN_SIDE").unwrap(), Key::BTN_SIDE);
+        assert_eq!(parse_key_name("BTN_EXTRA").unwrap(), Key::BTN_EXTRA);
+        assert_eq!(parse_key_name("BTN_FORWARD").unwrap(), Key::BTN_FORWARD);
+        assert_eq!(parse_key_name("BTN_BACK").unwrap(), Key::BTN_BACK);
+        assert_eq!(parse_key_name("BTN_TASK").unwrap(), Key::BTN_TASK);
+        assert_eq!(parse_key_name("BTN_MIDDLE").unwrap(), Key::BTN_MIDDLE);
+    }
+
+    /// The same spelling flexibility the KEY_ names get: prefix optional,
+    /// case and separators normalized.
+    #[test]
+    fn mouse_button_names_normalize_like_key_names() {
+        assert_eq!(parse_key_name("side").unwrap(), Key::BTN_SIDE);
+        assert_eq!(parse_key_name("btn-extra").unwrap(), Key::BTN_EXTRA);
+        assert_eq!(parse_key_name(" btn side ").unwrap(), Key::BTN_SIDE);
+    }
+
+    /// Primary click is not offered. Push-to-talk on left button makes the
+    /// desktop unusable, and someone typing "BTN_LEFT" should get the error
+    /// listing the buttons that are safe rather than a working footgun.
+    #[test]
+    fn primary_mouse_buttons_are_not_bindable() {
+        assert!(parse_key_name("BTN_LEFT").is_err());
+        assert!(parse_key_name("BTN_RIGHT").is_err());
+    }
+
+    /// The suggestion text is the only place a user learns mouse buttons are
+    /// an option, since they will not guess the BTN_ spelling.
+    #[test]
+    fn unknown_key_error_mentions_mouse_buttons() {
+        let err = parse_key_name("NOT_A_REAL_KEY").unwrap_err().to_string();
+        assert!(
+            err.contains("BTN_SIDE"),
+            "the error should point at mouse buttons, got: {err}"
+        );
+    }
+
+    /// Adding the BTN_ branch must not shadow any existing key name.
+    #[test]
+    fn keyboard_names_still_resolve() {
+        assert_eq!(parse_key_name("SCROLLLOCK").unwrap(), Key::KEY_SCROLLLOCK);
+        assert_eq!(parse_key_name("KEY_PAUSE").unwrap(), Key::KEY_PAUSE);
+        assert_eq!(parse_key_name("leftalt").unwrap(), Key::KEY_LEFTALT);
+    }
     use super::*;
 
     /// #556: a device change while the hotkey is held must synthesize a
