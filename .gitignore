@@ -56,3 +56,5 @@ website/docs
 # Local agent worktrees and ephemeral plans
 .claude/worktrees/
 PLAN-*.md
+build.log
+cargo-fetch.log

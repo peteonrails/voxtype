@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 mod cohere;
 mod dolphin;
+mod gigaam;
 mod moonshine;
 mod omnilingual;
 mod paraformer;
@@ -13,6 +14,7 @@ mod soniox;
 
 pub use cohere::CohereConfig;
 pub use dolphin::DolphinConfig;
+pub use gigaam::GigaAMConfig;
 pub use moonshine::MoonshineConfig;
 pub use omnilingual::OmnilingualConfig;
 pub use paraformer::ParaformerConfig;
@@ -63,6 +65,10 @@ pub enum TranscriptionEngine {
     /// task tokens). Top of the Open ASR Leaderboard.
     /// Requires: cargo build --features cohere
     Cohere,
+    /// Use GigaAM (SberDevices GigaAM-v3 e2e RNN-T via ONNX Runtime).
+    /// Russian with built-in punctuation and text normalization.
+    /// Requires: cargo build --features gigaam
+    GigaAM,
     /// Use Soniox (cloud streaming WebSocket STT).
     Soniox,
 }

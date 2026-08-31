@@ -323,6 +323,7 @@ impl Variant {
                     || matches_str(engine, "dolphin")
                     || matches_str(engine, "omnilingual")
                     || matches_str(engine, "cohere")
+                    || matches_str(engine, "gigaam")
             }
         }
     }
@@ -382,6 +383,7 @@ pub fn installed_engines(inv: &Inventory) -> std::collections::HashSet<&'static 
         "dolphin",
         "omnilingual",
         "cohere",
+        "gigaam",
     ];
     let mut out = std::collections::HashSet::new();
     for status in &inv.variants {
@@ -748,6 +750,9 @@ pub fn compiled_features() -> Vec<&'static str> {
     if cfg!(feature = "omnilingual") {
         f.push("omnilingual");
     }
+    if cfg!(feature = "gigaam") {
+        f.push("gigaam");
+    }
     if cfg!(feature = "cohere") {
         f.push("cohere");
     }
@@ -1091,6 +1096,7 @@ mod tests {
         require_feature_listed!("dolphin");
         require_feature_listed!("omnilingual");
         require_feature_listed!("cohere");
+        require_feature_listed!("gigaam");
         require_feature_listed!("ml-diarization");
         require_feature_listed!("gpu-vulkan");
         require_feature_listed!("gpu-cuda");

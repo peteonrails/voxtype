@@ -99,6 +99,12 @@ pub struct AllFields {
     pub pf_on_demand_loading: bool,
     pub pf_section_existed: bool,
 
+    // GigaAM
+    pub ga_model: String,
+    pub ga_threads: Option<i64>,
+    pub ga_on_demand_loading: bool,
+    pub ga_section_existed: bool,
+
     // Dolphin
     pub dol_model: String,
     pub dol_threads: Option<i64>,
@@ -170,6 +176,11 @@ pub enum FieldId {
     PfModel,
     PfThreads,
     PfOnDemandLoading,
+
+    // GigaAM
+    GaModel,
+    GaThreads,
+    GaOnDemandLoading,
 
     // Dolphin
     DolModel,
@@ -247,6 +258,11 @@ fn rows_for_engine_with_mode(engine: &str, whisper_mode: &str) -> Vec<FieldId> {
             FieldId::PfModel,
             FieldId::PfThreads,
             FieldId::PfOnDemandLoading,
+        ]),
+        "gigaam" => rows.extend_from_slice(&[
+            FieldId::GaModel,
+            FieldId::GaThreads,
+            FieldId::GaOnDemandLoading,
         ]),
         "dolphin" => rows.extend_from_slice(&[
             FieldId::DolModel,
@@ -340,6 +356,14 @@ impl EngineState {
                 .get_bool("paraformer", "on_demand_loading")
                 .unwrap_or(false),
             pf_section_existed: ed.get_string("paraformer", "model").is_some(),
+
+            // GigaAM
+            ga_model: ed
+                .get_string("gigaam", "model")
+                .unwrap_or_else(|| default_model("gigaam").to_string()),
+            ga_threads: ed.get_int("gigaam", "threads"),
+            ga_on_demand_loading: ed.get_bool("gigaam", "on_demand_loading").unwrap_or(false),
+            ga_section_existed: ed.get_string("gigaam", "model").is_some(),
 
             // Dolphin
             dol_model: ed
@@ -550,6 +574,16 @@ impl EngineState {
                 None => ed.unset("paraformer", "threads"),
             }
             ed.set_bool("paraformer", "on_demand_loading", f.pf_on_demand_loading);
+        }
+
+        // GigaAM
+        if self.engine == "gigaam" || f.ga_section_existed {
+            ed.set_string("gigaam", "model", &f.ga_model);
+            match f.ga_threads {
+                Some(n) => ed.set_int("gigaam", "threads", n),
+                None => ed.unset("gigaam", "threads"),
+            }
+            ed.set_bool("gigaam", "on_demand_loading", f.ga_on_demand_loading);
         }
 
         // Dolphin
@@ -810,6 +844,10 @@ impl EngineState {
             FieldId::PfThreads => f.pf_threads = cycle_threads(f.pf_threads, delta),
             FieldId::PfOnDemandLoading => f.pf_on_demand_loading = !f.pf_on_demand_loading,
 
+            FieldId::GaModel => f.ga_model = cycle_model("gigaam", &f.ga_model, delta),
+            FieldId::GaThreads => f.ga_threads = cycle_threads(f.ga_threads, delta),
+            FieldId::GaOnDemandLoading => f.ga_on_demand_loading = !f.ga_on_demand_loading,
+
             FieldId::DolModel => f.dol_model = cycle_model("dolphin", &f.dol_model, delta),
             FieldId::DolThreads => f.dol_threads = cycle_threads(f.dol_threads, delta),
             FieldId::DolOnDemandLoading => f.dol_on_demand_loading = !f.dol_on_demand_loading,
@@ -843,6 +881,7 @@ fn active_model_for_engine(engine: &str, f: &AllFields) -> Option<String> {
         "moonshine" => Some(f.mn_model.clone()),
         "sensevoice" => Some(f.sv_model.clone()),
         "paraformer" => Some(f.pf_model.clone()),
+        "gigaam" => Some(f.ga_model.clone()),
         "dolphin" => Some(f.dol_model.clone()),
         "omnilingual" => Some(f.om_model.clone()),
         "cohere" => Some(f.co_model.clone()),
@@ -1176,6 +1215,18 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
             yesno(f.pf_on_demand_loading),
         ),
 
+        FieldId::GaModel => ("GigaAM · model", f.ga_model.clone()),
+        FieldId::GaThreads => (
+            "GigaAM · threads",
+            f.ga_threads
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "auto".to_string()),
+        ),
+        FieldId::GaOnDemandLoading => (
+            "GigaAM · on-demand model load",
+            yesno(f.ga_on_demand_loading),
+        ),
+
         FieldId::DolModel => ("Dolphin · model", f.dol_model.clone()),
         FieldId::DolThreads => (
             "Dolphin · threads",
@@ -1340,6 +1391,7 @@ fn guidance(state: &EngineState) -> Vec<Line<'_>> {
         FieldId::MnModel => model_guidance("moonshine", &f.mn_model),
         FieldId::SvModel => model_guidance("sensevoice", &f.sv_model),
         FieldId::PfModel => model_guidance("paraformer", &f.pf_model),
+        FieldId::GaModel => model_guidance("gigaam", &f.ga_model),
         FieldId::DolModel => model_guidance("dolphin", &f.dol_model),
         FieldId::OmModel => model_guidance("omnilingual", &f.om_model),
         FieldId::CoModel => model_guidance("cohere", &f.co_model),
@@ -1607,6 +1659,8 @@ fn guidance(state: &EngineState) -> Vec<Line<'_>> {
 
         FieldId::PfThreads => threads_guidance("Paraformer"),
         FieldId::PfOnDemandLoading => on_demand_guidance("Paraformer"),
+        FieldId::GaThreads => threads_guidance("GigaAM"),
+        FieldId::GaOnDemandLoading => on_demand_guidance("GigaAM"),
 
         FieldId::DolThreads => threads_guidance("Dolphin"),
         FieldId::DolOnDemandLoading => on_demand_guidance("Dolphin"),
@@ -1757,6 +1811,7 @@ fn display_engine(engine: &str) -> &'static str {
         "dolphin" => "Dolphin",
         "omnilingual" => "Omnilingual",
         "cohere" => "Cohere",
+        "gigaam" => "GigaAM",
         _ => "Engine",
     }
 }

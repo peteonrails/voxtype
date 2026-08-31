@@ -242,6 +242,9 @@ omnilingual-tensorrt = ["omnilingual", "onnx-tensorrt-enabled"]
 cohere = ["onnx-common", "dep:half", "dep:tokenizers"]
 cohere-cuda = ["cohere", "onnx-cuda-enabled"]
 cohere-tensorrt = ["cohere", "onnx-tensorrt-enabled"]
+gigaam = ["onnx-common", "ort/download-binaries", "ort/tls-rustls"]
+gigaam-cuda = ["gigaam", "onnx-cuda-enabled"]
+gigaam-tensorrt = ["gigaam", "onnx-tensorrt-enabled"]
 # Soniox is unconditional. Its deps (tokio-tungstenite, futures-util, reqwest)
 # add ~1-2 MB after LTO+strip and ride alongside ureq, which every binary
 # already ships for model downloads. Treating it like remote.rs (also always
