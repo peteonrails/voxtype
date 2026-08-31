@@ -2767,6 +2767,10 @@ impl Daemon {
             }
         }
 
+        // Only now that the lock is ours: a refused second instance must not
+        // overwrite the running daemon's answer with its own version.
+        crate::daemon_status::publish_version();
+
         tracing::info!("Output mode: {:?}", self.config.output.mode);
 
         // Log state file if configured

@@ -1793,9 +1793,19 @@ pub fn schema_json(cfg: &Config, path: &Path, editor: &ConfigEditor) -> Json {
         .iter()
         .map(|(k, v)| (k.clone(), json!(v)))
         .collect();
+    // `voxtype_version` is this CLI's build. `daemon_version` is what is
+    // actually serving dictation, which is routinely a different thing: an
+    // upgrade installed but not restarted, an ExecStart override pointing at
+    // a private build, or a /usr/local install shadowing a packaged one. A
+    // settings UI that shows only the former tells the user a fix is live
+    // while the process without it is still running.
+    let daemon = crate::daemon_status::running_version();
     json!({
         "schema_version": SCHEMA_VERSION,
         "voxtype_version": env!("CARGO_PKG_VERSION"),
+        "daemon_version": daemon.version(),
+        "daemon_version_label": daemon.describe(),
+        "daemon_version_differs": daemon.differs_from_caller(),
         "config_path": path.display().to_string(),
         "engine": cfg.engine.name(),
         "keys": keys,

@@ -77,6 +77,73 @@
 
             <!-- v0.7.x Era Posts -->
 
+            <article class="news-article" id="v101">
+                <div class="article-meta">
+                    <time datetime="2026-08-30">August 30, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v1.0.1: Cleaner audio, resumable downloads, and the first-week fixes</h2>
+                <div class="article-body">
+                    <p>The first patch release after 1.0.0, covering everything reported in the days after it shipped. Four of these change what the audio pipeline actually produces, so this is worth installing even if none of the individual bugs bit you.</p>
+
+                    <h3>Band-limited resampling (<a href="https://github.com/peteonrails/voxtype/issues/641">#641</a>)</h3>
+                    <p>The resampler that converts your microphone's rate to the 16kHz the models expect was doing linear interpolation with no anti-aliasing filter. Downsampling 48kHz to 16kHz folded every frequency above 8kHz back down into the speech band, so on the most common capture configuration there is, the model was handed audio dirtier than the microphone produced.</p>
+                    <p>Two smaller faults came with it. The old function started fresh on every audio callback, so the fractional read position reset roughly a hundred times a second and left a discontinuity each time. And whatever sat in the buffer when you released the key was discarded, losing up to 21ms off the end of every recording.</p>
+                    <p><strong>Why it matters:</strong> better transcription accuracy on any machine whose microphone does not natively run at 16kHz, which is most of them, and your last word no longer gets clipped.</p>
+
+                    <h3>Media ducking fades</h3>
+                    <p>Ducking now ramps the volume down and back rather than jumping, and the fade runs without delaying the microphone. Configurable in milliseconds, and reachable from <code>voxtype configure</code> as well as the config file, the flag, and the environment variable.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[audio]
+duck_media = true
+duck_media_volume_percent = 34
+duck_media_fade_ms = 150      # 0 for the old instant behavior</code></pre>
+                    </div>
+
+                    <p><strong>Why use it:</strong> the old jump was jarring when dictating over music, and a slow fade that held up the microphone would have been worse. This does neither.</p>
+
+                    <h3>Model downloads resume (<a href="https://github.com/peteonrails/voxtype/issues/645">#645</a>)</h3>
+                    <p>An interrupted download used to start over from zero, and a stalled one would hang indefinitely. Downloads now resume from where they stopped and abort when the transfer goes quiet. A partial file is never left at the final path, so a failed download cannot masquerade as a complete model.</p>
+                    <p><strong>Why it matters:</strong> the large ONNX models are a slow download on a domestic connection, and losing an hour of progress to a dropped connection was a genuine reason to give up.</p>
+
+                    <h3>Hotkeys that stay unstuck</h3>
+                    <p>Three separate faults, all of which left push-to-talk in a bad state. Plugging in a keyboard mid-press left the daemon believing the key was still held, so recording never stopped (<a href="https://github.com/peteonrails/voxtype/issues/556">#556</a>). After voxtype typed through dotool, the listener kept the file descriptor of the tool's short-lived virtual keyboard; once the tool tore it down, the daemon spun a CPU core at 100 percent (<a href="https://github.com/peteonrails/voxtype/issues/445">#445</a>). And dropped evdev events could desynchronize the pressed-key state.</p>
+
+                    <h3>Idle model eviction actually runs (<a href="https://github.com/peteonrails/voxtype/issues/644">#644</a>)</h3>
+                    <p>The code to unload an idle model was written, correct, and had never once executed. It sat on a 500ms timer arm that a 100ms arm beside it starved: in a <code>tokio::select!</code> loop, an uncompleted timer future is recreated on every iteration, so a timer that never gets to complete never fires. Moved onto an arm that does.</p>
+                    <p><strong>Why it matters:</strong> long-running daemons on laptops now release model memory when idle, as the setting always claimed.</p>
+
+                    <h3>Bug fixes</h3>
+                    <ul>
+                        <li>Audio stream errors are reported instead of silently returning a truncated recording when a device disconnects mid-recording (<a href="https://github.com/peteonrails/voxtype/issues/642">#642</a>)</li>
+                        <li><code>voxtype configure</code> honors <code>-c</code> / <code>--config</code> instead of always writing the default config (<a href="https://github.com/peteonrails/voxtype/issues/595">#595</a>)</li>
+                        <li>The configure TUI no longer freezes when opening the Audio section on ALSA <code>dsnoop</code> devices (<a href="https://github.com/peteonrails/voxtype/issues/541">#541</a>), thanks to Jan van Winsen</li>
+                        <li>The configure TUI no longer reports an installed sensevoice or moonshine model as missing (<a href="https://github.com/peteonrails/voxtype/issues/662">#662</a>), from a diagnosis by xzedx</li>
+                        <li>Remote mode uses <code>remote_model</code> instead of falling back to the local model name and 404ing against OpenAI-compatible APIs (<a href="https://github.com/peteonrails/voxtype/issues/496">#496</a>), thanks to poommmes-del</li>
+                        <li>Remote Whisper honors <code>language = "auto"</code> (<a href="https://github.com/peteonrails/voxtype/issues/619">#619</a>), thanks to musingfox</li>
+                        <li>Filler-word filtering no longer strips "um" in Portuguese and German, where it is an article and a preposition rather than a disfluency (<a href="https://github.com/peteonrails/voxtype/issues/566">#566</a>), thanks to robertvbs</li>
+                        <li>Zero-delay eitype output no longer truncates long dictation on KDE (<a href="https://github.com/peteonrails/voxtype/issues/552">#552</a>), thanks to Vaspyyy</li>
+                        <li>Eager processing no longer transcribes chunks with Whisper when a non-Whisper engine uses on-demand loading (<a href="https://github.com/peteonrails/voxtype/issues/618">#618</a>), thanks to yusuke8h</li>
+                        <li><code>setup variant --to</code> refuses to activate a binary that cannot run on the host instead of reporting success (<a href="https://github.com/peteonrails/voxtype/issues/633">#633</a>)</li>
+                        <li><code>setup model --set</code> routes by engine instead of rewriting the engine to Whisper and crash-looping the daemon (<a href="https://github.com/peteonrails/voxtype/issues/610">#610</a>)</li>
+                        <li>aarch64 OSD binaries are published, having been built by CI but never shipped (<a href="https://github.com/peteonrails/voxtype/issues/579">#579</a>)</li>
+                        <li>Homebrew macOS dependency syntax updated for the current cask format, thanks to erodriguezh</li>
+                        <li>Documentation fixes for the Cohere engine, the docs links, and the audio device listing command (<a href="https://github.com/peteonrails/voxtype/issues/528">#528</a>, <a href="https://github.com/peteonrails/voxtype/issues/526">#526</a>, <a href="https://github.com/peteonrails/voxtype/issues/564">#564</a>)</li>
+                    </ul>
+
+                    <h3>New</h3>
+                    <ul>
+                        <li><code>--no-osd</code> suppresses the on-screen display for a single recording without changing your config (<a href="https://github.com/peteonrails/voxtype/issues/636">#636</a>)</li>
+                        <li>Programs can wait for a dictation to complete rather than polling for it</li>
+                    </ul>
+
+                    <h3>Thanks</h3>
+                    <p>To Zeus-Deus for the evdev hotkey work, and to kaizenagentdev, lunetics, robertvbs, poommmes-del, musingfox, Vaspyyy, yusuke8h, Jan van Winsen, Matthias Breddin, erodriguezh and xzedx for reports, diagnoses and fixes that went into this release.</p>
+                </div>
+            </article>
+
             <article class="news-article" id="v075">
                 <div class="article-meta">
                     <time datetime="2026-05-28">May 28, 2026</time>

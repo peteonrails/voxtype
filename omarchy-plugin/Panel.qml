@@ -44,6 +44,8 @@ Item {
   property string searchText: ""
   property string engine: ""
   property string voxtypeVersion: ""
+  property string daemonVersionLabel: ""
+  property bool daemonVersionDiffers: false
   property string configPath: ""
   property var replacements: ({})
   property var engineChoices: []
@@ -335,6 +337,8 @@ Item {
     root.keys = Array.isArray(next.keys) ? next.keys : []
     root.engine = next.engine === undefined || next.engine === null ? "" : String(next.engine)
     root.voxtypeVersion = next.voxtype_version ? String(next.voxtype_version) : ""
+    root.daemonVersionLabel = next.daemon_version_label ? String(next.daemon_version_label) : ""
+    root.daemonVersionDiffers = next.daemon_version_differs === true
     root.configPath = next.config_path ? String(next.config_path) : ""
     root.replacements = (next.replacements && typeof next.replacements === "object") ? next.replacements : ({})
     root.sections = computeSections(root.keys, next.replacements !== undefined)
@@ -604,6 +608,8 @@ Item {
           // below the header, paints over the facts line instead of under it.
           z: 2
           voxtypeVersion: root.voxtypeVersion
+          daemonVersionLabel: root.daemonVersionLabel
+          daemonVersionDiffers: root.daemonVersionDiffers
           configPath: root.configPath
           restarting: cli.restarting
           accelState: root.accelState
