@@ -14,8 +14,10 @@ use ort::session::Session;
 use ort::value::Tensor;
 use rustfft::num_complex::Complex;
 use rustfft::{Fft, FftPlanner};
+use sha2::{Digest, Sha256};
 use std::f32::consts::PI;
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 const SAMPLE_RATE: usize = 16000;
@@ -45,6 +47,27 @@ const ENCODER_FILE: &str = "v3_rnnt_encoder_int8.onnx";
 const DECODER_FILE: &str = "v3_rnnt_decoder.onnx";
 const JOINT_FILE: &str = "v3_rnnt_joint.onnx";
 const VOCAB_FILE: &str = "v3_vocab.txt";
+
+/// SHA-256 of GitHub Release `models-v3-2026-06-22`. Checked at load so a
+/// manual copy (or a renamed istupakov encoder) cannot silently run.
+const GIGAAM_SHA256: &[(&str, &str)] = &[
+    (
+        ENCODER_FILE,
+        "c52665e9d96c4ca3a153c063d2ee9af6c567fe2975ca50fd038b75bbf2f60e7f",
+    ),
+    (
+        DECODER_FILE,
+        "443c3b7bd42b453611618135d6b1e7d9467e5dd97c8a68501da4aa355750c0da",
+    ),
+    (
+        JOINT_FILE,
+        "fd1d02f45c2ad3d6b67cc149811ad794ab4b020ed49a0a9e2790a8619d1cddd8",
+    ),
+    (
+        VOCAB_FILE,
+        "a9143c30844d3c0bee3e9e927e4084774eb1b9eeaafc473b2c4521e4911a7c07",
+    ),
+];
 
 struct SparseMelBand {
     start: usize,
@@ -305,6 +328,7 @@ impl GigaamTranscriber {
                 )));
             }
         }
+        verify_release_checksums(&model_dir)?;
 
         let tokenizer = Tokenizer::load(&vocab_path)?;
         let encoder = load_session(&encoder_path, threads, "encoder")?;
@@ -549,6 +573,37 @@ impl Transcriber for GigaamTranscriber {
     }
 }
 
+fn verify_release_checksums(model_dir: &Path) -> Result<(), TranscribeError> {
+    for (name, expected) in GIGAAM_SHA256 {
+        let path = model_dir.join(name);
+        let got = sha256_file(&path).map_err(|e| {
+            TranscribeError::InitFailed(format!("failed to hash GigaAM {name}: {e}"))
+        })?;
+        if got != *expected {
+            return Err(TranscribeError::InitFailed(format!(
+                "GigaAM {name} sha256 mismatch (got {got}, expected {expected}). \
+                 Use the gigastt GitHub Release models-v3-2026-06-22 files, not \
+                 istupakov/gigaam-v3-onnx."
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
     let path = PathBuf::from(model);
     if path.is_absolute() && path.exists() {
@@ -629,5 +684,28 @@ mod tests {
     fn resolve_model_path_reports_missing() {
         let err = resolve_model_path("/nonexistent/gigaam").unwrap_err();
         assert!(matches!(err, TranscribeError::ModelNotFound(_)));
+    }
+
+    #[test]
+    fn verify_release_checksums_rejects_wrong_bytes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        for (name, _) in GIGAAM_SHA256 {
+            std::fs::write(dir.path().join(name), b"not the release").unwrap();
+        }
+        let err = verify_release_checksums(dir.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("sha256 mismatch"), "{msg}");
+        assert!(msg.contains("models-v3-2026-06-22"), "{msg}");
+    }
+
+    #[test]
+    fn sha256_file_matches_known_vector() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("x");
+        std::fs::write(&path, b"abc").unwrap();
+        assert_eq!(
+            sha256_file(&path).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 }

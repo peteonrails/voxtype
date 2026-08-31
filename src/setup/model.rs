@@ -674,17 +674,13 @@ const COHERE_MODELS: &[CohereModelInfo] = &[
 // =============================================================================
 //
 // Russian specialist (SberDevices GigaAM v3, RNN-T head). The INT8 bundle
-// voxtype loads is published as GitHub Release tag `models-v3-2026-06-22`
-// on ekhodzitsky/gigastt — not on Hugging Face. `huggingface_repo` is a
-// registry slot so R2 can host `gigaam/gigaam-v3-rnnt-int8/`. The HF
-// mirror script cannot fetch this bundle; seed models.voxtype.io from
-// that GitHub Release (rclone) or a dedicated HF repo if one is published.
-//
-// Files (SHA-256 of the GitHub Release assets):
-//   v3_rnnt_encoder_int8.onnx  225250603 B
-//   v3_rnnt_decoder.onnx
-//   v3_rnnt_joint.onnx
-//   v3_vocab.txt
+// voxtype loads is GitHub Release tag `models-v3-2026-06-22` on
+// ekhodzitsky/gigastt — not Hugging Face. This engine is intentionally
+// omitted from `registry_snapshot()` so `scripts/mirror-models-to-r2.sh`
+// cannot treat a GitHub repo as an HF source. Seed R2 with rclone from
+// that release (or a dedicated HF repo) before adding it to the snapshot.
+// SHA-256 pins for the four files live in `src/transcribe/gigaam.rs` and
+// are checked at engine load.
 
 struct GigaamModelInfo {
     name: &'static str,
@@ -693,7 +689,6 @@ struct GigaamModelInfo {
     description: &'static str,
     languages: &'static str,
     files: &'static [(&'static str, &'static str)],
-    huggingface_repo: &'static str,
 }
 
 const GIGAAM_MODELS: &[GigaamModelInfo] = &[GigaamModelInfo {
@@ -708,8 +703,6 @@ const GIGAAM_MODELS: &[GigaamModelInfo] = &[GigaamModelInfo {
         ("v3_rnnt_joint.onnx", "v3_rnnt_joint.onnx"),
         ("v3_vocab.txt", "v3_vocab.txt"),
     ],
-    // Placeholder: files live on GitHub Releases, not this HF repo.
-    huggingface_repo: "ekhodzitsky/gigastt",
 }];
 
 // =============================================================================
@@ -908,7 +901,9 @@ impl ModelArtifact for GigaamModelInfo {
         "gigaam"
     }
     fn upstream_repo(&self) -> &str {
-        self.huggingface_repo
+        // Not a Hugging Face repo. Do not add this engine to
+        // `registry_snapshot()` until R2 is seeded from this tag.
+        "github.com/ekhodzitsky/gigastt/releases/tag/models-v3-2026-06-22"
     }
     fn expected_files(&self) -> Vec<ExpectedFile> {
         self.files
@@ -957,7 +952,21 @@ pub struct RegistryFile {
 /// published manifest on every download.
 ///
 /// Empty for whisper, whose models are single files with no registry entry.
+/// GigaAM is not in `registry_snapshot` (no HF upstream); its names come
+/// from the local GigaAM table so a copied bundle still has a file-list check.
 pub(crate) fn expected_file_names(engine: &str, model: &str) -> Vec<String> {
+    if engine == "gigaam" {
+        return GIGAAM_MODELS
+            .iter()
+            .find(|m| m.dir_name == model || m.name == model)
+            .map(|m| {
+                m.files
+                    .iter()
+                    .map(|(_, local)| (*local).to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
     registry_snapshot()
         .into_iter()
         .find(|e| e.engine_prefix == engine && e.name == model)
@@ -965,10 +974,11 @@ pub(crate) fn expected_file_names(engine: &str, model: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Snapshot the full ONNX-engine model registry (Parakeet, Moonshine,
-/// SenseVoice, Paraformer, Dolphin, Omnilingual, Cohere, GigaAM) into a
-/// single flat list. Used by `voxtype-mirror-registry` to drive
-/// `scripts/mirror-models-to-r2.sh`.
+/// Snapshot the ONNX-engine model registry for engines that have a Hugging
+/// Face upstream (Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin,
+/// Omnilingual, Cohere). Used by `voxtype-mirror-registry` to drive
+/// `scripts/mirror-models-to-r2.sh`. GigaAM is omitted: its INT8 bundle is
+/// a GitHub Release, not an HF repo.
 pub fn registry_snapshot() -> Vec<RegistryEntry> {
     let mut out = Vec::new();
     for m in PARAKEET_MODELS {
@@ -1066,21 +1076,6 @@ pub fn registry_snapshot() -> Vec<RegistryEntry> {
     for m in COHERE_MODELS {
         out.push(RegistryEntry {
             engine_prefix: "cohere",
-            name: m.dir_name.to_string(),
-            upstream_repo: m.huggingface_repo.to_string(),
-            files: m
-                .files
-                .iter()
-                .map(|(remote, local)| RegistryFile {
-                    upstream_path: (*remote).to_string(),
-                    local_path: (*local).to_string(),
-                })
-                .collect(),
-        });
-    }
-    for m in GIGAAM_MODELS {
-        out.push(RegistryEntry {
-            engine_prefix: "gigaam",
             name: m.dir_name.to_string(),
             upstream_repo: m.huggingface_repo.to_string(),
             files: m
@@ -4395,9 +4390,37 @@ mode = "type"
         for m in GIGAAM_MODELS {
             assert_eq!(m.engine_prefix(), "gigaam");
             assert_eq!(m.name(), m.dir_name);
-            assert_eq!(m.upstream_repo(), m.huggingface_repo);
+            assert!(
+                m.upstream_repo().starts_with("github.com/"),
+                "GigaAM upstream must not look like a Hugging Face repo, got {}",
+                m.upstream_repo()
+            );
             assert_eq!(m.expected_files().len(), m.files.len());
         }
+    }
+
+    #[test]
+    fn gigaam_is_not_in_the_hf_mirror_registry() {
+        for e in registry_snapshot() {
+            assert_ne!(
+                e.engine_prefix, "gigaam",
+                "GigaAM has no HF upstream; do not list it in registry_snapshot"
+            );
+        }
+    }
+
+    #[test]
+    fn gigaam_expected_file_names_come_from_the_local_table() {
+        let names = expected_file_names("gigaam", "gigaam-v3-rnnt-int8");
+        assert_eq!(
+            names,
+            vec![
+                "v3_rnnt_encoder_int8.onnx",
+                "v3_rnnt_decoder.onnx",
+                "v3_rnnt_joint.onnx",
+                "v3_vocab.txt",
+            ]
+        );
     }
 
     #[test]
