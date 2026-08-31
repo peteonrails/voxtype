@@ -579,6 +579,31 @@ fn render_help_overlay(f: &mut Frame) {
 }
 
 fn render_title(f: &mut Frame, area: Rect) {
+    // The version shown is the *daemon's*, not this TUI's. Someone editing
+    // settings wants to know what will act on them, and after an upgrade
+    // that was installed but never restarted those are different numbers.
+    // Showing the TUI's own build here would quietly answer the wrong
+    // question.
+    let daemon = crate::daemon_status::running_version();
+    let (version_text, version_style) = match &daemon {
+        crate::daemon_status::DaemonVersion::Running(v) if daemon.differs_from_caller() => (
+            format!("daemon {} · this TUI {}", v, env!("CARGO_PKG_VERSION")),
+            Style::default().fg(Color::Yellow),
+        ),
+        crate::daemon_status::DaemonVersion::Running(v) => (
+            format!("daemon {}", v),
+            Style::default().fg(Color::DarkGray),
+        ),
+        crate::daemon_status::DaemonVersion::NotRunning => (
+            "daemon not running".to_string(),
+            Style::default().fg(Color::DarkGray),
+        ),
+        crate::daemon_status::DaemonVersion::Unknown => (
+            "daemon running, version unknown".to_string(),
+            Style::default().fg(Color::DarkGray),
+        ),
+    };
+
     let line = Line::from(vec![
         Span::raw(" Voxtype Configuration"),
         Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
@@ -586,6 +611,8 @@ fn render_title(f: &mut Frame, area: Rect) {
             "edit settings without leaving the terminal",
             Style::default().fg(Color::DarkGray),
         ),
+        Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(version_text, version_style),
     ]);
     f.render_widget(Paragraph::new(line), area);
 }
