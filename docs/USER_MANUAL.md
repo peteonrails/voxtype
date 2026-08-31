@@ -457,7 +457,8 @@ fallback_to_clipboard = true
 type_delay_ms = 0
 
 [output.notification]
-# Show notification when recording starts (hotkey pressed)
+# Show notification when recording starts (hotkey pressed).
+# Stays on screen until the recording ends.
 on_recording_start = false
 
 # Show notification when recording stops (transcription begins)
