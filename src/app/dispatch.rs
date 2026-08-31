@@ -339,6 +339,23 @@ pub(crate) async fn dispatch(
                         setup::vad::download_model()?;
                     }
                 }
+                Some(SetupAction::Xai {
+                    login,
+                    logout,
+                    status,
+                    no_browser,
+                }) => {
+                    warn_if_root("xai");
+                    if logout {
+                        voxtype::transcribe::xai_oauth::logout()?;
+                        println!("xAI OAuth session removed.");
+                    } else if login {
+                        voxtype::transcribe::xai_oauth::login_device_code(!no_browser)?;
+                    } else {
+                        println!("{}", voxtype::transcribe::xai_oauth::status_line());
+                        let _ = status;
+                    }
+                }
                 Some(SetupAction::Quickshell {
                     target,
                     source,

@@ -2,6 +2,7 @@ use super::{
     AudioConfig, CohereConfig, DolphinConfig, HotkeyConfig, MeetingConfig, MoonshineConfig,
     OmnilingualConfig, OutputConfig, ParaformerConfig, ParakeetConfig, Profile, SenseVoiceConfig,
     SonioxConfig, StatusConfig, TextConfig, TranscriptionEngine, VadConfig, WhisperConfig,
+    XaiConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -61,6 +62,10 @@ pub struct Config {
     #[serde(default)]
     pub soniox: Option<SonioxConfig>,
 
+    /// xAI Grok STT (optional, used when engine = "xai")
+    #[serde(default)]
+    pub xai: Option<XaiConfig>,
+
     /// Text processing configuration (replacements, spoken punctuation)
     #[serde(default)]
     pub text: TextConfig,
@@ -113,6 +118,7 @@ impl Default for Config {
             omnilingual: None,
             cohere: None,
             soniox: None,
+            xai: None,
             text: TextConfig::default(),
             vad: VadConfig::default(),
             status: StatusConfig::default(),
@@ -340,6 +346,7 @@ impl Config {
                 .unwrap_or(false),
             // Soniox is a cloud backend; nothing to load on demand.
             TranscriptionEngine::Soniox => false,
+            TranscriptionEngine::Xai => false,
         }
     }
 
@@ -387,6 +394,7 @@ impl Config {
                 .as_ref()
                 .map(|s| s.model.as_str())
                 .unwrap_or("soniox (not configured)"),
+            TranscriptionEngine::Xai => "grok-stt",
         }
     }
 

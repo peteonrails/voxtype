@@ -198,7 +198,7 @@ pub fn feature_compiled(feature: &str) -> bool {
 /// `src/tui/engine.rs` and [`crate::config_set::ENGINE_NAMES`]. Note this is
 /// deliberately narrower than [`super::TranscriptionEngine`], which also has
 /// a `Soniox` variant that neither the TUI picker nor `config set engine`
-/// offers today.
+/// offers today. `Xai` is in ENGINE_NAMES (cloud, but settable).
 const ENGINE_CHOICES: &[&str] = crate::config_set::ENGINE_NAMES;
 
 const WHISPER_MODE_CHOICES: &[&str] = &["local", "remote", "cli"];
@@ -2151,7 +2151,7 @@ mod tests {
     #[test]
     fn feature_gate_agrees_with_config_set() {
         for name in config_set::ENGINE_NAMES {
-            if *name == "whisper" {
+            if *name == "whisper" || *name == "xai" {
                 continue; // always available, so it has no feature entry
             }
             assert_eq!(

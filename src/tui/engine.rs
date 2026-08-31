@@ -894,6 +894,7 @@ fn installed_engine_choices() -> std::collections::HashSet<&'static str> {
     // Whisper is always present.
     let inv = binary::inventory();
     out.insert("whisper");
+    out.insert("xai");
     for f in &inv.compiled_features {
         for engine in [
             "parakeet",
