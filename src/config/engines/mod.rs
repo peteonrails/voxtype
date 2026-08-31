@@ -10,6 +10,7 @@ mod paraformer;
 mod parakeet;
 mod sensevoice;
 mod soniox;
+mod xai;
 
 pub use cohere::CohereConfig;
 pub use dolphin::DolphinConfig;
@@ -19,6 +20,7 @@ pub use paraformer::ParaformerConfig;
 pub use parakeet::{ParakeetConfig, ParakeetModelType};
 pub use sensevoice::SenseVoiceConfig;
 pub use soniox::SonioxConfig;
+pub use xai::XaiConfig;
 
 /// Transcription engine selection (which ASR technology to use)
 #[derive(
@@ -65,6 +67,8 @@ pub enum TranscriptionEngine {
     Cohere,
     /// Use Soniox (cloud streaming WebSocket STT).
     Soniox,
+    /// Use xAI Grok Speech-to-Text (cloud batch REST `/v1/stt`).
+    Xai,
 }
 
 impl TranscriptionEngine {
@@ -190,6 +194,19 @@ mod tests {
             config.parakeet.as_ref().unwrap().model,
             "parakeet-tdt-0.6b-v3"
         );
+    }
+
+    #[test]
+    fn test_parse_engine_xai() {
+        let toml_str = r#"
+            engine = "xai"
+
+            [xai]
+            language = "en"
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.engine, TranscriptionEngine::Xai);
+        assert_eq!(config.xai.as_ref().unwrap().language.as_deref(), Some("en"));
     }
 
     #[test]

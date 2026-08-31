@@ -21,6 +21,7 @@ pub mod streaming;
 pub mod subprocess;
 pub mod whisper;
 pub mod worker;
+pub mod xai;
 
 pub use streaming::{SegmentId, StreamHandle, StreamingEvent, StreamingTranscriber};
 
@@ -275,6 +276,10 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
                 )
             })?;
             Ok(Box::new(soniox::SonioxTranscriber::new(cfg.clone())?))
+        }
+        TranscriptionEngine::Xai => {
+            let cfg = config.xai.clone().unwrap_or_default();
+            Ok(Box::new(xai::XaiTranscriber::new(&cfg)?))
         }
     }
 }

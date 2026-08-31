@@ -169,6 +169,12 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
             .get_or_insert_with(config::SonioxConfig::default)
             .api_key = Some(key.clone());
     }
+    if let Some(ref key) = cli.xai_api_key {
+        config
+            .xai
+            .get_or_insert_with(config::XaiConfig::default)
+            .api_key = Some(key.clone());
+    }
 
     // Audio overrides
     if let Some(ref device) = cli.audio_device {

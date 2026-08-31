@@ -100,6 +100,7 @@ pub const ENGINE_NAMES: &[&str] = &[
     "dolphin",
     "omnilingual",
     "cohere",
+    "xai",
 ];
 
 /// Is the engine name one we recognize at all?
@@ -134,6 +135,7 @@ pub fn engine_feature_compiled(name: &str) -> bool {
     match engine {
         TranscriptionEngine::Whisper => true,
         TranscriptionEngine::Soniox => true,
+        TranscriptionEngine::Xai => true,
         TranscriptionEngine::Parakeet => cfg!(feature = "parakeet"),
         TranscriptionEngine::Moonshine => cfg!(feature = "moonshine"),
         TranscriptionEngine::SenseVoice => cfg!(feature = "sensevoice"),

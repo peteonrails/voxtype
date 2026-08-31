@@ -188,6 +188,10 @@ pub struct Cli {
     )]
     pub soniox_api_key: Option<String>,
 
+    /// API key for xAI Grok STT (or VOXTYPE_XAI_API_KEY / XAI_API_KEY)
+    #[arg(long, value_name = "KEY", help_heading = "xAI", hide_short_help = true)]
+    pub xai_api_key: Option<String>,
+
     // -- Hotkey --
     /// Override hotkey (e.g., SCROLLLOCK, PAUSE, F13, MEDIA, WEV_234, EVTEST_226)
     #[arg(long, value_name = "KEY", help_heading = "Hotkey")]

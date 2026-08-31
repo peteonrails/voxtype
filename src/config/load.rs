@@ -1,5 +1,5 @@
 use super::parse::parse_config_with_defaults;
-use super::{Config, LanguageConfig, OutputMode, SonioxConfig, TranscriptionEngine};
+use super::{Config, LanguageConfig, OutputMode, SonioxConfig, TranscriptionEngine, XaiConfig};
 use crate::error::VoxtypeError;
 use std::path::{Path, PathBuf};
 
@@ -188,6 +188,14 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             .soniox
             .get_or_insert_with(SonioxConfig::default)
             .api_key = Some(key);
+    }
+    for var in ["VOXTYPE_XAI_API_KEY", "XAI_API_KEY"] {
+        if let Ok(key) = std::env::var(var) {
+            if !key.trim().is_empty() {
+                config.xai.get_or_insert_with(XaiConfig::default).api_key = Some(key);
+                break;
+            }
+        }
     }
     if let Ok(val) = std::env::var("VOXTYPE_RESTORE_CLIPBOARD") {
         config.output.restore_clipboard = parse_bool_env(&val);

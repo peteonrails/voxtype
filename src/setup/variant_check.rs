@@ -63,7 +63,7 @@ pub enum Remediation {
 /// the feature name is just the engine's canonical name.
 pub fn required_feature(engine: TranscriptionEngine) -> Option<&'static str> {
     match engine {
-        TranscriptionEngine::Whisper => None,
+        TranscriptionEngine::Whisper | TranscriptionEngine::Xai => None,
         other => Some(other.name()),
     }
 }
@@ -244,5 +244,6 @@ mod tests {
             );
         }
         assert_eq!(required_feature(TranscriptionEngine::Whisper), None);
+        assert_eq!(required_feature(TranscriptionEngine::Xai), None);
     }
 }

@@ -486,6 +486,19 @@ language_hints = ["en"]
 
 See [SONIOX.md](SONIOX.md) for the full reference (realtime vs async modes, performance tips with dotoold, privacy considerations).
 
+### Cloud Backend: xAI Grok STT
+
+Batch Grok STT after you stop recording. Audio leaves the machine.
+
+```toml
+engine = "xai"
+
+[xai]
+api_key = "xai-..."
+```
+
+See [XAI.md](XAI.md).
+
 ### Creating a Custom Configuration
 
 ```bash
