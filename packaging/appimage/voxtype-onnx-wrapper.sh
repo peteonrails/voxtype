@@ -74,6 +74,9 @@ fi
 if [ -x "$VOXTYPE_LIB/voxtype-onnx-migraphx" ]; then
     exec "$VOXTYPE_LIB/voxtype-onnx-migraphx" "$@"
 fi
+if [ -x "$VOXTYPE_LIB/voxtype-onnx-webgpu" ]; then
+    exec "$VOXTYPE_LIB/voxtype-onnx-webgpu" "$@"
+fi
 
 echo "Error: No voxtype binary found in $VOXTYPE_LIB" >&2
 exit 1

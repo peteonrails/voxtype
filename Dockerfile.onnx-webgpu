@@ -1,0 +1,48 @@
+FROM ubuntu:24.04
+
+ARG VERSION=1.1.1
+ARG DEBIAN_FRONTEND=noninteractive
+ENV VERSION=${VERSION}
+
+RUN apt-get update && apt-get install -y \
+    curl build-essential clang cmake pkg-config libasound2-dev \
+    libssl-dev protobuf-compiler libprotobuf-dev git binutils patchelf file \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /build
+COPY . .
+
+ENV RUSTFLAGS="-C target-cpu=haswell -C target-feature=-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl,-gfni"
+ENV GGML_NATIVE=OFF
+ENV GGML_AVX512=OFF
+ENV GGML_AVX_VNNI=OFF
+ENV GGML_AVX512_VNNI=OFF
+ENV ORT_CACHE_DIR=/opt/ort-cache
+
+RUN cargo build --locked --release \
+        --features parakeet-webgpu,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,ml-diarization \
+        --config 'profile.release.lto=false' \
+        --config 'profile.release.codegen-units=8'
+
+RUN env -u LD_LIBRARY_PATH target/release/voxtype --version \
+    && readelf -d target/release/voxtype | grep -E '\((RUNPATH|RPATH)\).*\[\$ORIGIN\]'
+
+RUN mkdir -p /tmp/webgpu/licenses \
+    && cp target/release/voxtype /tmp/webgpu/voxtype-onnx-webgpu \
+    && cp /opt/ort-cache/dfbin/x86_64-unknown-linux-gnu/e9aa41101eacde0bf8f832f28c06a8bf3d0f7896a463e0b2d3550563583262b9/libwebgpu_dawn.so \
+        /tmp/webgpu/libwebgpu_dawn.so \
+    && patchelf --set-rpath '$ORIGIN' /tmp/webgpu/voxtype-onnx-webgpu \
+    && env -u LD_LIBRARY_PATH /tmp/webgpu/voxtype-onnx-webgpu --version \
+    && test "$(patchelf --print-rpath /tmp/webgpu/voxtype-onnx-webgpu)" = '$ORIGIN' \
+    && readelf -d /tmp/webgpu/voxtype-onnx-webgpu | grep 'NEEDED.*libwebgpu_dawn.so'
+
+RUN cp packaging/licenses/webgpu/* /tmp/webgpu/licenses/
+
+CMD ["/bin/sh", "-ec", "mkdir -p /output \
+    && cp /tmp/webgpu/voxtype-onnx-webgpu /output/voxtype-${VERSION}-linux-x86_64-onnx-webgpu \
+    && cp /tmp/webgpu/libwebgpu_dawn.so /output/voxtype-${VERSION}-linux-x86_64-onnx-webgpu.libwebgpu_dawn.so \
+    && tar -czf /output/voxtype-${VERSION}-linux-x86_64-onnx-webgpu.licenses.tar.gz -C /tmp/webgpu/licenses . \
+    && exec tar -czf /output/voxtype-${VERSION}-linux-x86_64-onnx-webgpu.tar.gz -C /tmp/webgpu ."]

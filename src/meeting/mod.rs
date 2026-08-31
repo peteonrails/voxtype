@@ -170,6 +170,16 @@ impl MeetingDaemon {
         })
     }
 
+    /// Return acceleration metadata from the meeting transcriber.
+    #[cfg(feature = "parakeet-webgpu")]
+    pub(crate) fn acceleration_status(
+        &self,
+    ) -> Option<transcribe::acceleration::AccelerationStatus> {
+        self.transcriber
+            .as_deref()
+            .and_then(Transcriber::acceleration_status)
+    }
+
     /// Start a new meeting
     pub async fn start(&mut self, title: Option<String>) -> Result<MeetingId> {
         if !self.state.is_idle() {

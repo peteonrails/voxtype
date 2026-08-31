@@ -7,6 +7,8 @@
 //! - CTC (Connectionist Temporal Classification): faster, character-level output
 //! - TDT (Token-Duration-Transducer): recommended, proper punctuation and word boundaries
 
+use super::acceleration::AccelerationStatus;
+use super::parakeet_execution::ExecutionSetup;
 use super::{TimedSegment, Transcriber};
 use crate::config::{ParakeetConfig, ParakeetModelType};
 use crate::error::TranscribeError;
@@ -15,10 +17,8 @@ use crate::error::TranscribeError;
     feature = "parakeet-migraphx",
     feature = "parakeet-tensorrt"
 ))]
-use parakeet_rs::ExecutionProvider;
-use parakeet_rs::{
-    ExecutionConfig, Parakeet, ParakeetTDT, Transcriber as ParakeetTranscriberTrait,
-};
+use parakeet_rs::{ExecutionConfig, ExecutionProvider};
+use parakeet_rs::{Parakeet, ParakeetTDT, Transcriber as ParakeetTranscriberTrait};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -36,6 +36,7 @@ pub struct ParakeetTranscriber {
     model: ParakeetModel,
     /// Model type for logging
     model_type: ParakeetModelType,
+    acceleration_status: Option<AccelerationStatus>,
 }
 
 impl ParakeetTranscriber {
@@ -55,25 +56,26 @@ impl ParakeetTranscriber {
         );
         let start = std::time::Instant::now();
 
-        // Configure execution provider based on feature flags
-        let exec_config = build_execution_config();
+        let (model, acceleration_status) = build_execution_config().load(|exec_config| {
+            let model = match model_type {
+                ParakeetModelType::Ctc => {
+                    let parakeet =
+                        Parakeet::from_pretrained(&model_path, exec_config).map_err(|e| {
+                            TranscribeError::InitFailed(format!("Parakeet CTC init failed: {}", e))
+                        })?;
+                    ParakeetModel::Ctc(Mutex::new(parakeet))
+                }
+                ParakeetModelType::Tdt => {
+                    let parakeet =
+                        ParakeetTDT::from_pretrained(&model_path, exec_config).map_err(|e| {
+                            TranscribeError::InitFailed(format!("Parakeet TDT init failed: {}", e))
+                        })?;
+                    ParakeetModel::Tdt(Mutex::new(parakeet))
+                }
+            };
 
-        let model = match model_type {
-            ParakeetModelType::Ctc => {
-                let parakeet =
-                    Parakeet::from_pretrained(&model_path, exec_config).map_err(|e| {
-                        TranscribeError::InitFailed(format!("Parakeet CTC init failed: {}", e))
-                    })?;
-                ParakeetModel::Ctc(Mutex::new(parakeet))
-            }
-            ParakeetModelType::Tdt => {
-                let parakeet =
-                    ParakeetTDT::from_pretrained(&model_path, exec_config).map_err(|e| {
-                        TranscribeError::InitFailed(format!("Parakeet TDT init failed: {}", e))
-                    })?;
-                ParakeetModel::Tdt(Mutex::new(parakeet))
-            }
-        };
+            Ok::<_, TranscribeError>(model)
+        })?;
 
         tracing::info!(
             "Parakeet {:?} model loaded in {:.2}s",
@@ -81,11 +83,19 @@ impl ParakeetTranscriber {
             start.elapsed().as_secs_f32()
         );
 
-        Ok(Self { model, model_type })
+        Ok(Self {
+            model,
+            model_type,
+            acceleration_status,
+        })
     }
 }
 
 impl Transcriber for ParakeetTranscriber {
+    fn acceleration_status(&self) -> Option<AccelerationStatus> {
+        self.acceleration_status
+    }
+
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat(
@@ -287,15 +297,16 @@ impl Transcriber for ParakeetTranscriber {
 }
 
 /// Build execution config based on compile-time feature flags
-pub(super) fn build_execution_config() -> Option<ExecutionConfig> {
+pub(super) fn build_execution_config() -> ExecutionSetup {
     #[cfg(feature = "parakeet-cuda")]
     {
         if probe_cuda_runtime() {
             tracing::info!("Configuring CUDA execution provider for NVIDIA GPU acceleration");
-            return Some(ExecutionConfig::new().with_execution_provider(ExecutionProvider::Cuda));
+            return Some(ExecutionConfig::new().with_execution_provider(ExecutionProvider::Cuda))
+                .into();
         }
         tracing::warn!("CUDA not available or incompatible, falling back to CPU inference");
-        return None;
+        return None.into();
     }
 
     #[cfg(feature = "parakeet-tensorrt")]
@@ -304,25 +315,34 @@ pub(super) fn build_execution_config() -> Option<ExecutionConfig> {
             tracing::info!("Configuring TensorRT execution provider for NVIDIA GPU acceleration");
             return Some(
                 ExecutionConfig::new().with_execution_provider(ExecutionProvider::TensorRT),
-            );
+            )
+            .into();
         }
         tracing::warn!("CUDA not available or incompatible, falling back to CPU inference");
-        return None;
+        return None.into();
     }
 
     #[cfg(feature = "parakeet-migraphx")]
     {
         tracing::info!("Configuring MIGraphX execution provider for AMD GPU acceleration");
-        return Some(ExecutionConfig::new().with_execution_provider(ExecutionProvider::MIGraphX));
+        return Some(ExecutionConfig::new().with_execution_provider(ExecutionProvider::MIGraphX))
+            .into();
+    }
+
+    #[cfg(feature = "parakeet-webgpu")]
+    {
+        tracing::info!("Configuring WebGPU execution provider for GPU acceleration");
+        ExecutionSetup::webgpu()
     }
 
     #[cfg(not(any(
         feature = "parakeet-cuda",
         feature = "parakeet-tensorrt",
-        feature = "parakeet-migraphx"
+        feature = "parakeet-migraphx",
+        feature = "parakeet-webgpu"
     )))]
     {
-        None
+        None.into()
     }
 }
 
@@ -516,6 +536,31 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[cfg(all(
+        feature = "parakeet-webgpu",
+        not(any(
+            feature = "parakeet-cuda",
+            feature = "parakeet-tensorrt",
+            feature = "parakeet-migraphx"
+        ))
+    ))]
+    #[test]
+    fn test_build_execution_config_registers_webgpu_explicitly() {
+        let (_, status) = build_execution_config()
+            .load(|config| {
+                let config = config.expect("WebGPU should configure the session builder");
+
+                assert_eq!(
+                    (config.execution_provider, config.configure.is_some()),
+                    (parakeet_rs::ExecutionProvider::Cpu, true)
+                );
+                Ok::<_, std::convert::Infallible>(())
+            })
+            .expect("the configuration inspection should succeed");
+
+        assert_eq!(status, None);
+    }
 
     #[test]
     fn test_detect_model_type_tdt_with_encoder_and_decoder() {

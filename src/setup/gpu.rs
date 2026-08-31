@@ -17,7 +17,7 @@
 //!
 //! This sets VK_LOADER_DRIVERS_SELECT internally to filter Vulkan ICDs.
 
-use super::binary::{install_active_binary, resolve_active_binary};
+use super::binary::{self, install_active_binary, resolve_active_binary};
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
@@ -96,25 +96,29 @@ fn parse_ldd_missing(output: &str) -> Vec<String> {
 
 /// Shared libraries an ONNX GPU execution provider needs but cannot resolve.
 ///
-/// The GPU binaries dlopen `libonnxruntime_providers_<ep>.so` at runtime,
+/// CUDA and MIGraphX binaries dlopen `libonnxruntime_providers_<ep>.so` at runtime,
 /// relative to their own location. When the system libraries that provider
 /// links against are absent, ORT fails to register the execution provider and
 /// falls back to CPU without saying so. Reporting "Active backend: ONNX GPU
 /// (MIGraphX)" in that state tells the user the opposite of the truth (#444:
 /// the Arch package shipped voxtype-onnx-migraphx with no migraphx dependency).
+/// WebGPU links Dawn at startup, so its executable is checked directly.
 ///
 /// Returns `None` when the check cannot be performed (no provider library
 /// alongside the binary, or no `ldd`), and `Some(vec![])` when every
 /// dependency resolves.
 fn unresolved_provider_deps(binary_name: &str) -> Option<Vec<String>> {
     let resolved = fs::canonicalize(Path::new(VOXTYPE_LIB_DIR).join(binary_name)).ok()?;
-    let dir = resolved.parent()?;
+    let provider = if binary_name == "voxtype-onnx-webgpu" {
+        resolved
+    } else {
+        let dir = resolved.parent()?;
 
-    // Providers sit next to the binary; ORT locates them via /proc/self/exe.
-    let provider = ["migraphx", "cuda", "rocm"]
-        .iter()
-        .map(|ep| dir.join(format!("libonnxruntime_providers_{ep}.so")))
-        .find(|p| p.exists())?;
+        ["migraphx", "cuda", "rocm"]
+            .iter()
+            .map(|ep| dir.join(format!("libonnxruntime_providers_{ep}.so")))
+            .find(|p| p.exists())?
+    };
 
     let output = Command::new("ldd").arg(&provider).output().ok()?;
     if !output.status.success() && output.stdout.is_empty() {
@@ -134,8 +138,12 @@ fn warn_if_provider_unloadable(binary_name: &str) {
     }
 
     println!();
-    println!("  WARNING: this backend is selected but cannot load. ONNX Runtime will");
-    println!("           fall back to CPU. Missing shared libraries:");
+    if binary_name == "voxtype-onnx-webgpu" {
+        println!("  WARNING: this WebGPU backend cannot start. Missing shared libraries:");
+    } else {
+        println!("  WARNING: this backend is selected but cannot load. ONNX Runtime will");
+        println!("           fall back to CPU. Missing shared libraries:");
+    }
     for lib in &missing {
         println!("             {lib}");
     }
@@ -156,6 +164,7 @@ fn describe_onnx_variant(name: &str) -> &'static str {
         "voxtype-onnx-cuda-13" => "ONNX GPU (CUDA 13)",
         "voxtype-onnx-cuda" | "voxtype-parakeet-cuda" => "ONNX GPU (CUDA, unversioned)",
         "voxtype-onnx-migraphx" => "ONNX GPU (MIGraphX)",
+        "voxtype-onnx-webgpu" => "ONNX (WebGPU)",
         "voxtype-onnx-rocm" | "voxtype-parakeet-rocm" => "ONNX GPU (MIGraphX, legacy name)",
         _ => "ONNX (unknown variant)",
     }
@@ -982,12 +991,15 @@ pub fn show_status() {
                 "voxtype-onnx-rocm",
                 "ONNX GPU (MIGraphX)",
             ),
+            (
+                "voxtype-onnx-webgpu",
+                "voxtype-onnx-webgpu",
+                "ONNX (WebGPU)",
+            ),
         ];
 
         // Get current symlink target
-        let current_target = fs::read_link(active_bin)
-            .ok()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()));
+        let current_target = resolved_active_binary_name();
 
         for (binary, legacy_binary, display) in onnx_backends {
             let path = Path::new(VOXTYPE_LIB_DIR).join(binary);
@@ -1072,12 +1084,15 @@ pub fn show_status() {
     println!();
     if is_parakeet {
         // Parakeet-specific hints
-        let current_target = fs::read_link(active_bin)
-            .ok()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()));
+        let current_target = resolved_active_binary_name();
         let is_gpu_active = current_target
             .as_ref()
-            .map(|t| t.contains("cuda") || t.contains("migraphx") || t.contains("rocm"))
+            .map(|t| {
+                t.contains("cuda")
+                    || t.contains("migraphx")
+                    || t.contains("rocm")
+                    || t.contains("webgpu")
+            })
             .unwrap_or(false);
 
         if !is_gpu_active && detect_best_parakeet_gpu_backend().is_some() {
@@ -1098,24 +1113,32 @@ pub fn show_status() {
 
 /// Detect the best ONNX GPU backend based on available hardware and installed binaries
 fn detect_best_parakeet_gpu_backend() -> Option<(&'static str, &'static str)> {
-    let gpus = detect_gpus();
+    select_parakeet_gpu_backend(
+        Path::new(VOXTYPE_LIB_DIR),
+        &binary::detect_cpu(),
+        &detect_gpus(),
+        super::parakeet::detect_cuda_runtime_major(),
+    )
+}
 
-    // The CUDA and MIGraphX binaries bundle ONNX Runtime which contains AVX-512
-    // instructions. On CPUs without AVX-512 (e.g., Zen 3), these binaries will
-    // crash with SIGILL. Only select GPU backends if the CPU supports AVX-512.
-    let has_avx512 = fs::read_to_string("/proc/cpuinfo")
-        .map(|info| info.contains("avx512f"))
-        .unwrap_or(false);
+fn select_parakeet_gpu_backend(
+    lib_dir: &Path,
+    cpu: &binary::Cpu,
+    gpus: &[GpuInfo],
+    host_cuda_major: Option<i32>,
+) -> Option<(&'static str, &'static str)> {
+    let webgpu = (cpu.avx2 && lib_dir.join("voxtype-onnx-webgpu").exists())
+        .then_some(("voxtype-onnx-webgpu", "WebGPU"));
 
-    if !has_avx512 {
-        return None;
+    if !cpu.avx512 {
+        return webgpu;
     }
 
     // Helper to find installed binary, preferring new name over legacy
     let find_binary = |new_name: &'static str, legacy_name: &'static str| -> Option<&'static str> {
-        if Path::new(VOXTYPE_LIB_DIR).join(new_name).exists() {
+        if lib_dir.join(new_name).exists() {
             Some(new_name)
-        } else if Path::new(VOXTYPE_LIB_DIR).join(legacy_name).exists() {
+        } else if lib_dir.join(legacy_name).exists() {
             Some(legacy_name)
         } else {
             None
@@ -1137,7 +1160,6 @@ fn detect_best_parakeet_gpu_backend() -> Option<(&'static str, &'static str)> {
     // silently fall back to CPU.
     let has_nvidia = gpus.iter().any(|g| g.vendor == GpuVendor::Nvidia);
     if has_nvidia {
-        let host_cuda_major = crate::setup::parakeet::detect_cuda_runtime_major();
         let cuda_pref: &[&str] = match host_cuda_major {
             Some(13) => &["voxtype-onnx-cuda-13", "voxtype-onnx-cuda"],
             Some(12) => &["voxtype-onnx-cuda-12", "voxtype-onnx-cuda"],
@@ -1149,7 +1171,7 @@ fn detect_best_parakeet_gpu_backend() -> Option<(&'static str, &'static str)> {
             ],
         };
         for name in cuda_pref {
-            if Path::new(VOXTYPE_LIB_DIR).join(name).exists() {
+            if lib_dir.join(name).exists() {
                 let label = match host_cuda_major {
                     Some(13) => "CUDA 13",
                     Some(12) => "CUDA 12",
@@ -1158,6 +1180,10 @@ fn detect_best_parakeet_gpu_backend() -> Option<(&'static str, &'static str)> {
                 return Some((*name, label));
             }
         }
+    }
+
+    if webgpu.is_some() {
+        return webgpu;
     }
 
     // Fall back to whichever is installed (user may have external GPU)
@@ -1169,7 +1195,7 @@ fn detect_best_parakeet_gpu_backend() -> Option<(&'static str, &'static str)> {
         "voxtype-onnx-cuda-12",
         "voxtype-onnx-cuda",
     ] {
-        if Path::new(VOXTYPE_LIB_DIR).join(name).exists() {
+        if lib_dir.join(name).exists() {
             return Some((name, "CUDA"));
         }
     }
@@ -1177,13 +1203,12 @@ fn detect_best_parakeet_gpu_backend() -> Option<(&'static str, &'static str)> {
     None
 }
 
-/// Enable GPU backend (engine-aware: Vulkan for Whisper, CUDA/MIGraphX for Parakeet)
+/// Enable Vulkan for Whisper or a compiled ONNX GPU provider for Parakeet.
 pub fn enable() -> anyhow::Result<()> {
     // Check which engine is active by looking at the current symlink
     let is_parakeet = is_parakeet_binary_active();
 
     if is_parakeet {
-        // Parakeet mode: switch to best available GPU backend (CUDA or MIGraphX)
         let (backend_binary, backend_name) = detect_best_parakeet_gpu_backend().ok_or_else(|| {
             let gpus = detect_gpus();
             let has_amd = gpus.iter().any(|g| g.vendor == GpuVendor::Amd);
@@ -1195,17 +1220,18 @@ pub fn enable() -> anyhow::Result<()> {
             let hint = if (has_amd || has_nvidia) && !has_avx512 {
                 "You have a GPU, but the ONNX GPU binaries (CUDA/MIGraphX) require a CPU with \
                  AVX-512 support. Your CPU only supports AVX2.\n\n\
-                 Use ONNX on CPU instead:\n  \
+                 Install voxtype-onnx-webgpu for experimental Vulkan acceleration,\n\
+                 or use ONNX on CPU:\n  \
                  sudo ln -sf /usr/lib/voxtype/voxtype-onnx-avx2 /usr/bin/voxtype\n\n\
                  Or use the Whisper engine with Vulkan GPU acceleration:\n  \
                  voxtype setup onnx --disable && sudo voxtype setup gpu --enable"
             } else if has_amd {
-                "You have an AMD GPU. Install voxtype-onnx-migraphx for GPU acceleration."
+                "You have an AMD GPU. Install voxtype-onnx-migraphx or voxtype-onnx-webgpu."
             } else if has_nvidia {
                 "You have an NVIDIA GPU. Install voxtype-onnx-cuda-12 (for CUDA 12.x) or \
                  voxtype-onnx-cuda-13 (for CUDA 13.x) for GPU acceleration."
             } else {
-                "No supported GPU detected. ONNX GPU acceleration requires NVIDIA (CUDA) or AMD (MIGraphX)."
+                "Install voxtype-onnx-webgpu for experimental Parakeet acceleration on a Vulkan GPU."
             };
 
             anyhow::anyhow!(
@@ -1391,6 +1417,61 @@ fn switch_backend_tiered_parakeet(binary_name: &str, retry_hint: &str) -> anyhow
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn webgpu_selection_uses_avx2_and_preserves_vendor_provider_priority() {
+        use super::{binary::Cpu, select_parakeet_gpu_backend, GpuInfo, GpuVendor};
+
+        let dir = tempfile::tempdir().expect("create a package directory");
+        for binary in [
+            "voxtype-onnx-webgpu",
+            "voxtype-onnx-migraphx",
+            "voxtype-onnx-cuda-12",
+        ] {
+            std::fs::write(dir.path().join(binary), b"").expect("create an installed binary");
+        }
+
+        let cases = [
+            (
+                true,
+                false,
+                GpuVendor::Intel,
+                Some(("voxtype-onnx-webgpu", "WebGPU")),
+            ),
+            (
+                true,
+                false,
+                GpuVendor::Amd,
+                Some(("voxtype-onnx-webgpu", "WebGPU")),
+            ),
+            (
+                true,
+                true,
+                GpuVendor::Amd,
+                Some(("voxtype-onnx-migraphx", "MIGraphX")),
+            ),
+            (
+                true,
+                true,
+                GpuVendor::Nvidia,
+                Some(("voxtype-onnx-cuda-12", "CUDA 12")),
+            ),
+            (false, false, GpuVendor::Intel, None),
+        ];
+
+        for (avx2, avx512, vendor, expected) in cases {
+            let gpus = [GpuInfo {
+                name: vendor.display_name().to_string(),
+                vendor,
+                pci_slot: None,
+            }];
+
+            assert_eq!(
+                select_parakeet_gpu_backend(dir.path(), &Cpu { avx2, avx512 }, &gpus, Some(12),),
+                expected,
+            );
+        }
+    }
 
     fn advice(vendors: &[super::GpuVendor], selected: Option<super::GpuVendor>) -> String {
         super::gpu_selection_advice(vendors, selected).join("\n")

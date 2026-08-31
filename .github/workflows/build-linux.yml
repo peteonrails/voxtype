@@ -6,7 +6,7 @@ name: Build Linux
 permissions:
   contents: write
 
-# Builds the full 8-binary x86_64 release matrix using Docker for every variant.
+# Builds the x86_64 release matrix using Docker for every variant.
 # Each Dockerfile pins a glibc cap via its base image; the matrix mirrors that
 # with a matching ubuntu host runner as belt-and-suspenders. See CLAUDE.md
 # "Building Release Binaries" for the policy this enforces.
@@ -90,6 +90,14 @@ jobs:
             glibc_cap: '2.39'
             check_no_avx512: false
             companion_libs: ''
+            timeout_minutes: 90
+          - variant: onnx-webgpu
+            arch: x86_64
+            dockerfile: Dockerfile.onnx-webgpu
+            runner: ubuntu-24.04
+            glibc_cap: '2.39'
+            check_no_avx512: false
+            companion_libs: 'libwebgpu_dawn.so licenses.tar.gz'
             timeout_minutes: 90
           - variant: onnx-cuda-12
             arch: x86_64
@@ -205,6 +213,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION='${{ steps.version.outputs.version }}'
+          VARIANT='${{ matrix.variant }}'
           BIN="releases/${VERSION}/voxtype-${VERSION}-linux-${{ matrix.arch }}-${{ matrix.variant }}"
           test -f "${BIN}" || { echo "Missing binary: ${BIN}"; ls -la "releases/${VERSION}/"; exit 1; }
           # The Dockerfile already sets the binary to 755; no chmod needed.
@@ -214,9 +223,21 @@ jobs:
           # the runtime --version check on those because the GitHub-hosted
           # runner CPU usually lacks AVX-512 and would SIGILL. The Dockerfile's
           # in-build AVX-512 presence check already proves the binary is valid.
-          if [[ "${{ matrix.variant }}" == *avx512* ]]; then
+          if [[ "${VARIANT}" == *avx512* ]]; then
             echo "Skipping --version check on cross-compiled AVX-512 binary (runner CPU lacks AVX-512)."
             file "${BIN}"
+          elif [[ "${VARIANT}" == 'onnx-webgpu' ]]; then
+            WORK=$(mktemp -d)
+            trap 'rm -rf "${WORK}"' EXIT
+            tar -xzf "${BIN}.tar.gz" -C "${WORK}"
+            for notice in LICENSE.dawn LICENSE.onnxruntime ThirdPartyNotices.dawn.txt ThirdPartyNotices.onnxruntime.txt; do
+              test -s "${WORK}/licenses/${notice}"
+            done
+            env -u LD_LIBRARY_PATH "${WORK}/voxtype-onnx-webgpu" --version
+            ldd "${WORK}/voxtype-onnx-webgpu" | tee "${WORK}/ldd.txt"
+            if grep -q 'not found' "${WORK}/ldd.txt"; then
+              exit 1
+            fi
           else
             "${BIN}" --version
           fi
@@ -447,6 +468,12 @@ jobs:
           find artifacts -type f -name 'voxtype-*' -exec mv -n {} "releases/${VERSION}/" \;
           echo "Collected files:"
           ls -la "releases/${VERSION}/"
+
+      - name: Build WebGPU AppImage
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          APPIMAGE_EXTRACT_AND_RUN=1 ./scripts/build-appimage.sh --variant onnx-webgpu '${{ steps.version.outputs.version }}'
+          test -s 'releases/${{ steps.version.outputs.version }}/voxtype-${{ steps.version.outputs.version }}-onnx-webgpu-x86_64.AppImage'
 
       - name: Generate SHA256SUMS.txt
         run: |

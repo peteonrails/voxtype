@@ -280,9 +280,12 @@ sudo install -Dm755 target/release/voxtype /usr/local/bin/voxtype
 | `parakeet` | Parakeet ASR engine (ONNX-based) |
 | `parakeet-migraphx` | Parakeet on AMD MIGraphX |
 | `parakeet-cuda` | Parakeet on NVIDIA CUDA |
+| `parakeet-webgpu` | Parakeet on WebGPU via Dawn (experimental; see [WebGPU requirements][parakeet-webgpu]) |
 | `moonshine`, `sensevoice`, `paraformer`, `dolphin`, `omnilingual`, `cohere` | Additional ONNX engines |
 | `osd-gtk4` | GTK4 on-screen visualizer |
 | `osd-native` | wgpu + egui on-screen visualizer |
+
+[parakeet-webgpu]: PARAKEET.md#webgpu-experimental
 
 Example: full ONNX engine set with MIGraphX:
 

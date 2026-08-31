@@ -12,12 +12,10 @@
 //!
 //! Evidence, in order of authority:
 //!
-//! 1. **The daemon's own answer.** A future daemon writes its acceleration
-//!    state to `$XDG_RUNTIME_DIR/voxtype/accel.json` when it loads a model
-//!    (see [`AccelStateFile`]); nothing else can know as reliably. The read
-//!    is implemented here already and preferred when the file exists and
-//!    names the running PID, so shipping that daemon-side write later
-//!    upgrades this command's accuracy with no change on this side.
+//! 1. **The daemon's own answer.** WebGPU builds publish provider registration
+//!    results to `$XDG_RUNTIME_DIR/voxtype/accel.json` when the daemon selects
+//!    a transcriber (see [`AccelStateFile`]). A successful registration does
+//!    not prove GPU execution. Other backends use the observations below.
 //! 2. **VRAM held by the daemon's PID**, via `rocm-smi` or `nvidia-smi`.
 //!    Proof of GPU use when present. Absence proves nothing: a daemon with
 //!    `on_demand_loading` holds no VRAM while idle.
@@ -123,12 +121,12 @@ impl AccelReport {
 
 /// Contents of `$XDG_RUNTIME_DIR/voxtype/accel.json`.
 ///
-/// Not written yet. The daemon should write it once per model load, after the
-/// backend has actually initialized, and remove it on shutdown. `pid` exists
-/// so a file left by a crashed predecessor is ignored rather than believed.
+/// WebGPU builds publish the selected transcriber's registration result and
+/// clear that result when the selected model changes or is released. `pid`
+/// prevents a file from a previous process from being used for a new daemon.
 /// `state` uses the same strings as [`AccelState::tag`], and `detail` is a
 /// free-form line for the evidence list (e.g. the device name).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccelStateFile {
     pub pid: i32,
     pub state: String,
@@ -139,6 +137,58 @@ pub struct AccelStateFile {
 /// Where the daemon publishes its acceleration state.
 pub fn state_file_path() -> PathBuf {
     Config::runtime_dir().join("accel.json")
+}
+
+#[cfg(feature = "parakeet-webgpu")]
+pub(crate) fn publish_transcriber_status(
+    status: Option<crate::transcribe::acceleration::AccelerationStatus>,
+) {
+    if let Err(error) =
+        publish_transcriber_status_at(&state_file_path(), std::process::id(), status)
+    {
+        tracing::warn!(%error, "Could not publish acceleration status");
+    }
+}
+
+#[cfg(feature = "parakeet-webgpu")]
+fn publish_transcriber_status_at(
+    path: &Path,
+    pid: u32,
+    status: Option<crate::transcribe::acceleration::AccelerationStatus>,
+) -> anyhow::Result<()> {
+    use crate::transcribe::acceleration::ProviderRegistration;
+
+    let Some(status) = status else {
+        match std::fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let (state, detail) = match status.registration {
+        ProviderRegistration::CpuFallback => (
+            AccelState::CpuFallback,
+            "WebGPU registration failed for every model session; inference uses CPU.",
+        ),
+        ProviderRegistration::RegisteredOrMixed => (
+            AccelState::Unknown,
+            "WebGPU registered for at least one model session; GPU execution is unverified.",
+        ),
+    };
+    let published = AccelStateFile {
+        pid: i32::try_from(pid)?,
+        state: state.tag().to_string(),
+        backend: Some(status.backend.to_string()),
+        detail: Some(detail.to_string()),
+    };
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Acceleration status path has no parent directory"))?;
+    std::fs::create_dir_all(parent)?;
+    let file = tempfile::NamedTempFile::new_in(parent)?;
+    serde_json::to_writer(file.as_file(), &published)?;
+    file.persist(path)?;
+    Ok(())
 }
 
 /// Whether a journal line proves acceleration, disproves it, or merely states
@@ -311,7 +361,9 @@ pub(crate) fn classify_line(line: &str) -> Option<(Signal, Option<&'static str>)
     // voxtype's own "about to try this EP" lines. Intent only: they are
     // logged before registration, and ort silently uses CPU if it fails.
     if l.contains("execution provider") || l.contains("execution providers") {
-        let backend = if l.contains("migraphx") {
+        let backend = if l.contains("webgpu") {
+            Some("webgpu")
+        } else if l.contains("migraphx") {
             Some("migraphx")
         } else if l.contains("cuda") || l.contains("tensorrt") {
             // TensorRT is an NVIDIA EP; `backend` reports the vendor stack
@@ -485,7 +537,12 @@ pub(crate) fn read_state_file_at(path: &Path, pid: i32) -> Option<AccelStateFile
 /// doesn't settle it (a source build, or an unrecognised name).
 pub(crate) fn gpu_capable(variant: Option<Variant>) -> Option<bool> {
     match variant.map(|v| v.acceleration()) {
-        Some(Acceleration::Vulkan | Acceleration::Cuda | Acceleration::Migraphx) => Some(true),
+        Some(
+            Acceleration::Vulkan
+            | Acceleration::Cuda
+            | Acceleration::Migraphx
+            | Acceleration::Webgpu,
+        ) => Some(true),
         Some(Acceleration::Baseline | Acceleration::Avx2 | Acceleration::Avx512) => Some(false),
         Some(Acceleration::Native) | None => None,
     }
@@ -497,6 +554,7 @@ pub(crate) fn variant_backend(variant: Option<Variant>) -> Option<&'static str> 
         Some(Acceleration::Vulkan) => Some("vulkan"),
         Some(Acceleration::Cuda) => Some("cuda"),
         Some(Acceleration::Migraphx) => Some("migraphx"),
+        Some(Acceleration::Webgpu) => Some("webgpu"),
         _ => None,
     }
 }
@@ -575,6 +633,8 @@ pub(crate) fn report_for(pid: Option<i32>) -> AccelReport {
             Some("vulkan") => Some("vulkan"),
             Some("cuda") => Some("cuda"),
             Some("migraphx") => Some("migraphx"),
+            Some("webgpu") => Some("webgpu"),
+            None => None,
             _ => variant_backend(variant),
         };
         return AccelReport {
@@ -640,12 +700,74 @@ fn strip_ansi(line: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "parakeet-webgpu")]
+    #[test]
+    fn runtime_snapshot_replaces_the_previous_model_result() -> anyhow::Result<()> {
+        use crate::transcribe::acceleration::{AccelerationStatus, ProviderRegistration};
+
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("runtime/accel.json");
+        let cases = [
+            (
+                Some(AccelerationStatus {
+                    backend: "webgpu",
+                    registration: ProviderRegistration::CpuFallback,
+                }),
+                Some(AccelStateFile {
+                    pid: 42,
+                    state: "cpu-fallback".to_string(),
+                    backend: Some("webgpu".to_string()),
+                    detail: Some("WebGPU registration failed for every model session; inference uses CPU.".to_string()),
+                }),
+            ),
+            (
+                Some(AccelerationStatus {
+                    backend: "webgpu",
+                    registration: ProviderRegistration::RegisteredOrMixed,
+                }),
+                Some(AccelStateFile {
+                    pid: 42,
+                    state: "unknown".to_string(),
+                    backend: Some("webgpu".to_string()),
+                    detail: Some("WebGPU registered for at least one model session; GPU execution is unverified.".to_string()),
+                }),
+            ),
+            (None, None),
+        ];
+
+        for (status, expected) in cases {
+            publish_transcriber_status_at(&path, 42, status)?;
+
+            assert_eq!(read_state_file_at(&path, 42), expected);
+        }
+
+        Ok(())
+    }
+
     fn signals_from(lines: &[&str]) -> Signals {
         let mut s = Signals::default();
         for line in lines {
             s.record(line);
         }
         s
+    }
+
+    #[test]
+    fn webgpu_provider_selection_requires_runtime_evidence() {
+        let variant = Variant::from_binary_name("voxtype-onnx-webgpu")
+            .expect("recognise the packaged WebGPU variant");
+        let intent = "Configuring WebGPU execution provider for GPU acceleration";
+        let cases = [
+            (None, vec![intent], None, AccelState::Unknown),
+            (Some(variant), vec![intent], None, AccelState::Unknown),
+            (Some(variant), vec![intent], Some(1024), AccelState::Gpu),
+        ];
+
+        for (variant, lines, vram, expected) in cases {
+            let signals = signals_from(&lines);
+
+            assert_eq!(decide(variant, &signals, vram), (expected, Some("webgpu")));
+        }
     }
 
     #[test]

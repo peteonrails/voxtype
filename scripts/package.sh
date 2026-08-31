@@ -458,6 +458,16 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
     install_onnx_gpu_variant cuda-12 cuda
     install_onnx_gpu_variant cuda-13 cuda libonnxruntime.so.1.24.4
     install_onnx_gpu_variant migraphx migraphx
+
+    webgpu_src="${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-onnx-webgpu"
+    if [[ -f "$webgpu_src" ]]; then
+        webgpu_dir="$STAGING/usr/lib/voxtype/webgpu"
+        mkdir -p "$webgpu_dir" "$STAGING/usr/share/licenses/voxtype/webgpu"
+        install -m755 "$webgpu_src" "$webgpu_dir/voxtype-onnx-webgpu"
+        install -m644 "${webgpu_src}.libwebgpu_dawn.so" "$webgpu_dir/libwebgpu_dawn.so"
+        tar -xzf "${webgpu_src}.licenses.tar.gz" -C "$STAGING/usr/share/licenses/voxtype/webgpu"
+        ln -sf webgpu/voxtype-onnx-webgpu "$STAGING/usr/lib/voxtype/voxtype-onnx-webgpu"
+    fi
     # Legacy compat symlink for users with scripts referencing the old
     # voxtype-onnx-rocm name. The AMD GPU EP changed from ROCm to MIGraphX
     # in v0.7.0; ship one release with both names. Drop in v0.8.0.
@@ -729,6 +739,7 @@ if [[ "$BUILD_DEB" == "true" ]]; then
         "${FPM_OPTS[@]}" \
         --depends "libasound2 | libasound2t64" \
         --depends libc6 \
+        --depends libstdc++6 \
         --depends curl \
         --deb-recommends pipewire-alsa \
         --deb-recommends wtype \
@@ -763,6 +774,7 @@ if [[ "$BUILD_RPM" == "true" ]]; then
         "${FPM_OPTS[@]}" \
         --depends "alsa-lib" \
         --depends "glibc" \
+        --depends "libstdc++" \
         --depends "curl" \
         --depends "pipewire-alsa" \
         --rpm-summary "$DESCRIPTION" \
