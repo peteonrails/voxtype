@@ -194,6 +194,11 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if let Some(fade_ms) = cli.duck_media_fade_ms {
         config.audio.duck_media_fade_ms = fade_ms;
     }
+    apply_bool_override(
+        &mut config.audio.wait_for_device,
+        cli.wait_for_device,
+        cli.no_wait_for_device,
+    );
 
     // Output overrides
     if let Some(ref append_text) = cli.append_text {

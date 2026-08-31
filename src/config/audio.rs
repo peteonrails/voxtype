@@ -43,6 +43,13 @@ pub struct AudioConfig {
     #[serde(default = "default_duck_media_fade_ms")]
     pub duck_media_fade_ms: u32,
 
+    /// Wait for the input device to deliver real audio before playing the
+    /// recording-start cue and showing the OSD. Devices resuming from idle
+    /// suspend produce ~0.5s of digital silence; without this gate, users
+    /// who speak as soon as they see/hear the cue lose their first word.
+    #[serde(default = "default_audio_wait_for_device")]
+    pub wait_for_device: bool,
+
     /// Audio feedback settings
     #[serde(default)]
     pub feedback: AudioFeedbackConfig,
@@ -59,6 +66,7 @@ impl Default for AudioConfig {
             duck_media: false,
             duck_media_volume_percent: default_duck_media_volume_percent(),
             duck_media_fade_ms: default_duck_media_fade_ms(),
+            wait_for_device: default_audio_wait_for_device(),
             feedback: AudioFeedbackConfig::default(),
         }
     }
@@ -88,6 +96,10 @@ fn default_duck_media_volume_percent() -> u8 {
 
 fn default_duck_media_fade_ms() -> u32 {
     150
+}
+
+fn default_audio_wait_for_device() -> bool {
+    true
 }
 
 /// Audio feedback configuration for sound cues
@@ -121,5 +133,24 @@ impl Default for AudioFeedbackConfig {
             theme: default_sound_theme(),
             volume: default_volume(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wait_for_device_defaults_to_true() {
+        assert!(AudioConfig::default().wait_for_device);
+        // Old configs without the field must keep the default
+        let cfg: AudioConfig = toml::from_str("").unwrap();
+        assert!(cfg.wait_for_device);
+    }
+
+    #[test]
+    fn wait_for_device_can_be_disabled() {
+        let cfg: AudioConfig = toml::from_str("wait_for_device = false").unwrap();
+        assert!(!cfg.wait_for_device);
     }
 }
