@@ -57,7 +57,7 @@ let
     cfg.settings;
 
   # Engines that use ONNX Runtime (need model.path, not model.name)
-  onnxEngines = [ "parakeet" "moonshine" "sensevoice" "paraformer" "dolphin" "omnilingual" ];
+  onnxEngines = [ "parakeet" "moonshine" "sensevoice" "paraformer" "dolphin" "omnilingual" "cohere" "gigaam" ];
   isOnnxEngine = builtins.elem cfg.engine onnxEngines;
 
   # Fetch model from HuggingFace if using declarative model management

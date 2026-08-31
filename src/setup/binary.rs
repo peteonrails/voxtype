@@ -311,7 +311,7 @@ impl Variant {
     /// True if this variant's binary was compiled with the feature for the
     /// given engine. Whisper variants only support `whisper`; ONNX variants
     /// support every ONNX-based engine the project ships (parakeet,
-    /// moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere).
+    /// moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere, gigaam).
     pub const fn supports_engine(self, engine: &str) -> bool {
         match self.family() {
             EngineFamily::Whisper => matches_str(engine, "whisper"),
@@ -323,6 +323,7 @@ impl Variant {
                     || matches_str(engine, "dolphin")
                     || matches_str(engine, "omnilingual")
                     || matches_str(engine, "cohere")
+                    || matches_str(engine, "gigaam")
             }
         }
     }
@@ -382,6 +383,7 @@ pub fn installed_engines(inv: &Inventory) -> std::collections::HashSet<&'static 
         "dolphin",
         "omnilingual",
         "cohere",
+        "gigaam",
     ];
     let mut out = std::collections::HashSet::new();
     for status in &inv.variants {
@@ -751,6 +753,9 @@ pub fn compiled_features() -> Vec<&'static str> {
     if cfg!(feature = "cohere") {
         f.push("cohere");
     }
+    if cfg!(feature = "gigaam") {
+        f.push("gigaam");
+    }
     // Meeting-mode capability: ML-based speaker diarization (ECAPA-TDNN).
     // When absent, meeting mode falls back to source-based attribution.
     if cfg!(feature = "ml-diarization") {
@@ -1091,6 +1096,7 @@ mod tests {
         require_feature_listed!("dolphin");
         require_feature_listed!("omnilingual");
         require_feature_listed!("cohere");
+        require_feature_listed!("gigaam");
         require_feature_listed!("ml-diarization");
         require_feature_listed!("gpu-vulkan");
         require_feature_listed!("gpu-cuda");

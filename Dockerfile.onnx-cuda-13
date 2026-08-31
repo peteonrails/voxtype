@@ -107,6 +107,7 @@ RUN set -eux; \
 #   - parakeet-cuda          → parakeet-rs/cuda  (registers CUDA EP for Parakeet)
 #   - parakeet-load-dynamic  → parakeet-rs/load-dynamic  (dlopen ORT in parakeet-rs)
 #   - {moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere}-cuda
+#   - gigaam                 → CPU-first RNN-T (uses CUDA EP if onnx-cuda-enabled)
 #                            → onnx-cuda-enabled = ort/cuda  (CUDA EP type)
 #   - onnx-load-dynamic      → ort/load-dynamic  (dlopen ORT crate-wide)
 #   - ml-diarization         → ort (no EP gates needed)
@@ -126,7 +127,7 @@ ENV ORT_CUDA_VERSION=13
 #
 # Disable LTO for faster builds; same as the rest of the matrix.
 RUN cargo build --release \
-        --features parakeet-cuda,parakeet-load-dynamic,moonshine-cuda,sensevoice-cuda,paraformer-cuda,dolphin-cuda,omnilingual-cuda,cohere-cuda,onnx-load-dynamic,ml-diarization \
+        --features parakeet-cuda,parakeet-load-dynamic,moonshine-cuda,sensevoice-cuda,paraformer-cuda,dolphin-cuda,omnilingual-cuda,cohere-cuda,gigaam,onnx-load-dynamic,ml-diarization \
         --config 'profile.release.lto=false' \
         --config 'profile.release.codegen-units=8' \
     && cp target/release/voxtype /tmp/voxtype-onnx-cuda-13

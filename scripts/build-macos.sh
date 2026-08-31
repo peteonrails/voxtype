@@ -5,7 +5,7 @@
 # This script:
 #   1. Downloads Microsoft's official ONNX Runtime prebuilt (cached)
 #   2. Builds with --features "gpu-metal,parakeet-coreml,moonshine,sensevoice,
-#      paraformer,dolphin,omnilingual,cohere"
+#      paraformer,dolphin,omnilingual,cohere,gigaam"
 #   3. Copies the binary and libonnxruntime.dylib into releases/${VERSION}/
 #
 # The DMG packaging step (build-macos-dmg.sh) bundles the dylib into
@@ -44,7 +44,7 @@ ORT_VERSION="1.24.2"
 
 # Engines to build with. Whisper is always on; the rest are opt-in features.
 # parakeet-coreml gives Parakeet CoreML acceleration on Apple Silicon.
-ENGINE_FEATURES="gpu-metal,parakeet-coreml,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere"
+ENGINE_FEATURES="gpu-metal,parakeet-coreml,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,gigaam"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"

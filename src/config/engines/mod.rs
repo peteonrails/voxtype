@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 mod cohere;
 mod dolphin;
+mod gigaam;
 mod moonshine;
 mod omnilingual;
 mod paraformer;
@@ -13,6 +14,7 @@ mod soniox;
 
 pub use cohere::CohereConfig;
 pub use dolphin::DolphinConfig;
+pub use gigaam::GigaamConfig;
 pub use moonshine::MoonshineConfig;
 pub use omnilingual::OmnilingualConfig;
 pub use paraformer::ParaformerConfig;
@@ -63,6 +65,9 @@ pub enum TranscriptionEngine {
     /// task tokens). Top of the Open ASR Leaderboard.
     /// Requires: cargo build --features cohere
     Cohere,
+    /// Use GigaAM v3 RNN-T (ONNX Runtime). Russian specialist.
+    /// Requires: cargo build --features gigaam
+    Gigaam,
     /// Use Soniox (cloud streaming WebSocket STT).
     Soniox,
 }
@@ -190,6 +195,36 @@ mod tests {
             config.parakeet.as_ref().unwrap().model,
             "parakeet-tdt-0.6b-v3"
         );
+    }
+
+    #[test]
+    fn test_parse_engine_gigaam() {
+        let toml_str = r#"
+            engine = "gigaam"
+
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+
+            [gigaam]
+            model = "gigaam-v3-rnnt-int8"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.engine, TranscriptionEngine::Gigaam);
+        assert!(config.gigaam.is_some());
+        assert_eq!(config.gigaam.as_ref().unwrap().model, "gigaam-v3-rnnt-int8");
     }
 
     #[test]

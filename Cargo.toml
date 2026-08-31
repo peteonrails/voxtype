@@ -242,6 +242,11 @@ omnilingual-tensorrt = ["omnilingual", "onnx-tensorrt-enabled"]
 cohere = ["onnx-common", "dep:half", "dep:tokenizers"]
 cohere-cuda = ["cohere", "onnx-cuda-enabled"]
 cohere-tensorrt = ["cohere", "onnx-tensorrt-enabled"]
+# GigaAM v3 RNN-T backend (ONNX-based Russian specialist).
+# CPU-first for v1: no dedicated gigaam-cuda / gigaam-migraphx flag.
+# If the binary was built with another engine's *-cuda feature, the
+# shared onnx_ep helper still registers GPU EPs at session load.
+gigaam = ["onnx-common"]
 # Soniox is unconditional. Its deps (tokio-tungstenite, futures-util, reqwest)
 # add ~1-2 MB after LTO+strip and ride alongside ureq, which every binary
 # already ships for model downloads. Treating it like remote.rs (also always
