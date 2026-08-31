@@ -14,8 +14,7 @@ use crate::hotkey::{self, HotkeyEvent};
 use crate::hotkey_macos::{self as hotkey, HotkeyEvent};
 use crate::meeting::{self, MeetingDaemon, MeetingEvent, StorageConfig};
 use crate::model_manager::ModelManager;
-#[cfg(target_os = "macos")]
-use crate::notification;
+use crate::notification::{self, Lifetime};
 use crate::output;
 use crate::output::post_process::PostProcessor;
 use crate::output::streaming::StreamingSession;
@@ -25,10 +24,8 @@ use crate::text::TextProcessor;
 use crate::transcribe::{StreamHandle, StreamingEvent, Transcriber};
 use pidlock::Pidlock;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::process::Command;
 use tokio::signal::unix::{signal, SignalKind};
 
 /// Send a desktop notification with optional engine icon
@@ -38,6 +35,26 @@ async fn send_notification(
     show_engine_icon: bool,
     engine: crate::config::TranscriptionEngine,
     urgency: &str,
+) {
+    send_notification_with_lifetime(
+        title,
+        body,
+        show_engine_icon,
+        engine,
+        urgency,
+        Lifetime::Millis(2000),
+    )
+    .await;
+}
+
+/// As `send_notification`, but the caller decides how long it stays on screen.
+async fn send_notification_with_lifetime(
+    title: &str,
+    body: &str,
+    show_engine_icon: bool,
+    engine: crate::config::TranscriptionEngine,
+    urgency: &str,
+    lifetime: Lifetime,
 ) {
     // On Linux, add emoji to title. On macOS, use content image instead.
     #[cfg(target_os = "linux")]
@@ -51,34 +68,45 @@ async fn send_notification(
 
     #[cfg(target_os = "linux")]
     {
-        let urgency_arg = format!("--urgency={}", crate::output::sanitize_urgency(urgency));
-        // Synchronous + transient hints ([#345]): force a single Voxtype
-        // notification slot the compositor overwrites in place, and prevent
-        // status updates from accumulating in the notification history.
-        let _ = Command::new("notify-send")
-            .args([
-                "--app-name=Voxtype",
-                &urgency_arg,
-                "--expire-time=2000",
-                "-h",
-                "string:x-canonical-private-synchronous:voxtype",
-                "-h",
-                "int:transient:1",
-                &title,
-                body,
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
+        // Through the notification module rather than straight to
+        // notify-send: that module owns the --replace-id bookkeeping that
+        // keeps every Voxtype notification in a single slot. Posting from
+        // here directly is why status notifications carried on stacking on
+        // KDE after #532, which only fixed the module.
+        notification::send_status(&title, body, urgency, lifetime).await;
     }
 
     #[cfg(target_os = "macos")]
     {
-        // terminal-notifier has no urgency concept; ignore the arg on macOS.
-        let _ = urgency;
+        // terminal-notifier has no urgency or lifetime concept; ignore both.
+        let _ = (urgency, lifetime);
         let engine_for_icon = if show_engine_icon { Some(engine) } else { None };
         notification::send_with_engine(&title, body, engine_for_icon).await;
+    }
+}
+
+/// Take down the recording banner now that the recording has ended.
+///
+/// With stop notifications enabled the stop message replaces the banner in
+/// place, which is smoother than closing one and posting another. Without
+/// them nothing else would ever take the banner down, so it is closed.
+async fn end_recording_notification(
+    title: &str,
+    body: &str,
+    notification_config: &crate::config::NotificationConfig,
+    engine: crate::config::TranscriptionEngine,
+) {
+    if notification_config.on_recording_stop {
+        send_notification(
+            title,
+            body,
+            notification_config.show_engine_icon,
+            engine,
+            &notification_config.urgency,
+        )
+        .await;
+    } else {
+        notification::close_persistent().await;
     }
 }
 
@@ -2974,7 +3002,7 @@ impl Daemon {
 
                                 // Send notification if enabled
                                 if self.config.output.notification.on_recording_start {
-                                    send_notification("Push to Talk Active", "Recording...", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency).await;
+                                    send_notification_with_lifetime("Push to Talk Active", "Recording...", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
                                 }
 
                                 // Prepare model for transcription
@@ -3142,9 +3170,7 @@ impl Daemon {
 
                                 self.play_feedback(SoundEvent::RecordingStop);
 
-                                if self.config.output.notification.on_recording_stop {
-                                    send_notification("Recording Stopped", "Transcribing...", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency).await;
-                                }
+                                end_recording_notification("Recording Stopped", "Transcribing...", &self.config.output.notification, self.config.engine).await;
 
                                 let transcriber = match self.get_transcriber_for_recording(
                                     model_override.as_deref(),
@@ -3187,7 +3213,7 @@ impl Daemon {
                                 tracing::info!("Recording started (toggle mode)");
 
                                 if self.config.output.notification.on_recording_start {
-                                    send_notification("Recording Started", "Press hotkey again to stop", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency).await;
+                                    send_notification_with_lifetime("Recording Started", "Press hotkey again to stop", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
                                 }
 
                                 // Prepare model for transcription
@@ -3337,9 +3363,7 @@ impl Daemon {
 
                                 self.play_feedback(SoundEvent::RecordingStop);
 
-                                if self.config.output.notification.on_recording_stop {
-                                    send_notification("Recording Stopped", "Transcribing...", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency).await;
-                                }
+                                end_recording_notification("Recording Stopped", "Transcribing...", &self.config.output.notification, self.config.engine).await;
 
                                 let transcriber = match self.get_transcriber_for_recording(
                                     model_override.as_deref(),
@@ -3419,9 +3443,7 @@ impl Daemon {
                                     }
                                 }
 
-                                if self.config.output.notification.on_recording_stop {
-                                    send_notification("Cancelled", "Recording discarded", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency).await;
-                                }
+                                end_recording_notification("Cancelled", "Recording discarded", &self.config.output.notification, self.config.engine).await;
                             } else if matches!(state, State::Transcribing { .. }) {
                                 tracing::info!("Transcription cancelled via hotkey");
 
@@ -3448,9 +3470,7 @@ impl Daemon {
                                     }
                                 }
 
-                                if self.config.output.notification.on_recording_stop {
-                                    send_notification("Cancelled", "Transcription aborted", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency).await;
-                                }
+                                end_recording_notification("Cancelled", "Transcription aborted", &self.config.output.notification, self.config.engine).await;
                             } else {
                                 tracing::trace!("Cancel ignored - not recording or transcribing");
                             }
@@ -3510,9 +3530,7 @@ impl Daemon {
                             }
                         }
 
-                        if self.config.output.notification.on_recording_stop {
-                            send_notification("Cancelled", "Recording discarded", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency).await;
-                        }
+                        end_recording_notification("Cancelled", "Recording discarded", &self.config.output.notification, self.config.engine).await;
 
                         continue;
                     }
@@ -3666,7 +3684,7 @@ impl Daemon {
                         tracing::info!("Recording started (external trigger), model_override = {:?}", model_override);
 
                         if self.config.output.notification.on_recording_start {
-                            send_notification("Recording Started", "External trigger", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency).await;
+                            send_notification_with_lifetime("Recording Started", "External trigger", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
                         }
 
                         // Prepare model for transcription
@@ -3827,9 +3845,7 @@ impl Daemon {
 
                         self.play_feedback(SoundEvent::RecordingStop);
 
-                        if self.config.output.notification.on_recording_stop {
-                            send_notification("Recording Stopped", "Transcribing...", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency).await;
-                        }
+                        end_recording_notification("Recording Stopped", "Transcribing...", &self.config.output.notification, self.config.engine).await;
 
                         let transcriber = match self.get_transcriber_for_recording(
                             model_override.as_deref(),
@@ -3991,9 +4007,7 @@ impl Daemon {
                             }
                         }
 
-                        if self.config.output.notification.on_recording_stop {
-                            send_notification("Cancelled", "Transcription aborted", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency).await;
-                        }
+                        end_recording_notification("Cancelled", "Transcription aborted", &self.config.output.notification, self.config.engine).await;
                     }
                 }
 
@@ -4188,6 +4202,7 @@ impl Daemon {
             let _ = capture.stop().await;
         }
         self.restore_recording_media();
+        notification::close_persistent().await;
         if let Some(task) = streaming_task {
             let _ = task.await;
         }

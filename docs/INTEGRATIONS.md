@@ -49,8 +49,9 @@ Without `--json`, an `ok` transcript is printed on stdout and any other outcome
 is reported on stderr. The exit code is the same either way.
 
 `--wait` needs to know which transcript to wait on. It uses the `--file` path
-the recording was started with, so you normally pass nothing; use `--wait-file
-<PATH>` to name it explicitly, and `--timeout <SECS>` to bound the wait.
+the recording was started with, so you normally pass nothing; use
+`--wait-file <PATH>` to name it explicitly, and `--timeout <SECS>` to bound the
+wait.
 
 ### Why not poll the file yourself
 
