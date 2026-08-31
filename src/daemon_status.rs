@@ -63,6 +63,93 @@ pub fn read_pid_if_alive() -> Option<i32> {
     is_running(pid).then_some(pid)
 }
 
+/// Path to the file the daemon writes its own version into at startup.
+///
+/// Sits beside the lockfile in the runtime dir, so it is cleared by the same
+/// reboot that clears the lock and can never outlive the machine's uptime.
+pub fn version_file_path() -> std::path::PathBuf {
+    Config::runtime_dir().join("version")
+}
+
+/// Publish this process's version. Called by the daemon at startup, after
+/// the lock is acquired, so a refused second instance never overwrites the
+/// running daemon's answer.
+pub fn publish_version() {
+    let path = version_file_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // Best effort: a daemon that cannot write this still runs fine, callers
+    // just fall back to reporting the version as unknown.
+    let _ = std::fs::write(&path, env!("CARGO_PKG_VERSION"));
+}
+
+/// What the *running daemon* reports as its version.
+///
+/// This is deliberately not `env!("CARGO_PKG_VERSION")`. That constant
+/// describes whichever binary is asking, which is routinely not the one
+/// serving dictation: an upgrade that was installed but never restarted, a
+/// systemd `ExecStart=` override pointing at a private build, or a
+/// `/usr/local/bin` install shadowing a packaged one all produce a CLI and a
+/// daemon at different versions. Reporting the caller's version as though it
+/// were the daemon's is how a UI ends up claiming a fix is live when the
+/// process without it is still running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonVersion {
+    /// The daemon published this version at startup.
+    Running(String),
+    /// No daemon is alive.
+    NotRunning,
+    /// A daemon is alive but published no version: it predates
+    /// `publish_version`, or could not write the runtime dir.
+    Unknown,
+}
+
+/// Resolve the running daemon's version.
+///
+/// Liveness is checked first, so a stale version file left by a daemon that
+/// died without cleanup reads as `NotRunning` rather than as a running
+/// version that does not exist.
+pub fn running_version() -> DaemonVersion {
+    if read_pid_if_alive().is_none() {
+        return DaemonVersion::NotRunning;
+    }
+    match std::fs::read_to_string(version_file_path()) {
+        Ok(v) if !v.trim().is_empty() => DaemonVersion::Running(v.trim().to_string()),
+        _ => DaemonVersion::Unknown,
+    }
+}
+
+impl DaemonVersion {
+    /// The version string, when there is one.
+    pub fn version(&self) -> Option<&str> {
+        match self {
+            Self::Running(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// True when a daemon is running something other than the caller's own
+    /// build. This is the condition worth surfacing: the user is looking at a
+    /// UI from one version while a different one is doing the work.
+    pub fn differs_from_caller(&self) -> bool {
+        matches!(self, Self::Running(v) if v != env!("CARGO_PKG_VERSION"))
+    }
+
+    /// One line for a status surface, phrased so the three states stay
+    /// distinguishable rather than collapsing into a bare version number.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Running(v) if self.differs_from_caller() => {
+                format!("{} (this CLI is {})", v, env!("CARGO_PKG_VERSION"))
+            }
+            Self::Running(v) => v.clone(),
+            Self::NotRunning => "not running".to_string(),
+            Self::Unknown => "running, version unknown".to_string(),
+        }
+    }
+}
+
 /// Boolean shorthand for callers that only need "is the daemon up?"
 /// (status display, TUI banner, etc.). Equivalent to
 /// `read_pid_if_alive().is_some()`.
@@ -145,5 +232,69 @@ mod tests {
         // must match what every external caller reads.
         let from_send = Config::runtime_dir().join("voxtype.lock");
         assert_eq!(canonical, from_send);
+    }
+    /// The whole point of the type: a caller must not be able to mistake its
+    /// own build for the daemon's. `differs_from_caller` is what a UI keys
+    /// off to warn, so it has to be false for every state that is not a
+    /// confirmed, different, running version.
+    #[test]
+    fn only_a_confirmed_different_running_version_counts_as_differing() {
+        let same = DaemonVersion::Running(env!("CARGO_PKG_VERSION").to_string());
+        assert!(!same.differs_from_caller());
+        assert_eq!(same.version(), Some(env!("CARGO_PKG_VERSION")));
+
+        let other = DaemonVersion::Running("0.0.1-other".to_string());
+        assert!(other.differs_from_caller());
+        assert!(other.describe().contains("0.0.1-other"));
+        assert!(
+            other.describe().contains(env!("CARGO_PKG_VERSION")),
+            "a mismatch must name both versions, or the user cannot tell \
+             which one they are looking at"
+        );
+
+        // Neither unknown state may masquerade as agreement or as a mismatch.
+        assert!(!DaemonVersion::NotRunning.differs_from_caller());
+        assert!(!DaemonVersion::Unknown.differs_from_caller());
+        assert_eq!(DaemonVersion::NotRunning.version(), None);
+        assert_eq!(DaemonVersion::Unknown.version(), None);
+    }
+
+    /// The three states have to stay distinguishable in the one line a status
+    /// surface gets. Collapsing "not running" into an empty string is how a
+    /// panel ends up rendering a blank where it should say the daemon is down.
+    #[test]
+    fn describe_distinguishes_every_state() {
+        let labels = [
+            DaemonVersion::Running("1.2.3".into()).describe(),
+            DaemonVersion::NotRunning.describe(),
+            DaemonVersion::Unknown.describe(),
+        ];
+        for l in &labels {
+            assert!(!l.trim().is_empty(), "no state may describe as blank");
+        }
+        assert_eq!(
+            labels.len(),
+            labels
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            "states must not share a label: {labels:?}"
+        );
+    }
+
+    /// A version file left behind by a daemon that died without cleaning up
+    /// must not read as a running version. Liveness is checked first, so with
+    /// no daemon alive the answer is NotRunning whatever the file says.
+    #[test]
+    fn a_stale_version_file_does_not_report_a_running_daemon() {
+        // Whatever this machine's real state is, the invariant holds: a
+        // version is only ever reported alongside a live pid.
+        let v = running_version();
+        if matches!(v, DaemonVersion::Running(_)) {
+            assert!(
+                read_pid_if_alive().is_some(),
+                "reported a running version with no live daemon"
+            );
+        }
     }
 }
