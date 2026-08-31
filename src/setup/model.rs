@@ -670,6 +670,42 @@ const COHERE_MODELS: &[CohereModelInfo] = &[
 ];
 
 // =============================================================================
+// GigaAM v3 RNN-T Model Definitions
+// =============================================================================
+//
+// Russian specialist (SberDevices GigaAM v3, RNN-T head). The INT8 bundle
+// voxtype loads is GitHub Release tag `models-v3-2026-06-22` on
+// ekhodzitsky/gigastt — not Hugging Face. This engine is intentionally
+// omitted from `registry_snapshot()` so `scripts/mirror-models-to-r2.sh`
+// cannot treat a GitHub repo as an HF source. Seed R2 with rclone from
+// that release (or a dedicated HF repo) before adding it to the snapshot.
+// SHA-256 pins for the four files live in `src/transcribe/gigaam.rs` and
+// are checked at engine load.
+
+struct GigaamModelInfo {
+    name: &'static str,
+    dir_name: &'static str,
+    size_mb: u32,
+    description: &'static str,
+    languages: &'static str,
+    files: &'static [(&'static str, &'static str)],
+}
+
+const GIGAAM_MODELS: &[GigaamModelInfo] = &[GigaamModelInfo {
+    name: "gigaam-v3-rnnt-int8",
+    dir_name: "gigaam-v3-rnnt-int8",
+    size_mb: 225,
+    description: "GigaAM v3 RNN-T INT8 (Russian specialist)",
+    languages: "ru",
+    files: &[
+        ("v3_rnnt_encoder_int8.onnx", "v3_rnnt_encoder_int8.onnx"),
+        ("v3_rnnt_decoder.onnx", "v3_rnnt_decoder.onnx"),
+        ("v3_rnnt_joint.onnx", "v3_rnnt_joint.onnx"),
+        ("v3_vocab.txt", "v3_vocab.txt"),
+    ],
+}];
+
+// =============================================================================
 // ModelArtifact implementations
 // =============================================================================
 //
@@ -856,6 +892,30 @@ impl ModelArtifact for CohereModelInfo {
     }
 }
 
+impl ModelArtifact for GigaamModelInfo {
+    #[allow(clippy::misnamed_getters)]
+    fn name(&self) -> &str {
+        self.dir_name
+    }
+    fn engine_prefix(&self) -> &'static str {
+        "gigaam"
+    }
+    fn upstream_repo(&self) -> &str {
+        // Not a Hugging Face repo. Do not add this engine to
+        // `registry_snapshot()` until R2 is seeded from this tag.
+        "github.com/ekhodzitsky/gigastt/releases/tag/models-v3-2026-06-22"
+    }
+    fn expected_files(&self) -> Vec<ExpectedFile> {
+        self.files
+            .iter()
+            .map(|(_repo, local)| ExpectedFile {
+                path: (*local).to_string(),
+                size: 0,
+            })
+            .collect()
+    }
+}
+
 // =============================================================================
 // Registry export (for the mirror script)
 // =============================================================================
@@ -892,7 +952,21 @@ pub struct RegistryFile {
 /// published manifest on every download.
 ///
 /// Empty for whisper, whose models are single files with no registry entry.
+/// GigaAM is not in `registry_snapshot` (no HF upstream); its names come
+/// from the local GigaAM table so a copied bundle still has a file-list check.
 pub(crate) fn expected_file_names(engine: &str, model: &str) -> Vec<String> {
+    if engine == "gigaam" {
+        return GIGAAM_MODELS
+            .iter()
+            .find(|m| m.dir_name == model || m.name == model)
+            .map(|m| {
+                m.files
+                    .iter()
+                    .map(|(_, local)| (*local).to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
     registry_snapshot()
         .into_iter()
         .find(|e| e.engine_prefix == engine && e.name == model)
@@ -900,10 +974,11 @@ pub(crate) fn expected_file_names(engine: &str, model: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Snapshot the full ONNX-engine model registry (Parakeet, Moonshine,
-/// SenseVoice, Paraformer, Dolphin, Omnilingual, Cohere) into a single
-/// flat list. Used by `voxtype-mirror-registry` to drive
-/// `scripts/mirror-models-to-r2.sh`.
+/// Snapshot the ONNX-engine model registry for engines that have a Hugging
+/// Face upstream (Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin,
+/// Omnilingual, Cohere). Used by `voxtype-mirror-registry` to drive
+/// `scripts/mirror-models-to-r2.sh`. GigaAM is omitted: its INT8 bundle is
+/// a GitHub Release, not an HF repo.
 pub fn registry_snapshot() -> Vec<RegistryEntry> {
     let mut out = Vec::new();
     for m in PARAKEET_MODELS {
@@ -1386,6 +1461,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let is_dolphin_engine = matches!(config.engine, TranscriptionEngine::Dolphin);
     let is_omnilingual_engine = matches!(config.engine, TranscriptionEngine::Omnilingual);
     let is_cohere_engine = matches!(config.engine, TranscriptionEngine::Cohere);
+    let is_gigaam_engine = matches!(config.engine, TranscriptionEngine::Gigaam);
     let current_whisper_model = &config.whisper.model;
     let current_parakeet_model = config.parakeet.as_ref().map(|p| p.model.as_str());
     let current_moonshine_model = config.moonshine.as_ref().map(|m| m.model.as_str());
@@ -1394,6 +1470,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let current_dolphin_model = config.dolphin.as_ref().map(|d| d.model.as_str());
     let current_omnilingual_model = config.omnilingual.as_ref().map(|o| o.model.as_str());
     let current_cohere_model = config.cohere.as_ref().map(|c| c.model.as_str());
+    let current_gigaam_model = config.gigaam.as_ref().map(|g| g.model.as_str());
     let parakeet_available = cfg!(feature = "parakeet");
     let moonshine_available = cfg!(feature = "moonshine");
     let sensevoice_available = cfg!(feature = "sensevoice");
@@ -1401,6 +1478,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let dolphin_available = cfg!(feature = "dolphin");
     let omnilingual_available = cfg!(feature = "omnilingual");
     let cohere_available = cfg!(feature = "cohere");
+    let gigaam_available = cfg!(feature = "gigaam");
     let whisper_count = MODELS.len();
     let parakeet_count = PARAKEET_MODELS.len();
     let moonshine_count = MOONSHINE_MODELS.len();
@@ -1409,6 +1487,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let dolphin_count = DOLPHIN_MODELS.len();
     let omnilingual_count = OMNILINGUAL_MODELS.len();
     let cohere_count = COHERE_MODELS.len();
+    let gigaam_count = GIGAAM_MODELS.len();
 
     let available_count = |available: bool, count: usize| if available { count } else { 0 };
     let total_count = whisper_count
@@ -1418,7 +1497,8 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         + available_count(paraformer_available, paraformer_count)
         + available_count(dolphin_available, dolphin_count)
         + available_count(omnilingual_available, omnilingual_count)
-        + available_count(cohere_available, cohere_count);
+        + available_count(cohere_available, cohere_count)
+        + available_count(gigaam_available, gigaam_count);
 
     // --- Whisper Section ---
     println!("--- Whisper (OpenAI, 99+ languages) ---\n");
@@ -1718,6 +1798,42 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         println!("  \x1b[90m(not available - rebuild with --features cohere)\x1b[0m");
     }
 
+    // --- GigaAM Section ---
+    let gigaam_offset = cohere_offset + available_count(cohere_available, cohere_count);
+    println!(
+        "\n--- GigaAM v3 RNN-T (Russian specialist){} ---\n",
+        AMD_CPU_ONLY_TAG
+    );
+
+    if gigaam_available {
+        for (i, model) in GIGAAM_MODELS.iter().enumerate() {
+            let model_path = models_dir.join(model.dir_name);
+            let installed = model_path.exists() && validate_gigaam_model(&model_path).is_ok();
+
+            let is_current = is_gigaam_engine && current_gigaam_model == Some(model.dir_name);
+            let star = if is_current { "*" } else { " " };
+
+            let status = if installed {
+                "\x1b[32m[installed]\x1b[0m"
+            } else {
+                ""
+            };
+
+            println!(
+                " {}[{:>2}] {:<28} ({:>4} MB) {} - {} {}",
+                star,
+                gigaam_offset + i + 1,
+                model.dir_name,
+                model.size_mb,
+                model.languages,
+                model.description,
+                status
+            );
+        }
+    } else {
+        println!("  \x1b[90m(not available - rebuild with --features gigaam)\x1b[0m");
+    }
+
     println!("\n  [ 0] Cancel\n");
 
     // Get user selection
@@ -1764,6 +1880,11 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     } else if cohere_available && selection <= cohere_offset + cohere_count {
         let idx = selection - cohere_offset;
         handle_cohere_selection(idx).await
+    } else if gigaam_available && selection <= gigaam_offset + gigaam_count {
+        let idx = selection - gigaam_offset;
+        let entries: Vec<(&str, &GigaamModelInfo)> =
+            GIGAAM_MODELS.iter().map(|m| (m.name, m)).collect();
+        handle_onnx_engine_selection("gigaam", &entries, idx, validate_gigaam_model).await
     } else {
         println!("\nInvalid selection.");
         Ok(())
@@ -2738,6 +2859,29 @@ pub fn validate_cohere_model(path: &Path) -> anyhow::Result<()> {
         Ok(())
     } else {
         anyhow::bail!("Incomplete Cohere model, missing: {}", missing.join(", "))
+    }
+}
+
+/// Validate that a GigaAM model directory has encoder, decoder, joiner, vocab.
+pub fn validate_gigaam_model(path: &Path) -> anyhow::Result<()> {
+    if !path.exists() {
+        anyhow::bail!("Model directory does not exist: {:?}", path);
+    }
+    let required = [
+        "v3_rnnt_encoder_int8.onnx",
+        "v3_rnnt_decoder.onnx",
+        "v3_rnnt_joint.onnx",
+        "v3_vocab.txt",
+    ];
+    let missing: Vec<&str> = required
+        .iter()
+        .copied()
+        .filter(|f| !path.join(f).exists())
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("Incomplete GigaAM model, missing: {}", missing.join(", "))
     }
 }
 
@@ -4239,6 +4383,73 @@ mode = "type"
             assert_eq!(m.engine_prefix(), "cohere");
             assert_eq!(m.name(), m.dir_name);
         }
+    }
+
+    #[test]
+    fn gigaam_engine_prefix() {
+        for m in GIGAAM_MODELS {
+            assert_eq!(m.engine_prefix(), "gigaam");
+            assert_eq!(m.name(), m.dir_name);
+            assert!(
+                m.upstream_repo().starts_with("github.com/"),
+                "GigaAM upstream must not look like a Hugging Face repo, got {}",
+                m.upstream_repo()
+            );
+            assert_eq!(m.expected_files().len(), m.files.len());
+        }
+    }
+
+    #[test]
+    fn gigaam_is_not_in_the_hf_mirror_registry() {
+        for e in registry_snapshot() {
+            assert_ne!(
+                e.engine_prefix, "gigaam",
+                "GigaAM has no HF upstream; do not list it in registry_snapshot"
+            );
+        }
+    }
+
+    #[test]
+    fn gigaam_expected_file_names_come_from_the_local_table() {
+        let names = expected_file_names("gigaam", "gigaam-v3-rnnt-int8");
+        assert_eq!(
+            names,
+            vec![
+                "v3_rnnt_encoder_int8.onnx",
+                "v3_rnnt_decoder.onnx",
+                "v3_rnnt_joint.onnx",
+                "v3_vocab.txt",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_validate_gigaam_model_accepts_complete_bundle() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let model_dir = tmp.path().join("gigaam-v3-rnnt-int8");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        for name in [
+            "v3_rnnt_encoder_int8.onnx",
+            "v3_rnnt_decoder.onnx",
+            "v3_rnnt_joint.onnx",
+            "v3_vocab.txt",
+        ] {
+            std::fs::write(model_dir.join(name), b"x").unwrap();
+        }
+        validate_gigaam_model(&model_dir).unwrap();
+    }
+
+    #[test]
+    fn test_validate_gigaam_model_reports_missing_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let model_dir = tmp.path().join("gigaam-v3-rnnt-int8");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(model_dir.join("v3_vocab.txt"), b"x").unwrap();
+        let err = validate_gigaam_model(&model_dir).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("v3_rnnt_encoder_int8.onnx"), "{msg}");
+        assert!(msg.contains("v3_rnnt_decoder.onnx"), "{msg}");
+        assert!(msg.contains("v3_rnnt_joint.onnx"), "{msg}");
     }
 
     /// The `.part` name has to be one no installed-model check can match:

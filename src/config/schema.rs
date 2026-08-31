@@ -186,6 +186,7 @@ pub fn feature_compiled(feature: &str) -> bool {
         "dolphin" => cfg!(feature = "dolphin"),
         "omnilingual" => cfg!(feature = "omnilingual"),
         "cohere" => cfg!(feature = "cohere"),
+        "gigaam" => cfg!(feature = "gigaam"),
         _ => false,
     }
 }
@@ -660,6 +661,37 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Load the model when recording starts and unload at idle.",
     )
     .for_onnx_engine("cohere"),
+    // gigaam
+    spec(
+        "gigaam.model",
+        "gigaam",
+        "model",
+        KeyType::DynamicEnum { source: "models" },
+        "Engine",
+        "Model",
+        "GigaAM v3 RNN-T model directory name.",
+    )
+    .for_onnx_engine("gigaam"),
+    spec(
+        "gigaam.threads",
+        "gigaam",
+        "threads",
+        KeyType::Int { min: 1, max: 256 },
+        "Engine",
+        "Threads",
+        "ONNX Runtime intra-op threads. Unset lets voxtype pick.",
+    )
+    .for_onnx_engine("gigaam"),
+    spec(
+        "gigaam.on_demand_loading",
+        "gigaam",
+        "on_demand_loading",
+        KeyType::Bool,
+        "Engine",
+        "Load on demand",
+        "Load the model when recording starts and unload at idle.",
+    )
+    .for_onnx_engine("gigaam"),
     // -- Hotkey -------------------------------------------------------------
     spec(
         "hotkey.enabled",
@@ -1528,6 +1560,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
     let dol = || cfg.dolphin.clone().unwrap_or_default();
     let om = || cfg.omnilingual.clone().unwrap_or_default();
     let co = || cfg.cohere.clone().unwrap_or_default();
+    let ga = || cfg.gigaam.clone().unwrap_or_default();
 
     let v = match key {
         "engine" => json!(cfg.engine.name()),
@@ -1610,6 +1643,13 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             None => Json::Null,
         },
         "cohere.on_demand_loading" => json!(co().on_demand_loading),
+
+        "gigaam.model" => json!(ga().model),
+        "gigaam.threads" => match ga().threads {
+            Some(n) => json!(n),
+            None => Json::Null,
+        },
+        "gigaam.on_demand_loading" => json!(ga().on_demand_loading),
 
         "hotkey.enabled" => json!(cfg.hotkey.enabled),
         "hotkey.key" => json!(cfg.hotkey.key),

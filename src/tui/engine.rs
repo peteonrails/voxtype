@@ -117,6 +117,12 @@ pub struct AllFields {
     pub co_threads: Option<i64>,
     pub co_on_demand_loading: bool,
     pub co_section_existed: bool,
+
+    // GigaAM v3 RNN-T (ONNX, Russian specialist)
+    pub ga_model: String,
+    pub ga_threads: Option<i64>,
+    pub ga_on_demand_loading: bool,
+    pub ga_section_existed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +192,11 @@ pub enum FieldId {
     CoLanguage,
     CoThreads,
     CoOnDemandLoading,
+
+    // GigaAM
+    GaModel,
+    GaThreads,
+    GaOnDemandLoading,
 }
 
 /// Cohere Transcribe officially supports these 14 languages. Token IDs are
@@ -263,6 +274,11 @@ fn rows_for_engine_with_mode(engine: &str, whisper_mode: &str) -> Vec<FieldId> {
             FieldId::CoLanguage,
             FieldId::CoThreads,
             FieldId::CoOnDemandLoading,
+        ]),
+        "gigaam" => rows.extend_from_slice(&[
+            FieldId::GaModel,
+            FieldId::GaThreads,
+            FieldId::GaOnDemandLoading,
         ]),
         _ => {}
     }
@@ -369,6 +385,14 @@ impl EngineState {
             co_threads: ed.get_int("cohere", "threads"),
             co_on_demand_loading: ed.get_bool("cohere", "on_demand_loading").unwrap_or(false),
             co_section_existed: ed.get_string("cohere", "model").is_some(),
+
+            // GigaAM
+            ga_model: ed
+                .get_string("gigaam", "model")
+                .unwrap_or_else(|| default_model("gigaam").to_string()),
+            ga_threads: ed.get_int("gigaam", "threads"),
+            ga_on_demand_loading: ed.get_bool("gigaam", "on_demand_loading").unwrap_or(false),
+            ga_section_existed: ed.get_string("gigaam", "model").is_some(),
         };
         let mut state = Self {
             engine,
@@ -581,6 +605,16 @@ impl EngineState {
                 None => ed.unset("cohere", "threads"),
             }
             ed.set_bool("cohere", "on_demand_loading", f.co_on_demand_loading);
+        }
+
+        // GigaAM
+        if self.engine == "gigaam" || f.ga_section_existed {
+            ed.set_string("gigaam", "model", &f.ga_model);
+            match f.ga_threads {
+                Some(n) => ed.set_int("gigaam", "threads", n),
+                None => ed.unset("gigaam", "threads"),
+            }
+            ed.set_bool("gigaam", "on_demand_loading", f.ga_on_demand_loading);
         }
 
         match ed.save() {
@@ -824,6 +858,10 @@ impl EngineState {
             }
             FieldId::CoThreads => f.co_threads = cycle_threads(f.co_threads, delta),
             FieldId::CoOnDemandLoading => f.co_on_demand_loading = !f.co_on_demand_loading,
+
+            FieldId::GaModel => f.ga_model = cycle_model("gigaam", &f.ga_model, delta),
+            FieldId::GaThreads => f.ga_threads = cycle_threads(f.ga_threads, delta),
+            FieldId::GaOnDemandLoading => f.ga_on_demand_loading = !f.ga_on_demand_loading,
         }
         self.dirty_since_load = true;
         self.feedback = None;
@@ -846,6 +884,7 @@ fn active_model_for_engine(engine: &str, f: &AllFields) -> Option<String> {
         "dolphin" => Some(f.dol_model.clone()),
         "omnilingual" => Some(f.om_model.clone()),
         "cohere" => Some(f.co_model.clone()),
+        "gigaam" => Some(f.ga_model.clone()),
         _ => None,
     }
 }
@@ -881,6 +920,7 @@ fn installed_engine_choices() -> std::collections::HashSet<&'static str> {
             "dolphin",
             "omnilingual",
             "cohere",
+            "gigaam",
         ] {
             if variant.supports_engine(engine) {
                 out.insert(engine);
@@ -903,6 +943,7 @@ fn installed_engine_choices() -> std::collections::HashSet<&'static str> {
             "dolphin",
             "omnilingual",
             "cohere",
+            "gigaam",
         ] {
             if *f == engine {
                 out.insert(engine);
@@ -1030,6 +1071,7 @@ const AMD_CPU_ONLY_ENGINES: &[&str] = &[
     "dolphin",
     "omnilingual",
     "cohere",
+    "gigaam",
 ];
 
 fn engine_value_for_display(engine: &str) -> String {
@@ -1212,6 +1254,18 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
             "Cohere · on-demand model load",
             yesno(f.co_on_demand_loading),
         ),
+
+        FieldId::GaModel => ("GigaAM · model", f.ga_model.clone()),
+        FieldId::GaThreads => (
+            "GigaAM · threads",
+            f.ga_threads
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "auto".to_string()),
+        ),
+        FieldId::GaOnDemandLoading => (
+            "GigaAM · on-demand model load",
+            yesno(f.ga_on_demand_loading),
+        ),
     }
 }
 
@@ -1307,6 +1361,11 @@ fn engine_guidance(state: &EngineState) -> Vec<Line<'static>> {
             "Cohere Transcribe (Cohere Labs). #1 on the Open ASR Leaderboard \
              for English (5.42 WER). 14 languages. ~3 GB on disk.",
         ),
+        (
+            "gigaam",
+            "GigaAM v3 RNN-T via ONNX Runtime. Russian specialist \
+             (char vocab, ~225 MB INT8). Bare lowercase output.",
+        ),
     ] {
         lines.push(Line::from(Span::styled(
             format!("{}: ", name),
@@ -1343,6 +1402,7 @@ fn guidance(state: &EngineState) -> Vec<Line<'_>> {
         FieldId::DolModel => model_guidance("dolphin", &f.dol_model),
         FieldId::OmModel => model_guidance("omnilingual", &f.om_model),
         FieldId::CoModel => model_guidance("cohere", &f.co_model),
+        FieldId::GaModel => model_guidance("gigaam", &f.ga_model),
 
         FieldId::WMode => vec![
             heading("Whisper · execution mode"),
@@ -1636,6 +1696,9 @@ fn guidance(state: &EngineState) -> Vec<Line<'_>> {
         FieldId::CoThreads => threads_guidance("Cohere"),
         FieldId::CoOnDemandLoading => on_demand_guidance("Cohere"),
 
+        FieldId::GaThreads => threads_guidance("GigaAM"),
+        FieldId::GaOnDemandLoading => on_demand_guidance("GigaAM"),
+
         FieldId::WRemoteEndpoint => vec![
             heading("Whisper · remote endpoint"),
             Line::from(""),
@@ -1757,6 +1820,7 @@ fn display_engine(engine: &str) -> &'static str {
         "dolphin" => "Dolphin",
         "omnilingual" => "Omnilingual",
         "cohere" => "Cohere",
+        "gigaam" => "GigaAM",
         _ => "Engine",
     }
 }

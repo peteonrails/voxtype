@@ -289,6 +289,7 @@ fn send_macos_native(title: &str, body: &str, engine: Option<TranscriptionEngine
         | TranscriptionEngine::Dolphin
         | TranscriptionEngine::Omnilingual
         | TranscriptionEngine::Cohere
+        | TranscriptionEngine::Gigaam
         | TranscriptionEngine::Soniox => None,
     });
 

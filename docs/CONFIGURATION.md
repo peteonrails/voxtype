@@ -46,6 +46,7 @@ Selects which speech-to-text engine to use for transcription.
 - `dolphin` - Dictation-optimized CTC via ONNX Runtime (Chinese + English)
 - `omnilingual` - FunASR Omnilingual CTC via ONNX Runtime (50+ languages)
 - `cohere` - Cohere Transcribe encoder-decoder via ONNX Runtime (#1 Open ASR Leaderboard, 14 languages, ~3 GB model)
+- `gigaam` - GigaAM v3 RNN-T via ONNX Runtime (Russian specialist, ~225 MB INT8)
 
 **Example:**
 ```toml
@@ -76,7 +77,7 @@ config changes; restart it with `systemctl --user restart voxtype` for the
 new engine to take effect.
 
 **Notes:**
-- Whisper, Remote Whisper, and Soniox run in every binary. The other engines (Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual, Cohere) require an ONNX-enabled binary (`voxtype-*-onnx-*`)
+- Whisper, Remote Whisper, and Soniox run in every binary. The other engines (Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual, Cohere, GigaAM) require an ONNX-enabled binary (`voxtype-*-onnx-*`)
 - Each ONNX engine reads its own `[<engine>]` section (e.g. `[parakeet]`, `[cohere]`)
 - See [PARAKEET.md](PARAKEET.md) for detailed Parakeet setup instructions
 - See [MOONSHINE.md](MOONSHINE.md) for detailed Moonshine setup instructions
@@ -1456,6 +1457,64 @@ cargo build --release --features cohere-tensorrt  # NVIDIA + TensorRT EP
 ```
 
 The prebuilt `voxtype-*-onnx-*` release binaries already include `cohere`, so users installing via AUR/.deb/.rpm don't need to rebuild.
+
+---
+
+## [gigaam]
+
+Configuration for the GigaAM v3 RNN-T speech-to-text engine. This section is only used when `engine = "gigaam"`.
+
+GigaAM is a Russian-specialist Conformer + LSTM RNN-T model (SberDevices). voxtype loads the gigastt INT8 bundle (~225 MB): encoder, decoder, joiner, and a 34-token char vocabulary. Output is bare lowercase Russian; there is no punctuation or inverse text normalization in v1.
+
+The catalog entry is `gigaam-v3-rnnt-int8`. Until models.voxtype.io hosts the bundle, copy the four files from [gigastt release `models-v3-2026-06-22`](https://github.com/ekhodzitsky/gigastt/releases/tag/models-v3-2026-06-22) into `~/.local/share/voxtype/models/gigaam-v3-rnnt-int8/`.
+
+### model
+
+**Type:** String
+**Default:** `"gigaam-v3-rnnt-int8"`
+**Required:** No
+
+Model directory name under the models dir, or an absolute path. Expects `v3_rnnt_encoder_int8.onnx`, `v3_rnnt_decoder.onnx`, `v3_rnnt_joint.onnx`, and `v3_vocab.txt`.
+
+**Example:**
+```toml
+[gigaam]
+model = "gigaam-v3-rnnt-int8"
+```
+
+### threads
+
+**Type:** Integer
+**Default:** unset (voxtype picks, typically `min(ncpus, 4)`)
+**Required:** No
+
+ONNX Runtime intra-op threads for the encoder. Decoder and joiner always run on one thread.
+
+### on_demand_loading
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Same behavior as `[whisper].on_demand_loading`.
+
+### Complete Example
+
+```toml
+engine = "gigaam"
+
+[gigaam]
+model = "gigaam-v3-rnnt-int8"
+on_demand_loading = false
+```
+
+Source builds need the `gigaam` Cargo feature:
+
+```bash
+cargo build --release --features gigaam
+```
+
+v1 is CPU-first. There is no `gigaam-cuda` flag; a CUDA ONNX binary still registers GPU execution providers through the shared helper if it was built with another engine's `*-cuda` feature.
 
 ---
 

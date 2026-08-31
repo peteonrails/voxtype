@@ -23,6 +23,7 @@ pub const CATALOG_ENGINES: &[&str] = &[
     "dolphin",
     "omnilingual",
     "cohere",
+    "gigaam",
 ];
 
 /// Models voxtype knows how to download for `engine`.
@@ -41,6 +42,7 @@ pub fn model_catalog(engine: &str) -> Vec<&'static str> {
             "cohere-transcribe-int8",
             "cohere-transcribe-fp16",
         ],
+        "gigaam" => vec!["gigaam-v3-rnnt-int8"],
         _ => Vec::new(),
     }
 }
@@ -58,6 +60,7 @@ pub const fn default_model(engine: &str) -> &'static str {
         b"dolphin" => "dolphin-base",
         b"omnilingual" => "omnilingual-300m",
         b"cohere" => "cohere-transcribe-q4f16",
+        b"gigaam" => "gigaam-v3-rnnt-int8",
         _ => "",
     }
 }

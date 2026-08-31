@@ -158,7 +158,8 @@ PanelWindow {
         { name: "paraformer",  label: "Paraformer",  blurb: "FunASR CTC encoder" },
         { name: "dolphin",     label: "Dolphin",     blurb: "Dictation-optimized CTC" },
         { name: "omnilingual", label: "Omnilingual", blurb: "FunASR 50+ languages" },
-        { name: "cohere",      label: "Cohere",      blurb: "Whisper-style; top of OpenASR" }
+        { name: "cohere",      label: "Cohere",      blurb: "Whisper-style; top of OpenASR" },
+        { name: "gigaam",      label: "GigaAM",      blurb: "Russian specialist RNN-T" }
     ]
 
     // ----- internal state -----

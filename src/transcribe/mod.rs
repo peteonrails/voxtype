@@ -11,6 +11,7 @@
 //! - Optionally Paraformer via ONNX Runtime (when `paraformer` feature is enabled)
 //! - Optionally Dolphin via ONNX Runtime (when `dolphin` feature is enabled)
 //! - Optionally Omnilingual via ONNX Runtime (when `omnilingual` feature is enabled)
+//! - Optionally GigaAM v3 RNN-T via ONNX Runtime (when `gigaam` feature is enabled)
 
 pub mod cli;
 #[cfg(feature = "parakeet")]
@@ -74,6 +75,9 @@ pub mod cohere;
 /// Cohere-specific log-mel feature extractor (NeMo conventions, 128 mels).
 #[cfg(feature = "cohere")]
 pub mod cohere_fbank;
+
+#[cfg(feature = "gigaam")]
+pub mod gigaam;
 
 use crate::config::{Config, TranscriptionEngine, WhisperConfig, WhisperMode};
 use crate::error::TranscribeError;
@@ -266,6 +270,20 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
         #[cfg(not(feature = "cohere"))]
         TranscriptionEngine::Cohere => Err(TranscribeError::InitFailed(
             "Cohere engine requested but voxtype was not compiled with --features cohere"
+                .to_string(),
+        )),
+        #[cfg(feature = "gigaam")]
+        TranscriptionEngine::Gigaam => {
+            let cfg = config.gigaam.as_ref().ok_or_else(|| {
+                TranscribeError::InitFailed(
+                    "GigaAM engine selected but [gigaam] config section is missing".to_string(),
+                )
+            })?;
+            Ok(Box::new(gigaam::GigaamTranscriber::new(cfg)?))
+        }
+        #[cfg(not(feature = "gigaam"))]
+        TranscriptionEngine::Gigaam => Err(TranscribeError::InitFailed(
+            "GigaAM engine requested but voxtype was not compiled with --features gigaam"
                 .to_string(),
         )),
         TranscriptionEngine::Soniox => {

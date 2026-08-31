@@ -86,7 +86,7 @@ ENV GGML_NATIVE=OFF
 ENV ORT_STRATEGY=download
 
 # Build with all ONNX engines. CPU-only on aarch64 — no GPU EPs.
-RUN cargo build --release --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,ml-diarization \
+RUN cargo build --release --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,gigaam,ml-diarization \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
     && cp target/release/voxtype /tmp/voxtype-aarch64-onnx
