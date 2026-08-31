@@ -212,25 +212,17 @@ pub async fn send_transcription_notification(
         "Transcribed".to_string()
     };
 
-    let urgency_arg = format!("--urgency={}", sanitize_urgency(urgency));
-    // Synchronous + transient hints ([#345]): single Voxtype notification slot
-    // that the compositor overwrites in place, and no stacking in the history.
-    let _ = Command::new("notify-send")
-        .args([
-            "--app-name=Voxtype",
-            &urgency_arg,
-            "--expire-time=3000",
-            "-h",
-            "string:x-canonical-private-synchronous:voxtype",
-            "-h",
-            "int:transient:1",
-            &title,
-            &preview,
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await;
+    // Through the notification module rather than straight to notify-send:
+    // that module owns the --replace-id bookkeeping that keeps every Voxtype
+    // notification in a single slot, and a notification posted from here
+    // stacks beside the daemon's instead of replacing it ([#532]).
+    crate::notification::send_status(
+        &title,
+        &preview,
+        urgency,
+        crate::notification::Lifetime::Millis(3000),
+    )
+    .await;
 }
 
 /// Trait for text output implementations
