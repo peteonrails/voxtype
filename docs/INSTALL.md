@@ -85,8 +85,8 @@ For the GTK4 OSD frontend, additionally install `gtk4` + `gtk4-layer-shell`.
 Pick your distro from the list below. The fastest path on each:
 
 - **Arch:** `paru -S voxtype-bin`
-- **Debian/Ubuntu:** `sudo apt install ./voxtype_0.7.5-1_amd64.deb`
-- **Fedora:** `sudo dnf install ./voxtype-0.7.5-1.x86_64.rpm`
+- **Debian/Ubuntu:** `sudo apt install ./voxtype_1.0.1-1_amd64.deb`
+- **Fedora:** `sudo dnf install ./voxtype-1.0.1-1.x86_64.rpm`
 - **macOS:** `brew install --cask peteonrails/voxtype/voxtype`
 - **NixOS:** `nix profile install github:peteonrails/voxtype#vulkan`
 - **AppImage:** download, `chmod +x`, run.
@@ -143,8 +143,8 @@ The post-install hook auto-picks the right CUDA variant (`cuda-12` vs `cuda-13`)
 Requires Ubuntu 24.04+ or Debian Trixie+ (glibc 2.39+). Older versions: [build from source](#build-from-source).
 
 ```bash
-wget https://github.com/peteonrails/voxtype/releases/download/v0.7.5/voxtype_0.7.5-1_amd64.deb
-sudo apt install ./voxtype_0.7.5-1_amd64.deb
+wget https://github.com/peteonrails/voxtype/releases/download/v1.0.1/voxtype_1.0.1-1_amd64.deb
+sudo apt install ./voxtype_1.0.1-1_amd64.deb
 ```
 
 Recommended optional packages:
@@ -160,8 +160,8 @@ The .deb ships every Linux binary variant (avx2, avx512, vulkan, plus ONNX CPU/C
 Requires Fedora 40+ (glibc 2.39+).
 
 ```bash
-wget https://github.com/peteonrails/voxtype/releases/download/v0.7.5/voxtype-0.7.5-1.x86_64.rpm
-sudo dnf install ./voxtype-0.7.5-1.x86_64.rpm
+wget https://github.com/peteonrails/voxtype/releases/download/v1.0.1/voxtype-1.0.1-1.x86_64.rpm
+sudo dnf install ./voxtype-1.0.1-1.x86_64.rpm
 ```
 
 Recommended optional packages:
@@ -181,9 +181,7 @@ brew install --cask peteonrails/voxtype/voxtype
 voxtype configure
 ```
 
-The cask installs a `voxtype` command-line tool, not an app bundle. The build is
-not signed or notarized yet, so macOS asks you to approve it on first run. Or
-download `voxtype-0.7.5-macos-universal.dmg` from the [latest release](https://github.com/peteonrails/voxtype/releases/latest).
+Or download `voxtype-1.0.1-macos-universal.dmg` from the [latest release](https://github.com/peteonrails/voxtype/releases/latest). First launch opens a setup wizard that walks you through accessibility permissions, model download, and the FN-key hotkey.
 
 ### NixOS
 
@@ -191,13 +189,13 @@ A flake ships every variant:
 
 ```bash
 # Imperative install
-nix profile install github:peteonrails/voxtype/v0.7.5#vulkan
+nix profile install github:peteonrails/voxtype/v1.0.1#vulkan
 
 # Available outputs: default, vulkan, cuda, rocm, osdGtk4, osdNative
-nix build github:peteonrails/voxtype/v0.7.5#osdGtk4
+nix build github:peteonrails/voxtype/v1.0.1#osdGtk4
 
 # Or pin in your flake inputs
-inputs.voxtype.url = "github:peteonrails/voxtype/v0.7.5";
+inputs.voxtype.url = "github:peteonrails/voxtype/v1.0.1";
 ```
 
 ### Linux arm64 (aarch64) — manual install
