@@ -184,6 +184,22 @@ pub enum SetupAction {
         status: bool,
     },
 
+    /// xAI Grok STT: SuperGrok / X Premium+ login, logout, or status
+    Xai {
+        /// Sign in (device code). Uses the Grok/X subscription quota, not console tokens.
+        #[arg(long)]
+        login: bool,
+        /// Forget stored xAI OAuth tokens
+        #[arg(long)]
+        logout: bool,
+        /// Show whether an xAI OAuth session exists
+        #[arg(long)]
+        status: bool,
+        /// With --login: print the URL only (no xdg-open)
+        #[arg(long)]
+        no_browser: bool,
+    },
+
     /// Install the Quickshell QML tree for the voxtype-osd-quickshell launcher
     ///
     /// Copies shell.qml, OsdSurface.qml, EnginePicker.qml,
@@ -623,6 +639,29 @@ mod tests {
                 assert!(!qml, "should have qml=false");
             }
             _ => panic!("Expected Setup Dms command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_xai_login() {
+        let cli = Cli::parse_from(["voxtype", "setup", "xai", "--login"]);
+        match cli.command {
+            Some(Commands::Setup {
+                action:
+                    Some(SetupAction::Xai {
+                        login,
+                        logout,
+                        status,
+                        no_browser,
+                    }),
+                ..
+            }) => {
+                assert!(login);
+                assert!(!logout);
+                assert!(!status);
+                assert!(!no_browser);
+            }
+            _ => panic!("Expected Setup Xai command"),
         }
     }
 }

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::super::default_true;
 
-/// Cloud batch STT. Auth: `[xai] api_key`, then `VOXTYPE_XAI_API_KEY` / `XAI_API_KEY`.
+/// Cloud batch STT. Auth: `[xai] api_key`, env keys, or `voxtype setup xai --login`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct XaiConfig {
     #[serde(default)]

@@ -1,5 +1,6 @@
 //! Grok Speech-to-Text (`POST https://api.x.ai/v1/stt`). Batch after PTT.
 
+use super::xai_oauth;
 use super::Transcriber;
 use crate::config::XaiConfig;
 use crate::error::TranscribeError;
@@ -9,23 +10,24 @@ use ureq::serde_json;
 
 const DEFAULT_ENDPOINT: &str = "https://api.x.ai/v1/stt";
 
-#[derive(Debug)]
 pub struct XaiTranscriber {
     endpoint: String,
     language: Option<String>,
     format: bool,
     timeout: Duration,
-    api_key: String,
+    api_key: Option<String>,
 }
 
 impl XaiTranscriber {
     pub fn new(config: &XaiConfig) -> Result<Self, TranscribeError> {
-        let api_key = api_key(config.api_key.as_deref()).ok_or_else(|| {
-            TranscribeError::ConfigError(
-                "xAI engine needs an API key: [xai] api_key, VOXTYPE_XAI_API_KEY, or XAI_API_KEY"
+        let api_key = explicit_api_key(config.api_key.as_deref());
+        if api_key.is_none() && !xai_oauth::is_logged_in() {
+            return Err(TranscribeError::ConfigError(
+                "xAI engine needs credentials. Set [xai] api_key, VOXTYPE_XAI_API_KEY / XAI_API_KEY, \
+                 or run: voxtype setup xai --login"
                     .into(),
-            )
-        })?;
+            ));
+        }
 
         let endpoint = config
             .endpoint
@@ -49,8 +51,13 @@ impl XaiTranscriber {
             .map(str::to_string);
 
         tracing::info!(
-            "Configured xAI STT: endpoint={endpoint}, language={}",
-            language.as_deref().unwrap_or("auto")
+            "Configured xAI STT: endpoint={endpoint}, language={}, auth={}",
+            language.as_deref().unwrap_or("auto"),
+            if api_key.is_some() {
+                "api_key"
+            } else {
+                "oauth"
+            }
         );
 
         Ok(Self {
@@ -60,6 +67,13 @@ impl XaiTranscriber {
             timeout: Duration::from_secs(config.timeout_secs.unwrap_or(120).max(5)),
             api_key,
         })
+    }
+
+    fn bearer(&self) -> Result<String, TranscribeError> {
+        if let Some(ref k) = self.api_key {
+            return Ok(k.clone());
+        }
+        xai_oauth::access_token().map_err(|e| TranscribeError::ConfigError(e.to_string()))
     }
 
     fn encode_wav(samples: &[f32]) -> Result<Vec<u8>, TranscribeError> {
@@ -110,9 +124,27 @@ impl XaiTranscriber {
         body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
         (boundary, body)
     }
+
+    fn post(
+        &self,
+        bearer: &str,
+        boundary: &str,
+        body: &[u8],
+    ) -> Result<ureq::Response, Box<ureq::Error>> {
+        ureq::post(&self.endpoint)
+            .timeout(self.timeout)
+            .set(
+                "Content-Type",
+                &format!("multipart/form-data; boundary={boundary}"),
+            )
+            .set("Authorization", &format!("Bearer {bearer}"))
+            .set("User-Agent", "voxtype")
+            .send_bytes(body)
+            .map_err(Box::new)
+    }
 }
 
-fn api_key(from_config: Option<&str>) -> Option<String> {
+fn explicit_api_key(from_config: Option<&str>) -> Option<String> {
     if let Some(k) = from_config.map(str::trim).filter(|s| !s.is_empty()) {
         return Some(k.to_string());
     }
@@ -144,24 +176,27 @@ impl Transcriber for XaiTranscriber {
         let start = std::time::Instant::now();
         let wav = Self::encode_wav(samples)?;
         let (boundary, body) = self.build_multipart(&wav);
-        let response = ureq::post(&self.endpoint)
-            .timeout(self.timeout)
-            .set(
-                "Content-Type",
-                &format!("multipart/form-data; boundary={boundary}"),
-            )
-            .set("Authorization", &format!("Bearer {}", self.api_key))
-            .set("User-Agent", "voxtype")
-            .send_bytes(&body)
-            .map_err(|e| match e {
-                ureq::Error::Status(code, resp) => {
-                    let body = resp.into_string().unwrap_or_default();
-                    TranscribeError::RemoteError(format!("xAI STT HTTP {code}: {body}"))
+        let mut bearer = self.bearer()?;
+        let mut response = self.post(&bearer, &boundary, &body);
+        if let Err(e) = &response {
+            if let ureq::Error::Status(code, _) = e.as_ref() {
+                if *code == 401 && self.api_key.is_none() {
+                    if let Ok(tok) = xai_oauth::force_refresh() {
+                        bearer = tok;
+                        response = self.post(&bearer, &boundary, &body);
+                    }
                 }
-                ureq::Error::Transport(t) => {
-                    TranscribeError::NetworkError(format!("xAI STT request failed: {t}"))
-                }
-            })?;
+            }
+        }
+        let response = response.map_err(|e| match *e {
+            ureq::Error::Status(code, resp) => {
+                let body = resp.into_string().unwrap_or_default();
+                TranscribeError::RemoteError(format!("xAI STT HTTP {code}: {body}"))
+            }
+            ureq::Error::Transport(t) => {
+                TranscribeError::NetworkError(format!("xAI STT request failed: {t}"))
+            }
+        })?;
         let json: serde_json::Value = response.into_json().map_err(|e| {
             TranscribeError::RemoteError(format!("Failed to parse xAI STT response: {e}"))
         })?;
@@ -200,7 +235,7 @@ mod tests {
             language: None,
             format: true,
             timeout: Duration::from_secs(5),
-            api_key: "test".into(),
+            api_key: Some("test".into()),
         };
         let (_b, body) = t.build_multipart(b"WAV");
         let s = String::from_utf8_lossy(&body);
@@ -216,14 +251,14 @@ mod tests {
             language: Some("en".into()),
             format: true,
             timeout: Duration::from_secs(5),
-            api_key: "test".into(),
+            api_key: Some("test".into()),
         };
         let (_b, body) = t.build_multipart(b"WAV");
         let s = String::from_utf8_lossy(&body);
+        let lang = s.find("name=\"language\"").unwrap();
+        let format = s.find("name=\"format\"").unwrap();
         let file = s.find("name=\"file\"").unwrap();
-        assert!(s.contains("name=\"language\""));
-        assert!(s.contains("name=\"format\""));
-        assert!(file > s.find("name=\"language\"").unwrap());
+        assert!(lang < format && format < file, "{s}");
     }
 
     #[test]
@@ -233,13 +268,41 @@ mod tests {
             endpoint: Some("http://127.0.0.1/stt".into()),
             ..XaiConfig::default()
         };
-        let msg = XaiTranscriber::new(&cfg).unwrap_err().to_string();
+        let msg = match XaiTranscriber::new(&cfg) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("http endpoint should fail"),
+        };
         assert!(msg.contains("https"), "{msg}");
     }
 
     #[test]
-    fn rejects_missing_key() {
-        let err = XaiTranscriber::new(&XaiConfig::default()).unwrap_err();
-        assert!(err.to_string().contains("API key"));
+    fn rejects_missing_credentials() {
+        let prev_data = std::env::var_os("VOXTYPE_DATA_DIR");
+        let prev_a = std::env::var_os("VOXTYPE_XAI_API_KEY");
+        let prev_b = std::env::var_os("XAI_API_KEY");
+        let dir = std::env::temp_dir().join(format!("voxtype-xai-nocred-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var("VOXTYPE_DATA_DIR", &dir);
+        std::env::remove_var("VOXTYPE_XAI_API_KEY");
+        std::env::remove_var("XAI_API_KEY");
+        let err = match XaiTranscriber::new(&XaiConfig::default()) {
+            Err(e) => e,
+            Ok(_) => panic!("missing credentials should fail"),
+        };
+        match prev_data {
+            Some(v) => std::env::set_var("VOXTYPE_DATA_DIR", v),
+            None => std::env::remove_var("VOXTYPE_DATA_DIR"),
+        }
+        if let Some(v) = prev_a {
+            std::env::set_var("VOXTYPE_XAI_API_KEY", v);
+        }
+        if let Some(v) = prev_b {
+            std::env::set_var("XAI_API_KEY", v);
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains("credentials") || msg.contains("API key"),
+            "{msg}"
+        );
     }
 }

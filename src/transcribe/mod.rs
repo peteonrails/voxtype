@@ -22,6 +22,7 @@ pub mod subprocess;
 pub mod whisper;
 pub mod worker;
 pub mod xai;
+pub mod xai_oauth;
 
 pub use streaming::{SegmentId, StreamHandle, StreamingEvent, StreamingTranscriber};
 

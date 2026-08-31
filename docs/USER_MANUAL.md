@@ -488,7 +488,7 @@ See [SONIOX.md](SONIOX.md) for the full reference (realtime vs async modes, perf
 
 ### Cloud Backend: xAI Grok STT
 
-Batch Grok STT after you stop recording. Audio leaves the machine.
+Batch Grok STT after you stop recording. Audio leaves the machine. Pay-per-token API key, or SuperGrok / X Premium+ (`voxtype setup xai --login`) which uses the same plan quota as Grok web / grok CLI.
 
 ```toml
 engine = "xai"
