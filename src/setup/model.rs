@@ -309,40 +309,15 @@ const MOONSHINE_MODELS: &[MoonshineModelInfo] = &[
         ],
         huggingface_repo: "onnx-community/moonshine-base-zh-ONNX",
     },
-    MoonshineModelInfo {
-        name: "tiny-ja",
-        dir_name: "moonshine-tiny-ja",
-        size_mb: 100,
-        description: "Japanese (tiny)",
-        language: "ja",
-        license: "Community",
-        files: &[
-            ("onnx/encoder_model.onnx", "encoder_model.onnx"),
-            (
-                "onnx/decoder_model_merged.onnx",
-                "decoder_model_merged.onnx",
-            ),
-            ("tokenizer.json", "tokenizer.json"),
-        ],
-        huggingface_repo: "onnx-community/moonshine-tiny-ja-ONNX",
-    },
-    MoonshineModelInfo {
-        name: "tiny-zh",
-        dir_name: "moonshine-tiny-zh",
-        size_mb: 100,
-        description: "Mandarin Chinese (tiny)",
-        language: "zh",
-        license: "Community",
-        files: &[
-            ("onnx/encoder_model.onnx", "encoder_model.onnx"),
-            (
-                "onnx/decoder_model_merged.onnx",
-                "decoder_model_merged.onnx",
-            ),
-            ("tokenizer.json", "tokenizer.json"),
-        ],
-        huggingface_repo: "onnx-community/moonshine-tiny-zh-ONNX",
-    },
+    // tiny-ja and tiny-zh are deliberately absent (#694). Their upstream
+    // repos (onnx-community/moonshine-tiny-{ja,zh}-ONNX) were published
+    // without a decoder_model_merged.onnx export — only the plain no-past
+    // decoder, in any revision — and the transcriber drives the merged
+    // graph's use_cache_branch/past_key_values contract, so there is no
+    // upstream file it can run. They were also never mirrored to R2, so
+    // every download of them 404ed on the manifest. Restore them only if
+    // upstream adds a merged export (compare moonshine-base-ja-ONNX, which
+    // has one).
     MoonshineModelInfo {
         name: "tiny-ko",
         dir_name: "moonshine-tiny-ko",
@@ -831,6 +806,33 @@ impl ModelArtifact for OmnilingualModelInfo {
     }
 }
 
+impl ModelArtifact for OpenVinoModelInfo {
+    // Intentional: the trait method is `name()` but the struct field that
+    // serves as the canonical identifier is `dir_name`. Clippy's
+    // misnamed_getters lint fires on the mismatch; it's not a bug.
+    #[allow(clippy::misnamed_getters)]
+    fn name(&self) -> &str {
+        self.dir_name
+    }
+    fn engine_prefix(&self) -> &'static str {
+        "openvino"
+    }
+    fn upstream_repo(&self) -> &str {
+        self.huggingface_repo
+    }
+    fn expected_files(&self) -> Vec<ExpectedFile> {
+        // Every OpenVINO Whisper repo ships the same file set; the manifest
+        // is authoritative for sizes, so size 0 here like the other engines.
+        OPENVINO_MODEL_FILES
+            .iter()
+            .map(|f| ExpectedFile {
+                path: (*f).to_string(),
+                size: 0,
+            })
+            .collect()
+    }
+}
+
 impl ModelArtifact for CohereModelInfo {
     // Intentional: the trait method is `name()` but the struct field that
     // serves as the canonical identifier is `dir_name`. Clippy's
@@ -1009,6 +1011,27 @@ pub fn registry_snapshot() -> Vec<RegistryEntry> {
                 .map(|(remote, local)| RegistryFile {
                     upstream_path: (*remote).to_string(),
                     local_path: (*local).to_string(),
+                })
+                .collect(),
+        });
+    }
+    // OpenVINO Whisper conversions (Intel's official HF org). Keyed by
+    // dir_name like moonshine/sensevoice, since that is the on-disk layout
+    // download_artifact writes and the R2 tree must mirror byte-for-byte.
+    // Every repo ships the same file set; preprocessor_config.json differs
+    // per model (mel bin count) so it is fetched per-repo, never shared.
+    // Licenses verified 2026-09-01: whisper-* are Apache-2.0,
+    // distil-whisper-* are MIT (#692).
+    for m in OPENVINO_MODELS {
+        out.push(RegistryEntry {
+            engine_prefix: "openvino",
+            name: m.dir_name.to_string(),
+            upstream_repo: m.huggingface_repo.to_string(),
+            files: OPENVINO_MODEL_FILES
+                .iter()
+                .map(|f| RegistryFile {
+                    upstream_path: (*f).to_string(),
+                    local_path: (*f).to_string(),
                 })
                 .collect(),
         });
@@ -2725,14 +2748,33 @@ pub fn list_installed_parakeet() {
 // Moonshine Model Functions
 // =============================================================================
 
+fn find_moonshine_model(name: &str) -> Option<&'static MoonshineModelInfo> {
+    MOONSHINE_MODELS
+        .iter()
+        .find(|m| m.name == name || m.dir_name == name)
+}
+
 /// Check if a model name is a Moonshine model
 pub fn is_moonshine_model(name: &str) -> bool {
-    MOONSHINE_MODELS.iter().any(|m| m.name == name)
+    find_moonshine_model(name).is_some()
 }
 
 /// Get list of valid Moonshine model names
 pub fn valid_moonshine_model_names() -> Vec<&'static str> {
     MOONSHINE_MODELS.iter().map(|m| m.name).collect()
+}
+
+/// Moonshine names to show for `voxtype setup --model`. Uses the directory
+/// form so the suggestion can't be swallowed by the Whisper table (`base`
+/// and `tiny` are Whisper names too).
+pub fn moonshine_setup_model_names() -> Vec<&'static str> {
+    MOONSHINE_MODELS.iter().map(|m| m.dir_name).collect()
+}
+
+/// Config value for a Moonshine model: the short name, matching what the
+/// interactive picker writes and the `[moonshine]` default.
+pub fn moonshine_config_name(name: &str) -> Option<&'static str> {
+    find_moonshine_model(name).map(|m| m.name)
 }
 
 /// Directory name for a Moonshine model.
@@ -2783,9 +2825,7 @@ pub fn validate_moonshine_model(path: &Path) -> anyhow::Result<()> {
 /// after to guard against publisher errors that the sha256 check can't
 /// catch.
 pub fn download_moonshine_model(model_name: &str) -> anyhow::Result<()> {
-    let model = MOONSHINE_MODELS
-        .iter()
-        .find(|m| m.name == model_name)
+    let model = find_moonshine_model(model_name)
         .ok_or_else(|| anyhow::anyhow!("Unknown Moonshine model: {}", model_name))?;
 
     let models_dir = Config::models_dir();
@@ -2797,6 +2837,28 @@ pub fn download_moonshine_model(model_name: &str) -> anyhow::Result<()> {
 // =============================================================================
 // Cohere Transcribe Functions
 // =============================================================================
+
+fn find_cohere_model(name: &str) -> Option<&'static CohereModelInfo> {
+    COHERE_MODELS
+        .iter()
+        .find(|m| m.name == name || m.dir_name == name)
+}
+
+/// Check if a model name is a Cohere model
+pub fn is_cohere_model(name: &str) -> bool {
+    find_cohere_model(name).is_some()
+}
+
+/// Directory name for a Cohere model. Also its config value: the picker,
+/// the catalog, and the `[cohere]` default all use the directory form.
+pub fn cohere_dir_name(name: &str) -> Option<&'static str> {
+    find_cohere_model(name).map(|m| m.dir_name)
+}
+
+/// Cohere names to show for `voxtype setup --model`.
+pub fn cohere_setup_model_names() -> Vec<&'static str> {
+    COHERE_MODELS.iter().map(|m| m.dir_name).collect()
+}
 
 /// Validate that a Cohere model directory has the required files.
 ///
@@ -2843,9 +2905,7 @@ pub fn validate_cohere_model(path: &Path) -> anyhow::Result<()> {
 /// the unified downloader takes over so users don't wonder why their
 /// disk is filling.
 pub fn download_cohere_model(model_name: &str) -> anyhow::Result<()> {
-    let model = COHERE_MODELS
-        .iter()
-        .find(|m| m.name == model_name)
+    let model = find_cohere_model(model_name)
         .ok_or_else(|| anyhow::anyhow!("Unknown Cohere model: {}", model_name))?;
     let models_dir = Config::models_dir();
     let model_path = models_dir.join(model.dir_name);
@@ -3444,7 +3504,7 @@ pub fn list_installed_sensevoice() {
 // =============================================================================
 
 /// Validate a CTC-based ONNX model directory (model.int8.onnx or model.onnx + tokens.txt)
-fn validate_onnx_ctc_model(path: &Path) -> anyhow::Result<()> {
+pub(crate) fn validate_onnx_ctc_model(path: &Path) -> anyhow::Result<()> {
     if !path.exists() {
         anyhow::bail!("Model directory does not exist: {:?}", path);
     }
@@ -3463,6 +3523,119 @@ fn validate_onnx_ctc_model(path: &Path) -> anyhow::Result<()> {
             missing.push("tokens.txt");
         }
         anyhow::bail!("Incomplete model, missing: {}", missing.join(", "))
+    }
+}
+
+fn find_paraformer_model(name: &str) -> Option<&'static ParaformerModelInfo> {
+    PARAFORMER_MODELS
+        .iter()
+        .find(|m| m.name == name || m.dir_name == name)
+}
+
+/// Check if a model name is a Paraformer model
+pub fn is_paraformer_model(name: &str) -> bool {
+    find_paraformer_model(name).is_some()
+}
+
+/// Directory name for a Paraformer model. Also its config value: the catalog
+/// and the `[paraformer]` default use the directory form, and the runtime
+/// resolver accepts it.
+pub fn paraformer_dir_name(name: &str) -> Option<&'static str> {
+    find_paraformer_model(name).map(|m| m.dir_name)
+}
+
+/// Paraformer names to show for `voxtype setup --model`.
+pub fn paraformer_setup_model_names() -> Vec<&'static str> {
+    PARAFORMER_MODELS.iter().map(|m| m.dir_name).collect()
+}
+
+/// Download a Paraformer model by name (public API for run_setup).
+pub fn download_paraformer_model(model_name: &str) -> anyhow::Result<()> {
+    let model = find_paraformer_model(model_name)
+        .ok_or_else(|| anyhow::anyhow!("Unknown Paraformer model: {}", model_name))?;
+    let models_dir = Config::models_dir();
+    download_artifact(model, &models_dir)?;
+    validate_onnx_ctc_model(&models_dir.join(model.dir_name))?;
+    Ok(())
+}
+
+fn find_dolphin_model(name: &str) -> Option<&'static DolphinModelInfo> {
+    DOLPHIN_MODELS
+        .iter()
+        .find(|m| m.name == name || m.dir_name == name)
+}
+
+/// Check if a model name is a Dolphin model
+pub fn is_dolphin_model(name: &str) -> bool {
+    find_dolphin_model(name).is_some()
+}
+
+/// Directory name for a Dolphin model. Also its config value.
+pub fn dolphin_dir_name(name: &str) -> Option<&'static str> {
+    find_dolphin_model(name).map(|m| m.dir_name)
+}
+
+/// Dolphin names to show for `voxtype setup --model`. Uses the directory
+/// form so the suggestion can't be swallowed by the Whisper table (`base`
+/// is a Whisper name too).
+pub fn dolphin_setup_model_names() -> Vec<&'static str> {
+    DOLPHIN_MODELS.iter().map(|m| m.dir_name).collect()
+}
+
+/// Download a Dolphin model by name (public API for run_setup).
+pub fn download_dolphin_model(model_name: &str) -> anyhow::Result<()> {
+    let model = find_dolphin_model(model_name)
+        .ok_or_else(|| anyhow::anyhow!("Unknown Dolphin model: {}", model_name))?;
+    let models_dir = Config::models_dir();
+    download_artifact(model, &models_dir)?;
+    validate_onnx_ctc_model(&models_dir.join(model.dir_name))?;
+    Ok(())
+}
+
+fn find_omnilingual_model(name: &str) -> Option<&'static OmnilingualModelInfo> {
+    OMNILINGUAL_MODELS
+        .iter()
+        .find(|m| m.name == name || m.dir_name == name)
+}
+
+/// Check if a model name is an Omnilingual model
+pub fn is_omnilingual_model(name: &str) -> bool {
+    find_omnilingual_model(name).is_some()
+}
+
+/// Directory name for an Omnilingual model. Also its config value.
+pub fn omnilingual_dir_name(name: &str) -> Option<&'static str> {
+    find_omnilingual_model(name).map(|m| m.dir_name)
+}
+
+/// Omnilingual names to show for `voxtype setup --model`.
+pub fn omnilingual_setup_model_names() -> Vec<&'static str> {
+    OMNILINGUAL_MODELS.iter().map(|m| m.dir_name).collect()
+}
+
+/// Download an Omnilingual model by name (public API for run_setup).
+pub fn download_omnilingual_model(model_name: &str) -> anyhow::Result<()> {
+    let model = find_omnilingual_model(model_name)
+        .ok_or_else(|| anyhow::anyhow!("Unknown Omnilingual model: {}", model_name))?;
+    let models_dir = Config::models_dir();
+    download_artifact(model, &models_dir)?;
+    validate_onnx_ctc_model(&models_dir.join(model.dir_name))?;
+    Ok(())
+}
+
+/// Silently point the config at `engine` + `model_name`, like
+/// `set_parakeet_config`: no status output, so `run_setup` can print its own
+/// confirmation while honoring --quiet.
+pub(crate) fn set_engine_model_config(engine: &str, model_name: &str) -> anyhow::Result<()> {
+    if let Some(config_path) = Config::default_path() {
+        if config_path.exists() {
+            let content = std::fs::read_to_string(&config_path)?;
+            let updated = update_engine_in_config(&content, engine, model_name);
+            std::fs::write(&config_path, updated)?;
+        }
+        Ok(())
+    } else {
+        anyhow::bail!("Could not determine config path")
     }
 }
 
@@ -3751,17 +3924,6 @@ const OPENVINO_REQUIRED_MODEL_FILES: &[&str] = &[
     "preprocessor_config.json",
 ];
 
-fn openvino_download_command(file_path: &std::path::Path, url: &str) -> Command {
-    let mut command = Command::new("curl");
-    command
-        .arg("-fL")
-        .arg("--progress-bar")
-        .arg("-o")
-        .arg(file_path)
-        .arg(url);
-    command
-}
-
 const OPENVINO_MODELS: &[OpenVinoModelInfo] = &[
     // --- Tiny models ---
     OpenVinoModelInfo {
@@ -4035,11 +4197,18 @@ const OPENVINO_MODELS: &[OpenVinoModelInfo] = &[
     },
 ];
 
-/// Download an OpenVINO Whisper model by name
+/// Download an OpenVINO Whisper model by name.
+///
+/// Routes through the unified R2 downloader (#692) - manifest fetch, per-file
+/// sha256 verification, resume, and stall detection - replacing a per-file
+/// curl loop that fetched straight from huggingface.co with no integrity
+/// checking and skipped any file already on disk, however truncated.
+/// `validate_openvino_model` still runs after, as the inference-time check
+/// for the files OpenVINO GenAI actually loads.
 pub fn download_openvino_model(model_name: &str) -> anyhow::Result<()> {
     let model = OPENVINO_MODELS
         .iter()
-        .find(|m| m.name == model_name)
+        .find(|m| m.name == model_name || m.dir_name == model_name)
         .ok_or_else(|| {
             let valid: Vec<&str> = OPENVINO_MODELS.iter().map(|m| m.name).collect();
             anyhow::anyhow!(
@@ -4052,49 +4221,13 @@ pub fn download_openvino_model(model_name: &str) -> anyhow::Result<()> {
     let models_dir = Config::models_dir();
     let model_path = models_dir.join(model.dir_name);
 
-    std::fs::create_dir_all(&model_path)?;
-
     println!(
-        "\nDownloading OpenVINO Whisper {} (~{} MB, {})...\n",
+        "\nDownloading OpenVINO Whisper {} (~{} MB, {})...",
         model.name, model.size_mb, model.quantization
     );
 
-    for filename in OPENVINO_MODEL_FILES {
-        let file_path = model_path.join(filename);
+    download_artifact(model, &models_dir)?;
 
-        if file_path.exists() {
-            println!("  {} already exists, skipping", filename);
-            continue;
-        }
-
-        let url = format!(
-            "https://huggingface.co/{}/resolve/main/{}",
-            model.huggingface_repo, filename
-        );
-
-        println!("  Downloading {}...", filename);
-
-        let status = openvino_download_command(&file_path, &url).status();
-
-        match status {
-            Ok(exit_status) if exit_status.success() => {}
-            Ok(exit_status) => {
-                print_failure(&format!(
-                    "Download failed: curl exited with code {}",
-                    exit_status.code().unwrap_or(-1)
-                ));
-                let _ = std::fs::remove_file(&file_path);
-                anyhow::bail!("Download failed for {}", filename)
-            }
-            Err(e) => {
-                print_failure(&format!("Failed to run curl: {}", e));
-                print_info("Please ensure curl is installed");
-                anyhow::bail!("curl not available: {}", e)
-            }
-        }
-    }
-
-    // Validate critical files
     validate_openvino_model(&model_path).inspect_err(|_| {
         print_failure("Model download incomplete. Missing required files.");
     })?;
@@ -4244,22 +4377,96 @@ mod tests {
         );
     }
 
+    /// The OpenVINO download goes through `download_artifact` (#692), so its
+    /// artifacts must speak the manifest contract: R2 URL under the
+    /// `openvino` prefix keyed by directory name, and a manifest that
+    /// enumerates every file the runtime expects.
     #[test]
-    fn openvino_downloads_fail_on_http_errors() {
-        let command = openvino_download_command(
-            std::path::Path::new("/tmp/openvino-model-file"),
-            "https://example.invalid/model-file",
-        );
-        let args: Vec<_> = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
+    fn openvino_artifacts_follow_the_r2_manifest_contract() {
+        use super::super::manifest::{
+            manifest_url, validate_manifest, Manifest, ManifestFile, MANIFEST_SCHEMA_VERSION,
+        };
 
-        assert!(
-            args.iter()
-                .any(|arg| arg.starts_with('-') && arg[1..].contains('f')),
-            "curl must fail on HTTP errors instead of saving an error page: {args:?}"
+        let model = OPENVINO_MODELS
+            .iter()
+            .find(|m| m.name == "base.en-int8")
+            .unwrap();
+        assert_eq!(
+            manifest_url(model),
+            "https://models.voxtype.io/openvino/openvino-whisper-base.en-int8-ov/manifest.json"
         );
+
+        // A manifest listing exactly the published file set validates.
+        let good = Manifest {
+            version: MANIFEST_SCHEMA_VERSION,
+            model: model.dir_name.to_string(),
+            engine: "openvino".to_string(),
+            files: OPENVINO_MODEL_FILES
+                .iter()
+                .map(|f| ManifestFile {
+                    path: (*f).to_string(),
+                    size: 1,
+                    sha256: "aa".to_string(),
+                })
+                .collect(),
+        };
+        validate_manifest(&good, model).unwrap();
+
+        // A publisher who forgets a file (and so would never sha256-verify
+        // it) is rejected before anything lands on disk.
+        let mut incomplete = good.clone();
+        incomplete
+            .files
+            .retain(|f| f.path != "preprocessor_config.json");
+        let err = validate_manifest(&incomplete, model)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("preprocessor_config.json"), "{}", err);
+
+        // A manifest uploaded under the wrong prefix fails fast.
+        let mut misrouted = good.clone();
+        misrouted.engine = "moonshine".to_string();
+        assert!(validate_manifest(&misrouted, model).is_err());
+    }
+
+    /// Every catalog entry must have a registry entry keyed by its directory
+    /// name, or the mirror script can't publish it and the runtime download
+    /// 404s on the manifest - exactly how moonshine tiny-ja/tiny-zh shipped
+    /// broken (#694).
+    #[test]
+    fn every_openvino_model_is_in_the_mirror_registry() {
+        let registry = registry_snapshot();
+        for model in OPENVINO_MODELS {
+            let entry = registry
+                .iter()
+                .find(|e| e.engine_prefix == "openvino" && e.name == model.dir_name)
+                .unwrap_or_else(|| panic!("'{}' has no registry entry", model.dir_name));
+            let paths: Vec<&str> = entry.files.iter().map(|f| f.local_path.as_str()).collect();
+            for file in OPENVINO_MODEL_FILES {
+                assert!(
+                    paths.contains(file),
+                    "registry entry for '{}' is missing {}",
+                    model.dir_name,
+                    file
+                );
+            }
+        }
+    }
+
+    /// `download_openvino_model` is called with short names by `run_setup`
+    /// and the picker, and with directory names by anything holding a
+    /// catalog entry; both must resolve to the same artifact.
+    #[test]
+    fn openvino_models_resolve_by_short_and_directory_name() {
+        for model in OPENVINO_MODELS {
+            for name in [model.name, model.dir_name] {
+                let found = OPENVINO_MODELS
+                    .iter()
+                    .find(|m| m.name == name || m.dir_name == name)
+                    .unwrap_or_else(|| panic!("'{}' did not resolve", name));
+                assert_eq!(found.dir_name, model.dir_name);
+            }
+        }
     }
 
     #[test]

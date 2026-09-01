@@ -1399,8 +1399,6 @@ The Moonshine model to use. Can be a model name (looked up in `~/.local/share/vo
 | `base` | 61M | 237MB | Better accuracy, English |
 | `base-ja` | 61M | 237MB | Multilingual (Japanese) |
 | `base-zh` | 61M | 237MB | Multilingual (Mandarin) |
-| `tiny-ja` | 27M | 100MB | Multilingual (Japanese) |
-| `tiny-zh` | 27M | 100MB | Multilingual (Mandarin) |
 | `tiny-ko` | 27M | 100MB | Multilingual (Korean) |
 | `tiny-ar` | 27M | 100MB | Multilingual (Arabic) |
 
