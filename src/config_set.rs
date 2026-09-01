@@ -100,6 +100,7 @@ pub const ENGINE_NAMES: &[&str] = &[
     "dolphin",
     "omnilingual",
     "cohere",
+    "openvino",
 ];
 
 /// Is the engine name one we recognize at all?
@@ -120,9 +121,8 @@ pub fn parse_engine(name: &str) -> Option<TranscriptionEngine> {
 /// This is the source-of-truth check that matches what the TUI shows on
 /// source builds (see `EngineState::refresh_binary_match` in
 /// `src/tui/engine.rs`). The TUI's `compiled_features()` list in
-/// `src/setup/binary.rs` is incomplete (it only enumerates parakeet + GPU
-/// features), so we evaluate `cfg!` directly here rather than going
-/// through that helper.
+/// `src/setup/binary.rs`, so we evaluate `cfg!` directly here rather than
+/// coupling validation to its user-facing labels.
 ///
 /// Matches `TranscriptionEngine` exhaustively so adding a new variant
 /// produces a compile error here, not a silent `false` at runtime. The
@@ -141,6 +141,7 @@ pub fn engine_feature_compiled(name: &str) -> bool {
         TranscriptionEngine::Dolphin => cfg!(feature = "dolphin"),
         TranscriptionEngine::Omnilingual => cfg!(feature = "omnilingual"),
         TranscriptionEngine::Cohere => cfg!(feature = "cohere"),
+        TranscriptionEngine::OpenVino => cfg!(feature = "openvino-whisper"),
     }
 }
 

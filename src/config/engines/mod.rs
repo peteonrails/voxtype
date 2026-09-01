@@ -6,6 +6,7 @@ mod cohere;
 mod dolphin;
 mod moonshine;
 mod omnilingual;
+mod openvino;
 mod paraformer;
 mod parakeet;
 mod sensevoice;
@@ -15,6 +16,7 @@ pub use cohere::CohereConfig;
 pub use dolphin::DolphinConfig;
 pub use moonshine::MoonshineConfig;
 pub use omnilingual::OmnilingualConfig;
+pub use openvino::OpenVinoConfig;
 pub use paraformer::ParaformerConfig;
 pub use parakeet::{ParakeetConfig, ParakeetModelType};
 pub use sensevoice::SenseVoiceConfig;
@@ -63,6 +65,9 @@ pub enum TranscriptionEngine {
     /// task tokens). Top of the Open ASR Leaderboard.
     /// Requires: cargo build --features cohere
     Cohere,
+    /// Use OpenVINO Whisper (Intel NPU/CPU/GPU via OpenVINO Runtime).
+    /// Requires: cargo build --features openvino-whisper
+    OpenVino,
     /// Use Soniox (cloud streaming WebSocket STT).
     Soniox,
 }
