@@ -309,40 +309,15 @@ const MOONSHINE_MODELS: &[MoonshineModelInfo] = &[
         ],
         huggingface_repo: "onnx-community/moonshine-base-zh-ONNX",
     },
-    MoonshineModelInfo {
-        name: "tiny-ja",
-        dir_name: "moonshine-tiny-ja",
-        size_mb: 100,
-        description: "Japanese (tiny)",
-        language: "ja",
-        license: "Community",
-        files: &[
-            ("onnx/encoder_model.onnx", "encoder_model.onnx"),
-            (
-                "onnx/decoder_model_merged.onnx",
-                "decoder_model_merged.onnx",
-            ),
-            ("tokenizer.json", "tokenizer.json"),
-        ],
-        huggingface_repo: "onnx-community/moonshine-tiny-ja-ONNX",
-    },
-    MoonshineModelInfo {
-        name: "tiny-zh",
-        dir_name: "moonshine-tiny-zh",
-        size_mb: 100,
-        description: "Mandarin Chinese (tiny)",
-        language: "zh",
-        license: "Community",
-        files: &[
-            ("onnx/encoder_model.onnx", "encoder_model.onnx"),
-            (
-                "onnx/decoder_model_merged.onnx",
-                "decoder_model_merged.onnx",
-            ),
-            ("tokenizer.json", "tokenizer.json"),
-        ],
-        huggingface_repo: "onnx-community/moonshine-tiny-zh-ONNX",
-    },
+    // tiny-ja and tiny-zh are deliberately absent (#694). Their upstream
+    // repos (onnx-community/moonshine-tiny-{ja,zh}-ONNX) were published
+    // without a decoder_model_merged.onnx export — only the plain no-past
+    // decoder, in any revision — and the transcriber drives the merged
+    // graph's use_cache_branch/past_key_values contract, so there is no
+    // upstream file it can run. They were also never mirrored to R2, so
+    // every download of them 404ed on the manifest. Restore them only if
+    // upstream adds a merged export (compare moonshine-base-ja-ONNX, which
+    // has one).
     MoonshineModelInfo {
         name: "tiny-ko",
         dir_name: "moonshine-tiny-ko",
