@@ -6,7 +6,7 @@
 
 Voice-to-text for Linux. 9-11× realtime on your CPU. Local by default.
 
-Hold a hotkey (default: ScrollLock) while speaking, release to transcribe and output the text at your cursor position. Voxtype runs Cohere Transcribe (#1 on the Open ASR Leaderboard) faster than realtime on a plain Zen 4 CPU. Parakeet, Whisper, and five more engines if you want them. No cloud, no subscription, no telemetry.
+Hold a hotkey (default: ScrollLock) while speaking, release to transcribe and output the text at your cursor position. Voxtype runs Cohere Transcribe (#1 on the Open ASR Leaderboard) faster than realtime on a plain Zen 4 CPU. Parakeet, Whisper, and six more engines if you want them. No cloud, no subscription, no telemetry.
 
 ## Features
 
@@ -14,9 +14,10 @@ Hold a hotkey (default: ScrollLock) while speaking, release to transcribe and ou
 
 - **Cohere Transcribe at 9-11× realtime — on your CPU.** Quantized to 1.5 GB (q4f16). Punctuation, capitalization, and inverse text normalization out of the box. Sits at #1 on the Open ASR Leaderboard. *(New in 0.7.0)*
 - **Parakeet on AMD and NVIDIA GPUs.** MIGraphX 7.2 for Radeon, separate CUDA 12 and CUDA 13 binaries for every NVIDIA driver generation, Vulkan for Whisper across vendors. *(MIGraphX new in 0.7.0)*
+- **OpenVINO Whisper on Intel NPU, CPU, or GPU.** Run Whisper models through OpenVINO IR with Intel NPU acceleration on Lunar Lake machines, plus CPU/GPU fallback on other Intel systems.
 - **Text processing built in.** Spoken punctuation (`"comma"` → `,`), per-user replacement tables for common mistranscriptions, and an optional post-processing pipe through any LLM or shell script. Fix domain terms, drop filler words, polish grammar — all without leaving voxtype.
-- **Dynamic per-engine model loading.** Configure all 7 engines, pay memory only for the active one. Models load on first use and unload when idle.
-- **Seven transcription engines.** Whisper, Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual. Switch with `voxtype configure` or one config line. CJK and 1600+ languages covered by the multilingual engines.
+- **Dynamic per-engine model loading.** Configure all 9 engines, pay memory only for the active one. Models load on first use and unload when idle.
+- **Nine transcription engines.** Whisper, Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual, Cohere, and OpenVINO Whisper. Switch with `voxtype configure` or one config line. CJK and 1600+ languages covered by the multilingual engines.
 - **Meeting mode.** Continuous transcription with chunked processing, speaker attribution, and export to Markdown, JSON, SRT, or VTT.
 
 ### Native Linux integration
@@ -370,11 +371,13 @@ Voxtype ships separate binaries for Whisper and ONNX engines. Use `voxtype setup
 | **Paraformer** | zh+en, zh+yue+en | Non-autoregressive (ONNX) | Chinese-English bilingual |
 | **Dolphin** | 40 languages + 22 Chinese dialects | CTC E-Branchformer (ONNX) | Eastern languages (no English) |
 | **Omnilingual** | 1600+ languages | wav2vec2 CTC (ONNX) | Low-resource and rare languages |
+| **Cohere Transcribe** | 14 languages | Encoder-decoder (ONNX) | Fast CPU dictation with punctuation |
+| **OpenVINO Whisper** | 99 languages | Encoder-decoder (OpenVINO) | Intel NPU (Lunar Lake), CPU/GPU fallback |
 
 To set the engine in your config:
 
 ```toml
-engine = "sensevoice"  # or: whisper, parakeet, moonshine, paraformer, dolphin, omnilingual
+engine = "sensevoice"  # or: whisper, parakeet, moonshine, paraformer, dolphin, omnilingual, cohere, openvino
 ```
 
 Or override on the command line:
@@ -430,6 +433,44 @@ cargo build --release --features gpu-metal
 ```bash
 cargo build --release --features gpu-hipblas
 ```
+
+### Intel NPU (Lunar Lake, Arrow Lake, Meteor Lake)
+
+Intel NPU acceleration uses OpenVINO GenAI with Whisper models exported in OpenVINO IR format:
+
+```bash
+# Build with OpenVINO support
+cargo build --release --features openvino-whisper
+
+# Arch Linux: install the core runtime plus the plugin/driver for your device
+sudo pacman -S openvino openvino-intel-npu-plugin intel-npu-driver        # NPU
+# sudo pacman -S openvino openvino-intel-gpu-plugin level-zero-loader intel-compute-runtime  # GPU
+# sudo pacman -S openvino                                                  # CPU
+
+# Download a model
+voxtype setup model  # Select an OpenVINO model
+
+# Configure
+cat >> ~/.config/voxtype/config.toml << 'EOF'
+engine = "openvino"
+
+[openvino]
+model = "base.en-int8"
+device = "NPU"
+EOF
+```
+
+Every device also requires `libopenvino_genai_c.so` from Intel's
+[version-matched OpenVINO GenAI C/C++ SDK archive](https://storage.openvinotoolkit.org/repositories/openvino_genai/packages/).
+The `openvino-genai` pip wheel and `openvino-genai-bin` package do not ship this
+C API library. Extract the SDK and set `openvino_dir` to its root (or add
+`runtime/lib/intel64` to `LD_LIBRARY_PATH`). The OpenVINO-enabled release binary
+loads this runtime only when `engine = "openvino"`, so other engines do not
+require any OpenVINO packages.
+
+The NPU driver requires a reboot; verify it with `ls /dev/accel/accel*`. For an
+Intel GPU, verify a render node with `ls /dev/dri/renderD*`. Set `device = "CPU"`
+for CPU-only inference, which needs no device-specific driver.
 
 ### Performance Comparison
 

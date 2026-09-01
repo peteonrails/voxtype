@@ -55,7 +55,7 @@ use crate::config::Config;
 use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, Mutex};
@@ -540,6 +540,68 @@ impl Default for LevelBucketer {
     }
 }
 
+/// Shared handle for tracking "time since audio last showed sustained
+/// speech", used to drive silence-based auto-stop for external-trigger
+/// (wake-word) recordings — those have no user-driven stop signal, so
+/// something has to decide the user is done talking.
+///
+/// Cloning is cheap (`Arc` inside); the emitter task holds one clone and
+/// updates it, the daemon's periodic checker holds another and reads it.
+/// Reset on construction so a session with no speech yet reports "elapsed
+/// since the session started", not zero or a stale value from a prior use.
+#[derive(Clone)]
+pub struct SpeechTracker {
+    inner: Arc<Mutex<SpeechTrackerInner>>,
+    threshold_dbfs: f32,
+}
+
+struct SpeechTrackerInner {
+    last_speech_at: Instant,
+    consecutive_loud: u32,
+}
+
+/// A frame's peak at/above the threshold only counts as speech once this
+/// many consecutive 100 Hz frames (30 ms) have reached it. A single frame's
+/// peak is too spike-prone on a noisy mic (fans, HVAC, movement) to reset
+/// the silence timer on its own — without this, any ambient transient keeps
+/// the timer from ever accumulating. Real words sustain well past 30 ms.
+const SPEECH_BURST_FRAMES: u32 = 3;
+
+impl SpeechTracker {
+    pub fn new(threshold_dbfs: f32) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(SpeechTrackerInner {
+                last_speech_at: Instant::now(),
+                consecutive_loud: 0,
+            })),
+            threshold_dbfs,
+        }
+    }
+
+    /// Record one bucketed frame's peak level. A run of
+    /// [`SPEECH_BURST_FRAMES`] consecutive frames at or above the speech
+    /// threshold bumps the "last speech" timestamp; a lone loud frame (or
+    /// a quiet frame) doesn't, so a noisy mic can't keep the silence clock
+    /// from ever accumulating.
+    pub async fn observe(&self, peak_dbfs: f32) {
+        let mut inner = self.inner.lock().await;
+        if peak_dbfs >= self.threshold_dbfs {
+            inner.consecutive_loud += 1;
+            if inner.consecutive_loud >= SPEECH_BURST_FRAMES {
+                inner.last_speech_at = Instant::now();
+            }
+        } else {
+            inner.consecutive_loud = 0;
+        }
+    }
+
+    /// Time elapsed since the last speech burst (or since construction, if
+    /// none has arrived yet).
+    pub async fn silence_elapsed(&self) -> Duration {
+        self.inner.lock().await.last_speech_at.elapsed()
+    }
+}
+
 /// Spawn a forwarder task that reads from an `mpsc::Receiver<Vec<f32>>`
 /// (the chunk stream from `AudioCapture::start()`), buckets the samples
 /// into 100 Hz frames, and publishes them to the supplied `FrameSink`.
@@ -550,21 +612,24 @@ pub fn spawn_emitter(
     chunk_rx: mpsc::Receiver<Vec<f32>>,
     sink: FrameSink,
 ) -> tokio::task::JoinHandle<()> {
-    spawn_emitter_with_streaming_tap(chunk_rx, sink, None)
+    spawn_emitter_with_streaming_tap(chunk_rx, sink, None, None)
 }
 
 /// Like [`spawn_emitter`] but also forwards every chunk to an optional
-/// `streaming_tx`, used by the streaming transcription pipeline to feed
-/// audio into a backend without disturbing the OSD level emitter.
+/// `streaming_tx` (used by the streaming transcription pipeline to feed
+/// audio into a backend without disturbing the OSD level emitter) and
+/// updates an optional [`SpeechTracker`] from each bucketed frame's peak
+/// level (used for silence-based auto-stop).
 ///
 /// When `streaming_tx` is `Some`, each chunk is cloned and `try_send`'d to
 /// it. Failure to send (closed receiver, full bounded channel) is logged at
-/// trace and never blocks the level emitter. When `streaming_tx` is `None`,
-/// behavior is identical to [`spawn_emitter`].
+/// trace and never blocks the level emitter. When both optional args are
+/// `None`, behavior is identical to [`spawn_emitter`].
 pub fn spawn_emitter_with_streaming_tap(
     mut chunk_rx: mpsc::Receiver<Vec<f32>>,
     sink: FrameSink,
     streaming_tx: Option<mpsc::Sender<Vec<f32>>>,
+    speech_tracker: Option<SpeechTracker>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut bucketer = LevelBucketer::new();
@@ -576,6 +641,9 @@ pub fn spawn_emitter_with_streaming_tap(
             out.clear();
             bucketer.push(&chunk, &mut out);
             for frame in out.drain(..) {
+                if let Some(tracker) = &speech_tracker {
+                    tracker.observe(frame.peak_dbfs).await;
+                }
                 sink.publish(frame);
             }
 
@@ -586,6 +654,28 @@ pub fn spawn_emitter_with_streaming_tap(
             }
         }
         tracing::trace!("Audio level emitter task ended");
+    })
+}
+
+/// Like [`spawn_emitter_with_streaming_tap`] but with no `FrameSink` to
+/// publish to — for silence tracking on a recording that has no OSD level
+/// hub running (OSD disabled or bind failed). Buckets samples purely to
+/// feed `speech_tracker`; frames are computed and discarded otherwise.
+pub fn spawn_silence_tracker(
+    mut chunk_rx: mpsc::Receiver<Vec<f32>>,
+    speech_tracker: SpeechTracker,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut bucketer = LevelBucketer::new();
+        let mut out: Vec<AudioFrame> = Vec::with_capacity(8);
+        while let Some(chunk) = chunk_rx.recv().await {
+            out.clear();
+            bucketer.push(&chunk, &mut out);
+            for frame in out.drain(..) {
+                speech_tracker.observe(frame.peak_dbfs).await;
+            }
+        }
+        tracing::trace!("Silence-tracking-only emitter task ended");
     })
 }
 

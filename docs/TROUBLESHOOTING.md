@@ -321,6 +321,24 @@ curl -L -o ~/.local/share/voxtype/models/ggml-base.en.bin \
     https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
 ```
 
+### OpenVINO: transcription fails with "unknown exception" (but the daemon starts fine)
+
+**Cause:** The model directory is missing `preprocessor_config.json` (mel-spectrogram feature-extraction parameters). This file isn't needed to *load* the model — only the `.xml`/`.bin` graph files are — so the daemon starts and logs "Model loaded, ready for voice input" with no complaint. OpenVINO GenAI's `WhisperPipeline` only reads it on the *first real transcription call*, where its absence surfaces as an opaque `unknown exception` instead of a clear error.
+
+Models downloaded by older Voxtype versions may be missing it because the downloader's file list did not include it. Current builds check for this file at startup and fail with a clear message and fix command rather than letting the model reach this confusing runtime error.
+
+**Solution:**
+```bash
+# Re-download the model (fetches the missing file along with everything else)
+voxtype setup --download --model <model-name>
+
+# Or fetch just the missing file directly (note: NOT identical across model
+# sizes -- large-v3/large-v3-turbo use 128 mel bins, everything else uses 80,
+# so fetch it from the specific model's own repo, not a different one's)
+curl -Lo ~/.local/share/voxtype/models/<model-dir>/preprocessor_config.json \
+    https://huggingface.co/<org>/<model-repo>/resolve/main/preprocessor_config.json
+```
+
 ### Voxtype crashes during transcription (Linux)
 
 **Cause:** On some Linux systems (particularly with glibc 2.42+ like Ubuntu 25.10), the whisper-rs FFI bindings crash due to C++ exceptions crossing the FFI boundary.

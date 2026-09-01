@@ -1,5 +1,7 @@
 use super::parse::parse_config_salvaging;
-use super::{Config, LanguageConfig, OutputMode, SonioxConfig, TranscriptionEngine};
+use super::{
+    Config, LanguageConfig, OpenVinoConfig, OutputMode, SonioxConfig, TranscriptionEngine,
+};
 use crate::error::VoxtypeError;
 use std::path::{Path, PathBuf};
 
@@ -109,6 +111,12 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     }
     if let Ok(val) = std::env::var("VOXTYPE_ON_DEMAND_LOADING") {
         config.whisper.on_demand_loading = parse_bool_env(&val);
+    }
+    if let Ok(dir) = std::env::var("VOXTYPE_OPENVINO_DIR") {
+        config
+            .openvino
+            .get_or_insert_with(OpenVinoConfig::default)
+            .openvino_dir = Some(dir);
     }
 
     // Audio
@@ -281,5 +289,35 @@ mod tests {
         assert_eq!(config.hotkey.key, "F12");
         assert_eq!(config.whisper.model, "tiny.en");
         assert_eq!(config.output.mode, OutputMode::Clipboard);
+    }
+
+    /// #646's user-facing contract: a config file with one broken section
+    /// still loads. Before the salvage path, `load_config` returned Err here
+    /// and the daemon refused to start, costing the user every setting they
+    /// had over one bad value.
+    #[test]
+    fn load_config_warns_but_succeeds_on_a_partially_bad_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+                [hotkey]
+                key = "F13"
+
+                [audio]
+                max_duration_secs = "not a number"
+            "#,
+        )
+        .unwrap();
+
+        let config = load_config(Some(&config_path))
+            .expect("a partially bad config must load, not refuse to start (#646)");
+        assert_eq!(config.hotkey.key, "F13", "the good section must survive");
+        assert_eq!(
+            config.audio.max_duration_secs,
+            Config::default().audio.max_duration_secs,
+            "the bad section falls back to its default"
+        );
     }
 }

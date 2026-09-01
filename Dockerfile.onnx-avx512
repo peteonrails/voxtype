@@ -60,7 +60,7 @@ ENV ORT_STRATEGY=download
 
 # Disable LTO for faster builds
 # Build with all ONNX engines
-RUN cargo build --release --target x86_64-unknown-linux-gnu --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,ml-diarization \
+RUN cargo build --release --target x86_64-unknown-linux-gnu --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,openvino-whisper,ml-diarization \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
     && cp target/x86_64-unknown-linux-gnu/release/voxtype /tmp/voxtype-onnx-avx512

@@ -398,7 +398,8 @@ impl Variant {
     /// True if this variant's binary was compiled with the feature for the
     /// given engine. Whisper variants only support `whisper`; ONNX variants
     /// support every ONNX-based engine the project ships (parakeet,
-    /// moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere).
+    /// moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere,
+    /// OpenVINO).
     pub const fn supports_engine(self, engine: &str) -> bool {
         match self.family() {
             EngineFamily::Whisper => matches_str(engine, "whisper"),
@@ -410,6 +411,7 @@ impl Variant {
                     || matches_str(engine, "dolphin")
                     || matches_str(engine, "omnilingual")
                     || matches_str(engine, "cohere")
+                    || matches_str(engine, "openvino")
             }
         }
     }
@@ -838,6 +840,9 @@ pub fn compiled_features() -> Vec<&'static str> {
     if cfg!(feature = "cohere") {
         f.push("cohere");
     }
+    if cfg!(feature = "openvino-whisper") {
+        f.push("openvino");
+    }
     // Meeting-mode capability: ML-based speaker diarization (ECAPA-TDNN).
     // When absent, meeting mode falls back to source-based attribution.
     if cfg!(feature = "ml-diarization") {
@@ -1145,6 +1150,13 @@ mod tests {
         let _ = inv.recommendation;
     }
 
+    #[test]
+    fn packaged_onnx_variants_include_openvino_engine() {
+        assert!(Variant::OnnxAvx2.supports_engine("openvino"));
+        assert!(Variant::OnnxAvx512.supports_engine("openvino"));
+        assert!(!Variant::WhisperAvx2.supports_engine("openvino"));
+    }
+
     /// Regression test for #383: `compiled_features()` previously omitted
     /// the six ONNX engines and `ml-diarization`. The bug was visible to
     /// users in `voxtype info variants` and the TUI inventory panes, and
@@ -1178,6 +1190,9 @@ mod tests {
         require_feature_listed!("dolphin");
         require_feature_listed!("omnilingual");
         require_feature_listed!("cohere");
+        if cfg!(feature = "openvino-whisper") {
+            assert!(f.contains(&"openvino"));
+        }
         require_feature_listed!("ml-diarization");
         require_feature_listed!("gpu-vulkan");
         require_feature_listed!("gpu-cuda");
