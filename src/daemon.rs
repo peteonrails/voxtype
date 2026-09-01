@@ -110,6 +110,15 @@ async fn end_recording_notification(
     }
 }
 
+/// Whether a transcription task's `JoinError` means the engine that ran it
+/// is suspect. A `JoinError` has exactly two causes: the daemon aborted the
+/// task (a cancel — our own doing, the engine is fine) or the task panicked
+/// (the engine's internal state is whatever the panic left behind). Only the
+/// panic warrants discarding cached engine instances (#643).
+fn join_error_poisons_engine(e: &tokio::task::JoinError) -> bool {
+    !e.is_cancelled()
+}
+
 /// Write state to file for external integrations (e.g., Waybar)
 fn write_state_file(path: &PathBuf, state: &str) {
     // Ensure parent directory exists
@@ -843,6 +852,13 @@ pub struct Daemon {
     // keyboard-layout hints to eitype/dotool, see issue #180) after the task
     // completes. Cleared when transcription_task is taken.
     active_transcriber: Option<Arc<dyn Transcriber>>,
+    // Engine instance preloaded at startup when on_demand_loading is off.
+    // Whisper draws its transcriber from model_manager instead; every other
+    // engine clones from here. A field rather than a `run()` local so the
+    // panic recovery in handle_transcription_result can discard a poisoned
+    // instance (#643) — get_transcriber_for_recording re-creates it on the
+    // next recording when it finds this empty.
+    transcriber_preloaded: Option<Arc<dyn Transcriber>>,
     // Background tasks for eager chunk transcriptions (chunk_index, task)
     eager_chunk_tasks: Vec<(
         usize,
@@ -970,6 +986,7 @@ impl Daemon {
             whisper_prepare_task: None,
             transcription_task: None,
             active_transcriber: None,
+            transcriber_preloaded: None,
             eager_chunk_tasks: Vec::new(),
             vad,
             meeting_daemon: None,
@@ -1230,7 +1247,6 @@ impl Daemon {
     #[allow(clippy::too_many_arguments)]
     async fn try_start_streaming(
         &mut self,
-        transcriber_preloaded: &Option<Arc<dyn Transcriber>>,
         state: &mut State,
         audio_capture: &mut Option<Box<dyn AudioCapture>>,
         streaming_handle: &mut Option<StreamHandle>,
@@ -1243,7 +1259,9 @@ impl Daemon {
         // an is_recording() state, so a leftover cancel file would kill the
         // session moments after it starts. See #606.
         cleanup_cancel_file();
-        let Some(transcriber) = transcriber_preloaded.as_ref() else {
+        // Clone out of the field so the borrow doesn't overlap the
+        // `&mut self` capture start below.
+        let Some(transcriber) = self.transcriber_preloaded.clone() else {
             return false;
         };
         if transcriber.as_streaming().is_none() {
@@ -1342,7 +1360,6 @@ impl Daemon {
     /// keybinding) and the silence-timeout auto-stop, which need identical
     /// per-state-variant stop behavior; the only difference between them is
     /// *why* the stop fired, not what happens next.
-    #[allow(clippy::too_many_arguments)]
     async fn stop_active_recording(
         &mut self,
         state: &mut State,
@@ -1350,7 +1367,6 @@ impl Daemon {
         streaming_session: &mut Option<StreamingSession>,
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
         eager_transcriber: &mut Option<Arc<dyn Transcriber>>,
-        transcriber_preloaded: &Option<Arc<dyn Transcriber>>,
     ) {
         // Notify an external-trigger caller that this session is ending,
         // regardless of why (stop, silence timeout, hard timeout) — it may
@@ -1395,13 +1411,8 @@ impl Daemon {
         } else if let State::Recording { model_override, .. } = &*state {
             let model_override = model_override.clone();
 
-            self.start_transcription_task(
-                state,
-                audio_capture,
-                model_override,
-                transcriber_preloaded,
-            )
-            .await;
+            self.start_transcription_task(state, audio_capture, model_override)
+                .await;
         } else if state.is_eager_recording() {
             // Handle eager recording stop via external trigger - extract model_override first
             let model_override = match &*state {
@@ -1436,7 +1447,7 @@ impl Daemon {
             .await;
 
             let transcriber = match self
-                .get_transcriber_for_recording(model_override.as_deref(), transcriber_preloaded)
+                .get_transcriber_for_recording(model_override.as_deref())
                 .await
             {
                 Ok(t) => t,
@@ -1742,7 +1753,6 @@ impl Daemon {
     async fn get_transcriber_for_recording(
         &mut self,
         model_override: Option<&str>,
-        transcriber_preloaded: &Option<Arc<dyn Transcriber>>,
     ) -> std::result::Result<Arc<dyn Transcriber>, ()> {
         if self.config.on_demand_loading() {
             // Wait for background model load task
@@ -1780,12 +1790,36 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox => {
-                    if let Some(ref t) = transcriber_preloaded {
-                        Ok(t.clone())
+                    if let Some(t) = self.transcriber_preloaded.clone() {
+                        Ok(t)
                     } else {
-                        tracing::error!("Parakeet transcriber not preloaded");
-                        self.play_feedback(SoundEvent::Error);
-                        Err(())
+                        // Empty on the non-on-demand path means the panic
+                        // recovery discarded a poisoned instance (#643).
+                        // Re-create rather than error so one bad recording
+                        // doesn't disable every one after it.
+                        tracing::info!("Transcriber not loaded; creating a fresh instance");
+                        let config = self.config.clone();
+                        let created = tokio::task::spawn_blocking(move || {
+                            crate::transcribe::create_transcriber(&config)
+                        })
+                        .await;
+                        match created {
+                            Ok(Ok(t)) => {
+                                let t: Arc<dyn Transcriber> = Arc::from(t);
+                                self.transcriber_preloaded = Some(t.clone());
+                                Ok(t)
+                            }
+                            Ok(Err(e)) => {
+                                tracing::error!("Failed to re-create transcriber: {}", e);
+                                self.play_feedback(SoundEvent::Error);
+                                Err(())
+                            }
+                            Err(e) => {
+                                tracing::error!("Transcriber creation task panicked: {}", e);
+                                self.play_feedback(SoundEvent::Error);
+                                Err(())
+                            }
+                        }
                     }
                 }
                 crate::config::TranscriptionEngine::Whisper => {
@@ -2448,7 +2482,6 @@ impl Daemon {
         state: &mut State,
         audio_capture: &mut Option<Box<dyn AudioCapture>>,
         model_override: Option<String>,
-        transcriber_preloaded: &Option<Arc<dyn Transcriber>>,
     ) -> bool {
         let duration = state.recording_duration().unwrap_or_default();
         tracing::info!("Recording stopped ({:.1}s)", duration.as_secs_f32());
@@ -2522,10 +2555,7 @@ impl Daemon {
                     self.update_state("transcribing");
 
                     let transcriber = match self
-                        .get_transcriber_for_recording(
-                            model_override.as_deref(),
-                            transcriber_preloaded,
-                        )
+                        .get_transcriber_for_recording(model_override.as_deref())
                         .await
                     {
                         Ok(transcriber) => transcriber,
@@ -2892,7 +2922,7 @@ impl Daemon {
             }
             Err(e) => {
                 // JoinError - task was cancelled or panicked
-                if e.is_cancelled() {
+                if !join_error_poisons_engine(&e) {
                     tracing::debug!("Transcription task was cancelled");
                 } else {
                     tracing::error!("Transcription task panicked: {}", e);
@@ -2914,6 +2944,17 @@ impl Daemon {
                                 dropped
                             );
                         }
+                    }
+                    // model_manager only covers Whisper. Every other engine
+                    // clones from transcriber_preloaded, so a poisoned
+                    // instance there has to be discarded the same way;
+                    // get_transcriber_for_recording re-creates it on the
+                    // next recording.
+                    if self.transcriber_preloaded.take().is_some() {
+                        tracing::warn!(
+                            "Dropped the preloaded transcriber after the panic; \
+                             the next recording will re-create it"
+                        );
                     }
                 }
                 self.reset_to_idle(state).await;
@@ -3186,7 +3227,6 @@ impl Daemon {
         let mut model_manager = ModelManager::new(&self.config.whisper, self.config_path.clone());
 
         // Pre-load transcription model if on_demand_loading is disabled
-        let mut transcriber_preloaded: Option<Arc<dyn Transcriber>> = None;
         if !self.config.on_demand_loading() {
             tracing::info!("Loading transcription model: {}", self.config.model_name());
             match self.config.engine {
@@ -3201,7 +3241,7 @@ impl Daemon {
                                  streaming will be unavailable"
                             );
                         }
-                        transcriber_preloaded = Some(Arc::from(
+                        self.transcriber_preloaded = Some(Arc::from(
                             crate::transcribe::create_transcriber(&self.config)?,
                         ));
                     } else {
@@ -3223,9 +3263,9 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Soniox => {
                     // Non-Whisper engines do their own setup; Soniox just validates
                     // API key + endpoint at construction (no model to download).
-                    transcriber_preloaded = Some(Arc::from(crate::transcribe::create_transcriber(
-                        &self.config,
-                    )?));
+                    self.transcriber_preloaded = Some(Arc::from(
+                        crate::transcribe::create_transcriber(&self.config)?,
+                    ));
                 }
             }
             tracing::info!("Model loaded, ready for voice input");
@@ -3373,7 +3413,7 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox => {
-                                            if let Some(ref t) = transcriber_preloaded {
+                                            if let Some(ref t) = self.transcriber_preloaded {
                                                 let transcriber = t.clone();
                                                 tokio::task::spawn_blocking(move || {
                                                     transcriber.prepare();
@@ -3390,7 +3430,6 @@ impl Daemon {
                                 // Try streaming first; fall through to batch if the engine
                                 // doesn't support streaming or setup fails.
                                 if self.try_start_streaming(
-                                    &transcriber_preloaded,
                                     &mut state,
                                     &mut audio_capture,
                                     &mut streaming_handle,
@@ -3463,7 +3502,6 @@ impl Daemon {
                                     &mut state,
                                     &mut audio_capture,
                                     model_override,
-                                    &transcriber_preloaded,
                                 ).await;
                             } else if state.is_eager_recording() {
                                 // Handle eager recording stop - extract model_override first
@@ -3492,7 +3530,6 @@ impl Daemon {
 
                                 let transcriber = match self.get_transcriber_for_recording(
                                     model_override.as_deref(),
-                                    &transcriber_preloaded,
                                 ).await {
                                     Ok(t) => t,
                                     Err(()) => {
@@ -3587,7 +3624,7 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox => {
-                                            if let Some(ref t) = transcriber_preloaded {
+                                            if let Some(ref t) = self.transcriber_preloaded {
                                                 let transcriber = t.clone();
                                                 tokio::task::spawn_blocking(move || {
                                                     transcriber.prepare();
@@ -3600,7 +3637,6 @@ impl Daemon {
                                 self.suppress_recording_media().await;
 
                                 if self.try_start_streaming(
-                                    &transcriber_preloaded,
                                     &mut state,
                                     &mut audio_capture,
                                     &mut streaming_handle,
@@ -3660,7 +3696,6 @@ impl Daemon {
                                     &mut state,
                                     &mut audio_capture,
                                     model_override,
-                                    &transcriber_preloaded,
                                 ).await;
                             } else if state.is_eager_recording() {
                                 // Handle eager recording stop in toggle mode - extract model_override first
@@ -3688,7 +3723,6 @@ impl Daemon {
 
                                 let transcriber = match self.get_transcriber_for_recording(
                                     model_override.as_deref(),
-                                    &transcriber_preloaded,
                                 ).await {
                                     Ok(t) => t,
                                     Err(()) => {
@@ -3870,7 +3904,7 @@ impl Daemon {
                             State::EagerRecording { model_override, .. } => model_override.as_deref(),
                             _ => None,
                         };
-                        eager_transcriber = transcriber_preloaded.clone();
+                        eager_transcriber = self.transcriber_preloaded.clone();
                         if eager_transcriber.is_none()
                             && self.config.engine
                                 == crate::config::TranscriptionEngine::Whisper
@@ -3947,7 +3981,6 @@ impl Daemon {
                                         &mut streaming_session,
                                         &mut streaming_chain,
                                         &mut eager_transcriber,
-                                        &transcriber_preloaded,
                                     )
                                     .await;
                                     continue;
@@ -4010,7 +4043,6 @@ impl Daemon {
 
                             let transcriber = match self.get_transcriber_for_recording(
                                 model_override.as_deref(),
-                                &transcriber_preloaded,
                             ).await {
                                 Ok(transcriber) => transcriber,
                                 Err(()) => {
@@ -4038,7 +4070,6 @@ impl Daemon {
                                 &mut state,
                                 &mut audio_capture,
                                 model_override,
-                                &transcriber_preloaded,
                             ).await;
                         }
                     }
@@ -4108,7 +4139,7 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox => {
-                                    if let Some(ref t) = transcriber_preloaded {
+                                    if let Some(ref t) = self.transcriber_preloaded {
                                         let transcriber = t.clone();
                                         tokio::task::spawn_blocking(move || {
                                             transcriber.prepare();
@@ -4121,7 +4152,6 @@ impl Daemon {
                         self.suppress_recording_media().await;
 
                         if self.try_start_streaming(
-                            &transcriber_preloaded,
                             &mut state,
                             &mut audio_capture,
                             &mut streaming_handle,
@@ -4181,7 +4211,6 @@ impl Daemon {
                         &mut streaming_session,
                         &mut streaming_chain,
                         &mut eager_transcriber,
-                        &transcriber_preloaded,
                     ).await;
                 }
 
@@ -4621,6 +4650,34 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    /// #643: the panic-recovery arm in handle_transcription_result must fire
+    /// only for a real panic. Both JoinError flavors are constructed for real
+    /// here — a task that panics and a task that gets aborted — because the
+    /// two are indistinguishable by type and only differ in what
+    /// `is_cancelled`/`is_panic` report.
+    #[tokio::test]
+    async fn join_error_distinguishes_panic_from_abort() {
+        // Keep the spawned panic from printing a backtrace into test output.
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let panic_err = tokio::spawn(async { panic!("engine blew up") })
+            .await
+            .expect_err("a panicking task must yield a JoinError");
+        std::panic::set_hook(prev_hook);
+        assert!(panic_err.is_panic());
+        assert!(join_error_poisons_engine(&panic_err));
+
+        let aborted = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        aborted.abort();
+        let abort_err = aborted
+            .await
+            .expect_err("an aborted task must yield a JoinError");
+        assert!(abort_err.is_cancelled());
+        assert!(!join_error_poisons_engine(&abort_err));
+    }
 
     // Helper to create a test runtime directory and set it up
     fn with_test_runtime_dir<F, R>(f: F) -> R
