@@ -166,6 +166,17 @@ impl SharedState {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Keep GDK off the Wayland linux-dmabuf path. GTK4's dmabuf-feedback
+    // handling corrupts its own heap under long-running sessions (GPtrArray
+    // refcount garbage inside the feedback listener), which SIGSEGVs this
+    // process every few minutes-to-hours on AMD iGPUs (#656). The OSD is a
+    // small overlay; shared-memory buffers cost nothing here. Respect an
+    // explicit GDK_DISABLE from the user (they may be working around
+    // something else, or testing the dmabuf path deliberately).
+    if std::env::var_os("GDK_DISABLE").is_none() {
+        std::env::set_var("GDK_DISABLE", "dmabuf");
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
