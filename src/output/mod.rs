@@ -179,6 +179,7 @@ pub fn engine_icon(engine: crate::config::TranscriptionEngine) -> &'static str {
         crate::config::TranscriptionEngine::Omnilingual => "\u{1F30D}", // 🌍
         crate::config::TranscriptionEngine::Cohere => "\u{1F4DD}",   // 📝
         crate::config::TranscriptionEngine::Soniox => "\u{2601}\u{FE0F}", // ☁️
+        crate::config::TranscriptionEngine::OpenVino => "\u{1F9E0}", // 🧠
     }
 }
 
