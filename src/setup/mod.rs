@@ -505,6 +505,7 @@ pub(crate) enum ModelKind {
     Whisper,
     Parakeet,
     SenseVoice,
+    Cohere,
 }
 
 /// Resolve a `--model` name to the engine that owns it.
@@ -524,13 +525,16 @@ pub(crate) fn classify_model_override(name: &str) -> anyhow::Result<ModelKind> {
         Ok(ModelKind::Parakeet)
     } else if model::is_sensevoice_model(name) {
         Ok(ModelKind::SenseVoice)
+    } else if model::is_cohere_model(name) {
+        Ok(ModelKind::Cohere)
     } else {
         anyhow::bail!(
-            "Unknown model '{}'.\n  Whisper: {}\n  Parakeet: {}\n  SenseVoice: {}",
+            "Unknown model '{}'.\n  Whisper: {}\n  Parakeet: {}\n  SenseVoice: {}\n  Cohere: {}",
             name,
             model::valid_model_names().join(", "),
             model::valid_parakeet_model_names().join(", "),
             model::sensevoice_setup_model_names().join(", "),
+            model::cohere_setup_model_names().join(", "),
         )
     }
 }
@@ -605,8 +609,76 @@ pub async fn run_setup(
     };
     let is_parakeet = kind == Some(ModelKind::Parakeet);
     let is_sensevoice = kind == Some(ModelKind::SenseVoice);
+    let is_cohere = kind == Some(ModelKind::Cohere);
 
-    if is_sensevoice {
+    if is_cohere {
+        // Handle Cohere model
+        #[allow(unused_variables)]
+        let model_name = model_override.unwrap(); // Safe: is_cohere implies Some
+
+        if !quiet {
+            println!("\nCohere model...");
+        }
+
+        #[cfg(not(feature = "cohere"))]
+        {
+            print_failure(&format!(
+                "Cohere model '{}' requires the 'cohere' feature",
+                model_name
+            ));
+            println!("       Rebuild with: cargo build --features cohere");
+            anyhow::bail!("Cohere feature not enabled");
+        }
+
+        #[cfg(feature = "cohere")]
+        {
+            let dir_name = model::cohere_dir_name(model_name).unwrap();
+            let model_path = models_dir.join(dir_name);
+            let model_valid =
+                model_path.exists() && model::validate_cohere_model(&model_path).is_ok();
+
+            if model_valid {
+                if !quiet {
+                    let size = std::fs::read_dir(&model_path)
+                        .map(|entries| {
+                            entries
+                                .flatten()
+                                .filter_map(|e| e.metadata().ok())
+                                .map(|m| m.len() as f64 / 1024.0 / 1024.0)
+                                .sum::<f64>()
+                        })
+                        .unwrap_or(0.0);
+                    print_success(&format!("Model ready: {} ({:.0} MB)", model_name, size));
+                }
+                if activate {
+                    model::set_cohere_config(dir_name)?;
+                    if !quiet {
+                        print_success(&format!(
+                            "Config updated: engine = \"cohere\", model = \"{}\"",
+                            dir_name
+                        ));
+                    }
+                }
+            } else if download {
+                model::download_cohere_model(model_name)?;
+                if activate {
+                    model::set_cohere_config(dir_name)?;
+                    if !quiet {
+                        print_success(&format!(
+                            "Config updated: engine = \"cohere\", model = \"{}\"",
+                            dir_name
+                        ));
+                    }
+                }
+            } else if !quiet {
+                print_info(&format!("Model '{}' not downloaded yet", model_name));
+                println!(
+                    "       Run: voxtype setup --download --model {}",
+                    model_name
+                );
+            }
+        }
+    } else if is_sensevoice {
         // Handle SenseVoice model
         #[allow(unused_variables)]
         let model_name = model_override.unwrap(); // Safe: is_sensevoice implies Some
