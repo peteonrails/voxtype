@@ -2725,14 +2725,33 @@ pub fn list_installed_parakeet() {
 // Moonshine Model Functions
 // =============================================================================
 
+fn find_moonshine_model(name: &str) -> Option<&'static MoonshineModelInfo> {
+    MOONSHINE_MODELS
+        .iter()
+        .find(|m| m.name == name || m.dir_name == name)
+}
+
 /// Check if a model name is a Moonshine model
 pub fn is_moonshine_model(name: &str) -> bool {
-    MOONSHINE_MODELS.iter().any(|m| m.name == name)
+    find_moonshine_model(name).is_some()
 }
 
 /// Get list of valid Moonshine model names
 pub fn valid_moonshine_model_names() -> Vec<&'static str> {
     MOONSHINE_MODELS.iter().map(|m| m.name).collect()
+}
+
+/// Moonshine names to show for `voxtype setup --model`. Uses the directory
+/// form so the suggestion can't be swallowed by the Whisper table (`base`
+/// and `tiny` are Whisper names too).
+pub fn moonshine_setup_model_names() -> Vec<&'static str> {
+    MOONSHINE_MODELS.iter().map(|m| m.dir_name).collect()
+}
+
+/// Config value for a Moonshine model: the short name, matching what the
+/// interactive picker writes and the `[moonshine]` default.
+pub fn moonshine_config_name(name: &str) -> Option<&'static str> {
+    find_moonshine_model(name).map(|m| m.name)
 }
 
 /// Directory name for a Moonshine model.
@@ -2783,9 +2802,7 @@ pub fn validate_moonshine_model(path: &Path) -> anyhow::Result<()> {
 /// after to guard against publisher errors that the sha256 check can't
 /// catch.
 pub fn download_moonshine_model(model_name: &str) -> anyhow::Result<()> {
-    let model = MOONSHINE_MODELS
-        .iter()
-        .find(|m| m.name == model_name)
+    let model = find_moonshine_model(model_name)
         .ok_or_else(|| anyhow::anyhow!("Unknown Moonshine model: {}", model_name))?;
 
     let models_dir = Config::models_dir();
@@ -2797,6 +2814,28 @@ pub fn download_moonshine_model(model_name: &str) -> anyhow::Result<()> {
 // =============================================================================
 // Cohere Transcribe Functions
 // =============================================================================
+
+fn find_cohere_model(name: &str) -> Option<&'static CohereModelInfo> {
+    COHERE_MODELS
+        .iter()
+        .find(|m| m.name == name || m.dir_name == name)
+}
+
+/// Check if a model name is a Cohere model
+pub fn is_cohere_model(name: &str) -> bool {
+    find_cohere_model(name).is_some()
+}
+
+/// Directory name for a Cohere model. Also its config value: the picker,
+/// the catalog, and the `[cohere]` default all use the directory form.
+pub fn cohere_dir_name(name: &str) -> Option<&'static str> {
+    find_cohere_model(name).map(|m| m.dir_name)
+}
+
+/// Cohere names to show for `voxtype setup --model`.
+pub fn cohere_setup_model_names() -> Vec<&'static str> {
+    COHERE_MODELS.iter().map(|m| m.dir_name).collect()
+}
 
 /// Validate that a Cohere model directory has the required files.
 ///
@@ -2843,9 +2882,7 @@ pub fn validate_cohere_model(path: &Path) -> anyhow::Result<()> {
 /// the unified downloader takes over so users don't wonder why their
 /// disk is filling.
 pub fn download_cohere_model(model_name: &str) -> anyhow::Result<()> {
-    let model = COHERE_MODELS
-        .iter()
-        .find(|m| m.name == model_name)
+    let model = find_cohere_model(model_name)
         .ok_or_else(|| anyhow::anyhow!("Unknown Cohere model: {}", model_name))?;
     let models_dir = Config::models_dir();
     let model_path = models_dir.join(model.dir_name);
@@ -3444,7 +3481,7 @@ pub fn list_installed_sensevoice() {
 // =============================================================================
 
 /// Validate a CTC-based ONNX model directory (model.int8.onnx or model.onnx + tokens.txt)
-fn validate_onnx_ctc_model(path: &Path) -> anyhow::Result<()> {
+pub(crate) fn validate_onnx_ctc_model(path: &Path) -> anyhow::Result<()> {
     if !path.exists() {
         anyhow::bail!("Model directory does not exist: {:?}", path);
     }
@@ -3463,6 +3500,119 @@ fn validate_onnx_ctc_model(path: &Path) -> anyhow::Result<()> {
             missing.push("tokens.txt");
         }
         anyhow::bail!("Incomplete model, missing: {}", missing.join(", "))
+    }
+}
+
+fn find_paraformer_model(name: &str) -> Option<&'static ParaformerModelInfo> {
+    PARAFORMER_MODELS
+        .iter()
+        .find(|m| m.name == name || m.dir_name == name)
+}
+
+/// Check if a model name is a Paraformer model
+pub fn is_paraformer_model(name: &str) -> bool {
+    find_paraformer_model(name).is_some()
+}
+
+/// Directory name for a Paraformer model. Also its config value: the catalog
+/// and the `[paraformer]` default use the directory form, and the runtime
+/// resolver accepts it.
+pub fn paraformer_dir_name(name: &str) -> Option<&'static str> {
+    find_paraformer_model(name).map(|m| m.dir_name)
+}
+
+/// Paraformer names to show for `voxtype setup --model`.
+pub fn paraformer_setup_model_names() -> Vec<&'static str> {
+    PARAFORMER_MODELS.iter().map(|m| m.dir_name).collect()
+}
+
+/// Download a Paraformer model by name (public API for run_setup).
+pub fn download_paraformer_model(model_name: &str) -> anyhow::Result<()> {
+    let model = find_paraformer_model(model_name)
+        .ok_or_else(|| anyhow::anyhow!("Unknown Paraformer model: {}", model_name))?;
+    let models_dir = Config::models_dir();
+    download_artifact(model, &models_dir)?;
+    validate_onnx_ctc_model(&models_dir.join(model.dir_name))?;
+    Ok(())
+}
+
+fn find_dolphin_model(name: &str) -> Option<&'static DolphinModelInfo> {
+    DOLPHIN_MODELS
+        .iter()
+        .find(|m| m.name == name || m.dir_name == name)
+}
+
+/// Check if a model name is a Dolphin model
+pub fn is_dolphin_model(name: &str) -> bool {
+    find_dolphin_model(name).is_some()
+}
+
+/// Directory name for a Dolphin model. Also its config value.
+pub fn dolphin_dir_name(name: &str) -> Option<&'static str> {
+    find_dolphin_model(name).map(|m| m.dir_name)
+}
+
+/// Dolphin names to show for `voxtype setup --model`. Uses the directory
+/// form so the suggestion can't be swallowed by the Whisper table (`base`
+/// is a Whisper name too).
+pub fn dolphin_setup_model_names() -> Vec<&'static str> {
+    DOLPHIN_MODELS.iter().map(|m| m.dir_name).collect()
+}
+
+/// Download a Dolphin model by name (public API for run_setup).
+pub fn download_dolphin_model(model_name: &str) -> anyhow::Result<()> {
+    let model = find_dolphin_model(model_name)
+        .ok_or_else(|| anyhow::anyhow!("Unknown Dolphin model: {}", model_name))?;
+    let models_dir = Config::models_dir();
+    download_artifact(model, &models_dir)?;
+    validate_onnx_ctc_model(&models_dir.join(model.dir_name))?;
+    Ok(())
+}
+
+fn find_omnilingual_model(name: &str) -> Option<&'static OmnilingualModelInfo> {
+    OMNILINGUAL_MODELS
+        .iter()
+        .find(|m| m.name == name || m.dir_name == name)
+}
+
+/// Check if a model name is an Omnilingual model
+pub fn is_omnilingual_model(name: &str) -> bool {
+    find_omnilingual_model(name).is_some()
+}
+
+/// Directory name for an Omnilingual model. Also its config value.
+pub fn omnilingual_dir_name(name: &str) -> Option<&'static str> {
+    find_omnilingual_model(name).map(|m| m.dir_name)
+}
+
+/// Omnilingual names to show for `voxtype setup --model`.
+pub fn omnilingual_setup_model_names() -> Vec<&'static str> {
+    OMNILINGUAL_MODELS.iter().map(|m| m.dir_name).collect()
+}
+
+/// Download an Omnilingual model by name (public API for run_setup).
+pub fn download_omnilingual_model(model_name: &str) -> anyhow::Result<()> {
+    let model = find_omnilingual_model(model_name)
+        .ok_or_else(|| anyhow::anyhow!("Unknown Omnilingual model: {}", model_name))?;
+    let models_dir = Config::models_dir();
+    download_artifact(model, &models_dir)?;
+    validate_onnx_ctc_model(&models_dir.join(model.dir_name))?;
+    Ok(())
+}
+
+/// Silently point the config at `engine` + `model_name`, like
+/// `set_parakeet_config`: no status output, so `run_setup` can print its own
+/// confirmation while honoring --quiet.
+pub(crate) fn set_engine_model_config(engine: &str, model_name: &str) -> anyhow::Result<()> {
+    if let Some(config_path) = Config::default_path() {
+        if config_path.exists() {
+            let content = std::fs::read_to_string(&config_path)?;
+            let updated = update_engine_in_config(&content, engine, model_name);
+            std::fs::write(&config_path, updated)?;
+        }
+        Ok(())
+    } else {
+        anyhow::bail!("Could not determine config path")
     }
 }
 
