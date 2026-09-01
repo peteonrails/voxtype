@@ -290,4 +290,34 @@ mod tests {
         assert_eq!(config.whisper.model, "tiny.en");
         assert_eq!(config.output.mode, OutputMode::Clipboard);
     }
+
+    /// #646's user-facing contract: a config file with one broken section
+    /// still loads. Before the salvage path, `load_config` returned Err here
+    /// and the daemon refused to start, costing the user every setting they
+    /// had over one bad value.
+    #[test]
+    fn load_config_warns_but_succeeds_on_a_partially_bad_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+                [hotkey]
+                key = "F13"
+
+                [audio]
+                max_duration_secs = "not a number"
+            "#,
+        )
+        .unwrap();
+
+        let config = load_config(Some(&config_path))
+            .expect("a partially bad config must load, not refuse to start (#646)");
+        assert_eq!(config.hotkey.key, "F13", "the good section must survive");
+        assert_eq!(
+            config.audio.max_duration_secs,
+            Config::default().audio.max_duration_secs,
+            "the bad section falls back to its default"
+        );
+    }
 }
