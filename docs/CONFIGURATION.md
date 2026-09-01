@@ -153,6 +153,8 @@ Selects which speech-to-text engine to use for transcription.
 - `dolphin` - Dictation-optimized CTC via ONNX Runtime (Chinese + English)
 - `omnilingual` - FunASR Omnilingual CTC via ONNX Runtime (50+ languages)
 - `cohere` - Cohere Transcribe via transcribe.cpp/GGUF or legacy ONNX Runtime (14 languages)
+- `deepgram` - Deepgram pre-recorded HTTPS API (batch cloud transcription, built in)
+- `soniox` - Soniox WebSocket/REST cloud transcription (built in)
 
 **Example:**
 ```toml
@@ -185,10 +187,11 @@ new engine to take effect.
 
 **Notes:**
 - First selection through `config set engine`, the TUI, or a schema-backed settings client seeds the compiled model default only when no model was saved. Existing explicit ONNX model names/paths and other settings are not migrated. The top-level default engine remains Whisper; this is not a global switch to Cohere.
-- Whisper, Remote Whisper, and Soniox run in every binary. Shared GGUF, Cohere GGUF, and Parakeet GGUF need their GGUF client features and a matching `voxtype-gguf-worker`; `gpu-vulkan` enables all three clients. Their ONNX models and the other ONNX engines require an ONNX-enabled binary (`voxtype-*-onnx-*`).
+- Whisper, Remote Whisper, Deepgram, and Soniox run in every binary. Shared GGUF, Cohere GGUF, and Parakeet GGUF need their GGUF client features and a matching `voxtype-gguf-worker`; `gpu-vulkan` enables all three clients. Their ONNX models and the other ONNX engines require an ONNX-enabled binary (`voxtype-*-onnx-*`).
 - Each ONNX engine reads its own `[<engine>]` section (e.g. `[parakeet]`, `[cohere]`)
 - See [PARAKEET.md](PARAKEET.md) for detailed Parakeet setup instructions
 - See [MOONSHINE.md](MOONSHINE.md) for detailed Moonshine setup instructions
+- See [DEEPGRAM.md](DEEPGRAM.md) for Deepgram credentials, privacy, and request behavior
 - Cohere Transcribe is the largest model voxtype ships (~3 GB int8); use `voxtype setup model` to download it
 
 ---

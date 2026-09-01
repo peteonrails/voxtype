@@ -1,9 +1,9 @@
 use super::{
-    AudioConfig, CohereConfig, DolphinConfig, GgufConfig, HotkeyConfig, MeetingConfig,
-    MoonshineConfig, OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig,
-    ParakeetConfig, ParakeetModelType, Profile, SenseVoiceConfig, SonioxConfig, StatusConfig,
-    StreamingConfig, StreamingRecoveryConfig, TextConfig, TranscriptionEngine, VadConfig,
-    WhisperConfig,
+    AudioConfig, CohereConfig, DeepgramConfig, DolphinConfig, GgufConfig, HotkeyConfig,
+    MeetingConfig, MoonshineConfig, OmnilingualConfig, OpenVinoConfig, OutputConfig,
+    ParaformerConfig, ParakeetConfig, ParakeetModelType, Profile, SenseVoiceConfig, SonioxConfig,
+    StatusConfig, StreamingConfig, StreamingRecoveryConfig, TextConfig, TranscriptionEngine,
+    VadConfig, WhisperConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -107,6 +107,11 @@ pub struct Config {
     /// `[streaming]` so changing recovery cannot override legacy tuning.
     #[serde(default)]
     pub streaming_recovery: Option<StreamingRecoveryConfig>,
+
+    /// Deepgram cloud batch STT configuration
+    /// (optional, only used when engine = "deepgram")
+    #[serde(default)]
+    pub deepgram: Option<DeepgramConfig>,
 
     /// Text processing configuration (replacements, spoken punctuation)
     #[serde(default)]
@@ -226,6 +231,7 @@ impl Default for Config {
             soniox: None,
             streaming: None,
             streaming_recovery: None,
+            deepgram: None,
             text: TextConfig::default(),
             vad: VadConfig::default(),
             status: StatusConfig::default(),
@@ -606,8 +612,8 @@ impl Config {
                 .as_ref()
                 .map(|o| o.on_demand_loading)
                 .unwrap_or(false),
-            // Soniox is a cloud backend; nothing to load on demand.
-            TranscriptionEngine::Soniox => false,
+            // Cloud backends have no local model to load on demand.
+            TranscriptionEngine::Soniox | TranscriptionEngine::Deepgram => false,
         }
     }
 
@@ -644,6 +650,11 @@ impl Config {
             },
             TranscriptionEngine::Cohere => self.cohere.as_ref().map(|c| c.language.as_str()),
             TranscriptionEngine::Gguf => self.gguf.as_ref().map(|g| g.language.as_str()),
+            // "multi" asks Deepgram to code-switch; it pins no one language.
+            TranscriptionEngine::Deepgram => match self.deepgram.as_ref() {
+                Some(d) if d.language == "multi" => return EngineLanguage::Open,
+                other => other.map(|d| d.language.as_str()),
+            },
             TranscriptionEngine::SenseVoice => {
                 self.sensevoice.as_ref().map(|s| s.language.as_str())
             }
@@ -690,6 +701,7 @@ impl Config {
             TranscriptionEngine::SenseVoice => "sensevoice.language",
             TranscriptionEngine::OpenVino => "openvino.language",
             TranscriptionEngine::Soniox => "soniox.language_hints",
+            TranscriptionEngine::Deepgram => "deepgram.language",
             TranscriptionEngine::Parakeet
             | TranscriptionEngine::Moonshine
             | TranscriptionEngine::Paraformer
@@ -884,6 +896,11 @@ impl Config {
                 .as_ref()
                 .map(|s| s.model.as_str())
                 .unwrap_or("soniox (not configured)"),
+            TranscriptionEngine::Deepgram => self
+                .deepgram
+                .as_ref()
+                .map(|d| d.model.as_str())
+                .unwrap_or("deepgram (not configured)"),
         }
     }
 
@@ -969,6 +986,9 @@ impl Config {
             }
             TranscriptionEngine::Soniox => {
                 self.soniox.get_or_insert_with(Default::default).model = model
+            }
+            TranscriptionEngine::Deepgram => {
+                self.deepgram.get_or_insert_with(Default::default).model = model
             }
         }
     }

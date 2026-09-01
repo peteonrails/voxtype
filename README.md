@@ -6,7 +6,7 @@
 
 Voice-to-text for Linux. 9-11× realtime on your CPU. Local by default.
 
-Hold a hotkey (default: ScrollLock) while speaking, release to transcribe and output the text at your cursor position. Voxtype runs Cohere Transcribe (#1 on the Open ASR Leaderboard) faster than realtime on a plain Zen 4 CPU. Parakeet, Whisper, and six more engines if you want them. No cloud, no subscription, no telemetry.
+Hold a hotkey (default: ScrollLock) while speaking, release to transcribe and output the text at your cursor position. Voxtype runs Cohere Transcribe (#1 on the Open ASR Leaderboard) faster than realtime on a plain Zen 4 CPU. Parakeet, Whisper, and six more engines if you want them. Local engines are the default; Deepgram and Soniox are optional cloud backends.
 
 ## Features
 
@@ -17,7 +17,7 @@ Hold a hotkey (default: ScrollLock) while speaking, release to transcribe and ou
 - **OpenVINO Whisper on Intel NPU, CPU, or GPU.** Run Whisper models through OpenVINO IR with Intel NPU acceleration on Lunar Lake machines, plus CPU/GPU fallback on other Intel systems.
 - **Text processing built in.** Spoken punctuation (`"comma"` → `,`), per-user replacement tables for common mistranscriptions, and an optional post-processing pipe through any LLM or shell script. Fix domain terms, drop filler words, polish grammar — all without leaving voxtype.
 - **Dynamic per-engine model loading.** Configure all 9 engines, pay memory only for the active one. Models load on first use and unload when idle.
-- **Nine transcription engines.** Whisper, Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual, Cohere, and OpenVINO Whisper. Switch with `voxtype configure` or one config line. CJK and 1600+ languages covered by the multilingual engines.
+- **Local and cloud transcription engines.** Whisper, Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual, Cohere, and OpenVINO Whisper run locally; Deepgram batch and Soniox streaming are built-in cloud options. Switch with `voxtype configure` or one config line. CJK and 1600+ languages covered by the multilingual engines.
 - **Meeting mode.** Continuous transcription with chunked processing, speaker attribution, and export to Markdown, JSON, SRT, or VTT.
 
 ### Native Linux integration
@@ -375,12 +375,16 @@ Voxtype ships separate binaries for Whisper and ONNX engines. Use `voxtype setup
 | **Omnilingual** | 1600+ languages | wav2vec2 CTC (ONNX) | Low-resource and rare languages |
 | **Cohere Transcribe** | 14 languages | Encoder-decoder (ONNX) | Fast CPU dictation with punctuation |
 | **OpenVINO Whisper** | 99 languages | Encoder-decoder (OpenVINO) | Intel NPU (Lunar Lake), CPU/GPU fallback |
+| **Deepgram** (cloud) | Multilingual | Batch HTTPS API | Low-power computers, formatted dictation |
+| **Soniox** (cloud) | 60+ languages | Streaming/REST API | Live cloud partials |
 
 To set the engine in your config:
 
 ```toml
-engine = "sensevoice"  # or: whisper, parakeet, moonshine, paraformer, dolphin, omnilingual, cohere, openvino
+engine = "sensevoice"  # or: whisper, parakeet, moonshine, paraformer, dolphin, omnilingual, cohere, openvino, deepgram, soniox
 ```
+
+Deepgram ships in every binary. See [Deepgram setup and privacy notes](docs/DEEPGRAM.md).
 
 Or override on the command line:
 

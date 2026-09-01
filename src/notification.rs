@@ -921,6 +921,7 @@ fn send_macos_native(title: &str, body: &str, engine: Option<TranscriptionEngine
         | TranscriptionEngine::Omnilingual
         | TranscriptionEngine::Cohere
         | TranscriptionEngine::Soniox
+        | TranscriptionEngine::Deepgram
         | TranscriptionEngine::OpenVino
         | TranscriptionEngine::Gguf => None,
     });

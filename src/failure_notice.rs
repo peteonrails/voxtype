@@ -78,7 +78,7 @@ pub fn capture_failed(device: &str, err: &AudioError) -> Notice {
 /// be the fix.
 fn is_remote(config: &Config) -> bool {
     match config.engine {
-        TranscriptionEngine::Soniox => true,
+        TranscriptionEngine::Soniox | TranscriptionEngine::Deepgram => true,
         TranscriptionEngine::Whisper => config.whisper.effective_mode() == WhisperMode::Remote,
         _ => false,
     }

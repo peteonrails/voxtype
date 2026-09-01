@@ -146,9 +146,10 @@ pub fn path_check(id: &'static str, label: &str, path: &Path, exists: bool) -> C
 
 /// Is the configured transcription model on disk and intact?
 ///
-/// `soniox_env_key` says whether `SONIOX_API_KEY` is set, the alternative to
-/// `[soniox] api_key`.
-pub fn engine_model_check(config: &Config, models_dir: &Path, soniox_env_key: bool) -> Check {
+/// `env_key` says whether the active cloud engine's API key is set in the
+/// environment (`SONIOX_API_KEY`, `DEEPGRAM_API_KEY`), the alternative to
+/// `api_key` in its config section.
+pub fn engine_model_check(config: &Config, models_dir: &Path, env_key: bool) -> Check {
     const ID: &str = "transcription.model";
     let engine = config.engine;
     let name = engine.name();
@@ -165,6 +166,7 @@ pub fn engine_model_check(config: &Config, models_dir: &Path, soniox_env_key: bo
         TranscriptionEngine::Gguf => config.gguf.is_none(),
         TranscriptionEngine::OpenVino => config.openvino.is_none(),
         TranscriptionEngine::Soniox => config.soniox.is_none(),
+        TranscriptionEngine::Deepgram => config.deepgram.is_none(),
     };
     if section_missing {
         return Check::error(
@@ -177,15 +179,30 @@ pub fn engine_model_check(config: &Config, models_dir: &Path, soniox_env_key: bo
         );
     }
 
-    if engine == TranscriptionEngine::Soniox {
-        let has_key = config.soniox.as_ref().is_some_and(|s| s.api_key.is_some());
-        return if has_key || soniox_env_key {
-            Check::ok(ID, "Soniox cloud engine: API key configured")
+    let cloud = match engine {
+        TranscriptionEngine::Soniox => Some((
+            "Soniox",
+            "SONIOX_API_KEY",
+            config.soniox.as_ref().is_some_and(|s| s.api_key.is_some()),
+        )),
+        TranscriptionEngine::Deepgram => Some((
+            "Deepgram",
+            "DEEPGRAM_API_KEY",
+            config
+                .deepgram
+                .as_ref()
+                .is_some_and(|d| d.api_key.is_some()),
+        )),
+        _ => None,
+    };
+    if let Some((label, env_var, has_key)) = cloud {
+        return if has_key || env_key {
+            Check::ok(ID, format!("{label} cloud engine: API key configured"))
         } else {
             Check::error(
                 ID,
-                "Soniox engine selected but no API key is configured",
-                "Set [soniox] api_key in config.toml or export SONIOX_API_KEY",
+                format!("{label} engine selected but no API key is configured"),
+                format!("Set [{name}] api_key in config.toml or export {env_var}"),
             )
         };
     }
@@ -1073,11 +1090,11 @@ pub async fn run(config: &Config, config_path: Option<&Path>, scope: Scope) -> R
         }
     }
 
-    checks.push(engine_model_check(
-        config,
-        &models_dir,
-        env_set("SONIOX_API_KEY"),
-    ));
+    let cloud_env_key = match config.engine {
+        TranscriptionEngine::Deepgram => env_set("DEEPGRAM_API_KEY"),
+        _ => env_set("SONIOX_API_KEY"),
+    };
+    checks.push(engine_model_check(config, &models_dir, cloud_env_key));
     checks.extend(secondary_model_check(config, &models_dir));
     checks.extend(vad_check(config, &models_dir));
     checks.extend(lard_check(config, super::lard::problem(config).as_ref()));

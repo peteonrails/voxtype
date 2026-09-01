@@ -226,6 +226,18 @@ translate = false
 # enabled = true
 # stop_timeout_secs = 30
 
+# --- Deepgram batch cloud transcription ---
+# Select with the root setting: engine = "deepgram"
+# Credentials: set DEEPGRAM_API_KEY (recommended), or add api_key here.
+# Audio is sent as a completed 16 kHz mono WAV after recording stops.
+# [deepgram]
+# model = "nova-3"
+# language = "en"       # BCP-47 code, "auto", or "multi"
+# smart_format = true
+# mip_opt_out = true
+# timeout_secs = 30
+# endpoint = "https://api.deepgram.com/v1/listen"
+
 [output]
 # Primary output mode: "type" or "clipboard"
 # - type: Simulates keyboard input at cursor position (requires ydotool)
