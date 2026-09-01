@@ -1013,6 +1013,27 @@ pub fn registry_snapshot() -> Vec<RegistryEntry> {
                 .collect(),
         });
     }
+    // OpenVINO Whisper conversions (Intel's official HF org). Keyed by
+    // dir_name like moonshine/sensevoice, since that is the on-disk layout
+    // download_artifact writes and the R2 tree must mirror byte-for-byte.
+    // Every repo ships the same file set; preprocessor_config.json differs
+    // per model (mel bin count) so it is fetched per-repo, never shared.
+    // Licenses verified 2026-09-01: whisper-* are Apache-2.0,
+    // distil-whisper-* are MIT (#692).
+    for m in OPENVINO_MODELS {
+        out.push(RegistryEntry {
+            engine_prefix: "openvino",
+            name: m.dir_name.to_string(),
+            upstream_repo: m.huggingface_repo.to_string(),
+            files: OPENVINO_MODEL_FILES
+                .iter()
+                .map(|f| RegistryFile {
+                    upstream_path: (*f).to_string(),
+                    local_path: (*f).to_string(),
+                })
+                .collect(),
+        });
+    }
     out
 }
 
