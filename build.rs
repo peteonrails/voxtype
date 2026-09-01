@@ -23,6 +23,10 @@ mod cli;
 use cli::Cli;
 
 fn main() -> Result<(), Error> {
+    // Before the man-page early return: the version must be stamped for
+    // every build, not just release builds.
+    expose_build_version();
+
     // Only generate man pages for release builds or when explicitly requested
     let profile = env::var("PROFILE").unwrap_or_default();
     let generate = env::var("VOXTYPE_GEN_MANPAGES").is_ok() || profile == "release";
@@ -79,6 +83,57 @@ fn main() -> Result<(), Error> {
     expose_cuda_build_major();
 
     Ok(())
+}
+
+/// Make untagged builds distinguishable in `--version` output.
+///
+/// Cargo.toml is bumped to the release version before the tag exists, so
+/// every CI or local build between the bump and the tag self-reports as the
+/// release. On 2026-08-31 a stale binary honestly claiming "1.0.1" was
+/// missing a day of fixes, and nothing it printed could tell it apart from
+/// the real release build. Stamp the short commit hash into the version
+/// unless HEAD sits exactly on the matching release tag: `--version` prints
+/// `1.1.0` only for a build of tag v1.1.0 and `1.1.0+g<sha>` for everything
+/// else.
+///
+/// Builds without git (release tarballs — the AUR source package builds from
+/// one, so there is no .git dir) get no env var; `cli::VERSION` then falls
+/// back to the bare crate version. Git trouble must never fail the build and
+/// never leak a placeholder like "+gunknown" into the version string.
+fn expose_build_version() {
+    // Re-run when HEAD moves (commit, checkout). Creating a tag without a
+    // new commit does not retrigger by itself; release binaries are always
+    // clean `--no-cache` Docker builds, so best-effort staleness is fine.
+    if let Some(head) = git(&["rev-parse", "--git-path", "HEAD"]) {
+        if std::path::Path::new(&head).exists() {
+            println!("cargo:rerun-if-changed={head}");
+        }
+    }
+
+    let Some(sha) = git(&["rev-parse", "--short", "HEAD"]) else {
+        return;
+    };
+
+    let pkg = env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    let at_release_tag = git(&["tag", "--points-at", "HEAD"])
+        .is_some_and(|tags| tags.lines().any(|t| t == format!("v{pkg}")));
+
+    let version = if at_release_tag {
+        pkg
+    } else {
+        format!("{pkg}+g{sha}")
+    };
+    println!("cargo:rustc-env=VOXTYPE_BUILD_VERSION={version}");
+}
+
+/// Run git, returning trimmed stdout only on success with non-empty output.
+fn git(args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git").args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!s.is_empty()).then_some(s)
 }
 
 /// Mirror ort-sys's build-time CUDA version selection so the binary's runtime
