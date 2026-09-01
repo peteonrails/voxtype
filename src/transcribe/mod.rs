@@ -11,8 +11,11 @@
 //! - Optionally Paraformer via ONNX Runtime (when `paraformer` feature is enabled)
 //! - Optionally Dolphin via ONNX Runtime (when `dolphin` feature is enabled)
 //! - Optionally Omnilingual via ONNX Runtime (when `omnilingual` feature is enabled)
+//! - Deepgram batch transcription over HTTPS (available in every binary)
 
+pub mod audio;
 pub mod cli;
+pub mod deepgram;
 #[cfg(feature = "parakeet")]
 pub mod parakeet_streaming;
 pub mod remote;
@@ -275,6 +278,14 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
                 )
             })?;
             Ok(Box::new(soniox::SonioxTranscriber::new(cfg.clone())?))
+        }
+        TranscriptionEngine::Deepgram => {
+            let cfg = config.deepgram.as_ref().ok_or_else(|| {
+                TranscribeError::InitFailed(
+                    "Deepgram engine selected but [deepgram] config section is missing".to_string(),
+                )
+            })?;
+            Ok(Box::new(deepgram::DeepgramTranscriber::new(cfg.clone())?))
         }
     }
 }

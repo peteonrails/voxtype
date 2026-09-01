@@ -45,6 +45,7 @@
 //! The daemon disowns the session on `Error`/`Ended` so post-stop
 //! emissions are dropped (matches the v0.7.2 disown-on-stop fix).
 
+use super::audio::encode_wav_s16le;
 use super::streaming::{SegmentId, StreamHandle, StreamingEvent, StreamingTranscriber};
 use super::Transcriber;
 use crate::config::SonioxConfig;
@@ -637,30 +638,6 @@ impl SonioxTranscriber {
         let _ = write.send(Message::Close(None)).await;
         Ok(transcript.trim().to_string())
     }
-}
-
-/// Encode 16 kHz f32 mono samples as a WAV byte buffer (PCM 16-bit LE)
-/// for upload to the Soniox async API. Mirrors the helper in
-/// `transcribe/remote.rs` so both cloud backends share one WAV format.
-fn encode_wav_s16le(samples: &[f32]) -> Result<Vec<u8>, TranscribeError> {
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate: SAMPLE_RATE,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-    let mut buffer = std::io::Cursor::new(Vec::new());
-    let mut writer = hound::WavWriter::new(&mut buffer, spec)
-        .map_err(|e| TranscribeError::AudioFormat(format!("WAV writer init: {}", e)))?;
-    for &s in samples {
-        writer
-            .write_sample(f32_to_i16(s))
-            .map_err(|e| TranscribeError::AudioFormat(format!("WAV sample write: {}", e)))?;
-    }
-    writer
-        .finalize()
-        .map_err(|e| TranscribeError::AudioFormat(format!("WAV finalize: {}", e)))?;
-    Ok(buffer.into_inner())
 }
 
 #[derive(Deserialize, Debug)]

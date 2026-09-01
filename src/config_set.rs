@@ -100,6 +100,7 @@ pub const ENGINE_NAMES: &[&str] = &[
     "dolphin",
     "omnilingual",
     "cohere",
+    "deepgram",
 ];
 
 /// Is the engine name one we recognize at all?
@@ -115,8 +116,9 @@ pub fn parse_engine(name: &str) -> Option<TranscriptionEngine> {
 
 /// Was this binary compiled with the feature needed to run the given engine?
 ///
-/// Whisper and Soniox are unconditional (Soniox was un-feature-gated in
-/// #441); every other engine is gated on the corresponding Cargo feature.
+/// Whisper, Soniox, and Deepgram are unconditional (Soniox was
+/// un-feature-gated in #441); every local ONNX engine is gated on the
+/// corresponding Cargo feature.
 /// This is the source-of-truth check that matches what the TUI shows on
 /// source builds (see `EngineState::refresh_binary_match` in
 /// `src/tui/engine.rs`). The TUI's `compiled_features()` list in
@@ -134,6 +136,7 @@ pub fn engine_feature_compiled(name: &str) -> bool {
     match engine {
         TranscriptionEngine::Whisper => true,
         TranscriptionEngine::Soniox => true,
+        TranscriptionEngine::Deepgram => true,
         TranscriptionEngine::Parakeet => cfg!(feature = "parakeet"),
         TranscriptionEngine::Moonshine => cfg!(feature = "moonshine"),
         TranscriptionEngine::SenseVoice => cfg!(feature = "sensevoice"),

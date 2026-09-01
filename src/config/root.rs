@@ -1,7 +1,8 @@
 use super::{
-    AudioConfig, CohereConfig, DolphinConfig, HotkeyConfig, MeetingConfig, MoonshineConfig,
-    OmnilingualConfig, OutputConfig, ParaformerConfig, ParakeetConfig, Profile, SenseVoiceConfig,
-    SonioxConfig, StatusConfig, TextConfig, TranscriptionEngine, VadConfig, WhisperConfig,
+    AudioConfig, CohereConfig, DeepgramConfig, DolphinConfig, HotkeyConfig, MeetingConfig,
+    MoonshineConfig, OmnilingualConfig, OutputConfig, ParaformerConfig, ParakeetConfig, Profile,
+    SenseVoiceConfig, SonioxConfig, StatusConfig, TextConfig, TranscriptionEngine, VadConfig,
+    WhisperConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -61,6 +62,11 @@ pub struct Config {
     #[serde(default)]
     pub soniox: Option<SonioxConfig>,
 
+    /// Deepgram cloud batch STT configuration
+    /// (optional, only used when engine = "deepgram")
+    #[serde(default)]
+    pub deepgram: Option<DeepgramConfig>,
+
     /// Text processing configuration (replacements, spoken punctuation)
     #[serde(default)]
     pub text: TextConfig,
@@ -113,6 +119,7 @@ impl Default for Config {
             omnilingual: None,
             cohere: None,
             soniox: None,
+            deepgram: None,
             text: TextConfig::default(),
             vad: VadConfig::default(),
             status: StatusConfig::default(),
@@ -338,8 +345,8 @@ impl Config {
                 .as_ref()
                 .map(|c| c.on_demand_loading)
                 .unwrap_or(false),
-            // Soniox is a cloud backend; nothing to load on demand.
-            TranscriptionEngine::Soniox => false,
+            // Cloud backends have no local model to load on demand.
+            TranscriptionEngine::Soniox | TranscriptionEngine::Deepgram => false,
         }
     }
 
@@ -361,6 +368,7 @@ impl Config {
                 super::language::LanguageConfig::Multiple(_) => return None,
             },
             TranscriptionEngine::Cohere => self.cohere.as_ref().map(|c| c.language.as_str())?,
+            TranscriptionEngine::Deepgram => self.deepgram.as_ref().map(|d| d.language.as_str())?,
             TranscriptionEngine::SenseVoice => {
                 self.sensevoice.as_ref().map(|s| s.language.as_str())?
             }
@@ -419,6 +427,11 @@ impl Config {
                 .as_ref()
                 .map(|s| s.model.as_str())
                 .unwrap_or("soniox (not configured)"),
+            TranscriptionEngine::Deepgram => self
+                .deepgram
+                .as_ref()
+                .map(|d| d.model.as_str())
+                .unwrap_or("deepgram (not configured)"),
         }
     }
 

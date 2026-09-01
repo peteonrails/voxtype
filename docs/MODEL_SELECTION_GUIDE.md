@@ -2,7 +2,7 @@
 
 This guide helps you choose the right transcription engine and model for voxtype v0.6.0. The choice depends on your language, hardware, and how you use dictation.
 
-Voxtype has eight transcription engines. Three ship in every binary — Whisper (local), Remote Whisper (HTTP API), and Soniox (cloud streaming). The other five require the ONNX binary variant.
+Voxtype includes local engines plus two native cloud providers. Whisper, Remote Whisper, Deepgram batch, and Soniox streaming ship in every binary; ONNX engines require an ONNX binary variant.
 
 ---
 
@@ -19,8 +19,9 @@ Voxtype has eight transcription engines. Three ship in every binary — Whisper 
 | **Omnilingual** | 1600+ | CTC wav2vec2 | 3.9 GB | Moderate | No | ONNX |
 | **Cohere** | 14 | Encoder-decoder | 1.5 - 3.9 GB | Slow (CPU) | Yes | ONNX |
 | **Soniox** (cloud) | 60+ | Cloud (WebSocket / REST) | n/a (no local model) | Cloud-bound | Yes | Built-in |
+| **Deepgram** (cloud) | Multilingual | Cloud (batch HTTPS) | n/a (no local model) | Cloud-bound | Yes | Built-in |
 
-**Soniox** is different from the others — it's a paid cloud service over WebSocket / REST. No local model, no GPU. Sub-second partial latency. Strong for non-English languages where local Whisper-based engines struggle on lower-end hardware. Ships in every release binary; you only need a `SONIOX_API_KEY`. See [SONIOX.md](SONIOX.md) for the full story.
+**Deepgram** sends each completed recording as a WAV and returns one final transcript, making it a simple fit for low-power computers. **Soniox** supports streaming partials as well as REST. Both are paid cloud services and send audio off-device. See [DEEPGRAM.md](DEEPGRAM.md) and [SONIOX.md](SONIOX.md).
 
 ---
 
@@ -35,6 +36,7 @@ What language(s) do you speak?
 │   ├─ Want best accuracy + punctuation? → Parakeet TDT (ONNX binary)
 │   ├─ Want smallest/fastest model?      → Moonshine tiny (ONNX binary)
 │   ├─ Want simplest setup?              → Whisper small.en (standard binary)
+│   ├─ Want to offload a slow laptop?     → Deepgram (cloud batch)
 │   └─ On a laptop / saving battery?     → Whisper small.en + on_demand_loading
 │
 ├─ Chinese (Mandarin or Cantonese)
@@ -68,7 +70,7 @@ OR — independently of language:
 │   └─ Soniox async API (cloud, stt-async-v4)
 │
 └─ Cannot send audio off-device (privacy-sensitive)?
-    └─ Pick any *local* engine above. Never Soniox.
+    └─ Pick any *local* engine above. Never Deepgram or Soniox.
 ```
 
 ---

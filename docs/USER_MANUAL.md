@@ -468,6 +468,22 @@ on_recording_stop = false
 on_transcription = true
 ```
 
+### Cloud Backend: Deepgram
+
+Deepgram provides batch transcription without running a model on your computer. It ships in every Voxtype binary. Set `DEEPGRAM_API_KEY`, then configure:
+
+```toml
+engine = "deepgram"
+
+[deepgram]
+model = "nova-3"
+language = "en"
+smart_format = true
+mip_opt_out = true
+```
+
+Voxtype uploads one completed WAV after recording stops, then inserts the final transcript through the normal cursor-output path. See [DEEPGRAM.md](DEEPGRAM.md) for credentials, privacy, language detection, and error handling.
+
 ### Cloud Backend: Soniox
 
 For a cloud streaming alternative to the local engines above, voxtype supports [Soniox](https://soniox.com). Different trade-off space: paid SaaS, no local model, 60+ languages with strong Hungarian/EU coverage, sub-second partials at the cursor.

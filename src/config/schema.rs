@@ -205,6 +205,7 @@ const WHISPER_MODE_CHOICES: &[&str] = &["local", "remote", "cli"];
 const WHISPER_LANG_CHOICES: &[&str] = &[
     "auto", "en", "fr", "de", "it", "es", "pt", "nl", "pl", "zh", "ja", "ko", "ru", "ar",
 ];
+const DEEPGRAM_LANG_CHOICES: &[&str] = &["auto", "multi", "en", "en-US", "en-GB"];
 const SENSEVOICE_LANG_CHOICES: &[&str] = &["auto", "zh", "en", "ja", "ko", "yue"];
 const COHERE_LANG_CHOICES: &[&str] = &[
     "ar", "de", "en", "es", "fr", "hi", "it", "ja", "ko", "nl", "pt", "ru", "tr", "zh",
@@ -403,6 +404,69 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Model name to request from the remote endpoint (e.g. whisper-1).",
     )
     .for_engine("whisper"),
+    // deepgram. `api_key` is intentionally omitted: credentials may be read
+    // from config for compatibility, but schema consumers must not display or
+    // round-trip secret values.
+    spec(
+        "deepgram.model",
+        "deepgram",
+        "model",
+        KeyType::String,
+        "Engine",
+        "Model",
+        "Deepgram model identifier (nova-3 by default).",
+    )
+    .for_engine("deepgram"),
+    spec(
+        "deepgram.language",
+        "deepgram",
+        "language",
+        open(DEEPGRAM_LANG_CHOICES),
+        "Engine",
+        "Language",
+        "BCP-47 language code, auto for detection, or multi for multilingual recognition.",
+    )
+    .for_engine("deepgram"),
+    spec(
+        "deepgram.smart_format",
+        "deepgram",
+        "smart_format",
+        KeyType::Bool,
+        "Engine",
+        "Smart format",
+        "Format dates, numbers, punctuation, and other entities in the transcript.",
+    )
+    .for_engine("deepgram"),
+    spec(
+        "deepgram.mip_opt_out",
+        "deepgram",
+        "mip_opt_out",
+        KeyType::Bool,
+        "Engine",
+        "Model improvement opt-out",
+        "Exclude request audio from Deepgram's Model Improvement Program.",
+    )
+    .for_engine("deepgram"),
+    spec(
+        "deepgram.timeout_secs",
+        "deepgram",
+        "timeout_secs",
+        KeyType::Int { min: 1, max: 300 },
+        "Engine",
+        "Timeout",
+        "Maximum number of seconds to wait for a Deepgram response.",
+    )
+    .for_engine("deepgram"),
+    spec(
+        "deepgram.endpoint",
+        "deepgram",
+        "endpoint",
+        KeyType::String,
+        "Engine",
+        "Endpoint",
+        "Deepgram pre-recorded transcription endpoint. HTTPS is required except for localhost testing.",
+    )
+    .for_engine("deepgram"),
     // parakeet
     spec(
         "parakeet.model",
@@ -1456,7 +1520,7 @@ pub fn validate_value(spec: &KeySpec, raw: &str) -> Result<TypedValue, ValueErro
 fn ensure_required_siblings(editor: &mut ConfigEditor, spec: &KeySpec) {
     let Some(engine) = spec.engine else { return };
     // Whisper's table is not optional and its `model` has a serde default.
-    if engine == "whisper" || spec.field == "model" {
+    if engine == "whisper" || engine == "deepgram" || spec.field == "model" {
         return;
     }
     if editor.get_string(spec.table, "model").is_none() {
@@ -1528,6 +1592,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
     let dol = || cfg.dolphin.clone().unwrap_or_default();
     let om = || cfg.omnilingual.clone().unwrap_or_default();
     let co = || cfg.cohere.clone().unwrap_or_default();
+    let dg = || cfg.deepgram.clone().unwrap_or_default();
 
     let v = match key {
         "engine" => json!(cfg.engine.name()),
@@ -1556,6 +1621,13 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             Some(n) => json!(n),
             None => Json::Null,
         },
+
+        "deepgram.model" => json!(dg().model),
+        "deepgram.language" => json!(dg().language),
+        "deepgram.smart_format" => json!(dg().smart_format),
+        "deepgram.mip_opt_out" => json!(dg().mip_opt_out),
+        "deepgram.timeout_secs" => json!(dg().timeout_secs),
+        "deepgram.endpoint" => json!(dg().endpoint),
 
         "parakeet.model" => json!(pk().model),
         "parakeet.model_type" => match pk().model_type {
@@ -2161,8 +2233,8 @@ mod tests {
     #[test]
     fn feature_gate_agrees_with_config_set() {
         for name in config_set::ENGINE_NAMES {
-            if *name == "whisper" {
-                continue; // always available, so it has no feature entry
+            if matches!(*name, "whisper" | "deepgram") {
+                continue; // unconditional engines have no Cargo feature entry
             }
             assert_eq!(
                 feature_compiled(name),
@@ -2179,11 +2251,12 @@ mod tests {
     fn onnx_engine_keys_are_feature_gated() {
         for s in CONFIG_KEYS {
             let Some(engine) = s.engine else { continue };
-            if engine == "whisper" {
+            if matches!(engine, "whisper" | "deepgram") {
                 assert!(
                     s.requires_feature.is_none(),
-                    "{} should not be feature-gated; whisper is always compiled in",
-                    s.key
+                    "{} should not be feature-gated; {} is always compiled in",
+                    s.key,
+                    engine,
                 );
             } else {
                 assert_eq!(

@@ -63,7 +63,9 @@ pub enum Remediation {
 /// the feature name is just the engine's canonical name.
 pub fn required_feature(engine: TranscriptionEngine) -> Option<&'static str> {
     match engine {
-        TranscriptionEngine::Whisper => None,
+        TranscriptionEngine::Whisper
+        | TranscriptionEngine::Soniox
+        | TranscriptionEngine::Deepgram => None,
         other => Some(other.name()),
     }
 }
@@ -222,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn every_non_whisper_engine_has_a_required_feature() {
+    fn every_optional_engine_has_a_required_feature() {
         // Regression guard: if a new engine is added to TranscriptionEngine
         // without updating required_feature, this catches it before it
         // ships as a silent always-passes mismatch check.
@@ -234,7 +236,6 @@ mod tests {
             TranscriptionEngine::Dolphin,
             TranscriptionEngine::Omnilingual,
             TranscriptionEngine::Cohere,
-            TranscriptionEngine::Soniox,
         ];
         for e in engines {
             assert!(
@@ -244,5 +245,7 @@ mod tests {
             );
         }
         assert_eq!(required_feature(TranscriptionEngine::Whisper), None);
+        assert_eq!(required_feature(TranscriptionEngine::Soniox), None);
+        assert_eq!(required_feature(TranscriptionEngine::Deepgram), None);
     }
 }

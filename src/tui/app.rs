@@ -534,7 +534,7 @@ fn detect_missing_model() -> Option<MissingModel> {
         // disk probe rather than emit a false-positive missing warning.
         config::TranscriptionEngine::Cohere => return None,
         // Soniox is cloud-only, no local model to probe.
-        config::TranscriptionEngine::Soniox => return None,
+        config::TranscriptionEngine::Soniox | config::TranscriptionEngine::Deepgram => return None,
     };
 
     if model.is_empty() {
