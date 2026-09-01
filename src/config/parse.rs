@@ -71,16 +71,16 @@ pub fn parse_config_salvaging(contents: &str) -> Result<(Config, Vec<String>), t
         }
     }
 
-    // Sections can interact, so the accumulated result is verified once more.
-    // If it still fails, fall back to pure defaults rather than refusing to
-    // start; every rejected key is reported either way.
-    match accepted.try_into::<Config>() {
-        Ok(config) => Ok((config, rejected)),
-        Err(_) => {
-            rejected.push("<combined>".to_string());
-            Ok((Config::default(), rejected))
-        }
-    }
+    // No combined re-verification: sections cannot interact. Config is a
+    // plain serde derive with no deny_unknown_fields, flatten, or custom
+    // Deserialize, so each top-level field deserializes from its own subtree
+    // independently, and merging distinct top-level keys onto the same
+    // defaults leaves every subtree identical to the probe that just
+    // validated it. If this ever errors, some future cross-field validation
+    // broke that invariant; propagating the error names the problem, where
+    // the old fallback silently discarded the entire config while claiming
+    // to have salvaged it.
+    accepted.try_into::<Config>().map(|c| (c, rejected))
 }
 
 /// Deep-merge `overlay` onto `base`. Tables merge recursively; for any other
@@ -128,6 +128,16 @@ max_duration_secs = "not a number"
             Config::default().audio.max_duration_secs,
             "the bad section falls back to its default"
         );
+    }
+
+    /// Both parse paths `.expect()` this serialization at runtime — for the
+    /// salvage path, once per daemon start for every user whose config has a
+    /// bad section. A Config field that stops serializing to TOML (e.g. a
+    /// map with non-string keys, or a newly `#[serde(skip_serializing)]`
+    /// required field) would turn that warning into a startup panic.
+    #[test]
+    fn default_config_serializes_to_toml() {
+        assert!(toml::Value::try_from(Config::default()).is_ok());
     }
 
     /// A clean config must take the fast path and report nothing.

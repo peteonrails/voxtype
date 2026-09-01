@@ -22,9 +22,15 @@
 #     `cargo run --bin voxtype-mirror-registry` to discover models).
 #
 # Usage:
-#   ./scripts/mirror-models-to-r2.sh <model-name>      # one model
-#   ./scripts/mirror-models-to-r2.sh --all             # every model
-#   ./scripts/mirror-models-to-r2.sh --all --dry-run   # skip rclone upload
+#   ./scripts/mirror-models-to-r2.sh <model-name>       # one model
+#   ./scripts/mirror-models-to-r2.sh --engine <prefix>  # every model of one engine
+#   ./scripts/mirror-models-to-r2.sh --all              # every model
+#   ./scripts/mirror-models-to-r2.sh --all --dry-run    # skip rclone upload
+#
+# Prefer --engine over --all when adding a new engine's models: --all
+# re-downloads every registry entry from HF and overwrites every manifest
+# already on R2, so a changed upstream repo would silently replace bytes
+# users' manifests already pin. --engine touches only that engine's tree.
 #
 # For the very first population (no models on R2 yet) Pete should run:
 #   ./scripts/mirror-models-to-r2.sh --all
@@ -38,6 +44,7 @@ set -euo pipefail
 
 DRY_RUN=0
 TARGET=""
+ENGINE_FILTER=""
 
 # Models that hit a per-file 404 (or transient fetch failure) during mirroring
 # and got skipped. Reported as a non-fatal summary at the end so the operator
@@ -59,6 +66,14 @@ while [[ $# -gt 0 ]]; do
             sed -n 's/^# \{0,1\}//p' "$0" | sed -n '1,40p'
             exit 0
             ;;
+        --engine)
+            if [[ $# -lt 2 ]]; then
+                echo "error: --engine needs a prefix (e.g. --engine openvino)" >&2
+                exit 2
+            fi
+            ENGINE_FILTER="$2"
+            shift 2
+            ;;
         --*)
             echo "error: unknown flag: $1" >&2
             exit 2
@@ -74,8 +89,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$TARGET" ]]; then
-    echo "error: pass a model name or --all (try --help)" >&2
+if [[ -n "$ENGINE_FILTER" && -n "$TARGET" ]]; then
+    echo "error: --engine cannot be combined with a model name or --all" >&2
+    exit 2
+fi
+
+if [[ -z "$TARGET" && -z "$ENGINE_FILTER" ]]; then
+    echo "error: pass a model name, --engine <prefix>, or --all (try --help)" >&2
     exit 2
 fi
 
@@ -176,7 +196,20 @@ mirror_one() {
     fi
 }
 
-if [[ "$TARGET" == "--all" ]]; then
+if [[ -n "$ENGINE_FILTER" ]]; then
+    if ! echo "$REGISTRY_JSON" | jq -e --arg e "$ENGINE_FILTER" 'any(.[]; .engine_prefix == $e)' >/dev/null; then
+        echo "error: no engine '$ENGINE_FILTER' in the registry; known engines:" >&2
+        echo "$REGISTRY_JSON" | jq -r '[.[].engine_prefix] | unique | .[]' | sed 's/^/         - /' >&2
+        exit 1
+    fi
+    while read -r entry; do
+        engine="$(echo "$entry" | jq -r '.engine_prefix')"
+        name="$(echo "$entry" | jq -r '.name')"
+        upstream="$(echo "$entry" | jq -r '.upstream_repo')"
+        files_json="$(echo "$entry" | jq -c '.files')"
+        mirror_one "$engine" "$name" "$upstream" "$files_json"
+    done < <(echo "$REGISTRY_JSON" | jq -c --arg e "$ENGINE_FILTER" '.[] | select(.engine_prefix == $e)')
+elif [[ "$TARGET" == "--all" ]]; then
     # Process-substitution rather than `... | while` so SKIPPED_MODELS+=
     # inside mirror_one persists past the loop body (a pipe would put the
     # whole while-loop in a subshell and lose the array on exit).

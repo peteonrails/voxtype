@@ -69,7 +69,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if raw_args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("voxtype-osd-quickshell {}", env!("CARGO_PKG_VERSION"));
+        println!("voxtype-osd-quickshell {}", voxtype::cli::VERSION);
         return ExitCode::SUCCESS;
     }
 
@@ -188,7 +188,7 @@ fn print_help() {
              VOXTYPE_OSD_QML_PATH   Same as --qml-path.\n    \
              VOXTYPE_OSD_STYLE      Same as --style.\n    \
              VOXTYPE_CONFIG         Path to voxtype config.toml.\n",
-        env!("CARGO_PKG_VERSION"),
+        voxtype::cli::VERSION,
     );
 }
 

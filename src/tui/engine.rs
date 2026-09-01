@@ -117,6 +117,14 @@ pub struct AllFields {
     pub co_threads: Option<i64>,
     pub co_on_demand_loading: bool,
     pub co_section_existed: bool,
+
+    // OpenVINO GenAI Whisper (Intel NPU/GPU/CPU)
+    pub ov_model: String,
+    pub ov_device: String,
+    pub ov_language: String,
+    pub ov_threads: Option<i64>,
+    pub ov_on_demand_loading: bool,
+    pub ov_section_existed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +194,13 @@ pub enum FieldId {
     CoLanguage,
     CoThreads,
     CoOnDemandLoading,
+
+    // OpenVINO
+    OvModel,
+    OvDevice,
+    OvLanguage,
+    OvThreads,
+    OvOnDemandLoading,
 }
 
 /// Cohere Transcribe officially supports these 14 languages. Token IDs are
@@ -201,6 +216,11 @@ const LANG_CHOICES: &[&str] = &[
 ];
 const SV_LANG_CHOICES: &[&str] = &["auto", "zh", "en", "ja", "ko", "yue"];
 const PARAKEET_MODEL_TYPES: &[Option<&str>] = &[None, Some("tdt"), Some("ctc")];
+/// Inference device OpenVINO GenAI tries first; falls back to CPU if the
+/// requested device fails to initialize (see `OpenVinoTranscriber::new`).
+/// AUTO is a real OpenVINO device value too (see `installation_guidance`'s
+/// own AUTO arm) — included here so it's reachable from the picker.
+const OV_DEVICE_CHOICES: &[&str] = &["NPU", "GPU", "CPU", "AUTO"];
 
 fn rows_for_engine_with_mode(engine: &str, whisper_mode: &str) -> Vec<FieldId> {
     let mut rows = vec![FieldId::Engine];
@@ -263,6 +283,13 @@ fn rows_for_engine_with_mode(engine: &str, whisper_mode: &str) -> Vec<FieldId> {
             FieldId::CoLanguage,
             FieldId::CoThreads,
             FieldId::CoOnDemandLoading,
+        ]),
+        "openvino" => rows.extend_from_slice(&[
+            FieldId::OvModel,
+            FieldId::OvDevice,
+            FieldId::OvLanguage,
+            FieldId::OvThreads,
+            FieldId::OvOnDemandLoading,
         ]),
         _ => {}
     }
@@ -369,6 +396,22 @@ impl EngineState {
             co_threads: ed.get_int("cohere", "threads"),
             co_on_demand_loading: ed.get_bool("cohere", "on_demand_loading").unwrap_or(false),
             co_section_existed: ed.get_string("cohere", "model").is_some(),
+
+            // OpenVINO
+            ov_model: ed
+                .get_string("openvino", "model")
+                .unwrap_or_else(|| default_model("openvino").to_string()),
+            ov_device: ed
+                .get_string("openvino", "device")
+                .unwrap_or_else(|| "NPU".to_string()),
+            ov_language: ed
+                .get_string("openvino", "language")
+                .unwrap_or_else(|| "en".to_string()),
+            ov_threads: ed.get_int("openvino", "threads"),
+            ov_on_demand_loading: ed
+                .get_bool("openvino", "on_demand_loading")
+                .unwrap_or(false),
+            ov_section_existed: ed.get_string("openvino", "model").is_some(),
         };
         let mut state = Self {
             engine,
@@ -401,6 +444,22 @@ impl EngineState {
         self.binary_switch_blocked = None;
 
         let inv = binary::inventory();
+
+        // OpenVINO isn't part of the prebuilt binary distribution: no
+        // Whisper or ONNX variant links against openvino-genai (it's an
+        // entirely separate Intel runtime, not an ONNX execution provider),
+        // so there's no variant to switch to. It's purely a source-build
+        // Cargo feature; just check whether the running binary has it.
+        if self.engine == "openvino" {
+            if !inv.compiled_features.contains(&"openvino") {
+                self.binary_switch_blocked = Some(
+                    "OpenVINO isn't available in prebuilt voxtype binaries. \
+                     Build from source with --features openvino.",
+                );
+            }
+            return;
+        }
+
         if inv.install_kind == InstallKind::Source {
             // Source builds can't be hot-swapped; whether the running binary
             // supports the chosen engine depends on its compiled features.
@@ -581,6 +640,18 @@ impl EngineState {
                 None => ed.unset("cohere", "threads"),
             }
             ed.set_bool("cohere", "on_demand_loading", f.co_on_demand_loading);
+        }
+
+        // OpenVINO
+        if self.engine == "openvino" || f.ov_section_existed {
+            ed.set_string("openvino", "model", &f.ov_model);
+            ed.set_string("openvino", "device", &f.ov_device);
+            ed.set_string("openvino", "language", &f.ov_language);
+            match f.ov_threads {
+                Some(n) => ed.set_int("openvino", "threads", n),
+                None => ed.unset("openvino", "threads"),
+            }
+            ed.set_bool("openvino", "on_demand_loading", f.ov_on_demand_loading);
         }
 
         match ed.save() {
@@ -824,6 +895,12 @@ impl EngineState {
             }
             FieldId::CoThreads => f.co_threads = cycle_threads(f.co_threads, delta),
             FieldId::CoOnDemandLoading => f.co_on_demand_loading = !f.co_on_demand_loading,
+
+            FieldId::OvModel => f.ov_model = cycle_model("openvino", &f.ov_model, delta),
+            FieldId::OvDevice => f.ov_device = cycle_str(OV_DEVICE_CHOICES, &f.ov_device, delta),
+            FieldId::OvLanguage => f.ov_language = cycle_str(LANG_CHOICES, &f.ov_language, delta),
+            FieldId::OvThreads => f.ov_threads = cycle_threads(f.ov_threads, delta),
+            FieldId::OvOnDemandLoading => f.ov_on_demand_loading = !f.ov_on_demand_loading,
         }
         self.dirty_since_load = true;
         self.feedback = None;
@@ -846,6 +923,7 @@ fn active_model_for_engine(engine: &str, f: &AllFields) -> Option<String> {
         "dolphin" => Some(f.dol_model.clone()),
         "omnilingual" => Some(f.om_model.clone()),
         "cohere" => Some(f.co_model.clone()),
+        "openvino" => Some(f.ov_model.clone()),
         _ => None,
     }
 }
@@ -881,6 +959,7 @@ fn installed_engine_choices() -> std::collections::HashSet<&'static str> {
             "dolphin",
             "omnilingual",
             "cohere",
+            "openvino",
         ] {
             if variant.supports_engine(engine) {
                 out.insert(engine);
@@ -903,6 +982,11 @@ fn installed_engine_choices() -> std::collections::HashSet<&'static str> {
             "dolphin",
             "omnilingual",
             "cohere",
+            // OpenVINO isn't checked against `variant.supports_engine()`
+            // above — it has no prebuilt binary variant at all (Intel-only
+            // runtime, unrelated to the Whisper/ONNX distribution). Source
+            // builds with the feature compiled in are the only way it runs.
+            "openvino",
         ] {
             if *f == engine {
                 out.insert(engine);
@@ -1212,6 +1296,20 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
             "Cohere · on-demand model load",
             yesno(f.co_on_demand_loading),
         ),
+
+        FieldId::OvModel => ("OpenVINO · model", f.ov_model.clone()),
+        FieldId::OvDevice => ("OpenVINO · device", f.ov_device.clone()),
+        FieldId::OvLanguage => ("OpenVINO · language", f.ov_language.clone()),
+        FieldId::OvThreads => (
+            "OpenVINO · threads",
+            f.ov_threads
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "auto".to_string()),
+        ),
+        FieldId::OvOnDemandLoading => (
+            "OpenVINO · on-demand model load",
+            yesno(f.ov_on_demand_loading),
+        ),
     }
 }
 
@@ -1307,6 +1405,12 @@ fn engine_guidance(state: &EngineState) -> Vec<Line<'static>> {
             "Cohere Transcribe (Cohere Labs). #1 on the Open ASR Leaderboard \
              for English (5.42 WER). 14 languages. ~3 GB on disk.",
         ),
+        (
+            "openvino",
+            "OpenVINO GenAI Whisper (Intel NPU/GPU/CPU). Included in the \
+             x86_64 ONNX release binaries; its runtime and device drivers \
+             are loaded only when this engine is selected.",
+        ),
     ] {
         lines.push(Line::from(Span::styled(
             format!("{}: ", name),
@@ -1343,6 +1447,7 @@ fn guidance(state: &EngineState) -> Vec<Line<'_>> {
         FieldId::DolModel => model_guidance("dolphin", &f.dol_model),
         FieldId::OmModel => model_guidance("omnilingual", &f.om_model),
         FieldId::CoModel => model_guidance("cohere", &f.co_model),
+        FieldId::OvModel => model_guidance("openvino", &f.ov_model),
 
         FieldId::WMode => vec![
             heading("Whisper · execution mode"),
@@ -1636,6 +1741,26 @@ fn guidance(state: &EngineState) -> Vec<Line<'_>> {
         FieldId::CoThreads => threads_guidance("Cohere"),
         FieldId::CoOnDemandLoading => on_demand_guidance("Cohere"),
 
+        FieldId::OvDevice => openvino_device_guidance(&f.ov_device),
+        FieldId::OvLanguage => vec![
+            heading("OpenVINO · language"),
+            Line::from(""),
+            Line::from("Two-letter language code passed to Whisper."),
+            Line::from(""),
+            Line::from(Span::styled(
+                "English-only .en models ignore this setting. Choose a multilingual model for other languages.",
+                Style::default().fg(Color::Gray),
+            )),
+        ],
+        FieldId::OvThreads => vec![
+            heading("OpenVINO · threads"),
+            Line::from(""),
+            Line::from(
+                "CPU thread count. It is ignored by the current OpenVINO GenAI Whisper pipeline API.",
+            ),
+        ],
+        FieldId::OvOnDemandLoading => on_demand_guidance("OpenVINO"),
+
         FieldId::WRemoteEndpoint => vec![
             heading("Whisper · remote endpoint"),
             Line::from(""),
@@ -1688,6 +1813,57 @@ fn guidance(state: &EngineState) -> Vec<Line<'_>> {
             ),
         ],
     }
+}
+
+fn openvino_device_guidance(device: &str) -> Vec<Line<'static>> {
+    let device = device.to_ascii_uppercase();
+    let (summary, packages, check) = match device.as_str() {
+        "NPU" => (
+            "Intel's dedicated low-power AI accelerator.",
+            "openvino openvino-intel-npu-plugin intel-npu-driver",
+            "Reboot after installing the driver; then verify /dev/accel/accel* exists.",
+        ),
+        "GPU" => (
+            "Intel integrated or discrete GPU.",
+            "openvino openvino-intel-gpu-plugin level-zero-loader intel-compute-runtime",
+            "Verify the device node with: ls /dev/dri/renderD*",
+        ),
+        "CPU" => (
+            "Portable CPU inference; no accelerator driver is required.",
+            "openvino",
+            "This is the simplest fallback when no Intel accelerator is available.",
+        ),
+        _ => (
+            "Let OpenVINO choose from the installed device plugins.",
+            "openvino, plus the NPU and/or GPU packages shown for those devices",
+            "Install every plugin and driver that AUTO should be allowed to use.",
+        ),
+    };
+
+    vec![
+        heading(format!("OpenVINO · {} device", device)),
+        Line::from(""),
+        Line::from(summary),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Arch Linux packages:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!("  sudo pacman -S {}", packages)),
+        Line::from(check),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Required for every device:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(
+            "Install Intel's version-matched OpenVINO GenAI C/C++ SDK archive and set openvino_dir to its extracted root.",
+        ),
+        Line::from(Span::styled(
+            "The pip wheel and openvino-genai-bin do not ship the required libopenvino_genai_c.so C API library.",
+            Style::default().fg(Color::Yellow),
+        )),
+    ]
 }
 
 fn model_guidance(engine: &str, current: &str) -> Vec<Line<'static>> {
@@ -1757,6 +1933,7 @@ fn display_engine(engine: &str) -> &'static str {
         "dolphin" => "Dolphin",
         "omnilingual" => "Omnilingual",
         "cohere" => "Cohere",
+        "openvino" => "OpenVINO",
         _ => "Engine",
     }
 }
@@ -1854,5 +2031,41 @@ fn handle_edit_key(state: &mut EngineState, key: KeyEvent) -> Action {
             state.editing = None;
             Action::None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line_text(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn openvino_engine_exposes_device_configuration() {
+        let rows = rows_for_engine_with_mode("openvino", "local");
+        assert!(rows.contains(&FieldId::OvModel));
+        assert!(rows.contains(&FieldId::OvDevice));
+        assert!(rows.contains(&FieldId::OvLanguage));
+        assert!(rows.contains(&FieldId::OvOnDemandLoading));
+    }
+
+    #[test]
+    fn openvino_tui_guidance_matches_selected_device() {
+        let gpu = line_text(&openvino_device_guidance("GPU"));
+        assert!(gpu.contains("openvino-intel-gpu-plugin"));
+        assert!(gpu.contains("intel-compute-runtime"));
+        assert!(!gpu.contains("intel-npu-driver"));
+
+        let npu = line_text(&openvino_device_guidance("NPU"));
+        assert!(npu.contains("openvino-intel-npu-plugin"));
+        assert!(npu.contains("intel-npu-driver"));
+        assert!(!npu.contains("intel-compute-runtime"));
     }
 }
