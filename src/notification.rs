@@ -222,6 +222,19 @@ pub async fn send_status(title: &str, body: &str, urgency: &str, lifetime: Lifet
     let _ = (title, body, urgency, lifetime);
 }
 
+/// Synchronous counterpart to `send_status`, for callers without a tokio
+/// runtime (the TUI's detached model-download worker thread). Same single
+/// notification slot, same urgency handling, always a timed lifetime: a
+/// caller with no runtime has no daemon event loop that would ever close a
+/// persistent banner.
+pub fn send_status_sync(title: &str, body: &str, urgency: &str) {
+    #[cfg(target_os = "linux")]
+    send_linux_sync(title, body, Some(urgency));
+
+    #[cfg(not(target_os = "linux"))]
+    let _ = (title, body, urgency);
+}
+
 /// Close the notification posted with `Lifetime::UntilClosed`, if one is still
 /// up. Does nothing when the slot holds a timed notification.
 ///
@@ -357,7 +370,7 @@ pub fn send_sync_with_engine(title: &str, body: &str, engine: Option<Transcripti
     #[cfg(target_os = "linux")]
     {
         let _ = engine;
-        send_linux_sync(title, body);
+        send_linux_sync(title, body, None);
     }
 
     #[cfg(target_os = "macos")]
@@ -371,12 +384,12 @@ pub fn send_sync_with_engine(title: &str, body: &str, engine: Option<Transcripti
 
 /// Send a notification on Linux using notify-send (synchronous)
 #[cfg(target_os = "linux")]
-fn send_linux_sync(title: &str, body: &str) {
+fn send_linux_sync(title: &str, body: &str, urgency: Option<&str>) {
     // Same overwrite-and-transient hints as the async path ([#345]).
     use std::sync::atomic::Ordering;
 
     if !REPLACE_UNSUPPORTED.load(Ordering::Relaxed) {
-        let mut args = linux_common_args(Lifetime::Millis(5000), None);
+        let mut args = linux_common_args(Lifetime::Millis(5000), urgency);
         args.push("--print-id".to_string());
         args.extend(replace_args());
         args.push(title.to_string());
@@ -399,7 +412,7 @@ fn send_linux_sync(title: &str, body: &str) {
         }
     }
 
-    let mut args = linux_common_args(Lifetime::Millis(5000), None);
+    let mut args = linux_common_args(Lifetime::Millis(5000), urgency);
     args.push(title.to_string());
     args.push(body.to_string());
     let _ = std::process::Command::new("notify-send")
