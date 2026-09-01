@@ -16,7 +16,7 @@ Hold a hotkey (default: ScrollLock) while speaking, release to transcribe and ou
 - **Parakeet on AMD and NVIDIA GPUs.** MIGraphX 7.2 for Radeon, separate CUDA 12 and CUDA 13 binaries for every NVIDIA driver generation, Vulkan for Whisper across vendors. *(MIGraphX new in 0.7.0)*
 - **Text processing built in.** Spoken punctuation (`"comma"` → `,`), per-user replacement tables for common mistranscriptions, and an optional post-processing pipe through any LLM or shell script. Fix domain terms, drop filler words, polish grammar — all without leaving voxtype.
 - **Dynamic per-engine model loading.** Configure all 7 engines, pay memory only for the active one. Models load on first use and unload when idle.
-- **Seven transcription engines.** Whisper, Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual. Switch with `voxtype configure` or one config line. CJK and 1600+ languages covered by the multilingual engines.
+- **Seven transcription engines.** Whisper, Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual. Switch with `voxtype configure` or one config line. CJK and 1600+ languages covered by the multilingual engines. GigaAM-v3 e2e RNN-T adds offline Russian with built-in punctuation (`--features gigaam`).
 - **Meeting mode.** Continuous transcription with chunked processing, speaker attribution, and export to Markdown, JSON, SRT, or VTT.
 
 ### Native Linux integration
@@ -370,11 +370,12 @@ Voxtype ships separate binaries for Whisper and ONNX engines. Use `voxtype setup
 | **Paraformer** | zh+en, zh+yue+en | Non-autoregressive (ONNX) | Chinese-English bilingual |
 | **Dolphin** | 40 languages + 22 Chinese dialects | CTC E-Branchformer (ONNX) | Eastern languages (no English) |
 | **Omnilingual** | 1600+ languages | wav2vec2 CTC (ONNX) | Low-resource and rare languages |
+| **GigaAM** | Russian | e2e RNN-T (ONNX) | Russian dictation with punctuation |
 
 To set the engine in your config:
 
 ```toml
-engine = "sensevoice"  # or: whisper, parakeet, moonshine, paraformer, dolphin, omnilingual
+engine = "sensevoice"  # or: whisper, parakeet, moonshine, paraformer, dolphin, omnilingual, gigaam
 ```
 
 Or override on the command line:

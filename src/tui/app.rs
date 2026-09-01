@@ -533,6 +533,14 @@ fn detect_missing_model() -> Option<MissingModel> {
         // Cohere — checked but model layout differs by rc/0.7.0; skip the
         // disk probe rather than emit a false-positive missing warning.
         config::TranscriptionEngine::Cohere => return None,
+        config::TranscriptionEngine::GigaAM => (
+            "gigaam",
+            cfg.gigaam
+                .as_ref()
+                .map(|c| c.model.clone())
+                .unwrap_or_default(),
+            "scripts/export_gigaam_onnx.py",
+        ),
         // Soniox is cloud-only, no local model to probe.
         config::TranscriptionEngine::Soniox => return None,
     };

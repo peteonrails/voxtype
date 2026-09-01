@@ -1,7 +1,8 @@
 use super::{
-    AudioConfig, CohereConfig, DolphinConfig, HotkeyConfig, MeetingConfig, MoonshineConfig,
-    OmnilingualConfig, OutputConfig, ParaformerConfig, ParakeetConfig, Profile, SenseVoiceConfig,
-    SonioxConfig, StatusConfig, TextConfig, TranscriptionEngine, VadConfig, WhisperConfig,
+    AudioConfig, CohereConfig, DolphinConfig, GigaAMConfig, HotkeyConfig, MeetingConfig,
+    MoonshineConfig, OmnilingualConfig, OutputConfig, ParaformerConfig, ParakeetConfig, Profile,
+    SenseVoiceConfig, SonioxConfig, StatusConfig, TextConfig, TranscriptionEngine, VadConfig,
+    WhisperConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -55,6 +56,10 @@ pub struct Config {
     /// Cohere Transcribe configuration (optional, only used when engine = "cohere")
     #[serde(default)]
     pub cohere: Option<CohereConfig>,
+
+    /// GigaAM configuration (optional, only used when engine = "gigaam")
+    #[serde(default)]
+    pub gigaam: Option<GigaAMConfig>,
 
     /// Soniox cloud streaming WebSocket STT configuration
     /// (optional, only used when engine = "soniox")
@@ -112,6 +117,7 @@ impl Default for Config {
             dolphin: None,
             omnilingual: None,
             cohere: None,
+            gigaam: None,
             soniox: None,
             text: TextConfig::default(),
             vad: VadConfig::default(),
@@ -338,6 +344,11 @@ impl Config {
                 .as_ref()
                 .map(|c| c.on_demand_loading)
                 .unwrap_or(false),
+            TranscriptionEngine::GigaAM => self
+                .gigaam
+                .as_ref()
+                .map(|g| g.on_demand_loading)
+                .unwrap_or(false),
             // Soniox is a cloud backend; nothing to load on demand.
             TranscriptionEngine::Soniox => false,
         }
@@ -414,6 +425,11 @@ impl Config {
                 .as_ref()
                 .map(|c| c.model.as_str())
                 .unwrap_or("cohere (not configured)"),
+            TranscriptionEngine::GigaAM => self
+                .gigaam
+                .as_ref()
+                .map(|g| g.model.as_str())
+                .unwrap_or("gigaam (not configured)"),
             TranscriptionEngine::Soniox => self
                 .soniox
                 .as_ref()

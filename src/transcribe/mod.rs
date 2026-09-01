@@ -11,6 +11,7 @@
 //! - Optionally Paraformer via ONNX Runtime (when `paraformer` feature is enabled)
 //! - Optionally Dolphin via ONNX Runtime (when `dolphin` feature is enabled)
 //! - Optionally Omnilingual via ONNX Runtime (when `omnilingual` feature is enabled)
+//! - Optionally GigaAM-v3 e2e RNN-T via ONNX Runtime (when `gigaam` feature is enabled)
 
 pub mod cli;
 #[cfg(feature = "parakeet")]
@@ -33,6 +34,14 @@ pub use streaming::{SegmentId, StreamHandle, StreamingEvent, StreamingTranscribe
     feature = "cohere",
 ))]
 pub mod fbank;
+
+/// GigaAM backend (SberDevices GigaAM-v3 e2e RNN-T, Russian, ONNX Runtime).
+#[cfg(feature = "gigaam")]
+pub mod gigaam;
+
+/// Torchaudio-compatible log-mel feature extraction for GigaAM.
+#[cfg(feature = "gigaam")]
+pub mod gigaam_mel;
 
 /// Shared GPU execution-provider registration for ONNX-based engines.
 #[cfg(feature = "onnx-common")]
@@ -266,6 +275,18 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
         #[cfg(not(feature = "cohere"))]
         TranscriptionEngine::Cohere => Err(TranscribeError::InitFailed(
             "Cohere engine requested but voxtype was not compiled with --features cohere"
+                .to_string(),
+        )),
+        #[cfg(feature = "gigaam")]
+        TranscriptionEngine::GigaAM => {
+            // Bare `--engine gigaam` without a [gigaam] table falls back to
+            // defaults so the CLI just works; config.toml can still override.
+            let cfg = config.gigaam.clone().unwrap_or_default();
+            Ok(Box::new(gigaam::GigaAMTranscriber::new(&cfg)?))
+        }
+        #[cfg(not(feature = "gigaam"))]
+        TranscriptionEngine::GigaAM => Err(TranscribeError::InitFailed(
+            "GigaAM engine requested but voxtype was not compiled with --features gigaam"
                 .to_string(),
         )),
         TranscriptionEngine::Soniox => {

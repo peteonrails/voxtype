@@ -234,6 +234,7 @@ mod tests {
             TranscriptionEngine::Dolphin,
             TranscriptionEngine::Omnilingual,
             TranscriptionEngine::Cohere,
+            TranscriptionEngine::GigaAM,
             TranscriptionEngine::Soniox,
         ];
         for e in engines {
