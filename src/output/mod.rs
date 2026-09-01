@@ -390,7 +390,14 @@ pub fn create_output_chain_with_override(
             }
         }
         crate::config::OutputMode::Paste => {
-            // Only paste mode (no fallback as requested)
+            // Paste mode (keystroke path). The modifier-release guard skips
+            // keystroke-synthesizing methods — including this paste driver —
+            // when a modifier is still held after the timeout, and its
+            // notification tells the user the transcription was "copied to
+            // clipboard". Keep a clipboard tail in the chain so that promise
+            // holds: if the paste driver is skipped (guard timeout) or fails,
+            // the transcription still lands on the clipboard instead of
+            // failing with AllMethodsFailed and being lost.
             chain.push(Box::new(paste::PasteOutput::new(
                 config.auto_submit,
                 config.append_text.clone(),
@@ -400,6 +407,16 @@ pub fn create_output_chain_with_override(
                 config.restore_clipboard,
                 config.restore_clipboard_delay_ms,
             )));
+            #[cfg(target_os = "macos")]
+            chain.push(Box::new(pbcopy::PbcopyOutput::new(
+                config.notification.on_transcription,
+            )));
+            #[cfg(not(target_os = "macos"))]
+            {
+                chain.push(Box::new(clipboard::ClipboardOutput::new(
+                    config.append_text.clone(),
+                )));
+            }
         }
         crate::config::OutputMode::File => {
             // File output is handled in the daemon before reaching the output chain.
@@ -588,6 +605,32 @@ mod tests {
         let text = "\u{201C}Don\u{2019}t worry,\u{201D} she said.";
         let result = normalize_quotes(text);
         assert_eq!(result, "\"Don't worry,\" she said.");
+    }
+
+    #[test]
+    fn test_paste_mode_chain_keeps_clipboard_tail() {
+        // A modifier-guard timeout skips every keystroke-synthesizing
+        // method; paste mode's only driver is one. Without a non-keystroke
+        // tail the chain becomes empty, output fails with AllMethodsFailed,
+        // and the transcription is lost despite the guard notification
+        // saying it was copied to the clipboard.
+        let mut config = crate::config::OutputConfig::default();
+        config.mode = crate::config::OutputMode::Paste;
+        let chain = create_output_chain(&config);
+
+        assert!(
+            chain.len() >= 2,
+            "paste chain must contain a fallback after the paste driver"
+        );
+        assert!(is_keystroke_method(chain[0].name()));
+        let tail = chain.last().unwrap().name();
+        assert!(
+            !is_keystroke_method(tail),
+            "paste chain must end with a non-keystroke method so a \
+             modifier-guard timeout still delivers the transcription, \
+             got tail {:?}",
+            tail
+        );
     }
 
     #[test]
