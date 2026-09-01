@@ -186,6 +186,9 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     if let Ok(endpoint) = std::env::var("VOXTYPE_REMOTE_ENDPOINT") {
         config.whisper.remote_endpoint = Some(endpoint);
     }
+    if let Ok(path) = std::env::var("VOXTYPE_REMOTE_PATH") {
+        config.whisper.remote_path = Some(path);
+    }
     if let Ok(key) = std::env::var("VOXTYPE_WHISPER_API_KEY") {
         config.whisper.remote_api_key = Some(key);
     }

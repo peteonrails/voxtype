@@ -1112,6 +1112,26 @@ remote_endpoint = "https://api.openai.com"
 
 **Security note:** Voxtype logs a warning if you use HTTP (unencrypted) for non-localhost endpoints, as your audio would be transmitted in the clear.
 
+### remote_path
+
+**Type:** String
+**Default:** `"/v1/audio/transcriptions"` (`"/v1/audio/translations"` when `translate = true`)
+**Required:** No
+
+The request path appended to `remote_endpoint`. The defaults match the OpenAI API, which most compatible servers implement. A stock whisper.cpp `server` does not: it only serves `/inference`, so a request to the default path returns 404.
+
+When this option is set, the same path is used for both transcription and translation, since servers with a custom path generally do not split the two. A leading `/` is added if you omit it.
+
+**Example:**
+```toml
+[whisper]
+mode = "remote"
+remote_endpoint = "http://192.168.1.100:8080"
+remote_path = "/inference"
+```
+
+If you run whisper.cpp's server with `--inference-path`, set `remote_path` to the same value.
+
 ### remote_model
 
 **Type:** String
@@ -3535,6 +3555,7 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_GPU_DEVICE` | integer | `whisper.gpu_device` |
 | `VOXTYPE_ON_DEMAND_LOADING` | bool | `whisper.on_demand_loading` |
 | `VOXTYPE_REMOTE_ENDPOINT` | string | `whisper.remote_endpoint` |
+| `VOXTYPE_REMOTE_PATH` | string | `whisper.remote_path` |
 | `VOXTYPE_WHISPER_API_KEY` | string | `whisper.remote_api_key` |
 
 **Audio:**

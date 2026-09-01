@@ -386,6 +386,16 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
     )
     .for_engine("whisper"),
     spec(
+        "whisper.remote_path",
+        "whisper",
+        "remote_path",
+        KeyType::String,
+        "Engine",
+        "Remote request path",
+        "Request path appended to remote_endpoint. Defaults to the OpenAI paths; set to /inference for a stock whisper.cpp server.",
+    )
+    .for_engine("whisper"),
+    spec(
         "whisper.remote_api_key",
         "whisper",
         "remote_api_key",
@@ -1640,6 +1650,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         },
         "whisper.initial_prompt" => opt_str(cfg.whisper.initial_prompt.as_ref()),
         "whisper.remote_endpoint" => opt_str(cfg.whisper.remote_endpoint.as_ref()),
+        "whisper.remote_path" => opt_str(cfg.whisper.remote_path.as_ref()),
         "whisper.remote_api_key" => opt_str(cfg.whisper.remote_api_key.as_ref()),
         "whisper.remote_model" => opt_str(cfg.whisper.remote_model.as_ref()),
         "whisper.gpu_isolation" => json!(cfg.whisper.gpu_isolation),

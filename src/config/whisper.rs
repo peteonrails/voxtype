@@ -218,6 +218,15 @@ pub struct WhisperConfig {
     #[serde(default)]
     pub remote_send_auto_language: bool,
 
+    /// Request path appended to `remote_endpoint` (default: the OpenAI paths
+    /// `/v1/audio/transcriptions`, or `/v1/audio/translations` when translating)
+    /// Set this for servers that expose a different path, such as a stock
+    /// whisper.cpp server, which only serves `/inference`. When set, the same
+    /// path is used for transcription and translation, since servers with a
+    /// custom path generally do not split the two.
+    #[serde(default)]
+    pub remote_path: Option<String>,
+
     // --- CLI backend settings ---
     /// Path to whisper-cli binary (optional, searches PATH if not set)
     /// Used when mode = "cli"
@@ -289,6 +298,7 @@ impl Default for WhisperConfig {
             remote_api_key: None,
             remote_timeout_secs: None,
             remote_send_auto_language: false,
+            remote_path: None,
             whisper_cli_path: None,
         }
     }

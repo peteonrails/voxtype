@@ -30,6 +30,8 @@ pub struct RemoteTranscriber {
     initial_prompt: Option<String>,
     /// Send an explicit `language=auto` field instead of omitting it
     send_auto_language: bool,
+    /// Request path override for servers that don't use the OpenAI paths
+    path: Option<String>,
     /// Request timeout
     timeout: Duration,
 }
@@ -109,8 +111,24 @@ impl RemoteTranscriber {
             api_key,
             initial_prompt,
             send_auto_language: config.remote_send_auto_language,
+            path: config.remote_path.as_ref().map(|p| {
+                if p.starts_with('/') {
+                    p.clone()
+                } else {
+                    format!("/{}", p)
+                }
+            }),
             timeout,
         })
+    }
+
+    /// Path to request on the remote server
+    fn request_path(&self) -> &str {
+        match self.path {
+            Some(ref path) => path,
+            None if self.translate => "/v1/audio/translations",
+            None => "/v1/audio/transcriptions",
+        }
     }
 
     /// Encode f32 samples to WAV format
@@ -223,14 +241,11 @@ impl Transcriber for RemoteTranscriber {
         // Build multipart form
         let (boundary, body) = self.build_multipart_body(&wav_data);
 
-        // Determine the API path based on whether we're doing transcription or translation
-        let path = if self.translate {
-            "/v1/audio/translations"
-        } else {
-            "/v1/audio/transcriptions"
-        };
-
-        let url = format!("{}{}", self.endpoint.trim_end_matches('/'), path);
+        let url = format!(
+            "{}{}",
+            self.endpoint.trim_end_matches('/'),
+            self.request_path()
+        );
 
         // Build request
         let mut request = ureq::post(&url).timeout(self.timeout).set(
@@ -472,14 +487,7 @@ mod tests {
 
         // Verify translate flag is stored correctly
         assert!(!transcriber.translate);
-
-        // The endpoint path logic: if !translate, use /v1/audio/transcriptions
-        let path = if transcriber.translate {
-            "/v1/audio/translations"
-        } else {
-            "/v1/audio/transcriptions"
-        };
-        assert_eq!(path, "/v1/audio/transcriptions");
+        assert_eq!(transcriber.request_path(), "/v1/audio/transcriptions");
     }
 
     #[test]
@@ -495,14 +503,36 @@ mod tests {
 
         // Verify translate flag is stored correctly
         assert!(transcriber.translate);
+        assert_eq!(transcriber.request_path(), "/v1/audio/translations");
+    }
 
-        // The endpoint path logic: if translate, use /v1/audio/translations
-        let path = if transcriber.translate {
-            "/v1/audio/translations"
-        } else {
-            "/v1/audio/transcriptions"
+    #[test]
+    fn test_remote_path_overrides_openai_paths() {
+        for translate in [false, true] {
+            let config = WhisperConfig {
+                mode: Some(crate::config::WhisperMode::Remote),
+                translate,
+                remote_endpoint: Some("http://localhost:8080".to_string()),
+                remote_path: Some("/inference".to_string()),
+                ..Default::default()
+            };
+
+            let transcriber = RemoteTranscriber::new(&config).unwrap();
+            assert_eq!(transcriber.request_path(), "/inference");
+        }
+    }
+
+    #[test]
+    fn test_remote_path_gets_leading_slash() {
+        let config = WhisperConfig {
+            mode: Some(crate::config::WhisperMode::Remote),
+            remote_endpoint: Some("http://localhost:8080".to_string()),
+            remote_path: Some("inference".to_string()),
+            ..Default::default()
         };
-        assert_eq!(path, "/v1/audio/translations");
+
+        let transcriber = RemoteTranscriber::new(&config).unwrap();
+        assert_eq!(transcriber.request_path(), "/inference");
     }
 
     #[test]
