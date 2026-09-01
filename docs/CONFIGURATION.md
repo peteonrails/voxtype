@@ -403,6 +403,50 @@ duck_media = true
 duck_media_volume_percent = 34
 ```
 
+### external_trigger_silence_timeout_secs
+
+**Type:** Float
+**Default:** unset (disabled)
+**Required:** No
+
+Auto-stops an external-trigger recording (started via `voxtype record start`
+— SIGUSR1 — the mechanism a wake-word integration uses, since it has no
+physical key to hold or press again) after this many seconds of continuous
+silence following any detected speech. Unset by default: an external-trigger
+recording only ends on an explicit `voxtype record stop`/`record toggle`,
+matching behavior from before this option existed.
+
+This never applies to hotkey-driven push-to-talk or toggle recordings —
+those already have an explicit user-driven stop (release the key, or press
+it again), and don't need a silence timer.
+
+Speech detection uses `external_trigger_speech_threshold_dbfs` (below) on
+the same 10 ms level frames the OSD visualizer already computes — no extra
+audio processing.
+
+```toml
+[audio]
+external_trigger_silence_timeout_secs = 2.0  # stop 2s after the user stops talking
+```
+
+### external_trigger_speech_threshold_dbfs
+
+**Type:** Float
+**Default:** `-40.0`
+**Required:** No
+
+Peak level, in dBFS, at or above which a frame counts as speech for
+`external_trigger_silence_timeout_secs`. Only meaningful when that option is
+set. `-40.0` is a reasonable quiet-room default; raise it (toward `0.0`) on
+a noisy mic that never reads as silent, or lower it (more negative) if soft
+speech isn't resetting the silence timer.
+
+```toml
+[audio]
+external_trigger_silence_timeout_secs = 2.0
+external_trigger_speech_threshold_dbfs = -35.0  # less sensitive, noisier room
+```
+
 ### duck_media_volume_percent
 
 **Type:** Integer
@@ -875,6 +919,30 @@ voxtype --eager-processing --eager-overlap-secs 1.0 daemon
 - More overlap: Better word boundary handling, slightly more processing
 - Less overlap: Faster processing, but may miss words at boundaries
 
+### streaming
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Enables live streaming transcription via the sliding-window engine: text lands at the cursor incrementally as you speak instead of only after the hotkey is released. Only applies to `mode = "local"`.
+
+Tuning (re-transcription interval, buffer size, etc.) lives in the shared `[streaming]` section below, since `[openvino] streaming` wraps the same engine. `[whisper]` also still accepts its own `streaming_interval_secs` / `streaming_max_buffer_secs` / `streaming_min_speech_rms` / `streaming_min_audio_secs` / `streaming_partial_min_words` / `streaming_type_partials` / `streaming_revision_mode` fields for backward compatibility — they're used only when config.toml has no `[streaming]` section.
+
+**Requires toggle activation** for the same libinput reason documented under [`openvino.streaming`](#openvinostreaming) below: push-to-talk is auto-promoted to toggle at startup when this is enabled.
+
+**Example:**
+```toml
+[hotkey]
+mode = "toggle"
+
+[whisper]
+streaming = true
+
+[streaming]
+interval_secs = 0.8
+```
+
 ### initial_prompt
 
 **Type:** String
@@ -1161,6 +1229,48 @@ sudo cp build/bin/whisper-cli /usr/local/bin/
 
 ---
 
+## [streaming]
+
+Tuning for the sliding-window streaming engine (`transcribe::sliding_window`): a rolling audio buffer is re-transcribed on an interval and stable-prefix deltas are emitted as you speak. Shared by every engine that wraps itself in this engine — currently `[whisper] streaming` and `[openvino] streaming` — so it's configured once here instead of once per engine. It has nothing to do with Parakeet's own cache-aware streaming pipeline (`[parakeet] streaming`) or Soniox's cloud WebSocket streaming (`[soniox] streaming`), which are different mechanisms that happen to share the word "streaming".
+
+This section is entirely optional. Omitting it (or omitting individual fields inside it) falls back to each engine's own deprecated `streaming_*` fields — see the compatibility note at the end of this section.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `interval_secs` | Float | `0.8` | Seconds between re-transcriptions of the rolling buffer. Lower = more responsive partials, higher CPU/NPU cost |
+| `max_buffer_secs` | Float | `29.0` | Max buffered audio (seconds) before the window slides (drops old samples to respect the model's context limit) |
+| `min_speech_rms` | Float | `0.005` | Skip transcription while whole-buffer RMS is below this |
+| `min_audio_secs` | Float | `1.0` | Min buffered audio (seconds) before the first partial is attempted |
+| `partial_min_words` | Integer | `1` | Min new stable words before a delta is committed/typed |
+| `type_partials` | Boolean | `true` | Type committed deltas live at the cursor, vs. commit whole segments at once |
+| `revision_mode` | Boolean | `false` | Experimental: type immediately and correct via backspace if wrong, instead of waiting for agreement. See `openvino.streaming_revision_mode` in the `[openvino]` section for the full explanation of the trade-off — it applies identically here |
+
+**Example:**
+```toml
+[hotkey]
+mode = "toggle"   # Required for streaming — see [whisper] streaming above
+
+[whisper]
+streaming = true
+
+[streaming]
+interval_secs = 0.5        # More responsive, more CPU/NPU load
+max_buffer_secs = 20.0
+partial_min_words = 2
+```
+
+### Compatibility with the old per-engine fields
+
+Before this section existed, `[whisper]` and `[openvino]` each carried their own verbatim copy of these seven fields, prefixed `streaming_` (e.g. `[whisper] streaming_interval_secs`). Those fields still work:
+
+- If `[streaming]` is present in config.toml, it wins outright for every engine that uses the sliding-window engine, and any old per-engine `streaming_*` fields are ignored.
+- If `[streaming]` is absent, each engine falls back to its own `streaming_*` fields (or their defaults, which are identical to `[streaming]`'s defaults).
+- The first time an old per-engine field is actually carrying a non-default value and gets used as a fallback, the daemon logs a one-time warning suggesting the migration. An old config that never touched these fields sees no warning and no behavior change.
+
+There's no need to migrate an existing config that already works the way you want — the old fields aren't going away.
+
+---
+
 ## [parakeet]
 
 Configuration for the Parakeet speech-to-text engine. This section is only used when `engine = "parakeet"`.
@@ -1229,7 +1339,9 @@ on_demand_loading = true  # Free memory when not transcribing
 
 When `true`, voxtype types text incrementally while you are still speaking
 instead of waiting for hotkey release. Uses the parakeet-rs cache-aware
-streaming pipeline and a TDT v3 family model with `tokenizer.model`.
+streaming pipeline and a TDT v3 family model with `tokenizer.model` — a
+different mechanism from the shared `[streaming]` section used by
+`[whisper] streaming` and `[openvino] streaming`, and not configured by it.
 
 **Requires toggle activation.** Streaming output types characters at the
 cursor while you dictate. On Wayland compositors backed by libinput
@@ -1685,6 +1797,123 @@ cargo build --release
 ```
 
 The Soniox backend pulls in a small WebSocket client (tokio-tungstenite + rustls) and an async HTTP client (reqwest) for the async API. They ship in every release binary so the engine surface stays uniform across flavors.
+
+---
+
+## [openvino]
+
+Configuration for the OpenVINO Whisper speech-to-text engine. This section is only used when `engine = "openvino"`. The x86_64 ONNX release binaries include the feature, and source builds can enable it with `--features openvino-whisper`. OpenVINO is loaded at runtime only when this engine is selected, so a missing runtime does not affect other engines.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `model` | String | `"base.en"` | Model name or path to an OpenVINO IR model directory |
+| `device` | String | `"NPU"` | OpenVINO device: `"NPU"`, `"CPU"`, `"GPU"`, or `"AUTO"`. On a genuine device error (missing driver, unsupported op, no NPU on this chip) voxtype falls back automatically: configured device → GPU → CPU, skipping a device already tried. This is for actual errors only — see the note below on large models, which don't error on NPU, just compile slowly the first time. |
+| `quantized` | Boolean | `true` | Prefer int8 quantized model variants |
+| `threads` | Integer | system-detected | CPU inference threads |
+| `language` | String | `"en"` | Whisper language code |
+| `translate` | Boolean | `false` | Translate non-English speech to English |
+| `on_demand_loading` | Boolean | `false` | Load the model when recording begins |
+| `streaming` | Boolean | `false` | Live streaming transcription via the shared sliding-window engine — see `[streaming]` for tuning |
+
+The model directory must contain the OpenVINO encoder and decoder XML/BIN files plus `tokenizer.json`. Available bundled short names include `"base.en-int8"`, `"base.en-fp16"`, `"small.en-int8"`, `"base-int8"`, and `"large-v3-int8"`.
+
+`[openvino]` also still accepts its own deprecated `streaming_interval_secs` / `streaming_max_buffer_secs` / `streaming_min_speech_rms` / `streaming_min_audio_secs` / `streaming_partial_min_words` / `streaming_type_partials` / `streaming_revision_mode` fields — identical knobs to the ones now documented under `[streaming]` — used only as a fallback when config.toml has no `[streaming]` section. See the compatibility note at the end of the `[streaming]` section.
+
+### Compiled model caching
+
+Not a config field — always on. OpenVINO compiles the model graph into a device-specific blob before first inference on NPU (graph compiled to NPU-ISA) and GPU (OpenCL kernel compilation), and both are slow: NPU compiled cold in ~17s, GPU in a few seconds, measured on Lunar Lake with `base.en`. voxtype passes `CACHE_DIR` pointing at `$XDG_CACHE_HOME/voxtype/openvino` (falls back to `$HOME/.cache/voxtype/openvino`) so that compiled blob persists to disk and subsequent pipeline inits skip recompilation entirely — cached reload measured at 0.5-0.6s on both NPU and GPU. CPU has no comparable compile step and sees no meaningful change either way.
+
+Safe to delete (`rm -rf ~/.cache/voxtype/openvino`) if you switch models/devices often and want to reclaim the space; it repopulates on the next cold load.
+
+**Large models on NPU compile *much* slower the first time — this is normal, not a hang.** Confirmed live: `large-v3-int4`'s first NPU compile took ~887s (about 15 minutes) on Lunar Lake, with no output in between (the VPU compiler's tiling-strategy search logs plenty at `OV_NPU_LOG_LEVEL=LOG_DEBUG`, including alarming-looking `ERROR_INPUT_TOO_BIG` lines, but at default log levels voxtype prints nothing until it either succeeds or genuinely fails). It's a real one-time cost, not a bug — every load after the first uses the cached blob and is fast, same as any other model. If you don't want to wait through it, use `device = "GPU"` instead (compiles in ~11s for a model this size, no long first-load tax) or a smaller model. voxtype logs an info-level message before attempting NPU on any non-CPU device warning that this can happen, so it's not silent, but there's still nothing else to look at during the wait itself.
+
+### openvino.streaming
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Enables live streaming transcription: text lands incrementally as you speak instead of only after the hotkey is released, via the same shared sliding-window engine `[whisper] streaming` uses (re-transcribes a rolling audio buffer on an interval and emits stable-prefix deltas — see `[streaming]` for the tuning knobs). Requires `[hotkey] mode = "toggle"` — push-to-talk is auto-promoted to toggle when this is set (see `Config::streaming_active`), since typing at the cursor while a key is physically held clobbers libinput's held-key tracking on Hyprland/Sway/River.
+
+```toml
+[hotkey]
+mode = "toggle"
+
+[openvino]
+streaming = true
+```
+
+### openvino.streaming_revision_mode
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+**Status:** Experimental
+
+Same setting as the shared `[streaming] revision_mode`, kept here as a deprecated fallback (see the `[streaming]` section's compatibility note). The default streaming gate withholds a word until it's agreed across two consecutive re-transcriptions — safe (never types something wrong) but can pause for a long stretch if Whisper keeps re-wording the same short phrase differently on every pass. Revision mode trades that safety for responsiveness: it types its current best guess immediately and corrects it later (backspace + retype, the same mechanism used to revise Soniox's punctuation flips) if a later pass disagrees. Once enough newer content has appeared behind a word (`REVISION_LAG_WORDS`, 4 words, not configurable), it's locked in and can never be revised again — bounding how far back any single correction can reach.
+
+This is a real, different failure mode from the default gate, not a strictly better version of it: instead of an occasional pause, you may occasionally see a word appear, then get backspaced and retyped differently, while dictating. For file-output sessions (`voxtype record start --file=path`) there's no real cursor involved — a "correction" is just an in-memory string edit — so this is the safer place to try it first. For live typing into an arbitrary focused window, a wrong backspace count could in principle remove characters that weren't typed by voxtype at all, if the daemon's own bookkeeping of what it typed ever drifts (e.g. focus moved mid-correction).
+
+```toml
+[openvino]
+streaming = true
+streaming_revision_mode = true
+```
+
+### openvino.openvino_dir
+
+**Type:** String (optional)
+**Default:** None (automatic discovery)
+**Environment variable:** `VOXTYPE_OPENVINO_DIR`
+
+Path to the OpenVINO GenAI installation directory containing shared libraries. When set, voxtype loads `libopenvino_genai_c.so` from this directory instead of relying on automatic discovery via `LD_LIBRARY_PATH`, `OPENVINO_INSTALL_DIR`, or system package paths.
+
+The library is searched in these subdirectories:
+- `<openvino_dir>/`
+- `<openvino_dir>/runtime/lib/intel64/`
+- `<openvino_dir>/runtime/lib/intel64/Release/`
+
+This is useful when you have a custom OpenVINO build or Intel's SDK archive extracted in a non-standard location.
+
+### Runtime and device packages
+
+All devices require the core OpenVINO runtime and `libopenvino_genai_c.so` from
+Intel's [version-matched OpenVINO GenAI C/C++ SDK archive](https://storage.openvinotoolkit.org/repositories/openvino_genai/packages/).
+Match the SDK version to the installed core OpenVINO version, extract it, then
+set `openvino_dir` to the extracted root or add its `runtime/lib/intel64`
+directory to `LD_LIBRARY_PATH`.
+
+The `openvino-genai` pip wheel and Arch's `openvino-genai-bin` package do not
+provide `libopenvino_genai_c.so`; installing either one alone is insufficient
+for the Rust/C API used by voxtype.
+
+On Arch Linux, install only the device packages you need:
+
+| Configured device | Packages | Verification |
+|-------------------|----------|--------------|
+| `NPU` | `openvino openvino-intel-npu-plugin intel-npu-driver` | Reboot, then `ls /dev/accel/accel*` |
+| `GPU` | `openvino openvino-intel-gpu-plugin level-zero-loader intel-compute-runtime` | `ls /dev/dri/renderD*` |
+| `CPU` | `openvino` | No device-specific driver required |
+| `AUTO` | `openvino` plus each NPU/GPU plugin and driver that AUTO may use | Verify each enabled device as above |
+
+**Example:**
+```toml
+engine = "openvino"
+
+[openvino]
+model = "base.en-int8"
+device = "NPU"
+quantized = true
+language = "en"
+on_demand_loading = false
+openvino_dir = "/opt/intel/openvino"
+```
+
+Build from source with:
+
+```bash
+cargo build --release --features openvino-whisper
+```
 
 ---
 

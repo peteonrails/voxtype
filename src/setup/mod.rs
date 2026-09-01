@@ -6,6 +6,7 @@
 //! - Interactive model selection
 //! - Output chain detection
 //! - GPU backend management
+//! - NPU backend management (Intel NPU via OpenVINO)
 //! - Parakeet backend management
 //! - Compositor integration (modifier key fix)
 
@@ -23,6 +24,7 @@ pub mod launchd;
 pub mod macos;
 pub mod manifest;
 pub mod model;
+pub mod npu;
 pub mod parakeet;
 pub mod progress;
 pub mod quickshell;
@@ -505,6 +507,7 @@ pub(crate) enum ModelKind {
     Whisper,
     Parakeet,
     SenseVoice,
+    OpenVino,
 }
 
 /// Resolve a `--model` name to the engine that owns it.
@@ -524,13 +527,16 @@ pub(crate) fn classify_model_override(name: &str) -> anyhow::Result<ModelKind> {
         Ok(ModelKind::Parakeet)
     } else if model::is_sensevoice_model(name) {
         Ok(ModelKind::SenseVoice)
+    } else if model::is_openvino_model(name) {
+        Ok(ModelKind::OpenVino)
     } else {
         anyhow::bail!(
-            "Unknown model '{}'.\n  Whisper: {}\n  Parakeet: {}\n  SenseVoice: {}",
+            "Unknown model '{}'.\n  Whisper: {}\n  Parakeet: {}\n  SenseVoice: {}\n  OpenVINO: {}",
             name,
             model::valid_model_names().join(", "),
             model::valid_parakeet_model_names().join(", "),
             model::sensevoice_setup_model_names().join(", "),
+            model::valid_openvino_model_names().join(", "),
         )
     }
 }
@@ -605,8 +611,76 @@ pub async fn run_setup(
     };
     let is_parakeet = kind == Some(ModelKind::Parakeet);
     let is_sensevoice = kind == Some(ModelKind::SenseVoice);
+    let is_openvino = kind == Some(ModelKind::OpenVino);
 
-    if is_sensevoice {
+    if is_openvino {
+        // Handle OpenVINO model
+        #[allow(unused_variables)]
+        let model_name = model_override.unwrap(); // Safe: is_openvino implies Some
+
+        if !quiet {
+            println!("\nOpenVINO Whisper model...");
+        }
+
+        #[cfg(not(feature = "openvino-whisper"))]
+        {
+            print_failure(&format!(
+                "OpenVINO model '{}' requires the 'openvino-whisper' feature",
+                model_name
+            ));
+            println!("       Rebuild with: cargo build --features openvino-whisper");
+            anyhow::bail!("openvino-whisper feature not enabled");
+        }
+
+        #[cfg(feature = "openvino-whisper")]
+        {
+            let dir_name = model::openvino_dir_name(model_name).unwrap();
+            let model_path = models_dir.join(dir_name);
+            let model_valid =
+                model_path.exists() && model::validate_openvino_model(&model_path).is_ok();
+
+            if model_valid {
+                if !quiet {
+                    let size = std::fs::read_dir(&model_path)
+                        .map(|entries| {
+                            entries
+                                .flatten()
+                                .filter_map(|e| e.metadata().ok())
+                                .map(|m| m.len() as f64 / 1024.0 / 1024.0)
+                                .sum::<f64>()
+                        })
+                        .unwrap_or(0.0);
+                    print_success(&format!("Model ready: {} ({:.0} MB)", model_name, size));
+                }
+                if activate {
+                    model::set_openvino_config(model_name)?;
+                    if !quiet {
+                        print_success(&format!(
+                            "Config updated: engine = \"openvino\", model = \"{}\"",
+                            model_name
+                        ));
+                    }
+                }
+            } else if download {
+                model::download_openvino_model(model_name)?;
+                if activate {
+                    model::set_openvino_config(model_name)?;
+                    if !quiet {
+                        print_success(&format!(
+                            "Config updated: engine = \"openvino\", model = \"{}\"",
+                            model_name
+                        ));
+                    }
+                }
+            } else if !quiet {
+                print_info(&format!("Model '{}' not downloaded yet", model_name));
+                println!(
+                    "       Run: voxtype setup --download --model {}",
+                    model_name
+                );
+            }
+        }
+    } else if is_sensevoice {
         // Handle SenseVoice model
         #[allow(unused_variables)]
         let model_name = model_override.unwrap(); // Safe: is_sensevoice implies Some
@@ -1017,6 +1091,70 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
         }
     }
 
+    // Check OpenVINO models
+    println!("\nOpenVINO Whisper Models:");
+
+    let mut openvino_models: Vec<(String, u64)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&models_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with("openvino-whisper")
+                    && model::validate_openvino_model(&path).is_ok()
+                {
+                    let size = std::fs::read_dir(&path)
+                        .map(|entries| {
+                            entries
+                                .flatten()
+                                .filter_map(|e| e.metadata().ok())
+                                .map(|m| m.len())
+                                .sum()
+                        })
+                        .unwrap_or(0);
+                    openvino_models.push((name, size));
+                }
+            }
+        }
+    }
+
+    if openvino_models.is_empty() {
+        print_info("No OpenVINO models found");
+        println!("       Download with: voxtype setup --download --model base.en-int8");
+    } else {
+        for (name, size) in &openvino_models {
+            let size_mb = *size as f64 / 1024.0 / 1024.0;
+            print_success(&format!("Model '{}' installed ({:.0} MB)", name, size_mb));
+        }
+    }
+
+    // Check if OpenVINO is configured but model is missing
+    if config.engine == crate::config::TranscriptionEngine::OpenVino {
+        if let Some(ref openvino_config) = config.openvino {
+            let configured_model = &openvino_config.model;
+            // Resolve the dir name for the configured model
+            let dir_name = model::openvino_dir_name(configured_model);
+            let model_found = match dir_name {
+                Some(dir) => openvino_models.iter().any(|(name, _)| name == dir),
+                None => false,
+            };
+            if !model_found {
+                print_failure(&format!(
+                    "Configured OpenVINO model '{}' not found",
+                    configured_model
+                ));
+                println!(
+                    "       Download with: voxtype setup --download --model {}",
+                    configured_model
+                );
+                all_ok = false;
+            }
+        } else {
+            print_failure("Engine set to 'openvino' but [openvino] config section is missing");
+            all_ok = false;
+        }
+    }
+
     // Check if Parakeet is configured but model is missing
     if config.engine == crate::config::TranscriptionEngine::Parakeet {
         if let Some(ref parakeet_config) = config.parakeet {
@@ -1118,6 +1256,7 @@ mod tests {
                     "whisper" => ModelKind::Whisper,
                     "parakeet" => ModelKind::Parakeet,
                     "sensevoice" => ModelKind::SenseVoice,
+                    "openvino" => ModelKind::OpenVino,
                     other => panic!(
                         "'{}' advertises a download argument but run_setup has no branch for it",
                         other

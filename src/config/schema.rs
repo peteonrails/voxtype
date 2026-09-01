@@ -186,6 +186,7 @@ pub fn feature_compiled(feature: &str) -> bool {
         "dolphin" => cfg!(feature = "dolphin"),
         "omnilingual" => cfg!(feature = "omnilingual"),
         "cohere" => cfg!(feature = "cohere"),
+        "openvino" => cfg!(feature = "openvino-whisper"),
         _ => false,
     }
 }
@@ -209,6 +210,7 @@ const SENSEVOICE_LANG_CHOICES: &[&str] = &["auto", "zh", "en", "ja", "ko", "yue"
 const COHERE_LANG_CHOICES: &[&str] = &[
     "ar", "de", "en", "es", "fr", "hi", "it", "ja", "ko", "nl", "pt", "ru", "tr", "zh",
 ];
+const OPENVINO_DEVICE_CHOICES: &[&str] = &["NPU", "GPU", "CPU", "AUTO"];
 const PARAKEET_MODEL_TYPE_CHOICES: &[&str] = &["tdt", "ctc"];
 
 const HOTKEY_MODE_CHOICES: &[&str] = &["push_to_talk", "toggle"];
@@ -660,6 +662,97 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Load the model when recording starts and unload at idle.",
     )
     .for_onnx_engine("cohere"),
+    // openvino
+    spec(
+        "openvino.model",
+        "openvino",
+        "model",
+        KeyType::DynamicEnum { source: "models" },
+        "Engine",
+        "Model",
+        "OpenVINO Whisper model name or model directory.",
+    )
+    .for_onnx_engine("openvino"),
+    spec(
+        "openvino.device",
+        "openvino",
+        "device",
+        closed(OPENVINO_DEVICE_CHOICES),
+        "Engine",
+        "Device",
+        "OpenVINO inference device to try first.",
+    )
+    .for_onnx_engine("openvino"),
+    spec(
+        "openvino.quantized",
+        "openvino",
+        "quantized",
+        KeyType::Bool,
+        "Engine",
+        "Quantized",
+        "Prefer int8 quantized model variants.",
+    )
+    .for_onnx_engine("openvino"),
+    spec(
+        "openvino.threads",
+        "openvino",
+        "threads",
+        KeyType::Int { min: 1, max: 256 },
+        "Engine",
+        "Threads",
+        "CPU inference threads. Unset lets voxtype pick.",
+    )
+    .for_onnx_engine("openvino"),
+    spec(
+        "openvino.language",
+        "openvino",
+        "language",
+        open(WHISPER_LANG_CHOICES),
+        "Engine",
+        "Language",
+        "Whisper language code.",
+    )
+    .for_onnx_engine("openvino"),
+    spec(
+        "openvino.translate",
+        "openvino",
+        "translate",
+        KeyType::Bool,
+        "Engine",
+        "Translate",
+        "Translate non-English speech to English.",
+    )
+    .for_onnx_engine("openvino"),
+    spec(
+        "openvino.on_demand_loading",
+        "openvino",
+        "on_demand_loading",
+        KeyType::Bool,
+        "Engine",
+        "Load on demand",
+        "Load the model when recording starts and unload at idle.",
+    )
+    .for_onnx_engine("openvino"),
+    spec(
+        "openvino.openvino_dir",
+        "openvino",
+        "openvino_dir",
+        KeyType::String,
+        "Engine",
+        "Runtime directory",
+        "OpenVINO GenAI installation directory containing shared libraries.",
+    )
+    .for_onnx_engine("openvino"),
+    spec(
+        "openvino.streaming",
+        "openvino",
+        "streaming",
+        KeyType::Bool,
+        "Engine",
+        "Streaming",
+        "Enable live transcription through the shared sliding-window engine.",
+    )
+    .for_onnx_engine("openvino"),
     // -- Hotkey -------------------------------------------------------------
     spec(
         "hotkey.enabled",
@@ -1528,6 +1621,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
     let dol = || cfg.dolphin.clone().unwrap_or_default();
     let om = || cfg.omnilingual.clone().unwrap_or_default();
     let co = || cfg.cohere.clone().unwrap_or_default();
+    let ov = || cfg.openvino.clone().unwrap_or_default();
 
     let v = match key {
         "engine" => json!(cfg.engine.name()),
@@ -1610,6 +1704,19 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             None => Json::Null,
         },
         "cohere.on_demand_loading" => json!(co().on_demand_loading),
+
+        "openvino.model" => json!(ov().model),
+        "openvino.device" => json!(ov().device),
+        "openvino.quantized" => json!(ov().quantized),
+        "openvino.threads" => match ov().threads {
+            Some(n) => json!(n),
+            None => Json::Null,
+        },
+        "openvino.language" => json!(ov().language),
+        "openvino.translate" => json!(ov().translate),
+        "openvino.on_demand_loading" => json!(ov().on_demand_loading),
+        "openvino.openvino_dir" => opt_str(ov().openvino_dir.as_ref()),
+        "openvino.streaming" => json!(ov().streaming),
 
         "hotkey.enabled" => json!(cfg.hotkey.enabled),
         "hotkey.key" => json!(cfg.hotkey.key),
@@ -2045,7 +2152,7 @@ mod tests {
             other => panic!("expected a map entry, got {:?}", other),
         }
         // The placeholder form is documentation, not a settable key.
-        assert!(find_key("text.replacements.<from>").is_none() || true);
+        assert!(find_key("text.replacements.<from>").is_none());
         // A dotted tail would be ambiguous with a nested table.
         assert!(find_key("text.replacements.a.b").is_none());
         assert!(find_key("text.replacements.").is_none());

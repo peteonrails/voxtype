@@ -32,7 +32,7 @@ pub use setup::{CompositorType, SetupAction};
 /// `src/config/engines/mod.rs` so a new engine variant forces this string
 /// to update or the build breaks.
 pub const ENGINE_NAMES_CSV: &str =
-    "whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere, soniox";
+    "whisper, parakeet, moonshine, sensevoice, paraformer, dolphin, omnilingual, cohere, openvino, soniox";
 
 /// Diarization backends the daemon dispatches on. Used by the CLI's
 /// `value_parser` for `--diarization` so unknown values are rejected at

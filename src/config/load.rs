@@ -1,5 +1,7 @@
 use super::parse::parse_config_salvaging;
-use super::{Config, LanguageConfig, OutputMode, SonioxConfig, TranscriptionEngine};
+use super::{
+    Config, LanguageConfig, OpenVinoConfig, OutputMode, SonioxConfig, TranscriptionEngine,
+};
 use crate::error::VoxtypeError;
 use std::path::{Path, PathBuf};
 
@@ -109,6 +111,12 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     }
     if let Ok(val) = std::env::var("VOXTYPE_ON_DEMAND_LOADING") {
         config.whisper.on_demand_loading = parse_bool_env(&val);
+    }
+    if let Ok(dir) = std::env::var("VOXTYPE_OPENVINO_DIR") {
+        config
+            .openvino
+            .get_or_insert_with(OpenVinoConfig::default)
+            .openvino_dir = Some(dir);
     }
 
     // Audio

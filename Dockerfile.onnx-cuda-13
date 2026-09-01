@@ -126,7 +126,7 @@ ENV ORT_CUDA_VERSION=13
 #
 # Disable LTO for faster builds; same as the rest of the matrix.
 RUN cargo build --release \
-        --features parakeet-cuda,parakeet-load-dynamic,moonshine-cuda,sensevoice-cuda,paraformer-cuda,dolphin-cuda,omnilingual-cuda,cohere-cuda,onnx-load-dynamic,ml-diarization \
+        --features parakeet-cuda,parakeet-load-dynamic,moonshine-cuda,sensevoice-cuda,paraformer-cuda,dolphin-cuda,omnilingual-cuda,cohere-cuda,openvino-whisper,onnx-load-dynamic,ml-diarization \
         --config 'profile.release.lto=false' \
         --config 'profile.release.codegen-units=8' \
     && cp target/release/voxtype /tmp/voxtype-onnx-cuda-13

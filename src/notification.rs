@@ -289,7 +289,8 @@ fn send_macos_native(title: &str, body: &str, engine: Option<TranscriptionEngine
         | TranscriptionEngine::Dolphin
         | TranscriptionEngine::Omnilingual
         | TranscriptionEngine::Cohere
-        | TranscriptionEngine::Soniox => None,
+        | TranscriptionEngine::Soniox
+        | TranscriptionEngine::OpenVino => None,
     });
 
     for notifier in notifier_paths {

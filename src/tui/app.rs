@@ -535,6 +535,9 @@ fn detect_missing_model() -> Option<MissingModel> {
         config::TranscriptionEngine::Cohere => return None,
         // Soniox is cloud-only, no local model to probe.
         config::TranscriptionEngine::Soniox => return None,
+        // OpenVINO models are stored as multi-file IR directories; skip the
+        // generic probe here until the TUI grows engine-specific validation.
+        config::TranscriptionEngine::OpenVino => return None,
     };
 
     if model.is_empty() {

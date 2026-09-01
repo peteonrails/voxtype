@@ -23,6 +23,7 @@ pub const CATALOG_ENGINES: &[&str] = &[
     "dolphin",
     "omnilingual",
     "cohere",
+    "openvino",
 ];
 
 /// Models voxtype knows how to download for `engine`.
@@ -41,6 +42,7 @@ pub fn model_catalog(engine: &str) -> Vec<&'static str> {
             "cohere-transcribe-int8",
             "cohere-transcribe-fp16",
         ],
+        "openvino" => model::valid_openvino_model_names(),
         _ => Vec::new(),
     }
 }
@@ -58,6 +60,7 @@ pub const fn default_model(engine: &str) -> &'static str {
         b"dolphin" => "dolphin-base",
         b"omnilingual" => "omnilingual-300m",
         b"cohere" => "cohere-transcribe-q4f16",
+        b"openvino" => "base.en-int8",
         _ => "",
     }
 }
@@ -77,6 +80,7 @@ pub fn model_dir_name(engine: &str, model: &str) -> String {
         "sensevoice" => model::sensevoice_dir_name(model)
             .unwrap_or(model)
             .to_string(),
+        "openvino" => model::openvino_dir_name(model).unwrap_or(model).to_string(),
         _ => model.to_string(),
     }
 }
@@ -84,7 +88,8 @@ pub fn model_dir_name(engine: &str, model: &str) -> String {
 /// The `--model` value that downloads this catalog entry.
 ///
 /// `None` means `voxtype setup --download` can't fetch it: `run_setup` only
-/// routes whisper, parakeet and SenseVoice names, so the other ONNX engines
+/// routes Whisper, Parakeet, SenseVoice, and OpenVINO names, so the other
+/// ONNX engines
 /// are reachable only through the interactive picker (`voxtype setup model`).
 /// A UI should not offer a Download button for those.
 ///
@@ -93,7 +98,7 @@ pub fn model_dir_name(engine: &str, model: &str) -> String {
 /// collision in `setup --model`.
 pub fn download_arg(engine: &str, model: &str) -> Option<String> {
     match engine {
-        "whisper" | "parakeet" => Some(model.to_string()),
+        "whisper" | "parakeet" | "openvino" => Some(model.to_string()),
         "sensevoice" => Some(model_dir_name(engine, model)),
         _ => None,
     }
@@ -163,6 +168,13 @@ pub(crate) fn model_health_in(models_dir: &Path, engine: &str, model: &str) -> M
 
     if engine == "whisper" {
         return match model::validate_download(&path, None, model::ContentCheck::Ggml) {
+            Ok(()) => ModelHealth::Present,
+            Err(e) => ModelHealth::Corrupt(vec![format!("{}: {}", display_name(&path), e)]),
+        };
+    }
+
+    if engine == "openvino" {
+        return match model::validate_openvino_model(&path) {
             Ok(()) => ModelHealth::Present,
             Err(e) => ModelHealth::Corrupt(vec![format!("{}: {}", display_name(&path), e)]),
         };
