@@ -1570,6 +1570,13 @@ impl Daemon {
             *streaming_session = None;
             *streaming_chain = None;
 
+            // The session accumulated raw engine output (the event pump's
+            // file_output branches deliberately skip per-segment
+            // processing), so this is where the transcript becomes final:
+            // apply replacements and spoken punctuation over the whole
+            // text, same as the batch path does before writing (#669).
+            let final_text = self.text_processor.process(&final_text);
+
             let file_mode = &self.config.output.file_mode;
             match write_transcription_to_file(&output_path, &final_text, file_mode).await {
                 Ok(()) => {
@@ -2497,16 +2504,13 @@ impl Daemon {
 
             self.play_feedback(SoundEvent::RecordingStop);
 
-            if self.config.output.notification.on_recording_stop {
-                send_notification(
-                    "Recording Stopped",
-                    "Transcribing...",
-                    self.config.output.notification.show_engine_icon,
-                    self.config.engine,
-                    &self.config.output.notification.urgency,
-                )
-                .await;
-            }
+            end_recording_notification(
+                "Recording Stopped",
+                "Transcribing...",
+                &self.config.output.notification,
+                self.config.engine,
+            )
+            .await;
 
             match stop_result {
                 Ok(samples) => {
@@ -4265,13 +4269,16 @@ impl Daemon {
                         Some(StreamingEvent::Final { text, .. }) => {
                             if let Some(s) = streaming_session.as_mut() {
                                 if file_output {
+                                    // Raw on purpose: file-mode text is
+                                    // processed once, whole, at write time
+                                    // in end_streaming — that also catches
+                                    // matches spanning segment boundaries.
                                     s.commit_segment_silent(&text);
                                 } else if let Some(chain) = streaming_chain.as_ref() {
-                                    let pp = self.post_processor.as_ref();
                                     if let Err(e) = s.commit_segment(
                                         chain,
                                         &text,
-                                        pp,
+                                        Some(&self.text_processor),
                                         self.config.output.pre_output_command.as_deref(),
                                         self.config.output.post_output_command.as_deref(),
                                     ).await {
@@ -4289,12 +4296,14 @@ impl Daemon {
                         Some(StreamingEvent::Replace { backspace, text, .. }) => {
                             if let Some(s) = streaming_session.as_mut() {
                                 if file_output {
+                                    // Raw on purpose — see the Final arm.
                                     s.replace_and_commit_silent(backspace, &text);
                                 } else if let Some(chain) = streaming_chain.as_ref() {
                                     if let Err(e) = s.replace_and_commit(
                                         chain,
                                         backspace,
                                         &text,
+                                        Some(&self.text_processor),
                                         self.config.output.pre_output_command.as_deref(),
                                         self.config.output.post_output_command.as_deref(),
                                     ).await {

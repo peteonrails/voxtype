@@ -45,8 +45,8 @@
 //! cleanup.
 
 use crate::error::OutputError;
-use crate::output::post_process::PostProcessor;
 use crate::output::{output_with_fallback, OutputOptions, TextOutput};
+use crate::text::TextProcessor;
 use std::process::Stdio;
 use tokio::process::Command;
 
@@ -160,8 +160,13 @@ impl StreamingSession {
     }
 
     /// Type a finalized segment to the output, optionally running it
-    /// through `post_process` first (with `VOXTYPE_CONTEXT` =
-    /// `finalized_text_so_far`).
+    /// through the daemon's [`TextProcessor`] (replacements, spoken
+    /// punctuation) first — a segment becoming final is the one point in
+    /// a streaming session where text stops being provisional, so this is
+    /// where the batch pipeline's processing applies (#669). Partials are
+    /// never processed: they get revised by backend-supplied backspace
+    /// counts that reference the raw text, and transforming them would
+    /// desynchronize that accounting.
     ///
     /// On output error, the session's internal state is **not**
     /// updated; the caller can retry or surface the error.
@@ -174,10 +179,18 @@ impl StreamingSession {
         &mut self,
         chain: &[Box<dyn TextOutput>],
         text: &str,
-        _post_process: Option<&PostProcessor>,
+        text_processor: Option<&TextProcessor>,
         pre_output_command: Option<&str>,
         post_output_command: Option<&str>,
     ) -> Result<(), OutputError> {
+        let processed;
+        let text = match text_processor {
+            Some(tp) => {
+                processed = tp.process(text);
+                processed.as_str()
+            }
+            None => text,
+        };
         if text.is_empty() {
             self.clear_partial();
             return Ok(());
@@ -188,11 +201,12 @@ impl StreamingSession {
         // a delta, not a cumulative transcript. So type it directly,
         // same as a partial.
         //
-        // post_process is intentionally bypassed during streaming.
-        // Per-segment cleanup would run only against the final tail
-        // (not the cumulative transcript visible at the cursor) and
-        // produce inconsistent output. Users who rely on post_process
-        // should disable streaming for now.
+        // The LLM post_process hook (unlike TextProcessor above) is
+        // intentionally bypassed during streaming. Per-segment cleanup
+        // would run only against the final tail (not the cumulative
+        // transcript visible at the cursor) and produce inconsistent
+        // output. Users who rely on post_process should disable
+        // streaming for now.
         let opts = OutputOptions {
             pre_output_command,
             post_output_command,
@@ -249,11 +263,17 @@ impl StreamingSession {
     /// `text` is appended to both cursor and finalized_text. Net effect:
     /// the cursor ends up with the truncated partial + new text, matching
     /// what the daemon's commit_segment would do for a plain Final.
+    ///
+    /// Like `commit_segment`, the committed `text` runs through the
+    /// [`TextProcessor`] when one is given — it is becoming final here —
+    /// while `backspace` stays untouched: it counts raw chars of the
+    /// previously-typed partial, which was never processed.
     pub async fn replace_and_commit(
         &mut self,
         chain: &[Box<dyn TextOutput>],
         backspace: usize,
         text: &str,
+        text_processor: Option<&TextProcessor>,
         pre_output_command: Option<&str>,
         post_output_command: Option<&str>,
     ) -> Result<(), OutputError> {
@@ -281,6 +301,14 @@ impl StreamingSession {
             }
         }
 
+        let processed;
+        let text = match text_processor {
+            Some(tp) => {
+                processed = tp.process(text);
+                processed.as_str()
+            }
+            None => text,
+        };
         if !text.is_empty() {
             let opts = OutputOptions {
                 pre_output_command,
@@ -511,6 +539,43 @@ mod tests {
             .unwrap();
         assert_eq!(session.typed_chars(), 11);
         assert_eq!(session.finalized_text(), "hello world");
+    }
+
+    /// #669: a segment becoming final is where streaming text stops being
+    /// provisional, so the daemon's replacements and spoken punctuation
+    /// apply there — what reaches the cursor is the processed text, and
+    /// typed_chars/finalized_text account for what was actually typed.
+    #[tokio::test]
+    async fn final_segments_apply_text_processing() {
+        let config = crate::config::TextConfig {
+            spoken_punctuation: true,
+            replacements: [("vox type".to_string(), "voxtype".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let tp = TextProcessor::new(&config);
+
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        let mut session = StreamingSession::new();
+        session
+            .commit_segment(&chain, "I use vox type period", Some(&tp), None, None)
+            .await
+            .unwrap();
+        assert_eq!(rec.typed(), vec!["I use voxtype.".to_string()]);
+        assert_eq!(session.finalized_text(), "I use voxtype.");
+        assert_eq!(session.typed_chars(), "I use voxtype.".chars().count());
+
+        // Replace commits are finals too: the correction text is processed,
+        // while the backspace count still refers to the raw partial tail.
+        let mut session = StreamingSession::new();
+        session.observe_partial_delta("raw partial");
+        session
+            .replace_and_commit(&chain, 8, "vox type comma", Some(&tp), None, None)
+            .await
+            .unwrap();
+        assert_eq!(rec.typed().last().unwrap(), "voxtype,");
     }
 
     #[tokio::test]
