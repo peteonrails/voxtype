@@ -806,6 +806,33 @@ impl ModelArtifact for OmnilingualModelInfo {
     }
 }
 
+impl ModelArtifact for OpenVinoModelInfo {
+    // Intentional: the trait method is `name()` but the struct field that
+    // serves as the canonical identifier is `dir_name`. Clippy's
+    // misnamed_getters lint fires on the mismatch; it's not a bug.
+    #[allow(clippy::misnamed_getters)]
+    fn name(&self) -> &str {
+        self.dir_name
+    }
+    fn engine_prefix(&self) -> &'static str {
+        "openvino"
+    }
+    fn upstream_repo(&self) -> &str {
+        self.huggingface_repo
+    }
+    fn expected_files(&self) -> Vec<ExpectedFile> {
+        // Every OpenVINO Whisper repo ships the same file set; the manifest
+        // is authoritative for sizes, so size 0 here like the other engines.
+        OPENVINO_MODEL_FILES
+            .iter()
+            .map(|f| ExpectedFile {
+                path: (*f).to_string(),
+                size: 0,
+            })
+            .collect()
+    }
+}
+
 impl ModelArtifact for CohereModelInfo {
     // Intentional: the trait method is `name()` but the struct field that
     // serves as the canonical identifier is `dir_name`. Clippy's
@@ -3897,17 +3924,6 @@ const OPENVINO_REQUIRED_MODEL_FILES: &[&str] = &[
     "preprocessor_config.json",
 ];
 
-fn openvino_download_command(file_path: &std::path::Path, url: &str) -> Command {
-    let mut command = Command::new("curl");
-    command
-        .arg("-fL")
-        .arg("--progress-bar")
-        .arg("-o")
-        .arg(file_path)
-        .arg(url);
-    command
-}
-
 const OPENVINO_MODELS: &[OpenVinoModelInfo] = &[
     // --- Tiny models ---
     OpenVinoModelInfo {
@@ -4181,11 +4197,18 @@ const OPENVINO_MODELS: &[OpenVinoModelInfo] = &[
     },
 ];
 
-/// Download an OpenVINO Whisper model by name
+/// Download an OpenVINO Whisper model by name.
+///
+/// Routes through the unified R2 downloader (#692) - manifest fetch, per-file
+/// sha256 verification, resume, and stall detection - replacing a per-file
+/// curl loop that fetched straight from huggingface.co with no integrity
+/// checking and skipped any file already on disk, however truncated.
+/// `validate_openvino_model` still runs after, as the inference-time check
+/// for the files OpenVINO GenAI actually loads.
 pub fn download_openvino_model(model_name: &str) -> anyhow::Result<()> {
     let model = OPENVINO_MODELS
         .iter()
-        .find(|m| m.name == model_name)
+        .find(|m| m.name == model_name || m.dir_name == model_name)
         .ok_or_else(|| {
             let valid: Vec<&str> = OPENVINO_MODELS.iter().map(|m| m.name).collect();
             anyhow::anyhow!(
@@ -4198,49 +4221,13 @@ pub fn download_openvino_model(model_name: &str) -> anyhow::Result<()> {
     let models_dir = Config::models_dir();
     let model_path = models_dir.join(model.dir_name);
 
-    std::fs::create_dir_all(&model_path)?;
-
     println!(
-        "\nDownloading OpenVINO Whisper {} (~{} MB, {})...\n",
+        "\nDownloading OpenVINO Whisper {} (~{} MB, {})...",
         model.name, model.size_mb, model.quantization
     );
 
-    for filename in OPENVINO_MODEL_FILES {
-        let file_path = model_path.join(filename);
+    download_artifact(model, &models_dir)?;
 
-        if file_path.exists() {
-            println!("  {} already exists, skipping", filename);
-            continue;
-        }
-
-        let url = format!(
-            "https://huggingface.co/{}/resolve/main/{}",
-            model.huggingface_repo, filename
-        );
-
-        println!("  Downloading {}...", filename);
-
-        let status = openvino_download_command(&file_path, &url).status();
-
-        match status {
-            Ok(exit_status) if exit_status.success() => {}
-            Ok(exit_status) => {
-                print_failure(&format!(
-                    "Download failed: curl exited with code {}",
-                    exit_status.code().unwrap_or(-1)
-                ));
-                let _ = std::fs::remove_file(&file_path);
-                anyhow::bail!("Download failed for {}", filename)
-            }
-            Err(e) => {
-                print_failure(&format!("Failed to run curl: {}", e));
-                print_info("Please ensure curl is installed");
-                anyhow::bail!("curl not available: {}", e)
-            }
-        }
-    }
-
-    // Validate critical files
     validate_openvino_model(&model_path).inspect_err(|_| {
         print_failure("Model download incomplete. Missing required files.");
     })?;
@@ -4390,22 +4377,96 @@ mod tests {
         );
     }
 
+    /// The OpenVINO download goes through `download_artifact` (#692), so its
+    /// artifacts must speak the manifest contract: R2 URL under the
+    /// `openvino` prefix keyed by directory name, and a manifest that
+    /// enumerates every file the runtime expects.
     #[test]
-    fn openvino_downloads_fail_on_http_errors() {
-        let command = openvino_download_command(
-            std::path::Path::new("/tmp/openvino-model-file"),
-            "https://example.invalid/model-file",
-        );
-        let args: Vec<_> = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
+    fn openvino_artifacts_follow_the_r2_manifest_contract() {
+        use super::super::manifest::{
+            manifest_url, validate_manifest, Manifest, ManifestFile, MANIFEST_SCHEMA_VERSION,
+        };
 
-        assert!(
-            args.iter()
-                .any(|arg| arg.starts_with('-') && arg[1..].contains('f')),
-            "curl must fail on HTTP errors instead of saving an error page: {args:?}"
+        let model = OPENVINO_MODELS
+            .iter()
+            .find(|m| m.name == "base.en-int8")
+            .unwrap();
+        assert_eq!(
+            manifest_url(model),
+            "https://models.voxtype.io/openvino/openvino-whisper-base.en-int8-ov/manifest.json"
         );
+
+        // A manifest listing exactly the published file set validates.
+        let good = Manifest {
+            version: MANIFEST_SCHEMA_VERSION,
+            model: model.dir_name.to_string(),
+            engine: "openvino".to_string(),
+            files: OPENVINO_MODEL_FILES
+                .iter()
+                .map(|f| ManifestFile {
+                    path: (*f).to_string(),
+                    size: 1,
+                    sha256: "aa".to_string(),
+                })
+                .collect(),
+        };
+        validate_manifest(&good, model).unwrap();
+
+        // A publisher who forgets a file (and so would never sha256-verify
+        // it) is rejected before anything lands on disk.
+        let mut incomplete = good.clone();
+        incomplete
+            .files
+            .retain(|f| f.path != "preprocessor_config.json");
+        let err = validate_manifest(&incomplete, model)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("preprocessor_config.json"), "{}", err);
+
+        // A manifest uploaded under the wrong prefix fails fast.
+        let mut misrouted = good.clone();
+        misrouted.engine = "moonshine".to_string();
+        assert!(validate_manifest(&misrouted, model).is_err());
+    }
+
+    /// Every catalog entry must have a registry entry keyed by its directory
+    /// name, or the mirror script can't publish it and the runtime download
+    /// 404s on the manifest - exactly how moonshine tiny-ja/tiny-zh shipped
+    /// broken (#694).
+    #[test]
+    fn every_openvino_model_is_in_the_mirror_registry() {
+        let registry = registry_snapshot();
+        for model in OPENVINO_MODELS {
+            let entry = registry
+                .iter()
+                .find(|e| e.engine_prefix == "openvino" && e.name == model.dir_name)
+                .unwrap_or_else(|| panic!("'{}' has no registry entry", model.dir_name));
+            let paths: Vec<&str> = entry.files.iter().map(|f| f.local_path.as_str()).collect();
+            for file in OPENVINO_MODEL_FILES {
+                assert!(
+                    paths.contains(file),
+                    "registry entry for '{}' is missing {}",
+                    model.dir_name,
+                    file
+                );
+            }
+        }
+    }
+
+    /// `download_openvino_model` is called with short names by `run_setup`
+    /// and the picker, and with directory names by anything holding a
+    /// catalog entry; both must resolve to the same artifact.
+    #[test]
+    fn openvino_models_resolve_by_short_and_directory_name() {
+        for model in OPENVINO_MODELS {
+            for name in [model.name, model.dir_name] {
+                let found = OPENVINO_MODELS
+                    .iter()
+                    .find(|m| m.name == name || m.dir_name == name)
+                    .unwrap_or_else(|| panic!("'{}' did not resolve", name));
+                assert_eq!(found.dir_name, model.dir_name);
+            }
+        }
     }
 
     #[test]
