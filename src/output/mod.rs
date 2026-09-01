@@ -5,12 +5,13 @@
 //! Fallback chain for `mode = "type"`:
 //!
 //! Linux:
-//! 1. wtype - Wayland-native via virtual-keyboard protocol, best Unicode/CJK support, no daemon needed
-//! 2. eitype - Wayland via libei/EI protocol, works on GNOME/KDE (no virtual-keyboard support)
-//! 3. dotool - Works on X11/Wayland/TTY, supports keyboard layouts, no daemon needed
-//! 4. ydotool - Works on X11/Wayland/TTY, requires daemon
-//! 5. clipboard (wl-copy) - Wayland clipboard fallback
-//! 6. xclip - X11 clipboard fallback
+//! 1. kwtype - KDE Plasma Wayland via KWin's Fake Input protocol
+//! 2. wtype - Wayland-native via virtual-keyboard protocol, best Unicode/CJK support, no daemon needed
+//! 3. eitype - Wayland via libei/EI protocol, works on GNOME/KDE (no virtual-keyboard support)
+//! 4. dotool - Works on X11/Wayland/TTY, supports keyboard layouts, no daemon needed
+//! 5. ydotool - Works on X11/Wayland/TTY, requires daemon
+//! 6. clipboard (wl-copy) - Wayland clipboard fallback
+//! 7. xclip - X11 clipboard fallback
 //!
 //! macOS:
 //! 1. cgevent - Native CGEvent API for keyboard simulation (best performance)
@@ -24,6 +25,7 @@ pub mod cgevent;
 pub mod clipboard;
 pub mod dotool;
 pub mod eitype;
+pub mod kwtype;
 // modifier_guard is evdev-based; macOS has its own osascript modifier handling.
 #[cfg(target_os = "linux")]
 pub mod modifier_guard;
@@ -241,6 +243,7 @@ pub trait TextOutput: Send + Sync {
 /// Default driver order for type mode
 #[cfg(not(target_os = "macos"))]
 const DEFAULT_DRIVER_ORDER: &[OutputDriver] = &[
+    OutputDriver::Kwtype,
     OutputDriver::Wtype,
     OutputDriver::Eitype,
     OutputDriver::Dotool,
@@ -257,6 +260,11 @@ fn create_driver_output(
     pre_type_delay_ms: u32,
 ) -> Box<dyn TextOutput> {
     match driver {
+        OutputDriver::Kwtype => Box::new(kwtype::KwtypeOutput::new(
+            config.auto_submit,
+            config.append_text.clone(),
+            pre_type_delay_ms,
+        )),
         OutputDriver::Wtype => Box::new(wtype::WtypeOutput::new(
             config.auto_submit,
             config.append_text.clone(),
@@ -454,7 +462,8 @@ pub struct OutputOptions<'a> {
 /// keybindings when modifiers are held. Used to filter the chain when the
 /// modifier-release wait times out.
 fn is_keystroke_method(name: &str) -> bool {
-    matches!(name, "wtype" | "eitype" | "dotool" | "ydotool") || name.starts_with("paste")
+    matches!(name, "kwtype" | "wtype" | "eitype" | "dotool" | "ydotool")
+        || name.starts_with("paste")
 }
 
 /// Try each output method in the chain until one succeeds
