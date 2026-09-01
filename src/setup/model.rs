@@ -2757,6 +2757,34 @@ pub fn validate_cohere_model(path: &Path) -> anyhow::Result<()> {
     }
 }
 
+/// Look up a Cohere model by either its short name (`q4f16`) or its
+/// directory name (`cohere-transcribe-q4f16`). Mirrors
+/// `find_sensevoice_model`'s dual match so `--model` accepts the same form
+/// `voxtype info models` prints back to the user.
+fn find_cohere_model(name: &str) -> Option<&'static CohereModelInfo> {
+    COHERE_MODELS
+        .iter()
+        .find(|m| m.name == name || m.dir_name == name)
+}
+
+/// Check if a model name is a Cohere model (short or directory form).
+pub fn is_cohere_model(name: &str) -> bool {
+    find_cohere_model(name).is_some()
+}
+
+/// Get the directory name for a Cohere model, from either its short name
+/// or its directory name.
+pub fn cohere_dir_name(name: &str) -> Option<&'static str> {
+    find_cohere_model(name).map(|m| m.dir_name)
+}
+
+/// Cohere names to show for `voxtype setup --model`. Uses the directory
+/// form, matching what the daemon's "download from" error message and
+/// `voxtype info models` already print.
+pub fn cohere_setup_model_names() -> Vec<&'static str> {
+    COHERE_MODELS.iter().map(|m| m.dir_name).collect()
+}
+
 /// Download a Cohere model by name (public API for run_setup).
 ///
 /// Cohere is the largest artifact voxtype ships (up to ~4 GB across a
@@ -2764,9 +2792,7 @@ pub fn validate_cohere_model(path: &Path) -> anyhow::Result<()> {
 /// the unified downloader takes over so users don't wonder why their
 /// disk is filling.
 pub fn download_cohere_model(model_name: &str) -> anyhow::Result<()> {
-    let model = COHERE_MODELS
-        .iter()
-        .find(|m| m.name == model_name)
+    let model = find_cohere_model(model_name)
         .ok_or_else(|| anyhow::anyhow!("Unknown Cohere model: {}", model_name))?;
     let models_dir = Config::models_dir();
     let model_path = models_dir.join(model.dir_name);
@@ -2869,6 +2895,21 @@ fn update_config_cohere(model_name: &str) -> anyhow::Result<()> {
             print_info("No config file found. Run 'voxtype setup' first.");
             Ok(())
         }
+    } else {
+        anyhow::bail!("Could not determine config path")
+    }
+}
+
+/// Update config to use Cohere engine and a specific model (quiet, no output).
+/// Mirrors `set_parakeet_config` — used by `run_setup`'s `--activate` path.
+pub fn set_cohere_config(model_name: &str) -> anyhow::Result<()> {
+    if let Some(config_path) = Config::default_path() {
+        if config_path.exists() {
+            let content = std::fs::read_to_string(&config_path)?;
+            let updated = update_cohere_in_config(&content, model_name);
+            std::fs::write(&config_path, updated)?;
+        }
+        Ok(())
     } else {
         anyhow::bail!("Could not determine config path")
     }
