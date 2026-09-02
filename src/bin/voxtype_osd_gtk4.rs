@@ -166,6 +166,17 @@ impl SharedState {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Keep GDK off the Wayland linux-dmabuf path. GTK4's dmabuf-feedback
+    // handling corrupts its own heap under long-running sessions (GPtrArray
+    // refcount garbage inside the feedback listener), which SIGSEGVs this
+    // process every few minutes-to-hours on AMD iGPUs (#656). The OSD is a
+    // small overlay; shared-memory buffers cost nothing here. Respect an
+    // explicit GDK_DISABLE from the user (they may be working around
+    // something else, or testing the dmabuf path deliberately).
+    if std::env::var_os("GDK_DISABLE").is_none() {
+        std::env::set_var("GDK_DISABLE", "dmabuf");
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -542,20 +553,42 @@ fn draw(
     let gap = (w * 0.01).max(2.0);
     let wave_width = (w - meter_width - gap).max(0.0);
 
-    draw_waveform(cr, 0.0, 0.0, wave_width, h, palette, state, gain);
-    draw_peak_meter(cr, wave_width + gap, 0.0, meter_width, h, palette, state);
+    draw_waveform(
+        cr,
+        &Rect {
+            x: 0.0,
+            y: 0.0,
+            w: wave_width,
+            h,
+        },
+        palette,
+        state,
+        gain,
+    );
+    draw_peak_meter(
+        cr,
+        &Rect {
+            x: wave_width + gap,
+            y: 0.0,
+            w: meter_width,
+            h,
+        },
+        palette,
+        state,
+    );
 }
 
-fn draw_waveform(
-    cr: &Context,
+/// Pixel-space rectangle for the draw helpers, so geometry travels as one
+/// argument instead of four loose floats.
+struct Rect {
     x: f64,
     y: f64,
     w: f64,
     h: f64,
-    palette: &Palette,
-    state: &Arc<SharedState>,
-    gain: f64,
-) {
+}
+
+fn draw_waveform(cr: &Context, r: &Rect, palette: &Palette, state: &Arc<SharedState>, gain: f64) {
+    let Rect { x, y, w, h } = *r;
     if w < 1.0 {
         return;
     }
@@ -622,15 +655,8 @@ fn sample_to_pixels(sample: f32, half_height: f64, gain: f64) -> f64 {
     s * half_height
 }
 
-fn draw_peak_meter(
-    cr: &Context,
-    x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
-    palette: &Palette,
-    state: &Arc<SharedState>,
-) {
+fn draw_peak_meter(cr: &Context, r: &Rect, palette: &Palette, state: &Arc<SharedState>) {
+    let Rect { x, y, w, h } = *r;
     if w < 1.0 || h < 1.0 {
         return;
     }
