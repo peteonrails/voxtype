@@ -128,6 +128,24 @@ impl ParsedKeystroke {
 
         Ok(args)
     }
+
+    /// Convert to dotool commands
+    /// e.g., "ctrl+v" -> "key ctrl+v\n"
+    fn to_dotool_commands(&self, key_delay_ms: u32) -> String {
+        let chord = if self.modifiers.is_empty() {
+            self.key.clone()
+        } else {
+            format!("{}+{}", self.modifiers.join("+"), self.key)
+        };
+
+        let mut commands = String::new();
+        if key_delay_ms > 0 {
+            commands.push_str(&format!("keydelay {}\n", key_delay_ms));
+            commands.push_str(&format!("keyhold {}\n", key_delay_ms));
+        }
+        commands.push_str(&format!("key {}\n", chord));
+        commands
+    }
 }
 
 /// Convert a key name to its evdev code
@@ -563,6 +581,18 @@ impl PasteOutput {
             .unwrap_or(false)
     }
 
+    /// Check if dotool is available
+    async fn is_dotool_available(&self) -> bool {
+        Command::new("which")
+            .arg("dotool")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
     /// Check if ydotool is available (installed and daemon running)
     async fn is_ydotool_available(&self) -> bool {
         // Check if ydotool exists
@@ -653,6 +683,56 @@ impl PasteOutput {
         Ok(())
     }
 
+    /// Simulate paste keystroke using dotool
+    async fn simulate_paste_dotool(&self) -> Result<(), OutputError> {
+        let commands = self.keystroke.to_dotool_commands(self.type_delay_ms);
+        tracing::debug!(
+            "Running: dotool {}",
+            commands.trim_end().replace('\n', "; ")
+        );
+
+        let mut child = Command::new("dotool")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    OutputError::DotoolNotFound
+                } else {
+                    OutputError::CtrlVFailed(e.to_string())
+                }
+            })?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(commands.as_bytes())
+                .await
+                .map_err(|e| OutputError::CtrlVFailed(e.to_string()))?;
+            drop(stdin);
+        }
+
+        let output = child
+            .wait_with_output()
+            .await
+            .map_err(|e| OutputError::CtrlVFailed(e.to_string()))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("uinput") || stderr.contains("permission") {
+                return Err(OutputError::CtrlVFailed(
+                    "dotool uinput permission denied. Is user in 'input' group?".to_string(),
+                ));
+            }
+            return Err(OutputError::CtrlVFailed(format!(
+                "dotool failed: {}",
+                stderr
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Simulate paste keystroke using ydotool
     async fn simulate_paste_ydotool(&self) -> Result<(), OutputError> {
         let args = self.keystroke.to_ydotool_args().map_err(|e| {
@@ -705,7 +785,7 @@ impl PasteOutput {
         Ok(())
     }
 
-    /// Simulate paste keystroke, trying wtype first, then eitype, then ydotool
+    /// Simulate paste keystroke, trying wtype first, then eitype, then dotool, then ydotool
     async fn simulate_paste_keystroke(&self) -> Result<(), OutputError> {
         // Try wtype first (preferred - no daemon needed)
         if self.is_wtype_available().await {
@@ -733,6 +813,19 @@ impl PasteOutput {
             }
         }
 
+        // Try dotool (uinput, no daemon; useful when compositor rejects wtype)
+        if self.is_dotool_available().await {
+            match self.simulate_paste_dotool().await {
+                Ok(()) => {
+                    tracing::debug!("Paste keystroke sent via dotool");
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::debug!("dotool paste failed: {}, trying ydotool", e);
+                }
+            }
+        }
+
         // Fall back to ydotool
         if self.is_ydotool_available().await {
             match self.simulate_paste_ydotool().await {
@@ -748,7 +841,7 @@ impl PasteOutput {
         }
 
         Err(OutputError::CtrlVFailed(
-            "No keystroke tool available (tried wtype, eitype, ydotool)".to_string(),
+            "No keystroke tool available (tried wtype, eitype, dotool, ydotool)".to_string(),
         ))
     }
 
@@ -943,20 +1036,22 @@ impl TextOutput for PasteOutput {
         // Check if wtype, eitype, or ydotool is available for keystroke simulation
         let wtype_available = self.is_wtype_available().await;
         let eitype_available = self.is_eitype_available().await;
+        let dotool_available = self.is_dotool_available().await;
         let ydotool_available = self.is_ydotool_available().await;
 
-        if !wtype_available && !eitype_available && !ydotool_available {
+        if !wtype_available && !eitype_available && !dotool_available && !ydotool_available {
             tracing::debug!(
                 "paste mode unavailable: no keystroke tool available \
-                (wtype needs WAYLAND_DISPLAY, eitype needs libei, ydotool needs daemon running)"
+                (wtype needs WAYLAND_DISPLAY, eitype needs libei, dotool needs uinput, ydotool needs daemon running)"
             );
             return false;
         }
 
         tracing::debug!(
-            "paste mode available (wtype: {}, eitype: {}, ydotool: {})",
+            "paste mode available (wtype: {}, eitype: {}, dotool: {}, ydotool: {})",
             wtype_available,
             eitype_available,
+            dotool_available,
             ydotool_available
         );
         true
@@ -995,5 +1090,20 @@ mod tests {
         assert!(debug_str.contains("[5 bytes]"));
         assert!(debug_str.contains("text/plain"));
         assert!(!debug_str.contains("[1, 2, 3"));
+    }
+
+    #[test]
+    fn test_ctrl_v_to_dotool_command() {
+        let keystroke = ParsedKeystroke::parse("ctrl+v").unwrap();
+        assert_eq!(keystroke.to_dotool_commands(0), "key ctrl+v\n");
+    }
+
+    #[test]
+    fn test_shift_insert_to_dotool_command_with_delay() {
+        let keystroke = ParsedKeystroke::parse("shift+insert").unwrap();
+        assert_eq!(
+            keystroke.to_dotool_commands(12),
+            "keydelay 12\nkeyhold 12\nkey shift+insert\n"
+        );
     }
 }
