@@ -101,11 +101,14 @@ pub struct MeetingDiarizationConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
-    /// Diarization backend: "simple" or "ml".
-    /// The match arms in `src/meeting/diarization/mod.rs` are the source of
-    /// truth for what the daemon actually dispatches on; the CLI's
-    /// `--diarization` value parser is pinned to the same set via
-    /// `crate::cli::DIARIZATION_BACKENDS` and a test in this file.
+    /// Diarization backend: "simple", "ml", or "remote".
+    /// "simple" and "ml" dispatch through the match arms in
+    /// `src/meeting/diarization/mod.rs`; "remote" runs no local diarizer —
+    /// speaker labels come embedded in the transcription (requires
+    /// engine = "whisper" with mode = "remote" against a voxtype-cloud
+    /// server, see `MeetingDaemon::new`). The CLI's `--diarization` value
+    /// parser is pinned to the same set via `crate::cli::DIARIZATION_BACKENDS`
+    /// and a test in this file.
     #[serde(default = "default_diarization_backend")]
     pub backend: String,
 

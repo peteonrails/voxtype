@@ -2264,6 +2264,29 @@ ollama_model = "llama3.2"
 timeout_secs = 120
 ```
 
+### Remote Diarization
+
+With `backend = "remote"`, speaker identification happens on the transcription server instead of your machine. This requires running meetings against a remote Whisper-compatible server that supports voxtype's diarization extension (such as a Voxtype Cloud endpoint):
+
+```toml
+engine = "whisper"
+
+[whisper]
+mode = "remote"
+remote_endpoint = "https://api.voxtype.io"
+remote_model = "nova-3"
+remote_api_key = "your-key"      # or VOXTYPE_WHISPER_API_KEY
+
+[meeting]
+chunk_duration_secs = 120        # longer chunks keep speaker IDs more stable
+
+[meeting.diarization]
+enabled = true
+backend = "remote"
+```
+
+The server returns one transcript segment per speaker turn. Your microphone is always labeled "You"; remote participants get `SPEAKER_NN` IDs. Because each audio chunk is diarized independently, speaker numbering is only guaranteed consistent within a chunk — one-on-one calls are fully stable, while multi-party calls may need labels reapplied. Meeting audio is sent to the remote service for processing, unlike the local `simple` and `ml` backends.
+
 ### Speaker Labeling
 
 When diarization is enabled, speakers are assigned auto-generated IDs like `SPEAKER_00`, `SPEAKER_01`, etc. Use the `label` command to assign readable names:

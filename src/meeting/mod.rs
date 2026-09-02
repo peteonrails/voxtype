@@ -144,14 +144,33 @@ impl MeetingDaemon {
             PostProcessor::new(cfg)
         });
 
-        // Create diarizer if configured
+        // Create diarizer if configured. The "remote" backend runs no local
+        // diarizer at all: speaker labels arrive embedded in the transcriber's
+        // segments (with_meeting_mode_overrides sets whisper.remote_diarize),
+        // and running a local diarizer would overwrite them in
+        // process_chunk_with_source.
         let diarizer = config.diarization.as_ref().and_then(|diar_config| {
-            if diar_config.enabled {
+            if !diar_config.enabled {
+                None
+            } else if diar_config.backend == "remote" {
+                if app_config.cloud_diarization_active() {
+                    tracing::info!(
+                        "Meeting diarization enabled: remote (speaker labels come from the remote transcription server)"
+                    );
+                    None
+                } else {
+                    tracing::warn!(
+                        "diarization backend \"remote\" requires engine = \"whisper\" with mode = \"remote\"; \
+                         falling back to the simple diarizer"
+                    );
+                    let mut simple_config = diar_config.clone();
+                    simple_config.backend = "simple".to_string();
+                    Some(diarization::create_diarizer(&simple_config))
+                }
+            } else {
                 let d = diarization::create_diarizer(diar_config);
                 tracing::info!("Meeting diarization enabled: {}", d.name());
                 Some(d)
-            } else {
-                None
             }
         });
 

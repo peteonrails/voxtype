@@ -30,6 +30,9 @@ pub struct RemoteTranscriber {
     initial_prompt: Option<String>,
     /// Send an explicit `language=auto` field instead of omitting it
     send_auto_language: bool,
+    /// Request speaker-diarized segments (voxtype-cloud extension). Set via
+    /// `Config::with_meeting_mode_overrides()` for meeting transcription only.
+    diarize: bool,
     /// Request timeout
     timeout: Duration,
 }
@@ -109,6 +112,7 @@ impl RemoteTranscriber {
             api_key,
             initial_prompt,
             send_auto_language: config.remote_send_auto_language,
+            diarize: config.remote_diarize,
             timeout,
         })
     }
@@ -189,15 +193,103 @@ impl RemoteTranscriber {
             body.extend_from_slice(b"\r\n");
         }
 
-        // Add response_format field
+        // Add response_format field. Diarization needs the segment-carrying
+        // verbose_json shape; the plain path keeps requesting json.
         body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
         body.extend_from_slice(b"Content-Disposition: form-data; name=\"response_format\"\r\n\r\n");
-        body.extend_from_slice(b"json\r\n");
+        if self.diarize {
+            body.extend_from_slice(b"verbose_json\r\n");
+        } else {
+            body.extend_from_slice(b"json\r\n");
+        }
+
+        // Add diarize field (voxtype-cloud extension; plain OpenAI servers
+        // ignore unknown form fields)
+        if self.diarize {
+            body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+            body.extend_from_slice(b"Content-Disposition: form-data; name=\"diarize\"\r\n\r\n");
+            body.extend_from_slice(b"true\r\n");
+        }
 
         // End boundary
         body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
 
         (boundary, body)
+    }
+
+    /// Send one transcription request and return the parsed JSON response.
+    fn request_json(&self, samples: &[f32]) -> Result<serde_json::Value, TranscribeError> {
+        let wav_data = self.encode_wav(samples)?;
+        tracing::debug!("Encoded WAV: {} bytes", wav_data.len());
+
+        let (boundary, body) = self.build_multipart_body(&wav_data);
+
+        // Determine the API path based on whether we're doing transcription or translation
+        let path = if self.translate {
+            "/v1/audio/translations"
+        } else {
+            "/v1/audio/transcriptions"
+        };
+
+        let url = format!("{}{}", self.endpoint.trim_end_matches('/'), path);
+
+        let mut request = ureq::post(&url).timeout(self.timeout).set(
+            "Content-Type",
+            &format!("multipart/form-data; boundary={}", boundary),
+        );
+
+        if let Some(ref key) = self.api_key {
+            request = request.set("Authorization", &format!("Bearer {}", key));
+        }
+
+        let response = request.send_bytes(&body).map_err(|e| match e {
+            ureq::Error::Status(code, resp) => {
+                let body = resp.into_string().unwrap_or_default();
+                TranscribeError::RemoteError(format!("Server returned {}: {}", code, body))
+            }
+            ureq::Error::Transport(t) => {
+                TranscribeError::NetworkError(format!("Request failed: {}", t))
+            }
+        })?;
+
+        response
+            .into_json()
+            .map_err(|e| TranscribeError::RemoteError(format!("Failed to parse response: {}", e)))
+    }
+}
+
+/// Parse a verbose_json `segments` array (with the voxtype-cloud
+/// `speaker`/`confidence` extensions) into [`TimedSegment`]s. Returns `None`
+/// when the response has no usable segments array, so callers can degrade to
+/// the whole-buffer single segment.
+fn parse_diarized_segments(json: &serde_json::Value) -> Option<Vec<super::TimedSegment>> {
+    let segments = json.get("segments")?.as_array()?;
+    let parsed: Vec<super::TimedSegment> = segments
+        .iter()
+        .filter_map(|seg| {
+            let text = seg.get("text")?.as_str()?.trim().to_string();
+            if text.is_empty() {
+                return None;
+            }
+            Some(super::TimedSegment {
+                text,
+                start_secs: seg.get("start").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                end_secs: seg.get("end").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                speaker: seg
+                    .get("speaker")
+                    .and_then(|v| v.as_u64())
+                    .map(|s| s as u32),
+                confidence: seg
+                    .get("confidence")
+                    .and_then(|v| v.as_f64())
+                    .map(|c| c as f32),
+            })
+        })
+        .collect();
+    if parsed.is_empty() {
+        None
+    } else {
+        Some(parsed)
     }
 }
 
@@ -216,48 +308,7 @@ impl Transcriber for RemoteTranscriber {
 
         let start = std::time::Instant::now();
 
-        // Encode audio to WAV
-        let wav_data = self.encode_wav(samples)?;
-        tracing::debug!("Encoded WAV: {} bytes", wav_data.len());
-
-        // Build multipart form
-        let (boundary, body) = self.build_multipart_body(&wav_data);
-
-        // Determine the API path based on whether we're doing transcription or translation
-        let path = if self.translate {
-            "/v1/audio/translations"
-        } else {
-            "/v1/audio/transcriptions"
-        };
-
-        let url = format!("{}{}", self.endpoint.trim_end_matches('/'), path);
-
-        // Build request
-        let mut request = ureq::post(&url).timeout(self.timeout).set(
-            "Content-Type",
-            &format!("multipart/form-data; boundary={}", boundary),
-        );
-
-        // Add authorization if API key is configured
-        if let Some(ref key) = self.api_key {
-            request = request.set("Authorization", &format!("Bearer {}", key));
-        }
-
-        // Send request
-        let response = request.send_bytes(&body).map_err(|e| match e {
-            ureq::Error::Status(code, resp) => {
-                let body = resp.into_string().unwrap_or_default();
-                TranscribeError::RemoteError(format!("Server returned {}: {}", code, body))
-            }
-            ureq::Error::Transport(t) => {
-                TranscribeError::NetworkError(format!("Request failed: {}", t))
-            }
-        })?;
-
-        // Parse JSON response
-        let json: serde_json::Value = response.into_json().map_err(|e| {
-            TranscribeError::RemoteError(format!("Failed to parse response: {}", e))
-        })?;
+        let json = self.request_json(samples)?;
 
         // Extract text from response
         let text = json
@@ -280,6 +331,81 @@ impl Transcriber for RemoteTranscriber {
         );
 
         Ok(text)
+    }
+
+    /// With `remote_diarize` set (meeting mode against a voxtype-cloud
+    /// server), parse the verbose_json `segments` array into speaker-tagged
+    /// timed segments. Without the flag — or when the server returns no
+    /// segments (an older Worker, or a plain OpenAI server that ignored the
+    /// extension field) — degrade to the whole-buffer single segment.
+    fn transcribe_timed(
+        &self,
+        samples: &[f32],
+    ) -> Result<Vec<super::TimedSegment>, TranscribeError> {
+        if !self.diarize {
+            // Same behavior as the trait's default implementation.
+            let text = self.transcribe(samples)?;
+            let duration = samples.len() as f32 / 16000.0;
+            return Ok(if text.is_empty() {
+                vec![]
+            } else {
+                vec![super::TimedSegment {
+                    text,
+                    start_secs: 0.0,
+                    end_secs: duration,
+                    speaker: None,
+                    confidence: None,
+                }]
+            });
+        }
+
+        if samples.is_empty() {
+            return Err(TranscribeError::AudioFormat("Empty audio buffer".into()));
+        }
+
+        let start = std::time::Instant::now();
+        let json = self.request_json(samples)?;
+
+        if let Some(segments) = parse_diarized_segments(&json) {
+            tracing::info!(
+                "Remote diarized transcription completed in {:.2}s: {} segments, {} speakers",
+                start.elapsed().as_secs_f32(),
+                segments.len(),
+                {
+                    let mut speakers: Vec<u32> =
+                        segments.iter().filter_map(|s| s.speaker).collect();
+                    speakers.sort_unstable();
+                    speakers.dedup();
+                    speakers.len()
+                }
+            );
+            return Ok(segments);
+        }
+
+        // No segments: degrade like the default implementation, from the text
+        // already present in this response.
+        tracing::warn!(
+            "Remote server returned no diarized segments; falling back to a single segment \
+             (server may not support the voxtype-cloud diarize extension)"
+        );
+        let text = json
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let duration = samples.len() as f32 / 16000.0;
+        Ok(if text.is_empty() {
+            vec![]
+        } else {
+            vec![super::TimedSegment {
+                text,
+                start_secs: 0.0,
+                end_secs: duration,
+                speaker: None,
+                confidence: None,
+            }]
+        })
     }
 }
 
@@ -503,6 +629,90 @@ mod tests {
             "/v1/audio/transcriptions"
         };
         assert_eq!(path, "/v1/audio/translations");
+    }
+
+    #[test]
+    fn test_multipart_body_plain_has_no_diarize_and_json_format() {
+        let config = WhisperConfig {
+            mode: Some(crate::config::WhisperMode::Remote),
+            remote_endpoint: Some("http://localhost:8080".to_string()),
+            ..Default::default()
+        };
+
+        let transcriber = RemoteTranscriber::new(&config).unwrap();
+        let (_boundary, body) = transcriber.build_multipart_body(&[0u8; 100]);
+        let body_str = String::from_utf8_lossy(&body);
+
+        assert!(!body_str.contains("name=\"diarize\""));
+        assert!(body_str.contains("name=\"response_format\"\r\n\r\njson\r\n"));
+    }
+
+    #[test]
+    fn test_multipart_body_diarize_requests_verbose_json() {
+        let config = WhisperConfig {
+            mode: Some(crate::config::WhisperMode::Remote),
+            remote_endpoint: Some("http://localhost:8080".to_string()),
+            remote_diarize: true,
+            ..Default::default()
+        };
+
+        let transcriber = RemoteTranscriber::new(&config).unwrap();
+        let (_boundary, body) = transcriber.build_multipart_body(&[0u8; 100]);
+        let body_str = String::from_utf8_lossy(&body);
+
+        assert!(body_str.contains("name=\"diarize\"\r\n\r\ntrue\r\n"));
+        assert!(body_str.contains("name=\"response_format\"\r\n\r\nverbose_json\r\n"));
+    }
+
+    #[test]
+    fn test_parse_diarized_segments() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{
+                "text": "Hello there. Hi.",
+                "segments": [
+                    {"id": 0, "start": 0.2, "end": 1.5, "text": "Hello there.", "speaker": 0, "confidence": 0.98},
+                    {"id": 1, "start": 2.0, "end": 2.6, "text": "Hi.", "speaker": 1, "confidence": 0.91}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let segments = parse_diarized_segments(&json).unwrap();
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].text, "Hello there.");
+        assert_eq!(segments[0].speaker, Some(0));
+        assert!((segments[0].start_secs - 0.2).abs() < 1e-6);
+        assert!((segments[0].confidence.unwrap() - 0.98).abs() < 1e-6);
+        assert_eq!(segments[1].speaker, Some(1));
+    }
+
+    #[test]
+    fn test_parse_diarized_segments_without_speaker_fields() {
+        // A plain OpenAI verbose_json response: segments without the
+        // voxtype-cloud speaker extension still parse, with speaker = None.
+        let json: serde_json::Value =
+            serde_json::from_str(r#"{"segments": [{"start": 0.0, "end": 1.0, "text": "Hello."}]}"#)
+                .unwrap();
+
+        let segments = parse_diarized_segments(&json).unwrap();
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].speaker, None);
+        assert_eq!(segments[0].confidence, None);
+    }
+
+    #[test]
+    fn test_parse_diarized_segments_absent_or_empty_is_none() {
+        let no_segments: serde_json::Value = serde_json::from_str(r#"{"text": "hello"}"#).unwrap();
+        assert!(parse_diarized_segments(&no_segments).is_none());
+
+        let empty: serde_json::Value =
+            serde_json::from_str(r#"{"text": "hello", "segments": []}"#).unwrap();
+        assert!(parse_diarized_segments(&empty).is_none());
+
+        let whitespace_only: serde_json::Value =
+            serde_json::from_str(r#"{"segments": [{"start": 0.0, "end": 1.0, "text": "  "}]}"#)
+                .unwrap();
+        assert!(parse_diarized_segments(&whitespace_only).is_none());
     }
 
     #[test]

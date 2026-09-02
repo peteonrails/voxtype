@@ -209,6 +209,14 @@ pub struct WhisperConfig {
     #[serde(default)]
     pub remote_timeout_secs: Option<u64>,
 
+    /// Request speaker-diarized segments from the remote server (voxtype-cloud
+    /// extension to the OpenAI transcription API). Not a user-facing knob:
+    /// `Config::with_meeting_mode_overrides()` sets this for meeting-mode
+    /// transcription when `[meeting.diarization] backend = "remote"`. Plain
+    /// OpenAI servers ignore the extra field and voxtype degrades gracefully.
+    #[serde(default, skip_serializing)]
+    pub remote_diarize: bool,
+
     /// Send an explicit `language=auto` field when language = "auto" (default: false)
     /// OpenAI-compatible endpoints treat a missing language field as auto-detect
     /// (and reject non-ISO-639-1 values like "auto"), but whisper.cpp's server
@@ -288,6 +296,7 @@ impl Default for WhisperConfig {
             remote_model: None,
             remote_api_key: None,
             remote_timeout_secs: None,
+            remote_diarize: false,
             remote_send_auto_language: false,
             whisper_cli_path: None,
         }

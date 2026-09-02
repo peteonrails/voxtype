@@ -41,7 +41,7 @@ pub const ENGINE_NAMES_CSV: &str =
 /// The authoritative dispatch lives in `src/meeting/diarization/mod.rs`'s
 /// `match backend.as_str()` block; a test in `src/config/meeting.rs` pins
 /// this list against those arms.
-pub(crate) const DIARIZATION_BACKENDS: &[&str] = &["simple", "ml"];
+pub(crate) const DIARIZATION_BACKENDS: &[&str] = &["simple", "ml", "remote"];
 
 /// Values `voxtype setup --progress-format` accepts. `human` is curl's
 /// progress bar and the usual status lines; `json` emits one NDJSON event per

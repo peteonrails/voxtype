@@ -270,6 +270,8 @@ impl Transcriber for ParakeetTranscriber {
                 text: sentence.clone(),
                 start_secs,
                 end_secs,
+                speaker: None,
+                confidence: None,
             });
 
             token_idx = end_token_idx;

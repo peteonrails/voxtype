@@ -95,6 +95,12 @@ pub struct TimedSegment {
     pub start_secs: f32,
     /// End time in seconds relative to the audio input
     pub end_secs: f32,
+    /// Request-local speaker index from engines with built-in diarization
+    /// (e.g. a voxtype-cloud server returning per-turn speakers). `None` for
+    /// engines without speaker awareness.
+    pub speaker: Option<u32>,
+    /// Engine-reported confidence for this segment, when available.
+    pub confidence: Option<f32>,
 }
 
 /// Trait for speech-to-text implementations
@@ -115,6 +121,8 @@ pub trait Transcriber: Send + Sync {
                 text,
                 start_secs: 0.0,
                 end_secs: duration,
+                speaker: None,
+                confidence: None,
             }])
         }
     }

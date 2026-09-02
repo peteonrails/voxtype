@@ -206,7 +206,31 @@ impl Config {
                 }
             }
         }
+        if self.cloud_diarization_active() {
+            tracing::info!(
+                "Remote diarization meeting mode: requesting speaker-diarized segments from the remote server; dictation path unchanged"
+            );
+            cfg.whisper.remote_diarize = true;
+        }
         cfg
+    }
+
+    /// True when meeting-mode transcription should ask the remote server for
+    /// speaker-diarized segments instead of running a local diarizer: the
+    /// meeting diarization backend is `"remote"`, diarization is enabled, and
+    /// the active engine is Whisper in remote mode (the only transcriber that
+    /// speaks the voxtype-cloud diarization extension).
+    ///
+    /// The dictation path reads the raw config and never sets
+    /// `whisper.remote_diarize`, so this only affects meetings.
+    pub fn cloud_diarization_active(&self) -> bool {
+        self.meeting.diarization.enabled
+            && self.meeting.diarization.backend == "remote"
+            && matches!(self.engine, TranscriptionEngine::Whisper)
+            && matches!(
+                self.whisper.effective_mode(),
+                crate::config::WhisperMode::Remote
+            )
     }
 
     /// System-wide config path used as a fallback when no user config exists.
@@ -480,6 +504,79 @@ mod tests {
     use super::super::hotkey::default_hotkey_key;
     use super::super::{ActivationMode, OutputMode};
     use super::*;
+
+    /// Config with the full remote-diarization gate satisfied: whisper engine
+    /// in remote mode, meeting diarization enabled with backend "remote".
+    fn remote_diarization_config() -> Config {
+        let mut cfg = Config {
+            engine: TranscriptionEngine::Whisper,
+            whisper: WhisperConfig {
+                mode: Some(crate::config::WhisperMode::Remote),
+                remote_endpoint: Some("https://api.voxtype.io".into()),
+                ..WhisperConfig::default()
+            },
+            ..Config::default()
+        };
+        cfg.meeting.diarization.enabled = true;
+        cfg.meeting.diarization.backend = "remote".into();
+        cfg
+    }
+
+    #[test]
+    fn meeting_mode_sets_remote_diarize_when_gate_satisfied() {
+        let cfg = remote_diarization_config();
+        assert!(cfg.cloud_diarization_active());
+        let meeting_cfg = cfg.with_meeting_mode_overrides();
+        assert!(meeting_cfg.whisper.remote_diarize);
+        // Original config untouched — dictation never diarizes.
+        assert!(!cfg.whisper.remote_diarize);
+    }
+
+    #[test]
+    fn remote_diarize_not_set_without_remote_backend() {
+        let mut cfg = remote_diarization_config();
+        cfg.meeting.diarization.backend = "simple".into();
+        assert!(!cfg.cloud_diarization_active());
+        assert!(!cfg.with_meeting_mode_overrides().whisper.remote_diarize);
+    }
+
+    #[test]
+    fn remote_diarize_not_set_when_diarization_disabled() {
+        let mut cfg = remote_diarization_config();
+        cfg.meeting.diarization.enabled = false;
+        assert!(!cfg.cloud_diarization_active());
+        assert!(!cfg.with_meeting_mode_overrides().whisper.remote_diarize);
+    }
+
+    #[test]
+    fn remote_diarize_not_set_for_non_whisper_engine() {
+        let mut cfg = remote_diarization_config();
+        cfg.engine = TranscriptionEngine::Soniox;
+        assert!(!cfg.cloud_diarization_active());
+        assert!(!cfg.with_meeting_mode_overrides().whisper.remote_diarize);
+    }
+
+    #[test]
+    fn remote_diarize_not_set_for_local_whisper_mode() {
+        let mut cfg = remote_diarization_config();
+        cfg.whisper.mode = Some(crate::config::WhisperMode::Local);
+        assert!(!cfg.cloud_diarization_active());
+        assert!(!cfg.with_meeting_mode_overrides().whisper.remote_diarize);
+    }
+
+    #[test]
+    fn remote_diarize_defaults_false_and_old_toml_parses() {
+        // Backwards compatibility: configs written before remote_diarize
+        // existed must parse, with the flag off.
+        let toml_str = r#"
+            engine = "whisper"
+            [whisper]
+            mode = "remote"
+            remote_endpoint = "http://localhost:8080"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert!(!cfg.whisper.remote_diarize);
+    }
 
     #[test]
     fn meeting_mode_forces_soniox_async_when_user_had_realtime() {

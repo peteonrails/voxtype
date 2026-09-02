@@ -15,6 +15,7 @@ Solutions to common issues when using Voxtype.
   - [Text output not working on X11](#text-output-not-working-on-x11)
   - [Wrong characters on non-US keyboard layouts](#wrong-characters-on-non-us-keyboard-layouts-yz-swapped-qwertz-azerty)
 - [Performance Issues](#performance-issues)
+- [Remote Diarization Issues](#remote-diarization-issues)
 - [Soniox Backend Issues](#soniox-backend-issues)
 - [Media Does Not Pause While Recording (Omarchy Quattro)](#media-does-not-pause-while-recording-omarchy-quattro)
 - [Quickshell OSD Issues](#quickshell-osd-issues)
@@ -1059,6 +1060,45 @@ model = "tiny.en"
 1. Ensure voxtype is running with normal priority
 2. Check for other applications using evdev
 3. Try a different hotkey
+
+---
+
+## Remote Diarization Issues
+
+Applies to `[meeting.diarization] backend = "remote"` (speaker labels from a remote transcription server such as a Voxtype Cloud endpoint).
+
+### "diarization backend \"remote\" requires engine = \"whisper\" with mode = \"remote\"" warning
+
+The remote backend only works when meetings transcribe through the remote Whisper path. Check that your config sets all three of:
+
+```toml
+engine = "whisper"
+
+[whisper]
+mode = "remote"
+remote_endpoint = "https://api.voxtype.io"
+```
+
+Until then, meetings fall back to the `simple` diarizer (mic = "You", loopback = "Remote").
+
+### Transcript has text but every speaker is "Remote" or missing SPEAKER_NN IDs
+
+The server did not return diarized segments, so voxtype degraded to plain transcription. Causes:
+
+- The endpoint is a plain OpenAI-compatible server (whisper.cpp, LocalAI) that ignores voxtype's `diarize` extension field. Point `remote_endpoint` at a server that supports it.
+- The server-side diarization returned a single speaker. Check the daemon log for "Remote server returned no diarized segments".
+
+### "Server returned 401" during meetings
+
+The API key is wrong or missing. Set `[whisper] remote_api_key` or the `VOXTYPE_WHISPER_API_KEY` environment variable.
+
+### Speaker numbers change mid-meeting
+
+Each audio chunk is diarized independently, so speaker numbering restarts per chunk. One-on-one calls (a single remote speaker) are stable. For multi-party calls, raise `[meeting] chunk_duration_secs` (for example to `120` or `300`) so boundaries are rare, and reapply `voxtype meeting label` where needed.
+
+### Meeting has gaps after network hiccups
+
+A chunk whose upload fails is skipped and the meeting continues; the lost interval is not retried. Check the daemon log for "Request failed" entries around the gap.
 
 ---
 

@@ -3244,7 +3244,7 @@ Diarization backend to use:
 
 - `"simple"` - Uses audio source (mic vs loopback) to attribute speech as "You" or "Remote". No model download required.
 - `"ml"` - ONNX-based speaker embeddings (ECAPA-TDNN) to identify individual remote speakers. The model is downloaded automatically on first use. **Experimental:** speaker clustering works best with longer speech segments; short segments may produce too many unique speaker IDs.
-- `"remote"` - Remote diarization API.
+- `"remote"` - Speaker labels come from the remote transcription server instead of a local model. Requires `engine = "whisper"` with `[whisper] mode = "remote"` pointed at a server that supports voxtype's diarization extension to the OpenAI transcription API (such as a Voxtype Cloud endpoint); with any other engine or mode this backend falls back to `"simple"` with a warning. The microphone channel is always attributed to "You"; loopback speakers get `SPEAKER_NN` IDs that work with `voxtype meeting label`. **Privacy:** meeting audio leaves your machine and is transcribed by the remote service. **Pilot limitation:** speaker numbering is only guaranteed consistent within one chunk, so raising `chunk_duration_secs` (for example to `120`) is recommended; one-on-one calls (a single remote speaker) get fully stable labels.
 
 ### max_speakers
 

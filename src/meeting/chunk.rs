@@ -314,6 +314,20 @@ impl ChunkProcessor {
             );
             segment.source = source;
 
+            // Engines with built-in diarization (remote voxtype-cloud) tag
+            // segments with a speaker index. The echo-cancelled mic channel is
+            // always the local user (same rule as the simple diarizer);
+            // loopback speakers surface as SPEAKER_NN, matching
+            // SpeakerId::Auto rendering so `voxtype meeting label` works
+            // unchanged. When a local diarizer is active it overwrites these.
+            if let Some(speaker) = timed.speaker {
+                segment.speaker_id = Some(match source {
+                    AudioSource::Microphone => "You".to_string(),
+                    _ => format!("SPEAKER_{:02}", speaker),
+                });
+                segment.confidence = timed.confidence;
+            }
+
             segments.push(segment);
         }
 
@@ -401,6 +415,82 @@ mod tests {
         let (start, end) = segments[0];
         assert!(start > 0);
         assert!(end < samples.len());
+    }
+
+    /// Stub transcriber returning fixed speaker-tagged segments, standing in
+    /// for a remote voxtype-cloud server with diarization enabled.
+    struct SpeakerStubTranscriber {
+        segments: Vec<crate::transcribe::TimedSegment>,
+    }
+
+    impl Transcriber for SpeakerStubTranscriber {
+        fn transcribe(&self, _samples: &[f32]) -> Result<String, TranscribeError> {
+            Ok(self
+                .segments
+                .iter()
+                .map(|s| s.text.clone())
+                .collect::<Vec<_>>()
+                .join(" "))
+        }
+
+        fn transcribe_timed(
+            &self,
+            _samples: &[f32],
+        ) -> Result<Vec<crate::transcribe::TimedSegment>, TranscribeError> {
+            Ok(self.segments.clone())
+        }
+    }
+
+    fn speaker_segment(text: &str, speaker: Option<u32>) -> crate::transcribe::TimedSegment {
+        crate::transcribe::TimedSegment {
+            text: text.to_string(),
+            start_secs: 0.0,
+            end_secs: 1.0,
+            speaker,
+            confidence: speaker.map(|_| 0.9),
+        }
+    }
+
+    fn process_with_stub(
+        source: AudioSource,
+        segments: Vec<crate::transcribe::TimedSegment>,
+    ) -> ProcessedChunk {
+        let transcriber = std::sync::Arc::new(SpeakerStubTranscriber { segments });
+        let mut processor = ChunkProcessor::new(ChunkConfig::default(), transcriber);
+        let mut buffer = processor.new_buffer(0, source, 0);
+        buffer.add_samples(&create_test_samples(2.0, 440.0, 0.5));
+        processor.process_chunk(buffer).unwrap()
+    }
+
+    #[test]
+    fn test_speaker_hint_loopback_maps_to_speaker_nn() {
+        let result = process_with_stub(
+            AudioSource::Loopback,
+            vec![
+                speaker_segment("hello", Some(0)),
+                speaker_segment("hi there", Some(1)),
+            ],
+        );
+        assert_eq!(result.segments.len(), 2);
+        assert_eq!(result.segments[0].speaker_id.as_deref(), Some("SPEAKER_00"));
+        assert_eq!(result.segments[1].speaker_id.as_deref(), Some("SPEAKER_01"));
+        assert_eq!(result.segments[0].confidence, Some(0.9));
+    }
+
+    #[test]
+    fn test_speaker_hint_microphone_is_always_you() {
+        let result = process_with_stub(
+            AudioSource::Microphone,
+            vec![speaker_segment("hello", Some(3))],
+        );
+        assert_eq!(result.segments[0].speaker_id.as_deref(), Some("You"));
+    }
+
+    #[test]
+    fn test_no_speaker_hint_leaves_speaker_id_unset() {
+        let result = process_with_stub(AudioSource::Loopback, vec![speaker_segment("hello", None)]);
+        assert_eq!(result.segments[0].speaker_id, None);
+        assert_eq!(result.segments[0].confidence, None);
     }
 
     #[test]
