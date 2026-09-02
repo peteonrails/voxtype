@@ -31,7 +31,8 @@
 #
 # This script builds tiered CPU binaries to support different CPUs:
 #   x86_64:
-#     - voxtype-avx2:   AVX2 baseline (compatible with most CPUs from 2013+)
+#     - voxtype-baseline: x86-64-v2, no AVX2 (pre-Haswell CPUs, #612)
+#     - voxtype-avx2:   AVX2 (most CPUs from 2013+)
 #     - voxtype-avx512: AVX-512 optimized (Zen 4+, some Intel)
 #   aarch64:
 #     - voxtype:        Single binary (no CPU feature tiers needed)
@@ -248,6 +249,11 @@ if [[ "$SKIP_BUILD" == "false" ]]; then
 else
     echo "Skipping binary build (--skip-build)"
     if [[ "$TARGET_ARCH" == "x86_64" ]]; then
+        if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-baseline" ]]; then
+            echo "Error: Binary not found: ${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-baseline"
+            echo "  The baseline (pre-AVX2, #612) binary is required from 1.1.0 on."
+            exit 1
+        fi
         if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2" ]]; then
             echo "Error: Binary not found: ${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2"
             exit 1
@@ -333,6 +339,12 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
     VERIFY_FAILED=false
 
     # AVX2 binary MUST NOT have AVX-512 or GFNI instructions (strict)
+    # Baseline gets the same static gate as avx2: AVX-512 must be zero. Per
+    # the Dockerfile.baseline notes, ymm/FMA counts cannot be gated statically
+    # (runtime-dispatched kernels); only execution on a pre-AVX2 CPU proves it.
+    if ! verify_no_forbidden_instructions "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-baseline" "voxtype-baseline"; then
+        VALIDATION_FAILED=1
+    fi
     if ! verify_no_forbidden_instructions "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2" "voxtype-avx2"; then
         VERIFY_FAILED=true
     fi
@@ -379,9 +391,11 @@ mkdir -p "$STAGING"/usr/share/{bash-completion/completions,zsh/site-functions,fi
 # Copy binaries to /usr/lib/voxtype/
 if [[ "$TARGET_ARCH" == "x86_64" ]]; then
     # x86_64: Tiered CPU binaries + Vulkan GPU binary (Whisper)
+    cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-baseline" "$STAGING/usr/lib/voxtype/voxtype-baseline"
     cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2" "$STAGING/usr/lib/voxtype/voxtype-avx2"
     cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512" "$STAGING/usr/lib/voxtype/voxtype-avx512"
     cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan" "$STAGING/usr/lib/voxtype/voxtype-vulkan"
+    chmod 755 "$STAGING/usr/lib/voxtype/voxtype-baseline"
     chmod 755 "$STAGING/usr/lib/voxtype/voxtype-avx2"
     chmod 755 "$STAGING/usr/lib/voxtype/voxtype-avx512"
     chmod 755 "$STAGING/usr/lib/voxtype/voxtype-vulkan"

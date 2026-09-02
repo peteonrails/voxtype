@@ -446,14 +446,15 @@ Building on hosts with newer glibc (e.g. 2.43 on CachyOS/Arch) can produce binar
 
 ### Build Strategy
 
-A full release requires **8 Linux binaries** (3 Whisper variants and 5 ONNX variants) plus a macOS arm64 DMG.
+A full release requires **9 Linux binaries** (4 Whisper variants and 5 ONNX variants) plus a macOS arm64 DMG.
 
 **CRITICAL: Every binary must be built in Docker.** Never build release binaries directly on the host, even for AVX-512 or MIGraphX builds that require specific hardware. Run Docker locally on the machine with the required hardware instead.
 
-**Whisper Binaries (3):**
+**Whisper Binaries (4):**
 
 | Binary | Dockerfile | Docker Context | Base Image | Max glibc |
 |--------|-----------|----------------|------------|-----------|
+| baseline | `Dockerfile.baseline` | CI (runner CPU irrelevant: GGML_NATIVE=OFF) | Ubuntu 22.04 | 2.35 |
 | AVX2 | `Dockerfile.build` | Remote (pre-AVX-512) | Ubuntu 22.04 | 2.35 |
 | Vulkan | `Dockerfile.vulkan` | Remote (pre-AVX-512) | Ubuntu 24.04 | 2.39 |
 | AVX-512 | `Dockerfile.avx512` | Local (AVX-512 host) | Ubuntu 22.04 | 2.35 |
