@@ -1,0 +1,101 @@
+# Build environment for the voxtype baseline x86-64 binary.
+#
+# WHY THIS EXISTS: every other x86-64 variant is built with
+# `-C target-cpu=haswell` or higher, so all of them SIGILL on a CPU without
+# AVX2. That is not a hypothetical: #612 came from a 2012 MacBook Pro with an
+# Ivy Bridge i5-3210M, which has `avx` and `f16c` but no `avx2`, `fma` or
+# `bmi2`. Before this variant existed, the honest advice to those users was
+# "build it yourself".
+#
+# The floor is x86-64-v2 (SSE4.2 + POPCNT, Nehalem 2008 and later) rather than
+# plain x86-64. It reaches every machine that could plausibly run a modern
+# Linux desktop and is meaningfully faster than true baseline. Going lower buys
+# hardware nobody is running voxtype on.
+#
+# Ubuntu 22.04 for the same reason as Dockerfile.build: newer distros ship a
+# libstdc++ whose inlined templates leak AVX-512 into binaries regardless of
+# RUSTFLAGS.
+#
+# Usage:
+#   docker build -f Dockerfile.baseline -t voxtype-baseline .
+#   docker run --rm -v $(pwd)/releases:/output voxtype-baseline
+#
+FROM ubuntu:22.04
+
+ARG VERSION=1.1.0
+ARG DEBIAN_FRONTEND=noninteractive
+ENV VERSION=${VERSION}
+
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    clang \
+    cmake \
+    pkg-config \
+    libasound2-dev \
+    libx11-dev \
+    libxi-dev \
+    libxtst-dev \
+    libgtk-3-dev \
+    libglib2.0-dev \
+    libappindicator3-dev \
+    git \
+    binutils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /build
+COPY . .
+
+# The whole point of the variant. GGML_NATIVE=OFF stops ggml probing the build
+# host, and every SIMD level above the floor is turned off explicitly rather
+# than left to CMake's detection, because detection reads the builder's CPU.
+ENV RUSTFLAGS="-C target-cpu=x86-64-v2 -C target-feature=-avx2,-fma,-bmi2,-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl,-gfni"
+ENV GGML_NATIVE=OFF
+ENV GGML_AVX=OFF
+ENV GGML_AVX2=OFF
+ENV GGML_FMA=OFF
+ENV GGML_F16C=OFF
+ENV GGML_AVX512=OFF
+ENV GGML_AVX_VNNI=OFF
+ENV GGML_AVX512_VNNI=OFF
+ENV CMAKE_C_FLAGS="-march=x86-64-v2 -mno-avx -mno-avx2 -mno-fma -mno-f16c -mno-bmi2 -mno-avx512f -mno-gfni -mno-avxvnni"
+ENV CMAKE_CXX_FLAGS="-march=x86-64-v2 -mno-avx -mno-avx2 -mno-fma -mno-f16c -mno-bmi2 -mno-avx512f -mno-gfni -mno-avxvnni"
+
+RUN cargo build --release \
+    && cp target/release/voxtype /tmp/voxtype-baseline
+
+# What this can and cannot prove.
+#
+# AVX-512 is a hard gate: ggml compiles it in only when asked, so any zmm here
+# means the flags above did not take and the binary is wrong.
+#
+# AVX2, FMA and BMI counts are reported but NOT gated, because a static count
+# cannot tell an unconditionally-executed instruction from one inside a
+# `#[target_feature(enable = "avx2")]` function that only runs after
+# `is_x86_feature_detected!`. Rust crates and ggml both ship runtime-dispatched
+# kernels, so a correct baseline binary still contains thousands of AVX2
+# instructions it will never execute on a pre-Haswell CPU. Gating on the count
+# would reject every buildable binary.
+#
+# The real test is booting it on a CPU without AVX2. See the voxtype-ivybridge
+# VM in CLAUDE.local.md, which exists for exactly this.
+RUN echo "=== Verifying baseline binary ===" \
+    && zmm=$(objdump -d /tmp/voxtype-baseline | grep -c zmm || echo 0) \
+    && ymm=$(objdump -d /tmp/voxtype-baseline | grep -c ymm || echo 0) \
+    && fma=$(objdump -d /tmp/voxtype-baseline | grep -cE 'vfmadd|vfmsub|vfnmadd' || echo 0) \
+    && echo "  zmm (AVX-512, gated):        $zmm" \
+    && echo "  ymm (AVX/AVX2, informational): $ymm" \
+    && echo "  FMA (informational):           $fma" \
+    && if [ "$zmm" -gt 0 ]; then \
+         echo "ERROR: AVX-512 present; target-cpu/GGML flags did not take effect" && exit 1; \
+       fi \
+    && echo "✓ no AVX-512. Runtime behaviour on a pre-AVX2 CPU must be confirmed on hardware."
+
+CMD mkdir -p /output \
+    && cp /tmp/voxtype-baseline /output/voxtype-${VERSION}-linux-x86_64-baseline \
+    && chmod 755 /output/voxtype-${VERSION}-linux-x86_64-baseline \
+    && echo "Binary copied to /output:" \
+    && ls -la /output/voxtype-*

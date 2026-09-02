@@ -40,6 +40,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Runs on any x86-64-v2 CPU (Nehalem 2008+). Every other x86_64
+          # variant is built for Haswell or newer and SIGILLs without AVX2,
+          # which is what #612 reported from a 2012 Ivy Bridge MacBook Pro.
+          - variant: baseline
+            arch: x86_64
+            dockerfile: Dockerfile.baseline
+            runner: ubuntu-22.04
+            glibc_cap: '2.35'
+            check_no_avx512: true
+            companion_libs: ''
+            timeout_minutes: 60
           - variant: avx2
             arch: x86_64
             dockerfile: Dockerfile.build
