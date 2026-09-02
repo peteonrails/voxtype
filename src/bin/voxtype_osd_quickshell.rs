@@ -38,18 +38,37 @@
 //!
 //! All other CLI arguments pass through to `qs` unchanged.
 //!
+//! ## Omarchy theme following
+//!
+//! When the resolved palette source is Omarchy, theme switches apply live:
+//! before exec'ing `qs`, the launcher spawns itself with the internal
+//! `--theme-follow` flag. That side process watches the Omarchy theme via
+//! `notify`, re-resolves the style on each change, and atomically rewrites
+//! the runtime JSON — which Quickshell's `FileView` reloads. The launcher
+//! can't run the watcher on a thread because `exec` replaces the process,
+//! so the follower's lifetime is tied to `qs` through a pipe instead: `qs`
+//! inherits the write end across exec, and the follower exits on EOF (i.e.
+//! when `qs` exits). Every failure on this path logs and degrades to the
+//! old restart-to-retheme behavior; it never blocks the OSD launch.
+//!
 //! Exit codes:
 //! - 2: Quickshell (`qs`) not found on PATH.
 //! - 3: No `shell.qml` found in any of the resolved directories.
 //! - 1: exec of `qs` failed for some other reason.
 
 use std::env;
+use std::fs;
+use std::io::Read;
+use std::os::fd::FromRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
+use std::sync::{Arc, Mutex};
 
 use voxtype::config;
-use voxtype::osd::style;
+use voxtype::osd::config::{OsdConfig, OsdPaletteSource};
+use voxtype::osd::style::{self, RuntimeOsdStyle};
+use voxtype::osd::theme;
 
 const QS_BIN: &str = "qs";
 const SHELL_FILE: &str = "shell.qml";
@@ -74,6 +93,12 @@ fn main() -> ExitCode {
     }
 
     let (cli_qml_path, cli_style, config_path, daemonize, rest) = parse_args(&raw_args);
+
+    // Internal mode: run as the Omarchy theme follower for an already
+    // launched qs (see the module docs). Never reached by user invocation.
+    if raw_args.iter().any(|a| a == "--theme-follow") {
+        return run_theme_follow(cli_style, config_path);
+    }
 
     let shell_dir = match resolve_shell_dir(cli_qml_path) {
         Some(p) => p,
@@ -140,6 +165,8 @@ fn main() -> ExitCode {
         }
     };
 
+    spawn_theme_follower(&runtime_style, cli_style.as_deref(), config_path.as_deref());
+
     let mut cmd = Command::new(QS_BIN);
     if daemonize {
         cmd.arg("-d");
@@ -177,6 +204,8 @@ fn print_help() {
                                   child-process slot (e.g. the daemon's OSD\n\
                                   supervisor relies on this so kill_on_drop\n\
                                   reaches qs on shutdown).\n    \
+             --theme-follow       Internal. Run as the Omarchy theme follower\n\
+                                  the launcher spawns alongside qs.\n    \
              -h, --help           Show this message.\n    \
              -V, --version        Show version.\n\
          \n\
@@ -190,6 +219,152 @@ fn print_help() {
              VOXTYPE_CONFIG         Path to voxtype config.toml.\n",
         voxtype::cli::VERSION,
     );
+}
+
+/// Spawn the theme-follower side process and hand qs the write end of its
+/// lifetime pipe. Best effort: every failure logs and returns, leaving the
+/// OSD launch untouched.
+fn spawn_theme_follower(
+    runtime_style: &RuntimeOsdStyle,
+    cli_style: Option<&str>,
+    config_path: Option<&Path>,
+) {
+    if runtime_style.palette != OsdPaletteSource::Omarchy {
+        return;
+    }
+    if theme::omarchy_current_dirs().is_empty() {
+        tracing::debug!("no Omarchy install detected; skipping theme follower");
+        return;
+    }
+    let exe = match env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot resolve own executable; theme changes need an OSD restart");
+            return;
+        }
+    };
+    let mut fds = [0i32; 2];
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        let e = std::io::Error::last_os_error();
+        tracing::warn!(error = %e, "pipe for theme follower failed; theme changes need an OSD restart");
+        return;
+    }
+    let (read_fd, write_fd) = (fds[0], fds[1]);
+
+    let mut cmd = Command::new(exe);
+    cmd.arg("--theme-follow");
+    if let Some(s) = cli_style {
+        cmd.arg("--style").arg(s);
+    }
+    if let Some(c) = config_path {
+        cmd.arg("--config").arg(c);
+    }
+    // SAFETY: read_fd is a fresh pipe fd owned by nothing else; Stdio takes
+    // ownership and closes it in this process after the spawn.
+    cmd.stdin(unsafe { Stdio::from_raw_fd(read_fd) });
+    cmd.stdout(Stdio::null());
+    match cmd.spawn() {
+        Ok(child) => {
+            // Clear CLOEXEC so qs inherits the write end across exec; the
+            // follower sees EOF (and exits) when qs closes it by exiting.
+            unsafe { libc::fcntl(write_fd, libc::F_SETFD, 0) };
+            tracing::info!(pid = child.id(), "started Omarchy theme follower");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to start theme follower; theme changes need an OSD restart");
+            unsafe { libc::close(write_fd) };
+        }
+    }
+}
+
+/// Run as the theme follower (internal `--theme-follow` mode): watch the
+/// Omarchy theme, re-resolve the style on each change, and rewrite the
+/// runtime JSON when the result differs. Exits when stdin hits EOF, which
+/// happens when the qs process holding our pipe's write end goes away.
+fn run_theme_follow(cli_style: Option<String>, config_path: Option<PathBuf>) -> ExitCode {
+    // Detach from the launcher's session: a hotkey terminal closing must
+    // not HUP us. Lifetime comes solely from the stdin pipe.
+    unsafe { libc::setsid() };
+
+    let env_style = env::var("VOXTYPE_OSD_STYLE").ok();
+    let style_override = cli_style.or(env_style);
+    let config = match config::load_config(config_path.as_deref()) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "theme follower: failed to load config; exiting");
+            return ExitCode::SUCCESS;
+        }
+    };
+    let initial = match style::resolve_runtime_style(&config.osd, style_override.as_deref()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "theme follower: failed to resolve OSD style; exiting");
+            return ExitCode::SUCCESS;
+        }
+    };
+
+    let path = style::runtime_style_path();
+    let last_json = Arc::new(Mutex::new(fs::read_to_string(&path).unwrap_or_default()));
+
+    let osd = config.osd.clone();
+    let handle = {
+        let (osd, style_override, path, last_json) = (
+            osd.clone(),
+            style_override.clone(),
+            path.clone(),
+            Arc::clone(&last_json),
+        );
+        style::follow_omarchy_theme(&initial, move || {
+            refresh_style(&osd, style_override.as_deref(), &path, &last_json);
+        })
+    };
+    let Some(_handle) = handle else {
+        tracing::debug!("theme follower: nothing to watch; exiting");
+        return ExitCode::SUCCESS;
+    };
+
+    // Catch a theme switch that slipped in between the launcher's initial
+    // write and our watches being established.
+    refresh_style(&osd, style_override.as_deref(), &path, &last_json);
+
+    let mut buf = [0u8; 64];
+    let mut stdin = std::io::stdin().lock();
+    loop {
+        match stdin.read(&mut buf) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    tracing::debug!("theme follower: qs exited; shutting down");
+    ExitCode::SUCCESS
+}
+
+/// Re-resolve the style with a fresh Omarchy theme load and rewrite the
+/// runtime JSON when it changed. Errors log and leave the last good JSON
+/// in place.
+fn refresh_style(
+    osd: &OsdConfig,
+    style_override: Option<&str>,
+    path: &Path,
+    last_json: &Mutex<String>,
+) {
+    let resolved = match style::resolve_runtime_style(osd, style_override) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "theme follower: failed to re-resolve OSD style");
+            return;
+        }
+    };
+    let mut last = last_json
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match style::rewrite_runtime_style_if_changed(path, &resolved, &mut last) {
+        Ok(true) => tracing::info!("theme follower: applied Omarchy theme change"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(error = %e, "theme follower: failed to rewrite OSD style"),
+    }
 }
 
 /// Strip our own flags out of `args`:
