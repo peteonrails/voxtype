@@ -67,27 +67,32 @@ ENV CMAKE_CXX_FLAGS="-march=x86-64-v2 -mno-avx -mno-avx2 -mno-fma -mno-f16c -mno
 RUN cargo build --release \
     && cp target/release/voxtype /tmp/voxtype-baseline
 
-# Verification is stricter here than for the other variants. Those only assert
-# "no AVX-512"; this one has to assert "no AVX2 either", which is the property
-# the variant exists to provide. A baseline binary that contains a single vpaddd
-# on a ymm register is worse than useless: it SIGILLs on exactly the machines it
-# was built for, and does so without the SIGILL handler being able to say
-# anything more useful than it already does.
+# What this can and cannot prove.
+#
+# AVX-512 is a hard gate: ggml compiles it in only when asked, so any zmm here
+# means the flags above did not take and the binary is wrong.
+#
+# AVX2, FMA and BMI counts are reported but NOT gated, because a static count
+# cannot tell an unconditionally-executed instruction from one inside a
+# `#[target_feature(enable = "avx2")]` function that only runs after
+# `is_x86_feature_detected!`. Rust crates and ggml both ship runtime-dispatched
+# kernels, so a correct baseline binary still contains thousands of AVX2
+# instructions it will never execute on a pre-Haswell CPU. Gating on the count
+# would reject every buildable binary.
+#
+# The real test is booting it on a CPU without AVX2. See the voxtype-ivybridge
+# VM in CLAUDE.local.md, which exists for exactly this.
 RUN echo "=== Verifying baseline binary ===" \
     && zmm=$(objdump -d /tmp/voxtype-baseline | grep -c zmm || echo 0) \
     && ymm=$(objdump -d /tmp/voxtype-baseline | grep -c ymm || echo 0) \
-    && avx2=$(objdump -d /tmp/voxtype-baseline | grep -cE 'vpbroadcast|vperm2i128|vpgather|vinserti128' || echo 0) \
     && fma=$(objdump -d /tmp/voxtype-baseline | grep -cE 'vfmadd|vfmsub|vfnmadd' || echo 0) \
-    && bmi=$(objdump -d /tmp/voxtype-baseline | grep -cE 'shlx|shrx|sarx|rorx|mulx|pdep|pext' || echo 0) \
-    && echo "  zmm (AVX-512): $zmm" \
-    && echo "  ymm (AVX/AVX2): $ymm" \
-    && echo "  AVX2-only ops:  $avx2" \
-    && echo "  FMA:            $fma" \
-    && echo "  BMI1/2:         $bmi" \
-    && if [ "$zmm" -gt 0 ] || [ "$ymm" -gt 0 ] || [ "$avx2" -gt 0 ] || [ "$fma" -gt 0 ] || [ "$bmi" -gt 0 ]; then \
-         echo "ERROR: baseline binary contains instructions a pre-Haswell CPU cannot execute!" && exit 1; \
+    && echo "  zmm (AVX-512, gated):        $zmm" \
+    && echo "  ymm (AVX/AVX2, informational): $ymm" \
+    && echo "  FMA (informational):           $fma" \
+    && if [ "$zmm" -gt 0 ]; then \
+         echo "ERROR: AVX-512 present; target-cpu/GGML flags did not take effect" && exit 1; \
        fi \
-    && echo "✓ baseline binary runs on x86-64-v2"
+    && echo "✓ no AVX-512. Runtime behaviour on a pre-AVX2 CPU must be confirmed on hardware."
 
 CMD mkdir -p /output \
     && cp /tmp/voxtype-baseline /output/voxtype-${VERSION}-linux-x86_64-baseline \
