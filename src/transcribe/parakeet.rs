@@ -13,7 +13,8 @@ use crate::error::TranscribeError;
 #[cfg(any(
     feature = "parakeet-cuda",
     feature = "parakeet-migraphx",
-    feature = "parakeet-tensorrt"
+    feature = "parakeet-tensorrt",
+    feature = "parakeet-webgpu"
 ))]
 use parakeet_rs::ExecutionProvider;
 use parakeet_rs::{
@@ -316,10 +317,17 @@ pub(super) fn build_execution_config() -> Option<ExecutionConfig> {
         return Some(ExecutionConfig::new().with_execution_provider(ExecutionProvider::MIGraphX));
     }
 
+    #[cfg(feature = "parakeet-webgpu")]
+    {
+        tracing::info!("Configuring WebGPU execution provider for GPU acceleration");
+        Some(ExecutionConfig::new().with_execution_provider(ExecutionProvider::WebGPU))
+    }
+
     #[cfg(not(any(
         feature = "parakeet-cuda",
         feature = "parakeet-tensorrt",
-        feature = "parakeet-migraphx"
+        feature = "parakeet-migraphx",
+        feature = "parakeet-webgpu"
     )))]
     {
         None
@@ -514,8 +522,18 @@ pub(super) fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
     use std::fs;
     use tempfile::TempDir;
+
+    #[cfg(feature = "parakeet-webgpu")]
+    #[test]
+    fn build_execution_config_uses_webgpu() {
+        let config = build_execution_config()
+            .expect("the parakeet-webgpu feature should configure an execution provider");
+
+        assert_eq!(ExecutionProvider::WebGPU, config.execution_provider);
+    }
 
     #[test]
     fn test_detect_model_type_tdt_with_encoder_and_decoder() {
