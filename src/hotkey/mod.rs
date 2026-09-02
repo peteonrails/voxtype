@@ -1,16 +1,16 @@
-//! Hotkey detection module
+//! Global hotkey detection for Linux.
 //!
-//! Provides kernel-level key event detection using evdev.
-//! This approach works on all Wayland compositors because it
-//! operates at the Linux input subsystem level.
-//!
-//! Requires the user to be in the 'input' group.
+//! Supports kernel input events through evdev and desktop-managed shortcuts
+//! through the XDG GlobalShortcuts portal.
 
+pub(crate) mod auto_listener;
 pub mod evdev_listener;
+pub(crate) mod portal_listener;
 
-use crate::config::HotkeyConfig;
+use crate::config::{HotkeyBackend, HotkeyConfig};
 use crate::error::HotkeyError;
 use async_trait::async_trait;
+use std::collections::HashSet;
 use tokio::sync::mpsc;
 
 /// Events emitted by the hotkey listener
@@ -44,8 +44,24 @@ pub trait HotkeyListener: Send {
 pub fn create_listener(
     config: &HotkeyConfig,
     secondary_model: Option<String>,
+    profiles: &HashSet<String>,
 ) -> Result<Box<dyn HotkeyListener>, HotkeyError> {
-    let mut listener = evdev_listener::EvdevListener::new(config)?;
-    listener.set_secondary_model(secondary_model);
-    Ok(Box::new(listener))
+    match config.backend {
+        HotkeyBackend::Evdev => {
+            let mut listener = evdev_listener::EvdevListener::new(config)?;
+            listener.set_secondary_model(secondary_model);
+            Ok(Box::new(listener))
+        }
+        HotkeyBackend::Portal => Ok(Box::new(portal_listener::PortalListener::new(
+            config,
+            secondary_model,
+            profiles,
+            portal_listener::OnPermanentFailure::NotifyUser,
+        ))),
+        HotkeyBackend::Auto => Ok(Box::new(auto_listener::AutoListener::new(
+            config,
+            secondary_model,
+            profiles,
+        ))),
+    }
 }

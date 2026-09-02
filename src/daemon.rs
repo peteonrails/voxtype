@@ -3878,15 +3878,21 @@ impl Daemon {
             }
         }
 
-        // Initialize hotkey listener (Linux: evdev, macOS: rdev)
+        // Initialize hotkey listener (Linux: configured backend, macOS: rdev)
         #[cfg(target_os = "linux")]
         let mut hotkey_listener: Option<Box<dyn hotkey::HotkeyListener>> =
             if self.config.hotkey.enabled {
-                tracing::info!("Hotkey: {}", self.config.hotkey.key);
+                tracing::info!(
+                    "Hotkey backend: {}, preferred key: {}",
+                    self.config.hotkey.backend,
+                    self.config.hotkey.key
+                );
                 let secondary_model = self.config.whisper.secondary_model.clone();
+                let profiles = self.config.profiles.keys().cloned().collect();
                 Some(hotkey::create_listener(
                     &self.config.hotkey,
                     secondary_model,
+                    &profiles,
                 )?)
             } else {
                 tracing::info!(
@@ -4063,12 +4069,17 @@ impl Daemon {
         loop {
             tokio::select! {
                 // Handle hotkey events (only if hotkey listener is enabled)
-                Some(hotkey_event) = async {
+                hotkey_event = async {
                     match &mut hotkey_rx {
                         Some(rx) => rx.recv().await,
                         None => std::future::pending().await,
                     }
                 } => {
+                    let Some(hotkey_event) = hotkey_event else {
+                        tracing::warn!("Hotkey listener stopped; use 'voxtype record start/stop/toggle' instead");
+                        hotkey_rx = None;
+                        continue;
+                    };
                     match (hotkey_event, activation_mode) {
                         // === PUSH-TO-TALK MODE ===
                         (HotkeyEvent::Pressed { model_override, profile_override }, ActivationMode::PushToTalk) => {
