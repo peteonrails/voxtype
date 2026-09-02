@@ -1,0 +1,33 @@
+{
+	"_comment": "PLACEHOLDER matching Deepgram's documented response schema. Replace with a live capture via scripts/capture-fixture.sh before trusting field names (plan step 2).",
+	"metadata": {
+		"duration": 8.42
+	},
+	"results": {
+		"channels": [
+			{
+				"detected_language": "en",
+				"alternatives": [
+					{
+						"transcript": "So the deploy failed twice. Yeah, I saw that in the logs.",
+						"confidence": 0.98,
+						"words": [
+							{ "word": "so", "punctuated_word": "So", "start": 0.32, "end": 0.48, "confidence": 0.99, "speaker": 0 },
+							{ "word": "the", "punctuated_word": "the", "start": 0.48, "end": 0.62, "confidence": 0.99, "speaker": 0 },
+							{ "word": "deploy", "punctuated_word": "deploy", "start": 0.62, "end": 1.04, "confidence": 0.98, "speaker": 0 },
+							{ "word": "failed", "punctuated_word": "failed", "start": 1.04, "end": 1.46, "confidence": 0.97, "speaker": 0 },
+							{ "word": "twice", "punctuated_word": "twice.", "start": 1.46, "end": 1.98, "confidence": 0.98, "speaker": 0 },
+							{ "word": "yeah", "punctuated_word": "Yeah,", "start": 3.1, "end": 3.34, "confidence": 0.96, "speaker": 1 },
+							{ "word": "i", "punctuated_word": "I", "start": 3.34, "end": 3.4, "confidence": 0.99, "speaker": 1 },
+							{ "word": "saw", "punctuated_word": "saw", "start": 3.4, "end": 3.66, "confidence": 0.99, "speaker": 1 },
+							{ "word": "that", "punctuated_word": "that", "start": 3.66, "end": 3.86, "confidence": 0.98, "speaker": 1 },
+							{ "word": "in", "punctuated_word": "in", "start": 3.86, "end": 3.98, "confidence": 0.99, "speaker": 1 },
+							{ "word": "the", "punctuated_word": "the", "start": 3.98, "end": 4.1, "confidence": 0.99, "speaker": 1 },
+							{ "word": "logs", "punctuated_word": "logs.", "start": 4.1, "end": 4.52, "confidence": 0.97, "speaker": 1 }
+						]
+					}
+				]
+			}
+		]
+	}
+}

@@ -1,0 +1,18 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "voxtype-cloud",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-09-02",
+	"compatibility_flags": ["nodejs_compat"],
+	"ai": {
+		"binding": "AI"
+	},
+	"observability": {
+		"enabled": true,
+		"head_sampling_rate": 1
+	}
+	// Custom domain — enable once the voxtype.io zone is on Cloudflare DNS
+	// (the site itself stays on GitHub Pages; only the `api` subdomain is claimed).
+	// Until then the Worker serves on its workers.dev URL.
+	// "routes": [{ "pattern": "api.voxtype.io", "custom_domain": true }]
+}
