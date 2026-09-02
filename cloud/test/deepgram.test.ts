@@ -83,28 +83,34 @@ describe("nova3Language", () => {
 	});
 });
 
-describe("transcribeNova3 against the pinned fixture", () => {
+describe("transcribeNova3 against the pinned fixture (live-captured 2026-09-02)", () => {
 	const stubAi = { run: async () => fixture } as unknown as Ai;
 
-	it("extracts transcript, duration, and speaker turns", async () => {
-		const result = await transcribeNova3(stubAi, new Uint8Array(0), {
+	it("extracts transcript, duration, and speaker-tagged turns", async () => {
+		const result = await transcribeNova3({ ai: stubAi }, new Uint8Array(0), {
 			diarize: true,
 			contentType: "audio/wav",
 		});
-		expect(result.text).toBe("So the deploy failed twice. Yeah, I saw that in the logs.");
-		expect(result.duration).toBeCloseTo(8.42);
-		expect(result.language).toBe("en");
-		expect(result.segments).toHaveLength(2);
-		expect(result.segments[0].speaker).toBe(0);
-		expect(result.segments[0].text).toBe("So the deploy failed twice.");
-		expect(result.segments[1].speaker).toBe(1);
-		expect(result.segments[1].text).toBe("Yeah, I saw that in the logs.");
+		expect(result.text).toBe(
+			"So the deploy failed twice last night. I think the migration step is timing out before the database comes up. Yeah. I saw that in the logs this morning. Let's add a health check before the migration runs and try again.",
+		);
+		// The live response carries no metadata.duration; it falls back to the
+		// last word's end time.
+		expect(result.duration).toBeCloseTo(14.96);
+		expect(result.words).toHaveLength(41);
+		expect(result.segments.length).toBeGreaterThanOrEqual(1);
+		// Workers AI's nova-3 currently tags every word speaker 0 even on
+		// multi-speaker audio (upstream diarization defect, observed live on
+		// Deepgram's own two-speaker demo files); the fixture reflects that.
+		// The turn-grouping tests above cover real multi-speaker word arrays.
+		expect(result.segments.every((s) => s.speaker === 0)).toBe(true);
+		expect(result.segments.map((s) => s.text).join(" ")).toBe(result.text);
 	});
 
 	it("falls back to a single segment when words are missing", async () => {
 		const bare = { results: { channels: [{ alternatives: [{ transcript: "hello there" }] }] } };
 		const ai = { run: async () => bare } as unknown as Ai;
-		const result = await transcribeNova3(ai, new Uint8Array(0), { diarize: false, contentType: "audio/wav" });
+		const result = await transcribeNova3({ ai }, new Uint8Array(0), { diarize: false, contentType: "audio/wav" });
 		expect(result.text).toBe("hello there");
 		expect(result.segments).toHaveLength(1);
 		expect(result.segments[0].speaker).toBeUndefined();
@@ -112,8 +118,52 @@ describe("transcribeNova3 against the pinned fixture", () => {
 
 	it("returns empty segments for an empty response", async () => {
 		const ai = { run: async () => ({}) } as unknown as Ai;
-		const result = await transcribeNova3(ai, new Uint8Array(0), { diarize: false, contentType: "audio/wav" });
+		const result = await transcribeNova3({ ai }, new Uint8Array(0), { diarize: false, contentType: "audio/wav" });
 		expect(result.text).toBe("");
 		expect(result.segments).toHaveLength(0);
+	});
+
+	it("falls back to REST on the 5006 binding bug and unwraps the envelope", async () => {
+		const ai = {
+			run: async () => {
+				throw new Error("5006: Error: required properties at '/audio' are 'body,contentType'");
+			},
+		} as unknown as Ai;
+		const calls: { url: string; init: RequestInit }[] = [];
+		const originalFetch = globalThis.fetch;
+		globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+			calls.push({ url: String(url), init: init ?? {} });
+			return Response.json({ result: fixture, success: true });
+		}) as typeof fetch;
+		try {
+			const result = await transcribeNova3({ ai, accountId: "acct123", apiToken: "tok" }, new Uint8Array([1, 2, 3]), {
+				diarize: true,
+				language: "en",
+				contentType: "audio/wav",
+			});
+			expect(result.words).toHaveLength(41);
+			expect(calls).toHaveLength(1);
+			const { url, init } = calls[0];
+			// Mirrors the verified-working curl: binary body + query params.
+			expect(url).toBe(
+				"https://api.cloudflare.com/client/v4/accounts/acct123/ai/run/@cf/deepgram/nova-3?punctuate=true&smart_format=true&diarize=true&language=en",
+			);
+			expect((init.headers as Record<string, string>).Authorization).toBe("Bearer tok");
+			expect((init.headers as Record<string, string>)["Content-Type"]).toBe("audio/wav");
+			expect(init.body).toBeInstanceOf(Uint8Array);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	it("surfaces the workerd#5082 hint when the binding rejects and no fallback is configured", async () => {
+		const ai = {
+			run: async () => {
+				throw new Error("5006: Error: required properties at '/audio' are 'body,contentType'");
+			},
+		} as unknown as Ai;
+		await expect(transcribeNova3({ ai }, new Uint8Array(0), { diarize: false, contentType: "audio/wav" })).rejects.toThrow(
+			/workerd#5082/,
+		);
 	});
 });

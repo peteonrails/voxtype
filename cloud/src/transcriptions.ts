@@ -1,5 +1,10 @@
-import { transcribeNova3, transcribeWhisper, type TranscriptionResult } from "./deepgram";
+import { runNova3Raw, transcribeNova3, transcribeWhisper, type NovaUpstream, type TranscriptionResult } from "./deepgram";
 import { errorResponse } from "./errors";
+
+/** Binding plus optional REST-fallback credentials (workerd#5082). */
+function novaUpstream(env: Env): NovaUpstream {
+	return { ai: env.AI, accountId: env.CLOUDFLARE_ACCOUNT_ID, apiToken: env.CLOUDFLARE_API_TOKEN };
+}
 
 /**
  * formData() buffers the body and the audio bytes are buffered again for the
@@ -51,6 +56,23 @@ export async function handleTranscription(request: Request, env: Env): Promise<R
 		return errorResponse(400, "Diarization requires the nova-3 model; whisper models do not support diarize=true.");
 	}
 
+	// Debug extension: raw=true returns the un-normalized Nova-3 model output.
+	// Used by scripts/capture-fixture.sh to pin the parser fixture.
+	if (str(form.get("raw")) === "true") {
+		if (useWhisper) return errorResponse(400, "raw=true is only supported with the nova-3 model.");
+		try {
+			const raw = await runNova3Raw(novaUpstream(env), new Uint8Array(await file.arrayBuffer()), {
+				diarize,
+				language,
+				contentType: file.type !== "" ? file.type : "audio/wav",
+			});
+			return Response.json(raw);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			return errorResponse(502, `Speech-to-text inference failed: ${message}`, "api_error", "inference_failed");
+		}
+	}
+
 	const started = Date.now();
 	let result: TranscriptionResult;
 	try {
@@ -58,7 +80,7 @@ export async function handleTranscription(request: Request, env: Env): Promise<R
 			result = await transcribeWhisper(env.AI, new Uint8Array(await file.arrayBuffer()), language);
 		} else {
 			const contentType = file.type !== "" ? file.type : "audio/wav";
-			result = await transcribeNova3(env.AI, new Uint8Array(await file.arrayBuffer()), { diarize, language, contentType });
+			result = await transcribeNova3(novaUpstream(env), new Uint8Array(await file.arrayBuffer()), { diarize, language, contentType });
 		}
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);

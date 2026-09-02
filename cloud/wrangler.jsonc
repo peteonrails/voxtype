@@ -7,6 +7,11 @@
 	"ai": {
 		"binding": "AI"
 	},
+	"vars": {
+		// Used by the nova-3 REST fallback (workerd#5082) together with the
+		// CLOUDFLARE_API_TOKEN secret (Workers AI Run scope).
+		"CLOUDFLARE_ACCOUNT_ID": "414602f08a782b26293948812b54a9df"
+	},
 	"observability": {
 		"enabled": true,
 		"head_sampling_rate": 1

@@ -1,33 +1,432 @@
 {
-	"_comment": "PLACEHOLDER matching Deepgram's documented response schema. Replace with a live capture via scripts/capture-fixture.sh before trusting field names (plan step 2).",
-	"metadata": {
-		"duration": 8.42
-	},
-	"results": {
-		"channels": [
-			{
-				"detected_language": "en",
-				"alternatives": [
-					{
-						"transcript": "So the deploy failed twice. Yeah, I saw that in the logs.",
-						"confidence": 0.98,
-						"words": [
-							{ "word": "so", "punctuated_word": "So", "start": 0.32, "end": 0.48, "confidence": 0.99, "speaker": 0 },
-							{ "word": "the", "punctuated_word": "the", "start": 0.48, "end": 0.62, "confidence": 0.99, "speaker": 0 },
-							{ "word": "deploy", "punctuated_word": "deploy", "start": 0.62, "end": 1.04, "confidence": 0.98, "speaker": 0 },
-							{ "word": "failed", "punctuated_word": "failed", "start": 1.04, "end": 1.46, "confidence": 0.97, "speaker": 0 },
-							{ "word": "twice", "punctuated_word": "twice.", "start": 1.46, "end": 1.98, "confidence": 0.98, "speaker": 0 },
-							{ "word": "yeah", "punctuated_word": "Yeah,", "start": 3.1, "end": 3.34, "confidence": 0.96, "speaker": 1 },
-							{ "word": "i", "punctuated_word": "I", "start": 3.34, "end": 3.4, "confidence": 0.99, "speaker": 1 },
-							{ "word": "saw", "punctuated_word": "saw", "start": 3.4, "end": 3.66, "confidence": 0.99, "speaker": 1 },
-							{ "word": "that", "punctuated_word": "that", "start": 3.66, "end": 3.86, "confidence": 0.98, "speaker": 1 },
-							{ "word": "in", "punctuated_word": "in", "start": 3.86, "end": 3.98, "confidence": 0.99, "speaker": 1 },
-							{ "word": "the", "punctuated_word": "the", "start": 3.98, "end": 4.1, "confidence": 0.99, "speaker": 1 },
-							{ "word": "logs", "punctuated_word": "logs.", "start": 4.1, "end": 4.52, "confidence": 0.97, "speaker": 1 }
-						]
-					}
-				]
-			}
-		]
-	}
+  "results": {
+    "channels": [
+      {
+        "alternatives": [
+          {
+            "confidence": 1,
+            "paragraphs": {
+              "paragraphs": [
+                {
+                  "end": 14.96,
+                  "num_words": 41,
+                  "sentences": [
+                    {
+                      "end": 3.04,
+                      "start": 0.24,
+                      "text": "So the deploy failed twice last night."
+                    },
+                    {
+                      "end": 7.44,
+                      "start": 3.1999998,
+                      "text": "I think the migration step is timing out before the database comes up."
+                    },
+                    {
+                      "end": 9.36,
+                      "start": 8.88,
+                      "text": "Yeah."
+                    },
+                    {
+                      "end": 11.5199995,
+                      "start": 9.36,
+                      "text": "I saw that in the logs this morning."
+                    },
+                    {
+                      "end": 14.96,
+                      "start": 11.679999,
+                      "text": "Let's add a health check before the migration runs and try again."
+                    }
+                  ],
+                  "speaker": 0,
+                  "start": 0.24
+                }
+              ],
+              "transcript": "\nSpeaker 0: So the deploy failed twice last night. I think the migration step is timing out before the database comes up. Yeah. I saw that in the logs this morning. Let's add a health check before the migration runs and try again."
+            },
+            "transcript": "So the deploy failed twice last night. I think the migration step is timing out before the database comes up. Yeah. I saw that in the logs this morning. Let's add a health check before the migration runs and try again.",
+            "words": [
+              {
+                "confidence": 0.99316406,
+                "end": 0.48,
+                "punctuated_word": "So",
+                "speaker": 0,
+                "speaker_confidence": 0.67446744,
+                "start": 0.24,
+                "word": "so"
+              },
+              {
+                "confidence": 1,
+                "end": 0.64,
+                "punctuated_word": "the",
+                "speaker": 0,
+                "speaker_confidence": 0.67446744,
+                "start": 0.48,
+                "word": "the"
+              },
+              {
+                "confidence": 0.9980469,
+                "end": 1.12,
+                "punctuated_word": "deploy",
+                "speaker": 0,
+                "speaker_confidence": 0.67446744,
+                "start": 0.64,
+                "word": "deploy"
+              },
+              {
+                "confidence": 1,
+                "end": 1.5999999,
+                "punctuated_word": "failed",
+                "speaker": 0,
+                "speaker_confidence": 0.67446744,
+                "start": 1.12,
+                "word": "failed"
+              },
+              {
+                "confidence": 1,
+                "end": 2,
+                "punctuated_word": "twice",
+                "speaker": 0,
+                "speaker_confidence": 0.67446744,
+                "start": 1.5999999,
+                "word": "twice"
+              },
+              {
+                "confidence": 1,
+                "end": 2.3999999,
+                "punctuated_word": "last",
+                "speaker": 0,
+                "speaker_confidence": 0.67446744,
+                "start": 2,
+                "word": "last"
+              },
+              {
+                "confidence": 0.99902344,
+                "end": 3.04,
+                "punctuated_word": "night.",
+                "speaker": 0,
+                "speaker_confidence": 0.67446744,
+                "start": 2.3999999,
+                "word": "night"
+              },
+              {
+                "confidence": 1,
+                "end": 3.36,
+                "punctuated_word": "I",
+                "speaker": 0,
+                "speaker_confidence": 0.67446744,
+                "start": 3.1999998,
+                "word": "i"
+              },
+              {
+                "confidence": 1,
+                "end": 3.6,
+                "punctuated_word": "think",
+                "speaker": 0,
+                "speaker_confidence": 0.67446744,
+                "start": 3.36,
+                "word": "think"
+              },
+              {
+                "confidence": 1,
+                "end": 3.76,
+                "punctuated_word": "the",
+                "speaker": 0,
+                "speaker_confidence": 0.67446744,
+                "start": 3.6,
+                "word": "the"
+              },
+              {
+                "confidence": 1,
+                "end": 4.24,
+                "punctuated_word": "migration",
+                "speaker": 0,
+                "speaker_confidence": 0.67446744,
+                "start": 3.76,
+                "word": "migration"
+              },
+              {
+                "confidence": 1,
+                "end": 4.64,
+                "punctuated_word": "step",
+                "speaker": 0,
+                "speaker_confidence": 0.67446744,
+                "start": 4.24,
+                "word": "step"
+              },
+              {
+                "confidence": 1,
+                "end": 4.88,
+                "punctuated_word": "is",
+                "speaker": 0,
+                "speaker_confidence": 0.67446744,
+                "start": 4.64,
+                "word": "is"
+              },
+              {
+                "confidence": 0.99902344,
+                "end": 5.2,
+                "punctuated_word": "timing",
+                "speaker": 0,
+                "speaker_confidence": 0.67446744,
+                "start": 4.88,
+                "word": "timing"
+              },
+              {
+                "confidence": 1,
+                "end": 5.44,
+                "punctuated_word": "out",
+                "speaker": 0,
+                "speaker_confidence": 0.67446744,
+                "start": 5.2,
+                "word": "out"
+              },
+              {
+                "confidence": 1,
+                "end": 5.8399997,
+                "punctuated_word": "before",
+                "speaker": 0,
+                "speaker_confidence": 0.67446744,
+                "start": 5.44,
+                "word": "before"
+              },
+              {
+                "confidence": 1,
+                "end": 6,
+                "punctuated_word": "the",
+                "speaker": 0,
+                "speaker_confidence": 0.67446744,
+                "start": 5.8399997,
+                "word": "the"
+              },
+              {
+                "confidence": 1,
+                "end": 6.56,
+                "punctuated_word": "database",
+                "speaker": 0,
+                "speaker_confidence": 0.67446744,
+                "start": 6,
+                "word": "database"
+              },
+              {
+                "confidence": 1,
+                "end": 6.8799996,
+                "punctuated_word": "comes",
+                "speaker": 0,
+                "speaker_confidence": 0.67446744,
+                "start": 6.56,
+                "word": "comes"
+              },
+              {
+                "confidence": 1,
+                "end": 7.44,
+                "punctuated_word": "up.",
+                "speaker": 0,
+                "speaker_confidence": 0.67446744,
+                "start": 6.8799996,
+                "word": "up"
+              },
+              {
+                "confidence": 0.9995117,
+                "end": 9.36,
+                "punctuated_word": "Yeah.",
+                "speaker": 0,
+                "speaker_confidence": 0.67446756,
+                "start": 8.88,
+                "word": "yeah"
+              },
+              {
+                "confidence": 1,
+                "end": 9.5199995,
+                "punctuated_word": "I",
+                "speaker": 0,
+                "speaker_confidence": 0.67446756,
+                "start": 9.36,
+                "word": "i"
+              },
+              {
+                "confidence": 1,
+                "end": 9.76,
+                "punctuated_word": "saw",
+                "speaker": 0,
+                "speaker_confidence": 0.67446756,
+                "start": 9.5199995,
+                "word": "saw"
+              },
+              {
+                "confidence": 1,
+                "end": 9.92,
+                "punctuated_word": "that",
+                "speaker": 0,
+                "speaker_confidence": 0.67446756,
+                "start": 9.76,
+                "word": "that"
+              },
+              {
+                "confidence": 1,
+                "end": 10.16,
+                "punctuated_word": "in",
+                "speaker": 0,
+                "speaker_confidence": 0.67446756,
+                "start": 9.92,
+                "word": "in"
+              },
+              {
+                "confidence": 1,
+                "end": 10.24,
+                "punctuated_word": "the",
+                "speaker": 0,
+                "speaker_confidence": 0.67446756,
+                "start": 10.16,
+                "word": "the"
+              },
+              {
+                "confidence": 1,
+                "end": 10.639999,
+                "punctuated_word": "logs",
+                "speaker": 0,
+                "speaker_confidence": 0.67446756,
+                "start": 10.24,
+                "word": "logs"
+              },
+              {
+                "confidence": 1,
+                "end": 10.96,
+                "punctuated_word": "this",
+                "speaker": 0,
+                "speaker_confidence": 0.67446756,
+                "start": 10.639999,
+                "word": "this"
+              },
+              {
+                "confidence": 1,
+                "end": 11.5199995,
+                "punctuated_word": "morning.",
+                "speaker": 0,
+                "speaker_confidence": 0.67446756,
+                "start": 10.96,
+                "word": "morning"
+              },
+              {
+                "confidence": 1,
+                "end": 12,
+                "punctuated_word": "Let's",
+                "speaker": 0,
+                "speaker_confidence": 0.67446756,
+                "start": 11.679999,
+                "word": "let's"
+              },
+              {
+                "confidence": 1,
+                "end": 12.16,
+                "punctuated_word": "add",
+                "speaker": 0,
+                "speaker_confidence": 0.67446756,
+                "start": 12,
+                "word": "add"
+              },
+              {
+                "confidence": 1,
+                "end": 12.32,
+                "punctuated_word": "a",
+                "speaker": 0,
+                "speaker_confidence": 0.67446756,
+                "start": 12.16,
+                "word": "a"
+              },
+              {
+                "confidence": 1,
+                "end": 12.559999,
+                "punctuated_word": "health",
+                "speaker": 0,
+                "speaker_confidence": 0.67446756,
+                "start": 12.32,
+                "word": "health"
+              },
+              {
+                "confidence": 1,
+                "end": 12.799999,
+                "punctuated_word": "check",
+                "speaker": 0,
+                "speaker_confidence": 0.67446756,
+                "start": 12.559999,
+                "word": "check"
+              },
+              {
+                "confidence": 1,
+                "end": 13.2,
+                "punctuated_word": "before",
+                "speaker": 0,
+                "speaker_confidence": 0.67446756,
+                "start": 12.799999,
+                "word": "before"
+              },
+              {
+                "confidence": 1,
+                "end": 13.36,
+                "punctuated_word": "the",
+                "speaker": 0,
+                "speaker_confidence": 0.67446756,
+                "start": 13.2,
+                "word": "the"
+              },
+              {
+                "confidence": 1,
+                "end": 13.84,
+                "punctuated_word": "migration",
+                "speaker": 0,
+                "speaker_confidence": 0.67446756,
+                "start": 13.36,
+                "word": "migration"
+              },
+              {
+                "confidence": 1,
+                "end": 14.24,
+                "punctuated_word": "runs",
+                "speaker": 0,
+                "speaker_confidence": 0.67446756,
+                "start": 13.84,
+                "word": "runs"
+              },
+              {
+                "confidence": 0.9941406,
+                "end": 14.4,
+                "punctuated_word": "and",
+                "speaker": 0,
+                "speaker_confidence": 0.67446756,
+                "start": 14.24,
+                "word": "and"
+              },
+              {
+                "confidence": 1,
+                "end": 14.639999,
+                "punctuated_word": "try",
+                "speaker": 0,
+                "speaker_confidence": 0.67446756,
+                "start": 14.4,
+                "word": "try"
+              },
+              {
+                "confidence": 1,
+                "end": 14.96,
+                "punctuated_word": "again.",
+                "speaker": 0,
+                "speaker_confidence": 0.67446756,
+                "start": 14.639999,
+                "word": "again"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "usage": {
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "total_tokens": 0,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    },
+    "neurons": 122.909805
+  }
 }
