@@ -134,7 +134,9 @@ Layer types are `shadow`, `background`, `waveform`, `bars`, `pulse`, `ring`,
 
 `palette = "omarchy"` maps the active Omarchy theme's `colors.toml` into
 semantic roles such as `accent`, `background`, `foreground`, `success`,
-`warning`, and `error`.
+`warning`, and `error`. Omarchy theme switches apply live: the launcher
+rewrites the resolved style when the theme changes and `StyleLoader` reloads
+it without a restart. (The GTK4 frontend picks a new theme up on restart.)
 
 `layout` controls the host frame, not just the animation area. `compact`,
 `wide`, and `minimal` are strip layouts; `tile` is a square card; `orb` is a
