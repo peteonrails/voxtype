@@ -152,10 +152,26 @@ impl SonioxTranscriber {
                 )
             })?;
 
-        // User left the default realtime model with async_api enabled —
-        // swap to the async-default model.
-        if config.async_api && config.model == "stt-rt-v4" {
-            config.model = "stt-async-v4".to_string();
+        // A realtime model with async_api enabled cannot work: the REST
+        // endpoint will not serve it. Derive the async counterpart from the
+        // name rather than listing the versions we happen to know about.
+        //
+        // Soniox names the two families in parallel — stt-rt-vN and
+        // stt-async-vN — so the mapping is mechanical. Listing them instead
+        // means the list has to be updated every time the default moves, and
+        // nothing catches it when that is forgotten: bumping
+        // `default_soniox_model` to a version missing from the list silently
+        // sends a realtime model to the async endpoint for everyone on
+        // defaults, and it only fails against the live API.
+        //
+        // Only the versioned family is mapped. The deprecated preview models
+        // are not named in parallel (there is no stt-async-preview-v2), so
+        // inventing a counterpart for those would be worse than leaving them
+        // alone.
+        if config.async_api {
+            if let Some(version) = config.model.strip_prefix("stt-rt-v") {
+                config.model = format!("stt-async-v{version}");
+            }
         }
 
         let context_terms = load_context_terms(&config)?;
@@ -1157,7 +1173,7 @@ mod tests {
     fn cfg_with_key(key: Option<&str>) -> SonioxConfig {
         SonioxConfig {
             api_key: key.map(|s| s.to_string()),
-            model: "stt-rt-v4".into(),
+            model: "stt-rt-v5".into(),
             language_hints: vec!["hu".into(), "en".into()],
             language_hints_strict: true,
             streaming: true,
@@ -1176,7 +1192,45 @@ mod tests {
         cfg.async_api = true;
         let t = SonioxTranscriber::new(cfg).unwrap();
         assert!(t.as_streaming().is_none());
-        assert_eq!(t.config.model, "stt-async-v4");
+        assert_eq!(t.config.model, "stt-async-v5");
+    }
+
+    #[test]
+    fn async_api_maps_each_realtime_version_to_its_async_counterpart() {
+        // Backwards-compat: a config left on an older realtime default still
+        // reaches an async model. v4 maps to stt-async-v4, which Soniox
+        // documents as an alias for v5, so this is the same model the current
+        // default reaches by a different name.
+        for (realtime, expected) in [
+            ("stt-rt-v5", "stt-async-v5"),
+            ("stt-rt-v4", "stt-async-v4"),
+            ("stt-rt-v3", "stt-async-v3"),
+        ] {
+            let mut cfg = cfg_with_key(Some("k"));
+            cfg.async_api = true;
+            cfg.model = realtime.into();
+            let t = SonioxTranscriber::new(cfg).unwrap();
+            assert_eq!(t.config.model, expected, "mapping {realtime}");
+        }
+    }
+
+    /// The guard the hard-coded version list did not have. Whatever
+    /// `default_soniox_model` returns must reach an async model when
+    /// `async_api` is set, so moving the default to a new version cannot
+    /// silently leave the async path pointed at a realtime one.
+    #[test]
+    fn async_api_maps_whatever_the_current_realtime_default_is() {
+        let mut cfg = cfg_with_key(Some("k"));
+        cfg.async_api = true;
+        cfg.model = SonioxConfig::default().model;
+        let t = SonioxTranscriber::new(cfg).unwrap();
+        assert!(
+            t.config.model.starts_with("stt-async-"),
+            "the realtime default {:?} mapped to {:?}, which the async REST \
+             endpoint will not serve",
+            SonioxConfig::default().model,
+            t.config.model
+        );
     }
 
     #[test]
@@ -1221,7 +1275,7 @@ mod tests {
         let t = SonioxTranscriber::new(cfg_with_key(Some("my-key"))).unwrap();
         let frame: serde_json::Value = serde_json::from_str(&t.init_frame()).unwrap();
         assert_eq!(frame["api_key"], "my-key");
-        assert_eq!(frame["model"], "stt-rt-v4");
+        assert_eq!(frame["model"], "stt-rt-v5");
         assert_eq!(frame["audio_format"], "pcm_s16le");
         assert_eq!(frame["sample_rate"], 16000);
         assert_eq!(frame["num_channels"], 1);

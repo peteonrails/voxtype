@@ -65,7 +65,7 @@ OR — independently of language:
 │   └─ Any of 60+ languages, paid OK?     → Soniox (cloud, sub-100ms partials)
 │
 ├─ Want highest accuracy and don't mind a few seconds of wait?
-│   └─ Soniox async API (cloud, stt-async-v4)
+│   └─ Soniox async API (cloud, stt-async-v5)
 │
 └─ Cannot send audio off-device (privacy-sensitive)?
     └─ Pick any *local* engine above. Never Soniox.

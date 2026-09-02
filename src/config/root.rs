@@ -187,9 +187,9 @@ impl Config {
     /// - **Soniox:** forces `async_api = true`. Meetings feed fixed-size audio
     ///   chunks (30s default) to `Transcriber::transcribe()` — the realtime WS
     ///   would open a fresh socket per chunk, pay connect latency, and bill by
-    ///   WS-duration. The async REST path (`stt-async-v4`) is purpose-built
-    ///   for this: bills audio-seconds, gives higher accuracy, integrates with
-    ///   speaker diarization, and survives network hiccups.
+    ///   WS-duration. The async REST path (default model `stt-async-v5`) is
+    ///   purpose-built for this: bills audio-seconds, gives higher accuracy,
+    ///   integrates with speaker diarization, and survives network hiccups.
     ///
     /// The dictation path still reads the raw config, so a user who set
     /// `async_api = false` (the default) keeps live-partial WS dictation while
@@ -200,7 +200,7 @@ impl Config {
             if let Some(ref mut sx) = cfg.soniox {
                 if !sx.async_api {
                     tracing::info!(
-                        "Soniox meeting mode: routing to async API (stt-async-v4); dictation path unchanged"
+                        "Soniox meeting mode: routing to async API; dictation path unchanged"
                     );
                     sx.async_api = true;
                 }
