@@ -1835,10 +1835,18 @@ impl Daemon {
             return Ok(());
         }
 
-        // CLI override (validated against ["simple", "ml"] by clap) wins over config.
+        // CLI override (validated against DIARIZATION_BACKENDS by clap) wins
+        // over config.
         let backend = diarization_override
             .clone()
             .unwrap_or_else(|| self.config.meeting.diarization.backend.clone());
+
+        // MeetingDaemon::new consults app_config.meeting.diarization.backend
+        // (via cloud_diarization_active / with_meeting_mode_overrides), so the
+        // CLI override must be visible there too, not just in the
+        // meeting-module DiarizationConfig built below.
+        let mut app_config = self.config.clone();
+        app_config.meeting.diarization.backend = backend.clone();
 
         // Create meeting config from main config
         tracing::debug!(
@@ -1886,7 +1894,7 @@ impl Daemon {
         self.meeting_event_rx = Some(rx);
 
         // Create meeting daemon
-        match MeetingDaemon::new(meeting_config, &self.config, tx) {
+        match MeetingDaemon::new(meeting_config, &app_config, tx) {
             Ok(mut daemon) => {
                 match daemon.start(title).await {
                     Ok(meeting_id) => {
