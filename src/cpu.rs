@@ -116,6 +116,15 @@ pub fn is_running_in_vm() -> bool {
     false
 }
 
+/// Whether *this* binary was compiled requiring AVX2.
+///
+/// True for every variant built with `-C target-cpu=haswell` or higher, false
+/// for the baseline build. Without this the baseline binary told users
+/// "Voxtype requires AVX2" while running perfectly well on a CPU that has
+/// none, which is the binary calling itself impossible.
+#[cfg(target_arch = "x86_64")]
+const BUILT_REQUIRING_AVX2: bool = cfg!(target_feature = "avx2");
+
 /// Check CPU feature compatibility and warn if there might be issues.
 /// Returns a warning message if potential problems are detected.
 #[cfg(target_arch = "x86_64")]
@@ -124,10 +133,17 @@ pub fn check_cpu_compatibility() -> Option<String> {
     let has_avx2 = std::arch::is_x86_feature_detected!("avx2");
     let has_avx512f = std::arch::is_x86_feature_detected!("avx512f");
 
-    if !has_avx2 {
+    if !has_avx2 && BUILT_REQUIRING_AVX2 {
         return Some(
-            "WARNING: Your CPU does not support AVX2. Voxtype requires AVX2 or newer.".to_string(),
+            "WARNING: Your CPU does not support AVX2, which this binary requires. \
+             Install the baseline variant: voxtype setup variant --to baseline"
+                .to_string(),
         );
+    }
+
+    // No AVX2 and not built for it: this is the baseline variant doing its job.
+    if !has_avx2 {
+        return None;
     }
 
     // If we're in a VM and don't have AVX-512, warn that the AVX-512 binary won't work
@@ -155,15 +171,17 @@ const PRE_AVX2_MESSAGE: &str = concat!(
     "  FATAL: Illegal CPU instruction (SIGILL)\n",
     "═══════════════════════════════════════════════════════════════════\n",
     "\n",
-    "  This CPU does not support AVX2, and every prebuilt voxtype binary\n",
-    "  requires it. Switching variants will not help: they are all built\n",
-    "  for Haswell (2013) or newer.\n",
+    "  This CPU does not support AVX2, and the binary you are running\n",
+    "  requires it.\n",
     "\n",
-    "  To run voxtype here, build it for your own CPU:\n",
+    "  Switch to the baseline variant, which is built for x86-64-v2 and\n",
+    "  runs without AVX2:\n",
     "\n",
-    "        RUSTFLAGS=\"-C target-cpu=native\" cargo build --release\n",
+    "        voxtype setup variant --to baseline\n",
     "\n",
-    "  See docs/INSTALL.md for the build dependencies.\n",
+    "  If your install has no baseline binary, download\n",
+    "  voxtype-<version>-linux-x86_64-baseline from the release, or build\n",
+    "  from source with RUSTFLAGS=\"-C target-cpu=native\".\n",
     "\n",
     "  If this is a VM, the host may well have AVX2 and the hypervisor may\n",
     "  simply not be exposing it. Enabling CPU passthrough is easier than\n",
@@ -197,9 +215,41 @@ mod tests {
         assert!(sampled, "non-x86_64 must not take the pre-AVX2 path");
     }
 
+    /// A binary that does not require AVX2 must not warn that AVX2 is
+    /// required. The baseline build shipped this exact contradiction on the
+    /// Ivy Bridge VM: "Voxtype requires AVX2 or newer", printed by a process
+    /// that was running fine without it.
+    #[test]
+    fn the_avx2_warning_matches_what_this_binary_actually_needs() {
+        let warning = check_cpu_compatibility();
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            let has_avx2 = std::arch::is_x86_feature_detected!("avx2");
+            if !has_avx2 && !BUILT_REQUIRING_AVX2 {
+                assert!(
+                    warning.is_none(),
+                    "a baseline binary on a pre-AVX2 CPU is working as designed \
+                     and must not warn: {warning:?}"
+                );
+            }
+            if !has_avx2 && BUILT_REQUIRING_AVX2 {
+                let w = warning
+                    .clone()
+                    .expect("must warn when it genuinely cannot run");
+                assert!(
+                    w.contains("baseline"),
+                    "the warning must name the variant that would work: {w}"
+                );
+            }
+        }
+        let _ = warning;
+    }
+
     /// The whole point of #612: this message must not send someone to a
     /// binary their CPU cannot execute, and must give them something that
-    /// does work.
+    /// does work. Verified on the voxtype-ivybridge VM, where the baseline
+    /// binary runs and reports no CPU warning at all.
     #[test]
     fn the_pre_avx2_message_gives_advice_that_can_succeed() {
         assert!(
@@ -211,8 +261,12 @@ mod tests {
             "must not suggest relinking to another prebuilt variant"
         );
         assert!(
+            PRE_AVX2_MESSAGE.contains("baseline"),
+            "must point at the baseline variant, which does run here"
+        );
+        assert!(
             PRE_AVX2_MESSAGE.contains("target-cpu=native"),
-            "must tell the user how to get a binary that runs"
+            "must keep the build-from-source fallback for installs without it"
         );
         assert!(
             PRE_AVX2_MESSAGE.contains("AVX2"),
