@@ -457,7 +457,11 @@ enum HotkeyTransition {
 /// modifier's release event before the hotkey key's; gating the release on
 /// the modifier state would leave the recording stuck until the next
 /// engaged press or the recording-length cap.
-fn hotkey_event(value: i32, is_pressed: bool, modifiers_satisfied: bool) -> Option<HotkeyTransition> {
+fn hotkey_event(
+    value: i32,
+    is_pressed: bool,
+    modifiers_satisfied: bool,
+) -> Option<HotkeyTransition> {
     match value {
         1 if !is_pressed && modifiers_satisfied => Some(HotkeyTransition::Pressed),
         0 if is_pressed => Some(HotkeyTransition::Released),
