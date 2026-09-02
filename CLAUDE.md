@@ -338,10 +338,11 @@ Milestone-aligned with GitHub so the two don't drift. Based on the 29 Aug 2026 b
 **1.0.1 (fast follow-up):** Defects that shipped in 1.0.0 - SIGILL guidance on pre-AVX2 CPUs ([#612](https://github.com/peteonrails/voxtype/issues/612)), `configure --config` overwriting the real config ([#595](https://github.com/peteonrails/voxtype/issues/595)), impossible install instructions ([#604](https://github.com/peteonrails/voxtype/issues/604), [#622](https://github.com/peteonrails/voxtype/issues/622)), stuck push-to-talk ([#556](https://github.com/peteonrails/voxtype/issues/556)), and `voxtype info accel` reading a state file nothing writes. Plus docs corrections (#526, #528, #564).
 
 **1.1.x (incremental):**
+- 1.1.0 Daemon core, model plumbing and OSD: #581, #612, #646, #656, #669, #687, #692, #694, #705
 - 1.1.1 GPU selection and display: #577, #611, #430, #578, #580
 - 1.1.2 Output drivers: #530, #538, #543, #507, #552
 - 1.1.3 macOS: #522, #576, #452, #632
-- 1.1.5 Compatibility: #612, #603
+- 1.1.5 Compatibility: #603
 
 **1.2.0 (architecture):** Model registry out of Rust structs into versioned data ([#648](https://github.com/peteonrails/voxtype/issues/648)), owning the model download transfer layer ([#647](https://github.com/peteonrails/voxtype/issues/647)), long-audio windowing for Cohere and Parakeet (#551, #288), Nemotron ([#47](https://github.com/peteonrails/voxtype/issues/47)). Dictation cleanup pipeline ([#696](https://github.com/peteonrails/voxtype/issues/696)): staged labelers and rules instead of LLM rewriting - vocabulary, disfluency tagging (LARD-trained, CC-BY), punctuation/casing for the CTC engines that emit neither, ITN via text-processing-rs, user rules last; the LLM keeps only tone/restructuring behind an edit-list contract. Absorbs #535 and the filler-word half of #566; profile vocabularies feed #519.
 

@@ -200,11 +200,15 @@ where
 
 /// Watch the given Omarchy "current" directories for theme changes.
 ///
-/// Two kinds of change are covered: `omarchy-theme-set` flips the `theme`
-/// symlink inside a "current" directory (caught by the non-recursive watch
-/// on the parent), and theme files can be edited in place (caught by a
-/// watch on the resolved theme directory, re-pinned after every change so
-/// a symlink flip moves it to the new target).
+/// A theme switch looks different across Omarchy versions: `theme` may be a
+/// symlink that gets flipped, or a real directory that is removed and
+/// recreated (with the sibling `theme.name` file rewritten alongside).
+/// In-place edits to theme files are a third case. The non-recursive watch
+/// on each "current" parent catches the flip, the directory replacement,
+/// and the `theme.name` rewrite; a watch on the resolved theme directory
+/// catches in-place edits and is re-established from scratch after every
+/// change, since a replaced directory silently kills its inotify watch even
+/// though the path is unchanged.
 ///
 /// Bursts of events are debounced: `on_change` fires once per quiet period
 /// of `debounce`. Returns `None` when none of `current_dirs` exist or no
@@ -275,21 +279,25 @@ where
     })
 }
 
-/// (Re-)pin the watcher to the theme directories the `theme` symlinks
-/// currently resolve to, dropping watches on directories no longer active.
+/// (Re-)pin the watcher to the currently resolved theme directories.
+///
+/// Old watches are dropped and fresh ones established unconditionally: an
+/// unchanged path proves nothing, because a theme switch that removes and
+/// recreates the directory takes the inotify watch with it. Unwatch errors
+/// (e.g. a watch already dead) are expected and ignored.
 fn watch_theme_targets(
     watcher: &mut RecommendedWatcher,
     parents: &[PathBuf],
     old: &[PathBuf],
 ) -> Vec<PathBuf> {
+    for stale in old {
+        let _ = watcher.unwatch(stale);
+    }
     let resolved: Vec<PathBuf> = parents
         .iter()
         .filter_map(|p| fs::canonicalize(p.join("theme")).ok())
         .collect();
-    for stale in old.iter().filter(|dir| !resolved.contains(dir)) {
-        let _ = watcher.unwatch(stale);
-    }
-    for dir in resolved.iter().filter(|dir| !old.contains(*dir)) {
+    for dir in &resolved {
         if let Err(e) = watcher.watch(dir, RecursiveMode::NonRecursive) {
             tracing::debug!(dir = %dir.display(), error = %e, "failed to watch theme dir");
         }
@@ -464,6 +472,64 @@ mod tests {
         fs::write(theme_b.join("colors.toml"), "accent = \"#444444\"\n").unwrap();
         rx.recv_timeout(Duration::from_secs(10))
             .expect("edit in the newly resolved theme dir should trigger the callback");
+    }
+
+    /// Fake Omarchy layout for installs where `current/theme` is a REAL
+    /// directory (no symlink) and switches replace it in place, rewriting
+    /// the sibling `theme.name` file.
+    fn fake_omarchy_real_dir() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let current = tmp.path().join("current");
+        let theme = current.join("theme");
+        fs::create_dir_all(&theme).unwrap();
+        fs::write(theme.join("colors.toml"), "accent = \"#111111\"\n").unwrap();
+        fs::write(current.join("theme.name"), "red\n").unwrap();
+        (tmp, current, theme)
+    }
+
+    #[test]
+    fn directory_replacement_fires_once_and_repins_dead_watch() {
+        let (_tmp, current, theme) = fake_omarchy_real_dir();
+        let (tx, rx) = mpsc::channel();
+        let _handle = watch_omarchy_dirs(vec![current.clone()], DEBOUNCE, move || {
+            let _ = tx.send(());
+        })
+        .unwrap();
+
+        // Switch mechanics on real-directory installs: remove and recreate
+        // the theme dir, rewrite theme.name.
+        fs::remove_dir_all(&theme).unwrap();
+        fs::create_dir_all(&theme).unwrap();
+        fs::write(theme.join("colors.toml"), "accent = \"#222222\"\n").unwrap();
+        fs::write(current.join("theme.name"), "blue\n").unwrap();
+
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("directory replacement should trigger the callback");
+        assert!(
+            rx.recv_timeout(DEBOUNCE * 4).is_err(),
+            "a replacement burst must be debounced into exactly one callback"
+        );
+
+        // Replacing the directory killed the original inner inotify watch
+        // even though the path is unchanged; only an unconditional re-pin
+        // can deliver this in-place edit.
+        fs::write(theme.join("colors.toml"), "accent = \"#333333\"\n").unwrap();
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("edit inside the recreated theme dir should trigger the callback");
+    }
+
+    #[test]
+    fn theme_name_rewrite_alone_fires_callback() {
+        let (_tmp, current, _theme) = fake_omarchy_real_dir();
+        let (tx, rx) = mpsc::channel();
+        let _handle = watch_omarchy_dirs(vec![current.clone()], DEBOUNCE, move || {
+            let _ = tx.send(());
+        })
+        .unwrap();
+
+        fs::write(current.join("theme.name"), "blue\n").unwrap();
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("rewriting theme.name beside the theme dir should trigger the callback");
     }
 
     #[test]
