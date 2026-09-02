@@ -118,7 +118,10 @@ populate_shared_files() {
     fi
 
     # Desktop entry and icon at AppDir root (AppImage spec)
-    cp "$APPIMAGE_DIR/voxtype.desktop" "$appdir/"
+    cp "$PROJECT_DIR/packaging/io.voxtype.Voxtype.desktop" "$appdir/"
+    mkdir -p "$appdir/usr/share/applications"
+    cp "$PROJECT_DIR/packaging/io.voxtype.Voxtype.desktop" \
+        "$appdir/usr/share/applications/"
     cp "$APPIMAGE_DIR/voxtype.svg" "$appdir/"
 }
 
