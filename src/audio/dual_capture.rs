@@ -209,7 +209,22 @@ impl DualCapture {
                 }
             }
         }
-        // Fall back to any monitor source
+        // Second pass: the default sink's monitor. When nothing is actively
+        // playing at start, this is where remote audio will land — far more
+        // reliable than grabbing whatever monitor happens to sort first, which
+        // is often an AEC reference sink (e.g. "echo-cancel-sink.monitor") that
+        // is permanently silent and yields an empty loopback transcript.
+        if let Some(default_monitor) = Self::default_sink_monitor() {
+            let exists = stdout
+                .lines()
+                .any(|l| l.split('\t').nth(1) == Some(default_monitor.as_str()));
+            if exists {
+                tracing::debug!("Using default sink monitor: {}", default_monitor);
+                return Some(default_monitor);
+            }
+        }
+
+        // Last resort: any monitor source
         for line in stdout.lines() {
             let fields: Vec<&str> = line.split('\t').collect();
             if fields.len() >= 2 {
@@ -221,6 +236,27 @@ impl DualCapture {
             }
         }
         None
+    }
+
+    /// The default sink's monitor source name (`<default-sink>.monitor`) via pactl.
+    fn default_sink_monitor() -> Option<String> {
+        let output = std::process::Command::new("pactl")
+            .args(["get-default-sink"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let sink = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if sink.is_empty() {
+            return None;
+        }
+        Some(format!("{}.monitor", sink))
     }
 
     /// Check if loopback capture is active
