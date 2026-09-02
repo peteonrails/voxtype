@@ -214,6 +214,8 @@ install -D -m 644 packaging/completions/voxtype.fish \
 # Install configuration TUI launcher (.desktop entry + terminal-picker script)
 install -D -m 644 packaging/voxtype-configure.desktop \
     %{buildroot}%{_datadir}/applications/voxtype-configure.desktop
+install -D -m 644 packaging/io.voxtype.Voxtype.desktop \
+    %{buildroot}%{_datadir}/applications/io.voxtype.Voxtype.desktop
 install -D -m 755 packaging/scripts/voxtype-configure-launcher \
     %{buildroot}%{_bindir}/voxtype-configure-launcher
 
@@ -332,6 +334,7 @@ fi
 %{_datadir}/zsh/site-functions/_voxtype
 %{_datadir}/fish/vendor_completions.d/voxtype.fish
 %{_datadir}/applications/voxtype-configure.desktop
+%{_datadir}/applications/io.voxtype.Voxtype.desktop
 %{_bindir}/voxtype-configure-launcher
 %{_datadir}/applications/voxtype-meetings.desktop
 %{_datadir}/icons/hicolor/scalable/apps/voxtype.svg

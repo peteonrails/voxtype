@@ -98,6 +98,8 @@ override_dh_auto_install:
 	# Configuration TUI launcher (.desktop entry + terminal-picker script)
 	install -D -m 644 packaging/voxtype-configure.desktop \
 		$(PKG)/usr/share/applications/voxtype-configure.desktop
+	install -D -m 644 packaging/io.voxtype.Voxtype.desktop \
+		$(PKG)/usr/share/applications/io.voxtype.Voxtype.desktop
 	install -D -m 755 packaging/scripts/voxtype-configure-launcher \
 		$(PKG)/usr/bin/voxtype-configure-launcher
 	# Voxtype Meetings launcher entry, and the icon both entries use

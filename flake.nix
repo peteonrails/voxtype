@@ -320,6 +320,8 @@
                 $out/share/icons/hicolor/scalable/apps/voxtype.svg
               install -Dm644 assets/icon.png \
                 $out/share/icons/hicolor/128x128/apps/voxtype.png
+              install -Dm644 packaging/io.voxtype.Voxtype.desktop \
+                $out/share/applications/io.voxtype.Voxtype.desktop
             '';
 
             meta = with pkgs.lib; {
