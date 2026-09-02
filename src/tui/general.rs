@@ -435,6 +435,15 @@ struct ModelRecommendations {
 fn recommended_models(v: Variant) -> ModelRecommendations {
     match v {
         // ---- Whisper family ----
+        Variant::WhisperBaseline => ModelRecommendations {
+            english: "base.en  (tiny.en if base is too slow)",
+            european: "base  (small if you can tolerate the wait)",
+            asian: "small  (CJK needs the larger model, and it will be slow here)",
+            note: Some(
+                "No AVX2, so this is the slowest CPU path voxtype has. Sizes \
+                 above small are not practical.",
+            ),
+        },
         Variant::WhisperAvx2 | Variant::WhisperNative => ModelRecommendations {
             english: "small.en  (or base.en for low-power CPUs)",
             european: "small  (covers FR, DE, IT, ES, NL, PL, PT and more)",
@@ -509,6 +518,18 @@ fn recommended_models(v: Variant) -> ModelRecommendations {
 
 fn variant_hint(v: Variant) -> VariantHint {
     match v {
+        Variant::WhisperBaseline => VariantHint {
+            headline: "Whisper on pre-AVX2 CPUs",
+            body: &[
+                "The floor build, for x86-64-v2 (Nehalem 2008 and newer). \
+                 Every other x86_64 binary needs AVX2 and will SIGILL on \
+                 these machines. Slower than the AVX2 build, which is the \
+                 trade for running at all.",
+            ],
+            models: "tiny, base, small (larger models are impractical at this speed)",
+            speed: "Slower than AVX2; tiny/base are the usable sizes",
+            hardware: "Any x86-64 CPU without AVX2 (pre-Haswell, e.g. Ivy Bridge)",
+        },
         Variant::WhisperAvx2 => VariantHint {
             headline: "Whisper on AVX2 CPUs",
             body: &[
@@ -650,6 +671,7 @@ fn family_label(f: EngineFamily) -> &'static str {
 
 fn accel_label(a: Acceleration) -> &'static str {
     match a {
+        Acceleration::Baseline => "baseline",
         Acceleration::Avx2 => "AVX2",
         Acceleration::Avx512 => "AVX-512",
         Acceleration::Vulkan => "Vulkan",
