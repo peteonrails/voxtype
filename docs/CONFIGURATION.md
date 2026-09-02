@@ -2861,7 +2861,7 @@ When `true`, converts spoken punctuation words into their symbol equivalents. Us
 
 | Spoken | Symbol |
 |--------|--------|
-| `period` | `.` |
+| `period` / `full stop` | `.` |
 | `comma` | `,` |
 | `question mark` | `?` |
 | `exclamation mark` / `exclamation point` | `!` |
@@ -2890,6 +2890,8 @@ When `true`, converts spoken punctuation words into their symbol equivalents. Us
 | `backtick` | `` ` `` |
 | `single quote` | `'` |
 | `double quote` | `"` |
+| `quote` | `"` (opening) |
+| `unquote` | `"` (closing) |
 | `new line` | newline character |
 | `new paragraph` | double newline |
 | `tab` | tab character |
@@ -2901,6 +2903,35 @@ spoken_punctuation = true
 ```
 
 With this enabled, saying "function open paren close paren" produces `function()`.
+
+`quote` and `unquote` are a pair: the opening quote attaches to the word after
+it and the closing quote to the word before it, so "quote hello there unquote"
+produces `"hello there"`. A lone `double quote` is still available where you
+want the character on its own.
+
+**Engines that punctuate for themselves**
+
+Parakeet and other auto-punctuating engines add punctuation and capitalisation
+to the whole transcription, including to the command words themselves: saying
+"full stop" reaches voxtype as "Full stop.", or as "world, full stop." when the
+engine reads the dictated pause as a clause boundary. The conversion absorbs
+that decoration. It takes in one punctuation character after the phrase, and
+one connector (`,` `;` `:`) before a sentence terminator or a closing symbol,
+so you get `.` rather than `..` or `,.`. Each phrase absorbs only the
+characters touching it, so dictating "full stop comma" still produces `.,`.
+
+Because the engine did not know a sentence ended where you dictated one, it
+leaves the next word in lower case. Voxtype capitalises the first letter after
+a terminator it inserted, skipping any opening quote or bracket, so "quote, this
+is" becomes `"This is`. Casing elsewhere in the engine's text is left alone.
+
+Whisper does not punctuate its own output, and the conversion is unchanged
+for it.
+
+This absorption applies to the conversions in the table above. A custom entry in
+[`replacements`](#replacements) that maps a spoken word to a punctuation
+character does not absorb the decoration, so prefer the built-in words on an
+auto-punctuating engine.
 
 ### replacements
 
