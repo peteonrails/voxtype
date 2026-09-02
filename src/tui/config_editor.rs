@@ -473,6 +473,23 @@ mod tests {
     }
 
     #[test]
+    fn dotted_table_reads_and_writes_nested() {
+        // The output section stores its post-process command under
+        // [output.post_process], so dotted paths must resolve on both
+        // the read and write sides.
+        let (_dir, path) = temp_config("[output.post_process]\ncommand = \"my-cleanup\"\n");
+        let mut ed = ConfigEditor::load_from(path).unwrap();
+        assert_eq!(
+            ed.get_string("output.post_process", "command").as_deref(),
+            Some("my-cleanup")
+        );
+        ed.set_string("output.post_process", "command", "other-cleanup");
+        assert!(ed.document.to_string().contains("command = \"other-cleanup\""));
+        ed.unset("output.post_process", "command");
+        assert_eq!(ed.get_string("output.post_process", "command"), None);
+    }
+
+    #[test]
     fn dirty_tracks_writes() {
         let (_dir, path) = temp_config("[hotkey]\nkey = \"HOME\"\n");
         let mut ed = ConfigEditor::load_from(path).unwrap();
