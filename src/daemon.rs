@@ -5057,7 +5057,7 @@ impl Daemon {
         // Cleanup hotkey listener
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some(mut listener) = hotkey_listener {
-            let _ = listener.stop(); // Best effort cleanup
+            let _ = listener.stop().await; // Best effort cleanup
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let _ = hotkey_listener; // Silence unused variable warning
