@@ -47,7 +47,7 @@ pub fn install_sigill_handler() {
     // message told users to switch to the AVX2 binary, which was both the one
     // they were already running and the one their CPU cannot execute (#612).
     #[cfg(target_arch = "x86_64")]
-    CPU_HAS_AVX2.store(is_x86_feature_detected!("avx2"), Ordering::SeqCst);
+    CPU_HAS_AVX2.store(cpuid_has_avx2(), Ordering::SeqCst);
     #[cfg(not(target_arch = "x86_64"))]
     CPU_HAS_AVX2.store(true, Ordering::SeqCst);
 
@@ -125,13 +125,38 @@ pub fn is_running_in_vm() -> bool {
 #[cfg(target_arch = "x86_64")]
 const BUILT_REQUIRING_AVX2: bool = cfg!(target_feature = "avx2");
 
+/// Ask the silicon, not the compiler: `is_x86_feature_detected!` statically
+/// evaluates to `true` when the queried feature is enabled at compile time,
+/// and every non-baseline x86_64 variant is built with `-C target-cpu=haswell`
+/// or higher. That folded the pre-AVX2 SIGILL message selection to "has AVX2"
+/// in precisely the binaries that crash on pre-AVX2 CPUs - proven on the Ivy
+/// Bridge test VM, where the AVX2 binary printed the old message despite the
+/// fix being compiled in. CPUID itself executes on any x86-64 CPU.
+#[cfg(target_arch = "x86_64")]
+fn cpuid_has_avx2() -> bool {
+    // AVX2: CPUID leaf 7 subleaf 0, EBX bit 5.
+    unsafe {
+        core::arch::x86_64::__cpuid(0).eax >= 7
+            && (core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 5)) != 0
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn cpuid_has_avx512f() -> bool {
+    // AVX-512F: CPUID leaf 7 subleaf 0, EBX bit 16.
+    unsafe {
+        core::arch::x86_64::__cpuid(0).eax >= 7
+            && (core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 16)) != 0
+    }
+}
+
 /// Check CPU feature compatibility and warn if there might be issues.
 /// Returns a warning message if potential problems are detected.
 #[cfg(target_arch = "x86_64")]
 pub fn check_cpu_compatibility() -> Option<String> {
     let in_vm = is_running_in_vm();
-    let has_avx2 = std::arch::is_x86_feature_detected!("avx2");
-    let has_avx512f = std::arch::is_x86_feature_detected!("avx512f");
+    let has_avx2 = cpuid_has_avx2();
+    let has_avx512f = cpuid_has_avx512f();
 
     if !has_avx2 && BUILT_REQUIRING_AVX2 {
         return Some(
@@ -200,6 +225,18 @@ mod tests {
     /// The flag is sampled outside signal context, so pin that the installer
     /// actually sets it rather than leaving the AtomicBool at its `false`
     /// default, which would send every user down the pre-AVX2 path.
+    /// Test builds use the generic target-cpu, so the std macro performs a
+    /// real runtime probe here and must agree with the raw-CPUID helpers.
+    /// (In release variants built with target-cpu=haswell the macro constant-
+    /// folds to true, which is the bug the helpers exist to avoid; that case
+    /// is only observable on pre-AVX2 hardware, e.g. the Ivy Bridge VM.)
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn cpuid_helpers_agree_with_runtime_detection_in_generic_builds() {
+        assert_eq!(cpuid_has_avx2(), is_x86_feature_detected!("avx2"));
+        assert_eq!(cpuid_has_avx512f(), is_x86_feature_detected!("avx512f"));
+    }
+
     #[test]
     fn avx2_detection_is_sampled_when_the_handler_is_installed() {
         install_sigill_handler();
