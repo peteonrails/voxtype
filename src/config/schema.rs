@@ -405,6 +405,16 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Model name to request from the remote endpoint (e.g. whisper-1).",
     )
     .for_engine("whisper"),
+    spec(
+        "whisper.remote_send_auto_language",
+        "whisper",
+        "remote_send_auto_language",
+        KeyType::Bool,
+        "Engine",
+        "Send explicit auto language",
+        "Send language=auto instead of omitting the field. Needed by whisper.cpp servers, which otherwise fall back to their own -l setting.",
+    )
+    .for_engine("whisper"),
     // parakeet
     spec(
         "parakeet.model",
@@ -1642,6 +1652,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "whisper.remote_endpoint" => opt_str(cfg.whisper.remote_endpoint.as_ref()),
         "whisper.remote_api_key" => opt_str(cfg.whisper.remote_api_key.as_ref()),
         "whisper.remote_model" => opt_str(cfg.whisper.remote_model.as_ref()),
+        "whisper.remote_send_auto_language" => json!(cfg.whisper.remote_send_auto_language),
         "whisper.gpu_isolation" => json!(cfg.whisper.gpu_isolation),
         "whisper.on_demand_loading" => json!(cfg.whisper.on_demand_loading),
         "whisper.flash_attention" => json!(cfg.whisper.flash_attention),
