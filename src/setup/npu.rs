@@ -177,10 +177,19 @@ pub fn enable() -> anyhow::Result<()> {
             ));
         }
 
-        // Update config to use OpenVINO engine
+        // Update config to use OpenVINO engine on the NPU. Persisting the
+        // device matters: the compile below caches an NPU blob, and a config
+        // left on another device would never use it.
         super::model::set_openvino_config(DEFAULT_OPENVINO_MODEL)?;
-        super::print_success("Config updated: engine = \"openvino\"");
+        super::model::set_openvino_device("NPU")?;
+        super::print_success("Config updated: engine = \"openvino\", device = \"NPU\"");
         super::model::print_openvino_installation_guidance("NPU");
+
+        // Compile the NPU cache blob now that the config opts into NPU, so
+        // the first recording doesn't absorb a multi-minute wait. Skipped
+        // when the blob already exists; warns and continues on failure.
+        let config = crate::config::load_config(None).unwrap_or_default();
+        super::model::prepare_openvino_model(DEFAULT_OPENVINO_MODEL, &config);
 
         println!();
         println!("NPU acceleration enabled (OpenVINO engine).");
