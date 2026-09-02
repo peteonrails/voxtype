@@ -6,6 +6,7 @@ Solutions to common issues when using Voxtype.
 
 - [Modifier Key Interference (Hyprland/Sway/River)](#modifier-key-interference-hyprlandswayriver)
 - [Hotkey Detection on KDE Plasma](#hotkey-detection-on-kde-plasma)
+- [XDG GlobalShortcuts Portal Hotkeys](#xdg-globalshortcuts-portal-hotkeys)
 - [Permission Issues](#permission-issues)
 - [Audio Problems](#audio-problems)
 - [Transcription Issues](#transcription-issues)
@@ -186,7 +187,155 @@ modifiers = ["LEFTSHIFT"]  # Press Shift first, then Alt
 
 Press Shift first, then Alt while holding Shift. This avoids KDE keyboard layout switching and works consistently.
 
+**5. Use the GlobalShortcuts portal**
+
+KDE implements the XDG GlobalShortcuts portal, so it can own the binding itself
+and deliver the events to voxtype:
+
+```toml
+[hotkey]
+enabled = true
+backend = "portal"
+```
+
+The compositor grabs the shortcut rather than voxtype reading `/dev/input`, so
+combinations KDE reserves are available again. See [XDG GlobalShortcuts Portal
+Hotkeys](#xdg-globalshortcuts-portal-hotkeys) below.
+
 **Note:** This is not a voxtype limitation. Any application using evdev on KDE Plasma will experience the same behavior with Meta+modifier hotkeys. The compositor keybinding approach is the most reliable solution on KDE.
+
+---
+
+## XDG GlobalShortcuts Portal Hotkeys
+
+These apply to `[hotkey] backend = "portal"` and to `backend = "auto"` on a
+desktop that provides the portal. Start with:
+
+```bash
+voxtype setup check
+```
+
+which reports both the installed application identity and the portal interface
+versions.
+
+### The shortcut dialog was dismissed or never appeared
+
+**Symptoms:** The daemon logs `Global shortcut registration was cancelled`, a
+desktop notification says global shortcuts are unavailable, and the hotkey does
+nothing. `voxtype record start` still works.
+
+**Cause:** The first time voxtype binds its actions, the desktop asks you to
+confirm or assign them. Voxtype treats a dismissed dialog as a refusal. Under
+`backend = "auto"` it does not then fall back to evdev, because that would take
+the raw keyboard access you just declined.
+
+**Fix:** Restart the daemon and answer the dialog:
+
+```bash
+systemctl --user restart voxtype
+```
+
+If the dialog never appears, look for it behind other windows, or check your
+desktop's shortcut settings for a pending Voxtype entry. On GNOME the entries
+are under Settings → Keyboard → View and Customize Shortcuts; on KDE they are
+under System Settings → Shortcuts.
+
+Voxtype calls `ListShortcuts` before `BindShortcuts`, so once the desktop holds
+every action the dialog does not reappear on later starts. Adding a profile or a
+`model_modifier` adds an action, which does prompt again.
+
+### Holding the key produces a burst of very short recordings
+
+**Symptoms:** One press starts and stops recording several times over, leaving
+several transcriptions of nothing, or a recording that toggles on and off while
+you hold the key. The log shows a run of `Recording started (external trigger)`
+lines.
+
+**Cause:** A desktop or compositor keybinding running `voxtype record toggle` is
+bound to the same key as the portal shortcut. That keybinding fires on every
+keyboard auto-repeat, so each repeat toggles recording through the IPC path
+while the portal binding sits unused. The `(external trigger)` in the log is the
+giveaway: a portal activation logs plain `Recording started`, or
+`Recording started (toggle mode)`.
+
+**Fix:** Use one mechanism or the other, not both. Either remove the desktop
+keybinding and let the portal own the shortcut, or set `[hotkey] enabled = false`
+and keep the keybinding. GNOME's custom shortcuts are under Settings → Keyboard
+→ View and Customize Shortcuts → Custom Shortcuts; on KDE they are under System
+Settings → Shortcuts.
+
+Voxtype ignores portal activations that repeat within 600 ms while the desktop
+still reports the shortcut as held, so auto-repeat on the portal's own binding
+does not produce this. The repeats have to be reaching the daemon another way.
+
+### "Portal application identity is not installed"
+
+**Symptoms:** `voxtype setup check` reports the missing identity, and the daemon
+logs `XDG Desktop Portal could not register Voxtype`.
+
+**Cause:** Voxtype registers the application ID `io.voxtype.Voxtype` with the
+portal's host registry, and the desktop resolves that ID through an installed
+`io.voxtype.Voxtype.desktop` file. Installations that predate portal support do
+not have one.
+
+**Fix:** Reinstall the package, or install the file for your user:
+
+```bash
+mkdir -p ~/.local/share/applications
+cp packaging/io.voxtype.Voxtype.desktop ~/.local/share/applications/
+update-desktop-database ~/.local/share/applications
+```
+
+AppImage users need the file on the host as well. The copy inside the image is
+only visible while the image is mounted, so the desktop cannot use it to resolve
+the application ID.
+
+### The portal has no GlobalShortcuts interface
+
+**Symptoms:** `voxtype setup check` reports the portal as unavailable, or the
+daemon logs `XDG GlobalShortcuts returned an invalid response`. With
+`backend = "portal"`, a portal that cannot be reached at all shows up as
+repeated `Could not reach XDG GlobalShortcuts` and `Reconnecting to XDG
+GlobalShortcuts` lines.
+
+**Cause:** `xdg-desktop-portal` dispatches to a backend for your desktop, and
+not every backend implements GlobalShortcuts. KDE, GNOME and Hyprland do.
+wlroots-based backends such as `xdg-desktop-portal-wlr` generally do not.
+
+**Check which backend is in use:**
+
+```bash
+busctl --user introspect org.freedesktop.portal.Desktop \
+    /org/freedesktop/portal/desktop | grep GlobalShortcuts
+```
+
+**Fix:** Use evdev or compositor keybindings instead:
+
+```toml
+[hotkey]
+backend = "evdev"   # or "auto", which tries the portal first
+```
+
+### xdg-desktop-portal is older than 1.20
+
+**Symptoms:** Registration fails, or `voxtype setup check` reports an
+unsupported host registry version.
+
+**Cause:** The host registry interface (`org.freedesktop.host.portal.Registry`),
+which voxtype uses to declare its application ID, arrived in
+xdg-desktop-portal 1.20.
+
+**Check the version:**
+
+```bash
+/usr/libexec/xdg-desktop-portal --version
+# or
+pkg-config --modversion xdg-desktop-portal
+```
+
+**Fix:** Upgrade xdg-desktop-portal and its backend together, then log out and
+back in so the session picks up the new services. If your distribution does not
+package 1.20 yet, use `backend = "evdev"`.
 
 ---
 
