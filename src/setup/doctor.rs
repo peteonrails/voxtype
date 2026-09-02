@@ -448,6 +448,45 @@ pub fn input_access_check(hotkey_enabled: bool, total: usize, readable: usize) -
     }
 }
 
+#[cfg(target_os = "linux")]
+async fn portal_hotkey_check(required: bool) -> Check {
+    use crate::hotkey::portal_listener::{desktop_entry_path, probe_portal};
+
+    const ID: &str = "input.portal";
+    let unavailable = |message, fix| {
+        if required {
+            Check::error(ID, message, fix)
+        } else {
+            Check::warn(ID, message, fix)
+        }
+    };
+    let Some(entry) = desktop_entry_path() else {
+        return unavailable(
+            "Portal hotkey application identity is missing".into(),
+            "Install io.voxtype.Voxtype.desktop in an XDG applications directory",
+        );
+    };
+
+    match probe_portal().await {
+        Ok((registry, shortcuts)) if registry >= 1 && shortcuts >= 1 => Check::ok(
+            ID,
+            format!(
+                "Hotkey: XDG GlobalShortcuts v{shortcuts}, host registry v{registry}, {}",
+                entry.display()
+            ),
+        ),
+        result => unavailable(
+            match result {
+                Ok((registry, shortcuts)) => format!(
+                    "Unsupported XDG portal interfaces (host registry v{registry}, GlobalShortcuts v{shortcuts})"
+                ),
+                Err(error) => format!("XDG GlobalShortcuts portal unavailable: {error}"),
+            },
+            "Start xdg-desktop-portal with a backend that supports GlobalShortcuts",
+        ),
+    }
+}
+
 /// Desktop notifications are how the daemon reports problems.
 pub fn notification_check(notify_send: bool, server: Option<bool>) -> Check {
     const ID: &str = "notifications";
@@ -972,8 +1011,29 @@ pub async fn run(config: &Config, config_path: Option<&Path>, scope: Scope) -> R
     // At startup the evdev listener reports its own failure (and exits), so
     // only the full report covers input access and notifications.
     if scope == Scope::Full && linux {
-        let (total, readable) = input_device_access();
-        checks.push(input_access_check(config.hotkey.enabled, total, readable));
+        #[cfg(target_os = "linux")]
+        {
+            use crate::config::HotkeyBackend;
+
+            let (total, readable) = input_device_access();
+            let evdev = match (config.hotkey.enabled, config.hotkey.backend) {
+                (true, HotkeyBackend::Evdev) => true,
+                (true, HotkeyBackend::Portal) => {
+                    checks.push(portal_hotkey_check(true).await);
+                    false
+                }
+                (true, HotkeyBackend::Auto) => {
+                    let portal = portal_hotkey_check(readable == 0).await;
+                    let fallback = portal.severity != Severity::Ok && readable > 0;
+                    checks.push(portal);
+                    fallback
+                }
+                (false, _) => false,
+            };
+            if evdev || config.output.wait_for_modifier_release {
+                checks.push(input_access_check(evdev, total, readable));
+            }
+        }
 
         let server = on_path("busctl")
             .then(|| command_stdout("busctl", &["--user", "list", "--no-legend", "--no-pager"]))
