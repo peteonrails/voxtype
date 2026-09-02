@@ -669,8 +669,13 @@ fn evdev_listener_loop(
     }
 }
 
-/// Parse a key name string to evdev Key
-fn parse_key_name(name: &str) -> Result<Key, HotkeyError> {
+/// Parse a key name string to evdev Key.
+///
+/// This is the only place that knows which names and aliases a user may write
+/// in `hotkey.key`, `hotkey.modifiers`, `hotkey.cancel_key` and the modifier
+/// maps. The portal backend translates through it as well, so both backends
+/// accept the same vocabulary.
+pub(super) fn parse_key_name(name: &str) -> Result<Key, HotkeyError> {
     let trimmed = name.trim();
 
     // Try parsing as a prefixed numeric keycode (e.g. "wev_234", "evtest_226")
