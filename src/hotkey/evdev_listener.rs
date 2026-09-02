@@ -771,7 +771,6 @@ fn evdev_listener_loop(
     }
 }
 
-/// Parse a key name string to evdev Key
 /// A key with the modifiers that must be held for it, such as Ctrl+Alt+V.
 /// Each modifier is a set of keys, any one of which counts: "CTRL" is either
 /// control key, "LEFTCTRL" only the left one.
@@ -875,7 +874,13 @@ fn letter_or_digit(name: &str) -> Option<Key> {
     }
 }
 
-fn parse_key_name(name: &str) -> Result<Key, HotkeyError> {
+/// Parse a key name string to evdev Key.
+///
+/// This is the only place that knows which names and aliases a user may write
+/// in `hotkey.key`, `hotkey.modifiers`, `hotkey.cancel_key` and the modifier
+/// maps. The portal backend translates through it as well, so both backends
+/// accept the same vocabulary.
+pub(super) fn parse_key_name(name: &str) -> Result<Key, HotkeyError> {
     let trimmed = name.trim();
 
     // Try parsing as a prefixed numeric keycode (e.g. "wev_234", "evtest_226")

@@ -188,6 +188,9 @@ zbus = { version = "4", default-features = false, features = ["tokio"] }
 # Meeting subprocess groups are also used on macOS.
 nix = { version = "0.29", features = ["signal", "process", "user"] }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+zbus = { version = "4", default-features = false, features = ["tokio", "p2p"] }
+
 [features]
 default = ["itn"]
 # OSD frontends. Each binary is gated on its own feature so users can

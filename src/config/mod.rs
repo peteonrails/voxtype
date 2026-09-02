@@ -38,7 +38,7 @@ pub use history::{
     parse_app_list as parse_history_app_list, HistoryConfig, HistoryOverrides,
     DEFAULT_EXCLUDE_APPS as DEFAULT_HISTORY_EXCLUDE_APPS,
 };
-pub use hotkey::{ActivationMode, HotkeyConfig};
+pub use hotkey::{ActivationMode, HotkeyBackend, HotkeyConfig};
 pub use language::{LanguageConfig, COHERE_LANGUAGES};
 pub use load::{load_config, resolve_config_file, save_config};
 pub use meeting::{

@@ -10,6 +10,7 @@ complete -c voxtype -s q -l quiet -d 'Quiet mode (errors only)'
 complete -c voxtype -l clipboard -d 'Force clipboard mode'
 complete -c voxtype -l model -d 'Override whisper model' -xa 'tiny tiny.en base base.en small small.en medium medium.en large-v3'
 complete -c voxtype -l hotkey -d 'Override hotkey' -xa 'SCROLLLOCK PAUSE RIGHTALT F13 F14 F15 F16 F17 F18 F19 F20'
+complete -c voxtype -l hotkey-backend -d 'Override Linux hotkey backend' -xa 'evdev portal auto'
 complete -c voxtype -s h -l help -d 'Print help'
 complete -c voxtype -s V -l version -d 'Print version'
 
