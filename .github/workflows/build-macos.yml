@@ -240,6 +240,12 @@ jobs:
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
+          # Whichever workflow finishes first CREATES the release, and a
+          # created release defaults to prerelease=false, which GitHub then
+          # marks "latest". This step racing ahead of Build Linux on the
+          # v1.1.0-rc2 tag published an RC as the latest release. Every
+          # workflow that can create the release must set this.
+          prerelease: ${{ contains(github.ref_name, '-rc') }}
           files: |
             releases/${{ steps.version.outputs.version }}/voxtype-*
             releases/${{ steps.version.outputs.version }}/SHA256SUMS-macos.txt
