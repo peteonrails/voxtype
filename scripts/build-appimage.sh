@@ -2,10 +2,11 @@
 # Build AppImage packages for voxtype
 # Uses pre-built release binaries from releases/{version}/
 #
-# Produces 3 AppImages:
-#   voxtype-{ver}-x86_64.AppImage          Whisper (avx2 + avx512 + vulkan)
-#   voxtype-{ver}-onnx-x86_64.AppImage     ONNX engines (onnx-avx2 + onnx-avx512 + vulkan)
-#   voxtype-{ver}-onnx-cuda-x86_64.AppImage  ONNX CUDA (onnx-cuda + vulkan)
+# Produces 4 AppImages:
+#   voxtype-{ver}-x86_64.AppImage               Whisper (avx2 + avx512 + vulkan)
+#   voxtype-{ver}-onnx-x86_64.AppImage          ONNX engines (onnx-avx2 + onnx-avx512 + vulkan)
+#   voxtype-{ver}-onnx-cuda-12-x86_64.AppImage  ONNX CUDA 12 (onnx-cuda-12 + vulkan)
+#   voxtype-{ver}-onnx-cuda-13-x86_64.AppImage  ONNX CUDA 13 (onnx-cuda-13 + vulkan)
 #
 # Usage:
 #   ./scripts/build-appimage.sh [options] VERSION
@@ -222,12 +223,18 @@ build_onnx() {
     build_appimage "$appdir" "voxtype-${VERSION}-onnx-x86_64.AppImage"
 }
 
-# ONNX CUDA AppImage: onnx-cuda + vulkan
+# ONNX CUDA AppImage: onnx-cuda-<major> + vulkan
+#
+# v0.7.0 split the single `onnx-cuda` binary into `onnx-cuda-12` and
+# `onnx-cuda-13` (ort picks its CUDA major at build time). This function takes
+# the CUDA major as its first argument and emits one AppImage per major, so a
+# user on either driver generation has something that runs.
 build_onnx_cuda() {
+    local cuda_major="$1"
     echo ""
-    echo "Building ONNX CUDA AppImage (onnx-cuda + vulkan)..."
+    echo "Building ONNX CUDA ${cuda_major} AppImage (onnx-cuda-${cuda_major} + vulkan)..."
 
-    local onnx_cuda="$RELEASE_DIR/voxtype-${VERSION}-linux-x86_64-onnx-cuda"
+    local onnx_cuda="$RELEASE_DIR/voxtype-${VERSION}-linux-x86_64-onnx-cuda-${cuda_major}"
     if [[ ! -f "$onnx_cuda" ]]; then
         echo "  Skipping: $onnx_cuda not found" >&2
         return 1
@@ -254,7 +261,7 @@ build_onnx_cuda() {
     chmod 755 "$appdir/AppRun"
 
     populate_shared_files "$appdir"
-    build_appimage "$appdir" "voxtype-${VERSION}-onnx-cuda-x86_64.AppImage"
+    build_appimage "$appdir" "voxtype-${VERSION}-onnx-cuda-${cuda_major}-x86_64.AppImage"
 }
 
 # Main
@@ -271,12 +278,14 @@ case "$VARIANT" in
         build_onnx || failed=1
         ;;
     onnx-cuda)
-        build_onnx_cuda || failed=1
+        build_onnx_cuda 12 || failed=1
+        build_onnx_cuda 13 || failed=1
         ;;
     all)
         build_whisper || failed=1
         build_onnx || failed=1
-        build_onnx_cuda || failed=1
+        build_onnx_cuda 12 || failed=1
+        build_onnx_cuda 13 || failed=1
         ;;
     *)
         echo "Error: Unknown variant '$VARIANT'" >&2
