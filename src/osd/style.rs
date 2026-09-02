@@ -115,26 +115,83 @@ pub fn resolve_runtime_style(
 
 /// Write the runtime JSON consumed by Quickshell and return its path.
 pub fn write_runtime_style(style: &RuntimeOsdStyle) -> Result<PathBuf, VoxtypeError> {
-    let dir = runtime_dir();
-    fs::create_dir_all(&dir).map_err(|e| {
-        VoxtypeError::Config(format!(
-            "Failed to create OSD runtime directory {}: {}",
-            dir.display(),
-            e
-        ))
-    })?;
-    let path = dir.join("quickshell-style.json");
-    let json = serde_json::to_string_pretty(style).map_err(|e| {
+    let path = runtime_style_path();
+    write_style_file(&path, &style_json(style)?)?;
+    Ok(path)
+}
+
+/// Path of the runtime JSON consumed by Quickshell.
+pub fn runtime_style_path() -> PathBuf {
+    runtime_dir().join("quickshell-style.json")
+}
+
+/// Serialize a resolved style to the JSON written for Quickshell.
+pub fn style_json(style: &RuntimeOsdStyle) -> Result<String, VoxtypeError> {
+    serde_json::to_string_pretty(style).map_err(|e| {
         VoxtypeError::Config(format!("Failed to serialize Quickshell OSD style: {}", e))
-    })?;
-    fs::write(&path, json).map_err(|e| {
+    })
+}
+
+/// Rewrite the runtime JSON only when `style` serializes differently from
+/// `last_json`; updates `last_json` and reports whether a write happened.
+pub fn rewrite_runtime_style_if_changed(
+    path: &Path,
+    style: &RuntimeOsdStyle,
+    last_json: &mut String,
+) -> Result<bool, VoxtypeError> {
+    let json = style_json(style)?;
+    if json == *last_json {
+        return Ok(false);
+    }
+    write_style_file(path, &json)?;
+    *last_json = json;
+    Ok(true)
+}
+
+/// Start live Omarchy theme following for a resolved style.
+///
+/// Returns `None` when the palette source is not Omarchy (a pinned package
+/// or custom palette never gets a watcher) or when no Omarchy install is
+/// present.
+pub fn follow_omarchy_theme<F>(
+    style: &RuntimeOsdStyle,
+    on_change: F,
+) -> Option<theme::ThemeWatchHandle>
+where
+    F: FnMut() + Send + 'static,
+{
+    if style.palette != OsdPaletteSource::Omarchy {
+        return None;
+    }
+    theme::watch_current_theme(on_change)
+}
+
+/// Atomic write: the Quickshell FileView reloads this file on change, so a
+/// reader must never observe a partially written JSON. Write to a sibling
+/// temp file and rename it into place. Creates the parent directory when
+/// missing (XDG_RUNTIME_DIR contents can be cleaned under a live follower).
+fn write_style_file(path: &Path, json: &str) -> Result<(), VoxtypeError> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| {
+            VoxtypeError::Config(format!(
+                "Failed to create OSD runtime directory {}: {}",
+                dir.display(),
+                e
+            ))
+        })?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".tmp.{}", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    let write_err = |e: std::io::Error| {
         VoxtypeError::Config(format!(
             "Failed to write Quickshell OSD style {}: {}",
             path.display(),
             e
         ))
-    })?;
-    Ok(path)
+    };
+    fs::write(&tmp, json).map_err(write_err)?;
+    fs::rename(&tmp, path).map_err(write_err)
 }
 
 fn runtime_dir() -> PathBuf {
@@ -515,6 +572,61 @@ mod tests {
         let home = dirs::home_dir().unwrap();
         assert_eq!(expand_tilde(Path::new("~/x/y")), home.join("x/y"));
         assert_eq!(expand_tilde(Path::new("/abs/x")), PathBuf::from("/abs/x"));
+    }
+
+    #[test]
+    fn rewrite_skips_write_when_style_is_unchanged() {
+        let style = resolve_runtime_style(&OsdConfig::default(), None).unwrap();
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("quickshell-style.json");
+
+        let mut last = String::new();
+        assert!(rewrite_runtime_style_if_changed(&path, &style, &mut last).unwrap());
+        assert!(path.is_file());
+
+        // Deleting the file proves the no-op: an unchanged style must not
+        // recreate it.
+        fs::remove_file(&path).unwrap();
+        assert!(!rewrite_runtime_style_if_changed(&path, &style, &mut last).unwrap());
+        assert!(!path.exists());
+
+        let mut changed = style.clone();
+        changed.margin_px += 1;
+        assert!(rewrite_runtime_style_if_changed(&path, &changed, &mut last).unwrap());
+        assert!(path.is_file());
+        assert_eq!(fs::read_to_string(&path).unwrap(), last);
+    }
+
+    #[test]
+    fn atomic_write_leaves_no_temp_file_behind() {
+        let style = resolve_runtime_style(&OsdConfig::default(), None).unwrap();
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("quickshell-style.json");
+        write_style_file(&path, &style_json(&style).unwrap()).unwrap();
+        let entries: Vec<_> = fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![std::ffi::OsString::from("quickshell-style.json")]
+        );
+    }
+
+    #[test]
+    fn non_omarchy_palette_gets_no_theme_watcher() {
+        let mut style = resolve_runtime_style(&OsdConfig::default(), None).unwrap();
+        for source in [
+            OsdPaletteSource::Fallback,
+            OsdPaletteSource::Custom,
+            OsdPaletteSource::Package,
+        ] {
+            style.palette = source;
+            assert!(
+                follow_omarchy_theme(&style, || {}).is_none(),
+                "palette {source:?} must not start a theme watcher"
+            );
+        }
     }
 
     #[test]

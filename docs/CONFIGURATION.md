@@ -3876,6 +3876,11 @@ recipe colors such as `accent`, `background`,
 Omarchy theme at `~/.config/omarchy/current/theme/colors.toml`. Literal colors
 such as `"#ff6600"` are allowed when a recipe needs to override the theme.
 
+With the Quickshell frontend, Omarchy theme switches apply live: the launcher
+watches the active theme and rewrites the resolved style, and the OSD picks up
+the new colors immediately without a restart. The GTK4 frontend reads the
+theme at startup, so it picks up a new theme the next time the OSD starts.
+
 Recipe layer `type` can be `shadow`, `background`, `waveform`, `bars`,
 `pulse`, `ring`, `meter`, `icon`, or `label`. Layer `source` can be `peak`,
 `rms`, `vad`, `state`, or `none`. Layer tunables you don't set use each
