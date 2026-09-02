@@ -910,7 +910,6 @@
                 <button class="tab-btn" data-tab="fedora">Fedora</button>
                 <button class="tab-btn" data-tab="macos">macOS</button>
                 <button class="tab-btn" data-tab="nixos">NixOS</button>
-                <button class="tab-btn" data-tab="appimage">AppImage</button>
                 <button class="tab-btn" data-tab="source">From Source</button>
             </div>
 
@@ -1003,23 +1002,6 @@ inputs.voxtype.url = "github:peteonrails/voxtype/v1.0.1";</code></pre>
                     <p class="install-note" style="margin-top: 1rem;"><strong>Next:</strong> <a href="#quick-start">First-run setup</a> below.</p>
                 </div>
 
-                <div id="appimage" class="tab-content">
-                    <p class="install-note">Self-contained binary for distros that don't have a packaged voxtype. Three variants: CPU, Vulkan GPU, and ONNX engines.</p>
-                    <div class="code-block">
-                        <div class="code-header">
-                            <span>Download and run</span>
-                            <button class="copy-btn" data-copy="chmod +x voxtype-0.7.5-x86_64.AppImage && ./voxtype-0.7.5-x86_64.AppImage">Copy</button>
-                        </div>
-                        <pre><code><span class="comment"># Download a variant from the latest release</span>
-wget https://github.com/peteonrails/voxtype/releases/download/v0.7.5/voxtype-0.7.5-x86_64.AppImage
-chmod +x voxtype-0.7.5-x86_64.AppImage
-
-<span class="comment"># Run directly, or move to ~/.local/bin/ for permanent install</span>
-./voxtype-0.7.5-x86_64.AppImage --help
-mv voxtype-0.7.5-x86_64.AppImage ~/.local/bin/voxtype</code></pre>
-                    </div>
-                    <p class="install-note" style="margin-top: 1rem;"><strong>Next:</strong> <a href="#quick-start">First-run setup</a> below.</p>
-                </div>
 
                 <div id="source" class="tab-content">
                     <div class="code-block">
