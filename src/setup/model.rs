@@ -4,6 +4,7 @@ use super::manifest::{ExpectedFile, ModelArtifact};
 use super::progress::{self, FileProgress};
 use super::{print_failure, print_info, print_success, print_warning};
 use crate::config::{Config, TranscriptionEngine};
+use crate::model_catalog::{model_catalog, model_dir_name, model_installed_in, CATALOG_ENGINES};
 use crate::transcribe::whisper::{get_model_filename, get_model_url};
 use std::io::{self, Write};
 use std::path::Path;
@@ -2359,10 +2360,111 @@ pub async fn set_model(model_name: &str, restart: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// List installed models
+#[derive(Debug, PartialEq)]
+struct InstalledModelEntry {
+    engine: &'static str,
+    name: String,
+    size_mb: f64,
+    description: &'static str,
+}
+
+fn model_description(engine: &str, name: &str) -> &'static str {
+    match engine {
+        "whisper" => MODELS
+            .iter()
+            .find(|model| model.name == name)
+            .map(|model| model.description),
+        "parakeet" => PARAKEET_MODELS
+            .iter()
+            .find(|model| model.name == name)
+            .map(|model| model.description),
+        "moonshine" => MOONSHINE_MODELS
+            .iter()
+            .find(|model| model.name == name || model.dir_name == name)
+            .map(|model| model.description),
+        "sensevoice" => SENSEVOICE_MODELS
+            .iter()
+            .find(|model| model.name == name || model.dir_name == name)
+            .map(|model| model.description),
+        "paraformer" => PARAFORMER_MODELS
+            .iter()
+            .find(|model| model.name == name || model.dir_name == name)
+            .map(|model| model.description),
+        "dolphin" => DOLPHIN_MODELS
+            .iter()
+            .find(|model| model.name == name || model.dir_name == name)
+            .map(|model| model.description),
+        "omnilingual" => OMNILINGUAL_MODELS
+            .iter()
+            .find(|model| model.name == name || model.dir_name == name)
+            .map(|model| model.description),
+        "cohere" => COHERE_MODELS
+            .iter()
+            .find(|model| model.name == name || model.dir_name == name)
+            .map(|model| model.description),
+        _ => None,
+    }
+    .unwrap_or("")
+}
+
+fn path_size(path: &Path) -> u64 {
+    if path.is_file() {
+        return std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    }
+
+    std::fs::read_dir(path)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| path_size(&entry.path()))
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+fn installed_model_entries_in(models_dir: &Path) -> Vec<InstalledModelEntry> {
+    CATALOG_ENGINES
+        .iter()
+        .flat_map(|&engine| {
+            model_catalog(engine)
+                .into_iter()
+                .filter(move |model| model_installed_in(models_dir, engine, model))
+                .map(move |model| {
+                    let name = model_dir_name(engine, model);
+                    let path = if engine == "whisper" {
+                        models_dir.join(get_model_filename(model))
+                    } else {
+                        models_dir.join(&name)
+                    };
+                    InstalledModelEntry {
+                        engine,
+                        name,
+                        size_mb: path_size(&path) as f64 / 1024.0 / 1024.0,
+                        description: model_description(engine, model),
+                    }
+                })
+        })
+        .collect()
+}
+
+fn engine_display_name(engine: &str) -> &str {
+    match engine {
+        "whisper" => "Whisper",
+        "parakeet" => "Parakeet",
+        "moonshine" => "Moonshine",
+        "sensevoice" => "SenseVoice",
+        "paraformer" => "Paraformer",
+        "dolphin" => "Dolphin",
+        "omnilingual" => "Omnilingual",
+        "cohere" => "Cohere Transcribe",
+        _ => engine,
+    }
+}
+
+/// List installed models across every local ASR engine.
 pub fn list_installed() {
-    println!("Installed Whisper Models\n");
-    println!("========================\n");
+    println!("Installed Models\n");
+    println!("================\n");
 
     let models_dir = Config::models_dir();
 
@@ -2371,57 +2473,30 @@ pub fn list_installed() {
         return;
     }
 
-    let mut found = false;
-
-    for model in MODELS {
-        let filename = get_model_filename(model.name);
-        let model_path = models_dir.join(&filename);
-
-        if model_path.exists() {
-            let size = std::fs::metadata(&model_path)
-                .map(|m| m.len() as f64 / 1024.0 / 1024.0)
-                .unwrap_or(0.0);
-
-            println!("  {} ({:.0} MB) - {}", model.name, size, model.description);
-            found = true;
-        }
-    }
-
-    if !found {
-        println!("  No Whisper models installed.");
-    }
-
-    // List installed OpenVINO models
-    println!("\nInstalled OpenVINO Whisper Models\n");
-    println!("=================================\n");
-
-    let mut openvino_found = false;
-
-    for model in OPENVINO_MODELS {
-        let model_path = models_dir.join(model.dir_name);
-
-        if model_path.exists() && validate_openvino_model(&model_path).is_ok() {
-            let size = std::fs::read_dir(&model_path)
-                .map(|entries| {
-                    entries
-                        .flatten()
-                        .filter_map(|e| e.metadata().ok())
-                        .map(|m| m.len() as f64 / 1024.0 / 1024.0)
-                        .sum::<f64>()
-                })
-                .unwrap_or(0.0);
-
-            println!("  {} ({:.0} MB) - {}", model.name, size, model.description);
-            openvino_found = true;
-        }
-    }
-
-    if !openvino_found {
-        println!("  No OpenVINO models installed.");
-    }
-
-    if !found && !openvino_found {
+    let entries = installed_model_entries_in(&models_dir);
+    if entries.is_empty() {
+        println!("  No models installed.");
         println!("\n  Run 'voxtype setup model' to download a model.");
+        return;
+    }
+
+    for &engine in CATALOG_ENGINES {
+        let models: Vec<&InstalledModelEntry> = entries
+            .iter()
+            .filter(|entry| entry.engine == engine)
+            .collect();
+        if models.is_empty() {
+            continue;
+        }
+
+        println!("{}:", engine_display_name(engine));
+        for model in models {
+            println!(
+                "  {} ({:.0} MB) - {}",
+                model.name, model.size_mb, model.description
+            );
+        }
+        println!();
     }
 }
 
@@ -5286,5 +5361,28 @@ on_demand_loading = false
             got,
             "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
         );
+    }
+
+    #[test]
+    fn installed_model_entries_include_non_whisper_engines() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let mut whisper = GGML_MAGIC.to_vec();
+        whisper.extend_from_slice(&[0u8; 60]);
+        std::fs::write(tmp.path().join("ggml-base.bin"), whisper).unwrap();
+
+        let sensevoice = tmp.path().join("sensevoice-small");
+        std::fs::create_dir_all(&sensevoice).unwrap();
+        std::fs::write(sensevoice.join("model.int8.onnx"), b"onnx").unwrap();
+        std::fs::write(sensevoice.join("tokens.txt"), b"token").unwrap();
+
+        let entries = installed_model_entries_in(tmp.path());
+
+        assert!(entries
+            .iter()
+            .any(|entry| entry.engine == "whisper" && entry.name == "base"));
+        assert!(entries
+            .iter()
+            .any(|entry| { entry.engine == "sensevoice" && entry.name == "sensevoice-small" }));
     }
 }
