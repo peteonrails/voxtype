@@ -931,34 +931,19 @@ impl Daemon {
             );
         }
 
-        // Streaming types text at the cursor as it is decoded, so there is
-        // never a finished transcript for these settings to run against, and
-        // none of them are applied on that path. Say so at startup: the
-        // report in #581 was not that the feature was missing, it was that
-        // the daemon logged "Word replacements configured: 3 rules" and then
-        // silently ignored them, which is indistinguishable from a bad config.
-        if config.streaming_enabled() {
-            let mut ignored = Vec::new();
-            if !config.text.replacements.is_empty() {
-                ignored.push("text.replacements");
-            }
-            if config.text.spoken_punctuation {
-                ignored.push("text.spoken_punctuation");
-            }
-            if config.text.filter_filler_words {
-                ignored.push("text.filter_filler_words");
-            }
-            if config.output.post_process.is_some() {
-                ignored.push("output.post_process");
-            }
-            if !ignored.is_empty() {
-                tracing::warn!(
-                    "Streaming is enabled, so {} will NOT be applied to output. \
-                     These run on the completed transcript, which streaming never \
-                     produces. Disable streaming to use them (see #581).",
-                    ignored.join(", ")
-                );
-            }
+        if config.streaming_enabled() && config.output.post_process.is_some() {
+            // [text] rules no longer belong in this warning: since the #669
+            // fix they are applied when a streaming segment is committed, and
+            // warning that a working setting is ignored is worse than not
+            // warning at all. The LLM post_process hook is the one completed-
+            // transcript stage streaming still skips (see the note in
+            // output::streaming): incremental output would re-run it per
+            // segment and let it rewrite already-typed text.
+            tracing::warn!(
+                "Streaming is enabled, so output.post_process will NOT run. \
+                 The post-process command needs a completed transcript, which \
+                 streaming never produces. Disable streaming to use it."
+            );
         }
 
         // Initialize post-processor if configured

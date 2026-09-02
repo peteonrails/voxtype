@@ -1402,11 +1402,11 @@ streaming pipeline and a TDT v3 family model with `tokenizer.model` — a
 different mechanism from the shared `[streaming]` section used by
 `[whisper] streaming` and `[openvino] streaming`, and not configured by it.
 
-**Disables `[text]` processing and `post_process`.** Word replacements,
-spoken punctuation, filler-word filtering, and the `post_process` command all
-operate on a finished transcript, which streaming never produces. They are
-silently inactive while streaming, so the daemon warns at startup if you have
-configured any of them. Turn streaming off if you depend on them.
+**Disables `post_process`.** The `post_process` command operates on a
+finished transcript, which streaming never produces, so it is inactive while
+streaming and the daemon warns at startup if it is configured. `[text]`
+processing (replacements, spoken punctuation, filler filtering) IS applied:
+each streaming segment is processed as it is committed.
 
 **Requires toggle activation.** Streaming output types characters at the
 cursor while you dictate. On Wayland compositors backed by libinput
@@ -1730,10 +1730,9 @@ language_hints_strict = false   # allow occasional third-language tokens
 **Default:** `true`
 **Required:** No
 
-> While streaming, `[text]` processing (replacements, spoken punctuation,
-> filler filtering) and `[output.post_process]` do not run, because they
-> operate on a completed transcript. Set `async_api = true` or
-> `streaming = false` if you rely on them.
+> While streaming, `[output.post_process]` does not run, because it operates
+> on a completed transcript. Set `async_api = true` or `streaming = false` if
+> you rely on it. `[text]` processing is applied to each committed segment.
 
 Activation mode for the Soniox backend:
 
@@ -2923,14 +2922,14 @@ post_process_timeout_ms = 60000
 
 Controls text post-processing after transcription.
 
-> **Not applied when streaming is enabled.** Everything in this section runs
-> on the completed transcript. Streaming types text at the cursor as it is
-> decoded, so there is no completed transcript for these rules to run against
-> and none of them are applied. This affects `spoken_punctuation`,
-> `replacements`, and `filter_filler_words`, as well as
-> [`[output.post_process]`](#outputpost_process). The daemon logs a warning at
-> startup listing whichever of these you have configured. To use them, set
-> `streaming = false` for your engine.
+> **Applied per committed segment when streaming is enabled.** Streaming types
+> text at the cursor as it is decoded; `spoken_punctuation`, `replacements`,
+> and `filter_filler_words` run on each segment as it is committed rather than
+> on partial (still-revisable) text. A rule whose match spans a segment
+> boundary only takes effect in file-output mode (`--file`), where the whole
+> transcript is processed once at the end.
+> [`[output.post_process]`](#outputpost_process) remains inactive while
+> streaming; the daemon warns at startup if it is configured.
 
 ### spoken_punctuation
 
