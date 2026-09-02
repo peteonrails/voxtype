@@ -109,7 +109,7 @@ Then disable the built-in hotkey in your config:
 enabled = false
 ```
 
-> **X11 / Built-in hotkey fallback:** If you're on X11 or prefer voxtype's built-in hotkey (ScrollLock by default), add yourself to the `input` group: `sudo usermod -aG input $USER` and log out/in. See the [User Manual](docs/USER_MANUAL.md) for details.
+> **X11 / Built-in hotkey fallback:** If you're on X11 or prefer voxtype's built-in hotkey (ScrollLock by default), add yourself to the `input` group: `sudo usermod -aG input $USER` and log out/in. On KDE, GNOME 48 or later, or Hyprland, `[hotkey] backend = "portal"` lets the desktop own the shortcut instead, with no `input` group needed. See the [User Manual](docs/USER_MANUAL.md) and [Configuration](docs/CONFIGURATION.md#backend) for details.
 
 > **Omarchy / Multi-modifier keybindings:** If using keybindings with multiple modifiers (e.g., `SUPER+CTRL+X`), releasing keys slowly can cause typed text to trigger window manager shortcuts instead of inserting text. See [Modifier Key Interference](docs/TROUBLESHOOTING.md#modifier-key-interference-hyprlandsway) in the troubleshooting guide for the solution using output hooks and Hyprland submaps.
 
@@ -499,7 +499,7 @@ Results vary by hardware. Example on AMD RX 6800:
 ### Permissions
 
 - **Wayland compositors:** No special permissions needed when using compositor keybindings
-- **Built-in hotkey / X11:** User must be in the `input` group (for evdev access)
+- **Built-in hotkey / X11:** User must be in the `input` group for the evdev backend. The portal backend needs no group membership.
 
 ### Installing Dependencies
 
@@ -636,6 +636,9 @@ sudo usermod -aG input $USER
 # Log out and back in
 ```
 
+**Option 3: Let the desktop own the shortcut**
+On KDE, GNOME 48 or later, or Hyprland, set `[hotkey] backend = "portal"` so the XDG GlobalShortcuts portal delivers the hotkey without any access to `/dev/input`. See [Configuration](docs/CONFIGURATION.md#backend).
+
 ### Text not appearing / typing not working
 
 Voxtype uses wtype (preferred), dotool, or ydotool for typing output:
@@ -719,7 +722,7 @@ flowchart LR
 
 **Why compositor keybindings?** Wayland compositors like Hyprland, Sway, and River support key-release events, enabling push-to-talk without special permissions. Voxtype's `record start/stop` commands integrate directly with your compositor's keybinding system.
 
-**Fallback: evdev hotkey.** For X11 or compositors without key-release support, voxtype includes a built-in hotkey using evdev (the Linux input subsystem). This requires the user to be in the `input` group.
+**Fallback: evdev hotkey.** For X11 or compositors without key-release support, voxtype includes a built-in hotkey using evdev (the Linux input subsystem). This requires the user to be in the `input` group. On desktops that implement the XDG GlobalShortcuts portal, `[hotkey] backend = "portal"` lets the desktop own the binding instead, so voxtype needs no access to `/dev/input`.
 
 **Why wtype + dotool + ydotool?** On Wayland, wtype uses the virtual-keyboard protocol for text input, with excellent Unicode/CJK support and no daemon required. When wtype fails (KDE/GNOME), direct dotool fallback provides keyboard layout support via XKB for non-US layouts. As a final fallback, ydotool uses uinput for text injection on X11/TTY. This combination ensures Voxtype works on any Linux desktop with proper keyboard layout support.
 
