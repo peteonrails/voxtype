@@ -3,7 +3,7 @@
 use super::manifest::{ExpectedFile, ModelArtifact};
 use super::progress::{self, FileProgress};
 use super::{print_failure, print_info, print_success, print_warning};
-use crate::config::{Config, TranscriptionEngine};
+use crate::config::{Config, OpenVinoConfig, TranscriptionEngine};
 use crate::transcribe::whisper::{get_model_filename, get_model_url};
 use std::io::{self, Write};
 use std::path::Path;
@@ -1849,7 +1849,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         handle_cohere_selection(idx).await
     } else if openvino_available && selection <= openvino_offset + openvino_count {
         let idx = selection - openvino_offset;
-        handle_openvino_selection(idx).await
+        handle_openvino_selection(idx, &config).await
     } else {
         println!("\nInvalid selection.");
         Ok(())
@@ -3640,7 +3640,7 @@ pub(crate) fn set_engine_model_config(engine: &str, model_name: &str) -> anyhow:
 }
 
 /// Handle OpenVINO model selection (download/config).
-async fn handle_openvino_selection(selection: usize) -> anyhow::Result<()> {
+async fn handle_openvino_selection(selection: usize, config: &Config) -> anyhow::Result<()> {
     let models_dir = Config::models_dir();
 
     if selection == 0 || selection > OPENVINO_MODELS.len() {
@@ -3664,6 +3664,7 @@ async fn handle_openvino_selection(selection: usize) -> anyhow::Result<()> {
         match choice.trim() {
             "" | "1" => {
                 update_config_openvino(model.name)?;
+                prepare_openvino_model(model.name, config);
                 restart_daemon_if_running().await;
                 return Ok(());
             }
@@ -3677,6 +3678,7 @@ async fn handle_openvino_selection(selection: usize) -> anyhow::Result<()> {
 
     download_openvino_model(model.name)?;
     update_config_openvino(model.name)?;
+    prepare_openvino_model(model.name, config);
     restart_daemon_if_running().await;
     Ok(())
 }
@@ -4197,6 +4199,78 @@ const OPENVINO_MODELS: &[OpenVinoModelInfo] = &[
     },
 ];
 
+fn openvino_download_needs_precompile(device: &str) -> bool {
+    device.trim().eq_ignore_ascii_case("NPU")
+}
+
+/// The `[openvino]` config to compile with when the user has explicitly opted
+/// into the NPU, and `None` otherwise. Only a literal `device = "NPU"` in a
+/// real `[openvino]` section opts in: `OpenVinoConfig::default()` uses
+/// `device = "NPU"`, so falling back to the default for a missing section
+/// would manufacture an NPU opt-in on machines that never asked for one.
+/// AUTO does not opt in either — it may resolve to CPU or GPU at runtime.
+fn openvino_npu_opted_in(config: &Config) -> Option<OpenVinoConfig> {
+    config
+        .openvino
+        .as_ref()
+        .filter(|openvino| openvino_download_needs_precompile(&openvino.device))
+        .cloned()
+}
+
+/// Run the setup-time NPU compile for one model when, and only when, it is
+/// needed: the user has explicitly opted into NPU (see
+/// `openvino_npu_opted_in`; `voxtype setup npu` persists that opt-in before
+/// calling this) and no compiled cache blob exists for this model yet. This
+/// also covers retrying after a previous compile failed but left the fully
+/// downloaded IR files in place.
+///
+/// Never fails setup. The runtime falls back NPU -> GPU -> CPU, so a failed
+/// warm-up is a slower or degraded first transcription, not a broken install:
+/// compile errors print as a warning and setup's exit code keeps reflecting
+/// download and config success only.
+pub fn prepare_openvino_model(model_name: &str, config: &Config) {
+    let Some(mut openvino) = openvino_npu_opted_in(config) else {
+        return;
+    };
+    openvino.model = model_name.to_string();
+
+    #[cfg(feature = "openvino-whisper")]
+    {
+        if crate::transcribe::openvino_whisper::has_compiled_blob(&openvino) {
+            return;
+        }
+
+        println!(
+            "\nCompiling '{}' for Intel NPU and creating its cache blob...",
+            model_name
+        );
+        println!("  This can take several minutes for large models. Please wait.");
+        let _ = io::stdout().flush();
+
+        match crate::transcribe::openvino_whisper::precompile_npu_model(&openvino) {
+            Ok(cache_dir) => print_success(&format!(
+                "OpenVINO model '{}' compiled for NPU and cached in {}",
+                model_name,
+                cache_dir.display()
+            )),
+            Err(error) => {
+                print_warning(&format!("NPU preparation failed: {}", error));
+                print_info(
+                    "Continuing setup. The daemon compiles the model on first use \
+                     and falls back to GPU or CPU when the NPU is unavailable.",
+                );
+            }
+        }
+    }
+
+    // Unreachable in practice: every OpenVINO setup path checks the feature
+    // before it can download or activate a model.
+    #[cfg(not(feature = "openvino-whisper"))]
+    {
+        let _ = openvino;
+    }
+}
+
 /// Download an OpenVINO Whisper model by name.
 ///
 /// Routes through the unified R2 downloader (#692) - manifest fetch, per-file
@@ -4266,6 +4340,23 @@ pub fn validate_openvino_model(path: &std::path::Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Persist `device` in the config file's `[openvino]` section, preserving
+/// comments and unrelated keys via the same toml_edit editor that backs the
+/// TUI and `voxtype config set`. Like `set_openvino_config`, this only writes
+/// when the config file already exists.
+pub fn set_openvino_device(device: &str) -> anyhow::Result<()> {
+    if let Some(config_path) = Config::default_path() {
+        if config_path.exists() {
+            let mut editor = crate::tui::ConfigEditor::load_from_path(config_path)?;
+            editor.set_string("openvino", "device", device);
+            editor.save()?;
+        }
+        Ok(())
+    } else {
+        anyhow::bail!("Could not determine config path")
+    }
 }
 
 /// Update config to use OpenVINO engine with a specific model
@@ -4362,6 +4453,44 @@ fn update_openvino_in_config(config: &str, model_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_npu_downloads_require_eager_openvino_compilation() {
+        assert!(openvino_download_needs_precompile("NPU"));
+        assert!(openvino_download_needs_precompile(" npu "));
+        assert!(!openvino_download_needs_precompile("GPU"));
+        assert!(!openvino_download_needs_precompile("CPU"));
+        assert!(!openvino_download_needs_precompile("AUTO"));
+    }
+
+    #[test]
+    fn npu_preparation_requires_an_explicit_openvino_section() {
+        // No [openvino] section: never opt in, even though the section's
+        // *default* device would be NPU.
+        let mut config = Config {
+            openvino: None,
+            ..Config::default()
+        };
+        assert!(openvino_npu_opted_in(&config).is_none());
+
+        // A real section with device = "NPU" opts in.
+        let mut openvino = OpenVinoConfig {
+            device: "NPU".to_string(),
+            ..OpenVinoConfig::default()
+        };
+        config.openvino = Some(openvino.clone());
+        assert!(openvino_npu_opted_in(&config).is_some());
+
+        // Any other device, AUTO included, does not.
+        for device in ["AUTO", "CPU", "GPU"] {
+            openvino.device = device.to_string();
+            config.openvino = Some(openvino.clone());
+            assert!(
+                openvino_npu_opted_in(&config).is_none(),
+                "device {device} must not trigger setup-time NPU compilation"
+            );
+        }
+    }
 
     #[test]
     fn openvino_download_manifest_covers_every_required_runtime_file() {
