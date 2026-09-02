@@ -134,20 +134,17 @@ const BUILT_REQUIRING_AVX2: bool = cfg!(target_feature = "avx2");
 /// fix being compiled in. CPUID itself executes on any x86-64 CPU.
 #[cfg(target_arch = "x86_64")]
 fn cpuid_has_avx2() -> bool {
-    // AVX2: CPUID leaf 7 subleaf 0, EBX bit 5.
-    unsafe {
-        core::arch::x86_64::__cpuid(0).eax >= 7
-            && (core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 5)) != 0
-    }
+    // AVX2: CPUID leaf 7 subleaf 0, EBX bit 5. __cpuid is safe on x86_64
+    // (the instruction predates every CPU this binary can load on).
+    core::arch::x86_64::__cpuid(0).eax >= 7
+        && (core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 5)) != 0
 }
 
 #[cfg(target_arch = "x86_64")]
 fn cpuid_has_avx512f() -> bool {
     // AVX-512F: CPUID leaf 7 subleaf 0, EBX bit 16.
-    unsafe {
-        core::arch::x86_64::__cpuid(0).eax >= 7
-            && (core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 16)) != 0
-    }
+    core::arch::x86_64::__cpuid(0).eax >= 7
+        && (core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 16)) != 0
 }
 
 /// Check CPU feature compatibility and warn if there might be issues.
