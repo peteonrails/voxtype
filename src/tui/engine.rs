@@ -19,7 +19,7 @@ use super::common::{
     self, FeedbackLevel as CommonFeedback, FormRowSpec, TextInput, TextInputResult,
 };
 use super::config_editor::{ConfigEditor, EditorError};
-use crate::config::TranscriptionEngine;
+use crate::config::{TranscriptionEngine, NEMOTRON_LANGUAGE_CHOICES};
 use crate::model_catalog::{default_model, installed_models_for, model_catalog};
 use crate::setup::binary::{self, EngineFamily, InstallKind, Variant};
 use crate::setup::model;
@@ -217,13 +217,7 @@ const LANG_CHOICES: &[&str] = &[
     "auto", "en", "fr", "de", "it", "es", "pt", "nl", "pl", "zh", "ja", "ko", "ru", "ar",
 ];
 const SV_LANG_CHOICES: &[&str] = &["auto", "zh", "en", "ja", "ko", "yue"];
-const PARAKEET_MODEL_TYPES: &[Option<&str>] =
-    &[None, Some("tdt"), Some("ctc"), Some("nemotron")];
-const NEMOTRON_LANG_CHOICES: &[&str] = &[
-    "auto", "en-US", "en-GB", "es-US", "es-ES", "fr-FR", "fr-CA", "de-DE", "it-IT", "pt-BR",
-    "pt-PT", "nl-NL", "pl-PL", "tr-TR", "ru-RU", "uk-UA", "ar-AR", "hi-IN", "ja-JP", "ko-KR",
-    "vi-VN", "zh-CN",
-];
+const PARAKEET_MODEL_TYPES: &[Option<&str>] = &[None, Some("tdt"), Some("ctc"), Some("nemotron")];
 /// Inference device OpenVINO GenAI tries first; falls back to CPU if the
 /// requested device fails to initialize (see `OpenVinoTranscriber::new`).
 /// AUTO is a real OpenVINO device value too (see `installation_guidance`'s
@@ -876,7 +870,7 @@ impl EngineState {
                 f.pk_model_type = PARAKEET_MODEL_TYPES[n as usize].map(|s| s.to_string());
             }
             FieldId::PkLanguage => {
-                f.pk_language = cycle_str(NEMOTRON_LANG_CHOICES, &f.pk_language, delta)
+                f.pk_language = cycle_str(NEMOTRON_LANGUAGE_CHOICES, &f.pk_language, delta)
             }
             FieldId::PkOnDemandLoading => f.pk_on_demand_loading = !f.pk_on_demand_loading,
 

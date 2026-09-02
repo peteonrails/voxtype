@@ -25,7 +25,7 @@ use std::path::Path;
 
 use serde_json::{json, Map, Value as Json};
 
-use super::{ActivationMode, Config, LanguageConfig};
+use super::{ActivationMode, Config, LanguageConfig, NEMOTRON_LANGUAGE_CHOICES};
 use crate::tui::ConfigEditor;
 
 /// Version of the `voxtype config schema --json` document shape. Bump when
@@ -211,7 +211,7 @@ const COHERE_LANG_CHOICES: &[&str] = &[
     "ar", "de", "en", "es", "fr", "hi", "it", "ja", "ko", "nl", "pt", "ru", "tr", "zh",
 ];
 const OPENVINO_DEVICE_CHOICES: &[&str] = &["NPU", "GPU", "CPU", "AUTO"];
-const PARAKEET_MODEL_TYPE_CHOICES: &[&str] = &["tdt", "ctc"];
+const PARAKEET_MODEL_TYPE_CHOICES: &[&str] = &["tdt", "ctc", "nemotron"];
 
 const HOTKEY_MODE_CHOICES: &[&str] = &["push_to_talk", "toggle"];
 const HOTKEY_KEY_CHOICES: &[&str] = &[
@@ -424,6 +424,16 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Engine",
         "Decoder type",
         "Force the decoder family instead of auto-detecting it from the model directory.",
+    )
+    .for_onnx_engine("parakeet"),
+    spec(
+        "parakeet.language",
+        "parakeet",
+        "language",
+        closed(NEMOTRON_LANGUAGE_CHOICES),
+        "Engine",
+        "Nemotron language",
+        "Target locale for multilingual Nemotron models, or auto for language detection.",
     )
     .for_onnx_engine("parakeet"),
     spec(
@@ -1656,6 +1666,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             Some(t) => serde_json::to_value(t).ok()?,
             None => Json::Null,
         },
+        "parakeet.language" => json!(pk().language),
         "parakeet.on_demand_loading" => json!(pk().on_demand_loading),
         "parakeet.streaming" => json!(pk().streaming),
 

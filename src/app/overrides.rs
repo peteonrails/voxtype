@@ -132,9 +132,13 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         config.whisper.initial_prompt = Some(prompt.clone());
     }
     if let Some(ref lang) = cli.language {
-        config.whisper.language = config::LanguageConfig::from_comma_separated(lang);
-        if let Some(parakeet) = config.parakeet.as_mut() {
-            parakeet.language = lang.clone();
+        if config.engine == config::TranscriptionEngine::Parakeet {
+            config
+                .parakeet
+                .get_or_insert_with(config::ParakeetConfig::default)
+                .language = lang.clone();
+        } else {
+            config.whisper.language = config::LanguageConfig::from_comma_separated(lang);
         }
     }
     if cli.translate {

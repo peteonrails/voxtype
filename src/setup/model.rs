@@ -263,6 +263,27 @@ pub fn is_nemotron_parakeet_model(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Returns true when a configured Parakeet model resolves to Nemotron.
+///
+/// Relative model names are checked both against the registry and under the
+/// standard models directory, matching the path resolution used by the
+/// transcriber factory.
+pub fn is_configured_nemotron_parakeet_model(name: &str) -> bool {
+    is_nemotron_parakeet_model_in(name, &Config::models_dir())
+}
+
+fn is_nemotron_parakeet_model_in(name: &str, models_dir: &Path) -> bool {
+    if is_nemotron_parakeet_model(name) {
+        return true;
+    }
+    if Path::new(name).is_absolute() {
+        return false;
+    }
+
+    let resolved = models_dir.join(name);
+    is_nemotron_parakeet_model(resolved.to_string_lossy().as_ref())
+}
+
 /// Canonical Parakeet model name that the TUI auto-switches to when the user
 /// enables streaming on top of an incompatible model. Stable string identifier
 /// rather than a struct lookup so config writers and feedback messages can
@@ -4559,6 +4580,23 @@ language = "en"
         .unwrap();
 
         assert!(is_nemotron_parakeet_model(tmp.path().to_str().unwrap()));
+    }
+
+    #[test]
+    fn test_detects_custom_nemotron_under_models_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let model_path = tmp.path().join("custom-nemotron");
+        std::fs::create_dir(&model_path).unwrap();
+        std::fs::write(model_path.join("encoder.onnx"), []).unwrap();
+        std::fs::write(model_path.join("decoder_joint.onnx"), []).unwrap();
+        std::fs::write(model_path.join("tokenizer.model"), []).unwrap();
+        std::fs::write(
+            model_path.join("config.json"),
+            r#"{"model_name":"nemotron-3.5-asr-streaming-0.6b"}"#,
+        )
+        .unwrap();
+
+        assert!(is_nemotron_parakeet_model_in("custom-nemotron", tmp.path()));
     }
 
     #[test]

@@ -9,7 +9,6 @@ use parakeet_rs::{Nemotron, NemotronHandle, NemotronMode};
 use std::sync::Mutex;
 use tokio::sync::{mpsc, oneshot};
 
-const NEMOTRON_CHUNK_SAMPLES: usize = 8_960;
 const NEMOTRON_FLUSH_CHUNKS: usize = 3;
 
 /// Streaming-capable Nemotron transcriber with shared model weights.
@@ -131,6 +130,7 @@ impl StreamingTranscriber for NemotronStreamingTranscriber {
     ) -> Result<StreamHandle, TranscribeError> {
         let mut model = Nemotron::from_shared(&self.handle);
         configure_language(&mut model, &self.language)?;
+        let chunk_samples = self.handle.chunk_samples();
 
         let (events_tx, events_rx) = mpsc::channel::<StreamingEvent>(64);
         let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
@@ -204,9 +204,9 @@ impl StreamingTranscriber for NemotronStreamingTranscriber {
 
             {
                 let mut final_text = String::new();
-                let remainder = total_samples % NEMOTRON_CHUNK_SAMPLES;
+                let remainder = total_samples % chunk_samples;
                 if remainder != 0 {
-                    match model.transcribe_chunk(&vec![0.0; NEMOTRON_CHUNK_SAMPLES - remainder]) {
+                    match model.transcribe_chunk(&vec![0.0; chunk_samples - remainder]) {
                         Ok(text) => final_text.push_str(&text),
                         Err(e) => {
                             let err = TranscribeError::InferenceFailed(format!(
@@ -222,7 +222,7 @@ impl StreamingTranscriber for NemotronStreamingTranscriber {
                 // Silence drains the RNNT right context, matching the
                 // parakeet-rs reference example.
                 for _ in 0..NEMOTRON_FLUSH_CHUNKS {
-                    match model.transcribe_chunk(&vec![0.0; NEMOTRON_CHUNK_SAMPLES]) {
+                    match model.transcribe_chunk(&vec![0.0; chunk_samples]) {
                         Ok(text) => final_text.push_str(&text),
                         Err(e) => {
                             let err = TranscribeError::InferenceFailed(format!(
@@ -266,11 +266,6 @@ mod tests {
     use super::*;
     use crate::config::ParakeetModelType;
     use crate::transcribe::StreamingEvent;
-
-    #[test]
-    fn nemotron_uses_560ms_chunks() {
-        assert_eq!(NEMOTRON_CHUNK_SAMPLES, 16_000 * 560 / 1_000);
-    }
 
     #[test]
     fn streaming_rejects_on_demand_loading_before_model_lookup() {
@@ -349,14 +344,12 @@ mod tests {
             ..ParakeetConfig::default()
         };
         let transcriber = NemotronStreamingTranscriber::new(&config).unwrap();
+        let chunk_samples = transcriber.handle.chunk_samples();
         let (samples_tx, samples_rx) = mpsc::channel(128);
         let mut handle = transcriber.start_stream(samples_rx).unwrap();
 
         for _ in 0..96 {
-            samples_tx
-                .send(vec![0.25; NEMOTRON_CHUNK_SAMPLES])
-                .await
-                .unwrap();
+            samples_tx.send(vec![0.25; chunk_samples]).await.unwrap();
         }
         let _ = handle.cancel.send(());
         handle.events.close();

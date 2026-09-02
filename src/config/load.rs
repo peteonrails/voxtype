@@ -73,9 +73,13 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
         }
     }
     if let Ok(lang) = std::env::var("VOXTYPE_LANGUAGE") {
-        config.whisper.language = LanguageConfig::from_comma_separated(&lang);
-        if let Some(parakeet) = config.parakeet.as_mut() {
-            parakeet.language = lang;
+        if config.engine == TranscriptionEngine::Parakeet {
+            config
+                .parakeet
+                .get_or_insert_with(super::ParakeetConfig::default)
+                .language = lang;
+        } else {
+            config.whisper.language = LanguageConfig::from_comma_separated(&lang);
         }
     }
     if let Ok(val) = std::env::var("VOXTYPE_TRANSLATE") {

@@ -1,8 +1,8 @@
 use super::{
     AudioConfig, CohereConfig, DolphinConfig, HotkeyConfig, MeetingConfig, MoonshineConfig,
-    OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig, ParakeetConfig, Profile,
-    SenseVoiceConfig, SonioxConfig, StatusConfig, StreamingConfig, TextConfig, TranscriptionEngine,
-    VadConfig, WhisperConfig,
+    OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig, ParakeetConfig,
+    ParakeetModelType, Profile, SenseVoiceConfig, SonioxConfig, StatusConfig, StreamingConfig,
+    TextConfig, TranscriptionEngine, VadConfig, WhisperConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -400,8 +400,22 @@ impl Config {
             TranscriptionEngine::SenseVoice => {
                 self.sensevoice.as_ref().map(|s| s.language.as_str())?
             }
-            // Parakeet, Moonshine, Paraformer, Dolphin, Omnilingual and Soniox
-            // either detect the language or are fixed to one.
+            TranscriptionEngine::Parakeet => {
+                let parakeet = self.parakeet.as_ref()?;
+                let is_nemotron = match parakeet.model_type {
+                    Some(ParakeetModelType::Nemotron) => true,
+                    Some(_) => false,
+                    None => {
+                        crate::setup::model::is_configured_nemotron_parakeet_model(&parakeet.model)
+                    }
+                };
+                if !is_nemotron {
+                    return None;
+                }
+                parakeet.language.as_str()
+            }
+            // Moonshine, Paraformer, Dolphin, Omnilingual and Soniox either
+            // detect the language or are fixed to one.
             _ => return None,
         };
 
@@ -531,6 +545,33 @@ mod tests {
         assert_eq!(config.whisper.model, "base.en");
         assert_eq!(config.output.mode, OutputMode::Type);
         assert!(!config.output.auto_submit);
+    }
+
+    #[test]
+    fn active_language_uses_nemotron_locale() {
+        let config = Config {
+            engine: TranscriptionEngine::Parakeet,
+            parakeet: Some(ParakeetConfig {
+                model: "nemotron-3.5-asr-streaming-0.6b-int8".to_string(),
+                language: "de-DE".to_string(),
+                ..ParakeetConfig::default()
+            }),
+            ..Config::default()
+        };
+        assert_eq!(config.active_language(), Some("de-DE"));
+    }
+
+    #[test]
+    fn active_language_ignores_non_nemotron_parakeet_language() {
+        let config = Config {
+            engine: TranscriptionEngine::Parakeet,
+            parakeet: Some(ParakeetConfig {
+                language: "de-DE".to_string(),
+                ..ParakeetConfig::default()
+            }),
+            ..Config::default()
+        };
+        assert_eq!(config.active_language(), None);
     }
 
     #[test]

@@ -33,17 +33,13 @@ pub(crate) fn send_record_command(
         return Ok(());
     }
 
-    // Streaming uses a model preloaded by the daemon, so a model supplied on
-    // this one record command cannot take effect without restarting it. Reject
-    // before writing any other override files that could leak into the next
-    // recording after this command fails.
+    // Parakeet uses the model loaded by the daemon, so a model supplied on one
+    // record command cannot take effect without restarting it. Reject before
+    // writing override files that could leak into the next recording.
     let model_override = action.model_override().or(top_level_model);
-    if model_override.is_some()
-        && config.engine == config::TranscriptionEngine::Parakeet
-        && config.streaming_active()
-    {
+    if model_override.is_some() && config.engine == config::TranscriptionEngine::Parakeet {
         anyhow::bail!(
-            "Per-record model overrides are not supported during Parakeet streaming. \
+            "Per-record model overrides are not supported for Parakeet. \
              Set [parakeet] model in config.toml and restart the daemon instead."
         );
     }

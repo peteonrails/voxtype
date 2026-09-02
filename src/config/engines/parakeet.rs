@@ -4,6 +4,15 @@ use serde::{Deserialize, Serialize};
 
 use super::super::default_on_demand_loading;
 
+/// Nemotron 3.5 locales documented by NVIDIA, plus automatic detection.
+pub const NEMOTRON_LANGUAGE_CHOICES: &[&str] = &[
+    "auto", "en-US", "en-GB", "es-US", "es-ES", "fr-FR", "fr-CA", "it-IT", "pt-BR", "pt-PT",
+    "nl-NL", "de-DE", "tr-TR", "ru-RU", "ar-AR", "hi-IN", "ja-JP", "ko-KR", "vi-VN", "uk-UA",
+    "pl-PL", "sv-SE", "cs-CZ", "nb-NO", "da-DK", "bg-BG", "fi-FI", "hr-HR", "sk-SK", "zh-CN",
+    "hu-HU", "ro-RO", "et-EE", "el-GR", "lt-LT", "lv-LV", "mt-MT", "sl-SI", "he-IL", "th-TH",
+    "nn-NO",
+];
+
 /// Parakeet model architecture type
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]

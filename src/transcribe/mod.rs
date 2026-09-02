@@ -188,21 +188,12 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
                     "Parakeet engine selected but [parakeet] config section is missing".to_string(),
                 )
             })?;
-            let model_path = if std::path::Path::new(&parakeet_config.model).is_absolute() {
-                parakeet_config.model.clone()
-            } else {
-                Config::models_dir()
-                    .join(&parakeet_config.model)
-                    .to_string_lossy()
-                    .into_owned()
-            };
             let is_nemotron = match parakeet_config.model_type {
                 Some(crate::config::ParakeetModelType::Nemotron) => true,
                 Some(_) => false,
-                None => {
-                    crate::setup::model::is_nemotron_parakeet_model(&parakeet_config.model)
-                        || crate::setup::model::is_nemotron_parakeet_model(&model_path)
-                }
+                None => crate::setup::model::is_configured_nemotron_parakeet_model(
+                    &parakeet_config.model,
+                ),
             };
             if is_nemotron {
                 Ok(Box::new(

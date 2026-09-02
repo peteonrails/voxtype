@@ -1611,6 +1611,7 @@ impl Daemon {
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
         notification_body: &str,
     ) {
+        self.end_external_session(state.is_recording()).await;
         let backend_task = streaming_handle.take().map(|mut h| {
             let _ = h.cancel.send(());
             // Cutting the audio pump only closes the backend's input side.
@@ -4514,8 +4515,9 @@ impl Daemon {
 
         // Stop any active dictation capture before shutting down and always
         // restore media that this daemon suppressed for the session.
-        let streaming_task = streaming_handle.take().map(|handle| {
+        let streaming_task = streaming_handle.take().map(|mut handle| {
             let _ = handle.cancel.send(());
+            handle.events.close();
             handle.task
         });
         self.cut_streaming_audio();
