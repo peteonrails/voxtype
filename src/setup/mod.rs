@@ -832,6 +832,13 @@ pub async fn run_setup(
                         ));
                     }
                 }
+                // A failed first compile leaves valid downloaded IR files in
+                // place, so a --download retry (or activating the model) must
+                // still get a chance at NPU preparation. The compile is
+                // skipped when this model's cache blob already exists.
+                if download || activate {
+                    model::prepare_openvino_model(model_name, config);
+                }
             } else if download {
                 model::download_openvino_model(model_name)?;
                 if activate {
@@ -843,6 +850,7 @@ pub async fn run_setup(
                         ));
                     }
                 }
+                model::prepare_openvino_model(model_name, config);
             } else if !quiet {
                 print_info(&format!("Model '{}' not downloaded yet", model_name));
                 println!(
