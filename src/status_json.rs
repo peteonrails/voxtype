@@ -117,6 +117,7 @@ fn install_backend_label(inv: &setup::binary::Inventory) -> String {
 pub fn backend_display_for_variant(v: setup::binary::Variant) -> &'static str {
     use setup::binary::Variant;
     match v {
+        Variant::WhisperBaseline => "CPU (baseline)",
         Variant::WhisperAvx2 => "CPU (AVX2)",
         Variant::WhisperAvx512 => "CPU (AVX-512)",
         Variant::WhisperVulkan => "GPU (Vulkan)",
