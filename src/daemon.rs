@@ -3290,7 +3290,7 @@ impl Daemon {
         // Start hotkey listener (if enabled)
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let mut hotkey_rx = if let Some(ref mut listener) = hotkey_listener {
-            match listener.start() {
+            match listener.start().await {
                 Ok(rx) => Some(rx),
                 Err(e) => {
                     tracing::warn!("Failed to start hotkey listener: {}. Use 'voxtype record' commands instead.", e);
@@ -4577,7 +4577,7 @@ impl Daemon {
         // Cleanup hotkey listener
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some(mut listener) = hotkey_listener {
-            let _ = listener.stop(); // Best effort cleanup
+            let _ = listener.stop().await; // Best effort cleanup
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let _ = hotkey_listener; // Silence unused variable warning

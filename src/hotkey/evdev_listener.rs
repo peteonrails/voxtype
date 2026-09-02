@@ -11,6 +11,7 @@
 use super::{HotkeyEvent, HotkeyListener};
 use crate::config::HotkeyConfig;
 use crate::error::HotkeyError;
+use async_trait::async_trait;
 use evdev::{Device, EventType, KeyCode as Key};
 use inotify::{Inotify, WatchMask};
 use std::collections::{HashMap, HashSet};
@@ -110,8 +111,9 @@ impl EvdevListener {
     }
 }
 
+#[async_trait]
 impl HotkeyListener for EvdevListener {
-    fn start(&mut self) -> Result<mpsc::Receiver<HotkeyEvent>, HotkeyError> {
+    async fn start(&mut self) -> Result<mpsc::Receiver<HotkeyEvent>, HotkeyError> {
         let (tx, rx) = mpsc::channel(32);
         let (stop_tx, stop_rx) = oneshot::channel();
         self.stop_signal = Some(stop_tx);
@@ -142,7 +144,7 @@ impl HotkeyListener for EvdevListener {
         Ok(rx)
     }
 
-    fn stop(&mut self) -> Result<(), HotkeyError> {
+    async fn stop(&mut self) -> Result<(), HotkeyError> {
         if let Some(stop) = self.stop_signal.take() {
             let _ = stop.send(());
         }

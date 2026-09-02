@@ -8,6 +8,7 @@
 
 use crate::config::HotkeyConfig;
 use crate::error::{HotkeyError, Result};
+use async_trait::async_trait;
 use rdev::{listen, Event, EventType, Key};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -30,12 +31,13 @@ pub enum HotkeyEvent {
 }
 
 /// Hotkey listener trait for macOS
+#[async_trait]
 pub trait HotkeyListener: Send {
     /// Start listening for hotkey events
-    fn start(&mut self) -> Result<mpsc::Receiver<HotkeyEvent>>;
+    async fn start(&mut self) -> Result<mpsc::Receiver<HotkeyEvent>>;
 
     /// Stop listening
-    fn stop(&mut self) -> Result<()>;
+    async fn stop(&mut self) -> Result<()>;
 }
 
 /// rdev-based hotkey listener for macOS
@@ -63,8 +65,9 @@ impl RdevHotkeyListener {
     }
 }
 
+#[async_trait]
 impl HotkeyListener for RdevHotkeyListener {
-    fn start(&mut self) -> Result<mpsc::Receiver<HotkeyEvent>> {
+    async fn start(&mut self) -> Result<mpsc::Receiver<HotkeyEvent>> {
         // Check/request Accessibility permission before starting the listener.
         // This triggers the macOS system dialog if permission hasn't been granted.
         if !check_accessibility_permission() {
@@ -175,7 +178,7 @@ impl HotkeyListener for RdevHotkeyListener {
         Ok(rx)
     }
 
-    fn stop(&mut self) -> Result<()> {
+    async fn stop(&mut self) -> Result<()> {
         self.running.store(false, Ordering::SeqCst);
         // Note: rdev's listen() doesn't have a clean way to stop from another thread
         // The thread will stop when the process exits or on the next event
