@@ -17,6 +17,8 @@ use std::collections::HashMap;
 pub struct TextProcessor {
     /// Whether spoken punctuation is enabled
     spoken_punctuation: bool,
+    /// Marks that take no space before them, for the active language
+    tight_punctuation: &'static [char],
     /// Custom word replacements (lowercase key → replacement value)
     replacements: HashMap<String, String>,
     /// Whether smart auto-submit is enabled
@@ -161,8 +163,13 @@ impl TextProcessor {
 
         let filler_space_re = Regex::new(r" {2,}")
             .expect("BUG: whitespace regex is a compile-time constant and must be valid");
-        let filler_punct_re = Regex::new(r" +([,.;:!?])")
-            .expect("BUG: punctuation regex is a compile-time constant and must be valid");
+        // Built from the language's tight set, not a fixed class: in French
+        // a space before ? ! : ; is correct, so removing filler must not
+        // close it up either.
+        let tight = tight_punctuation(language);
+        let filler_class: String = ",.;:!?".chars().filter(|c| tight.contains(c)).collect();
+        let filler_punct_re = Regex::new(&format!(" +([{}])", filler_class))
+            .expect("BUG: punctuation class is built from a known-safe char set");
         let filler_dup_punct_re = Regex::new(r"([,;:])(\s*[,;:])+").expect(
             "BUG: duplicate-punctuation regex is a compile-time constant and must be valid",
         );
@@ -172,6 +179,7 @@ impl TextProcessor {
 
         Self {
             spoken_punctuation: config.spoken_punctuation,
+            tight_punctuation: tight_punctuation(language),
             replacements,
             smart_auto_submit: config.smart_auto_submit,
             submit_re,
@@ -324,7 +332,7 @@ impl TextProcessor {
         }
 
         // Clean up spacing around punctuation
-        result = clean_punctuation_spacing(&result);
+        result = clean_punctuation_spacing(&result, self.tight_punctuation);
 
         result
     }
@@ -401,6 +409,20 @@ fn replace_phrase_case_insensitive(text: &str, from: &str, to: &str) -> String {
     }
 }
 
+/// Punctuation that takes no space before it, which is language-specific.
+///
+/// English closes up against `? ! : ;`. French does not: it requires a
+/// (narrow, non-breaking) space before them, so "Bonjour ! Ça va ?" is
+/// correct and stripping that space is a typographic error. Same defect
+/// class as #566 - a language-blind rule applied to every transcription.
+fn tight_punctuation(language: Option<&str>) -> &'static [char] {
+    match language.map(|l| l.split(['-', '_']).next().unwrap_or(l)) {
+        // French keeps its space before the "high" punctuation marks.
+        Some("fr") => &['.', ',', ')', ']', '}'],
+        _ => &['.', ',', '?', '!', ':', ';', ')', ']', '}'],
+    }
+}
+
 /// Sentinel-wrapped symbols. Spoken punctuation emits these so the spacing
 /// pass can tell "the user said 'dollar sign'" from "the engine wrote $25".
 /// U+E000..U+E002 are private-use, so they cannot occur in real transcription.
@@ -437,11 +459,12 @@ fn glue_attached_symbols(text: &str) -> String {
 }
 
 /// Clean up spacing around punctuation marks
-fn clean_punctuation_spacing(text: &str) -> String {
+fn clean_punctuation_spacing(text: &str, tight: &[char]) -> String {
     let mut result = text.to_string();
 
-    // Remove space before punctuation that shouldn't have it
-    for punct in ['.', ',', '?', '!', ':', ';', ')', ']', '}'] {
+    // Remove space before punctuation that shouldn't have it. Which marks
+    // those are depends on the language: see tight_punctuation.
+    for punct in tight {
         result = result.replace(&format!(" {}", punct), &punct.to_string());
     }
 
@@ -677,6 +700,34 @@ mod tests {
         );
         assert_eq!(processor.process("hash include"), "#include");
         assert_eq!(processor.process("user at sign example"), "user@example");
+    }
+
+    #[test]
+    fn french_keeps_its_space_before_high_punctuation() {
+        // French typography requires a space before ? ! : ; - stripping it
+        // is an error, the same language-blind class of bug as #566.
+        let config = TextConfig {
+            spoken_punctuation: true,
+            ..Default::default()
+        };
+        let fr = TextProcessor::new_for_language(&config, Some("fr"));
+        assert_eq!(fr.process("Bonjour ! Ça va ?"), "Bonjour ! Ça va ?");
+        assert_eq!(fr.process("Attention : c'est important"), "Attention : c'est important");
+        // A space before a full stop or comma is still wrong in French.
+        assert_eq!(fr.process("Bonjour , le monde ."), "Bonjour, le monde.");
+    }
+
+    #[test]
+    fn english_still_closes_up_high_punctuation() {
+        let config = TextConfig {
+            spoken_punctuation: true,
+            ..Default::default()
+        };
+        let en = TextProcessor::new_for_language(&config, Some("en"));
+        assert_eq!(en.process("Hello ! How are you ?"), "Hello! How are you?");
+        // And the language-agnostic constructor keeps English behaviour.
+        let any = TextProcessor::new(&config);
+        assert_eq!(any.process("Hello ! How are you ?"), "Hello! How are you?");
     }
 
     #[test]
