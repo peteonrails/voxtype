@@ -16,7 +16,7 @@
 state_file = "auto"
 
 [hotkey]
-# Built-in hotkey using evdev (Linux input subsystem)
+# Built-in hotkey listener
 #
 # Most users should leave this disabled and use compositor keybindings instead:
 #   - Hyprland: bind/bindr in hyprland.conf
@@ -24,8 +24,14 @@ state_file = "auto"
 #   - River: riverctl map / map -release
 #
 # Enable this if you're on X11, using a compositor without key-release support,
-# or prefer a dedicated key like ScrollLock. Requires 'input' group membership.
+# or prefer a dedicated key like ScrollLock. The evdev backend requires 'input'
+# group membership.
 enabled = false
+
+# Linux hotkey backend: "evdev", "portal", or "auto"
+# evdev requires access to /dev/input. portal asks the desktop to manage
+# shortcuts and requires xdg-desktop-portal 1.20 or later.
+# backend = "evdev"
 
 # Key to hold for push-to-talk (when enabled = true)
 # Common choices: SCROLLLOCK, PAUSE, RIGHTALT, F13-F24
@@ -41,12 +47,12 @@ modifiers = []
 # - toggle: Press hotkey once to start recording, press again to stop
 # mode = "push_to_talk"
 
-# Modifier key for secondary model selection (evdev only)
-# Hold this key while pressing the hotkey to use secondary_model
+# Modifier key for secondary model selection. Portal mode exposes the
+# combination as a separate desktop-managed action.
 # model_modifier = "LEFTSHIFT"
 
-# Profile modifiers for context-aware post-processing (evdev only)
-# Maps modifier keys to named profiles defined in [profiles.*] sections
+# Profile modifiers for context-aware post-processing. Portal mode exposes
+# each profile and secondary-model combination as a separate action.
 # [hotkey.profile_modifiers]
 # LEFTSHIFT = "translate"   # Shift+hotkey activates [profiles.translate]
 # RIGHTALT = "formal"       # RightAlt+hotkey activates [profiles.formal]

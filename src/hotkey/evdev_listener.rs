@@ -11,6 +11,7 @@
 use super::{HotkeyEvent, HotkeyListener};
 use crate::config::HotkeyConfig;
 use crate::error::HotkeyError;
+use async_trait::async_trait;
 use evdev::{Device, EventType, KeyCode as Key};
 use inotify::{Inotify, WatchMask};
 use std::collections::{HashMap, HashSet};
@@ -110,8 +111,9 @@ impl EvdevListener {
     }
 }
 
+#[async_trait]
 impl HotkeyListener for EvdevListener {
-    fn start(&mut self) -> Result<mpsc::Receiver<HotkeyEvent>, HotkeyError> {
+    async fn start(&mut self) -> Result<mpsc::Receiver<HotkeyEvent>, HotkeyError> {
         let (tx, rx) = mpsc::channel(32);
         let (stop_tx, stop_rx) = oneshot::channel();
         self.stop_signal = Some(stop_tx);
@@ -142,7 +144,7 @@ impl HotkeyListener for EvdevListener {
         Ok(rx)
     }
 
-    fn stop(&mut self) -> Result<(), HotkeyError> {
+    async fn stop(&mut self) -> Result<(), HotkeyError> {
         if let Some(stop) = self.stop_signal.take() {
             let _ = stop.send(());
         }
@@ -667,8 +669,13 @@ fn evdev_listener_loop(
     }
 }
 
-/// Parse a key name string to evdev Key
-fn parse_key_name(name: &str) -> Result<Key, HotkeyError> {
+/// Parse a key name string to evdev Key.
+///
+/// This is the only place that knows which names and aliases a user may write
+/// in `hotkey.key`, `hotkey.modifiers`, `hotkey.cancel_key` and the modifier
+/// maps. The portal backend translates through it as well, so both backends
+/// accept the same vocabulary.
+pub(super) fn parse_key_name(name: &str) -> Result<Key, HotkeyError> {
     let trimmed = name.trim();
 
     // Try parsing as a prefixed numeric keycode (e.g. "wev_234", "evtest_226")
@@ -704,20 +711,21 @@ fn parse_key_name(name: &str) -> Result<Key, HotkeyError> {
     // Map common key names to evdev Key variants
     let key = match key_name.as_str() {
         // Lock keys (good hotkey candidates)
-        "KEY_SCROLLLOCK" => Key::KEY_SCROLLLOCK,
+        "KEY_SCROLLLOCK" | "KEY_SCROLL_LOCK" => Key::KEY_SCROLLLOCK,
         "KEY_PAUSE" => Key::KEY_PAUSE,
-        "KEY_CAPSLOCK" => Key::KEY_CAPSLOCK,
-        "KEY_NUMLOCK" => Key::KEY_NUMLOCK,
+        "KEY_CAPSLOCK" | "KEY_CAPS_LOCK" => Key::KEY_CAPSLOCK,
+        "KEY_NUMLOCK" | "KEY_NUM_LOCK" | "KEY_NUM" => Key::KEY_NUMLOCK,
         "KEY_INSERT" => Key::KEY_INSERT,
 
-        // Modifier keys
-        "KEY_LEFTALT" | "KEY_LALT" => Key::KEY_LEFTALT,
+        // Modifier keys. The unsided aliases (ALT, CTRL, ...) name the left
+        // key, matching the existing KEY_SUPER alias.
+        "KEY_LEFTALT" | "KEY_LALT" | "KEY_ALT" => Key::KEY_LEFTALT,
         "KEY_RIGHTALT" | "KEY_RALT" => Key::KEY_RIGHTALT,
-        "KEY_LEFTCTRL" | "KEY_LCTRL" => Key::KEY_LEFTCTRL,
+        "KEY_LEFTCTRL" | "KEY_LCTRL" | "KEY_CTRL" => Key::KEY_LEFTCTRL,
         "KEY_RIGHTCTRL" | "KEY_RCTRL" => Key::KEY_RIGHTCTRL,
-        "KEY_LEFTSHIFT" | "KEY_LSHIFT" => Key::KEY_LEFTSHIFT,
+        "KEY_LEFTSHIFT" | "KEY_LSHIFT" | "KEY_SHIFT" => Key::KEY_LEFTSHIFT,
         "KEY_RIGHTSHIFT" | "KEY_RSHIFT" => Key::KEY_RIGHTSHIFT,
-        "KEY_LEFTMETA" | "KEY_LMETA" | "KEY_SUPER" => Key::KEY_LEFTMETA,
+        "KEY_LEFTMETA" | "KEY_LMETA" | "KEY_SUPER" | "KEY_META" | "KEY_LOGO" => Key::KEY_LEFTMETA,
         "KEY_RIGHTMETA" | "KEY_RMETA" => Key::KEY_RIGHTMETA,
 
         // Function keys (F13-F24 are often unused and make good hotkeys)
@@ -749,17 +757,62 @@ fn parse_key_name(name: &str) -> Result<Key, HotkeyError> {
         // Navigation keys
         "KEY_HOME" => Key::KEY_HOME,
         "KEY_END" => Key::KEY_END,
-        "KEY_PAGEUP" => Key::KEY_PAGEUP,
-        "KEY_PAGEDOWN" => Key::KEY_PAGEDOWN,
+        "KEY_PAGEUP" | "KEY_PAGE_UP" => Key::KEY_PAGEUP,
+        "KEY_PAGEDOWN" | "KEY_PAGE_DOWN" => Key::KEY_PAGEDOWN,
         "KEY_DELETE" => Key::KEY_DELETE,
+        "KEY_UP" => Key::KEY_UP,
+        "KEY_DOWN" => Key::KEY_DOWN,
+        "KEY_LEFT" => Key::KEY_LEFT,
+        "KEY_RIGHT" => Key::KEY_RIGHT,
 
         // Common keys that might be used
         "KEY_SPACE" => Key::KEY_SPACE,
-        "KEY_ENTER" => Key::KEY_ENTER,
+        "KEY_ENTER" | "KEY_RETURN" => Key::KEY_ENTER,
         "KEY_TAB" => Key::KEY_TAB,
         "KEY_BACKSPACE" => Key::KEY_BACKSPACE,
         "KEY_ESC" | "KEY_ESCAPE" => Key::KEY_ESC,
         "KEY_GRAVE" | "KEY_BACKTICK" => Key::KEY_GRAVE,
+        "KEY_MENU" => Key::KEY_MENU,
+        "KEY_SYSRQ" | "KEY_PRINT" | "KEY_PRINTSCREEN" => Key::KEY_SYSRQ,
+
+        // Letters and digits, for desktops where a modifier combination such
+        // as Super+V is the natural binding
+        "KEY_A" => Key::KEY_A,
+        "KEY_B" => Key::KEY_B,
+        "KEY_C" => Key::KEY_C,
+        "KEY_D" => Key::KEY_D,
+        "KEY_E" => Key::KEY_E,
+        "KEY_F" => Key::KEY_F,
+        "KEY_G" => Key::KEY_G,
+        "KEY_H" => Key::KEY_H,
+        "KEY_I" => Key::KEY_I,
+        "KEY_J" => Key::KEY_J,
+        "KEY_K" => Key::KEY_K,
+        "KEY_L" => Key::KEY_L,
+        "KEY_M" => Key::KEY_M,
+        "KEY_N" => Key::KEY_N,
+        "KEY_O" => Key::KEY_O,
+        "KEY_P" => Key::KEY_P,
+        "KEY_Q" => Key::KEY_Q,
+        "KEY_R" => Key::KEY_R,
+        "KEY_S" => Key::KEY_S,
+        "KEY_T" => Key::KEY_T,
+        "KEY_U" => Key::KEY_U,
+        "KEY_V" => Key::KEY_V,
+        "KEY_W" => Key::KEY_W,
+        "KEY_X" => Key::KEY_X,
+        "KEY_Y" => Key::KEY_Y,
+        "KEY_Z" => Key::KEY_Z,
+        "KEY_0" => Key::KEY_0,
+        "KEY_1" => Key::KEY_1,
+        "KEY_2" => Key::KEY_2,
+        "KEY_3" => Key::KEY_3,
+        "KEY_4" => Key::KEY_4,
+        "KEY_5" => Key::KEY_5,
+        "KEY_6" => Key::KEY_6,
+        "KEY_7" => Key::KEY_7,
+        "KEY_8" => Key::KEY_8,
+        "KEY_9" => Key::KEY_9,
 
         // Media keys
         "KEY_MUTE" => Key::KEY_MUTE,

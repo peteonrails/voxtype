@@ -17,9 +17,52 @@ pub enum ActivationMode {
     Toggle,
 }
 
+/// Backend used to receive global hotkey events on Linux.
+///
+/// `crate::cli::HOTKEY_BACKENDS` mirrors these variants for the CLI's
+/// `value_parser` and is pinned to them by a test in this file.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Deserialize,
+    Serialize,
+    PartialEq,
+    Eq,
+    Default,
+    strum::IntoStaticStr,
+    strum::Display,
+    strum::EnumIter,
+    strum::EnumString,
+)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum HotkeyBackend {
+    /// Read kernel input events from `/dev/input`.
+    #[default]
+    Evdev,
+    /// Ask XDG Desktop Portal to manage global shortcuts.
+    Portal,
+    /// Prefer XDG Desktop Portal and use evdev when the portal is unavailable.
+    Auto,
+}
+
+impl HotkeyBackend {
+    /// The name this backend is written as in the config file, on the command
+    /// line and in `VOXTYPE_HOTKEY_BACKEND`. Backed by `strum::IntoStaticStr`,
+    /// so a new variant picks up its lowercase name without a match arm.
+    pub fn name(self) -> &'static str {
+        self.into()
+    }
+}
+
 /// Hotkey detection configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HotkeyConfig {
+    /// Backend used for global hotkeys on Linux.
+    #[serde(default)]
+    pub backend: HotkeyBackend,
+
     /// Key name (evdev KEY_* constant name, without the KEY_ prefix)
     /// Examples: "SCROLLLOCK", "RIGHTALT", "PAUSE", "F24"
     #[serde(default = "default_hotkey_key")]
@@ -62,6 +105,7 @@ pub struct HotkeyConfig {
 impl Default for HotkeyConfig {
     fn default() -> Self {
         Self {
+            backend: HotkeyBackend::default(),
             key: default_hotkey_key(),
             modifiers: Vec::new(),
             mode: ActivationMode::default(),
@@ -88,6 +132,50 @@ pub(super) fn default_hotkey_key() -> String {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use strum::IntoEnumIterator;
+
+    /// Pin `crate::cli::HOTKEY_BACKENDS` to the `HotkeyBackend` variants, so a
+    /// new variant cannot be accepted by the config file while
+    /// `--hotkey-backend` rejects it.
+    #[test]
+    fn cli_hotkey_backends_lists_every_variant() {
+        let from_enum: Vec<&str> = HotkeyBackend::iter().map(HotkeyBackend::name).collect();
+
+        assert_eq!(
+            from_enum,
+            crate::cli::HOTKEY_BACKENDS,
+            "src/cli/mod.rs::HOTKEY_BACKENDS is out of sync with HotkeyBackend. \
+             Update the constant to match every variant's name() in declaration order."
+        );
+    }
+
+    #[test]
+    fn every_backend_name_parses_back_to_its_variant() {
+        for backend in HotkeyBackend::iter() {
+            assert_eq!(backend.to_string().parse(), Ok(backend));
+        }
+    }
+
+    #[test]
+    fn parse_backends() {
+        for (value, expected) in [
+            ("evdev", HotkeyBackend::Evdev),
+            ("portal", HotkeyBackend::Portal),
+            ("auto", HotkeyBackend::Auto),
+        ] {
+            let config: Config = toml::from_str(&format!("[hotkey]\nbackend = \"{value}\"\n"))
+                .expect("hotkey backend should parse");
+
+            assert_eq!(config.hotkey.backend, expected);
+        }
+    }
+
+    #[test]
+    fn backend_defaults_to_evdev() {
+        let config: Config = toml::from_str("").expect("default config should parse");
+
+        assert_eq!(config.hotkey.backend, HotkeyBackend::Evdev);
+    }
 
     #[test]
     fn test_parse_hotkey_disabled_without_key() {

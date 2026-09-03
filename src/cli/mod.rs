@@ -43,6 +43,15 @@ pub const ENGINE_NAMES_CSV: &str =
 /// this list against those arms.
 pub(crate) const DIARIZATION_BACKENDS: &[&str] = &["simple", "ml"];
 
+/// Linux hotkey backends the daemon dispatches on. Used by the CLI's
+/// `value_parser` for `--hotkey-backend` so unknown values are rejected at
+/// parse time instead of reaching `HotkeyBackend::from_str`.
+///
+/// The authoritative list is `crate::config::HotkeyBackend`, which this module
+/// cannot name for the same reason as `ENGINE_NAMES_CSV` above; a test in
+/// `src/config/hotkey.rs` pins this list against those variants.
+pub const HOTKEY_BACKENDS: &[&str] = &["evdev", "portal", "auto"];
+
 /// Values `voxtype setup --progress-format` accepts. `human` is curl's
 /// progress bar and the usual status lines; `json` emits one NDJSON event per
 /// update on stdout for a GUI to render.

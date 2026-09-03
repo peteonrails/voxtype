@@ -1,4 +1,4 @@
-//! Hotkey settings: PTT key, mode, cancel/modifier keys, evdev enable.
+//! Hotkey settings: backend, PTT key, mode, cancel/modifier keys, listener enable.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -15,11 +15,18 @@ use super::common::{
 };
 use super::compositor_bindings;
 use super::config_editor::{ConfigEditor, EditorError};
+use crate::config::HotkeyBackend;
+use strum::IntoEnumIterator;
 
 /// In-memory copy of the hotkey state, owned by `App`. Edits mutate this; `s`
 /// commits via [`ConfigEditor`] and rolls back on validation error.
 #[derive(Debug, Clone)]
 pub struct HotkeyState {
+    pub backend: Backend,
+    /// Whether `save` writes `hotkey.backend`. The shipped config leaves the
+    /// key commented out so the compiled-in default applies, and saving an
+    /// unrelated field must not pin it.
+    pub backend_is_explicit: bool,
     pub key: String,
     pub mode: Mode,
     pub enabled: bool,
@@ -44,6 +51,51 @@ pub enum Mode {
     Toggle,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Backend {
+    Known(HotkeyBackend),
+    /// A `hotkey.backend` value voxtype cannot parse. The daemon refuses to
+    /// start on one, so the form shows it as written rather than presenting it
+    /// as evdev and overwriting it on the next save.
+    Unrecognised(String),
+}
+
+impl Backend {
+    /// The string this choice is written as in the config file, or `None` for
+    /// an unparseable value read from the file.
+    fn config_value(&self) -> Option<&str> {
+        match self {
+            Self::Known(backend) => Some(backend.name()),
+            Self::Unrecognised(_) => None,
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Self::Known(HotkeyBackend::Evdev) => "evdev (/dev/input)".to_string(),
+            Self::Known(HotkeyBackend::Portal) => "XDG GlobalShortcuts portal".to_string(),
+            Self::Known(HotkeyBackend::Auto) => "portal, then evdev if unavailable".to_string(),
+            Self::Unrecognised(value) => format!("{}  (unrecognised)", value),
+        }
+    }
+
+    /// The choice `delta` steps away in `HotkeyBackend`'s declaration order,
+    /// wrapping at either end. An unrecognised value steps to the default.
+    fn cycled(&self, delta: i32) -> Self {
+        let Self::Known(current) = self else {
+            return Self::Known(HotkeyBackend::default());
+        };
+        let choices: Vec<HotkeyBackend> = HotkeyBackend::iter().collect();
+        let index = choices
+            .iter()
+            .position(|choice| choice == current)
+            .unwrap_or(0);
+        let next = (index as i32 + delta).rem_euclid(choices.len() as i32) as usize;
+
+        Self::Known(choices[next])
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Feedback {
     pub level: FeedbackLevel,
@@ -59,6 +111,7 @@ pub enum FeedbackLevel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     Enabled,
+    Backend,
     Key,
     Mode,
     CancelKey,
@@ -68,6 +121,7 @@ pub enum Field {
 impl Field {
     const ALL: &'static [Field] = &[
         Field::Enabled,
+        Field::Backend,
         Field::Key,
         Field::Mode,
         Field::CancelKey,
@@ -114,7 +168,16 @@ const MODIFIER_CHOICES: &[Option<&str>] = &[
 impl HotkeyState {
     pub fn load() -> Result<Self, EditorError> {
         let ed = ConfigEditor::load()?;
+        let backend = ed.get_string("hotkey", "backend");
         Ok(Self {
+            backend_is_explicit: backend.is_some(),
+            backend: match backend.as_deref() {
+                None => Backend::Known(HotkeyBackend::default()),
+                Some(value) => value
+                    .parse()
+                    .map(Backend::Known)
+                    .unwrap_or_else(|_| Backend::Unrecognised(value.to_string())),
+            },
             key: ed
                 .get_string("hotkey", "key")
                 .unwrap_or_else(|| "HOME".to_string()),
@@ -144,6 +207,13 @@ impl HotkeyState {
             }
         };
         ed.set_string("hotkey", "key", &self.key);
+        if self.backend_is_explicit {
+            // An unrecognised value is the only record of what the user typed,
+            // so leave it in the file for them to correct.
+            if let Some(value) = self.backend.config_value() {
+                ed.set_string("hotkey", "backend", value);
+            }
+        }
         ed.set_string(
             "hotkey",
             "mode",
@@ -269,6 +339,10 @@ impl HotkeyState {
             return;
         }
         match self.field {
+            Field::Backend => {
+                self.backend = self.backend.cycled(delta);
+                self.backend_is_explicit = true;
+            }
             Field::Key => {
                 self.key = cycle_str(KEY_CHOICES, &self.key, delta);
             }
@@ -346,9 +420,15 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let rows = vec![
         FormRowSpec::new(
             state.field == Field::Enabled,
-            "Built-in evdev listener",
+            "Built-in hotkey listener",
             if state.enabled { "enabled" } else { "disabled" },
         ),
+        FormRowSpec::new(
+            state.field == Field::Backend,
+            "Linux backend",
+            state.backend.label(),
+        )
+        .dimmed(greyout),
         FormRowSpec::new(
             state.field == Field::Key,
             "Push-to-talk key",
@@ -416,6 +496,7 @@ fn to_common_level(level: FeedbackLevel) -> CommonFeedback {
 fn guidance_for_field(state: &HotkeyState) -> Vec<Line<'_>> {
     match state.field {
         Field::Enabled => guidance_enabled(state),
+        Field::Backend => guidance_backend(state),
         Field::Key => guidance_key(state),
         Field::Mode => guidance_mode(state),
         Field::CancelKey => guidance_cancel(state),
@@ -434,12 +515,11 @@ fn heading<'a>(text: &'a str) -> Line<'a> {
 
 fn guidance_enabled<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
     let mut lines = vec![
-        heading("Built-in evdev listener"),
+        heading("Built-in hotkey listener"),
         Line::from(""),
         Line::from(
-            "When enabled, voxtype reads keyboard events directly from \
-             /dev/input/event* (your user must be in the `input` group). It \
-             owns the chosen PTT key globally — no compositor binding needed.",
+            "When enabled, voxtype starts the selected backend and receives \
+             PTT shortcut events globally. No compositor binding is needed.",
         ),
         Line::from(""),
         Line::from(
@@ -536,6 +616,53 @@ fn guidance_enabled<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
     if !state.enabled {
         lines.push(Line::from(Span::styled(
             "Compositor mode active: the rest of this section is ignored.",
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    lines
+}
+
+fn guidance_backend(state: &HotkeyState) -> Vec<Line<'_>> {
+    let mut lines = vec![heading("Linux hotkey backend"), Line::from("")];
+    match &state.backend {
+        Backend::Known(HotkeyBackend::Evdev) => {
+            lines.push(Line::from(
+                "evdev reads keyboard events from /dev/input. It works independently of the desktop but requires membership in the input group.",
+            ));
+        }
+        Backend::Known(HotkeyBackend::Portal) => {
+            lines.push(Line::from(
+                "The portal asks the desktop to own each Voxtype shortcut. The first start can open a shortcut configuration dialog.",
+            ));
+            lines.push(Line::from(""));
+            lines.push(Line::from(
+                "The key fields are preferred bindings for the first request. The desktop's assigned bindings are authoritative afterwards.",
+            ));
+        }
+        Backend::Known(HotkeyBackend::Auto) => {
+            lines.push(Line::from(
+                "Auto tries the portal first. It uses evdev when the portal or host-application registry cannot be reached, at startup or later.",
+            ));
+            lines.push(Line::from(""));
+            lines.push(Line::from(
+                "Cancellation or refusal in the desktop's shortcut dialog does not fall back to raw keyboard access.",
+            ));
+        }
+        Backend::Unrecognised(value) => {
+            lines.push(Line::from(Span::styled(
+                format!("config.toml sets backend = \"{value}\", which voxtype cannot parse. The daemon will not start until it is corrected."),
+                Style::default().fg(Color::Red),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(
+                "Press ← or → to choose a valid backend, then s to save.",
+            ));
+        }
+    }
+    if !state.enabled {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "(Ignored: the built-in listener is disabled.)",
             Style::default().fg(Color::Yellow),
         )));
     }
@@ -731,5 +858,102 @@ fn handle_edit_key(state: &mut HotkeyState, key: KeyEvent) -> Action {
             state.editing = None;
             Action::None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_with(backend: Backend) -> HotkeyState {
+        HotkeyState {
+            backend,
+            backend_is_explicit: false,
+            key: "HOME".to_string(),
+            mode: Mode::PushToTalk,
+            enabled: true,
+            cancel_key: None,
+            modifier: None,
+            feedback: None,
+            dirty_since_load: false,
+            field: Field::Backend,
+            editing: None,
+        }
+    }
+
+    fn cycled(from: Backend, delta: i32) -> Backend {
+        let mut state = state_with(from);
+        state.cycle(delta);
+        state.backend
+    }
+
+    fn known(backend: HotkeyBackend) -> Backend {
+        Backend::Known(backend)
+    }
+
+    #[test]
+    fn backend_cycles_forwards_through_every_choice() {
+        let cycle = [
+            cycled(known(HotkeyBackend::Evdev), 1),
+            cycled(known(HotkeyBackend::Portal), 1),
+            cycled(known(HotkeyBackend::Auto), 1),
+        ];
+
+        assert_eq!(
+            cycle,
+            [
+                known(HotkeyBackend::Portal),
+                known(HotkeyBackend::Auto),
+                known(HotkeyBackend::Evdev)
+            ]
+        );
+    }
+
+    #[test]
+    fn backend_cycles_backwards_through_every_choice() {
+        let cycle = [
+            cycled(known(HotkeyBackend::Portal), -1),
+            cycled(known(HotkeyBackend::Auto), -1),
+            cycled(known(HotkeyBackend::Evdev), -1),
+        ];
+
+        assert_eq!(
+            cycle,
+            [
+                known(HotkeyBackend::Evdev),
+                known(HotkeyBackend::Portal),
+                known(HotkeyBackend::Auto)
+            ]
+        );
+    }
+
+    #[test]
+    fn cycling_replaces_an_unrecognised_backend() {
+        let unrecognised = Backend::Unrecognised("protal".to_string());
+
+        let replaced = [cycled(unrecognised.clone(), 1), cycled(unrecognised, -1)];
+
+        assert_eq!(
+            replaced,
+            [known(HotkeyBackend::Evdev), known(HotkeyBackend::Evdev)]
+        );
+    }
+
+    #[test]
+    fn cycling_the_backend_makes_save_write_it() {
+        let mut state = state_with(known(HotkeyBackend::Evdev));
+        state.cycle(1);
+
+        assert!(state.backend_is_explicit);
+    }
+
+    #[test]
+    fn a_known_backend_saves_its_config_name_and_an_unrecognised_one_saves_nothing() {
+        let known_backend = known(HotkeyBackend::Portal);
+        let unrecognised = Backend::Unrecognised("protal".to_string());
+
+        let values = [known_backend.config_value(), unrecognised.config_value()];
+
+        assert_eq!(values, [Some("portal"), None]);
     }
 }

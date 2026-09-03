@@ -66,7 +66,9 @@ Hotkey (compositor/evdev) → Audio Capture (cpal) → Transcription (whisper-rs
 src/
 ├── hotkey/           # Keyboard input detection
 │   ├── mod.rs        # HotkeyListener trait, factory
-│   └── evdev_listener.rs  # Kernel-level via evdev (fallback for X11)
+│   ├── evdev_listener.rs   # Kernel-level via evdev (fallback for X11)
+│   ├── portal_listener.rs  # Desktop-managed via XDG GlobalShortcuts
+│   └── auto_listener.rs    # Portal, falling back to evdev
 ├── audio/            # Audio I/O
 │   ├── mod.rs        # AudioCapture trait, factory
 │   ├── cpal_capture.rs   # PipeWire/PulseAudio/ALSA via cpal
@@ -101,7 +103,7 @@ Each major component defines a trait allowing multiple implementations:
 
 | Trait | Implementations | Extension Point |
 |-------|----------------|-----------------|
-| `HotkeyListener` | `EvdevListener` | Add libinput, compositor-specific listeners |
+| `HotkeyListener` | `EvdevListener`, `PortalListener`, `AutoListener` | Add libinput, compositor-specific listeners |
 | `AudioCapture` | `CpalCapture` | Add JACK, direct ALSA support |
 | `Transcriber` | `WhisperTranscriber`, `RemoteTranscriber`, `SubprocessTranscriber` | Add new ASR backends |
 | `TextOutput` | `WtypeOutput`, `DotoolOutput`, `YdotoolOutput`, `ClipboardOutput` | Add X11, compositor-specific output |
@@ -127,6 +129,8 @@ Understanding why things are built a certain way helps you extend them correctly
 **Preferred:** Compositor keybindings (Hyprland, Sway, River) - native integration, no special permissions needed. Voxtype provides `voxtype record start/stop/toggle` commands for compositor bindings to call.
 
 **Fallback:** evdev listener - works on X11 and as a universal fallback. Requires user to be in `input` group.
+
+**Also available:** the XDG GlobalShortcuts portal (`[hotkey] backend = "portal"` or `"auto"`), where the desktop owns the bindings and voxtype needs no access to `/dev/input`. Requires xdg-desktop-portal 1.20 or later and a backend that implements GlobalShortcuts.
 
 Set `[hotkey] enabled = false` when using compositor keybindings.
 

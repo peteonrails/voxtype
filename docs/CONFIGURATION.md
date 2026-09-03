@@ -88,13 +88,95 @@ new engine to take effect.
 
 Controls which key triggers push-to-talk recording.
 
+### backend
+
+**Type:** String
+**Default:** `"evdev"`
+**Required:** No
+
+Selects the built-in hotkey backend on Linux:
+
+- `evdev` reads kernel input events from `/dev/input`. It works independently of
+  desktop support but requires access to the input devices.
+- `portal` uses the [XDG GlobalShortcuts portal][global-shortcuts]. The desktop
+  owns the bindings, so Voxtype does not need access to `/dev/input`.
+- `auto` tries the portal first and falls back to evdev when the portal or the
+  host-application registry cannot be reached, whether at startup or later.
+
+Portal mode requires xdg-desktop-portal 1.20 or later. Voxtype registers the
+host application ID `io.voxtype.Voxtype`, which must match the installed
+`io.voxtype.Voxtype.desktop` file as required by the [host registry][registry].
+Other portal backends might not implement GlobalShortcuts; use `voxtype setup
+check` to inspect the current desktop.
+
+Backends differ in how they report a shortcut. KDE, GNOME 48 and Hyprland all
+send both activation and deactivation, so push-to-talk records for as long as
+the key is held. GNOME additionally sends an activation for every keyboard
+auto-repeat while the key is held. Voxtype therefore ignores an activation that
+follows another activation of the same shortcut within 600 ms when no
+deactivation arrived in between. The window exceeds GNOME's 500 ms repeat
+delay, so a held key produces one recording rather than a series of very short
+ones. A deactivation resets the window, so pressing again straight after a
+release registers however quickly it follows. Push-to-talk needs the
+deactivation, so `mode = "toggle"` is the safer choice on a backend whose
+behaviour you have not checked.
+
+Each session calls `ListShortcuts` first and calls `BindShortcuts` only when the
+desktop does not already hold every action Voxtype needs. `BindShortcuts` can
+open a desktop-owned configuration dialog, so an installation whose actions are
+unchanged is not prompted again at each login. Adding a profile or a
+`model_modifier` adds an action and does prompt again.
+
+If the user cancels or refuses a binding request, `portal` and `auto` leave the
+built-in listener inactive and send a desktop notification. `auto` does not
+switch to evdev after a binding request, because that would bypass the user's
+decision. It does switch to evdev when the portal or the host-application
+registry cannot be reached at all, including when the portal disappears while
+the daemon is running.
+
+When the portal is unreachable, `portal` keeps retrying with a delay that
+doubles up to one minute. A daemon that starts before the portal at login
+therefore binds its shortcuts once the portal appears.
+
+```toml
+[hotkey]
+backend = "portal"
+enabled = true
+```
+
+The `key`, `modifiers`, `model_modifier` and `profile_modifiers` settings
+provide preferred bindings on the first request. The desktop's saved bindings
+are authoritative after that request. Voxtype creates separate portal actions
+for the default model, the secondary model, every configured profile, every
+secondary-model/profile combination, and cancellation.
+
+Both backends accept the same key names, including the `WEV_*` and `EVTEST_*`
+numeric keycodes. A key that has no equivalent XDG keysym, such as a vendor key
+outside the standard set, is logged and left for the desktop to assign.
+
+A profile's action ID is derived from the profile name alone, so changing which
+modifier selects a profile keeps the binding the desktop already holds. Two
+modifiers mapped to the same profile produce one action, and the second is
+ignored with a warning.
+
+The command-line override is `--hotkey-backend`, and the corresponding
+environment variable is `VOXTYPE_HOTKEY_BACKEND`. The command line rejects an
+unrecognised value outright. An unrecognised environment value is logged and
+the configured backend is kept, so a stale variable cannot stop every command
+from running.
+
+[global-shortcuts]: https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.GlobalShortcuts.html
+[registry]: https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.host.portal.Registry.html
+
 ### key
 
 **Type:** String
 **Default:** `"SCROLLLOCK"`
 **Required:** No
 
-The main key to hold for recording. Must be a valid Linux evdev key name.
+The main key to hold for recording. In evdev mode, it must be a valid Linux
+evdev key name. In portal mode, it supplies the preferred trigger for the
+desktop's first binding request.
 
 **Common values:**
 - `SCROLLLOCK` - Scroll Lock key (recommended)
@@ -185,12 +267,14 @@ mode = "toggle"  # Press to start, press again to stop
 
 Enable or disable the built-in hotkey detection.
 
-When set to `false`, voxtype will not listen for keyboard events via evdev. Instead, use the `voxtype record` command to control recording from external sources like compositor keybindings.
+When set to `false`, voxtype does not start the selected hotkey backend. Use the
+`voxtype record` command to control recording from external sources such as
+compositor keybindings.
 
 **When to disable:**
 - You prefer using your compositor's native keybindings (Hyprland, Sway)
-- You don't want to add your user to the `input` group
-- You want to use key combinations not supported by evdev (e.g., Super+V)
+- You do not want Voxtype to own a global shortcut
+- You want the compositor configuration to remain the source of the binding
 
 **Example:**
 ```toml
@@ -256,7 +340,9 @@ secondary_model = "large-v3-turbo"
 - `LEFTALT`, `RIGHTALT`
 - `LEFTMETA`, `RIGHTMETA`
 
-**Note:** This only applies when using evdev hotkey detection (`enabled = true`). When using compositor keybindings, use `voxtype record start --model <model>` instead.
+In portal mode, Voxtype creates a separate action for the secondary model and
+supplies this combination as its preferred binding. When using compositor
+keybindings, use `voxtype record start --model <model>` instead.
 
 ### cancel_key
 
@@ -273,14 +359,25 @@ key = "SCROLLLOCK"
 cancel_key = "ESC"  # Press Escape to cancel
 ```
 
-**Valid key names:** Same as the `key` option - any valid Linux evdev key name.
+**Valid key names:** The same as the `key` option.
 
 **Common cancel keys:**
 - `ESC` - Escape key
 - `BACKSPACE` - Backspace key
 - `F12` - Function key
 
-**Note:** This only applies when using evdev hotkey detection (`enabled = true`). When using compositor keybindings, use `voxtype record cancel` instead. See [User Manual - Canceling Transcription](USER_MANUAL.md#canceling-transcription).
+In evdev mode voxtype reads the cancel key passively, so the key keeps working
+in other applications.
+
+Portal mode exposes cancellation as a separate action, but sends no preferred
+trigger for it, so setting `cancel_key` in portal mode only decides whether the
+action exists. Assign the key in the desktop's shortcut settings. Choose a
+combination rather than a bare key: the desktop grabs a global shortcut
+exclusively, so binding Escape on its own takes Escape away from every other
+application for as long as voxtype runs.
+
+When using compositor keybindings, use `voxtype record cancel` instead. See
+[User Manual - Canceling Transcription](USER_MANUAL.md#canceling-transcription).
 
 ### [hotkey.profile_modifiers]
 
@@ -313,7 +410,11 @@ post_process_command = "my-script.sh --formal"
 - `LEFTALT`, `RIGHTALT`
 - `LEFTMETA`, `RIGHTMETA`
 
-**Note:** This only applies when using evdev hotkey detection (`enabled = true`). When using compositor keybindings, use `voxtype record start --profile <name>` instead. Avoid using the same key in both `modifiers` and `profile_modifiers` -- every hotkey press would always activate that profile.
+Portal mode exposes each profile, and each secondary-model/profile combination,
+as a separate action. When using compositor keybindings, use `voxtype record
+start --profile <name>` instead. Avoid using the same key in both `modifiers`
+and `profile_modifiers`: every evdev hotkey press would always activate that
+profile, and the portal preferences would contain duplicate triggers.
 
 ---
 
@@ -3521,6 +3622,7 @@ Any config file setting can be overridden via environment variable. These are ap
 | Variable | Type | Config equivalent |
 |----------|------|-------------------|
 | `VOXTYPE_HOTKEY` | string | `hotkey.key` |
+| `VOXTYPE_HOTKEY_BACKEND` | `evdev`, `portal`, or `auto` | `hotkey.backend` |
 | `VOXTYPE_HOTKEY_ENABLED` | bool | `hotkey.enabled` |
 | `VOXTYPE_CANCEL_KEY` | string | `hotkey.cancel_key` |
 

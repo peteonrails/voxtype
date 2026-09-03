@@ -979,19 +979,46 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
         }
     }
 
-    // Check input group
-    println!("\nInput:");
-    if user_in_group("input") {
-        print_success(
-            "User is in 'input' group (evdev hotkeys + modifier-release guard available)",
-        );
-    } else {
-        print_warning("User is not in 'input' group");
-        println!("       evdev hotkeys: unavailable");
-        println!("       Modifier-release guard: unavailable");
-        println!("         (typed text may trigger keybindings if the hotkey is released late)");
-        println!("       Required only for evdev hotkey mode, not compositor keybindings");
-        println!("       To enable: sudo usermod -aG input $USER && logout");
+    #[cfg(target_os = "linux")]
+    {
+        use crate::config::HotkeyBackend;
+
+        println!("\nInput:");
+        let backend = config.hotkey.backend;
+        let listener_enabled = config.hotkey.enabled;
+        let guard_enabled = config.output.wait_for_modifier_release;
+        // Auto tolerates an unavailable portal by design, and a disabled
+        // listener uses neither backend, so neither case is a failure.
+        let portal_report = match (listener_enabled, backend) {
+            (false, _) => Report::Warning,
+            (true, HotkeyBackend::Auto) => Report::Info,
+            (true, _) => Report::Failure,
+        };
+
+        match backend {
+            HotkeyBackend::Evdev => {
+                check_input_group(true, guard_enabled);
+            }
+            HotkeyBackend::Portal => {
+                let portal_available = check_portal_hotkeys(portal_report).await;
+                if guard_enabled {
+                    check_input_group(false, true);
+                }
+                if !portal_available && listener_enabled {
+                    all_ok = false;
+                }
+            }
+            HotkeyBackend::Auto => {
+                let portal_available = check_portal_hotkeys(portal_report).await;
+                let evdev_available = check_input_group(true, guard_enabled);
+                if !portal_available && !evdev_available && listener_enabled {
+                    print_failure(
+                        "No hotkey backend is available: the portal is unusable and /dev/input is not readable",
+                    );
+                    all_ok = false;
+                }
+            }
+        }
     }
 
     // Check output chain
@@ -1195,9 +1222,138 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// How `setup check` reports a hotkey backend it cannot use.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+enum Report {
+    Failure,
+    Warning,
+    Info,
+}
+
+#[cfg(target_os = "linux")]
+fn report(level: Report, message: &str) {
+    match level {
+        Report::Failure => print_failure(message),
+        Report::Warning => print_warning(message),
+        Report::Info => print_info(message),
+    }
+}
+
+/// Reports `input` group membership, naming the features that depend on it.
+///
+/// The modifier-release guard reads `/dev/input` whatever the hotkey backend
+/// is, so this runs for the portal backend too whenever the guard is on.
+#[cfg(target_os = "linux")]
+fn check_input_group(evdev_hotkeys: bool, modifier_guard: bool) -> bool {
+    if user_in_group("input") {
+        print_success(&input_group_success(evdev_hotkeys, modifier_guard));
+        return true;
+    }
+
+    print_warning("User is not in 'input' group");
+    if evdev_hotkeys {
+        println!("       evdev hotkeys: unavailable");
+    }
+    if modifier_guard {
+        println!("       Modifier-release guard: unavailable");
+        println!("         (typed text may trigger keybindings if the hotkey is released late)");
+    }
+    println!("       To enable: sudo usermod -aG input $USER && logout");
+    false
+}
+
+/// The success line for `input` group membership, naming only the features
+/// the configured backend and output settings use.
+#[cfg(target_os = "linux")]
+fn input_group_success(evdev_hotkeys: bool, modifier_guard: bool) -> String {
+    let features = match (evdev_hotkeys, modifier_guard) {
+        (true, true) => " (evdev hotkeys + modifier-release guard available)",
+        (true, false) => " (evdev hotkeys available)",
+        (false, true) => " (modifier-release guard available)",
+        (false, false) => "",
+    };
+
+    format!("User is in 'input' group{features}")
+}
+
+#[cfg(target_os = "linux")]
+async fn check_portal_hotkeys(level: Report) -> bool {
+    match crate::hotkey::portal_listener::desktop_entry_path() {
+        Some(path) => {
+            print_success(&format!("Portal application identity: {}", path.display()));
+            // AppRun puts the image's share directory on XDG_DATA_DIRS, so the
+            // lookup can succeed on a host that has no copy of its own.
+            if let Some(appdir) = std::env::var_os("APPDIR") {
+                if path.starts_with(&appdir) {
+                    print_info("That copy is inside the AppImage; install one in");
+                    println!("       ~/.local/share/applications so the desktop can resolve");
+                    println!("       io.voxtype.Voxtype for its shortcut dialog");
+                }
+            }
+        }
+        None => {
+            report(level, "Portal application identity is not installed");
+            println!("       Expected io.voxtype.Voxtype.desktop in an XDG applications directory");
+            if std::env::var_os("APPDIR").is_some() {
+                println!("       Running from an AppImage: copy io.voxtype.Voxtype.desktop from");
+                println!("       the image into ~/.local/share/applications, because the desktop");
+                println!("       resolves the application ID from the host's directories");
+            }
+            return false;
+        }
+    }
+
+    match crate::hotkey::portal_listener::portal_versions().await {
+        Ok((registry, shortcuts)) if registry >= 1 && shortcuts >= 1 => {
+            print_success(&format!(
+                "XDG portal host registry v{registry}, GlobalShortcuts v{shortcuts}"
+            ));
+            true
+        }
+        Ok((registry, shortcuts)) => {
+            report(
+                level,
+                &format!(
+                    "Unsupported XDG portal interfaces: host registry v{registry}, GlobalShortcuts v{shortcuts}"
+                ),
+            );
+            false
+        }
+        Err(error) => {
+            report(level, &format!("XDG GlobalShortcuts portal: {error}"));
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn input_group_success_names_only_the_features_in_use() {
+        let cases = [
+            (
+                (true, true),
+                "User is in 'input' group (evdev hotkeys + modifier-release guard available)",
+            ),
+            (
+                (true, false),
+                "User is in 'input' group (evdev hotkeys available)",
+            ),
+            (
+                (false, true),
+                "User is in 'input' group (modifier-release guard available)",
+            ),
+            ((false, false), "User is in 'input' group"),
+        ];
+
+        for ((evdev_hotkeys, modifier_guard), expected) in cases {
+            assert_eq!(input_group_success(evdev_hotkeys, modifier_guard), expected);
+        }
+    }
 
     /// `small` is in both the Whisper and SenseVoice tables. Whisper has to
     /// win, or `setup --download --model small` can never fetch Whisper small.

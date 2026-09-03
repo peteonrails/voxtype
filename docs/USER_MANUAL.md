@@ -546,6 +546,22 @@ unaffected.
 
 ## Hotkeys
 
+On Linux, `[hotkey] backend` selects `evdev`, `portal`, or `auto`. The default
+remains `evdev`. Portal mode asks the desktop's XDG GlobalShortcuts service to
+own the bindings and does not require access to `/dev/input`. It requires
+xdg-desktop-portal 1.20 or later and an installed
+`io.voxtype.Voxtype.desktop` file. Run `voxtype setup check` to verify both the
+application identity and the portal interfaces.
+
+The desktop can show a shortcut configuration dialog when Voxtype first binds
+its actions. The configured key and modifiers are preferences for that request;
+the bindings saved by the desktop are authoritative. Later starts list the
+desktop's existing shortcuts and only bind again when an action is missing, so
+the dialog does not reappear at every login. Voxtype exposes separate actions
+for secondary models and profiles rather than trying to inspect held keys after
+a portal activation. See [Configuration - backend](CONFIGURATION.md#backend) for
+the complete behaviour and fallback rules.
+
 ### Supported Keys
 
 Any key supported by the Linux evdev system can be used as a hotkey:
@@ -744,6 +760,7 @@ voxtype record toggle
 | Approach | Pros | Cons |
 |----------|------|------|
 | Built-in hotkey (evdev) | Universal, no config needed | Requires `input` group |
+| XDG GlobalShortcuts portal | Desktop-owned bindings, no `input` group | Requires portal backend support |
 | Compositor keybindings | Native feel, no `input` group | Compositor-specific config |
 
 ### Modifier Key Issues

@@ -3,7 +3,7 @@ _voxtype() {
     _init_completion || return
 
     local commands="daemon transcribe setup config help"
-    local global_opts="-c --config -v --verbose -q --quiet --clipboard --model --hotkey -h --help -V --version"
+    local global_opts="-c --config -v --verbose -q --quiet --clipboard --model --hotkey --hotkey-backend -h --help -V --version"
 
     case $prev in
         -c|--config)
@@ -16,6 +16,10 @@ _voxtype() {
             ;;
         --hotkey)
             COMPREPLY=($(compgen -W "SCROLLLOCK PAUSE RIGHTALT F13 F14 F15 F16 F17 F18 F19 F20 F21 F22 F23 F24" -- "$cur"))
+            return
+            ;;
+        --hotkey-backend)
+            COMPREPLY=($(compgen -W "evdev portal auto" -- "$cur"))
             return
             ;;
         transcribe)

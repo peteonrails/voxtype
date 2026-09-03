@@ -1,6 +1,7 @@
 use super::parse::parse_config_with_defaults;
 use super::{
-    Config, LanguageConfig, OpenVinoConfig, OutputMode, SonioxConfig, TranscriptionEngine,
+    Config, HotkeyBackend, LanguageConfig, OpenVinoConfig, OutputMode, SonioxConfig,
+    TranscriptionEngine,
 };
 use crate::error::VoxtypeError;
 use std::path::{Path, PathBuf};
@@ -47,6 +48,12 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     // Hotkey
     if let Ok(key) = std::env::var("VOXTYPE_HOTKEY") {
         config.hotkey.key = key;
+    }
+    if let Ok(backend) = std::env::var("VOXTYPE_HOTKEY_BACKEND") {
+        match backend.parse::<HotkeyBackend>() {
+            Ok(b) => config.hotkey.backend = b,
+            Err(_) => tracing::warn!("Unknown VOXTYPE_HOTKEY_BACKEND value: {}", backend),
+        }
     }
     if let Ok(val) = std::env::var("VOXTYPE_HOTKEY_ENABLED") {
         config.hotkey.enabled = parse_bool_env(&val);

@@ -44,6 +44,51 @@ pub enum HotkeyError {
 
     #[error("evdev error: {0}")]
     Evdev(String),
+
+    #[cfg(target_os = "linux")]
+    #[error("XDG Desktop Portal is unavailable: {0}\n  Portal hotkeys need xdg-desktop-portal 1.20 or later running, or set [hotkey] backend = \"evdev\".\n  Run: voxtype setup check")]
+    PortalUnavailable(#[source] zbus::Error),
+
+    #[cfg(target_os = "linux")]
+    #[error("XDG Desktop Portal could not register Voxtype: {0}\n  The desktop needs io.voxtype.Voxtype.desktop in an XDG applications directory.\n  Run: voxtype setup check")]
+    PortalRegistration(#[source] zbus::Error),
+
+    #[cfg(target_os = "linux")]
+    #[error("XDG GlobalShortcuts could not bind Voxtype's shortcuts: {0}\n  Check the desktop's global shortcut settings for Voxtype, or set [hotkey] backend = \"evdev\".")]
+    PortalBinding(#[source] zbus::Error),
+
+    #[cfg(target_os = "linux")]
+    #[error("XDG GlobalShortcuts returned an invalid response: {0}\n  This desktop's portal backend may not implement GlobalShortcuts.\n  Set [hotkey] backend = \"evdev\" to read /dev/input instead.")]
+    PortalProtocol(String),
+
+    #[cfg(target_os = "linux")]
+    #[error("Global shortcut registration was cancelled\n  Accept the desktop's shortcut dialog so Voxtype can bind its shortcuts, or set [hotkey] backend = \"evdev\".")]
+    PortalCancelled,
+
+    #[cfg(target_os = "linux")]
+    #[error("Global shortcut registration failed with response code {0}\n  Check the desktop's global shortcut settings for Voxtype, then restart the daemon.")]
+    PortalResponse(u32),
+
+    #[cfg(target_os = "linux")]
+    #[error("The desktop did not bind the required '{0}' shortcut\n  Assign it in the desktop's global shortcut settings, or set [hotkey] backend = \"evdev\".")]
+    PortalMissingRequired(String),
+}
+
+#[cfg(target_os = "linux")]
+impl HotkeyError {
+    pub(crate) fn allows_evdev_fallback(&self) -> bool {
+        matches!(
+            self,
+            Self::PortalUnavailable(_) | Self::PortalRegistration(_)
+        )
+    }
+
+    pub(crate) fn allows_portal_retry(&self) -> bool {
+        matches!(
+            self,
+            Self::PortalUnavailable(_) | Self::PortalRegistration(_) | Self::PortalBinding(_)
+        )
+    }
 }
 
 /// Errors related to audio capture

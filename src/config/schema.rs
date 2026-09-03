@@ -213,6 +213,9 @@ const COHERE_LANG_CHOICES: &[&str] = &[
 const OPENVINO_DEVICE_CHOICES: &[&str] = &["NPU", "GPU", "CPU", "AUTO"];
 const PARAKEET_MODEL_TYPE_CHOICES: &[&str] = &["tdt", "ctc"];
 
+/// Mirrors [`crate::cli::HOTKEY_BACKENDS`], which a test in
+/// `src/config/hotkey.rs` pins to the `HotkeyBackend` variants.
+const HOTKEY_BACKEND_CHOICES: &[&str] = crate::cli::HOTKEY_BACKENDS;
 const HOTKEY_MODE_CHOICES: &[&str] = &["push_to_talk", "toggle"];
 const HOTKEY_KEY_CHOICES: &[&str] = &[
     "HOME",
@@ -761,7 +764,16 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Bool,
         "Hotkey",
         "Built-in hotkey listener",
-        "Watch the keyboard via evdev. Turn this off when your compositor calls `voxtype record` instead.",
+        "Start the selected hotkey backend. Turn this off when your compositor calls `voxtype record` instead.",
+    ),
+    spec(
+        "hotkey.backend",
+        "hotkey",
+        "backend",
+        closed(HOTKEY_BACKEND_CHOICES),
+        "Hotkey",
+        "Linux backend",
+        "evdev reads /dev/input; portal asks the desktop to manage shortcuts; auto prefers the portal and falls back to evdev.",
     ),
     spec(
         "hotkey.key",
@@ -1719,6 +1731,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "openvino.streaming" => json!(ov().streaming),
 
         "hotkey.enabled" => json!(cfg.hotkey.enabled),
+        "hotkey.backend" => json!(cfg.hotkey.backend.name()),
         "hotkey.key" => json!(cfg.hotkey.key),
         "hotkey.mode" => json!(match cfg.hotkey.mode {
             ActivationMode::PushToTalk => "push_to_talk",

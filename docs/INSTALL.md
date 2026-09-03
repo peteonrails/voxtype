@@ -55,7 +55,7 @@ Older distros (Ubuntu 22.04, Debian Bookworm, Fedora 39) can [build from source]
 | Component | Required? | Purpose |
 |-----------|-----------|---------|
 | PipeWire (with `pipewire-alsa`) or PulseAudio | Yes | Audio capture |
-| `input` group membership | Yes (for evdev hotkeys) | Detecting hotkeys outside the compositor |
+| `input` group membership | For the evdev hotkey backend | Detecting hotkeys outside the compositor. Not needed with `[hotkey] backend = "portal"` |
 | `wtype` | Recommended (Wayland) | Best Unicode/CJK typing support |
 | `dotool` | Recommended (KDE/GNOME Wayland) | Typing on compositors that don't speak the virtual-keyboard protocol |
 | `ydotool` | Fallback (X11/TTY) | Requires a daemon |
@@ -306,7 +306,10 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release
 
 ### 1. Add yourself to the input group
 
-For kernel-level hotkey detection via evdev:
+For kernel-level hotkey detection via evdev. Skip this step if you use
+compositor keybindings, or the portal backend (`[hotkey] backend = "portal"`),
+which needs xdg-desktop-portal 1.20 or later and a desktop that implements
+GlobalShortcuts, such as KDE, GNOME 48 or Hyprland.
 
 ```bash
 sudo usermod -aG input $USER
@@ -390,7 +393,7 @@ riverctl map -release normal Super V spawn 'voxtype record stop'
 
 KDE Plasma: System Settings → Shortcuts → Custom Shortcuts. See [USER_MANUAL.md](USER_MANUAL.md#kde-plasma) for the full walkthrough.
 
-GNOME / X11 / other: leave evdev enabled (`[hotkey] enabled = true`) and use the configured key.
+GNOME / X11 / other: leave the built-in hotkey enabled (`[hotkey] enabled = true`) and use the configured key. On GNOME 48 or later, `backend = "portal"` lets GNOME own the shortcut without the `input` group. See [CONFIGURATION.md](CONFIGURATION.md#backend).
 
 ---
 
@@ -434,7 +437,7 @@ voxtype setup
 
 Checks:
 
-- [x] User in `input` group (if evdev hotkey is enabled)
+- [x] User in `input` group (if the evdev hotkey backend is enabled)
 - [x] Audio source accessible
 - [x] Typing backend present (`wtype` / `dotool` / `ydotool` / clipboard)
 - [x] Whisper model downloaded

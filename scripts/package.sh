@@ -373,7 +373,7 @@ fi
 # Create staging directory using mktemp for portability
 STAGING="$(mktemp -d "${TMPDIR:-/tmp}/voxtype-package.XXXXXX")"
 trap 'rm -rf "$STAGING"' EXIT
-mkdir -p "$STAGING"/{usr/bin,usr/lib/voxtype,etc/voxtype,usr/lib/systemd/user,usr/share/doc/voxtype}
+mkdir -p "$STAGING"/{usr/bin,usr/lib/voxtype,etc/voxtype,usr/lib/systemd/user,usr/share/doc/voxtype,usr/share/applications}
 mkdir -p "$STAGING"/usr/share/{bash-completion/completions,zsh/site-functions,fish/vendor_completions.d}
 
 # Copy binaries to /usr/lib/voxtype/
@@ -497,6 +497,7 @@ install_companion_binary audio-bridge "$STAGING/usr/bin/voxtype-audio-bridge"
 
 cp config/default.toml "$STAGING/etc/voxtype/config.toml"
 cp packaging/systemd/voxtype.service "$STAGING/usr/lib/systemd/user/"
+cp packaging/io.voxtype.Voxtype.desktop "$STAGING/usr/share/applications/"
 cp README.md "$STAGING/usr/share/doc/voxtype/"
 cp LICENSE "$STAGING/usr/share/doc/voxtype/"
 
