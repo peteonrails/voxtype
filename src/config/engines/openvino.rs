@@ -75,8 +75,12 @@ pub struct OpenVinoConfig {
     pub streaming_type_partials: bool,
 
     /// DEPRECATED, see `streaming_interval_secs`.
-    #[serde(default)]
+    #[serde(default = "default_streaming_revision_mode")]
     pub streaming_revision_mode: bool,
+}
+
+fn default_streaming_revision_mode() -> bool {
+    true
 }
 
 fn default_streaming_interval_secs() -> f32 {
@@ -129,7 +133,7 @@ impl Default for OpenVinoConfig {
             streaming_min_audio_secs: default_streaming_min_audio_secs(),
             streaming_partial_min_words: default_streaming_partial_min_words(),
             streaming_type_partials: default_streaming_type_partials(),
-            streaming_revision_mode: false,
+            streaming_revision_mode: default_streaming_revision_mode(),
         }
     }
 }

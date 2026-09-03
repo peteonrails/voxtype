@@ -8,74 +8,68 @@
 //! inference is fast relative to speech, this gives the model full acoustic
 //! context on every pass.
 //!
-//! New text is extracted by diffing successive transcriptions against the
-//! already-committed text, and only the stable tail delta is emitted. The
-//! daemon appends each emitted delta at the cursor, so **events must always
-//! be deltas** — never cumulative transcripts (or the cursor receives
-//! duplicates). The stable-prefix commit policy below guarantees this.
+//! New text is extracted by aligning the fresh transcription against the
+//! already-committed text and taking everything beyond where they diverge.
+//! The daemon appends each emitted delta at the cursor, so **events must
+//! always be deltas** — never cumulative transcripts (or the cursor receives
+//! duplicates).
 //!
-//! ## Commit policy
+//! ## Commit policy (`revision_mode` config, default true)
 //!
-//! - **Growing mode** (buffer shorter than `max_buffer_seconds`): commit
-//!   the common-prefix words between the previous and current Whisper
-//!   outputs, gated by `partial_min_words`, advancing `confirmed_words` so
-//!   each emission is strictly-new stable text.
-//! - **Sliding mode** (buffer trimmed once it wraps): diff the whole
-//!   Whisper output against the already-emitted text and commit only the
-//!   common prefix of the current delta vs. the previous delta — a tail
-//!   word is only committed once stable across two consecutive passes.
+//! - **Type-then-correct (default)** — the whole best-guess tail is typed
+//!   immediately as `provisional_words` and reconciled every tick against
+//!   the freshly re-transcribed one:
+//!   - If the fresh tail still agrees with everything currently displayed,
+//!     whatever's new beyond it is appended (a plain `Partial`/`Final`).
+//!   - If the fresh tail disagrees partway through what's displayed, the
+//!     wrong suffix is backspaced (character-exact, accounting for the
+//!     inter-word space) and the corrected text retyped — a
+//!     [`StreamingEvent::Replace`], the same mechanism Soniox already uses
+//!     for punctuation-flip revisions. Divergence is punctuation-sensitive,
+//!     so a word that only changed its trailing punctuation (e.g. "it." →
+//!     "it?") is fixed with a minimal backspace from the stale punct char.
+//!   - **Question-mark reconciliation** — when the tail's last word gains a
+//!     "?", a stale "?" within `question_mark_lookback_words` behind it is
+//!     dropped, so a still-open question keeps exactly one "?" and it lands
+//!     on the true end: "what time is it? tomorrow afternoon?" → "what time
+//!     is it tomorrow afternoon?".
+//!   - A word only stays revisable for `revision_lag_words` words' worth of
+//!     further growth behind it, and only once it has been stable for
+//!     `stability_passes` ticks; beyond both it's promoted into
+//!     permanently-confirmed text and never revised again, bounding how far
+//!     back a correction can ever reach. A single flickering word never
+//!     stalls the tail — it's corrected every tick instead.
+//! - **Conservative gate (legacy opt-in, `revision_mode = false`)** — the
+//!   tail is withheld until each word has been present for `stability_passes`
+//!   ticks; only the stable prefix is typed, and it's committed immediately.
+//!   No visible corrections, at the cost of ~`stability_passes` ticks of
+//!   latency. Gated per-word, so one unstable word no longer blocks the
+//!   whole tail.
 //!
 //! The engine wraps any batch [`Transcriber`] (whisper.cpp, OpenVINO GenAI,
 //! …), so the same code powers every streaming backend.
 //!
-//! ## Known limitation: stability gating can stall on one unstable word
-//!
-//! The two-consecutive-pass stability check (both modes) requires the
-//! *entire* unconfirmed tail to match between passes before committing any
-//! of it — not just the specific word(s) still in flux. If Whisper keeps
-//! re-wording one short stretch differently on every single tick (found
-//! live: a phrase flickered between "Still said, okay." / "Still doesn't,
-//! okay." / "Still so okay." for 18+ consecutive seconds), nothing after
-//! that point can commit either, even though the rest of the tail is
-//! already well-formed. This isn't data loss — `final_flush` still catches
-//! it all at end-of-recording — but it can look like the transcript has
-//! stopped responding for an uncomfortably long stretch while the
-//! recording keeps running. Properly fixing this means gating stability
-//! per-word (or per-stable-run) instead of on the whole remaining delta;
-//! that's a real design change, not a quick patch, and hasn't been done.
-//!
-//! ## Revision mode (experimental, `revision_mode` config flag)
-//!
-//! An alternative to the conservative gate above, opt-in and off by
-//! default. Instead of withholding the whole unconfirmed tail until it's
-//! stable, revision mode types the current best-guess tail immediately as
-//! `provisional_words` and reconciles it every tick against the freshly
-//! re-transcribed one:
-//!
-//! - If the fresh tail still agrees with everything currently displayed,
-//!   whatever's new beyond it is appended (a plain `Partial`/`Final`, same
-//!   as today).
-//! - If the fresh tail disagrees partway through what's displayed, the
-//!   wrong suffix is backspaced (character-exact, accounting for the
-//!   inter-word space) and the corrected text retyped — a
-//!   [`StreamingEvent::Replace`], the same mechanism Soniox already uses
-//!   for punctuation-flip revisions.
-//! - A word only stays revisable for `REVISION_LAG_WORDS` ticks' worth of
-//!   further growth behind it; once that much newer content has appeared,
-//!   it's promoted into permanently-confirmed text (folded into
-//!   `full_text_parts`) and will never be revised again, bounding how far
-//!   back a correction can ever reach.
-//!
-//! This trades the "occasionally pauses, never wrong" property of the
-//! default gate for "more responsive, occasionally visibly
+//! Type-then-correct trades the "occasionally pauses, never wrong" property
+//! of the conservative gate for "more responsive, occasionally visibly
 //! backspaces-and-retypes." That's a materially different (and riskier)
-//! failure mode for the live-typing case specifically: a wrong backspace
-//! count doesn't just look bad, it can delete characters that were never
-//! ours to begin with if bookkeeping ever drifts (moved focus, a backend
-//! with no backspace primitive, ...) — see `replace_and_commit`'s own
-//! defensive handling of that in `output/streaming.rs`. File-output
-//! sessions have no such risk (`replace_and_commit_silent` just edits an
-//! in-memory string), which is the safer place to try this first.
+//! failure mode for the live-typing case: a wrong backspace count doesn't
+//! just look bad, it can delete characters that were never ours to begin
+//! with if bookkeeping ever drifts (moved focus, a backend with no backspace
+//! primitive, ...) — see `replace_and_commit`'s defensive handling of that
+//! in `output/streaming.rs`. File-output sessions have no such risk
+//! (`replace_and_commit_silent` just edits an in-memory string), which is
+//! the safer place to exercise corrections.
+//!
+//! ## Diffing: one unified alignment
+//!
+//! Growing mode (committed text is a prefix of the fresh transcription) and
+//! sliding mode (only a suffix of the committed tail overlaps the fresh
+//! window's start) used to be two separate code paths with different state,
+//! which duplicated text at the growing→sliding transition. Both are now one
+//! [`find_new_tail`]: anchor the committed tail (bounded to
+//! `SLIDING_DIFF_LOOKBACK_WORDS` words) somewhere inside the fresh
+//! transcription with text-tolerant, banded matching, and take everything
+//! after it as new.
 //!
 //! ## Event mapping
 //!
@@ -124,13 +118,33 @@ const HALLUCINATION_PATTERNS: &[&str] = &[
 /// Below this we skip transcription entirely (prevents hallucination).
 const MIN_SPEECH_RMS: f32 = 0.005;
 
-/// Revision mode only: how many trailing words of the provisional tail
-/// stay eligible for correction. Once more than this many words of fresh
-/// content have appeared behind a word, it's promoted to permanently
+/// Type-then-correct default: how many trailing words of the provisional
+/// tail stay eligible for correction. Once more than this many words of
+/// fresh content have appeared behind a word, it's promoted to permanently
 /// confirmed text and can never be revised again — this bounds how far
 /// back (in words, and therefore in backspaced characters) any single
-/// correction can ever reach.
+/// correction can ever reach. Overridable via `[streaming]
+/// revision_lag_words`.
 const REVISION_LAG_WORDS: usize = 4;
+
+/// Question-mark reconciliation default: when a new "?" is committed, scan
+/// back this many words for a stale earlier "?" to remove. Capped at the
+/// revision lag so a stale "?" can only ever be found still within
+/// revisable (provisional) text. Overridable via `[streaming]
+/// question_mark_lookback_words`.
+const QUESTION_MARK_LOOKBACK_WORDS: usize = 3;
+
+/// Type-then-correct default: how many consecutive ticks a word must appear
+/// (same text and punctuation) before it's eligible to be promoted out of
+/// the revisable provisional tail. Overridable via `[streaming]
+/// stability_passes`.
+const STABILITY_PASSES: u32 = 2;
+
+/// How far the unified alignment may skip ahead (in words) while anchoring
+/// the committed tail inside the current transcription. Small enough that a
+/// genuinely-new word can't be swallowed by the anchor, large enough to
+/// absorb a reworded boundary word.
+const ALIGN_BAND: usize = 2;
 
 /// One committed change to the streamed output, produced by a tick or by
 /// `final_flush`.
@@ -193,14 +207,25 @@ pub struct SlidingWindowConfig {
     /// Emit committed deltas as `Partial` (typed live at the cursor) when
     /// true; emit them as commit-only `Final` segments when false.
     pub type_partials: bool,
-    /// Experimental: type the current best-guess tail immediately and
-    /// correct it later via backspace + retype (`StreamingEvent::Replace`)
-    /// if a following tick disagrees, instead of withholding it until two
-    /// consecutive ticks agree. More responsive; can visibly flicker (type
-    /// then backspace then retype) when Whisper changes its mind about a
-    /// word. See the module doc's "Revision mode" section. Default false
-    /// keeps the conservative wait-for-agreement behavior.
+    /// Type the current best-guess tail immediately and correct it later via
+    /// backspace + retype (`StreamingEvent::Replace`) if a following tick
+    /// disagrees, instead of withholding it until it's been stable for a few
+    /// ticks. More responsive; can visibly flicker (type then backspace then
+    /// retype) when Whisper changes its mind about a word. **Default true.**
+    /// `false` opts back into the legacy conservative wait-for-stability
+    /// gate. See the module doc's "Commit policy" section.
     pub revision_mode: bool,
+    /// When a new "?" lands on the tail's last word, scan back this many
+    /// words for a stale earlier "?" and remove it, so a question ends with
+    /// exactly one "?". See `reconcile_question_marks`.
+    pub question_mark_lookback_words: usize,
+    /// Consecutive ticks a word must be present (text + punctuation) before
+    /// it's promoted out of the revisable provisional tail (type-then-correct
+    /// mode) or typed at all (conservative mode).
+    pub stability_passes: u32,
+    /// How many trailing words of the provisional tail stay revisable in
+    /// type-then-correct mode (replaces the `REVISION_LAG_WORDS` constant).
+    pub revision_lag_words: usize,
 }
 
 impl Default for SlidingWindowConfig {
@@ -219,7 +244,10 @@ impl Default for SlidingWindowConfig {
             // any future caller who assumes it matches config defaults.
             partial_min_words: 1,
             type_partials: true,
-            revision_mode: false,
+            revision_mode: true,
+            question_mark_lookback_words: QUESTION_MARK_LOOKBACK_WORDS,
+            stability_passes: STABILITY_PASSES,
+            revision_lag_words: REVISION_LAG_WORDS,
         }
     }
 }
@@ -350,28 +378,34 @@ struct Session {
 
     // Audio accumulator.
     buffer: Vec<f32>,
-    /// True once the buffer wrapped (audio was dropped). Switches diffing
-    /// from prefix-stable (growing) to tail-delta (sliding).
+    /// True once the buffer wrapped (audio was dropped). Only affects the
+    /// audio buffer — the diff logic is identical growing or sliding (the
+    /// unified alignment anchors the committed tail wherever it lands in
+    /// the fresh transcription).
     sliding: bool,
 
-    // Diff state.
-    /// Committed deltas (text already emitted).
-    full_text_parts: Vec<String>,
-    /// Last raw Whisper output.
-    #[allow(dead_code)]
-    prev_whisper: String,
-    /// Words of the previous transcription (growing mode).
-    last_words: Vec<String>,
-    /// Words already confirmed & emitted (growing mode).
-    confirmed_words: Vec<String>,
-    /// Delta words from the previous pass (sliding mode).
-    last_delta_words: Vec<String>,
-
-    /// Revision mode only: the tail currently typed at the cursor but not
-    /// yet permanently confirmed — may still be corrected via a `Replace`
-    /// on a later tick. Empty and unused when `config.revision_mode` is
-    /// false. See the module doc's "Revision mode" section.
-    provisional_words: Vec<String>,
+    // Diff state — one source of truth, shared by both commit policies.
+    /// Permanently-confirmed words (already typed, never revised). Both
+    /// mode's `full_text_parts` + `confirmed_words` + `last_words` +
+    /// `last_delta_words` collapsed into a single word list.
+    committed_words: Vec<Word>,
+    /// Type-then-correct only: the tail currently typed at the cursor but
+    /// not yet permanently confirmed — may still be corrected via a
+    /// `Replace` on a later tick. Empty and unused when
+    /// `config.revision_mode` is false.
+    provisional_words: Vec<Word>,
+    /// Stability tally for `provisional_words` (contiguous, aligned with
+    /// it after promotion drains both fronts equally).
+    provisional_stability: Vec<u32>,
+    /// Previous tick's full new tail (pre-promotion), for the per-word
+    /// stability comparison next tick.
+    prev_tail: Vec<Word>,
+    /// Previous tick's stability tally, aligned with `prev_tail`.
+    prev_stability: Vec<u32>,
+    /// How many front words of `prev_tail` were promoted (or, in
+    /// conservative mode, typed) last tick — the offset that re-aligns this
+    /// tick's new tail against `prev_tail`.
+    promoted_last_tick: usize,
 }
 
 impl Session {
@@ -381,12 +415,12 @@ impl Session {
             config,
             buffer: Vec::new(),
             sliding: false,
-            full_text_parts: Vec::new(),
-            prev_whisper: String::new(),
-            last_words: Vec::new(),
-            confirmed_words: Vec::new(),
-            last_delta_words: Vec::new(),
+            committed_words: Vec::new(),
             provisional_words: Vec::new(),
+            provisional_stability: Vec::new(),
+            prev_tail: Vec::new(),
+            prev_stability: Vec::new(),
+            promoted_last_tick: 0,
         }
     }
 
@@ -447,204 +481,124 @@ impl Session {
         Ok(Some(text))
     }
 
-    /// One interval tick: re-transcribe, diff, and return the newly-committed
-    /// deltas (at most one per tick in the conservative gate; revision mode
-    /// also produces at most one, but it may be a correction).
+    /// One interval tick: re-transcribe, align, and return the deltas to
+    /// emit (at most one per tick for either commit policy).
     fn on_tick(&mut self) -> Result<Vec<Delta>, TranscribeError> {
         let Some(curr) = self.transcribe_buffer()? else {
             return Ok(Vec::new());
         };
-        let curr_words: Vec<String> = curr.split_whitespace().map(str::to_owned).collect();
+        let curr_words = parse_words(&curr);
         if curr_words.is_empty() {
             return Ok(Vec::new());
         }
 
         let deltas = if self.config.revision_mode {
-            match self.revision_new_tail(&curr) {
-                Some(tail) => self.reconcile_revision(tail).into_iter().collect(),
-                None => Vec::new(),
+            // Type-then-correct (default): type the whole new tail now and
+            // correct it via `Replace` on any later tick that disagrees.
+            match find_new_tail(&self.committed_tail(), &curr_words, ALIGN_BAND) {
+                Some(mut new_tail) => {
+                    self.reconcile_question_marks(&mut new_tail);
+                    let delta = self.reconcile(&new_tail);
+                    self.provisional_stability = self.update_stability(&new_tail);
+                    self.promoted_last_tick = self.promote();
+                    delta.into_iter().collect()
+                }
+                None => {
+                    // No confident anchor this pass — type nothing, try again
+                    // next tick (same contract as the old confident-only diff).
+                    Vec::new()
+                }
             }
         } else {
-            self.on_tick_conservative(&curr, &curr_words)
+            // Legacy conservative gate (opt-in): type only the stable prefix
+            // of the new tail; withhold the unstable remainder until it has
+            // held for `stability_passes`. Per-word, so a single flickering
+            // word no longer stalls the whole tail.
+            match find_new_tail(&self.committed_tail(), &curr_words, ALIGN_BAND) {
+                Some(new_tail) => {
+                    let stability = self.update_stability(&new_tail);
+                    let passes = self.config.stability_passes;
+                    let mut stable_n = 0;
+                    while stable_n < new_tail.len() && stability[stable_n] >= passes {
+                        stable_n += 1;
+                    }
+                    if stable_n < self.config.partial_min_words {
+                        return Ok(Vec::new());
+                    }
+                    // `new_tail` starts beyond committed text, so the whole
+                    // stable prefix is genuinely new.
+                    let typed = if self.committed_words.is_empty() {
+                        render_words(&new_tail[..stable_n])
+                    } else {
+                        format!(" {}", render_words(&new_tail[..stable_n]))
+                    };
+                    tracing::debug!("[sliding] COMMIT (stable prefix): {typed:?}");
+                    self.committed_words.extend_from_slice(&new_tail[..stable_n]);
+                    self.promoted_last_tick = stable_n;
+                    vec![Delta::Append(typed)]
+                }
+                None => Vec::new(),
+            }
         };
 
-        self.prev_whisper = curr;
-        self.last_words = curr_words;
         Ok(deltas)
     }
 
-    /// The default (`revision_mode = false`) commit policy: withhold each
-    /// mode's tail until it's agreed across two consecutive ticks. See the
-    /// module doc's "Commit policy" section.
-    fn on_tick_conservative(&mut self, curr: &str, curr_words: &[String]) -> Vec<Delta> {
-        let mut deltas = Vec::new();
-
-        if self.sliding {
-            // Sliding mode: diff the whole output against what's already
-            // been emitted, then only commit the portion of the delta that
-            // was also present in the previous delta (stable across two
-            // consecutive passes).
-            let full_emitted = self.full_text_parts.join(" ");
-            let already_emitted = last_n_words(&full_emitted, SLIDING_DIFF_LOOKBACK_WORDS);
-            // `_confident`, not `extract_new_text`: no confident anchor
-            // this tick means "commit nothing, try again next tick" — see
-            // extract_new_text's doc comment for why guessing here (its
-            // length-based fallback) risks re-emitting already-committed
-            // text as a literal duplicate instead of just being briefly
-            // unresponsive.
-            let mut delta = extract_new_text_confident(&already_emitted, curr).unwrap_or_default();
-            let mut delta_words: Vec<String> =
-                delta.split_whitespace().map(str::to_owned).collect();
-            tracing::trace!(
-                "[sliding] sliding-diff: already_emitted(tail)={already_emitted:?} delta={delta:?} last_delta_words={:?}",
-                self.last_delta_words,
-            );
-
-            if !self.last_delta_words.is_empty() && !delta_words.is_empty() {
-                let stable_n = common_prefix_len(&self.last_delta_words, &delta_words);
-                if stable_n >= self.config.partial_min_words {
-                    let new = delta_words[..stable_n].join(" ");
-                    let new = dedupe_against_emitted(&self.full_text_parts.join(" "), &new);
-                    let last_emitted = self.full_text_parts.last();
-                    let not_repeat = last_emitted.map(|s| s != &new).unwrap_or(true);
-                    if !new.is_empty() && not_repeat {
-                        // `new` is a bare word-join with no leading space.
-                        // The daemon types deltas verbatim at the cursor, so
-                        // separate it from whatever was already committed.
-                        let typed = if self.full_text_parts.is_empty() {
-                            new.clone()
-                        } else {
-                            format!(" {new}")
-                        };
-                        tracing::debug!("[sliding] COMMIT (sliding mode): {typed:?}");
-                        self.full_text_parts.push(new);
-                        deltas.push(Delta::Append(typed));
-                        // Re-diff so last_delta_words reflects the remaining
-                        // unconfirmed words only.
-                        let full_emitted = self.full_text_parts.join(" ");
-                        let already_emitted =
-                            last_n_words(&full_emitted, SLIDING_DIFF_LOOKBACK_WORDS);
-                        delta =
-                            extract_new_text_confident(&already_emitted, curr).unwrap_or_default();
-                        delta_words = delta.split_whitespace().map(str::to_owned).collect();
-                    } else if !new.is_empty() {
-                        tracing::debug!(
-                            "[sliding] would-be commit suppressed as repeat of last: {new:?}"
-                        );
-                    }
-                }
-            }
-            self.last_delta_words = delta_words;
-        } else {
-            // Growing buffer: commit the common-prefix words between the
-            // previous and current transcriptions, advancing confirmed_words.
-            if !self.last_words.is_empty() {
-                let stable_n = common_prefix_len(&self.last_words, curr_words);
-                if stable_n > self.confirmed_words.len() {
-                    let confirmed_new = &curr_words[self.confirmed_words.len()..stable_n];
-                    if confirmed_new.len() >= self.config.partial_min_words {
-                        let new = confirmed_new.join(" ");
-                        let new = dedupe_against_emitted(&self.full_text_parts.join(" "), &new);
-                        let last_emitted = self.full_text_parts.last();
-                        let not_repeat = last_emitted.map(|s| s != &new).unwrap_or(true);
-                        if !new.is_empty() && not_repeat {
-                            // `new` is a bare word-join with no leading space.
-                            // The daemon types deltas verbatim at the cursor,
-                            // so separate it from whatever was already committed.
-                            let typed = if self.full_text_parts.is_empty() {
-                                new.clone()
-                            } else {
-                                format!(" {new}")
-                            };
-                            tracing::debug!("[sliding] COMMIT (growing mode): {typed:?}");
-                            self.full_text_parts.push(new);
-                            self.confirmed_words.extend(confirmed_new.iter().cloned());
-                            deltas.push(Delta::Append(typed));
-                        }
-                    }
-                }
-            }
-        }
-
-        deltas
+    /// The last `SLIDING_DIFF_LOOKBACK_WORDS` permanently-confirmed words —
+    /// what [`find_new_tail`] anchors `curr` against (see that function's doc
+    /// comment for why the anchor is bounded and not the whole session).
+    fn committed_tail(&self) -> Vec<Word> {
+        let n = self.committed_words.len();
+        let start = n.saturating_sub(SLIDING_DIFF_LOOKBACK_WORDS);
+        self.committed_words[start..].to_vec()
     }
 
-    /// Revision mode: the trailing window of permanently-confirmed text to
-    /// diff `curr` against. Shared by `revision_new_tail` and
-    /// `final_flush`'s end-of-session fallback guess.
-    fn revision_confirmed_text(&self) -> String {
-        last_n_words(
-            &if self.sliding {
-                self.full_text_parts.join(" ")
-            } else {
-                self.confirmed_words.join(" ")
-            },
-            SLIDING_DIFF_LOOKBACK_WORDS,
-        )
-    }
-
-    /// Revision mode: this tick's full best-guess of everything beyond
-    /// permanently-confirmed text, or `None` if no confident determination
-    /// could be made this pass (sliding mode only — see
-    /// `extract_new_text_confident`'s doc comment for why guessing here is
-    /// worse than waiting for the next tick). Shared by `on_tick` and
-    /// `final_flush` since both need the same computation, just against a
-    /// different `curr`.
-    fn revision_new_tail(&self, curr: &str) -> Option<Vec<String>> {
-        // Both modes diff against *text*, not a raw word-count index.
-        // Growing mode used to slice `curr_words[confirmed_words.len()..]`
-        // directly, assuming curr_words[..confirmed_words.len()] always
-        // exactly equals confirmed_words — true only as long as Whisper
-        // never rewords anything behind the confirmed boundary on a
-        // later pass. It does: a dropped filler word, a merged
-        // contraction, a punctuation change all shift the position
-        // confirmed_words.len() points to within curr_words, without
-        // changing the actual confirmed *text*. Found live: a session
-        // where this drifted re-typed several already-committed
-        // sentences as if they were new, repeatedly, every time it
-        // recurred — a plain index slice has no way to notice the
-        // words it's grabbing aren't actually new. Diffing against text
-        // (same confident-anchor-only strategy sliding mode already
-        // uses) is immune to this: it verifies the confirmed tail is
-        // still actually present before treating anything past it as new.
-        extract_new_text_confident(&self.revision_confirmed_text(), curr)
-            .map(|s| s.split_whitespace().map(str::to_owned).collect())
-    }
-
-    /// Revision mode: reconcile `new_tail_words` (this pass's full
-    /// best-guess of everything not yet permanently confirmed) against
-    /// `self.provisional_words` (what's currently displayed but still
-    /// revisable). Returns the single `Delta` needed to bring the cursor's
-    /// visible text in line with `new_tail_words` — a pure append, a
-    /// backspace+retype correction, or `None` if nothing changed — then
-    /// promotes anything more than `REVISION_LAG_WORDS` behind the tail's
-    /// end into `full_text_parts`, where it's confirmed and can never be
-    /// revised again. See the module doc's "Revision mode" section.
-    fn reconcile_revision(&mut self, new_tail_words: Vec<String>) -> Option<Delta> {
-        let agree_n = common_prefix_len(&self.provisional_words, &new_tail_words);
-        // Whether there's confirmed text before the whole provisional
-        // block — only matters when agree_n == 0; typed_len_from/
-        // format_typed already account for agree_n > 0 themselves (an
-        // earlier surviving word is always immediately before the point
-        // of correction/extension in that case).
-        let has_prefix = !self.full_text_parts.is_empty();
+    /// Type-then-correct: reconcile this pass's full best-guess tail
+    /// (`new_tail`, already question-mark-cleaned) against what's currently
+    /// displayed (`self.provisional_words`). Returns the single `Delta` that
+    /// brings the cursor's visible text in line with `new_tail` — a pure
+    /// append, a backspace+retype correction, or `None` if nothing changed.
+    /// Divergence is punctuation-sensitive: a word that changed only its
+    /// trailing punctuation is corrected with a minimal backspace from the
+    /// stale punct char instead of re-typing the whole word.
+    fn reconcile(&mut self, new_tail: &[Word]) -> Option<Delta> {
+        let agree_n = punct_prefix_len(&self.provisional_words, new_tail);
+        // Whether there's confirmed text before the whole provisional block —
+        // only matters when agree_n == 0; typed_len_from/format_typed already
+        // account for agree_n > 0 themselves (an earlier surviving word is
+        // always immediately before the point of correction/extension).
+        let has_prefix = !self.committed_words.is_empty();
 
         let delta = if agree_n < self.provisional_words.len() {
-            // Divergence: the tail beyond `agree_n` that's currently on
-            // screen is wrong. Backspace it (char-exact, including its own
-            // leading separator) and retype the corrected + extended tail.
-            let backspace = typed_len_from(&self.provisional_words, agree_n, has_prefix);
-            let text = format_typed(&new_tail_words, agree_n, has_prefix);
-            tracing::debug!(
-                "[sliding] REVISE: backspace {backspace} chars, retype {text:?} \
-                 (was {:?})",
-                self.provisional_words
-            );
-            Some(Delta::Replace { backspace, text })
-        } else if agree_n < new_tail_words.len() {
+            if agree_n < new_tail.len()
+                && word_text_eq(&self.provisional_words[agree_n], &new_tail[agree_n])
+            {
+                // Punctuation-only change: same word, different trailing
+                // punct. Backspace from the stale punct char onward and
+                // retype the new punct + following tail (fixes "it." → "it?"
+                // with a 1-char backspace instead of re-typing the word).
+                let backspace = tail_from_punct(&self.provisional_words, agree_n);
+                let text = typed_from_punct(new_tail, agree_n);
+                tracing::debug!(
+                    "[sliding] REVISE punct: backspace {backspace} chars, retype {text:?}"
+                );
+                Some(Delta::Replace { backspace, text })
+            } else {
+                // Word-level divergence: backspace the wrong tail (char-exact,
+                // including its leading separator) and retype the corrected
+                // + extended tail.
+                let backspace = typed_len_from(&self.provisional_words, agree_n, has_prefix);
+                let text = format_typed(new_tail, agree_n, has_prefix);
+                tracing::debug!(
+                    "[sliding] REVISE: backspace {backspace} chars, retype {text:?} (was {:?})",
+                    self.provisional_words
+                );
+                Some(Delta::Replace { backspace, text })
+            }
+        } else if agree_n < new_tail.len() {
             // Pure extension: everything already displayed still agrees;
             // append whatever's new beyond it.
-            let text = format_typed(&new_tail_words, agree_n, has_prefix);
+            let text = format_typed(new_tail, agree_n, has_prefix);
             if text.is_empty() {
                 None
             } else {
@@ -655,164 +609,337 @@ impl Session {
             None
         };
 
-        self.provisional_words = new_tail_words;
+        self.provisional_words = new_tail.to_vec();
+        delta
+    }
 
-        // Promote anything more than REVISION_LAG_WORDS behind the tail's
-        // end into permanently-confirmed text. Pure bookkeeping: this
-        // content is already correctly on screen as part of the delta
-        // just computed above, so no additional typing is needed for it.
-        if self.provisional_words.len() > REVISION_LAG_WORDS {
-            let confirm_upto = self.provisional_words.len() - REVISION_LAG_WORDS;
-            let newly_confirmed: Vec<String> =
-                self.provisional_words.drain(..confirm_upto).collect();
-            if !newly_confirmed.is_empty() {
-                self.full_text_parts.push(newly_confirmed.join(" "));
-                self.confirmed_words.extend(newly_confirmed);
+    /// Revision logic that keeps exactly one "?" where a question actually
+    /// ends. When `new_tail`'s last word ends in "?", Whisper may already
+    /// have emitted a premature "?" a few words earlier (re-processing a
+    /// still-open question) and then extended the utterance — turning "what
+    /// time is it?" into "what time is it? tomorrow afternoon?" with two
+    /// question marks, the first one wrong. When the new tail's final word
+    /// is "?", scan back up to `question_mark_lookback_words` for an earlier
+    /// "?" in the combined committed + new text and drop it, leaving only
+    /// the true end. Only words in the still-revisable `new_tail` are ever
+    /// edited; the lookback is capped at the revision lag so a stale "?"
+    /// can never have already been promoted into permanently-confirmed text.
+    fn reconcile_question_marks(&mut self, new_tail: &mut [Word]) {
+        if new_tail.last().and_then(|w| w.punct) != Some('?') {
+            return;
+        }
+        let lookback = self.config.question_mark_lookback_words;
+        let committed_len = self.committed_words.len();
+        let combined_len = committed_len + new_tail.len();
+        // Skip the final "?" itself: scan the `lookback` words behind it.
+        for back in 1..=lookback {
+            let Some(idx) = combined_len.checked_sub(1 + back) else {
+                break;
+            };
+            let has_q = if idx < committed_len {
+                self.committed_words[idx].punct == Some('?')
+            } else {
+                new_tail[idx - committed_len].punct == Some('?')
+            };
+            if has_q {
+                if idx >= committed_len {
+                    new_tail[idx - committed_len].punct = None;
+                    tracing::debug!(
+                        "[sliding] question-mark reconcile: dropped premature '?' {back} word(s) back"
+                    );
+                }
+                return;
             }
         }
+    }
 
-        delta
+    /// Compute per-word stability for `new_tail` against the previous tick's
+    /// tail, snapshot the full pre-promotion state for next tick's
+    /// comparison, and return the tally. A word is stable if its text AND
+    /// punctuation were present at the corresponding position
+    /// (`i + promoted_last_tick`) last tick; if so it carries its previous
+    /// tally forward incremented, otherwise it resets to one.
+    fn update_stability(&mut self, new_tail: &[Word]) -> Vec<u32> {
+        let mut tally = Vec::with_capacity(new_tail.len());
+        for (i, w) in new_tail.iter().enumerate() {
+            let prev_i = i + self.promoted_last_tick;
+            let stable = prev_i < self.prev_tail.len() && word_eq(w, &self.prev_tail[prev_i]);
+            let base = self.prev_stability.get(prev_i).copied().unwrap_or(1);
+            tally.push(if stable { base + 1 } else { 1 });
+        }
+        // Snapshot the FULL tail and tally (pre-promotion) so next tick's
+        // comparison can still see the words promoted out of the front.
+        self.prev_tail = new_tail.to_vec();
+        self.prev_stability = tally.clone();
+        self.promoted_last_tick = 0;
+        tally
+    }
+
+    /// Type-then-correct bookkeeping: promote a contiguous prefix of the
+    /// provisional tail that is both stable for `stability_passes` and sits
+    /// beyond `revision_lag_words` from the tail's end into
+    /// permanently-confirmed text. This content is already on screen (earlier
+    /// deltas typed it), so promotion emits nothing — it only shrinks what a
+    /// future correction is allowed to touch. Halts at the first unstable
+    /// word, so a flickering word stays revisable. Returns how many words
+    /// were promoted.
+    fn promote(&mut self) -> usize {
+        let lag = self.config.revision_lag_words;
+        let passes = self.config.stability_passes;
+        let mut promoted = 0;
+        while self.provisional_words.len() - promoted > lag
+            && self.provisional_stability.get(promoted).copied().unwrap_or(0) >= passes
+        {
+            promoted += 1;
+        }
+        if promoted > 0 {
+            let words: Vec<Word> = self.provisional_words.drain(..promoted).collect();
+            drop(self.provisional_stability.drain(..promoted));
+            tracing::debug!("[sliding] promote {promoted} word(s): {words:?}");
+            self.committed_words.extend(words);
+        }
+        promoted
     }
 
     /// One last transcription at end-of-recording. Returns the remaining tail
     /// delta (never cumulative text — the daemon already typed the partials).
+    /// Unlike `on_tick` there is no next tick to wait for, so a pass that
+    /// can't find a confident anchor falls back to a single best-effort
+    /// index-based guess rather than leaving the last text uncorrected
+    /// forever (same rationale as the old `extract_new_text` fallback).
     fn final_flush(&mut self) -> Option<Delta> {
         let final_text = match self.transcribe_buffer() {
             Ok(Some(t)) => t,
             _ => return None,
         };
+        let curr = parse_words(&final_text);
+
+        let committed_tail = self.committed_tail();
+        let mut new_tail = match find_new_tail(&committed_tail, &curr, ALIGN_BAND) {
+            Some(t) => t,
+            None => {
+                if curr.len() > self.committed_words.len() {
+                    curr[self.committed_words.len()..].to_vec()
+                } else {
+                    return None;
+                }
+            }
+        };
 
         if self.config.revision_mode {
-            // Unlike `on_tick`, there is no next tick to wait for: this is
-            // the true end of the session. Found live on a 60s recording
-            // that hit its hard timeout mid-babble — `revision_new_tail`
-            // declined to anchor on the very last pass (correctly, per its
-            // own doc comment, for an *ongoing* session) and nothing ever
-            // corrected the on-screen text afterward, because nothing
-            // else was ever going to run. Fall back to a single
-            // best-effort guess (`extract_new_text`'s safety strategy)
-            // the same way commit-only mode's own final_flush below
-            // already does, and for the same reason: a guess that might
-            // occasionally garble the last few words beats leaving
-            // whatever the last confident pass happened to type,
-            // uncorrected, forever.
-            let tail = self.revision_new_tail(&final_text).or_else(|| {
-                let guess = extract_new_text(&self.revision_confirmed_text(), &final_text);
-                if guess.is_empty() {
-                    None
-                } else {
-                    Some(guess.split_whitespace().map(str::to_owned).collect())
-                }
-            });
-            return tail.and_then(|t| self.reconcile_revision(t));
-        }
-
-        let full_emitted = self.full_text_parts.join(" ");
-        let already_emitted = last_n_words(&full_emitted, SLIDING_DIFF_LOOKBACK_WORDS);
-        let delta = extract_new_text(&already_emitted, &final_text);
-        let delta = delta.trim().to_string();
-        let delta = dedupe_against_emitted(&full_emitted, &delta);
-        if delta.is_empty() {
-            None
+            self.reconcile_question_marks(&mut new_tail);
+            self.reconcile(&new_tail)
         } else {
-            // `delta` has no leading space (see `on_tick`); separate it from
-            // whatever was already committed before typing it at the cursor.
-            let typed = if self.full_text_parts.is_empty() {
-                delta.clone()
+            // Conservative: type the whole remaining tail as one final delta.
+            // No stability gating (the recording is over) and no Replace is
+            // ever needed (nothing is typed before it's stable).
+            if new_tail.is_empty() {
+                None
             } else {
-                format!(" {delta}")
-            };
-            self.full_text_parts.push(delta);
-            Some(Delta::Append(typed))
+                let typed = if self.committed_words.is_empty() {
+                    render_words(&new_tail)
+                } else {
+                    format!(" {}", render_words(&new_tail))
+                };
+                self.committed_words.extend(new_tail);
+                Some(Delta::Append(typed))
+            }
         }
     }
 }
 
-// ── Diff helpers (ported 1:1 from nova's sliding_window.py) ──────────────
+// ── Word model and unified alignment ────────────────────────────────────
 
-/// Whisper-tolerant word equality: case-insensitive, ignoring trailing
-/// punctuation.
-fn word_eq(a: &str, b: &str) -> bool {
-    let norm = |s: &str| {
-        s.trim_end_matches(['.', ',', '!', '?', ';', ':'])
-            .to_lowercase()
-    };
-    norm(a) == norm(b)
+/// A single token of a transcription, with trailing punctuation split off
+/// so the engine can (a) match words without noise, (b) preserve the model's
+/// punctuation verbatim, and (c) correct punctuation changes — including the
+/// premature "?" reconciliation — with exact backspace arithmetic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Word {
+    text: String,
+    /// Trailing punctuation char, if any ("it?" → Some('?')). Repeated
+    /// punctuation collapses to the last char ("it??" → "it?").
+    punct: Option<char>,
 }
 
-fn words_match<T: AsRef<str>>(a: &[T], b: &[T]) -> bool {
-    if a.len() != b.len() {
-        return false;
+/// Punctuation stripped to the last trailing char of a token.
+fn trailing_punct(chars: &[char]) -> Option<char> {
+    chars
+        .iter()
+        .rev()
+        .find(|c| matches!(c, '.' | ',' | '!' | '?' | ';' | ':'))
+        .copied()
+}
+
+/// Parse a transcription into `Word`s. "It's 3:30?" → `[It's, 3:30?]`. A
+/// standalone punctuation token ("it ?") attaches to the previous word.
+fn parse_words(text: &str) -> Vec<Word> {
+    let mut out: Vec<Word> = Vec::new();
+    for tok in text.split_whitespace() {
+        let chars: Vec<char> = tok.chars().collect();
+        let mut punct = None;
+        let mut text_len = chars.len();
+        while text_len > 0 && matches!(chars[text_len - 1], '.' | ',' | '!' | '?' | ';' | ':') {
+            punct = Some(chars[text_len - 1]);
+            text_len -= 1;
+        }
+        let token_text: String = chars[..text_len].iter().collect();
+        if token_text.is_empty() {
+            // Entirely punctuation ("?" as its own token): merge into the
+            // previous word so "it ?" renders as "it?".
+            if let Some(prev) = out.last_mut() {
+                if prev.punct.is_none() {
+                    prev.punct = punct;
+                }
+            } else {
+                out.push(Word {
+                    text: String::new(),
+                    punct: trailing_punct(&chars),
+                });
+            }
+        } else {
+            out.push(Word { text: token_text, punct });
+        }
     }
-    a.iter()
-        .zip(b.iter())
-        .all(|(x, y)| word_eq(x.as_ref(), y.as_ref()))
+    out
 }
 
-fn common_prefix_len<T: AsRef<str>>(a: &[T], b: &[T]) -> usize {
+/// Render `Word`s back to text ("it?" + "tomorrow" → "it? tomorrow").
+fn render_words(words: &[Word]) -> String {
+    let mut s = String::new();
+    for (i, w) in words.iter().enumerate() {
+        if i > 0 {
+            s.push(' ');
+        }
+        s.push_str(&w.text);
+        if let Some(p) = w.punct {
+            s.push(p);
+        }
+    }
+    s
+}
+
+/// Word equality for **anchoring**: case-insensitive, ignoring trailing
+/// punctuation. A reworded or re-punctuated word at the committed boundary
+/// must not lose the anchor (this is what lets the alignment find the
+/// committed text even when Whisper changed a word's casing or punctuation).
+fn word_text_eq(a: &Word, b: &Word) -> bool {
+    a.text.eq_ignore_ascii_case(&b.text)
+}
+
+/// Word equality for **divergence detection and stability**: the trailing
+/// punctuation must agree exactly, while the text is compared
+/// case-insensitively. A punctuation-only change is visible to the reconcile
+/// step and the stability tally, but a casing flip ("world" → "WORLD") is
+/// not — Whisper capitalizes inconsistently and backspacing to fix casing
+/// would just flicker.
+fn word_eq(a: &Word, b: &Word) -> bool {
+    a.punct == b.punct && a.text.eq_ignore_ascii_case(&b.text)
+}
+
+/// Number of leading words that agree by text AND punctuation.
+fn punct_prefix_len(a: &[Word], b: &[Word]) -> usize {
     let n = a.len().min(b.len());
     let mut i = 0;
-    while i < n && word_eq(a[i].as_ref(), b[i].as_ref()) {
+    while i < n && word_eq(&a[i], &b[i]) {
         i += 1;
     }
     i
 }
 
-/// How many trailing words of already-committed text to hand to
-/// `extract_new_text` as `prev` in sliding mode. Just enough for anchor
-/// matching (strategies 1-3 below) — deliberately NOT the whole session.
-///
-/// `extract_new_text`'s strategy 4 safety check ("Whisper may have fully
-/// rewritten the window") compares `curr_words.len()` against
-/// `prev_words.len()` and bails to `""` once curr isn't longer. In sliding
-/// mode `curr` is always just one ~29s window's worth of words, but
-/// `full_text_parts.join(" ")` is the ENTIRE session's cumulative
-/// committed text, growing without bound. Once a long-running session's
-/// total committed word count exceeds one window's worth (a couple of
-/// minutes of continuous dictation, easily), `prev` becomes permanently
-/// longer than `curr` and strategy 4 never fires again — the transcript
-/// silently and permanently stops advancing, even though new speech keeps
-/// transcribing correctly tick over tick. Found live: a 60s recording
-/// stopped committing any new text at all about 15s into sliding mode,
-/// with every subsequent tick logging `delta=""` despite the raw
-/// transcription clearly growing.
+/// How many trailing words of already-committed text to anchor `curr`
+/// against — deliberately NOT the whole session. Once a long-running
+/// session's committed text exceeds one window's worth of words (a couple
+/// of minutes of continuous dictation), the fresh transcription `curr` is
+/// never longer than the whole committed history, so an unbounded anchor
+/// would silently stop matching (found live: a 60s recording stopped
+/// committing anything ~15s into sliding mode).
 const SLIDING_DIFF_LOOKBACK_WORDS: usize = 20;
 
-/// Trailing `n` words of `text` (or the whole thing if shorter).
+/// Trailing `n` words of `text` (or the whole thing if shorter). Kept for
+/// the test suite; production anchoring goes through `Session::committed_tail`,
+/// which bounds the same way over `Word`s.
+#[cfg(test)]
 fn last_n_words(text: &str, n: usize) -> String {
     let words: Vec<&str> = text.split_whitespace().collect();
     let start = words.len().saturating_sub(n);
     words[start..].join(" ")
 }
 
-/// Revision mode: exact character length that would be BACKSPACED to
-/// remove `words[from_idx..]` from the cursor. `has_prefix` is whether
-/// there's content immediately before `words[from_idx]` — either prior
-/// confirmed text or an earlier surviving provisional word — which means
-/// a separating space was typed right before it that also needs removing.
-fn typed_len_from(words: &[String], from_idx: usize, has_prefix: bool) -> usize {
+/// Find the new tail: everything in `curr` beyond the committed text.
+///
+/// Unified across the old growing mode (committed text is a prefix of
+/// `curr`) and sliding mode (only a suffix of the committed tail overlaps
+/// `curr`'s start). Every suffix start of `prev` (the committed tail) is
+/// greedily matched forward into `curr`, each `prev` word allowed to match
+/// a `curr` word up to `BAND` positions ahead; the match that consumes the
+/// longest `curr` prefix wins and its remainder — `curr[ci..]` — is the new
+/// tail. Returns `None` when no suffix aligns with even one `curr` word;
+/// the caller treats that as "nothing safe to type this pass".
+fn find_new_tail(prev: &[Word], curr: &[Word], band: usize) -> Option<Vec<Word>> {
+    if prev.is_empty() {
+        return Some(curr.to_vec());
+    }
+    if curr.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let n = prev.len();
+    let m = curr.len();
+    let mut best_ci: Option<usize> = None;
+
+    for s in 0..n {
+        let mut ci = 0usize;
+        let mut matched = 0usize;
+        for committed_word in &prev[s..] {
+            let lookahead_end = (ci + band + 1).min(m);
+            let found = curr[ci..lookahead_end]
+                .iter()
+                .position(|c| word_text_eq(committed_word, c))
+                .map(|k| ci + k);
+            match found {
+                Some(j) => {
+                    matched += 1;
+                    ci = j + 1;
+                }
+                None => break,
+            }
+        }
+        if matched > 0 {
+            best_ci = Some(best_ci.map_or(ci, |b| b.max(ci)));
+        }
+    }
+
+    best_ci.map(|ci| curr[ci..].to_vec())
+}
+
+/// Exact character length that would be BACKSPACED to remove
+/// `words[from_idx..]` from the cursor. `has_prefix` is whether there's
+/// content immediately before `words[from_idx]` — either prior confirmed
+/// text or an earlier surviving provisional word — which means a separating
+/// space was typed right before it that also needs removing.
+fn typed_len_from(words: &[Word], from_idx: usize, has_prefix: bool) -> usize {
     if from_idx >= words.len() {
         return 0;
     }
-    let tail = words[from_idx..].join(" ");
+    let tail = render_words(&words[from_idx..]);
     // A leading separating space was typed before `words[from_idx]`
-    // whenever there's anything before it — either an earlier word in
-    // this same array (`from_idx > 0`) or context the caller says exists
-    // before the whole array (`has_prefix`, meaningful only at
-    // `from_idx == 0`).
+    // whenever there's anything before it — either an earlier word in this
+    // same array (`from_idx > 0`) or context the caller says exists before
+    // the whole array (`has_prefix`, meaningful only at `from_idx == 0`).
     let leading_space = from_idx > 0 || has_prefix;
     tail.chars().count() + usize::from(leading_space)
 }
 
-/// Revision mode: the exact string that would be TYPED for
-/// `words[from_idx..]`, given `has_prefix` (see `typed_len_from`) — a
-/// leading separating space is prepended whenever there's content before
-/// `words[from_idx]`, by the same rule `typed_len_from` uses.
-fn format_typed(words: &[String], from_idx: usize, has_prefix: bool) -> String {
+/// The exact string that would be TYPED for `words[from_idx..]`, given
+/// `has_prefix` (see [`typed_len_from`]) — a leading separating space is
+/// prepended whenever there's content before `words[from_idx]`, by the same
+/// rule `typed_len_from` uses.
+fn format_typed(words: &[Word], from_idx: usize, has_prefix: bool) -> String {
     if from_idx >= words.len() {
         return String::new();
     }
-    let tail = words[from_idx..].join(" ");
+    let tail = render_words(&words[from_idx..]);
     if from_idx > 0 || has_prefix {
         format!(" {tail}")
     } else {
@@ -820,133 +947,35 @@ fn format_typed(words: &[String], from_idx: usize, has_prefix: bool) -> String {
     }
 }
 
-/// Strip any leading words of `candidate` that restate the tail of
-/// `already_emitted` — a defense-in-depth guard applied right before a
-/// segment is actually committed, independent of whichever diff produced
-/// `candidate` in the first place.
-///
-/// The per-tick diffs already try hard to avoid proposing a duplicate, but
-/// they compare against the *whole* current window (`curr`), which is a
-/// much noisier, harder match than comparing the final short candidate
-/// segment directly against what's already committed. Found live: a
-/// duplicate slipped through right at the growing→sliding mode transition
-/// — growing mode committed "...and then it spits it out." via its own
-/// word-prefix tracking, then sliding mode's first commit re-included
-/// "and then it spits it out." verbatim before its genuinely new tail.
-/// The two modes track diffing state independently and can briefly
-/// disagree about exactly where the boundary falls; this check catches
-/// that regardless of which mode is active or why the disagreement
-/// happened, rather than trying to keep both modes' state in perfect sync
-/// across the transition.
-fn dedupe_against_emitted(already_emitted_full: &str, candidate: &str) -> String {
-    let tail = last_n_words(already_emitted_full, SLIDING_DIFF_LOOKBACK_WORDS);
-    extract_new_text_confident(&tail, candidate).unwrap_or_else(|| candidate.to_string())
+/// Char count of everything from `words[k]`'s trailing punctuation (inclusive)
+/// to the end of the rendered tail — what backspace removes to fix a
+/// punctuation-only change at word `k` (e.g. "it? tomorrow" → backspace 9 to
+/// pull the stale "?" out of the middle of the typed text).
+fn tail_from_punct(words: &[Word], k: usize) -> usize {
+    let mut s = String::new();
+    if let Some(p) = words[k].punct {
+        s.push(p);
+    }
+    if k + 1 < words.len() {
+        s.push(' ');
+        s.push_str(&render_words(&words[k + 1..]));
+    }
+    s.chars().count()
 }
 
-/// Return the portion of `curr` that is new compared to `prev`, using only
-/// strategies that anchor on a real, verified match — never a guess.
-///
-/// Strategies, in order:
-/// 1. Longest suffix→prefix word overlap (the common case).
-/// 2. Verbatim string-prefix check.
-/// 3. Greedy forward scan — how far into `curr` the `prev` words reach,
-///    trusting the position when ≥50% matched (handles Whisper punctuation
-///    / casing rewrites).
-///
-/// Returns `None` when none of these find a confident anchor — the caller
-/// should treat that as "nothing safe to commit this pass", not as "no new
-/// text". See `extract_new_text`'s doc comment for why this distinction
-/// matters for repeated tick callers.
-fn extract_new_text_confident(prev: &str, curr: &str) -> Option<String> {
-    if prev.is_empty() {
-        return Some(curr.to_string());
+/// The corrected text to type for a punctuation-only change at word `k`: the
+/// replacement punctuation (if any) followed by the rest of the tail, exactly
+/// as it would render at the cursor.
+fn typed_from_punct(words: &[Word], k: usize) -> String {
+    let mut s = String::new();
+    if let Some(p) = words[k].punct {
+        s.push(p);
     }
-    if curr.is_empty() {
-        return Some(String::new());
+    if k + 1 < words.len() {
+        s.push(' ');
+        s.push_str(&render_words(&words[k + 1..]));
     }
-
-    let prev_words: Vec<&str> = prev.split_whitespace().collect();
-    let curr_words: Vec<&str> = curr.split_whitespace().collect();
-
-    if prev_words.is_empty() || curr_words.is_empty() {
-        return Some(curr.to_string());
-    }
-
-    // 1. Exact suffix→prefix overlap (longest wins).
-    let mut best_overlap = 0;
-    let max_check = prev_words.len().min(curr_words.len());
-    for length in 1..=max_check {
-        let suffix = &prev_words[prev_words.len() - length..];
-        let prefix = &curr_words[..length];
-        if words_match(suffix, prefix) {
-            best_overlap = length;
-        }
-    }
-    if best_overlap > 0 {
-        return Some(curr_words[best_overlap..].join(" "));
-    }
-
-    // 2. Verbatim prefix check.
-    if let Some(rest) = curr.strip_prefix(prev) {
-        return Some(rest.trim().to_string());
-    }
-
-    // 3. Greedy forward scan.
-    let mut pi = 0;
-    let mut best_ci = 0;
-    for (ci, cw) in curr_words.iter().enumerate() {
-        if pi >= prev_words.len() {
-            break;
-        }
-        if word_eq(prev_words[pi], cw) {
-            pi += 1;
-            best_ci = ci + 1;
-        }
-        // else: skip — Whisper rewrote this word, keep scanning.
-    }
-    if pi as f32 >= prev_words.len() as f32 * 0.5 {
-        return Some(curr_words[best_ci..].join(" "));
-    }
-
-    None
-}
-
-/// Return the portion of `curr` that is new compared to `prev`.
-///
-/// Tries [`extract_new_text_confident`]'s real-anchor strategies first,
-/// then falls back to a length-based guess: if `curr` is not substantially
-/// longer than `prev`, Whisper is refining — no new text; otherwise emit
-/// only the tail beyond `prev`'s length.
-///
-/// **This last-resort guess assumes `curr` = `prev` + some new suffix** —
-/// true for a single growing buffer re-transcribed in place, but NOT true
-/// for the sliding-window tick loop, where `curr` is an independently
-/// re-transcribed rolling window and `prev` is a bounded recent tail of
-/// the whole session's committed text (see `SLIDING_DIFF_LOOKBACK_WORDS`).
-/// Once the genuinely-overlapping part of that tail ages out of the
-/// window, this guess's fixed word-count strip no longer lines up with
-/// where new content actually starts, and can re-emit already-committed
-/// phrasing as if it were new — found live as literal duplicated
-/// sentences after a ~50s continuous recording with several repeated
-/// filler phrases. `on_tick`'s sliding-mode branch calls
-/// `extract_new_text_confident` directly instead, treating "no confident
-/// anchor" as "commit nothing this tick" (self-corrects next tick) rather
-/// than risk a wrong guess compounding into visible duplication. This
-/// function (with the guess) is still right for `final_flush`: a single
-/// best-effort guess at the true end of a recording, with no further
-/// ticks to compound the mistake, beats losing the trailing text outright.
-fn extract_new_text(prev: &str, curr: &str) -> String {
-    if let Some(text) = extract_new_text_confident(prev, curr) {
-        return text;
-    }
-
-    // 4. Safety: Whisper may have fully rewritten the window.
-    let prev_words: Vec<&str> = prev.split_whitespace().collect();
-    let curr_words: Vec<&str> = curr.split_whitespace().collect();
-    if curr_words.len() <= prev_words.len() + 1 {
-        return String::new();
-    }
-    curr_words[prev_words.len()..].join(" ")
+    s
 }
 
 /// Whole-buffer RMS (sqrt of mean of squares), float32.
@@ -970,144 +999,180 @@ mod tests {
     use super::*;
     use tokio::sync::mpsc;
 
-    // ── Pure diff helpers ────────────────────────────────────────────
+    // ── Word model ───────────────────────────────────────────────────
 
     #[test]
-    fn word_eq_ignores_case_and_trailing_punct() {
-        assert!(word_eq("Hello,", "hello"));
-        assert!(word_eq("WORLD.", "world"));
-        assert!(word_eq("you?", "you"));
-        assert!(!word_eq("there", "their"));
-    }
-
-    #[test]
-    fn common_prefix_len_stops_at_first_divergence() {
-        let a = ["hello", "world", "foo"];
-        let b = ["hello", "WORLD", "bar"];
-        assert_eq!(common_prefix_len(&a, &b), 2);
-        let c = ["hello"];
-        assert_eq!(common_prefix_len(&a, &c), 1);
-    }
-
-    #[test]
-    fn extract_new_text_empty_prev_returns_curr() {
-        assert_eq!(extract_new_text("", "hello world"), "hello world");
-    }
-
-    #[test]
-    fn extract_new_text_empty_curr_returns_empty() {
-        assert_eq!(extract_new_text("hello", ""), "");
-    }
-
-    #[test]
-    fn extract_new_text_suffix_prefix_overlap() {
-        // "you" overlaps: suffix of prev == prefix of curr.
-        assert_eq!(extract_new_text("hello world", "world foo bar"), "foo bar");
-        // Longest overlap wins: 2 words overlap.
+    fn parse_words_splits_trailing_punctuation() {
+        let ws = parse_words("It's 3:30?");
         assert_eq!(
-            extract_new_text("we should deploy now", "deploy now please"),
-            "please"
+            ws,
+            vec![
+                Word { text: "It's".into(), punct: None },
+                Word { text: "3:30".into(), punct: Some('?') },
+            ]
         );
     }
 
     #[test]
-    fn extract_new_text_verbatim_prefix() {
-        assert_eq!(extract_new_text("hello", "hello world foo"), "world foo");
-    }
-
-    #[test]
-    fn extract_new_text_fuzzy_scan() {
-        // Whisper rewrote punctuation: prev matches 2/3 words fuzzily.
-        assert_eq!(extract_new_text("hello, world", "hello world foo"), "foo");
-    }
-
-    #[test]
-    fn extract_new_text_refining_emits_nothing() {
-        // curr no longer than prev → Whisper is refining; no new text.
-        assert_eq!(extract_new_text("hello world foo", "hello world"), "");
-        assert_eq!(extract_new_text("a b c", "a b"), "");
-    }
-
-    #[test]
-    fn extract_new_text_safety_tail() {
-        // No overlap, prev unreachable via fuzzy scan, curr much longer.
-        assert_eq!(extract_new_text("x y", "a b c d"), "c d");
-    }
-
-    #[test]
-    fn extract_new_text_confident_declines_the_safety_guess() {
-        // Same inputs as extract_new_text_safety_tail: no strategies 1-3
-        // anchor succeeds. extract_new_text guesses "c d" (strategy 4);
-        // the confident variant refuses to guess at all.
-        assert_eq!(extract_new_text_confident("x y", "a b c d"), None);
-    }
-
-    #[test]
-    fn sliding_mode_duplicate_reproduction_and_fix() {
-        // Reproduces the shape of a real duplicate/garbled-text bug found
-        // live on a ~55s recording with repeated filler phrasing. Once the
-        // genuinely-overlapping tail of `already_emitted` no longer
-        // matches curr's start via strategies 1-3 (Whisper re-transcribed
-        // that stretch slightly differently this pass), extract_new_text's
-        // strategy 4 blindly strips `prev_words.len()` words off curr's
-        // front on the assumption curr = prev + new suffix. That
-        // assumption is wrong in sliding mode (curr is an independently
-        // re-transcribed window, not a continuation of prev), so the cut
-        // point is arbitrary and can land inside content curr is restating
-        // from `prev` — bleeding a fragment of already-committed text back
-        // into the "new" output as a garbled partial repeat.
-        let prev = "roses are red violets";
-        // curr restates content overlapping `prev` ("sugar is sweet" is
-        // new to `prev`, but conceptually the kind of near-repeat that
-        // trips this up), worded so strategies 1-3 all fail to anchor:
-        // curr's first word ("sky") doesn't appear anywhere in `prev`, so
-        // no suffix/prefix overlap or fuzzy-scan match is possible.
-        let curr = "sky is blue sugar is sweet and so are you my friend";
-        assert_eq!(extract_new_text_confident(prev, curr), None);
-
-        // The bug: extract_new_text's guess strips exactly 4 words
-        // (prev_words.len()) off curr's front — an arbitrary cut with no
-        // relationship to where curr's genuinely new content starts —
-        // leaving "is sweet" as a stray fragment in the output.
-        let guessed = extract_new_text(prev, curr);
-        assert_eq!(guessed, "is sweet and so are you my friend");
-
-        // The fix: the confident variant refuses to guess when no real
-        // anchor is found, so the sliding-mode tick loop commits nothing
-        // this pass instead of emitting that garbled fragment — it catches
-        // up once Whisper's wording stabilizes enough for a real anchor on
-        // a later tick.
-    }
-
-    #[test]
-    fn dedupe_strips_overlap_at_growing_to_sliding_transition() {
-        // Reproduces a real duplicate found live: growing mode committed
-        // "...and then it spits it out." via its own word-prefix tracking,
-        // then the very first sliding-mode commit re-included "and then it
-        // spits it out." verbatim before its genuinely new tail — the two
-        // modes track diffing state independently and briefly disagreed
-        // about exactly where the boundary fell.
-        let already_emitted = "It takes a little bit, bit, and then it spits it out.";
-        let candidate =
-            "and then it spits it out. Yeah, that's what we like to see. I think this is nice.";
+    fn parse_words_merges_standalone_punctuation_token() {
+        // "it ?" (space-separated question mark) must render back as "it?".
+        let ws = parse_words("what time is it ?");
         assert_eq!(
-            dedupe_against_emitted(already_emitted, candidate),
-            "Yeah, that's what we like to see. I think this is nice."
+            ws.last(),
+            Some(&Word { text: "it".into(), punct: Some('?') })
+        );
+        assert_eq!(render_words(&ws), "what time is it?");
+    }
+
+    #[test]
+    fn parse_words_collapses_repeated_punctuation() {
+        let ws = parse_words("right??");
+        assert_eq!(
+            ws.last(),
+            Some(&Word { text: "right".into(), punct: Some('?') })
+        );
+        assert_eq!(render_words(&ws), "right?");
+    }
+
+    #[test]
+    fn parse_words_round_trips_through_render() {
+        for s in [
+            "turn on the light.",
+            "what time is it?",
+            "hello world",
+            "it's 3:30, isn't it?",
+            "a single word",
+        ] {
+            assert_eq!(render_words(&parse_words(s)), s);
+        }
+    }
+
+    #[test]
+    fn word_text_eq_ignores_case_and_punct() {
+        let comma = parse_words("hello,");
+        let upper = parse_words("HELLO");
+        assert!(word_text_eq(&comma[0], &upper[0]));
+        assert!(!word_text_eq(&comma[0], &parse_words("there")[0]));
+    }
+
+    #[test]
+    fn word_eq_is_punct_sensitive() {
+        let q = parse_words("it?")[0].clone();
+        let dot = parse_words("it.")[0].clone();
+        let bare = Word { text: "it".into(), punct: None };
+        // Divergence detection and stability must SEE a punctuation flip
+        // (the old `word_eq` stripped trailing punctuation and could not).
+        assert_ne!(q, dot);
+        assert_ne!(q, bare);
+        assert!(!word_eq(&q, &dot));
+    }
+
+    #[test]
+    fn punct_prefix_len_stops_at_text_or_punct_divergence() {
+        let t = |s: &str| parse_words(s);
+        assert_eq!(punct_prefix_len(&t("hello world foo"), &t("hello WORLD bar")), 2);
+        // A punctuation-only change stops the punct-sensitive prefix...
+        assert_eq!(punct_prefix_len(&t("it."), &t("it?")), 0);
+        // ...where the text-only comparison would keep going.
+        assert_eq!(punct_prefix_len(&t("it"), &t("it")), 1);
+    }
+
+    // ── Unified alignment ────────────────────────────────────────────
+
+    #[test]
+    fn find_new_tail_empty_prev_returns_all_curr() {
+        assert_eq!(
+            find_new_tail(&[], &parse_words("hello world"), 2).unwrap(),
+            parse_words("hello world")
         );
     }
 
     #[test]
-    fn dedupe_leaves_genuinely_new_text_untouched() {
-        let already_emitted = "hello world";
-        let candidate = "completely unrelated new content";
+    fn find_new_tail_verbatim_prefix() {
         assert_eq!(
-            dedupe_against_emitted(already_emitted, candidate),
-            candidate
+            find_new_tail(&parse_words("hello"), &parse_words("hello world foo"), 2).unwrap(),
+            parse_words("world foo"),
         );
     }
 
-    fn words(s: &str) -> Vec<String> {
-        s.split_whitespace().map(str::to_owned).collect()
+    #[test]
+    fn find_new_tail_suffix_prefix_overlap() {
+        // A suffix of the committed tail overlaps curr's start (sliding mode).
+        assert_eq!(
+            find_new_tail(&parse_words("hello world"), &parse_words("world foo bar"), 2).unwrap(),
+            parse_words("foo bar"),
+        );
+        // Longest match wins.
+        assert_eq!(
+            find_new_tail(&parse_words("we should deploy now"), &parse_words("deploy now please"), 2)
+                .unwrap(),
+            parse_words("please"),
+        );
+    }
+
+    #[test]
+    fn find_new_tail_tolerates_a_reworded_boundary_word() {
+        // Whisper re-punctuated/cased "hello, world" into "hello World foo" —
+        // the anchor must survive so only "foo" is treated as new.
+        assert_eq!(
+            find_new_tail(&parse_words("hello, world"), &parse_words("hello World foo"), 2).unwrap(),
+            parse_words("foo"),
+        );
+    }
+
+    #[test]
+    fn find_new_tail_refining_emits_no_tail() {
+        assert_eq!(
+            find_new_tail(&parse_words("hello world foo"), &parse_words("hello world"), 2),
+            Some(vec![])
+        );
+        assert_eq!(find_new_tail(&parse_words("a b c"), &parse_words("a b"), 2), Some(vec![]));
+    }
+
+    #[test]
+    fn find_new_tail_declines_when_no_anchor_exists() {
+        // No committed word appears in curr: nothing safe to type this pass
+        // (the old confident-only diff's exact contract, now unified).
+        assert_eq!(find_new_tail(&parse_words("x y"), &parse_words("a b c d"), 2), None);
+    }
+
+    #[test]
+    fn find_new_tail_skips_restated_filler_at_the_window_start() {
+        // A leading fragment Whisper restated differently ("noise") must be
+        // swallowed by the anchor, not re-typed as if it were new.
+        assert_eq!(
+            find_new_tail(
+                &parse_words("cat sat the mat"),
+                &parse_words("noise cat sat the mat and then"),
+                2,
+            )
+            .unwrap(),
+            parse_words("and then"),
+        );
+    }
+
+    #[test]
+    fn find_new_tail_is_bounded_by_lookback_not_session_history() {
+        // Regression for the silent-freeze bug: once committed text exceeds
+        // one window's worth of words, the anchor must only consider the
+        // recent SLIDING_DIFF_LOOKBACK_WORDS tail — not the whole session —
+        // so a fresh window with genuinely new content still anchors.
+        let mut committed = Vec::new();
+        for i in 0..80 {
+            committed.push(Word {
+                text: if i % 2 == 0 { "word".into() } else { "other".into() },
+                punct: None,
+            });
+        }
+        let tail = committed[committed.len() - SLIDING_DIFF_LOOKBACK_WORDS..].to_vec();
+        let found =
+            find_new_tail(&tail, &parse_words("word other word other word other brand new content"), 2)
+                .unwrap();
+        assert_eq!(render_words(&found), "brand new content");
+    }
+
+    fn words(s: &str) -> Vec<Word> {
+        parse_words(s)
     }
 
     fn revision_session() -> Session {
@@ -1118,19 +1183,14 @@ mod tests {
 
     #[test]
     fn final_flush_falls_back_to_a_best_effort_guess_when_no_confident_anchor_exists() {
-        // Reproduces a real gap found live: a 60s recording hit its hard
-        // timeout mid-sentence, and the very last transcription pass
-        // reworded the trailing content so thoroughly that
-        // `extract_new_text_confident` had no anchor to re-attach it to
-        // (same shape as `extract_new_text_confident_declines_the_safety_guess`).
-        // In the tick loop, declining and waiting for the next tick is
-        // correct; at `final_flush` there is no next tick — declining
-        // there just leaves whatever the previous, less-accurate guess
-        // typed on screen forever, uncorrected. commit-only mode's own
-        // final_flush already falls back to `extract_new_text`'s safety
-        // guess for exactly this reason; revision mode must too.
+        // Reproduces a real gap found live: a recording hit its hard timeout
+        // mid-sentence, and the very last pass reworded the trailing content
+        // so thoroughly that no anchor could re-attach it. In the tick loop,
+        // declining and waiting for the next tick is correct; at
+        // `final_flush` there is no next tick, so a best-effort guess beats
+        // leaving the previous text uncorrected forever.
         let mut session = revision_session();
-        session.confirmed_words = words("x y");
+        session.committed_words = words("x y");
         session.feed(&loud_samples(1.5));
         session.base = Arc::new(RevisingTranscriber::new(vec!["a b c d"]));
 
@@ -1138,38 +1198,34 @@ mod tests {
             .final_flush()
             .expect("must fall back to a guess instead of silently giving up");
 
+        // Committed "x y" has no overlap with the fresh "a b c d", so the
+        // fallback slices the tail beyond committed; it carries its leading
+        // separator, like every delta that follows existing text.
         assert_eq!(
             delta,
-            Delta::Append("c d".to_string()),
+            Delta::Append(" c d".to_string()),
             "should type the safety-guess tail rather than leave nothing corrected"
         );
     }
 
     #[test]
-    fn revision_new_tail_growing_mode_is_immune_to_reworded_prefix_drift() {
-        // Reproduces a real bug found live: growing mode used to slice
-        // curr_words[confirmed_words.len()..] by raw word-count index.
-        // Here Whisper's fresh full-buffer pass rewords the
-        // already-confirmed sentence ("This works way better.") by
-        // hearing one extra word ("much") it missed before, shifting
-        // where the confirmed content actually ends in curr_words by
-        // one position. The old index slice would grab "better." again
-        // alongside the genuinely new tail; the live incident this
-        // reproduces did the same thing at a much larger scale (whole
-        // already-typed sentences retyped, repeatedly).
+    fn find_new_tail_growing_mode_is_immune_to_reworded_prefix_drift() {
+        // Regression: growing mode used to slice curr by raw word-count
+        // index, which re-grabbed "better." after Whisper heard one extra
+        // word ("much") and shifted the boundary. The unified alignment
+        // anchors on text, never a raw index, so the reworded "much" is
+        // swallowed and only genuinely-new text remains the new tail.
         let mut session = revision_session();
-        assert!(
-            !session.sliding,
-            "this scenario is specifically growing mode"
-        );
-        session.confirmed_words = words("This works way better.");
-
-        let curr = "This works way much better. No hang ups.";
-        let tail = session.revision_new_tail(curr).unwrap();
-
+        session.committed_words = words("This works way better.");
+        let tail = find_new_tail(
+            &session.committed_tail(),
+            &words("This works way much better. No hang ups."),
+            ALIGN_BAND,
+        )
+        .unwrap();
         assert_eq!(
-            tail,
-            words("No hang ups."),
+            render_words(&tail),
+            "No hang ups.",
             "must not re-include any part of the reworded confirmed sentence"
         );
     }
@@ -1209,43 +1265,48 @@ mod tests {
         }
     }
 
+    /// Drive the real per-tick flow the engine runs for type-then-correct:
+    /// reconcile (type/correct), tally stability, promote.
+    fn feed_tick(session: &mut Session, tail: &[Word]) -> Option<Delta> {
+        let delta = session.reconcile(tail);
+        session.provisional_stability = session.update_stability(tail);
+        session.promoted_last_tick = session.promote();
+        delta
+    }
+
     #[test]
-    fn reconcile_revision_pure_extension_has_zero_backspace() {
+    fn reconcile_pure_extension_has_zero_backspace() {
         let mut session = revision_session();
         // First tick: nothing displayed yet, tail is "hello".
-        let delta = session.reconcile_revision(words("hello"));
+        let delta = feed_tick(&mut session, &words("hello"));
         assert_eq!(delta, Some(Delta::Append("hello".to_string())));
         assert_eq!(session.provisional_words, words("hello"));
 
-        // Second tick: tail grew to "hello world" — pure extension, no
-        // correction needed.
-        let delta = session.reconcile_revision(words("hello world"));
+        // Second tick: tail grew to "hello world" — pure extension.
+        let delta = feed_tick(&mut session, &words("hello world"));
         assert_eq!(delta, Some(Delta::Append(" world".to_string())));
         assert_eq!(session.provisional_words, words("hello world"));
     }
 
     #[test]
-    fn reconcile_revision_no_change_emits_nothing() {
+    fn reconcile_no_change_emits_nothing() {
         let mut session = revision_session();
-        session.reconcile_revision(words("hello world"));
-        let delta = session.reconcile_revision(words("hello world"));
+        session.reconcile(&words("hello world"));
+        let delta = session.reconcile(&words("hello world"));
         assert_eq!(delta, None);
     }
 
     #[test]
-    fn reconcile_revision_divergence_emits_char_exact_backspace() {
+    fn reconcile_word_divergence_backspaces_only_the_wrong_suffix() {
         let mut session = revision_session();
-        // Displayed: "turn on the lamp" (all still provisional — under
-        // the confirm lag).
-        session.reconcile_revision(words("turn on the lamp"));
+        session.reconcile(&words("turn on the lamp"));
 
         // Whisper changes its mind: "lamp" should have been "light".
-        let delta = session.reconcile_revision(words("turn on the light"));
+        let delta = session.reconcile(&words("turn on the light"));
         match delta {
             Some(Delta::Replace { backspace, text }) => {
                 // Only "lamp" (4 chars) plus its leading space needs
-                // removing — "turn on the" survived unchanged and must
-                // NOT be touched.
+                // removing — "turn on the" survived unchanged.
                 assert_eq!(backspace, " lamp".chars().count());
                 assert_eq!(text, " light");
             }
@@ -1255,18 +1316,54 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_revision_divergence_mid_tail_only_touches_wrong_suffix() {
+    fn reconcile_punctuation_flip_backspaces_only_the_stale_punct_char() {
+        // Whisper heard "it." first, then "it?" — the type-then-correct
+        // engine must fix the punctuation with a 1-char backspace, not
+        // re-type the word.
         let mut session = revision_session();
-        // 6 words with REVISION_LAG_WORDS=4 immediately confirms the
-        // first 2 ("the", "cat") in this same call — provisional_words is
-        // left as ["sat", "on", "the", "mat"].
-        session.reconcile_revision(words("the cat sat on the mat"));
+        session.reconcile(&words("what time is it."));
+        let delta = session.reconcile(&words("what time is it?"));
+        match delta {
+            Some(Delta::Replace { backspace, text }) => {
+                assert_eq!(backspace, 1, "only the stale '.' needs removing");
+                assert_eq!(text, "?");
+            }
+            other => panic!("expected a punct Replace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reconcile_punct_flip_mid_tail_rewrites_only_the_following_tail() {
+        // A stale punctuation char sits mid-text behind already-typed words
+        // ("it? tomorrow"): removing it must backspace the stale "?" plus
+        // everything after it, then retype the corrected tail.
+        let mut session = revision_session();
+        feed_tick(&mut session, &words("what time is it? tomorrow"));
+        let mut new_tail = words("what time is it tomorrow afternoon?");
+        session.reconcile_question_marks(&mut new_tail);
+        let delta = session.reconcile(&new_tail);
+        match delta {
+            Some(Delta::Replace { backspace, text }) => {
+                assert_eq!(backspace, "? tomorrow".chars().count());
+                assert_eq!(text, " tomorrow afternoon?");
+            }
+            other => panic!("expected a punct Replace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reconcile_divergence_mid_tail_only_touches_wrong_suffix() {
+        let mut session = revision_session();
+        session.config.stability_passes = 1; // promote eagerly for this test
+        // 6 words with lag 4 immediately confirms the first 2 ("the",
+        // "cat") — provisional_words is left as ["sat", "on", "the", "mat"].
+        feed_tick(&mut session, &words("the cat sat on the mat"));
         assert_eq!(session.provisional_words, words("sat on the mat"));
 
-        // Next tail must not re-include the now-confirmed "the cat" (real
-        // callers never do — see revision_new_tail). Only "sat on the"
-        // still agrees; "mat" -> "rug" is the actual correction.
-        let delta = session.reconcile_revision(words("sat on the rug"));
+        // Next tail (as `find_new_tail` would return it) excludes the
+        // now-confirmed "the cat". Only "sat on the" still agrees;
+        // "mat" -> "rug" is the actual correction.
+        let delta = session.reconcile(&words("sat on the rug"));
         match delta {
             Some(Delta::Replace { backspace, text }) => {
                 assert_eq!(backspace, " mat".chars().count());
@@ -1277,32 +1374,60 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_revision_confirms_behind_the_lag_and_never_revisits_it() {
+    fn promotion_confirms_stable_words_behind_the_lag_and_never_revisits_them() {
         let mut session = revision_session();
-        // Feed one word at a time; once more than REVISION_LAG_WORDS
-        // words of newer content exist, the oldest word(s) must be
-        // promoted into full_text_parts and drop out of provisional_words
-        // — and from then on, even if a *fresh* tail were to "disagree"
-        // with that confirmed word, it's already outside provisional_words
-        // and cannot be reached by any future correction.
-        let sentence = "one two three four five six seven";
-        let all_words = words(sentence);
+        // Feed the tail one word at a time through the real per-tick flow.
+        let all_words = words("one two three four five six seven");
         for n in 1..=all_words.len() {
-            // Mirrors what `revision_new_tail` actually computes for
-            // growing mode: only the words beyond what's already
-            // confirmed — never re-passing already-confirmed words, which
-            // would (correctly) look like fresh duplicate content.
-            let confirmed_len = session.confirmed_words.len();
-            session.reconcile_revision(all_words[confirmed_len..n].to_vec());
+            let committed_len = session.committed_words.len();
+            // Same tail the engine would compute: everything beyond what's
+            // already confirmed.
+            let new_tail = all_words[committed_len..n].to_vec();
+            feed_tick(&mut session, &new_tail);
         }
-        assert!(session.provisional_words.len() <= REVISION_LAG_WORDS);
-        let confirmed_and_provisional: Vec<String> = session
-            .full_text_parts
-            .iter()
-            .flat_map(|s| s.split_whitespace().map(str::to_owned))
-            .chain(session.provisional_words.iter().cloned())
-            .collect();
-        assert_eq!(confirmed_and_provisional, all_words);
+        // The lag window keeps the last `revision_lag_words` provisional...
+        assert!(
+            session.provisional_words.len() <= session.config.revision_lag_words
+        );
+        // ...but committed + provisional still reconstruct the whole tail,
+        // with no word duplicated or lost.
+        let mut combined = session.committed_words.clone();
+        combined.extend(session.provisional_words.iter().cloned());
+        assert_eq!(combined, all_words);
+    }
+
+    #[test]
+    fn question_mark_reconcile_drops_a_stale_question_mark() {
+        // The priority fix: "what time is it? tomorrow afternoon?" must end
+        // with exactly one "?" — the premature one after "it" is removed.
+        let mut session = revision_session();
+        session.committed_words = words("what time is");
+        let mut new_tail = words("it? tomorrow afternoon?");
+        session.reconcile_question_marks(&mut new_tail);
+        assert_eq!(render_words(&new_tail), "it tomorrow afternoon?");
+    }
+
+    #[test]
+    fn question_mark_reconcile_leaves_a_single_question_alone() {
+        let mut session = revision_session();
+        session.committed_words = words("what time is");
+        let mut new_tail = words("it tomorrow afternoon?");
+        session.reconcile_question_marks(&mut new_tail);
+        assert_eq!(render_words(&new_tail), "it tomorrow afternoon?");
+    }
+
+    #[test]
+    fn question_mark_reconcile_never_touches_committed_text() {
+        // The stale "?" is within `question_mark_lookback_words`, which is
+        // capped at the revision lag, so it is always still provisional and
+        // committed words are never edited. Here the only "?" is inside
+        // committed text (defensive): the reconcile must leave new_tail alone.
+        let mut session = revision_session();
+        session.config.question_mark_lookback_words = 0;
+        session.committed_words = words("really?");
+        let mut new_tail = words("no thanks");
+        session.reconcile_question_marks(&mut new_tail);
+        assert_eq!(render_words(&new_tail), "no thanks");
     }
 
     #[test]
@@ -1311,57 +1436,6 @@ mod tests {
         assert_eq!(last_n_words("a b", 3), "a b");
         assert_eq!(last_n_words("", 3), "");
         assert_eq!(last_n_words("a b c", 0), "");
-    }
-
-    #[test]
-    fn long_session_stall_reproduction_and_fix() {
-        // Reproduces the empty-forever bug found live on a 60s recording:
-        // once a sliding-mode session's cumulative committed text exceeds
-        // one window's worth of words, extract_new_text's strategy-4
-        // safety check ("curr not substantially longer than prev") starts
-        // comparing curr against the WHOLE session instead of just the
-        // recent tail, and permanently returns "" even though curr keeps
-        // growing with genuinely new speech every tick.
-        let mut committed_history: Vec<&str> = Vec::new();
-        for i in 0..80 {
-            committed_history.push(if i % 2 == 0 { "word" } else { "other" });
-        }
-        let full_emitted = committed_history.join(" "); // 80 words, no overlap with curr below
-
-        // curr: a fresh ~29s window's transcript, entirely new content
-        // (as if the old committed words have aged out of the window),
-        // with no exact overlap with `full_emitted` at all — forcing
-        // strategy 4 (the length-based safety net) to be the deciding
-        // factor, exactly as happens once repeated/rewritten phrasing
-        // defeats strategies 1-3 in practice. Must be longer than
-        // SLIDING_DIFF_LOOKBACK_WORDS for strategy 4 to have anything to
-        // work with once `prev` is properly bounded.
-        let curr = "brand new content the user just said in this window \
-                     that should absolutely without question be committed \
-                     as a real delta and not silently dropped on the floor";
-        let curr_words: Vec<&str> = curr.split_whitespace().collect();
-        assert!(curr_words.len() > SLIDING_DIFF_LOOKBACK_WORDS);
-
-        // The bug: diffing against the entire unbounded session history.
-        assert_eq!(
-            extract_new_text(&full_emitted, curr),
-            "",
-            "sanity check: this is the exact failure mode observed live"
-        );
-
-        // The fix: bound `prev` to a small recent tail before diffing.
-        // Strategy 4 then strips only SLIDING_DIFF_LOOKBACK_WORDS words off
-        // curr's front (its usual "assume that much was already emitted"
-        // heuristic) instead of freezing solid — the point of the fix is
-        // that *something* keeps flowing, not that it's a perfect diff.
-        let bounded = last_n_words(&full_emitted, SLIDING_DIFF_LOOKBACK_WORDS);
-        assert_eq!(
-            bounded.split_whitespace().count(),
-            SLIDING_DIFF_LOOKBACK_WORDS
-        );
-        let expected = curr_words[SLIDING_DIFF_LOOKBACK_WORDS..].join(" ");
-        assert_eq!(extract_new_text(&bounded, curr), expected);
-        assert!(!expected.is_empty());
     }
 
     #[test]
@@ -1417,7 +1491,10 @@ mod tests {
             min_audio_s: 1.0,
             partial_min_words: 1,
             type_partials: true,
-            revision_mode: false,
+            revision_mode: true,
+            question_mark_lookback_words: 3,
+            stability_passes: 2,
+            revision_lag_words: 4,
         }
     }
 
@@ -1560,7 +1637,9 @@ mod tests {
 
     #[tokio::test]
     async fn commit_only_mode_emits_final_deltas() {
+        // Conservative gate + Final events: the legacy non-typing-tail mode.
         let mut cfg = streaming_config();
+        cfg.revision_mode = false;
         cfg.type_partials = false;
         let events = run_session(cfg).await;
 
@@ -1616,6 +1695,98 @@ mod tests {
         // this is the whole point: the wrong guess actually gets undone,
         // not just papered over by later appends.
         assert_eq!(reconstruct_typed_text(&events), "turn on the light");
+    }
+
+    #[tokio::test]
+    async fn question_mark_reconcile_end_to_end_puts_one_question_mark_in_the_right_place() {
+        // The priority fix, end-to-end: Whisper first hears "what time is
+        // it?" (the question isn't over), then hears the full question
+        // "what time is it? tomorrow afternoon?" with a second "?". The stale
+        // "?" after "it" must be dropped so the utterance ends with exactly
+        // one "?" — in the right place (the true end).
+        let transcriber: Arc<dyn Transcriber> = Arc::new(RevisingTranscriber::new(vec![
+            "",
+            "",
+            "what time is it?",
+            "what time is it?",
+            "what time is it? tomorrow afternoon?",
+            "what time is it? tomorrow afternoon?",
+        ]));
+        let mut cfg = streaming_config();
+        cfg.revision_mode = true;
+        let events = run_session_with(transcriber, cfg, 6).await;
+
+        assert!(matches!(events.last(), Some(StreamingEvent::Ended)));
+        assert!(
+            events
+                .iter()
+                .any(|ev| matches!(ev, StreamingEvent::Replace { .. })),
+            "expected a revision event that removes the premature '?', got {events:?}"
+        );
+        assert_eq!(
+            reconstruct_typed_text(&events),
+            "what time is it tomorrow afternoon?",
+            "exactly one question mark, at the end"
+        );
+    }
+
+    #[tokio::test]
+    async fn flickering_word_is_corrected_every_tick_without_stalling_the_tail() {
+        // The live stall scenario: one word flickers between passes ("said" /
+        // "doesn't" / "so") while the rest of the tail stays well-formed.
+        // Type-then-correct must correct that one word on every tick instead
+        // of withholding the whole tail until two passes agree — no
+        // multi-tick stall.
+        let transcriber: Arc<dyn Transcriber> = Arc::new(RevisingTranscriber::new(vec![
+            "",
+            "",
+            "still said okay.",
+            "still doesn't okay.",
+            "still so okay.",
+            "still so okay.",
+        ]));
+        let mut cfg = streaming_config();
+        cfg.revision_mode = true;
+        let events = run_session_with(transcriber, cfg, 6).await;
+
+        assert!(matches!(events.last(), Some(StreamingEvent::Ended)));
+        assert!(
+            events
+                .iter()
+                .filter(|ev| matches!(ev, StreamingEvent::Replace { .. }))
+                .count() >= 2,
+            "expected the flickering word to be revised on each disagreeing tick, got {events:?}"
+        );
+        // Ends on the last stable form — a stall would leave an earlier form
+        // stuck on screen uncorrected.
+        assert_eq!(reconstruct_typed_text(&events), "still so okay.");
+    }
+
+    #[tokio::test]
+    async fn punct_flip_end_to_end_fixes_punctuation() {
+        // Whisper re-punctuates the same word ("it." → "it?") on a later
+        // pass. Type-then-correct revises it (a Replace), so the final
+        // transcript carries the corrected punctuation.
+        let transcriber: Arc<dyn Transcriber> = Arc::new(RevisingTranscriber::new(vec![
+            "",
+            "",
+            "what time is it.",
+            "what time is it.",
+            "what time is it?",
+            "what time is it?",
+        ]));
+        let mut cfg = streaming_config();
+        cfg.revision_mode = true;
+        let events = run_session_with(transcriber, cfg, 6).await;
+
+        assert!(matches!(events.last(), Some(StreamingEvent::Ended)));
+        assert!(
+            events
+                .iter()
+                .any(|ev| matches!(ev, StreamingEvent::Replace { .. })),
+            "expected a punctuation revision, got {events:?}"
+        );
+        assert_eq!(reconstruct_typed_text(&events), "what time is it?");
     }
 
     #[tokio::test]

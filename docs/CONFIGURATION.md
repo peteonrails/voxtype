@@ -1241,9 +1241,12 @@ This section is entirely optional. Omitting it (or omitting individual fields in
 | `max_buffer_secs` | Float | `29.0` | Max buffered audio (seconds) before the window slides (drops old samples to respect the model's context limit) |
 | `min_speech_rms` | Float | `0.005` | Skip transcription while whole-buffer RMS is below this |
 | `min_audio_secs` | Float | `1.0` | Min buffered audio (seconds) before the first partial is attempted |
-| `partial_min_words` | Integer | `1` | Min new stable words before a delta is committed/typed |
+| `partial_min_words` | Integer | `1` | Min new stable words before a delta is committed/typed (conservative gate only — type-then-correct ignores it and types everything immediately) |
 | `type_partials` | Boolean | `true` | Type committed deltas live at the cursor, vs. commit whole segments at once |
-| `revision_mode` | Boolean | `false` | Experimental: type immediately and correct via backspace if wrong, instead of waiting for agreement. See `openvino.streaming_revision_mode` in the `[openvino]` section for the full explanation of the trade-off — it applies identically here |
+| `revision_mode` | Boolean | `true` | **Type-then-correct (default):** type immediately and correct via backspace + retype if a later pass disagrees, instead of withholding the tail until it's stable across `stability_passes` ticks. Setting this to `false` opts back into the legacy conservative gate (never types something wrong, but lags by ~`stability_passes` ticks and can visibly pause) |
+| `question_mark_lookback_words` | Integer | `3` | When a new "?" lands on the tail's last word, scan back this many words for a stale earlier "?" and remove it, so a still-open question keeps exactly one "?" on its true end (e.g. "what time is it? tomorrow afternoon?" becomes "what time is it tomorrow afternoon?"). Capped at `revision_lag_words` so it only ever revises still-revisable text |
+| `stability_passes` | Integer | `2` | Consecutive ticks a word must be present (same text and punctuation) before it's promoted out of the revisable tail (type-then-correct mode) or typed at all (conservative gate) |
+| `revision_lag_words` | Integer | `4` | How many trailing words of the tail stay revisable in type-then-correct mode; anything older is permanently confirmed and can never be revised again, bounding how far a correction can reach |
 
 **Example:**
 ```toml
@@ -1848,13 +1851,12 @@ streaming = true
 ### openvino.streaming_revision_mode
 
 **Type:** Boolean
-**Default:** `false`
+**Default:** `true`
 **Required:** No
-**Status:** Experimental
 
-Same setting as the shared `[streaming] revision_mode`, kept here as a deprecated fallback (see the `[streaming]` section's compatibility note). The default streaming gate withholds a word until it's agreed across two consecutive re-transcriptions — safe (never types something wrong) but can pause for a long stretch if Whisper keeps re-wording the same short phrase differently on every pass. Revision mode trades that safety for responsiveness: it types its current best guess immediately and corrects it later (backspace + retype, the same mechanism used to revise Soniox's punctuation flips) if a later pass disagrees. Once enough newer content has appeared behind a word (`REVISION_LAG_WORDS`, 4 words, not configurable), it's locked in and can never be revised again — bounding how far back any single correction can reach.
+Same setting as the shared `[streaming] revision_mode`, kept here as a deprecated fallback (see the `[streaming]` section's compatibility note). Defaults to type-then-correct: the tail is typed immediately and corrected via backspace + retype if a later pass disagrees (including punctuation changes, and the stale "?" fix described under `[streaming] question_mark_lookback_words`). Setting it to `false` opts back into the legacy conservative gate, which withholds a word until it's been stable across `stability_passes` ticks — safe (never types something wrong) but lags and can pause while Whisper re-words a phrase.
 
-This is a real, different failure mode from the default gate, not a strictly better version of it: instead of an occasional pause, you may occasionally see a word appear, then get backspaced and retyped differently, while dictating. For file-output sessions (`voxtype record start --file=path`) there's no real cursor involved — a "correction" is just an in-memory string edit — so this is the safer place to try it first. For live typing into an arbitrary focused window, a wrong backspace count could in principle remove characters that weren't typed by voxtype at all, if the daemon's own bookkeeping of what it typed ever drifts (e.g. focus moved mid-correction).
+This is a real, different failure mode from the conservative gate, not a strictly better version of it: instead of an occasional pause, you may occasionally see a word appear, then get backspaced and retyped differently, while dictating. For file-output sessions (`voxtype record start --file=path`) there's no real cursor involved — a "correction" is just an in-memory string edit — so this is the safer place to exercise it. For live typing into an arbitrary focused window, a wrong backspace count could in principle remove characters that weren't typed by voxtype at all, if the daemon's own bookkeeping of what it typed ever drifts (e.g. focus moved mid-correction).
 
 ```toml
 [openvino]
