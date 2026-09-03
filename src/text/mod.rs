@@ -285,9 +285,9 @@ impl TextProcessor {
             ("close bracket", "]"),
             ("open brace", "{"),
             ("close brace", "}"),
-            ("at sign", "@"),
-            ("at symbol", "@"),
-            ("dollar sign", "$"),
+            ("at sign", ATTACH_AT),
+            ("at symbol", ATTACH_AT),
+            ("dollar sign", ATTACH_DOLLAR),
             ("percent sign", "%"),
             ("plus sign", "+"),
             ("equals sign", "="),
@@ -304,8 +304,8 @@ impl TextProcessor {
             ("dash", "-"),
             ("hyphen", "-"),
             ("underscore", "_"),
-            ("hash", "#"),
-            ("hashtag", "#"),
+            ("hash", ATTACH_HASH),
+            ("hashtag", ATTACH_HASH),
             ("percent", "%"),
             ("ampersand", "&"),
             ("asterisk", "*"),
@@ -401,6 +401,32 @@ fn replace_phrase_case_insensitive(text: &str, from: &str, to: &str) -> String {
     }
 }
 
+/// Sentinel-wrapped symbols. Spoken punctuation emits these so the spacing
+/// pass can tell "the user said 'dollar sign'" from "the engine wrote $25".
+/// U+E000..U+E002 are private-use, so they cannot occur in real transcription.
+const ATTACH_AT: &str = "\u{e000}@\u{e000}";
+const ATTACH_DOLLAR: &str = "\u{e001}$\u{e001}";
+const ATTACH_HASH: &str = "\u{e002}#\u{e002}";
+
+/// Collapse whitespace either side of a sentinel-wrapped symbol, then drop
+/// the sentinels. "hash include" -> "#include"; "cost $25" is untouched
+/// because nothing wrapped that dollar sign.
+fn glue_attached_symbols(text: &str) -> String {
+    let mut result = text.to_string();
+    for sentinel in ['\u{e000}', '\u{e001}', '\u{e002}'] {
+        let s = sentinel.to_string();
+        // Whitespace outside the sentinels goes away; repeat so runs collapse.
+        while result.contains(&format!(" {}", s)) {
+            result = result.replace(&format!(" {}", s), &s);
+        }
+        while result.contains(&format!("{} ", s)) {
+            result = result.replace(&format!("{} ", s), &s);
+        }
+        result = result.replace(&s, "");
+    }
+    result
+}
+
 /// Clean up spacing around punctuation marks
 fn clean_punctuation_spacing(text: &str) -> String {
     let mut result = text.to_string();
@@ -420,15 +446,11 @@ fn clean_punctuation_spacing(text: &str) -> String {
         result = result.replace(&format!(" {}", punct), &punct.to_string());
     }
 
-    // Remove space before symbols that typically attach to the next word (email, hashtags, etc.)
-    for sym in ['#', '@', '$'] {
-        result = result.replace(&format!(" {}", sym), &sym.to_string());
-    }
-
-    // Remove space after symbols that typically attach to the next word
-    for sym in ['#', '@', '$'] {
-        result = result.replace(&format!("{} ", sym), &sym.to_string());
-    }
+    // Glue #, @ and $ to their neighbours - but only the ones spoken
+    // punctuation just inserted, which are the only ones wrapped in
+    // sentinels. Stripping every " $" unconditionally also ate the space in
+    // an engine's own output ("it will cost $25" -> "cost$25").
+    result = glue_attached_symbols(&result);
 
     // Remove spaces around newlines and tabs
     result = result.replace(" \n", "\n");
@@ -656,6 +678,28 @@ mod tests {
         );
         assert_eq!(processor.process("hash include"), "#include");
         assert_eq!(processor.process("user at sign example"), "user@example");
+    }
+
+    #[test]
+    fn engine_emitted_symbols_keep_their_spacing() {
+        // Parakeet emits "$25" itself. The spoken-punctuation spacing pass
+        // used to strip the space before any $, # or @, turning "it will
+        // cost $25" into "cost$25".
+        let config = make_config(true, &[]);
+        let processor = TextProcessor::new(&config);
+
+        assert_eq!(
+            processor.process("It will cost $25 a month."),
+            "It will cost $25 a month."
+        );
+        assert_eq!(
+            processor.process("We have 50% coverage and #3 is open."),
+            "We have 50% coverage and #3 is open."
+        );
+        assert_eq!(
+            processor.process("Mail me at pete@tern.travel"),
+            "Mail me at pete@tern.travel"
+        );
     }
 
     #[test]

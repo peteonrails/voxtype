@@ -163,22 +163,59 @@ fn rewrite_is_safe(before: &[&str], after: &[&str]) -> bool {
 }
 
 /// Split on sentence terminators, keeping the terminator with its sentence.
+///
+/// A full stop is not automatically a sentence end. Splitting naively cut
+/// "Meet me at 3.30 p.m." into three fragments, none of which still looked
+/// like a time, so nothing was converted. A terminator only ends a sentence
+/// when it is not inside a decimal, not part of a single-letter abbreviation
+/// ("p.m.", "e.g."), and is followed by whitespace then a capital - or by
+/// nothing at all.
 fn sentences(text: &str) -> Vec<&str> {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
     let mut out = Vec::new();
     let mut start = 0usize;
-    let bytes = text.as_bytes();
-    for (i, c) in text.char_indices() {
-        if matches!(c, '.' | '!' | '?') {
-            let end = i + c.len_utf8();
-            // Absorb trailing whitespace so rejoining is lossless.
-            let mut e = end;
-            while e < bytes.len() && (bytes[e] as char).is_whitespace() {
-                e += 1;
-            }
-            out.push(&text[start..e]);
-            start = e;
+
+    for (idx, &(_, c)) in chars.iter().enumerate() {
+        if !matches!(c, '.' | '!' | '?') {
+            continue;
         }
+        let prev = idx.checked_sub(1).map(|k| chars[k].1);
+        let next = chars.get(idx + 1).map(|&(_, c)| c);
+
+        if c == '.' {
+            // A decimal point: "3.30".
+            if prev.is_some_and(|p| p.is_ascii_digit()) && next.is_some_and(|n| n.is_ascii_digit())
+            {
+                continue;
+            }
+            // A single-letter abbreviation: the "p." and "m." of "p.m.".
+            let two_back = idx.checked_sub(2).map(|k| chars[k].1);
+            if prev.is_some_and(|p| p.is_alphabetic())
+                && two_back.is_none_or(|b| !b.is_alphanumeric())
+            {
+                continue;
+            }
+        }
+
+        // Only a capital (or the end of the text) starts a new sentence.
+        let mut j = idx + 1;
+        while let Some(&(_, w)) = chars.get(j) {
+            if w.is_whitespace() {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        match chars.get(j) {
+            Some(&(_, w)) if !w.is_uppercase() => continue,
+            _ => {}
+        }
+
+        let cut = chars.get(j).map(|&(k, _)| k).unwrap_or(text.len());
+        out.push(&text[start..cut]);
+        start = cut;
     }
+
     if start < text.len() {
         out.push(&text[start..]);
     }
@@ -217,6 +254,17 @@ fn strip_leading_zero_hour(text: &str) -> String {
     re.replace_all(text, "$1").into_owned()
 }
 
+/// Engines write a clock time with a full stop ("3.30 p.m."). Only rewrite
+/// when a meridiem marker follows, so a decimal or a price is never touched.
+fn fix_time_separator(text: &str) -> String {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)\b(\d{1,2})\.(\d{2})(\s*[ap]\.?m\.?)")
+            .expect("BUG: time-separator regex is a compile-time constant and must be valid")
+    });
+    re.replace_all(text, "$1:$2$3").into_owned()
+}
+
 /// Apply inverse text normalization, conservatively.
 pub fn apply(text: &str) -> String {
     let opts = text_processing_rs::NormalizeOptions {
@@ -238,6 +286,7 @@ pub fn apply(text: &str) -> String {
         let spaced = despace_hyphenated_numbers(sentence);
         let converted = text_processing_rs::normalize_sentence_with_options(&spaced, opts);
         let converted = strip_leading_zero_hour(&converted);
+        let converted = fix_time_separator(&converted);
         out.push_str(&reconcile(sentence, &converted));
     }
     out
@@ -360,5 +409,18 @@ mod tests {
     fn hyphen_splitting_only_applies_to_number_pairs() {
         let s = "It is a well-known follow-up issue.";
         assert_eq!(apply(s), s);
+    }
+
+    #[test]
+    fn engine_clock_times_get_a_colon() {
+        assert_eq!(apply("Meet me at 3.30 p.m."), "Meet me at 3:30 p.m.");
+        assert_eq!(apply("Standup is 4.15 a.m."), "Standup is 4:15 a.m.");
+    }
+
+    #[test]
+    fn decimals_and_prices_keep_their_full_stop() {
+        // No meridiem marker, so these must not become clock times.
+        assert_eq!(apply("it costs $3.30 a month"), "it costs $3.30 a month");
+        assert_eq!(apply("version 1.20 shipped"), "version 1.20 shipped");
     }
 }
