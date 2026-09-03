@@ -35,6 +35,14 @@ pub struct TextConfig {
     #[serde(default)]
     pub collapse_restarts: bool,
 
+    /// Convert dictated quantities to written form: "twenty five dollars"
+    /// becomes "$25", "three thirty p m" becomes "3:30 p.m.". Only sentences
+    /// that look like they are about a quantity are touched, and a lone
+    /// number word is never turned into a digit, so ordinary prose ("one of
+    /// the things", "no one knows") is left alone. Off by default.
+    #[serde(default)]
+    pub format_numbers: bool,
+
     /// Words removed when `filter_filler_words` is true. Matched
     /// case-insensitively on word boundaries; surrounding punctuation and
     /// whitespace are cleaned up after removal.
@@ -50,6 +58,7 @@ impl Default for TextConfig {
             smart_auto_submit: false,
             filter_filler_words: true,
             collapse_restarts: false,
+            format_numbers: false,
             filler_words: default_filler_words(),
         }
     }

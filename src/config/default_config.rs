@@ -326,6 +326,13 @@ on_transcription = true
 # ("scratch that", "I'm sorry"). Off by default, because a wrong guess
 # deletes words you actually said.
 # collapse_restarts = false
+#
+# Convert dictated quantities to written form: "twenty five dollars" becomes
+# "$25", "three thirty p m" becomes "3:30 p.m.". Only sentences that look like
+# they are about a quantity are touched, and a lone number word is never made
+# a digit, so "one of the things" and "no one knows" are left alone.
+# Requires a build with the `itn` feature.
+# format_numbers = false
 
 [osd]
 # On-screen display frontend.

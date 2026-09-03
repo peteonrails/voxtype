@@ -5,6 +5,8 @@
 //! - Custom word replacements
 
 pub mod diff;
+#[cfg(feature = "itn")]
+pub mod itn;
 pub mod restarts;
 
 use crate::config::TextConfig;
@@ -25,6 +27,10 @@ pub struct TextProcessor {
     filter_filler_words: bool,
     /// Whether restart/stutter collapsing is enabled
     collapse_restarts: bool,
+    /// Whether dictated quantities are converted to written form.
+    /// Only read when the `itn` feature is compiled in.
+    #[cfg_attr(not(feature = "itn"), allow(dead_code))]
+    format_numbers: bool,
     /// Pre-compiled regex matching any configured filler word.
     /// `None` when the filter is disabled or the list is empty so the hot
     /// path can early-out without touching regex.
@@ -171,6 +177,7 @@ impl TextProcessor {
             submit_re,
             filter_filler_words: config.filter_filler_words,
             collapse_restarts: config.collapse_restarts,
+            format_numbers: config.format_numbers,
             filler_re,
             filler_space_re,
             filler_punct_re,
@@ -209,6 +216,14 @@ impl TextProcessor {
         // either, and the replacements pass below still gets the last word.
         if self.collapse_restarts {
             result = restarts::collapse_restarts(&result);
+        }
+
+        // Number formatting runs on text that is already de-disfluent and
+        // punctuated, so its sentence-level quantity check sees real
+        // sentences, and still ahead of the replacements pass below.
+        #[cfg(feature = "itn")]
+        if self.format_numbers {
+            result = itn::apply(&result);
         }
 
         // Apply replacements again to catch patterns that only became matchable

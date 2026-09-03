@@ -2969,6 +2969,33 @@ VOXTYPE_SMART_AUTO_SUBMIT=true voxtype
 
 **Note:** `smart_auto_submit` is conditional - it only fires when you say "submit". The existing `auto_submit` option always presses Enter after every transcription. Use `smart_auto_submit` when you want the choice per dictation, and `auto_submit` when you always want Enter pressed.
 
+### format_numbers
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Converts dictated quantities into written form - inverse text normalization.
+
+- "it will cost twenty five dollars a month" becomes "it will cost $25 a month"
+- "Twenty-five dollars a month." becomes "$25 a month."
+- "meet me at three thirty p m" becomes "meet me at 3:30 p.m."
+
+**Why it is conservative:** English number words are also ordinary words, and a general-purpose converter mangles prose - "one of the things we need" becomes "1 of the things we need", "no one knows" becomes "no 1 knows", "the first thing" becomes "the 1st thing". Voxtype therefore only hands a sentence to the converter when it looks like it is about a quantity (a currency word, a time marker, a unit, or a compound number such as "twenty five"), and then rejects any individual rewrite that would turn a lone number word into a digit. Sentences with no quantity in them are never touched at all.
+
+That also means it does less than you might expect on engines that already normalize numbers themselves. Parakeet, for example, emits "22 open issues" as digits without help, so there is nothing left to convert.
+
+Requires a build with the `itn` Cargo feature.
+
+**Example:**
+
+```toml
+[text]
+format_numbers = true
+```
+
+Runs after disfluency cleanup and spoken punctuation, and before your `replacements`, so your own rules still get the last word.
+
 ### collapse_restarts
 
 **Type:** Boolean
