@@ -123,7 +123,7 @@ impl StreamingState {
             min_audio_secs: ed.get_f32_or("streaming", "min_audio_secs", 1.0),
             partial_min_words: ed.get_int("streaming", "partial_min_words").unwrap_or(1),
             type_partials: ed.get_bool("streaming", "type_partials").unwrap_or(true),
-            revision_mode: ed.get_bool("streaming", "revision_mode").unwrap_or(false),
+            revision_mode: ed.get_bool("streaming", "revision_mode").unwrap_or(true),
             section_existed,
             field: Field::Enabled,
             feedback: None,
@@ -470,18 +470,13 @@ fn guidance_for_field(state: &StreamingState) -> Vec<Line<'_>> {
             ),
         ],
         Field::RevisionMode => vec![
-            heading("Revision mode"),
+            heading("Revision mode (type-then-correct)"),
             Line::from(""),
-            Line::from(Span::styled(
-                "Experimental. ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )),
             Line::from(
                 "Types the current best-guess tail immediately instead of \
-                 waiting for two ticks to agree, correcting it later via \
-                 backspace + retype if a following tick disagrees.",
+                 waiting for it to stabilize, correcting it later via \
+                 backspace + retype if a following tick disagrees. On by \
+                 default — the conservative gate below is the opt-in.",
             ),
             Line::from(""),
             Line::from(Span::styled(
@@ -491,11 +486,11 @@ fn guidance_for_field(state: &StreamingState) -> Vec<Line<'_>> {
             Line::from(
                 "more responsive live text, at the cost of visible \
                  flicker (type, then backspace, then retype) when Whisper \
-                 changes its mind about a word — and, unlike the default \
-                 gate, a bookkeeping mistake here can in principle delete \
-                 characters that were never voxtype's to begin with. Off \
-                 by default; try it if the conservative gate feels too \
-                 laggy for your use case.",
+                 changes its mind about a word — and a bookkeeping mistake \
+                 here can in principle delete characters that were never \
+                 voxtype's to begin with. Turn it off to fall back to the \
+                 conservative gate, which never types something wrong but \
+                 lags by a couple of ticks.",
             ),
         ],
     };
