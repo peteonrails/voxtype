@@ -1,8 +1,10 @@
 //! On-Screen Display (OSD) configuration section.
 //!
-//! Surfaces every field on `[osd]` from `OsdConfig` (src/osd/config.rs) so
-//! users can tune the floating waveform/level surface without leaving the
-//! TUI. The OSD binaries (voxtype-osd, voxtype-osd-gtk4, voxtype-osd-native)
+//! Surfaces the scalar fields on `[osd]` from `OsdConfig` (src/osd/config.rs)
+//! so users can tune the floating waveform/level surface without leaving the
+//! TUI. The `[osd.frame]` and `[osd.visual]` recipe tables stay config-file
+//! (and, for frame, `voxtype config set`) territory; the guard test at the
+//! bottom pins which schema keys are deliberately absent here. The OSD binaries (voxtype-osd, voxtype-osd-gtk4, voxtype-osd-native)
 //! re-read this table at launch — the daemon doesn't load it, so a save
 //! here only takes effect for OSD restarts, not the next dictation.
 
@@ -16,7 +18,7 @@ use ratatui::{
 };
 
 use super::app::{Action, App};
-use super::common::{self, FeedbackLevel, FormRowSpec};
+use super::common::{self, FeedbackLevel, FormRowSpec, TextInput, TextInputResult};
 use super::config_editor::{ConfigEditor, EditorError};
 
 #[derive(Debug, Clone)]
@@ -24,6 +26,8 @@ pub struct OsdState {
     pub enabled: bool,
     pub frontend: String,
     pub style: String,
+    /// Development package directory; empty string means unset.
+    pub plugin_path: String,
     pub palette: String,
     pub layout: String,
     pub position: String,
@@ -36,6 +40,7 @@ pub struct OsdState {
     pub peak_decay_db_per_sec: f64,
     pub waveform_gain: f64,
     pub field: Field,
+    pub editing: Option<TextEdit>,
     pub feedback: Option<(FeedbackLevel, String)>,
     pub dirty_since_load: bool,
     /// True when neither voxtype-osd-gtk4 nor voxtype-osd-native is on
@@ -45,11 +50,18 @@ pub struct OsdState {
     pub binary_missing: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct TextEdit {
+    pub field: Field,
+    pub input: TextInput,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     Enabled,
     Frontend,
     Style,
+    PluginPath,
     Palette,
     Layout,
     Position,
@@ -68,6 +80,7 @@ impl Field {
         Field::Enabled,
         Field::Frontend,
         Field::Style,
+        Field::PluginPath,
         Field::Palette,
         Field::Layout,
         Field::Position,
@@ -122,6 +135,7 @@ impl OsdState {
             style: ed
                 .get_string(TABLE, "style")
                 .unwrap_or_else(|| "default".to_string()),
+            plugin_path: ed.get_string(TABLE, "plugin_path").unwrap_or_default(),
             palette: ed
                 .get_string(TABLE, "palette")
                 .unwrap_or_else(|| "auto".to_string()),
@@ -140,6 +154,7 @@ impl OsdState {
             peak_decay_db_per_sec: ed.get_float(TABLE, "peak_decay_db_per_sec").unwrap_or(6.0),
             waveform_gain: ed.get_float(TABLE, "waveform_gain").unwrap_or(10.0),
             field: Field::Enabled,
+            editing: None,
             feedback: None,
             dirty_since_load: false,
             binary_missing: !osd_binary_available(),
@@ -157,6 +172,11 @@ impl OsdState {
         ed.set_bool(TABLE, "enabled", self.enabled);
         ed.set_string(TABLE, "frontend", &self.frontend);
         ed.set_string(TABLE, "style", &self.style);
+        if self.plugin_path.is_empty() {
+            ed.unset(TABLE, "plugin_path");
+        } else {
+            ed.set_string(TABLE, "plugin_path", &self.plugin_path);
+        }
         if self.palette == "auto" {
             ed.unset(TABLE, "palette");
         } else {
@@ -216,6 +236,8 @@ impl OsdState {
                     self.style = cycle_str(STYLE_CHOICES, &self.style, delta);
                 }
             }
+            // Free-text only; Enter/i opens the inline editor instead.
+            Field::PluginPath => return,
             Field::Palette => self.palette = cycle_str(PALETTE_CHOICES, &self.palette, delta),
             Field::Layout => self.layout = cycle_str(LAYOUT_CHOICES, &self.layout, delta),
             Field::Position => self.position = cycle_str(POSITION_CHOICES, &self.position, delta),
@@ -237,6 +259,44 @@ impl OsdState {
             Field::WaveformGain => {
                 self.waveform_gain = cycle_float(GAIN_CHOICES, self.waveform_gain, delta)
             }
+        }
+        self.dirty_since_load = true;
+        self.feedback = None;
+    }
+
+    fn is_text_field(field: Field) -> bool {
+        matches!(field, Field::Style | Field::PluginPath)
+    }
+
+    fn start_edit_if_text_field(&mut self) -> bool {
+        if !Self::is_text_field(self.field) {
+            return false;
+        }
+        let initial = match self.field {
+            Field::Style => self.style.clone(),
+            Field::PluginPath => self.plugin_path.clone(),
+            _ => unreachable!("guarded by is_text_field"),
+        };
+        self.editing = Some(TextEdit {
+            field: self.field,
+            input: TextInput::new(initial),
+        });
+        true
+    }
+
+    fn commit_text_edit(&mut self, field: Field, buffer: String) {
+        let trimmed = buffer.trim();
+        match field {
+            Field::Style => {
+                self.style = if trimmed.is_empty() {
+                    "default".to_string()
+                } else {
+                    trimmed.to_string()
+                };
+            }
+            // Empty is meaningful here: it unsets plugin_path on save.
+            Field::PluginPath => self.plugin_path = trimmed.to_string(),
+            _ => return,
         }
         self.dirty_since_load = true;
         self.feedback = None;
@@ -342,7 +402,23 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             "Frontend",
             state.frontend.clone(),
         ),
-        FormRowSpec::new(state.field == Field::Style, "Style", state.style.clone()),
+        FormRowSpec::new(
+            state.field == Field::Style,
+            "Style",
+            match state.editing.as_ref() {
+                Some(e) if e.field == Field::Style => e.input.caret_string(),
+                _ => state.style.clone(),
+            },
+        ),
+        FormRowSpec::new(
+            state.field == Field::PluginPath,
+            "Plugin path",
+            match state.editing.as_ref() {
+                Some(e) if e.field == Field::PluginPath => e.input.caret_string(),
+                _ if state.plugin_path.is_empty() => "(unset)".to_string(),
+                _ => state.plugin_path.clone(),
+            },
+        ),
         FormRowSpec::new(
             state.field == Field::Palette,
             "Palette",
@@ -474,11 +550,25 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
             heading("Style"),
             Line::from(""),
             Line::from(
-                "Quickshell OSD style name or package path. The TUI only cycles \
-                 built-in names; set a package name/path by editing config.toml.",
+                "Quickshell OSD style name, installed package name, or package \
+                 directory path. Left/Right cycles built-in names; press Enter \
+                 or i to type a package name or path.",
             ),
             Line::from(""),
             dim("Default: default. Package manifests live in voxtype-osd.toml."),
+        ],
+        Field::PluginPath => vec![
+            heading("Plugin path"),
+            Line::from(""),
+            Line::from(
+                "Directory of a Quickshell style package under development. \
+                 Takes priority over the style search paths, so edits show up \
+                 without reinstalling. QML in this path is trusted.",
+            ),
+            Line::from(""),
+            Line::from("Press Enter or i to edit. Commit an empty value to unset."),
+            Line::from(""),
+            dim("Default: unset. Installed packages resolve via Style instead."),
         ],
         Field::Palette => vec![
             heading("Palette"),
@@ -618,6 +708,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         Some(s) => s,
         None => return Action::None,
     };
+
+    if state.editing.is_some() {
+        return handle_edit_key(state, key);
+    }
+
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => {
             state.move_field(-1);
@@ -635,11 +730,146 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
             state.cycle(1);
             Action::None
         }
+        KeyCode::Enter | KeyCode::Char('i') => {
+            state.start_edit_if_text_field();
+            Action::None
+        }
         KeyCode::Char('s') => state.save(),
         KeyCode::Char('r') => {
             state.reset();
             Action::None
         }
         _ => Action::None,
+    }
+}
+
+fn handle_edit_key(state: &mut OsdState, key: KeyEvent) -> Action {
+    let Some(editing) = state.editing.as_mut() else {
+        return Action::None;
+    };
+    match editing.input.handle_key(key) {
+        TextInputResult::Continue => Action::None,
+        TextInputResult::Commit => {
+            let buf = editing.input.buffer().to_string();
+            let field = editing.field;
+            state.editing = None;
+            state.commit_text_edit(field, buf);
+            Action::None
+        }
+        TextInputResult::Cancel => {
+            state.editing = None;
+            Action::None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::schema::{scalar_keys, CONFIG_KEYS};
+
+    /// The OSD form is a hand-written transcription of the schema's `OSD`
+    /// section, so the two drift silently whenever a key is added in one
+    /// place and not the other. That is exactly how `osd.plugin_path`
+    /// reached a release settable only by hand-editing config.toml.
+    ///
+    /// If a key genuinely does not belong in the TUI, add it to `NOT_IN_TUI`
+    /// with a reason rather than deleting the test.
+    #[test]
+    fn every_osd_schema_key_has_a_form_field() {
+        // The [osd.frame] recipe keys are Quickshell styling detail; the
+        // cycle-based form has nowhere sensible to put free-form color
+        // strings. They stay reachable via `voxtype config set` and the
+        // config file.
+        const NOT_IN_TUI: &[&str] = &[
+            "osd.frame.background",
+            "osd.frame.border",
+            "osd.frame.glow",
+            "osd.frame.halo",
+        ];
+
+        let expected: Vec<&str> = scalar_keys()
+            .filter(|s| s.section == "OSD")
+            .map(|s| s.key)
+            .filter(|k| !NOT_IN_TUI.contains(k))
+            .collect();
+
+        // Field -> the schema key it edits. Adding a Field without extending
+        // this map fails to compile, which is the point.
+        let covered: Vec<&str> = Field::ALL
+            .iter()
+            .map(|f| match f {
+                Field::Enabled => "osd.enabled",
+                Field::Frontend => "osd.frontend",
+                Field::Style => "osd.style",
+                Field::PluginPath => "osd.plugin_path",
+                Field::Palette => "osd.palette",
+                Field::Layout => "osd.layout",
+                Field::Position => "osd.position",
+                Field::WidthPx => "osd.width_px",
+                Field::HeightPx => "osd.height_px",
+                Field::MarginPx => "osd.margin_px",
+                Field::TopMargin => "osd.top_margin",
+                Field::Opacity => "osd.opacity",
+                Field::WaveformWindowSecs => "osd.waveform_window_secs",
+                Field::PeakDecayDbPerSec => "osd.peak_decay_db_per_sec",
+                Field::WaveformGain => "osd.waveform_gain",
+            })
+            .collect();
+
+        let missing: Vec<&&str> = expected.iter().filter(|k| !covered.contains(k)).collect();
+        assert!(
+            missing.is_empty(),
+            "schema keys in section OSD with no TUI field: {missing:?}"
+        );
+
+        // Guard the other direction too: a field editing a key the schema
+        // does not know about would be invisible to `config set`.
+        let unknown: Vec<&&str> = covered
+            .iter()
+            .filter(|k| !CONFIG_KEYS.iter().any(|s| s.key == **k))
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "TUI fields editing keys absent from the schema: {unknown:?}"
+        );
+    }
+
+    #[test]
+    fn plugin_path_commit_trims_and_allows_empty() {
+        let mut state = OsdState {
+            enabled: true,
+            frontend: "quickshell".to_string(),
+            style: "default".to_string(),
+            plugin_path: String::new(),
+            palette: "auto".to_string(),
+            layout: "compact".to_string(),
+            position: "bottom-center".to_string(),
+            width_px: 400,
+            height_px: 48,
+            margin_px: 24,
+            top_margin: 0.85,
+            opacity: 0.95,
+            waveform_window_secs: 3.0,
+            peak_decay_db_per_sec: 6.0,
+            waveform_gain: 10.0,
+            field: Field::PluginPath,
+            editing: None,
+            feedback: None,
+            dirty_since_load: false,
+            binary_missing: false,
+        };
+
+        state.commit_text_edit(Field::PluginPath, "  ~/dev/my-style  ".to_string());
+        assert_eq!(state.plugin_path, "~/dev/my-style");
+        assert!(state.dirty_since_load);
+
+        // Committing an empty buffer clears the path so save() unsets it.
+        state.commit_text_edit(Field::PluginPath, "   ".to_string());
+        assert_eq!(state.plugin_path, "");
+
+        // Style falls back to "default" rather than saving an empty name.
+        state.commit_text_edit(Field::Style, "".to_string());
+        assert_eq!(state.style, "default");
     }
 }

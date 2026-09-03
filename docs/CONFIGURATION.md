@@ -3834,7 +3834,19 @@ symlink is what puts the sidecar on PATH where the QML expects it. Pass
 
 The Quickshell frontend can customize the whole OSD without editing VoxType's
 packaged QML. Normal users configure declarative recipes; advanced users can
-explicitly opt into trusted custom QML packages.
+explicitly opt into trusted custom QML packages. The styling system was
+contributed by [OldJobobo](https://github.com/OldJobobo)
+([#501](https://github.com/peteonrails/voxtype/issues/501)).
+
+Every key below is also settable from the command line, so you can switch
+styles without opening the config file:
+
+```bash
+voxtype config set osd.style aegis-hud
+voxtype config set osd.layout orb
+voxtype config set osd.frame.border accent
+voxtype config schema          # lists every settable key
+```
 
 ```toml
 [osd]
@@ -3897,19 +3909,56 @@ ring-focused recipes.
 `background = "none"` or `border = "none"` for frameless recipes; the visual
 layers continue to render normally.
 
-Shareable style packages are directories containing `voxtype-osd.toml`, optional
-assets under `assets/`, and optionally a QML entry file. Package QML is trusted
+### Style packages
+
+A style package is a directory containing a `voxtype-osd.toml` manifest,
+optional assets under `assets/`, and optionally a QML entry file. A
+manifest-only package recolors and rearranges the built-in renderer; a package
+with a `qml_entry` replaces the renderer entirely. Package QML is trusted
 code and only loads when the package is selected through `style` or
 `plugin_path`. A manifest only overrides the `[osd]` fields it explicitly
 sets: a package that ships only `[colors]` keeps your configured `layout`,
 `[osd.frame]`, and `[[osd.visual.layers]]` recipe, and an explicit `palette`
 in your config always beats the manifest's.
 
+When `style` is a package name rather than a path, the launcher searches, in
+order:
+
+1. `$XDG_CONFIG_HOME/voxtype/osd/<name>` (or `~/.config/voxtype/osd/<name>`)
+2. `$XDG_DATA_HOME/voxtype/osd/<name>` (or `~/.local/share/voxtype/osd/<name>`)
+3. `/usr/share/voxtype/osd/<name>` (system-wide, where packaged installs ship
+   their example styles)
+
+To install a package someone shared, copy its directory into
+`~/.config/voxtype/osd/` and set `style` to the directory name.
+
+While developing a package, point `plugin_path` at your working directory
+instead. It takes priority over the search paths, so edits show up on the
+next OSD launch without reinstalling, and an unfinished package never shadows
+an installed one by accident. Unset it when you are done:
+
+```bash
+voxtype config set osd.plugin_path ~/dev/my-style
+voxtype config unset osd.plugin_path
+```
+
 If `style` names a package that isn't installed, `plugin_path` doesn't point
 at a package directory, or the manifest's `qml_entry` file is missing, the
 Quickshell launcher exits with an error explaining what to fix instead of
 silently falling back to the default style. `style` and `plugin_path` paths
 may start with `~`.
+
+VoxType ships working examples to copy from. Packaged installs place them
+under `/usr/share/voxtype/osd/`; in the source tree they live in
+[`examples/osd-packages/`](../examples/osd-packages/) (full packages,
+including the `aegis-hud` custom-QML showcase) and
+[`examples/osd-recipes/`](../examples/osd-recipes/) (recipe presets).
+Recipes are plain `[osd]` config snippets, not packages: open one and copy
+the `[osd.frame]` and `[[osd.visual.layers]]` keys you want into your own
+config. Each example package ships a README covering what it looks like, how
+to run it standalone, and which manifest fields it uses; the
+[aegis-hud README](../examples/osd-packages/aegis-hud/README.md) is the
+reference for documenting your own package.
 
 ```toml
 # ~/.config/voxtype/osd/bars-plus/voxtype-osd.toml
