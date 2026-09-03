@@ -179,6 +179,10 @@ impl StreamingSession {
         post_output_command: Option<&str>,
     ) -> Result<(), OutputError> {
         if text.is_empty() {
+            // An empty Final can still promote an already-typed partial.
+            // Snapshot-based providers use this when the final text exactly
+            // matches the visible provisional text.
+            self.finalized_text.push_str(&self.partial);
             self.clear_partial();
             return Ok(());
         }
@@ -233,6 +237,7 @@ impl StreamingSession {
     /// is a file.
     pub fn commit_segment_silent(&mut self, text: &str) {
         if text.is_empty() {
+            self.finalized_text.push_str(&self.partial);
             self.clear_partial();
             return;
         }
@@ -290,11 +295,12 @@ impl StreamingSession {
             };
             output_with_fallback(chain, text, opts).await?;
             self.typed_chars += text.chars().count();
-            // Treat the (now-truncated) partial + new text as committed,
-            // matching commit_segment's accounting.
-            let finalized_tail = format!("{}{}", self.partial, text);
-            self.finalized_text.push_str(&finalized_tail);
         }
+        // Treat the (now-truncated) partial plus any replacement as
+        // committed. The replacement may be empty when finalization only
+        // removes a provisional suffix.
+        let finalized_tail = format!("{}{}", self.partial, text);
+        self.finalized_text.push_str(&finalized_tail);
         self.clear_partial();
         Ok(())
     }
@@ -318,10 +324,8 @@ impl StreamingSession {
             let new_partial_len = self.partial.chars().count().saturating_sub(backspace);
             self.partial = self.partial.chars().take(new_partial_len).collect();
         }
-        if !text.is_empty() {
-            let finalized_tail = format!("{}{}", self.partial, text);
-            self.finalized_text.push_str(&finalized_tail);
-        }
+        let finalized_tail = format!("{}{}", self.partial, text);
+        self.finalized_text.push_str(&finalized_tail);
         self.clear_partial();
     }
 
@@ -538,6 +542,32 @@ mod tests {
             .unwrap();
         assert!(rec.typed().is_empty());
         assert_eq!(session.typed_chars(), 0);
+    }
+
+    #[tokio::test]
+    async fn empty_final_promotes_an_existing_partial() {
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        let mut session = StreamingSession::new();
+        session.observe_partial_delta("hello");
+
+        session
+            .commit_segment(&chain, "", None, None, None)
+            .await
+            .unwrap();
+
+        assert!(rec.typed().is_empty());
+        assert_eq!(session.finalized_text(), "hello");
+        assert!(session.partial().is_empty());
+    }
+
+    #[test]
+    fn empty_silent_final_promotes_an_existing_partial() {
+        let mut session = StreamingSession::new();
+        session.observe_partial_delta("hello");
+        session.commit_segment_silent("");
+        assert_eq!(session.finalized_text(), "hello");
+        assert!(session.partial().is_empty());
     }
 
     #[tokio::test]

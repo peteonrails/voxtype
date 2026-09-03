@@ -108,6 +108,38 @@ pub(crate) async fn show_config(config: &config::Config) -> anyhow::Result<()> {
         println!("  gpu_device = {}", gpu_device);
     }
 
+    println!("\n[seedasr]");
+    if let Some(ref seedasr) = config.seedasr {
+        println!(
+            "  api_key = {}",
+            if seedasr.api_key.is_some() {
+                "(set)"
+            } else {
+                "(unset)"
+            }
+        );
+        println!("  app_id = {:?}", seedasr.app_id);
+        println!(
+            "  access_token = {}",
+            if seedasr.access_token.is_some() {
+                "(set)"
+            } else {
+                "(unset)"
+            }
+        );
+        println!("  resource_id = {:?}", seedasr.resource_id);
+        println!("  url = {:?}", seedasr.url);
+        println!("  streaming = {}", seedasr.streaming);
+        println!("  type_partials = {}", seedasr.type_partials);
+        println!("  language = {:?}", seedasr.language);
+        println!("  enable_itn = {}", seedasr.enable_itn);
+        println!("  enable_punc = {}", seedasr.enable_punc);
+        println!("  enable_ddc = {}", seedasr.enable_ddc);
+        println!("  end_window_ms = {}", seedasr.end_window_ms);
+    } else {
+        println!("  (not configured)");
+    }
+
     // Show Parakeet status
     println!("\n[parakeet]");
     if let Some(ref parakeet_config) = config.parakeet {

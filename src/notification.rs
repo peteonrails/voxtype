@@ -290,6 +290,7 @@ fn send_macos_native(title: &str, body: &str, engine: Option<TranscriptionEngine
         | TranscriptionEngine::Omnilingual
         | TranscriptionEngine::Cohere
         | TranscriptionEngine::Soniox
+        | TranscriptionEngine::SeedAsr
         | TranscriptionEngine::OpenVino => None,
     });
 

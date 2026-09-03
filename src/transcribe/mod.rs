@@ -17,6 +17,7 @@ pub mod cli;
 #[cfg(feature = "parakeet")]
 pub mod parakeet_streaming;
 pub mod remote;
+pub mod seedasr;
 pub mod sliding_window;
 pub mod soniox;
 pub mod streaming;
@@ -300,6 +301,14 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
                 )
             })?;
             Ok(Box::new(soniox::SonioxTranscriber::new(cfg.clone())?))
+        }
+        TranscriptionEngine::SeedAsr => {
+            let cfg = config.seedasr.as_ref().ok_or_else(|| {
+                TranscribeError::InitFailed(
+                    "Seed-ASR engine selected but [seedasr] config section is missing".to_string(),
+                )
+            })?;
+            Ok(Box::new(seedasr::SeedAsrTranscriber::new(cfg.clone())?))
         }
         #[cfg(feature = "openvino-whisper")]
         TranscriptionEngine::OpenVino => {
