@@ -279,26 +279,65 @@ impl StreamingTranscriber for SlidingWindowStreamingTranscriber {
                 Cancelled,
             }
 
+            // How many *consecutive* ticks fired without a single chunk
+            // being drained in between. Purely diagnostic (see the WARN
+            // below) — doesn't affect the fix itself, just makes the
+            // starvation pattern visible in logs if it ever recurs.
+            let mut consecutive_ticks_without_drain: u32 = 0;
+
             loop {
                 let outcome = runtime.block_on(async {
+                    // `biased` makes `select!` check arms top-to-bottom
+                    // instead of picking a ready one at pseudo-random.
+                    // Chunk/Eof/Cancelled must win over Tick whenever both
+                    // are ready — otherwise, once inference falls behind
+                    // interval_s, the ticker arm is *permanently* ready
+                    // (MissedTickBehavior::Skip just collapses the backlog
+                    // to one ready tick, it doesn't stop being ready) and
+                    // can keep winning the random tie-break against a
+                    // stop/EOF signal indefinitely. Found live: a session
+                    // whose buffer grew past ~13s fell behind the 0.8s
+                    // tick, and the mic-stop signal (samples_rx closing)
+                    // sat unprocessed for 33+ seconds — the loop kept
+                    // re-transcribing the same frozen buffer once a second
+                    // at full NPU load, spinning until the unrelated hard
+                    // `max_duration_secs` recording cap force-ended it.
+                    // Biasing toward Chunk/Eof/Cancelled means a queued
+                    // stop is picked up on the very next loop iteration
+                    // once the in-flight transcribe() call returns,
+                    // regardless of how many ticks are backed up.
                     tokio::select! {
+                        biased;
+
                         chunk = samples_rx.recv() => match chunk {
                             Some(c) => Outcome::Chunk(c),
                             None => Outcome::Eof,
                         },
-                        _ = ticker.tick() => Outcome::Tick,
                         _ = &mut cancel_rx => Outcome::Cancelled,
+                        _ = ticker.tick() => Outcome::Tick,
                     }
                 });
 
                 match outcome {
-                    Outcome::Chunk(chunk) => session.feed(&chunk),
+                    Outcome::Chunk(chunk) => {
+                        tracing::trace!(
+                            "[sliding] drained chunk ({} samples) after {} consecutive tick(s)",
+                            chunk.len(),
+                            consecutive_ticks_without_drain,
+                        );
+                        consecutive_ticks_without_drain = 0;
+                        session.feed(&chunk);
+                    }
                     Outcome::Cancelled => {
+                        tracing::debug!("[sliding] Cancelled; ending stream without flush");
                         // Abort promptly; contract allows ending without flush.
                         let _ = runtime.block_on(events_tx.send(StreamingEvent::Ended));
                         return Ok(());
                     }
                     Outcome::Eof => {
+                        tracing::debug!(
+                            "[sliding] samples_rx closed (Eof); flushing and ending stream"
+                        );
                         // Graceful end: one last flush so no audio is lost.
                         if let Some(tail) = session.final_flush() {
                             let event = delta_to_event(tail, config.type_partials);
@@ -307,19 +346,41 @@ impl StreamingTranscriber for SlidingWindowStreamingTranscriber {
                         let _ = runtime.block_on(events_tx.send(StreamingEvent::Ended));
                         return Ok(());
                     }
-                    Outcome::Tick => match session.on_tick() {
-                        Ok(deltas) => {
-                            for delta in deltas {
-                                let event = delta_to_event(delta, config.type_partials);
-                                let _ = runtime.block_on(events_tx.send(event));
+                    Outcome::Tick => {
+                        consecutive_ticks_without_drain += 1;
+                        if consecutive_ticks_without_drain > 1 {
+                            // Not a bug by itself (Tick is legitimately
+                            // biased-last and speech can run for many
+                            // ticks between chunks arriving in the same
+                            // select! cycle), but a long streak here is
+                            // exactly the symptom of inference falling
+                            // behind interval_s — surfacing it makes a
+                            // recurrence of the starvation pattern (or a
+                            // slow-inference regression) visible without
+                            // needing to eyeball buffer-growth in trace
+                            // logs.
+                            tracing::debug!(
+                                "[sliding] {} consecutive tick(s) without draining a chunk \
+                                 (inference falling behind interval_s={:.2})",
+                                consecutive_ticks_without_drain,
+                                config.interval_s,
+                            );
+                        }
+                        match session.on_tick() {
+                            Ok(deltas) => {
+                                for delta in deltas {
+                                    let event = delta_to_event(delta, config.type_partials);
+                                    let _ = runtime.block_on(events_tx.send(event));
+                                }
+                            }
+                            Err(err) => {
+                                tracing::debug!("[sliding] on_tick error; ending stream: {err}");
+                                let _ = runtime.block_on(events_tx.send(StreamingEvent::Error(err)));
+                                let _ = runtime.block_on(events_tx.send(StreamingEvent::Ended));
+                                return Ok(());
                             }
                         }
-                        Err(err) => {
-                            let _ = runtime.block_on(events_tx.send(StreamingEvent::Error(err)));
-                            let _ = runtime.block_on(events_tx.send(StreamingEvent::Ended));
-                            return Ok(());
-                        }
-                    },
+                    }
                 }
             }
         });
