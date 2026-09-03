@@ -1,8 +1,8 @@
 use super::{
     AudioConfig, CohereConfig, DolphinConfig, HotkeyConfig, MeetingConfig, MoonshineConfig,
     OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig, ParakeetConfig, Profile,
-    SenseVoiceConfig, SonioxConfig, StatusConfig, StreamingConfig, TextConfig, TranscriptionEngine,
-    VadConfig, WhisperConfig,
+    SeedAsrConfig, SenseVoiceConfig, SonioxConfig, StatusConfig, StreamingConfig, TextConfig,
+    TranscriptionEngine, VadConfig, WhisperConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -24,8 +24,8 @@ pub struct Config {
     #[serde(default)]
     pub output: OutputConfig,
 
-    /// Transcription engine: "whisper" (default) or "parakeet"
-    /// Parakeet requires: cargo build --features parakeet
+    /// Active transcription engine. Local optional engines may require a
+    /// matching Cargo feature; cloud engines are always compiled.
     #[serde(default)]
     pub engine: TranscriptionEngine,
 
@@ -65,6 +65,11 @@ pub struct Config {
     /// (optional, only used when engine = "soniox")
     #[serde(default)]
     pub soniox: Option<SonioxConfig>,
+
+    /// Volcengine Seed-ASR streaming WebSocket STT configuration
+    /// (optional, only used when engine = "seedasr")
+    #[serde(default)]
+    pub seedasr: Option<SeedAsrConfig>,
 
     /// Shared sliding-window streaming engine tuning, used by every batch
     /// backend wrapped in `transcribe::sliding_window` (currently `whisper`
@@ -127,6 +132,7 @@ impl Default for Config {
             cohere: None,
             openvino: None,
             soniox: None,
+            seedasr: None,
             streaming: None,
             text: TextConfig::default(),
             vad: VadConfig::default(),
@@ -167,6 +173,9 @@ impl Config {
                 .as_ref()
                 .map(|s| s.streaming && !s.async_api)
                 .unwrap_or(false),
+            TranscriptionEngine::SeedAsr => {
+                self.seedasr.as_ref().map(|s| s.streaming).unwrap_or(false)
+            }
             // Same reasoning as Parakeet/Soniox: an absent [openvino] section
             // means the transcriber can't initialize anyway, so don't
             // auto-promote push-to-talk to toggle for a config that can't
@@ -375,7 +384,7 @@ impl Config {
                 .map(|o| o.on_demand_loading)
                 .unwrap_or(false),
             // Soniox is a cloud backend; nothing to load on demand.
-            TranscriptionEngine::Soniox => false,
+            TranscriptionEngine::Soniox | TranscriptionEngine::SeedAsr => false,
         }
     }
 
@@ -400,6 +409,7 @@ impl Config {
             TranscriptionEngine::SenseVoice => {
                 self.sensevoice.as_ref().map(|s| s.language.as_str())?
             }
+            TranscriptionEngine::SeedAsr => self.seedasr.as_ref()?.language.as_deref()?,
             // Parakeet, Moonshine, Paraformer, Dolphin, Omnilingual and Soniox
             // either detect the language or are fixed to one.
             _ => return None,
@@ -460,6 +470,11 @@ impl Config {
                 .as_ref()
                 .map(|s| s.model.as_str())
                 .unwrap_or("soniox (not configured)"),
+            TranscriptionEngine::SeedAsr => self
+                .seedasr
+                .as_ref()
+                .map(|_| "bigmodel")
+                .unwrap_or("seedasr (not configured)"),
         }
     }
 

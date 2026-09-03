@@ -1,6 +1,7 @@
 use super::parse::parse_config_with_defaults;
 use super::{
-    Config, LanguageConfig, OpenVinoConfig, OutputMode, SonioxConfig, TranscriptionEngine,
+    Config, LanguageConfig, OpenVinoConfig, OutputMode, SeedAsrConfig, SonioxConfig,
+    TranscriptionEngine,
 };
 use crate::error::VoxtypeError;
 use std::path::{Path, PathBuf};
@@ -196,6 +197,38 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             .soniox
             .get_or_insert_with(SonioxConfig::default)
             .api_key = Some(key);
+    }
+
+    // Volcengine Seed-ASR
+    if let Ok(key) = std::env::var("SEEDASR_API_KEY") {
+        config
+            .seedasr
+            .get_or_insert_with(SeedAsrConfig::default)
+            .api_key = Some(key);
+    }
+    if let Ok(app_id) = std::env::var("SEEDASR_APP_ID") {
+        config
+            .seedasr
+            .get_or_insert_with(SeedAsrConfig::default)
+            .app_id = Some(app_id);
+    }
+    if let Ok(token) = std::env::var("SEEDASR_ACCESS_TOKEN") {
+        config
+            .seedasr
+            .get_or_insert_with(SeedAsrConfig::default)
+            .access_token = Some(token);
+    }
+    if let Ok(resource_id) = std::env::var("SEEDASR_RESOURCE_ID") {
+        config
+            .seedasr
+            .get_or_insert_with(SeedAsrConfig::default)
+            .resource_id = resource_id;
+    }
+    if let Ok(url) = std::env::var("SEEDASR_URL") {
+        config
+            .seedasr
+            .get_or_insert_with(SeedAsrConfig::default)
+            .url = url;
     }
     if let Ok(val) = std::env::var("VOXTYPE_RESTORE_CLIPBOARD") {
         config.output.restore_clipboard = parse_bool_env(&val);

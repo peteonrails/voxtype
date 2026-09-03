@@ -198,8 +198,7 @@ pub fn feature_compiled(feature: &str) -> bool {
 /// Engines `voxtype config set engine` accepts. Mirrors `ENGINE_CHOICES` in
 /// `src/tui/engine.rs` and [`crate::config_set::ENGINE_NAMES`]. Note this is
 /// deliberately narrower than [`super::TranscriptionEngine`], which also has
-/// a `Soniox` variant that neither the TUI picker nor `config set engine`
-/// offers today.
+/// cloud-engine variants configured through their own tables.
 const ENGINE_CHOICES: &[&str] = crate::config_set::ENGINE_NAMES;
 
 const WHISPER_MODE_CHOICES: &[&str] = &["local", "remote", "cli"];

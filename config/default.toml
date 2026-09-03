@@ -143,6 +143,22 @@ on_demand_loading = false
 #
 # on_demand_loading = false
 
+# [seedasr]
+# Volcengine Seed-ASR cloud WebSocket engine (engine = "seedasr").
+# Use either api_key or the legacy app_id + access_token pair.
+# api_key = "your-api-key"             # Or SEEDASR_API_KEY
+# app_id = "your-app-id"               # Or SEEDASR_APP_ID
+# access_token = "your-access-token"   # Or SEEDASR_ACCESS_TOKEN
+# resource_id = "volc.seedasr.sauc.duration"
+# url = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
+# streaming = true
+# type_partials = false
+# language = "auto"
+# enable_itn = true
+# enable_punc = true
+# enable_ddc = false
+# end_window_ms = 800
+
 [output]
 # Primary output mode: "type", "clipboard", or "paste"
 # - type: Simulates keyboard input at cursor position (requires wtype or ydotool)
