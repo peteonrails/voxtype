@@ -19,7 +19,7 @@ use super::common::{
     self, FeedbackLevel as CommonFeedback, FormRowSpec, TextInput, TextInputResult,
 };
 use super::config_editor::{ConfigEditor, EditorError};
-use crate::config::TranscriptionEngine;
+use crate::config::{TranscriptionEngine, DEFAULT_SEEDASR_RESOURCE_ID, DEFAULT_SEEDASR_URL};
 use crate::model_catalog::{default_model, installed_models_for, model_catalog};
 use crate::setup::binary::{self, EngineFamily, InstallKind, Variant};
 use crate::setup::model;
@@ -125,6 +125,22 @@ pub struct AllFields {
     pub ov_threads: Option<i64>,
     pub ov_on_demand_loading: bool,
     pub ov_section_existed: bool,
+
+    // Volcengine Seed-ASR
+    pub seed_auth_mode: String,
+    pub seed_api_key: Option<String>,
+    pub seed_app_id: Option<String>,
+    pub seed_access_token: Option<String>,
+    pub seed_resource_id: String,
+    pub seed_url: String,
+    pub seed_streaming: bool,
+    pub seed_type_partials: bool,
+    pub seed_language: String,
+    pub seed_enable_itn: bool,
+    pub seed_enable_punc: bool,
+    pub seed_enable_ddc: bool,
+    pub seed_end_window_ms: i64,
+    pub seed_section_existed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -201,6 +217,21 @@ pub enum FieldId {
     OvLanguage,
     OvThreads,
     OvOnDemandLoading,
+
+    // Seed-ASR
+    SeedAuthMode,
+    SeedApiKey,
+    SeedAppId,
+    SeedAccessToken,
+    SeedResourceId,
+    SeedUrl,
+    SeedStreaming,
+    SeedTypePartials,
+    SeedLanguage,
+    SeedEnableItn,
+    SeedEnablePunc,
+    SeedEnableDdc,
+    SeedEndWindowMs,
 }
 
 /// Cohere Transcribe officially supports these 14 languages. Token IDs are
@@ -221,8 +252,13 @@ const PARAKEET_MODEL_TYPES: &[Option<&str>] = &[None, Some("tdt"), Some("ctc")];
 /// AUTO is a real OpenVINO device value too (see `installation_guidance`'s
 /// own AUTO arm) — included here so it's reachable from the picker.
 const OV_DEVICE_CHOICES: &[&str] = &["NPU", "GPU", "CPU", "AUTO"];
+const SEED_AUTH_MODE_CHOICES: &[&str] = &["api_key", "legacy"];
 
-fn rows_for_engine_with_mode(engine: &str, whisper_mode: &str) -> Vec<FieldId> {
+fn rows_for_engine_with_mode(
+    engine: &str,
+    whisper_mode: &str,
+    seed_auth_mode: &str,
+) -> Vec<FieldId> {
     let mut rows = vec![FieldId::Engine];
     match engine {
         "whisper" => {
@@ -291,6 +327,25 @@ fn rows_for_engine_with_mode(engine: &str, whisper_mode: &str) -> Vec<FieldId> {
             FieldId::OvThreads,
             FieldId::OvOnDemandLoading,
         ]),
+        "seedasr" => {
+            rows.push(FieldId::SeedAuthMode);
+            if seed_auth_mode == "legacy" {
+                rows.extend_from_slice(&[FieldId::SeedAppId, FieldId::SeedAccessToken]);
+            } else {
+                rows.push(FieldId::SeedApiKey);
+            }
+            rows.extend_from_slice(&[
+                FieldId::SeedResourceId,
+                FieldId::SeedUrl,
+                FieldId::SeedStreaming,
+                FieldId::SeedTypePartials,
+                FieldId::SeedLanguage,
+                FieldId::SeedEnableItn,
+                FieldId::SeedEnablePunc,
+                FieldId::SeedEnableDdc,
+                FieldId::SeedEndWindowMs,
+            ]);
+        }
         _ => {}
     }
     rows
@@ -302,6 +357,15 @@ impl EngineState {
         let engine = ed
             .get_string("", "engine")
             .unwrap_or_else(|| "whisper".to_string());
+        let seed_api_key = ed.get_string("seedasr", "api_key");
+        let seed_app_id = ed.get_string("seedasr", "app_id");
+        let seed_access_token = ed.get_string("seedasr", "access_token");
+        let seed_auth_mode =
+            if seed_api_key.is_none() && (seed_app_id.is_some() || seed_access_token.is_some()) {
+                "legacy"
+            } else {
+                "api_key"
+            };
         let fields = AllFields {
             // Whisper
             w_model: ed
@@ -412,6 +476,28 @@ impl EngineState {
                 .get_bool("openvino", "on_demand_loading")
                 .unwrap_or(false),
             ov_section_existed: ed.get_string("openvino", "model").is_some(),
+
+            // Seed-ASR
+            seed_auth_mode: seed_auth_mode.to_string(),
+            seed_api_key,
+            seed_app_id,
+            seed_access_token,
+            seed_resource_id: ed
+                .get_string("seedasr", "resource_id")
+                .unwrap_or_else(|| DEFAULT_SEEDASR_RESOURCE_ID.to_string()),
+            seed_url: ed
+                .get_string("seedasr", "url")
+                .unwrap_or_else(|| DEFAULT_SEEDASR_URL.to_string()),
+            seed_streaming: ed.get_bool("seedasr", "streaming").unwrap_or(true),
+            seed_type_partials: ed.get_bool("seedasr", "type_partials").unwrap_or(false),
+            seed_language: ed
+                .get_string("seedasr", "language")
+                .unwrap_or_else(|| "auto".to_string()),
+            seed_enable_itn: ed.get_bool("seedasr", "enable_itn").unwrap_or(true),
+            seed_enable_punc: ed.get_bool("seedasr", "enable_punc").unwrap_or(true),
+            seed_enable_ddc: ed.get_bool("seedasr", "enable_ddc").unwrap_or(false),
+            seed_end_window_ms: ed.get_int("seedasr", "end_window_ms").unwrap_or(800),
+            seed_section_existed: ed.raw_table("seedasr").is_some(),
         };
         let mut state = Self {
             engine,
@@ -442,6 +528,12 @@ impl EngineState {
     fn refresh_binary_match(&mut self) {
         self.pending_variant_switch = None;
         self.binary_switch_blocked = None;
+
+        // Seed-ASR is a cloud engine compiled into every binary family. It
+        // has no local model and never requires a binary variant switch.
+        if self.engine == "seedasr" {
+            return;
+        }
 
         let inv = binary::inventory();
 
@@ -520,6 +612,51 @@ impl EngineState {
     }
 
     pub fn save(&mut self) -> Action {
+        if self.engine == "seedasr" {
+            let f = &self.fields;
+            let env_present =
+                |env: &str| std::env::var(env).is_ok_and(|value| !value.trim().is_empty());
+            let present = |value: Option<&String>, env: &str| {
+                value.is_some_and(|v| !v.trim().is_empty()) || env_present(env)
+            };
+            let api_key = present(f.seed_api_key.as_ref(), "SEEDASR_API_KEY");
+            let app_id = present(f.seed_app_id.as_ref(), "SEEDASR_APP_ID");
+            let access_token = present(f.seed_access_token.as_ref(), "SEEDASR_ACCESS_TOKEN");
+            let incompatible_environment = if f.seed_auth_mode == "legacy" {
+                env_present("SEEDASR_API_KEY")
+            } else {
+                env_present("SEEDASR_APP_ID") || env_present("SEEDASR_ACCESS_TOKEN")
+            };
+            let error = if incompatible_environment {
+                Some(
+                    "Seed-ASR environment variables conflict with the selected authentication mode."
+                        .to_string(),
+                )
+            } else if f.seed_auth_mode == "api_key" && !api_key {
+                Some("Enter a Seed-ASR API key or set SEEDASR_API_KEY.".to_string())
+            } else if f.seed_auth_mode == "legacy" && (!app_id || !access_token) {
+                Some(
+                    "Legacy Seed-ASR authentication requires both App ID and access token."
+                        .to_string(),
+                )
+            } else if f.seed_resource_id.trim().is_empty() {
+                Some("Seed-ASR resource ID cannot be empty.".to_string())
+            } else if !(f.seed_url.starts_with("ws://") || f.seed_url.starts_with("wss://")) {
+                Some("Seed-ASR URL must start with ws:// or wss://.".to_string())
+            } else if !(300..=5_000).contains(&f.seed_end_window_ms) {
+                Some("Seed-ASR end window must be between 300 and 5000 ms.".to_string())
+            } else {
+                None
+            };
+            if let Some(message) = error {
+                self.feedback = Some(Feedback {
+                    level: FeedbackLevel::Err,
+                    message,
+                });
+                return Action::None;
+            }
+        }
+
         let mut ed = match ConfigEditor::load() {
             Ok(e) => e,
             Err(e) => {
@@ -654,6 +791,48 @@ impl EngineState {
             ed.set_bool("openvino", "on_demand_loading", f.ov_on_demand_loading);
         }
 
+        // Seed-ASR. Keep exactly one credential scheme in the file so the
+        // runtime cannot accidentally combine stale credentials.
+        if self.engine == "seedasr" || f.seed_section_existed {
+            if f.seed_auth_mode == "legacy" {
+                ed.unset("seedasr", "api_key");
+                match &f.seed_app_id {
+                    Some(value) if !value.trim().is_empty() => {
+                        ed.set_string("seedasr", "app_id", value)
+                    }
+                    _ => ed.unset("seedasr", "app_id"),
+                }
+                match &f.seed_access_token {
+                    Some(value) if !value.trim().is_empty() => {
+                        ed.set_string("seedasr", "access_token", value)
+                    }
+                    _ => ed.unset("seedasr", "access_token"),
+                }
+            } else {
+                ed.unset("seedasr", "app_id");
+                ed.unset("seedasr", "access_token");
+                match &f.seed_api_key {
+                    Some(value) if !value.trim().is_empty() => {
+                        ed.set_string("seedasr", "api_key", value)
+                    }
+                    _ => ed.unset("seedasr", "api_key"),
+                }
+            }
+            ed.set_string("seedasr", "resource_id", &f.seed_resource_id);
+            ed.set_string("seedasr", "url", &f.seed_url);
+            ed.set_bool("seedasr", "streaming", f.seed_streaming);
+            ed.set_bool("seedasr", "type_partials", f.seed_type_partials);
+            if f.seed_language == "auto" || f.seed_language.trim().is_empty() {
+                ed.unset("seedasr", "language");
+            } else {
+                ed.set_string("seedasr", "language", &f.seed_language);
+            }
+            ed.set_bool("seedasr", "enable_itn", f.seed_enable_itn);
+            ed.set_bool("seedasr", "enable_punc", f.seed_enable_punc);
+            ed.set_bool("seedasr", "enable_ddc", f.seed_enable_ddc);
+            ed.set_int("seedasr", "end_window_ms", f.seed_end_window_ms);
+        }
+
         match ed.save() {
             Ok(()) => {
                 self.dirty_since_load = false;
@@ -743,7 +922,11 @@ impl EngineState {
     /// Visible rows for the current engine. Whisper has extra rows when
     /// running in remote mode; everything else is constant per engine.
     fn rows(&self) -> Vec<FieldId> {
-        rows_for_engine_with_mode(&self.engine, &self.fields.w_mode)
+        rows_for_engine_with_mode(
+            &self.engine,
+            &self.fields.w_mode,
+            &self.fields.seed_auth_mode,
+        )
     }
 
     fn current_field(&self) -> FieldId {
@@ -760,6 +943,12 @@ impl EngineState {
                 | FieldId::WRemoteEndpoint
                 | FieldId::WRemoteApiKey
                 | FieldId::WRemoteModel
+                | FieldId::SeedApiKey
+                | FieldId::SeedAppId
+                | FieldId::SeedAccessToken
+                | FieldId::SeedResourceId
+                | FieldId::SeedUrl
+                | FieldId::SeedLanguage
         )
     }
 
@@ -773,6 +962,12 @@ impl EngineState {
             FieldId::WRemoteEndpoint => self.fields.w_remote_endpoint.clone().unwrap_or_default(),
             FieldId::WRemoteApiKey => self.fields.w_remote_api_key.clone().unwrap_or_default(),
             FieldId::WRemoteModel => self.fields.w_remote_model.clone().unwrap_or_default(),
+            FieldId::SeedApiKey => self.fields.seed_api_key.clone().unwrap_or_default(),
+            FieldId::SeedAppId => self.fields.seed_app_id.clone().unwrap_or_default(),
+            FieldId::SeedAccessToken => self.fields.seed_access_token.clone().unwrap_or_default(),
+            FieldId::SeedResourceId => self.fields.seed_resource_id.clone(),
+            FieldId::SeedUrl => self.fields.seed_url.clone(),
+            FieldId::SeedLanguage => self.fields.seed_language.clone(),
             _ => String::new(),
         };
         self.editing = Some(TextEdit {
@@ -794,6 +989,18 @@ impl EngineState {
             FieldId::WRemoteEndpoint => self.fields.w_remote_endpoint = opt,
             FieldId::WRemoteApiKey => self.fields.w_remote_api_key = opt,
             FieldId::WRemoteModel => self.fields.w_remote_model = opt,
+            FieldId::SeedApiKey => self.fields.seed_api_key = opt,
+            FieldId::SeedAppId => self.fields.seed_app_id = opt,
+            FieldId::SeedAccessToken => self.fields.seed_access_token = opt,
+            FieldId::SeedResourceId => self.fields.seed_resource_id = buffer.trim().to_string(),
+            FieldId::SeedUrl => self.fields.seed_url = buffer.trim().to_string(),
+            FieldId::SeedLanguage => {
+                self.fields.seed_language = if trimmed.is_empty() {
+                    "auto".to_string()
+                } else {
+                    buffer.trim().to_string()
+                }
+            }
             _ => {}
         }
         self.dirty_since_load = true;
@@ -901,6 +1108,27 @@ impl EngineState {
             FieldId::OvLanguage => f.ov_language = cycle_str(LANG_CHOICES, &f.ov_language, delta),
             FieldId::OvThreads => f.ov_threads = cycle_threads(f.ov_threads, delta),
             FieldId::OvOnDemandLoading => f.ov_on_demand_loading = !f.ov_on_demand_loading,
+
+            FieldId::SeedAuthMode => {
+                f.seed_auth_mode = cycle_str(SEED_AUTH_MODE_CHOICES, &f.seed_auth_mode, delta)
+            }
+            FieldId::SeedApiKey
+            | FieldId::SeedAppId
+            | FieldId::SeedAccessToken
+            | FieldId::SeedResourceId
+            | FieldId::SeedUrl
+            | FieldId::SeedLanguage => {
+                self.start_edit_if_text_field();
+                return;
+            }
+            FieldId::SeedStreaming => f.seed_streaming = !f.seed_streaming,
+            FieldId::SeedTypePartials => f.seed_type_partials = !f.seed_type_partials,
+            FieldId::SeedEnableItn => f.seed_enable_itn = !f.seed_enable_itn,
+            FieldId::SeedEnablePunc => f.seed_enable_punc = !f.seed_enable_punc,
+            FieldId::SeedEnableDdc => f.seed_enable_ddc = !f.seed_enable_ddc,
+            FieldId::SeedEndWindowMs => {
+                f.seed_end_window_ms = (f.seed_end_window_ms + delta as i64 * 100).clamp(300, 5_000)
+            }
         }
         self.dirty_since_load = true;
         self.feedback = None;
@@ -973,6 +1201,7 @@ fn installed_engine_choices() -> std::collections::HashSet<&'static str> {
     // Whisper is always present.
     let inv = binary::inventory();
     out.insert("whisper");
+    out.insert("seedasr");
     for f in &inv.compiled_features {
         for engine in [
             "parakeet",
@@ -1310,6 +1539,81 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
             "OpenVINO · on-demand model load",
             yesno(f.ov_on_demand_loading),
         ),
+
+        FieldId::SeedAuthMode => (
+            "Seed-ASR · authentication",
+            if f.seed_auth_mode == "legacy" {
+                "legacy App ID + access token".to_string()
+            } else {
+                "API key".to_string()
+            },
+        ),
+        FieldId::SeedApiKey => (
+            "Seed-ASR · API key",
+            match state.editing.as_ref() {
+                Some(e) if e.field == FieldId::SeedApiKey => mask(&e.input.caret_string()),
+                _ => match f.seed_api_key.as_deref() {
+                    None | Some("") => "(unset)".to_string(),
+                    Some(_) => "•••••• (set; press Enter to edit)".to_string(),
+                },
+            },
+        ),
+        FieldId::SeedAppId => (
+            "Seed-ASR · App ID",
+            match state.editing.as_ref() {
+                Some(e) if e.field == FieldId::SeedAppId => e.input.caret_string(),
+                _ => f
+                    .seed_app_id
+                    .clone()
+                    .unwrap_or_else(|| "(unset)".to_string()),
+            },
+        ),
+        FieldId::SeedAccessToken => (
+            "Seed-ASR · access token",
+            match state.editing.as_ref() {
+                Some(e) if e.field == FieldId::SeedAccessToken => mask(&e.input.caret_string()),
+                _ => match f.seed_access_token.as_deref() {
+                    None | Some("") => "(unset)".to_string(),
+                    Some(_) => "•••••• (set; press Enter to edit)".to_string(),
+                },
+            },
+        ),
+        FieldId::SeedResourceId => (
+            "Seed-ASR · resource ID",
+            match state.editing.as_ref() {
+                Some(e) if e.field == FieldId::SeedResourceId => e.input.caret_string(),
+                _ => f.seed_resource_id.clone(),
+            },
+        ),
+        FieldId::SeedUrl => (
+            "Seed-ASR · WebSocket URL",
+            match state.editing.as_ref() {
+                Some(e) if e.field == FieldId::SeedUrl => e.input.caret_string(),
+                _ => f.seed_url.clone(),
+            },
+        ),
+        FieldId::SeedStreaming => ("Seed-ASR · streaming", yesno(f.seed_streaming)),
+        FieldId::SeedTypePartials => (
+            "Seed-ASR · type partial results",
+            yesno(f.seed_type_partials),
+        ),
+        FieldId::SeedLanguage => (
+            "Seed-ASR · language",
+            match state.editing.as_ref() {
+                Some(e) if e.field == FieldId::SeedLanguage => e.input.caret_string(),
+                _ => f.seed_language.clone(),
+            },
+        ),
+        FieldId::SeedEnableItn => (
+            "Seed-ASR · inverse text normalization",
+            yesno(f.seed_enable_itn),
+        ),
+        FieldId::SeedEnablePunc => ("Seed-ASR · punctuation", yesno(f.seed_enable_punc)),
+        FieldId::SeedEnableDdc => ("Seed-ASR · semantic smoothing", yesno(f.seed_enable_ddc)),
+        FieldId::SeedEndWindowMs => (
+            "Seed-ASR · end window",
+            format!("{} ms", f.seed_end_window_ms),
+        ),
     }
 }
 
@@ -1410,6 +1714,10 @@ fn engine_guidance(state: &EngineState) -> Vec<Line<'static>> {
             "OpenVINO GenAI Whisper (Intel NPU/GPU/CPU). Included in the \
              x86_64 ONNX release binaries; its runtime and device drivers \
              are loaded only when this engine is selected.",
+        ),
+        (
+            "seedasr",
+            "Volcengine Seed-ASR over WebSocket. Native streaming, cloud-hosted, and optimized for low-latency dictation.",
         ),
     ] {
         lines.push(Line::from(Span::styled(
@@ -1809,10 +2117,101 @@ fn guidance(state: &EngineState) -> Vec<Line<'_>> {
             Line::from(
                 "Common values: whisper-1 (OpenAI), whisper-large-v3 \
                  (Groq, Together), whisper.cpp (whisper.cpp server). Check \
-                 your provider's docs.",
+                your provider's docs.",
             ),
         ],
+        FieldId::SeedAuthMode
+        | FieldId::SeedApiKey
+        | FieldId::SeedAppId
+        | FieldId::SeedAccessToken
+        | FieldId::SeedResourceId
+        | FieldId::SeedUrl
+        | FieldId::SeedStreaming
+        | FieldId::SeedTypePartials
+        | FieldId::SeedLanguage
+        | FieldId::SeedEnableItn
+        | FieldId::SeedEnablePunc
+        | FieldId::SeedEnableDdc
+        | FieldId::SeedEndWindowMs => seedasr_guidance(state.current_field()),
     }
+}
+
+fn seedasr_guidance(field: FieldId) -> Vec<Line<'static>> {
+    let (title, body, note) = match field {
+        FieldId::SeedAuthMode => (
+            "Seed-ASR · authentication",
+            "Choose API key for credentials from the current Volcengine console, or legacy for an App ID and access token.",
+            "The two credential schemes cannot be combined, including through SEEDASR_* environment variables.",
+        ),
+        FieldId::SeedApiKey => (
+            "Seed-ASR · API key",
+            "API key issued by the current Volcengine console. The value is masked on screen and in config command output.",
+            "Set SEEDASR_API_KEY instead if you do not want the credential stored in config.toml.",
+        ),
+        FieldId::SeedAppId => (
+            "Seed-ASR · App ID",
+            "Application ID used by the legacy Volcengine authentication scheme.",
+            "Legacy authentication also requires an access token.",
+        ),
+        FieldId::SeedAccessToken => (
+            "Seed-ASR · access token",
+            "Access token used with the legacy App ID. The value is masked on screen and in config command output.",
+            "Set SEEDASR_ACCESS_TOKEN instead if you do not want the token stored in config.toml.",
+        ),
+        FieldId::SeedResourceId => (
+            "Seed-ASR · resource ID",
+            "Service resource identifier assigned by Volcengine. The duration-based Seed-ASR resource is the default.",
+            "Press Enter to enter a different resource ID from your subscription.",
+        ),
+        FieldId::SeedUrl => (
+            "Seed-ASR · WebSocket URL",
+            "Bidirectional Seed-ASR WebSocket endpoint. Production connections should use wss://.",
+            "Override this only for a regional endpoint or a compatible protocol test server.",
+        ),
+        FieldId::SeedStreaming => (
+            "Seed-ASR · streaming",
+            "Send audio while recording and consume partial and final recognition events in real time.",
+            "When off, voxtype buffers the recording and sends it as a one-shot WebSocket request.",
+        ),
+        FieldId::SeedTypePartials => (
+            "Seed-ASR · type partial results",
+            "Type stable partial text before the server finalizes the utterance.",
+            "Keep this off if the target application does not handle cursor-based text revisions well.",
+        ),
+        FieldId::SeedLanguage => (
+            "Seed-ASR · language",
+            "Recognition language code. Use auto to let Seed-ASR detect the language.",
+            "Press Enter to enter a service-supported language code.",
+        ),
+        FieldId::SeedEnableItn => (
+            "Seed-ASR · inverse text normalization",
+            "Convert spoken numbers, dates, and similar expressions into written form.",
+            "Recommended for ordinary dictation.",
+        ),
+        FieldId::SeedEnablePunc => (
+            "Seed-ASR · punctuation",
+            "Ask Seed-ASR to add punctuation to recognition results.",
+            "Recommended for ordinary dictation.",
+        ),
+        FieldId::SeedEnableDdc => (
+            "Seed-ASR · semantic smoothing",
+            "Enable semantic smoothing and filler-word removal in the service.",
+            "Leave off when you need a more literal transcript.",
+        ),
+        FieldId::SeedEndWindowMs => (
+            "Seed-ASR · end window",
+            "Silence window used by the server to finalize an utterance. Use Left/Right to change it in 100 ms steps.",
+            "Valid range: 300-5000 ms. The default is 800 ms.",
+        ),
+        _ => unreachable!("seedasr_guidance called for a non-Seed-ASR field"),
+    };
+    vec![
+        heading(title),
+        Line::from(""),
+        Line::from(body),
+        Line::from(""),
+        Line::from(Span::styled(note, Style::default().fg(Color::Gray))),
+    ]
 }
 
 fn openvino_device_guidance(device: &str) -> Vec<Line<'static>> {
@@ -1934,6 +2333,7 @@ fn display_engine(engine: &str) -> &'static str {
         "omnilingual" => "Omnilingual",
         "cohere" => "Cohere",
         "openvino" => "OpenVINO",
+        "seedasr" => "Seed-ASR",
         _ => "Engine",
     }
 }
@@ -2049,11 +2449,24 @@ mod tests {
 
     #[test]
     fn openvino_engine_exposes_device_configuration() {
-        let rows = rows_for_engine_with_mode("openvino", "local");
+        let rows = rows_for_engine_with_mode("openvino", "local", "api_key");
         assert!(rows.contains(&FieldId::OvModel));
         assert!(rows.contains(&FieldId::OvDevice));
         assert!(rows.contains(&FieldId::OvLanguage));
         assert!(rows.contains(&FieldId::OvOnDemandLoading));
+    }
+
+    #[test]
+    fn seedasr_engine_exposes_the_selected_credential_scheme() {
+        let api_rows = rows_for_engine_with_mode("seedasr", "local", "api_key");
+        assert!(api_rows.contains(&FieldId::SeedApiKey));
+        assert!(!api_rows.contains(&FieldId::SeedAppId));
+        assert!(api_rows.contains(&FieldId::SeedStreaming));
+
+        let legacy_rows = rows_for_engine_with_mode("seedasr", "local", "legacy");
+        assert!(!legacy_rows.contains(&FieldId::SeedApiKey));
+        assert!(legacy_rows.contains(&FieldId::SeedAppId));
+        assert!(legacy_rows.contains(&FieldId::SeedAccessToken));
     }
 
     #[test]

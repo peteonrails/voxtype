@@ -37,6 +37,18 @@ feature.
 
 ## Quick start
 
+Run `voxtype configure`, choose `seedasr` in the Engine section, select an
+authentication mode, and enter its credentials. The form masks API keys and
+access tokens.
+
+The same setup can be performed non-interactively:
+
+```bash
+voxtype config set engine seedasr
+voxtype config set seedasr.api_key "$SEEDASR_API_KEY"
+voxtype config set seedasr.resource_id volc.seedasr.sauc.duration
+```
+
 ### New-console credentials
 
 ```toml
