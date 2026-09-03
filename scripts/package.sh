@@ -536,6 +536,35 @@ if [[ -d quickshell ]]; then
     find "$STAGING/usr/share/voxtype/quickshell" -type d -exec chmod 755 {} \;
 fi
 
+# OSD style packages and recipes. The style resolver searches
+# /usr/share/voxtype/osd/<name> after the user paths, so shipping the
+# examples gives `[osd] style = "<name>"` something to resolve out of the
+# box while still letting a user copy shadow it.
+if [[ -d examples/osd-packages ]]; then
+    mkdir -p "$STAGING/usr/share/voxtype/osd"
+    tar -cf - \
+        --exclude='.git' \
+        --exclude='.gitignore' \
+        --exclude='.*.swp' \
+        --exclude='*~' \
+        --exclude='.DS_Store' \
+        -C examples/osd-packages . | tar -xf - -C "$STAGING/usr/share/voxtype/osd"
+    find "$STAGING/usr/share/voxtype/osd" -type f -exec chmod 644 {} \;
+    find "$STAGING/usr/share/voxtype/osd" -type d -exec chmod 755 {} \;
+fi
+if [[ -d examples/osd-recipes ]]; then
+    mkdir -p "$STAGING/usr/share/voxtype/osd-recipes"
+    tar -cf - \
+        --exclude='.git' \
+        --exclude='.gitignore' \
+        --exclude='.*.swp' \
+        --exclude='*~' \
+        --exclude='.DS_Store' \
+        -C examples/osd-recipes . | tar -xf - -C "$STAGING/usr/share/voxtype/osd-recipes"
+    find "$STAGING/usr/share/voxtype/osd-recipes" -type f -exec chmod 644 {} \;
+    find "$STAGING/usr/share/voxtype/osd-recipes" -type d -exec chmod 755 {} \;
+fi
+
 # Shell completions (must be world-readable for non-root users)
 cp packaging/completions/voxtype.bash "$STAGING/usr/share/bash-completion/completions/voxtype"
 cp packaging/completions/voxtype.zsh "$STAGING/usr/share/zsh/site-functions/_voxtype"
