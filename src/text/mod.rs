@@ -161,14 +161,6 @@ impl TextProcessor {
             result = self.apply_filler_filter(&result);
         }
 
-        // Restart collapsing runs after filler removal so a filler sitting in
-        // the middle of a stutter ("the uh the point") does not hide the
-        // repeat, and before replacements so the user's rules always see -
-        // and get the last word on - the cleaned text.
-        if self.collapse_restarts {
-            result = restarts::collapse_restarts(&result);
-        }
-
         // Apply replacements first so phrases containing spoken punctuation words
         // (e.g. "slash pr" → "/pr") match before those words are converted to
         // punctuation characters.
@@ -178,6 +170,16 @@ impl TextProcessor {
 
         if self.spoken_punctuation {
             result = self.apply_spoken_punctuation(&result);
+        }
+
+        // Restart collapsing keys on sentence boundaries, so it has to run
+        // after spoken punctuation has turned a dictated "period" into a real
+        // ".". Running it earlier would make every boundary invisible for
+        // anyone using spoken_punctuation. Filler removal has already gone,
+        // so a filler mid-stutter ("the uh the point") cannot hide the repeat
+        // either, and the replacements pass below still gets the last word.
+        if self.collapse_restarts {
+            result = restarts::collapse_restarts(&result);
         }
 
         // Apply replacements again to catch patterns that only became matchable
@@ -491,6 +493,25 @@ mod tests {
         assert_eq!(
             processor.process("in this migration? migration tool on the admin side?"),
             "in this migration tool on the admin side?"
+        );
+    }
+
+    #[test]
+    fn restarts_see_boundaries_produced_by_spoken_punctuation() {
+        // With spoken_punctuation on, the boundary arrives as the word
+        // "period". Restart collapsing must run after the conversion or it
+        // sees no boundary at all and does nothing.
+        let config = TextConfig {
+            collapse_restarts: true,
+            spoken_punctuation: true,
+            ..Default::default()
+        };
+        let processor = TextProcessor::new(&config);
+        assert_eq!(
+            processor.process(
+                "are we looking at this migration period migration tool on the admin side period"
+            ),
+            "are we looking at this migration tool on the admin side."
         );
     }
 

@@ -2994,7 +2994,7 @@ Singular/plural restarts are matched too, and the repaired word inherits the cap
 collapse_restarts = true
 ```
 
-This runs after filler-word filtering and before your `replacements`, so your own rules always get the last word on the text.
+This runs after filler-word filtering and after spoken-punctuation conversion - it keys on sentence boundaries, so a dictated "period" has to have become a real `.` first - and before the final `replacements` pass, so your own rules still get the last word on the text.
 
 ### filter_filler_words
 
