@@ -19,6 +19,9 @@ use crate::osd::theme;
 use crate::osd::visual::{Color, Palette};
 
 const PACKAGE_MANIFEST: &str = "voxtype-osd.toml";
+/// System-wide package directory populated by distro packages; user paths
+/// are searched first so a user copy always shadows a shipped package.
+const SYSTEM_PACKAGE_DIR: &str = "/usr/share/voxtype/osd";
 
 /// Fully resolved style data consumed by Quickshell QML.
 #[derive(Debug, Clone, Serialize)]
@@ -225,8 +228,8 @@ fn resolve_package_dir(
         return Ok(Some(direct));
     }
     let candidates = candidate_package_dirs(style);
-    if let Some(found) = candidates.iter().find(|p| is_package_dir(p)) {
-        return Ok(Some(found.clone()));
+    if let Some(found) = find_package_dir(&candidates) {
+        return Ok(Some(found));
     }
     let mut searched: Vec<String> = vec![direct.display().to_string()];
     searched.extend(candidates.iter().map(|p| p.display().to_string()));
@@ -253,6 +256,10 @@ fn is_package_dir(path: &Path) -> bool {
 }
 
 fn candidate_package_dirs(name: &str) -> Vec<PathBuf> {
+    candidate_package_dirs_with_system(name, Path::new(SYSTEM_PACKAGE_DIR))
+}
+
+fn candidate_package_dirs_with_system(name: &str, system_dir: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         if !xdg.is_empty() {
@@ -270,7 +277,12 @@ fn candidate_package_dirs(name: &str) -> Vec<PathBuf> {
     if let Some(home) = dirs::home_dir() {
         dirs.push(home.join(".local/share/voxtype/osd").join(name));
     }
+    dirs.push(system_dir.join(name));
     dirs
+}
+
+fn find_package_dir(candidates: &[PathBuf]) -> Option<PathBuf> {
+    candidates.iter().find(|p| is_package_dir(p)).cloned()
 }
 
 fn load_manifest(dir: &Path) -> Result<Option<OsdPackageManifest>, VoxtypeError> {
@@ -533,6 +545,57 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("definitely-not-installed"), "got: {msg}");
         assert!(msg.contains("Searched"), "got: {msg}");
+        assert!(
+            msg.contains("/usr/share/voxtype/osd/definitely-not-installed"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn system_package_dir_is_last_candidate_after_user_paths() {
+        let system = Path::new("/fake/system/osd");
+        let dirs = candidate_package_dirs_with_system("neon", system);
+        assert_eq!(dirs.last(), Some(&system.join("neon")));
+        let home_config = dirs::home_dir().unwrap().join(".config/voxtype/osd/neon");
+        let user_idx = dirs.iter().position(|p| *p == home_config).unwrap();
+        assert!(user_idx < dirs.len() - 1, "user path must precede system");
+
+        assert_eq!(
+            candidate_package_dirs("neon").last(),
+            Some(&PathBuf::from("/usr/share/voxtype/osd/neon"))
+        );
+    }
+
+    #[test]
+    fn package_only_in_system_dir_resolves() {
+        let tmp = tempdir().unwrap();
+        let user = tmp.path().join("user/osd/neon");
+        let system = tmp.path().join("system/osd/neon");
+        fs::create_dir_all(&system).unwrap();
+        fs::write(
+            system.join(PACKAGE_MANIFEST),
+            "name = \"neon\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(find_package_dir(&[user, system.clone()]), Some(system));
+    }
+
+    #[test]
+    fn user_package_shadows_system_package() {
+        let tmp = tempdir().unwrap();
+        let user = tmp.path().join("user/osd/neon");
+        let system = tmp.path().join("system/osd/neon");
+        for dir in [&user, &system] {
+            fs::create_dir_all(dir).unwrap();
+            fs::write(
+                dir.join(PACKAGE_MANIFEST),
+                "name = \"neon\"\nversion = \"1.0.0\"\n",
+            )
+            .unwrap();
+        }
+
+        assert_eq!(find_package_dir(&[user.clone(), system]), Some(user));
     }
 
     #[test]
