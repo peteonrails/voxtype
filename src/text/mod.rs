@@ -58,6 +58,34 @@ fn filler_collisions(language: Option<&str>) -> &'static [&'static str] {
     }
 }
 
+/// Build a filler pattern that also matches a held pronunciation.
+///
+/// Engines transcribe a drawn-out filler with the last sound repeated -
+/// "uhhhh", "ummm", "hmmm" - and an exact-word pattern misses every one of
+/// them, which is the common case: a clipped "uh" barely registers in a
+/// transcript, a held one is what litters it.
+///
+/// Only the final character is allowed to repeat, so "um" matches "ummm"
+/// without "umbrella" or "summer" ever matching.
+fn elongated_filler_pattern(word: &str) -> String {
+    // "err" is an ordinary English verb, so "er" keeps matching exactly.
+    if word.eq_ignore_ascii_case("er") {
+        return regex::escape(word);
+    }
+    let mut chars = word.chars().collect::<Vec<_>>();
+    match chars.pop() {
+        Some(last) if last.is_alphabetic() => {
+            let head: String = chars.into_iter().collect();
+            format!(
+                "{}{}+",
+                regex::escape(&head),
+                regex::escape(&last.to_string())
+            )
+        }
+        _ => regex::escape(word),
+    }
+}
+
 impl TextProcessor {
     /// Create a new text processor from configuration
     /// Build a processor for a language-agnostic context.
@@ -111,7 +139,7 @@ impl TextProcessor {
             let alternation = effective_fillers
                 .iter()
                 .filter(|w| !w.trim().is_empty())
-                .map(|w| regex::escape(w.trim()))
+                .map(|w| elongated_filler_pattern(w.trim()))
                 .collect::<Vec<_>>()
                 .join("|");
             if alternation.is_empty() {
@@ -870,6 +898,35 @@ mod tests {
         assert_eq!(processor.process("UM hello"), "hello");
         assert_eq!(processor.process("Um hello"), "hello");
         assert_eq!(processor.process("Hmm I see"), "I see");
+    }
+
+    #[test]
+    fn filler_filter_catches_held_fillers() {
+        // The case users actually report: a drawn-out filler while thinking.
+        let config = make_filler_config(true, None);
+        let processor = TextProcessor::new(&config);
+
+        assert_eq!(processor.process("uhhhh hello world"), "hello world");
+        assert_eq!(processor.process("ummm hello world"), "hello world");
+        assert_eq!(processor.process("uhh ok then"), "ok then");
+        assert_eq!(processor.process("hmmm let me think"), "let me think");
+        assert_eq!(processor.process("well ahhh I see"), "well I see");
+    }
+
+    #[test]
+    fn elongation_does_not_swallow_real_words() {
+        let config = make_filler_config(true, None);
+        let processor = TextProcessor::new(&config);
+
+        // "er" stays exact: to err is human.
+        assert_eq!(processor.process("to err is human"), "to err is human");
+        // The classic boundary cases still hold with elongation enabled.
+        assert_eq!(processor.process("an umbrella"), "an umbrella");
+        assert_eq!(
+            processor.process("summer hummingbird"),
+            "summer hummingbird"
+        );
+        assert_eq!(processor.process("ahead of time"), "ahead of time");
     }
 
     #[test]

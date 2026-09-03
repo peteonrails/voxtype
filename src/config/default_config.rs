@@ -313,7 +313,8 @@ on_transcription = true
 # The word "submit" is stripped from the output text and Enter is pressed.
 # smart_auto_submit = false
 #
-# Remove filler words like "uh" and "um" from transcribed text.
+# Remove filler words like "uh" and "um" from transcribed text. Held
+# pronunciations ("uhhhh", "ummm", "hmmm") are matched too.
 # Enabled by default. Set filter_filler_words = false to disable, or override
 # the word list via filler_words.
 # filter_filler_words = true

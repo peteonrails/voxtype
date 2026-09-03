@@ -3016,6 +3016,9 @@ With this enabled:
 - "Well, um, I think" becomes "Well, I think"
 - "uh hello world" becomes "hello world"
 - "hello world, uh." becomes "hello world."
+- "uhhhh hello world" becomes "hello world"
+
+Held fillers match too: only the final sound is allowed to repeat, so "uhhhh", "ummm" and "hmmm" are all removed while "umbrella", "summer" and "ahead" are untouched. The one exception is `er`, which keeps matching exactly so the verb "err" survives.
 
 **CLI flag:**
 
