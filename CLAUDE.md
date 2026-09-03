@@ -343,7 +343,29 @@ Milestone-aligned with GitHub so the two don't drift. Based on the 29 Aug 2026 b
 - 1.1.3 macOS: #522, #576, #452, #632
 - 1.1.5 Compatibility: #612, #603
 
-**1.2.0 (architecture):** Model registry out of Rust structs into versioned data ([#648](https://github.com/peteonrails/voxtype/issues/648)), owning the model download transfer layer ([#647](https://github.com/peteonrails/voxtype/issues/647)), long-audio windowing for Cohere and Parakeet (#551, #288), Nemotron ([#47](https://github.com/peteonrails/voxtype/issues/47)). Dictation cleanup pipeline ([#696](https://github.com/peteonrails/voxtype/issues/696)): staged labelers and rules instead of LLM rewriting - vocabulary, disfluency tagging (LARD-trained, CC-BY), punctuation/casing for the CTC engines that emit neither, ITN via text-processing-rs, user rules last; the LLM keeps only tone/restructuring behind an edit-list contract. Absorbs #535 and the filler-word half of #566; profile vocabularies feed #519.
+**1.2.0 (text cleanup) - flagship release.** The dictation cleanup pipeline ([#696](https://github.com/peteonrails/voxtype/issues/696)) is the feature this release is named for; everything else in the milestone (#648, #647, #643, #651, #650, #649, #546, #474, #460, #551, #288, #47) is bug fixing and refactoring. Model registry out of Rust structs into versioned data ([#648](https://github.com/peteonrails/voxtype/issues/648)), owning the model download transfer layer ([#647](https://github.com/peteonrails/voxtype/issues/647)), long-audio windowing for Cohere and Parakeet (#551, #288), Nemotron ([#47](https://github.com/peteonrails/voxtype/issues/47)). Dictation cleanup pipeline ([#696](https://github.com/peteonrails/voxtype/issues/696)): staged labelers and rules instead of LLM rewriting - vocabulary, disfluency tagging (LARD-trained, CC-BY), punctuation/casing for the CTC engines that emit neither, ITN via text-processing-rs, user rules last; the LLM keeps only tone/restructuring behind an edit-list contract. Absorbs #535 and the filler-word half of #566; profile vocabularies feed #519.
+
+### 1.2.0 release preparation
+
+Three things to settle before 1.2.0 ships, none of them code in the pipeline itself.
+
+**1. Turn the good stuff on for new installations.** Defaults have been kept conservative for backwards compatibility, so a fresh install gets a mostly-off product. Those are two different mechanisms and only one of them is a compatibility risk:
+
+- `default_config_content()` in `src/config/default_config.rs` is the template written to a *new* config, by `voxtype setup` (`src/setup/mod.rs:592`) and by macOS first run (`src/app/macos.rs:41`).
+- The `#[serde(default)]` values on the config structs govern an *existing* config that lacks the key.
+
+Changing the template therefore affects new installs only and cannot break an upgrade. That is the safe way to ship cleanup on by default. Decide the full list, not just cleanup: which of the cleanup flags, VAD, and the other nice-to-haves should a new user get without touching a config file.
+
+**2. Omarchy migration PRs.** Decide what to submit upstream. Turning text cleanup on by default there needs a discussion first - it changes what users' dictation produces. Turning on the bells and whistles that should already be running is not controversial and should go regardless. Note the packaging gap recorded above: Omarchy's `edge` repo still ships `voxtype-bin` 0.7.5-1.
+
+**3. Basic and advanced configuration.** The Quickshell config panel exposes every knob there is, and the TUI has the same problem: both are shaped by the config schema rather than by what a new user needs. Want a basic mode by default with an advanced mode that reveals everything.
+
+Prior art worth copying, from the competitors:
+
+- **Handy** puts five items in a sidebar (General, History, Models, Advanced, About). *General* is about eight controls - shortcut, push-to-talk, language, microphone, mute-while-recording, audio feedback, output device, volume - and everything else lives under *Advanced*, grouped App / Output / Transcription. Its *Models* page is the strongest part: cards with accuracy and speed meters, download size, language count, and Active/Recommended badges, plus search and filters. Voxtype's model picker is a flat list by comparison.
+- **AirType** does the same job in a TUI: one status line (service, model, paste mode, hotkey) over a ten-item menu, including a "Doctor" entry.
+
+Both also surface things voxtype has planned but not shipped - Handy has transcript history (#209, currently 1.5.0) and a "Copy Last Transcript" tray entry.
 
 **Punctuation spacing is a dialect, not a universal (#696).** `clean_punctuation_spacing` in `src/text/mod.rs` applies one set of rules to every transcription, and several of them are only correct in a particular context. Split it into a general core plus profile- and language-scoped rules, so a coding profile keeps the developer behaviour and prose stops being damaged by it.
 
