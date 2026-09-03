@@ -198,7 +198,12 @@ pub(crate) fn send_record_command(
             RecordAction::Stop { json, timeout, .. } => (*json, *timeout),
             _ => (false, 120),
         };
-        let outcome = await_transcription(&transcript, Duration::from_secs(timeout));
+        let state_file = config.resolve_state_file();
+        let outcome = await_transcription(
+            &transcript,
+            state_file.as_deref(),
+            Duration::from_secs(timeout),
+        );
         report_outcome(&outcome, as_json);
         std::process::exit(outcome.exit_code());
     }
@@ -256,13 +261,16 @@ impl WaitOutcome {
 /// seeing the sidecar means the transcript is complete. A state file that
 /// returns to idle without one is the backstop: that means the recording ended
 /// down a path that produced no transcript.
-fn await_transcription(transcript: &Path, timeout: Duration) -> WaitOutcome {
+fn await_transcription(
+    transcript: &Path,
+    state_file: Option<&Path>,
+    timeout: Duration,
+) -> WaitOutcome {
     const POLL: Duration = Duration::from_millis(50);
     // How long to keep looking for a sidecar after the daemon reports idle.
     const SETTLE: Duration = Duration::from_millis(750);
 
     let sidecar = result_sidecar_path(transcript);
-    let state_file = config::Config::runtime_dir().join("state");
     let deadline = Instant::now() + timeout;
     let mut idle_since: Option<Instant> = None;
 
@@ -272,8 +280,9 @@ fn await_transcription(transcript: &Path, timeout: Duration) -> WaitOutcome {
             return finish(transcript, &body);
         }
 
-        let state = std::fs::read_to_string(&state_file)
-            .map(|s| s.trim().to_string())
+        let state = state_file
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .map(|state| state.trim().to_string())
             .unwrap_or_default();
         if state == "idle" {
             match idle_since {
@@ -367,5 +376,44 @@ fn report_outcome(outcome: &WaitOutcome, as_json: bool) {
         eprintln!("{}: {}", outcome.status, message);
     } else {
         eprintln!("{}", outcome.status);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wait_uses_the_resolved_custom_state_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.txt");
+        let state = dir.path().join("custom.state");
+        std::fs::write(&state, "idle\n").unwrap();
+
+        let outcome = await_transcription(&transcript, Some(&state), Duration::from_millis(900));
+
+        assert_eq!(outcome.status, "empty");
+        assert!(outcome
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("returned to idle"));
+    }
+
+    #[test]
+    fn wait_returns_published_transcript_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.txt");
+        std::fs::write(&transcript, "hello\n").unwrap();
+        std::fs::write(
+            result_sidecar_path(&transcript),
+            r#"{"status":"ok","chars":5}"#,
+        )
+        .unwrap();
+
+        let outcome = await_transcription(&transcript, None, Duration::from_millis(1));
+
+        assert_eq!(outcome.status, "ok");
+        assert_eq!(outcome.text, "hello");
     }
 }
