@@ -64,6 +64,7 @@ export default defineConfig({
             { text: "Model Selection", link: "/MODEL_SELECTION_GUIDE" },
             { text: "Waybar Integration", link: "/WAYBAR" },
             { text: "Parakeet ASR", link: "/PARAKEET" },
+            { text: "Seed-ASR", link: "/SEEDASR" },
             { text: "CI Setup", link: "/CI-SETUP" },
           ],
         },

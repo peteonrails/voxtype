@@ -29,8 +29,8 @@ pub use audio::{AudioConfig, AudioFeedbackConfig};
 pub use default_config::{default_config_content, DEFAULT_CONFIG};
 pub use engines::{
     CohereConfig, DolphinConfig, MoonshineConfig, OmnilingualConfig, OpenVinoConfig,
-    ParaformerConfig, ParakeetConfig, ParakeetModelType, SenseVoiceConfig, SonioxConfig,
-    TranscriptionEngine,
+    ParaformerConfig, ParakeetConfig, ParakeetModelType, SeedAsrConfig, SenseVoiceConfig,
+    SonioxConfig, TranscriptionEngine, DEFAULT_SEEDASR_RESOURCE_ID, DEFAULT_SEEDASR_URL,
 };
 pub use hotkey::{ActivationMode, HotkeyConfig};
 pub use language::LanguageConfig;
