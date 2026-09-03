@@ -4,6 +4,8 @@
 //! - Spoken punctuation conversion (e.g., "period" → ".")
 //! - Custom word replacements
 
+pub mod restarts;
+
 use crate::config::TextConfig;
 use regex::Regex;
 use std::collections::HashMap;
@@ -20,6 +22,8 @@ pub struct TextProcessor {
     submit_re: Regex,
     /// Whether filler-word filtering is enabled
     filter_filler_words: bool,
+    /// Whether restart/stutter collapsing is enabled
+    collapse_restarts: bool,
     /// Pre-compiled regex matching any configured filler word.
     /// `None` when the filter is disabled or the list is empty so the hot
     /// path can early-out without touching regex.
@@ -137,6 +141,7 @@ impl TextProcessor {
             smart_auto_submit: config.smart_auto_submit,
             submit_re,
             filter_filler_words: config.filter_filler_words,
+            collapse_restarts: config.collapse_restarts,
             filler_re,
             filler_space_re,
             filler_punct_re,
@@ -154,6 +159,14 @@ impl TextProcessor {
         // mapping "um" to itself) without needing to disable the filter.
         if self.filter_filler_words {
             result = self.apply_filler_filter(&result);
+        }
+
+        // Restart collapsing runs after filler removal so a filler sitting in
+        // the middle of a stutter ("the uh the point") does not hide the
+        // repeat, and before replacements so the user's rules always see -
+        // and get the last word on - the cleaned text.
+        if self.collapse_restarts {
+            result = restarts::collapse_restarts(&result);
         }
 
         // Apply replacements first so phrases containing spoken punctuation words
@@ -457,6 +470,46 @@ mod tests {
             smart_auto_submit: true,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn collapse_restarts_is_off_by_default() {
+        let config = TextConfig::default();
+        assert!(!config.collapse_restarts);
+        let processor = TextProcessor::new(&config);
+        let s = "in this migration? migration tool on the admin side?";
+        assert_eq!(processor.process(s), s);
+    }
+
+    #[test]
+    fn collapse_restarts_runs_in_the_pipeline_when_enabled() {
+        let config = TextConfig {
+            collapse_restarts: true,
+            ..Default::default()
+        };
+        let processor = TextProcessor::new(&config);
+        assert_eq!(
+            processor.process("in this migration? migration tool on the admin side?"),
+            "in this migration tool on the admin side?"
+        );
+    }
+
+    #[test]
+    fn user_replacements_still_win_over_restart_collapsing() {
+        // The user's rules run after restart collapsing, so they always get
+        // the last word on the text.
+        let mut config = TextConfig {
+            collapse_restarts: true,
+            ..Default::default()
+        };
+        config
+            .replacements
+            .insert("admin side".to_string(), "admin console".to_string());
+        let processor = TextProcessor::new(&config);
+        assert_eq!(
+            processor.process("in this migration? migration tool on the admin side?"),
+            "in this migration tool on the admin console?"
+        );
     }
 
     #[test]

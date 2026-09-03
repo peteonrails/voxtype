@@ -318,6 +318,13 @@ on_transcription = true
 # the word list via filler_words.
 # filter_filler_words = true
 # filler_words = ["uh", "um", "er", "ah", "eh", "hmm", "hm", "mm", "mhm"]
+#
+# Collapse restart disfluencies: a phrase you interrupt and restart by
+# repeating a word ("the independent tool. the independent booking tool"),
+# back-to-back stutters ("the the the"), and explicit retractions
+# ("scratch that", "I'm sorry"). Off by default, because a wrong guess
+# deletes words you actually said.
+# collapse_restarts = false
 
 [osd]
 # On-screen display frontend.

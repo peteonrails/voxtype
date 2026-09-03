@@ -27,6 +27,14 @@ pub struct TextConfig {
     #[serde(default)]
     pub filter_filler_words: bool,
 
+    /// Collapse restart disfluencies: a self-interrupted phrase that the
+    /// speaker restarts by repeating a word ("the independent tool. the
+    /// independent booking tool"), back-to-back stutters, and explicit
+    /// retractions ("scratch that", "I'm sorry"). Off by default: a false
+    /// positive deletes words the speaker actually said.
+    #[serde(default)]
+    pub collapse_restarts: bool,
+
     /// Words removed when `filter_filler_words` is true. Matched
     /// case-insensitively on word boundaries; surrounding punctuation and
     /// whitespace are cleaned up after removal.
@@ -41,6 +49,7 @@ impl Default for TextConfig {
             replacements: HashMap::new(),
             smart_auto_submit: false,
             filter_filler_words: true,
+            collapse_restarts: false,
             filler_words: default_filler_words(),
         }
     }

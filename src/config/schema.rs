@@ -974,6 +974,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Remove \"uh\", \"um\" and the rest of text.filler_words from the output.",
     ),
     spec(
+        "text.collapse_restarts",
+        "text",
+        "collapse_restarts",
+        KeyType::Bool,
+        "Text",
+        "Collapse restarts and stutters",
+        "Remove self-corrections where a phrase is restarted by repeating a word, plus stutters and \"scratch that\" retractions.",
+    ),
+    spec(
         "text.replacements.<from>",
         REPLACEMENTS_TABLE,
         "<from>",
@@ -1751,6 +1760,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "text.spoken_punctuation" => json!(cfg.text.spoken_punctuation),
         "text.smart_auto_submit" => json!(cfg.text.smart_auto_submit),
         "text.filter_filler_words" => json!(cfg.text.filter_filler_words),
+        "text.collapse_restarts" => json!(cfg.text.collapse_restarts),
         "text.replacements.<from>" => {
             let map: Map<String, Json> = cfg
                 .text

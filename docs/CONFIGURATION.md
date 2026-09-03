@@ -2969,6 +2969,33 @@ VOXTYPE_SMART_AUTO_SUBMIT=true voxtype
 
 **Note:** `smart_auto_submit` is conditional - it only fires when you say "submit". The existing `auto_submit` option always presses Enter after every transcription. Use `smart_auto_submit` when you want the choice per dictation, and `auto_submit` when you always want Enter pressed.
 
+### collapse_restarts
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Removes restart disfluencies: the pattern where you interrupt yourself and start the phrase again by repeating a word you already said. Speech engines usually put a sentence boundary at the point where you paused, which is the signal this uses.
+
+It handles three shapes:
+
+- **Repeat-anchored restarts.** "both the admin tool and the independent tool. the independent booking migration tool" becomes "both the admin tool and the independent booking migration tool".
+- **Stutters.** "so the the the point is" becomes "so the point is".
+- **Explicit retractions.** "it is not just a glitch. I'm sorry, it's not by design" becomes "it's not by design". Recognised phrases are "scratch that", "strike that", "I'm sorry", "I mean", "I meant to say" and "or rather".
+
+Singular/plural restarts are matched too, and the repaired word inherits the capitalisation of the word it replaced, so "consent line. Lines, so" becomes "consent lines, so" rather than leaving a stray capital mid-sentence.
+
+**Why it is off by default:** a false positive silently deletes words you actually said, which is worse than leaving a disfluency in place. The rules are deliberately conservative - a repeat has to carry a content word, the deleted span has to be short, and repeats of common function words or short names ("Send it to Bob. Bob will know.") are left alone - but the trade-off is a decision for you rather than a default.
+
+**Example:**
+
+```toml
+[text]
+collapse_restarts = true
+```
+
+This runs after filler-word filtering and before your `replacements`, so your own rules always get the last word on the text.
+
 ### filter_filler_words
 
 **Type:** Boolean
