@@ -41,6 +41,13 @@ pub enum BodyMarkup {
     Plain,
 }
 
+/// Colour for text the cleanup removed. Lightened rather than saturated so it
+/// stays legible on the dark backgrounds most notification themes use.
+const DELETED_COLOUR: &str = "#e05561";
+
+/// Colour for text the cleanup put in.
+const INSERTED_COLOUR: &str = "#22cc22";
+
 /// Escape text that is about to sit inside markup. Dictation really does
 /// produce `&` and `<` - "ampersand" and "less than" are both in the spoken
 /// punctuation map - and an unescaped one breaks the whole notification body.
@@ -136,12 +143,20 @@ pub fn render(spans: &[Span], markup: BodyMarkup) -> String {
             (SpanKind::Same, _) => body,
             (SpanKind::Deleted, BodyMarkup::Plain) => format!("[-{}-]", body),
             (SpanKind::Inserted, BodyMarkup::Plain) => format!("{{+{}+}}", body),
-            (SpanKind::Deleted, _) => format!("<s>{}</s>", body),
+            (SpanKind::Deleted, BodyMarkup::Qt) => {
+                format!("<font color=\"{}\"><s>{}</s></font>", DELETED_COLOUR, body)
+            }
+            (SpanKind::Deleted, BodyMarkup::Pango) => {
+                format!(
+                    "<span foreground=\"{}\"><s>{}</s></span>",
+                    DELETED_COLOUR, body
+                )
+            }
             (SpanKind::Inserted, BodyMarkup::Qt) => {
-                format!("<font color=\"#22cc22\">{}</font>", body)
+                format!("<font color=\"{}\">{}</font>", INSERTED_COLOUR, body)
             }
             (SpanKind::Inserted, BodyMarkup::Pango) => {
-                format!("<span foreground=\"#22cc22\">{}</span>", body)
+                format!("<span foreground=\"{}\">{}</span>", INSERTED_COLOUR, body)
             }
         });
     }
@@ -233,6 +248,7 @@ mod tests {
         let spans = word_diff("old", "new");
         let out = render(&spans, BodyMarkup::Qt);
         assert!(out.contains("<s>old</s>"), "{out}");
+        assert!(out.contains(DELETED_COLOUR), "{out}");
         assert!(out.contains("<font color=\"#22cc22\">new</font>"), "{out}");
     }
 
@@ -241,6 +257,7 @@ mod tests {
         let spans = word_diff("old", "new");
         let out = render(&spans, BodyMarkup::Pango);
         assert!(out.contains("<s>old</s>"), "{out}");
+        assert!(out.contains(DELETED_COLOUR), "{out}");
         assert!(
             out.contains("<span foreground=\"#22cc22\">new</span>"),
             "{out}"
@@ -271,7 +288,10 @@ mod tests {
     fn everything_deleted_still_renders() {
         let spans = word_diff("um uh", "");
         assert_eq!(edit_count(&spans), 1);
-        assert_eq!(render(&spans, BodyMarkup::Qt), "<s>um uh</s>");
+        assert_eq!(
+            render(&spans, BodyMarkup::Qt),
+            format!("<font color=\"{DELETED_COLOUR}\"><s>um uh</s></font>")
+        );
     }
 
     #[test]
@@ -294,7 +314,10 @@ mod tests {
         let after = format!("{} tail", "word ".repeat(60));
         let spans = word_diff(&before, &after);
         let out = render_for_notification(&spans, BodyMarkup::Qt, 80);
-        assert_eq!(out, "<s>uhhhh</s>");
+        assert_eq!(
+            out,
+            format!("<font color=\"{DELETED_COLOUR}\"><s>uhhhh</s></font>")
+        );
         // Whatever we emit must be balanced markup, never a sliced tag.
         assert_eq!(out.matches("<s>").count(), out.matches("</s>").count());
     }
