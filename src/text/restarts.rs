@@ -253,6 +253,39 @@ fn collapse_adjacent(text: &str, toks: &[Tok]) -> Option<(usize, usize)> {
     None
 }
 
+/// Whether byte offset `at` begins a sentence in `text`.
+fn is_sentence_start(text: &str, at: usize) -> bool {
+    let before = text[..at].trim_end();
+    before.is_empty() || before.ends_with(['.', '!', '?'])
+}
+
+/// Restore the capital when a deletion removed the words that opened a
+/// sentence. Deleting the reparandum of "It runs after the model. I'm sorry,
+/// it runs before ..." otherwise leaves a lower-case "it" starting the text.
+///
+/// Only an all-lower-case word is touched, so "iPhone" is never mangled.
+fn recapitalize_at(text: &mut String, at: usize) {
+    if at > text.len() || !is_sentence_start(text, at) {
+        return;
+    }
+    let rest = &text[at..];
+    let word_end = rest
+        .find(|c: char| c.is_whitespace())
+        .unwrap_or(rest.len());
+    let word = &rest[..word_end];
+    if word.is_empty() || word.chars().any(|c| c.is_uppercase()) {
+        return;
+    }
+    let Some(first) = word.chars().next() else {
+        return;
+    };
+    if !first.is_lowercase() {
+        return;
+    }
+    let upper: String = first.to_uppercase().collect();
+    text.replace_range(at..at + first.len_utf8(), &upper);
+}
+
 /// Remove restart, editing-phrase and stutter disfluencies from `text`.
 pub fn collapse_restarts(text: &str) -> String {
     let mut out = text.to_string();
@@ -265,6 +298,7 @@ pub fn collapse_restarts(text: &str) -> String {
 
         if let Some((from, to)) = collapse_adjacent(&out, &toks) {
             out.replace_range(from..to, "");
+            recapitalize_at(&mut out, from);
             continue;
         }
         if let Some((from, to, recased)) = find_restart(&out, &toks) {
@@ -276,10 +310,12 @@ pub fn collapse_restarts(text: &str) -> String {
                 out.replace_range(repair.start..repair.end, &word);
             }
             out.replace_range(from..to, "");
+            recapitalize_at(&mut out, from);
             continue;
         }
         if let Some((from, to)) = find_editing_phrase(&out, &toks) {
             out.replace_range(from..to, "");
+            recapitalize_at(&mut out, from);
             continue;
         }
         break;
@@ -396,5 +432,30 @@ mod tests {
         let s = "The migration ran overnight and finished without incident. \
                  The migration report is attached.";
         assert_eq!(collapse_restarts(s), s);
+    }
+
+    #[test]
+    fn a_retracted_opening_clause_leaves_a_capital() {
+        assert_eq!(
+            collapse_restarts("It runs after the model. I'm sorry, it runs before the output driver."),
+            "It runs before the output driver."
+        );
+    }
+
+    #[test]
+    fn recapitalization_only_touches_all_lowercase_words() {
+        // "iPhone" must not become "IPhone".
+        assert_eq!(
+            collapse_restarts("It ships on Android. I'm sorry, iPhone users get it first."),
+            "iPhone users get it first."
+        );
+    }
+
+    #[test]
+    fn mid_sentence_deletions_do_not_capitalize() {
+        assert_eq!(
+            collapse_restarts("we need the independent tool. the independent booking tool"),
+            "we need the independent booking tool"
+        );
     }
 }
