@@ -2874,6 +2874,7 @@ impl Daemon {
                             // Send notification on successful output
                             output::send_transcription_notification(
                                 &final_text,
+                                Some(text.as_str()),
                                 self.config.output.notification.show_engine_icon,
                                 self.config.engine,
                                 &self.config.output.notification.urgency,

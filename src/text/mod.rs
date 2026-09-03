@@ -4,6 +4,7 @@
 //! - Spoken punctuation conversion (e.g., "period" → ".")
 //! - Custom word replacements
 
+pub mod diff;
 pub mod restarts;
 
 use crate::config::TextConfig;
