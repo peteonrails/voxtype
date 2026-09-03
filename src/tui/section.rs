@@ -14,6 +14,7 @@ pub enum Section {
     Osd,
     Waybar,
     Advanced,
+    Streaming,
 }
 
 impl Section {
@@ -30,6 +31,7 @@ impl Section {
         Section::Osd,
         Section::Waybar,
         Section::Advanced,
+        Section::Streaming,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -46,6 +48,7 @@ impl Section {
             Section::Osd => "OSD",
             Section::Waybar => "Waybar",
             Section::Advanced => "Advanced",
+            Section::Streaming => "Streaming",
         }
     }
 
@@ -65,6 +68,7 @@ impl Section {
             Section::Osd => "Floating waveform OSD: frontend, position, size, opacity",
             Section::Waybar => "Status integration: icon theme, overrides",
             Section::Advanced => "GPU isolation, flash attention, on-demand loading",
+            Section::Streaming => "Live partial transcription: on/off + tick interval, buffer, revision mode",
         }
     }
 }
