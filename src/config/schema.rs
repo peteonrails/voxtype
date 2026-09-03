@@ -63,9 +63,8 @@ pub enum KeyType {
     /// Closed set of values. `open` means the listed choices are the useful
     /// presets but any non-empty string is accepted — used where the config
     /// field is a free-form string that also has canonical values (an evdev
-    /// key name, a sound theme that may be a directory path, an OSD style
-    /// that may be a package path). A UI should render these as an editable
-    /// combo box rather than a fixed picker.
+    /// key name, a sound theme that may be a directory path). A UI should
+    /// render these as an editable combo box rather than a fixed picker.
     Enum {
         choices: &'static [&'static str],
         open: bool,
@@ -240,10 +239,12 @@ const LOOPBACK_CHOICES: &[&str] = &["auto", "disabled"];
 const ECHO_CANCEL_CHOICES: &[&str] = &["auto", "disabled"];
 
 const OSD_FRONTEND_CHOICES: &[&str] = &["gtk4", "native", "quickshell"];
-const OSD_STYLE_CHOICES: &[&str] = &["default"];
 /// `auto` is absent on purpose: the config field is `Option`, and "auto"
 /// means absent. Use `voxtype config unset osd.palette`.
 const OSD_PALETTE_CHOICES: &[&str] = &["omarchy", "fallback", "package", "custom"];
+/// Canonical hints only — any palette role name or literal color is accepted.
+const OSD_FRAME_BACKGROUND_CHOICES: &[&str] = &["background", "none"];
+const OSD_FRAME_BORDER_CHOICES: &[&str] = &["state", "accent", "none"];
 const OSD_LAYOUT_CHOICES: &[&str] = &["compact", "wide", "minimal", "tile", "orb", "custom"];
 const OSD_POSITION_CHOICES: &[&str] = &[
     "bottom-center",
@@ -1107,10 +1108,19 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "osd.style",
         "osd",
         "style",
-        open(OSD_STYLE_CHOICES),
+        KeyType::DynamicEnum { source: "styles" },
         "OSD",
         "Style",
-        "Quickshell style name, package name, or package path.",
+        "Quickshell style name, package name, or package path. `voxtype info styles` lists what is installed.",
+    ),
+    spec(
+        "osd.plugin_path",
+        "osd",
+        "plugin_path",
+        KeyType::String,
+        "OSD",
+        "Plugin path",
+        "Directory of a Quickshell style package under development. QML in this path is trusted. Unset once the package is installed to a search path.",
     ),
     spec(
         "osd.palette",
@@ -1213,6 +1223,42 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "OSD",
         "Waveform gain",
         "Visual gain applied before drawing. Lower for hot mics, raise for quiet ones.",
+    ),
+    spec(
+        "osd.frame.background",
+        "osd.frame",
+        "background",
+        open(OSD_FRAME_BACKGROUND_CHOICES),
+        "OSD",
+        "Frame background",
+        "Card background of the Quickshell frame: a palette role name, a literal color like #1e1e2e, or none.",
+    ),
+    spec(
+        "osd.frame.border",
+        "osd.frame",
+        "border",
+        open(OSD_FRAME_BORDER_CHOICES),
+        "OSD",
+        "Frame border",
+        "Border of the Quickshell frame: state follows the daemon state color, or use a palette role, a literal color, or none.",
+    ),
+    spec(
+        "osd.frame.glow",
+        "osd.frame",
+        "glow",
+        KeyType::Bool,
+        "OSD",
+        "Frame glow",
+        "Voice-reactive soft glow around the Quickshell frame.",
+    ),
+    spec(
+        "osd.frame.halo",
+        "osd.frame",
+        "halo",
+        KeyType::Bool,
+        "OSD",
+        "Frame halo",
+        "Extra outline halo the orb layout renders around the frame.",
     ),
     // -- Status -------------------------------------------------------------
     spec(
@@ -1782,6 +1828,10 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "osd.enabled" => json!(cfg.osd.enabled),
         "osd.frontend" => serde_json::to_value(cfg.osd.frontend).ok()?,
         "osd.style" => json!(cfg.osd.style),
+        "osd.plugin_path" => match &cfg.osd.plugin_path {
+            Some(p) => json!(p.display().to_string()),
+            None => Json::Null,
+        },
         "osd.palette" => match cfg.osd.palette {
             Some(p) => serde_json::to_value(p).ok()?,
             None => Json::Null,
@@ -1796,6 +1846,10 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "osd.waveform_window_secs" => f32_json(cfg.osd.waveform_window_secs),
         "osd.peak_decay_db_per_sec" => f32_json(cfg.osd.peak_decay_db_per_sec),
         "osd.waveform_gain" => f32_json(cfg.osd.waveform_gain),
+        "osd.frame.background" => json!(cfg.osd.frame.background),
+        "osd.frame.border" => json!(cfg.osd.frame.border),
+        "osd.frame.glow" => json!(cfg.osd.frame.glow),
+        "osd.frame.halo" => json!(cfg.osd.frame.halo),
 
         "status.icon_theme" => json!(cfg.status.icon_theme),
         "status.icons.idle" => opt_str(cfg.status.icons.idle.as_ref()),
