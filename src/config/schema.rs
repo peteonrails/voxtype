@@ -1918,6 +1918,11 @@ fn key_json(spec: &KeySpec, cfg: &Config, editor: &ConfigEditor) -> Json {
         }
         KeyType::DynamicEnum { source } => {
             o.insert("source".into(), json!(source));
+            // Styles accept values outside the discovered list (package
+            // paths, packages installed later); models and devices do not.
+            if source == "styles" {
+                o.insert("open".into(), json!(true));
+            }
         }
         _ => {}
     }

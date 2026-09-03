@@ -36,6 +36,7 @@ Item {
   signal modelsLoaded(var engines)
   signal enginesLoaded(var list)
   signal devicesLoaded(var devices)
+  signal stylesLoaded(var styles)
   signal statusLoaded(string state, bool running)
   signal unitLoaded(string activeState, string mainPid)
   // state is "unknown" whenever the answer could not be obtained, which is also
@@ -311,6 +312,30 @@ Item {
       try {
         var parsed = JSON.parse(devicesProc.out)
         if (Array.isArray(parsed)) root.devicesLoaded(parsed)
+      } catch (e) {
+        // Same as models: an empty list is a survivable answer.
+      }
+    }
+  }
+
+  function fetchStyles() {
+    if (stylesProc.running) return
+    stylesProc.command = [root.bin, "info", "styles", "--json"]
+    stylesProc.running = true
+  }
+
+  Process {
+    id: stylesProc
+    property string out: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: stylesProc.out = String(text || "")
+    }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) return
+      try {
+        var parsed = JSON.parse(stylesProc.out)
+        if (Array.isArray(parsed)) root.stylesLoaded(parsed)
       } catch (e) {
         // Same as models: an empty list is a survivable answer.
       }
