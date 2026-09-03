@@ -124,6 +124,9 @@ pub enum OutputError {
     #[error("dotool not found in PATH. Install from https://sr.ht/~geb/dotool/")]
     DotoolNotFound,
 
+    #[error("xdotool not found in PATH. Install via your package manager (e.g. sudo pacman -S xdotool).")]
+    XdotoolNotFound,
+
     #[error("wtype not found in PATH. Install via your package manager.")]
     WtypeNotFound,
 
