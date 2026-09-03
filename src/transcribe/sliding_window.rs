@@ -868,14 +868,23 @@ fn last_n_words(text: &str, n: usize) -> String {
 
 /// Find the new tail: everything in `curr` beyond the committed text.
 ///
-/// Unified across the old growing mode (committed text is a prefix of
-/// `curr`) and sliding mode (only a suffix of the committed tail overlaps
-/// `curr`'s start). Every suffix start of `prev` (the committed tail) is
-/// greedily matched forward into `curr`, each `prev` word allowed to match
-/// a `curr` word up to `BAND` positions ahead; the match that consumes the
-/// longest `curr` prefix wins and its remainder — `curr[ci..]` — is the new
-/// tail. Returns `None` when no suffix aligns with even one `curr` word;
-/// the caller treats that as "nothing safe to type this pass".
+/// Unified across growing mode (the committed text is a prefix of `curr`)
+/// and sliding mode (only a suffix of the committed tail overlaps `curr`'s
+/// start). Every start position in `curr` is tried against every suffix
+/// start of `prev` (the committed tail), greedily matching forward with each
+/// `prev` word allowed to land up to `BAND` positions ahead. The anchor
+/// that consumes the most committed words wins (ties go to the one that
+/// consumes the most of `curr`), and its remainder — `curr[ci..]` — is the
+/// new tail.
+///
+/// Searching every `curr` start position (not just the prefix) matters once
+/// the committed text exceeds `SLIDING_DIFF_LOOKBACK_WORDS`: the committed
+/// tail is then no longer a prefix of `curr` (it starts mid-sentence), and a
+/// prefix-only search anchors on a single coincidental word and re-types the
+/// whole committed sentence as new — found live as literal duplication.
+///
+/// Returns `None` when no suffix aligns with even one `curr` word; the
+/// caller treats that as "nothing safe to type this pass".
 fn find_new_tail(prev: &[Word], curr: &[Word], band: usize) -> Option<Vec<Word>> {
     if prev.is_empty() {
         return Some(curr.to_vec());
@@ -886,31 +895,42 @@ fn find_new_tail(prev: &[Word], curr: &[Word], band: usize) -> Option<Vec<Word>>
 
     let n = prev.len();
     let m = curr.len();
-    let mut best_ci: Option<usize> = None;
+    // Best anchor: (committed words matched, curr position consumed).
+    let mut best: Option<(usize, usize)> = None;
 
-    for s in 0..n {
-        let mut ci = 0usize;
-        let mut matched = 0usize;
-        for committed_word in &prev[s..] {
-            let lookahead_end = (ci + band + 1).min(m);
-            let found = curr[ci..lookahead_end]
-                .iter()
-                .position(|c| word_text_eq(committed_word, c))
-                .map(|k| ci + k);
-            match found {
-                Some(j) => {
-                    matched += 1;
-                    ci = j + 1;
+    for j0 in 0..m {
+        for s in 0..n {
+            let mut ci = j0;
+            let mut matched = 0usize;
+            for committed_word in &prev[s..] {
+                let lookahead_end = (ci + band + 1).min(m);
+                let found = curr[ci..lookahead_end]
+                    .iter()
+                    .position(|c| word_text_eq(committed_word, c))
+                    .map(|k| ci + k);
+                match found {
+                    Some(j) => {
+                        matched += 1;
+                        ci = j + 1;
+                    }
+                    None => break,
                 }
-                None => break,
             }
-        }
-        if matched > 0 {
-            best_ci = Some(best_ci.map_or(ci, |b| b.max(ci)));
+            if matched > 0 {
+                let better = match best {
+                    None => true,
+                    Some((b_matched, b_ci)) => {
+                        matched > b_matched || (matched == b_matched && ci > b_ci)
+                    }
+                };
+                if better {
+                    best = Some((matched, ci));
+                }
+            }
         }
     }
 
-    best_ci.map(|ci| curr[ci..].to_vec())
+    best.map(|(_, ci)| curr[ci..].to_vec())
 }
 
 /// Exact character length that would be BACKSPACED to remove
@@ -1148,6 +1168,32 @@ mod tests {
             )
             .unwrap(),
             parse_words("and then"),
+        );
+    }
+
+    #[test]
+    fn find_new_tail_anchors_committed_tail_anywhere_in_curr_not_just_the_prefix() {
+        // Regression for the live duplication: once committed text exceeds
+        // SLIDING_DIFF_LOOKBACK_WORDS, the committed tail (last 20 words) is
+        // NOT a prefix of curr — curr starts with the full committed text.
+        // A prefix-only alignment anchored on a single coincidental word
+        // ("This") and re-typed the whole committed sentence as new.
+        let committed = parse_words(
+            "This definitely looks better out of the gate. I really like that we fixed \
+             the punctuation thing. This is really cool. I just noticed",
+        );
+        assert!(committed.len() > SLIDING_DIFF_LOOKBACK_WORDS);
+        let tail = committed[committed.len() - SLIDING_DIFF_LOOKBACK_WORDS..].to_vec();
+        let curr = parse_words(
+            "This definitely looks better out of the gate. I really like that we fixed \
+             the punctuation thing. This is really cool. I just noticed that after a \
+             while it does get",
+        );
+        let new_tail = find_new_tail(&tail, &curr, ALIGN_BAND).unwrap();
+        assert_eq!(
+            render_words(&new_tail),
+            "that after a while it does get",
+            "must not re-include any already-committed word"
         );
     }
 
