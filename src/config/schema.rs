@@ -63,9 +63,8 @@ pub enum KeyType {
     /// Closed set of values. `open` means the listed choices are the useful
     /// presets but any non-empty string is accepted — used where the config
     /// field is a free-form string that also has canonical values (an evdev
-    /// key name, a sound theme that may be a directory path, an OSD style
-    /// that may be a package path). A UI should render these as an editable
-    /// combo box rather than a fixed picker.
+    /// key name, a sound theme that may be a directory path). A UI should
+    /// render these as an editable combo box rather than a fixed picker.
     Enum {
         choices: &'static [&'static str],
         open: bool,
@@ -240,7 +239,6 @@ const LOOPBACK_CHOICES: &[&str] = &["auto", "disabled"];
 const ECHO_CANCEL_CHOICES: &[&str] = &["auto", "disabled"];
 
 const OSD_FRONTEND_CHOICES: &[&str] = &["gtk4", "native", "quickshell"];
-const OSD_STYLE_CHOICES: &[&str] = &["default"];
 /// `auto` is absent on purpose: the config field is `Option`, and "auto"
 /// means absent. Use `voxtype config unset osd.palette`.
 const OSD_PALETTE_CHOICES: &[&str] = &["omarchy", "fallback", "package", "custom"];
@@ -1110,10 +1108,10 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "osd.style",
         "osd",
         "style",
-        open(OSD_STYLE_CHOICES),
+        KeyType::DynamicEnum { source: "styles" },
         "OSD",
         "Style",
-        "Quickshell style name, package name, or package path.",
+        "Quickshell style name, package name, or package path. `voxtype info styles` lists what is installed.",
     ),
     spec(
         "osd.plugin_path",

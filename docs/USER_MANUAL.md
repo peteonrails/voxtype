@@ -329,10 +329,12 @@ and border without changing QML. The styling system was contributed by
 against `~/.config/voxtype/osd/`, `~/.local/share/voxtype/osd/`, and
 `/usr/share/voxtype/osd/`, so installing a shared package is copying its
 directory into `~/.config/voxtype/osd/` and setting `style` to the directory
-name. Packaged installs ship example styles under `/usr/share/voxtype/osd/`;
-the source tree keeps them in `examples/osd-packages/` alongside
-`examples/osd-recipes/`, which are plain `[osd]` config presets you copy
-keys from rather than installable packages. While developing a package, set
+name. `voxtype info styles` lists everything the search currently finds.
+Packaged installs ship example styles under `/usr/share/voxtype/osd/` and
+recipe presets under `/usr/share/voxtype/osd-recipes/`; the source tree keeps
+them in `examples/osd-packages/` alongside `examples/osd-recipes/`. Recipes
+are plain `[osd]` config presets you copy keys from rather than installable
+packages. While developing a package, set
 `plugin_path` to your working directory; it takes priority over the search
 paths so edits apply on the next OSD launch. Package QML is trusted code and
 is not sandboxed.
@@ -341,6 +343,7 @@ All of these keys work with `voxtype config set`, the `voxtype configure`
 TUI's OSD section, and the config file:
 
 ```bash
+voxtype info styles
 voxtype config set osd.style aegis-hud
 voxtype config set osd.plugin_path ~/dev/my-style
 voxtype config unset osd.plugin_path

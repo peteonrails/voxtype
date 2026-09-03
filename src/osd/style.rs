@@ -260,25 +260,101 @@ fn candidate_package_dirs(name: &str) -> Vec<PathBuf> {
 }
 
 fn candidate_package_dirs_with_system(name: &str, system_dir: &Path) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
+    package_roots_with_system(system_dir)
+        .into_iter()
+        .map(|root| root.join(name))
+        .collect()
+}
+
+/// Package search roots in priority order: user config, user data, then the
+/// system directory, so a user copy always shadows a shipped package. Shared
+/// by per-name resolution and [`list_installed_styles`] so the two can't
+/// disagree about where packages live.
+fn package_roots_with_system(system_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         if !xdg.is_empty() {
-            dirs.push(PathBuf::from(xdg).join("voxtype/osd").join(name));
+            roots.push(PathBuf::from(xdg).join("voxtype/osd"));
         }
     }
     if let Some(home) = dirs::home_dir() {
-        dirs.push(home.join(".config/voxtype/osd").join(name));
+        roots.push(home.join(".config/voxtype/osd"));
     }
     if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
         if !xdg.is_empty() {
-            dirs.push(PathBuf::from(xdg).join("voxtype/osd").join(name));
+            roots.push(PathBuf::from(xdg).join("voxtype/osd"));
         }
     }
     if let Some(home) = dirs::home_dir() {
-        dirs.push(home.join(".local/share/voxtype/osd").join(name));
+        roots.push(home.join(".local/share/voxtype/osd"));
     }
-    dirs.push(system_dir.join(name));
-    dirs
+    roots.push(system_dir.to_path_buf());
+    roots
+}
+
+/// An OSD style `[osd] style` can select, discovered on disk or built in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InstalledStyle {
+    /// The value to set `[osd] style` to.
+    pub name: String,
+    /// Package directory; `None` for the built-in default renderer.
+    pub dir: Option<PathBuf>,
+    /// The package manifest's `description`, when it sets one.
+    pub description: Option<String>,
+}
+
+/// Every style installed right now: the built-in `default`, then each valid
+/// package directory across the search roots in name order. A name present
+/// in several roots is listed once with the highest-priority copy, matching
+/// how [`resolve_runtime_style`] resolves it.
+pub fn list_installed_styles() -> Vec<InstalledStyle> {
+    list_installed_styles_in(&package_roots_with_system(Path::new(SYSTEM_PACKAGE_DIR)))
+}
+
+fn list_installed_styles_in(roots: &[PathBuf]) -> Vec<InstalledStyle> {
+    // "default" never resolves to a package (resolve_package_dir returns the
+    // built-in renderer before searching), so a package dir named "default"
+    // is unreachable and deliberately not listed.
+    let mut seen: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::from(["default".to_string()]);
+    let mut packages: Vec<InstalledStyle> = Vec::new();
+    for root in roots {
+        let Ok(entries) = fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if !is_package_dir(&dir) {
+                continue;
+            }
+            let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !seen.insert(name.to_string()) {
+                continue;
+            }
+            // A manifest that fails to parse would error at selection time,
+            // but the package is still installed; list it without a
+            // description rather than hiding it.
+            let description = load_manifest(&dir)
+                .ok()
+                .flatten()
+                .and_then(|m| m.description);
+            packages.push(InstalledStyle {
+                name: name.to_string(),
+                dir: Some(dir),
+                description,
+            });
+        }
+    }
+    packages.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut styles = vec![InstalledStyle {
+        name: "default".to_string(),
+        dir: None,
+        description: Some("Built-in recipe renderer".to_string()),
+    }];
+    styles.extend(packages);
+    styles
 }
 
 fn find_package_dir(candidates: &[PathBuf]) -> Option<PathBuf> {
@@ -579,6 +655,55 @@ mod tests {
         .unwrap();
 
         assert_eq!(find_package_dir(&[user, system.clone()]), Some(system));
+    }
+
+    #[test]
+    fn list_installed_styles_dedupes_shadowed_packages() {
+        let tmp = tempdir().unwrap();
+        let user_root = tmp.path().join("user/osd");
+        let system_root = tmp.path().join("system/osd");
+        for (root, desc) in [(&user_root, "User copy"), (&system_root, "Shipped copy")] {
+            let dir = root.join("neon");
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join(PACKAGE_MANIFEST),
+                format!("name = \"neon\"\nversion = \"1.0.0\"\ndescription = \"{desc}\"\n"),
+            )
+            .unwrap();
+        }
+        let aurora = system_root.join("aurora");
+        fs::create_dir_all(&aurora).unwrap();
+        fs::write(
+            aurora.join(PACKAGE_MANIFEST),
+            "name = \"aurora\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        // A plain directory without a manifest is not a package.
+        fs::create_dir_all(system_root.join("not-a-package")).unwrap();
+
+        let styles = list_installed_styles_in(&[user_root.clone(), system_root]);
+        let names: Vec<&str> = styles.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["default", "aurora", "neon"]);
+
+        let neon = styles.iter().find(|s| s.name == "neon").unwrap();
+        assert_eq!(
+            neon.dir.as_deref(),
+            Some(user_root.join("neon").as_path()),
+            "the user copy must shadow the system copy"
+        );
+        assert_eq!(neon.description.as_deref(), Some("User copy"));
+
+        let aurora = styles.iter().find(|s| s.name == "aurora").unwrap();
+        assert_eq!(aurora.description, None);
+    }
+
+    #[test]
+    fn list_installed_styles_with_no_packages_is_just_default() {
+        let tmp = tempdir().unwrap();
+        let styles = list_installed_styles_in(&[tmp.path().join("missing/osd")]);
+        assert_eq!(styles.len(), 1);
+        assert_eq!(styles[0].name, "default");
+        assert_eq!(styles[0].dir, None);
     }
 
     #[test]

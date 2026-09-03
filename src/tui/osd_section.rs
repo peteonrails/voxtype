@@ -20,12 +20,15 @@ use ratatui::{
 use super::app::{Action, App};
 use super::common::{self, FeedbackLevel, FormRowSpec, TextInput, TextInputResult};
 use super::config_editor::{ConfigEditor, EditorError};
+use crate::osd::style::{list_installed_styles, InstalledStyle};
 
 #[derive(Debug, Clone)]
 pub struct OsdState {
     pub enabled: bool,
     pub frontend: String,
     pub style: String,
+    /// Styles discovered on disk at section load, cycled by the Style field.
+    pub styles: Vec<InstalledStyle>,
     /// Development package directory; empty string means unset.
     pub plugin_path: String,
     pub palette: String,
@@ -98,7 +101,6 @@ impl Field {
 const TABLE: &str = "osd";
 
 const FRONTEND_CHOICES: &[&str] = &["gtk4", "native", "quickshell"];
-const STYLE_CHOICES: &[&str] = &["default"];
 const PALETTE_CHOICES: &[&str] = &["auto", "omarchy", "fallback", "package", "custom"];
 const LAYOUT_CHOICES: &[&str] = &["compact", "wide", "minimal", "tile", "orb", "custom"];
 const POSITION_CHOICES: &[&str] = &[
@@ -135,6 +137,7 @@ impl OsdState {
             style: ed
                 .get_string(TABLE, "style")
                 .unwrap_or_else(|| "default".to_string()),
+            styles: list_installed_styles(),
             plugin_path: ed.get_string(TABLE, "plugin_path").unwrap_or_default(),
             palette: ed
                 .get_string(TABLE, "palette")
@@ -229,11 +232,12 @@ impl OsdState {
             Field::Enabled => self.enabled = !self.enabled,
             Field::Frontend => self.frontend = cycle_str(FRONTEND_CHOICES, &self.frontend, delta),
             Field::Style => {
-                // Only cycle between built-in names. A custom package
-                // name/path isn't in STYLE_CHOICES, and cycling would
-                // replace it with no way to get it back.
-                if STYLE_CHOICES.contains(&self.style.as_str()) {
-                    self.style = cycle_str(STYLE_CHOICES, &self.style, delta);
+                // Only cycle between discovered styles. A literal package
+                // path isn't in the list, and cycling would replace it with
+                // no way to get it back; Enter/i edits it instead.
+                let names: Vec<&str> = self.styles.iter().map(|s| s.name.as_str()).collect();
+                if names.contains(&self.style.as_str()) {
+                    self.style = cycle_str(&names, &self.style, delta);
                 }
             }
             // Free-text only; Enter/i opens the inline editor instead.
@@ -344,7 +348,7 @@ fn osd_binary_available() -> bool {
     false
 }
 
-fn cycle_str(choices: &[&'static str], current: &str, delta: i32) -> String {
+fn cycle_str(choices: &[&str], current: &str, delta: i32) -> String {
     let idx = choices
         .iter()
         .position(|c| *c == current)
@@ -513,6 +517,10 @@ fn dim<'a>(text: &'a str) -> Line<'a> {
     Line::from(Span::styled(text, Style::default().fg(Color::Gray)))
 }
 
+fn dim_owned(text: String) -> Line<'static> {
+    Line::from(Span::styled(text, Style::default().fg(Color::Gray)))
+}
+
 fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
     match state.field {
         Field::Enabled => vec![
@@ -546,17 +554,31 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
             Line::from(""),
             dim("If the chosen binary isn't on PATH, the wrapper falls back to whichever it finds and logs a warning."),
         ],
-        Field::Style => vec![
-            heading("Style"),
-            Line::from(""),
-            Line::from(
-                "Quickshell OSD style name, installed package name, or package \
-                 directory path. Left/Right cycles built-in names; press Enter \
-                 or i to type a package name or path.",
-            ),
-            Line::from(""),
-            dim("Default: default. Package manifests live in voxtype-osd.toml."),
-        ],
+        Field::Style => {
+            let mut lines = vec![
+                heading("Style"),
+                Line::from(""),
+                Line::from(
+                    "Quickshell OSD style. Left/Right cycles the installed \
+                     styles below; press Enter or i to type a package name or \
+                     directory path instead.",
+                ),
+                Line::from(""),
+            ];
+            for s in &state.styles {
+                let marker = if s.name == state.style { "▸" } else { " " };
+                lines.push(Line::from(format!("{} {}", marker, s.name)));
+                if let Some(desc) = &s.description {
+                    lines.push(dim_owned(format!("     {}", desc)));
+                }
+            }
+            lines.push(Line::from(""));
+            lines.push(dim(
+                "Install packages into ~/.config/voxtype/osd/. List from the \
+                 shell with: voxtype info styles",
+            ));
+            lines
+        }
         Field::PluginPath => vec![
             heading("Plugin path"),
             Line::from(""),
@@ -841,6 +863,11 @@ mod tests {
             enabled: true,
             frontend: "quickshell".to_string(),
             style: "default".to_string(),
+            styles: vec![InstalledStyle {
+                name: "default".to_string(),
+                dir: None,
+                description: None,
+            }],
             plugin_path: String::new(),
             palette: "auto".to_string(),
             layout: "compact".to_string(),
@@ -871,5 +898,54 @@ mod tests {
         // Style falls back to "default" rather than saving an empty name.
         state.commit_text_edit(Field::Style, "".to_string());
         assert_eq!(state.style, "default");
+    }
+
+    #[test]
+    fn style_field_cycles_discovered_styles_but_not_custom_paths() {
+        let mut state = OsdState {
+            enabled: true,
+            frontend: "quickshell".to_string(),
+            style: "default".to_string(),
+            styles: vec![
+                InstalledStyle {
+                    name: "default".to_string(),
+                    dir: None,
+                    description: None,
+                },
+                InstalledStyle {
+                    name: "aegis-hud".to_string(),
+                    dir: Some(std::path::PathBuf::from("/tmp/aegis-hud")),
+                    description: Some("HUD showcase".to_string()),
+                },
+            ],
+            plugin_path: String::new(),
+            palette: "auto".to_string(),
+            layout: "compact".to_string(),
+            position: "bottom-center".to_string(),
+            width_px: 400,
+            height_px: 48,
+            margin_px: 24,
+            top_margin: 0.85,
+            opacity: 0.95,
+            waveform_window_secs: 3.0,
+            peak_decay_db_per_sec: 6.0,
+            waveform_gain: 10.0,
+            field: Field::Style,
+            editing: None,
+            feedback: None,
+            dirty_since_load: false,
+            binary_missing: false,
+        };
+
+        state.cycle(1);
+        assert_eq!(state.style, "aegis-hud");
+        state.cycle(1);
+        assert_eq!(state.style, "default");
+
+        // A hand-entered package path is not in the discovered list;
+        // cycling must not replace it.
+        state.style = "~/dev/my-style".to_string();
+        state.cycle(1);
+        assert_eq!(state.style, "~/dev/my-style");
     }
 }

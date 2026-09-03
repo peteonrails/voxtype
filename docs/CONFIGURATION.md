@@ -3842,6 +3842,7 @@ Every key below is also settable from the command line, so you can switch
 styles without opening the config file:
 
 ```bash
+voxtype info styles            # lists installed styles with their source paths
 voxtype config set osd.style aegis-hud
 voxtype config set osd.layout orb
 voxtype config set osd.frame.border accent
@@ -3931,6 +3932,8 @@ order:
 
 To install a package someone shared, copy its directory into
 `~/.config/voxtype/osd/` and set `style` to the directory name.
+`voxtype info styles` shows every style the search finds, which copy of a
+shadowed name won, and each package's manifest description.
 
 While developing a package, point `plugin_path` at your working directory
 instead. It takes priority over the search paths, so edits show up on the
@@ -3948,8 +3951,9 @@ Quickshell launcher exits with an error explaining what to fix instead of
 silently falling back to the default style. `style` and `plugin_path` paths
 may start with `~`.
 
-VoxType ships working examples to copy from. Packaged installs place them
-under `/usr/share/voxtype/osd/`; in the source tree they live in
+VoxType ships working examples to copy from. Packaged installs place style
+packages under `/usr/share/voxtype/osd/` and recipe presets under
+`/usr/share/voxtype/osd-recipes/`; in the source tree they live in
 [`examples/osd-packages/`](../examples/osd-packages/) (full packages,
 including the `aegis-hud` custom-QML showcase) and
 [`examples/osd-recipes/`](../examples/osd-recipes/) (recipe presets).
