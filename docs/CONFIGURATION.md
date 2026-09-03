@@ -2969,6 +2969,33 @@ VOXTYPE_SMART_AUTO_SUBMIT=true voxtype
 
 **Note:** `smart_auto_submit` is conditional - it only fires when you say "submit". The existing `auto_submit` option always presses Enter after every transcription. Use `smart_auto_submit` when you want the choice per dictation, and `auto_submit` when you always want Enter pressed.
 
+### repair_sentence_breaks
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Repairs sentence boundaries the engine placed at a pause rather than at the end of a thought. Two rules that only work together:
+
+- **Joining a premature break.** An engine capitalises after a boundary it believes in, so a terminator followed by a *lower-case* word is the engine contradicting itself. That fragment is rejoined.
+- **Restoring the question mark.** A sentence is treated as a question when it opens with a wh-word or an auxiliary *and* inverts subject and auxiliary.
+
+```text
+what are the other phases? we have here.
+  -> what are the other phases we have here?
+```
+
+The inversion test is what keeps it safe. "How might we ship this." becomes a question; "What we need is a switch.", "How to install this." and "What a mess." are left alone, because none of them inverts. Joining skips abbreviations (`e.g.`, `p.m.`), decimals (`3.30`), and lower-case proper nouns (`iPhone`).
+
+This is a heuristic standing in for a punctuation model, so it is deliberately narrow and off by default.
+
+**Example:**
+
+```toml
+[text]
+repair_sentence_breaks = true
+```
+
 ### format_numbers
 
 **Type:** Boolean

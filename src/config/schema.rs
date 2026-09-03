@@ -983,6 +983,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Remove self-corrections where a phrase is restarted by repeating a word, plus stutters and \"scratch that\" retractions.",
     ),
     spec(
+        "text.repair_sentence_breaks",
+        "text",
+        "repair_sentence_breaks",
+        KeyType::Bool,
+        "Text",
+        "Repair sentence breaks",
+        "Join fragments split off by a premature sentence boundary and add question marks to interrogatives.",
+    ),
+    spec(
         "text.format_numbers",
         "text",
         "format_numbers",
@@ -1770,6 +1779,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "text.smart_auto_submit" => json!(cfg.text.smart_auto_submit),
         "text.filter_filler_words" => json!(cfg.text.filter_filler_words),
         "text.collapse_restarts" => json!(cfg.text.collapse_restarts),
+        "text.repair_sentence_breaks" => json!(cfg.text.repair_sentence_breaks),
         "text.format_numbers" => json!(cfg.text.format_numbers),
         "text.replacements.<from>" => {
             let map: Map<String, Json> = cfg

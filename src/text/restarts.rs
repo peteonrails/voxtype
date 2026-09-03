@@ -269,9 +269,7 @@ fn recapitalize_at(text: &mut String, at: usize) {
         return;
     }
     let rest = &text[at..];
-    let word_end = rest
-        .find(|c: char| c.is_whitespace())
-        .unwrap_or(rest.len());
+    let word_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
     let word = &rest[..word_end];
     if word.is_empty() || word.chars().any(|c| c.is_uppercase()) {
         return;
@@ -437,7 +435,9 @@ mod tests {
     #[test]
     fn a_retracted_opening_clause_leaves_a_capital() {
         assert_eq!(
-            collapse_restarts("It runs after the model. I'm sorry, it runs before the output driver."),
+            collapse_restarts(
+                "It runs after the model. I'm sorry, it runs before the output driver."
+            ),
             "It runs before the output driver."
         );
     }

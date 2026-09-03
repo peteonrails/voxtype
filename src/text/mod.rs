@@ -8,6 +8,7 @@ pub mod diff;
 #[cfg(feature = "itn")]
 pub mod itn;
 pub mod restarts;
+pub mod sentences;
 
 use crate::config::TextConfig;
 use regex::Regex;
@@ -29,6 +30,8 @@ pub struct TextProcessor {
     filter_filler_words: bool,
     /// Whether restart/stutter collapsing is enabled
     collapse_restarts: bool,
+    /// Whether premature sentence breaks are repaired
+    repair_sentence_breaks: bool,
     /// Whether dictated quantities are converted to written form.
     /// Only read when the `itn` feature is compiled in.
     #[cfg_attr(not(feature = "itn"), allow(dead_code))]
@@ -185,6 +188,7 @@ impl TextProcessor {
             submit_re,
             filter_filler_words: config.filter_filler_words,
             collapse_restarts: config.collapse_restarts,
+            repair_sentence_breaks: config.repair_sentence_breaks,
             format_numbers: config.format_numbers,
             filler_re,
             filler_space_re,
@@ -224,6 +228,13 @@ impl TextProcessor {
         // either, and the replacements pass below still gets the last word.
         if self.collapse_restarts {
             result = restarts::collapse_restarts(&result);
+        }
+
+        // Boundary repair runs after disfluency removal, so a restart that
+        // straddled the bad boundary is already gone, and before number
+        // formatting, whose own sentence splitting wants real sentences.
+        if self.repair_sentence_breaks {
+            result = sentences::repair(&result);
         }
 
         // Number formatting runs on text that is already de-disfluent and
@@ -712,7 +723,10 @@ mod tests {
         };
         let fr = TextProcessor::new_for_language(&config, Some("fr"));
         assert_eq!(fr.process("Bonjour ! Ça va ?"), "Bonjour ! Ça va ?");
-        assert_eq!(fr.process("Attention : c'est important"), "Attention : c'est important");
+        assert_eq!(
+            fr.process("Attention : c'est important"),
+            "Attention : c'est important"
+        );
         // A space before a full stop or comma is still wrong in French.
         assert_eq!(fr.process("Bonjour , le monde ."), "Bonjour, le monde.");
     }

@@ -35,6 +35,13 @@ pub struct TextConfig {
     #[serde(default)]
     pub collapse_restarts: bool,
 
+    /// Repair sentence boundaries the engine placed at a pause: join a
+    /// fragment that was split off mid-sentence ("what are the other phases?
+    /// we have here.") and give a structurally interrogative sentence its
+    /// question mark. Off by default.
+    #[serde(default)]
+    pub repair_sentence_breaks: bool,
+
     /// Convert dictated quantities to written form: "twenty five dollars"
     /// becomes "$25", "three thirty p m" becomes "3:30 p.m.". Only sentences
     /// that look like they are about a quantity are touched, and a lone
@@ -58,6 +65,7 @@ impl Default for TextConfig {
             smart_auto_submit: false,
             filter_filler_words: true,
             collapse_restarts: false,
+            repair_sentence_breaks: false,
             format_numbers: false,
             filler_words: default_filler_words(),
         }

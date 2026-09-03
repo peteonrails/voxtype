@@ -333,6 +333,11 @@ on_transcription = true
 # a digit, so "one of the things" and "no one knows" are left alone.
 # Requires a build with the `itn` feature.
 # format_numbers = false
+#
+# Repair sentence boundaries the engine placed at a pause: join a fragment
+# split off mid-sentence ("what are the other phases? we have here.") and
+# give a structurally interrogative sentence its question mark.
+# repair_sentence_breaks = false
 
 [osd]
 # On-screen display frontend.
