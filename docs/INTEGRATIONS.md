@@ -93,6 +93,60 @@ decides for itself when to send it.
 A `[profiles.agent]` block with a `post_process_command` is a good place to
 normalise dictation before an agent sees it, stripping filler words for instance.
 
+## A menu for your dictation, before it lands
+
+Dictation is instant, but speech is not text: no punctuation, filler words,
+half-finished thoughts. `post_process` can open a small menu over the
+transcript — edit it, run actions on it (tidy, translate, reformat — any
+shell pipeline), steer a local model with typed or spoken instructions — and
+only then commit what you see.
+
+![The voxtype-review menu](https://raw.githubusercontent.com/DimitriGeelen/voxtype-review/master/docs/screenshot.png)
+
+One maintained implementation is
+[`voxtype-review`](https://github.com/DimitriGeelen/voxtype-review): the
+transcript in an editable box, an extensible action list on number
+shortcuts, results shown before they are committed, `Alt+arrow` through
+every round, `Esc` aborts: the hook prints nothing and exits 0, and with
+`fallback_on_empty = false` nothing lands at all — no paste, not even the
+original. (Keep that flag in mind when you build your own menu: it is the
+difference between "cancel to the original" and "cancel to nothing".)
+
+The pattern needs nothing from Voxtype but the hook it already has:
+`post_process` is a gate, not just a filter — whatever the hook prints on
+stdout is what lands, and a hook that is killed at `timeout_ms` — or exits
+non-zero — falls back to the raw transcript.
+
+The contract a review hook must honour:
+
+- read the transcript on stdin
+- print the final text on stdout, nothing else
+- exit `0`; any other exit, or the `timeout_ms` kill, means "use the raw
+  transcript" — a hook must never block past the timeout or the dictation
+  is silently lost
+- the text lands wherever the user was; the hook never needs to know
+
+A 30-second human will routinely exceed the default timeout, so raise it:
+
+```toml
+[output.post_process]
+command = "/usr/local/bin/my-review-gui"
+timeout_ms = 600000     # a human reading their own words, not a model answering
+trim = false            # the hook owns whitespace
+```
+
+Terminal targets paste with `Ctrl+Shift+V`, not `Ctrl+V`; point
+`output.paste_keys` at the chord your targets actually bind, or the paste
+silently does nothing in some of them.
+
+One maintained implementation of this pattern is
+[`voxtype-review`](https://github.com/DimitriGeelen/voxtype-review): a small
+Rust/egui popup that shows the transcript for editing, runs configurable
+actions (tidy, translate, bullets — local LLM or HTTP), keeps a per-round
+instruction box that accepts spoken input, and steps back through every
+round with `Alt+arrow`. `Esc` always emits the raw transcript; `Enter`
+commits what the box holds.
+
 ## What Voxtype will not do for you
 
 Voxtype does not edit your configuration, and asks that you not edit its own:
