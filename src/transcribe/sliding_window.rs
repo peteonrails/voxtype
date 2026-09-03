@@ -310,12 +310,29 @@ impl StreamingTranscriber for SlidingWindowStreamingTranscriber {
             loop {
                 let outcome = runtime.block_on(async {
                     tokio::select! {
+                        // Biased, in priority order:
+                        // 1. Cancelled — an explicit abort. `cancel_streaming_to_idle`'s
+                        //    own contract is "abort promptly, no flush required", so a
+                        //    cancel should win even over a chunk that's already queued
+                        //    and ready to drain, not sit behind it.
+                        // 2. Chunk/Eof — real audio data, or the channel closing
+                        //    gracefully (Eof only becomes ready once every queued
+                        //    chunk has already been drained, by mpsc's own semantics,
+                        //    so this can never itself starve).
+                        // 3. Tick — always last. Once inference falls behind
+                        //    interval_s, the ticker is essentially always ready by
+                        //    the time control returns here; an unbiased or
+                        //    Tick-preferring order lets it win the select forever,
+                        //    starving a real stop/cancel signal (found live: a
+                        //    33+s stall after the stop key was pressed once
+                        //    inference regularly exceeded the tick interval).
+                        biased;
+                        _ = &mut cancel_rx => Outcome::Cancelled,
                         chunk = samples_rx.recv() => match chunk {
                             Some(c) => Outcome::Chunk(c),
                             None => Outcome::Eof,
                         },
                         _ = ticker.tick() => Outcome::Tick,
-                        _ = &mut cancel_rx => Outcome::Cancelled,
                     }
                 });
 
@@ -1632,6 +1649,95 @@ mod tests {
             *calls += 1;
             Ok(self.sequence[idx].to_string())
         }
+    }
+
+    /// Fake backend for the select-starvation regression test below: counts
+    /// calls and blocks for `sleep_ms` (simulating inference that regularly
+    /// exceeds `interval_s`), returning a unique string each call so
+    /// `is_hallucination` never suppresses it.
+    struct SlowCountingTranscriber {
+        calls: std::sync::Mutex<usize>,
+        sleep_ms: u64,
+    }
+
+    impl Transcriber for SlowCountingTranscriber {
+        fn transcribe(&self, _samples: &[f32]) -> Result<String, TranscribeError> {
+            let mut calls = self.calls.lock().unwrap();
+            let n = *calls;
+            *calls += 1;
+            drop(calls);
+            std::thread::sleep(Duration::from_millis(self.sleep_ms));
+            Ok(format!("word{n}"))
+        }
+    }
+
+    /// Regression test for the `select!` starvation bug: an unbiased (or
+    /// wrongly-ordered) select lets an always-ready `ticker.tick()` win
+    /// against a closed/closing sample channel once inference falls behind
+    /// `interval_s`, so a real stop/EOF signal can sit unprocessed for many
+    /// extra ticks (found live: 30+s after the stop key was pressed).
+    /// Reproduces the exact race a PR reviewer (@jacob-vincent-mink)
+    /// proposed for this: fill the sample queue while a slow "inference"
+    /// call is in flight, close the channel, and confirm no extra periodic
+    /// tick sneaks in between the queue draining and EOF/final_flush.
+    #[tokio::test]
+    async fn ticks_never_run_after_eof_becomes_available_even_under_slow_inference() {
+        let transcriber = Arc::new(SlowCountingTranscriber {
+            calls: std::sync::Mutex::new(0),
+            sleep_ms: 150,
+        });
+        let mut cfg = streaming_config();
+        // Fast enough that the ticker is ready again well before a 150ms
+        // fake inference call returns -- simulates inference regularly
+        // falling behind the tick interval, the bug's actual trigger
+        // condition.
+        cfg.interval_s = 0.01;
+        let engine = SlidingWindowStreamingTranscriber::new(
+            Arc::clone(&transcriber) as Arc<dyn Transcriber>,
+            cfg,
+        );
+        let (tx, rx) = mpsc::channel::<Vec<f32>>(32);
+        let mut handle = engine.start_stream(rx).expect("start stream");
+
+        // Enough audio for the very first tick to have something to
+        // transcribe, then wait long enough for that first (slow)
+        // on_tick() call to actually be in flight, blocking the select
+        // loop for the full 150ms.
+        tx.send(loud_samples(1.5)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // While that first slow call is still running (and therefore
+        // nothing is draining the channel), fill it with a burst of
+        // chunks, then close it. By the time the slow call returns, both
+        // a fresh chunk backlog AND (interval_s=0.01s against a 150ms
+        // call) at least one more tick are ready simultaneously at the
+        // very next select -- the exact race this test targets.
+        for _ in 0..5 {
+            tx.send(loud_samples(0.1)).await.unwrap();
+        }
+        drop(tx);
+
+        let mut events = Vec::new();
+        while let Some(ev) = handle.events.recv().await {
+            events.push(ev);
+            if matches!(events.last(), Some(StreamingEvent::Ended)) {
+                break;
+            }
+        }
+        handle.task.await.unwrap().expect("task ok");
+
+        // Exactly two transcribe() calls: the one in-flight tick, plus
+        // final_flush's own call -- never a third, which would mean an
+        // extra Tick fired after the channel was already closed and
+        // drained, reproducing the original starvation bug.
+        let calls = *transcriber.calls.lock().unwrap();
+        assert_eq!(
+            calls, 2,
+            "expected exactly 2 transcribe() calls (the in-flight tick + \
+             final_flush), got {calls} -- an extra call means a periodic \
+             tick fired after EOF was already available"
+        );
+        assert!(matches!(events.last(), Some(StreamingEvent::Ended)));
     }
 
     async fn run_session_with(
