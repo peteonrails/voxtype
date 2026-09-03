@@ -13,6 +13,7 @@ use super::notifications_section::NotificationsState;
 use super::osd_section::OsdState;
 use super::output_section::OutputState;
 use super::section::Section;
+use super::streaming_section::StreamingState;
 use super::text_section::TextState;
 use super::vad_section::VadState;
 use super::waybar_section::WaybarState;
@@ -112,6 +113,7 @@ pub struct App {
     pub hotkey: Option<HotkeyState>,
     pub audio: Option<AudioState>,
     pub engine: Option<EngineState>,
+    pub streaming: Option<StreamingState>,
     pub output: Option<OutputState>,
     pub text: Option<TextState>,
     pub vad: Option<VadState>,
@@ -196,6 +198,7 @@ impl App {
             hotkey: None,
             audio: None,
             engine: None,
+            streaming: None,
             output: None,
             text: None,
             vad: None,
@@ -218,6 +221,15 @@ impl App {
             }
             Section::Engine if self.engine.is_none() => {
                 self.engine = EngineState::load().ok();
+            }
+            Section::Streaming => {
+                if self.streaming.is_none() {
+                    self.streaming = StreamingState::load().ok();
+                } else if let Some(s) = self.streaming.as_mut() {
+                    // The engine can change mid-session in the Engine section;
+                    // refresh the engine-dependent fields on every open.
+                    s.refresh_engine();
+                }
             }
             Section::Output if self.output.is_none() => {
                 self.output = OutputState::load().ok();
@@ -325,6 +337,7 @@ impl App {
         self.hotkey.is_some()
             || self.audio.is_some()
             || self.engine.is_some()
+            || self.streaming.is_some()
             || self.output.is_some()
             || self.text.is_some()
             || self.vad.is_some()
@@ -352,6 +365,10 @@ impl App {
             count += 1;
         }
         if let Some(s) = self.engine.as_mut() {
+            s.save();
+            count += 1;
+        }
+        if let Some(s) = self.streaming.as_mut() {
             s.save();
             count += 1;
         }
