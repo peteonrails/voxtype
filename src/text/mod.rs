@@ -277,14 +277,14 @@ impl TextProcessor {
             ("question mark", "?"),
             ("exclamation mark", "!"),
             ("exclamation point", "!"),
-            ("open parenthesis", "("),
-            ("close parenthesis", ")"),
-            ("open paren", "("),
-            ("close paren", ")"),
-            ("open bracket", "["),
-            ("close bracket", "]"),
-            ("open brace", "{"),
-            ("close brace", "}"),
+            ("open parenthesis", ATTACH_OPEN_PAREN),
+            ("close parenthesis", ATTACH_CLOSE_PAREN),
+            ("open paren", ATTACH_OPEN_PAREN),
+            ("close paren", ATTACH_CLOSE_PAREN),
+            ("open bracket", ATTACH_OPEN_BRACKET),
+            ("close bracket", ATTACH_CLOSE_BRACKET),
+            ("open brace", ATTACH_OPEN_BRACE),
+            ("close brace", ATTACH_CLOSE_BRACE),
             ("at sign", ATTACH_AT),
             ("at symbol", ATTACH_AT),
             ("dollar sign", ATTACH_DOLLAR),
@@ -407,13 +407,22 @@ fn replace_phrase_case_insensitive(text: &str, from: &str, to: &str) -> String {
 const ATTACH_AT: &str = "\u{e000}@\u{e000}";
 const ATTACH_DOLLAR: &str = "\u{e001}$\u{e001}";
 const ATTACH_HASH: &str = "\u{e002}#\u{e002}";
+const ATTACH_OPEN_PAREN: &str = "\u{e003}(\u{e003}";
+const ATTACH_CLOSE_PAREN: &str = "\u{e004})\u{e004}";
+const ATTACH_OPEN_BRACKET: &str = "\u{e005}[\u{e005}";
+const ATTACH_CLOSE_BRACKET: &str = "\u{e006}]\u{e006}";
+const ATTACH_OPEN_BRACE: &str = "\u{e007}{\u{e007}";
+const ATTACH_CLOSE_BRACE: &str = "\u{e008}}\u{e008}";
 
 /// Collapse whitespace either side of a sentinel-wrapped symbol, then drop
 /// the sentinels. "hash include" -> "#include"; "cost $25" is untouched
 /// because nothing wrapped that dollar sign.
 fn glue_attached_symbols(text: &str) -> String {
     let mut result = text.to_string();
-    for sentinel in ['\u{e000}', '\u{e001}', '\u{e002}'] {
+    for sentinel in [
+        '\u{e000}', '\u{e001}', '\u{e002}', '\u{e003}', '\u{e004}', '\u{e005}', '\u{e006}',
+        '\u{e007}', '\u{e008}',
+    ] {
         let s = sentinel.to_string();
         // Whitespace outside the sentinels goes away; repeat so runs collapse.
         while result.contains(&format!(" {}", s)) {
@@ -433,16 +442,6 @@ fn clean_punctuation_spacing(text: &str) -> String {
 
     // Remove space before punctuation that shouldn't have it
     for punct in ['.', ',', '?', '!', ':', ';', ')', ']', '}'] {
-        result = result.replace(&format!(" {}", punct), &punct.to_string());
-    }
-
-    // Remove space after opening brackets
-    for punct in ['(', '[', '{'] {
-        result = result.replace(&format!("{} ", punct), &punct.to_string());
-    }
-
-    // Remove space before opening brackets (for function calls, array access, etc.)
-    for punct in ['(', '[', '{'] {
         result = result.replace(&format!(" {}", punct), &punct.to_string());
     }
 
@@ -678,6 +677,23 @@ mod tests {
         );
         assert_eq!(processor.process("hash include"), "#include");
         assert_eq!(processor.process("user at sign example"), "user@example");
+    }
+
+    #[test]
+    fn prose_parentheses_keep_their_leading_space() {
+        // Gluing the space before "(" is a coding convention ("function(").
+        // Applied to prose it produced "the result(see below)".
+        let config = make_config(true, &[]);
+        let processor = TextProcessor::new(&config);
+
+        assert_eq!(
+            processor.process("the result (see below) is fine"),
+            "the result (see below) is fine"
+        );
+        assert_eq!(
+            processor.process("we shipped it [finally] last week"),
+            "we shipped it [finally] last week"
+        );
     }
 
     #[test]
