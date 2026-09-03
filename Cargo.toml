@@ -90,6 +90,10 @@ ort = { version = "2.0.0-rc.12", optional = true, default-features = false, feat
 ndarray = { version = "0.16", optional = true }
 half = { version = "2", optional = true }
 tokenizers = { version = "0.20", optional = true, default-features = false, features = ["onig"] }
+# Inverse text normalization: spoken-form numbers/dates/currency to written
+# form ("twenty five dollars" -> "$25"). Pure Rust port of NeMo text
+# processing; grammars are compiled in, so no runtime data files.
+text-processing-rs = { version = "0.2", optional = true }
 rustfft = { version = "6", optional = true }
 
 # OpenVINO GenAI backend (Intel NPU/CPU/GPU via OpenVINO GenAI WhisperPipeline)
@@ -203,6 +207,9 @@ parakeet-coreml = ["parakeet", "parakeet-rs/coreml"]
 # Dynamic loading for system ONNX Runtime (used by Nix builds)
 parakeet-load-dynamic = ["parakeet", "parakeet-rs/load-dynamic"]
 # Shared ONNX dependencies for engines using fbank/CTC preprocessing
+# Inverse text normalization for dictated numbers, dates, currency and URLs.
+itn = ["dep:text-processing-rs"]
+
 onnx-common = ["dep:ort", "dep:ndarray", "dep:rustfft"]
 # Marker features that aggregate per-engine GPU EP flags. Each engine's
 # session builder calls a shared helper (src/transcribe/onnx_ep.rs) that

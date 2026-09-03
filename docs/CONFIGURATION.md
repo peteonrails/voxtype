@@ -2969,6 +2969,87 @@ VOXTYPE_SMART_AUTO_SUBMIT=true voxtype
 
 **Note:** `smart_auto_submit` is conditional - it only fires when you say "submit". The existing `auto_submit` option always presses Enter after every transcription. Use `smart_auto_submit` when you want the choice per dictation, and `auto_submit` when you always want Enter pressed.
 
+### repair_sentence_breaks
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Repairs sentence boundaries the engine placed at a pause rather than at the end of a thought. Two rules that only work together:
+
+- **Joining a premature break.** An engine capitalises after a boundary it believes in, so a terminator followed by a *lower-case* word is the engine contradicting itself. That fragment is rejoined.
+- **Restoring the question mark.** A sentence is treated as a question when it opens with a wh-word or an auxiliary *and* inverts subject and auxiliary.
+
+```text
+what are the other phases? we have here.
+  -> what are the other phases we have here?
+```
+
+The inversion test is what keeps it safe. "How might we ship this." becomes a question; "What we need is a switch.", "How to install this." and "What a mess." are left alone, because none of them inverts. Joining skips abbreviations (`e.g.`, `p.m.`), decimals (`3.30`), and lower-case proper nouns (`iPhone`).
+
+This is a heuristic standing in for a punctuation model, so it is deliberately narrow and off by default.
+
+**Example:**
+
+```toml
+[text]
+repair_sentence_breaks = true
+```
+
+### format_numbers
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Converts dictated quantities into written form - inverse text normalization.
+
+- "it will cost twenty five dollars a month" becomes "it will cost $25 a month"
+- "Twenty-five dollars a month." becomes "$25 a month."
+- "meet me at three thirty p m" becomes "meet me at 3:30 p.m."
+
+**Why it is conservative:** English number words are also ordinary words, and a general-purpose converter mangles prose - "one of the things we need" becomes "1 of the things we need", "no one knows" becomes "no 1 knows", "the first thing" becomes "the 1st thing". Voxtype therefore only hands a sentence to the converter when it looks like it is about a quantity (a currency word, a time marker, a unit, or a compound number such as "twenty five"), and then rejects any individual rewrite that would turn a lone number word into a digit. Sentences with no quantity in them are never touched at all.
+
+That also means it does less than you might expect on engines that already normalize numbers themselves. Parakeet, for example, emits "22 open issues" as digits without help, so there is nothing left to convert.
+
+Requires a build with the `itn` Cargo feature.
+
+**Example:**
+
+```toml
+[text]
+format_numbers = true
+```
+
+Runs after disfluency cleanup and spoken punctuation, and before your `replacements`, so your own rules still get the last word.
+
+### collapse_restarts
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Removes restart disfluencies: the pattern where you interrupt yourself and start the phrase again by repeating a word you already said. Speech engines usually put a sentence boundary at the point where you paused, which is the signal this uses.
+
+It handles three shapes:
+
+- **Repeat-anchored restarts.** "both the admin tool and the independent tool. the independent booking migration tool" becomes "both the admin tool and the independent booking migration tool".
+- **Stutters.** "so the the the point is" becomes "so the point is".
+- **Explicit retractions.** "it is not just a glitch. I'm sorry, it's not by design" becomes "it's not by design". Recognised phrases are "scratch that", "strike that", "I'm sorry", "I mean", "I meant to say" and "or rather".
+
+Singular/plural restarts are matched too, and the repaired word inherits the capitalisation of the word it replaced, so "consent line. Lines, so" becomes "consent lines, so" rather than leaving a stray capital mid-sentence.
+
+**Why it is off by default:** a false positive silently deletes words you actually said, which is worse than leaving a disfluency in place. The rules are deliberately conservative - a repeat has to carry a content word, the deleted span has to be short, and repeats of common function words or short names ("Send it to Bob. Bob will know.") are left alone - but the trade-off is a decision for you rather than a default.
+
+**Example:**
+
+```toml
+[text]
+collapse_restarts = true
+```
+
+This runs after filler-word filtering and after spoken-punctuation conversion - it keys on sentence boundaries, so a dictated "period" has to have become a real `.` first - and before the final `replacements` pass, so your own rules still get the last word on the text.
+
 ### filter_filler_words
 
 **Type:** Boolean
@@ -2989,6 +3070,9 @@ With this enabled:
 - "Well, um, I think" becomes "Well, I think"
 - "uh hello world" becomes "hello world"
 - "hello world, uh." becomes "hello world."
+- "uhhhh hello world" becomes "hello world"
+
+Held fillers match too: only the final sound is allowed to repeat, so "uhhhh", "ummm" and "hmmm" are all removed while "umbrella", "summer" and "ahead" are untouched. The one exception is `er`, which keeps matching exactly so the verb "err" survives.
 
 **CLI flag:**
 

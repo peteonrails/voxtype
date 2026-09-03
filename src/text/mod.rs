@@ -4,6 +4,12 @@
 //! - Spoken punctuation conversion (e.g., "period" → ".")
 //! - Custom word replacements
 
+pub mod diff;
+#[cfg(feature = "itn")]
+pub mod itn;
+pub mod restarts;
+pub mod sentences;
+
 use crate::config::TextConfig;
 use regex::Regex;
 use std::collections::HashMap;
@@ -12,6 +18,8 @@ use std::collections::HashMap;
 pub struct TextProcessor {
     /// Whether spoken punctuation is enabled
     spoken_punctuation: bool,
+    /// Marks that take no space before them, for the active language
+    tight_punctuation: &'static [char],
     /// Custom word replacements (lowercase key → replacement value)
     replacements: HashMap<String, String>,
     /// Whether smart auto-submit is enabled
@@ -20,6 +28,14 @@ pub struct TextProcessor {
     submit_re: Regex,
     /// Whether filler-word filtering is enabled
     filter_filler_words: bool,
+    /// Whether restart/stutter collapsing is enabled
+    collapse_restarts: bool,
+    /// Whether premature sentence breaks are repaired
+    repair_sentence_breaks: bool,
+    /// Whether dictated quantities are converted to written form.
+    /// Only read when the `itn` feature is compiled in.
+    #[cfg_attr(not(feature = "itn"), allow(dead_code))]
+    format_numbers: bool,
     /// Pre-compiled regex matching any configured filler word.
     /// `None` when the filter is disabled or the list is empty so the hot
     /// path can early-out without touching regex.
@@ -51,6 +67,34 @@ fn filler_collisions(language: Option<&str>) -> &'static [&'static str] {
         Some("pt") => &["um"],
         Some("de") => &["um"],
         _ => &[],
+    }
+}
+
+/// Build a filler pattern that also matches a held pronunciation.
+///
+/// Engines transcribe a drawn-out filler with the last sound repeated -
+/// "uhhhh", "ummm", "hmmm" - and an exact-word pattern misses every one of
+/// them, which is the common case: a clipped "uh" barely registers in a
+/// transcript, a held one is what litters it.
+///
+/// Only the final character is allowed to repeat, so "um" matches "ummm"
+/// without "umbrella" or "summer" ever matching.
+fn elongated_filler_pattern(word: &str) -> String {
+    // "err" is an ordinary English verb, so "er" keeps matching exactly.
+    if word.eq_ignore_ascii_case("er") {
+        return regex::escape(word);
+    }
+    let mut chars = word.chars().collect::<Vec<_>>();
+    match chars.pop() {
+        Some(last) if last.is_alphabetic() => {
+            let head: String = chars.into_iter().collect();
+            format!(
+                "{}{}+",
+                regex::escape(&head),
+                regex::escape(&last.to_string())
+            )
+        }
+        _ => regex::escape(word),
     }
 }
 
@@ -107,7 +151,7 @@ impl TextProcessor {
             let alternation = effective_fillers
                 .iter()
                 .filter(|w| !w.trim().is_empty())
-                .map(|w| regex::escape(w.trim()))
+                .map(|w| elongated_filler_pattern(w.trim()))
                 .collect::<Vec<_>>()
                 .join("|");
             if alternation.is_empty() {
@@ -122,8 +166,13 @@ impl TextProcessor {
 
         let filler_space_re = Regex::new(r" {2,}")
             .expect("BUG: whitespace regex is a compile-time constant and must be valid");
-        let filler_punct_re = Regex::new(r" +([,.;:!?])")
-            .expect("BUG: punctuation regex is a compile-time constant and must be valid");
+        // Built from the language's tight set, not a fixed class: in French
+        // a space before ? ! : ; is correct, so removing filler must not
+        // close it up either.
+        let tight = tight_punctuation(language);
+        let filler_class: String = ",.;:!?".chars().filter(|c| tight.contains(c)).collect();
+        let filler_punct_re = Regex::new(&format!(" +([{}])", filler_class))
+            .expect("BUG: punctuation class is built from a known-safe char set");
         let filler_dup_punct_re = Regex::new(r"([,;:])(\s*[,;:])+").expect(
             "BUG: duplicate-punctuation regex is a compile-time constant and must be valid",
         );
@@ -133,10 +182,14 @@ impl TextProcessor {
 
         Self {
             spoken_punctuation: config.spoken_punctuation,
+            tight_punctuation: tight_punctuation(language),
             replacements,
             smart_auto_submit: config.smart_auto_submit,
             submit_re,
             filter_filler_words: config.filter_filler_words,
+            collapse_restarts: config.collapse_restarts,
+            repair_sentence_breaks: config.repair_sentence_breaks,
+            format_numbers: config.format_numbers,
             filler_re,
             filler_space_re,
             filler_punct_re,
@@ -165,6 +218,31 @@ impl TextProcessor {
 
         if self.spoken_punctuation {
             result = self.apply_spoken_punctuation(&result);
+        }
+
+        // Restart collapsing keys on sentence boundaries, so it has to run
+        // after spoken punctuation has turned a dictated "period" into a real
+        // ".". Running it earlier would make every boundary invisible for
+        // anyone using spoken_punctuation. Filler removal has already gone,
+        // so a filler mid-stutter ("the uh the point") cannot hide the repeat
+        // either, and the replacements pass below still gets the last word.
+        if self.collapse_restarts {
+            result = restarts::collapse_restarts(&result);
+        }
+
+        // Boundary repair runs after disfluency removal, so a restart that
+        // straddled the bad boundary is already gone, and before number
+        // formatting, whose own sentence splitting wants real sentences.
+        if self.repair_sentence_breaks {
+            result = sentences::repair(&result);
+        }
+
+        // Number formatting runs on text that is already de-disfluent and
+        // punctuated, so its sentence-level quantity check sees real
+        // sentences, and still ahead of the replacements pass below.
+        #[cfg(feature = "itn")]
+        if self.format_numbers {
+            result = itn::apply(&result);
         }
 
         // Apply replacements again to catch patterns that only became matchable
@@ -218,17 +296,17 @@ impl TextProcessor {
             ("question mark", "?"),
             ("exclamation mark", "!"),
             ("exclamation point", "!"),
-            ("open parenthesis", "("),
-            ("close parenthesis", ")"),
-            ("open paren", "("),
-            ("close paren", ")"),
-            ("open bracket", "["),
-            ("close bracket", "]"),
-            ("open brace", "{"),
-            ("close brace", "}"),
-            ("at sign", "@"),
-            ("at symbol", "@"),
-            ("dollar sign", "$"),
+            ("open parenthesis", ATTACH_OPEN_PAREN),
+            ("close parenthesis", ATTACH_CLOSE_PAREN),
+            ("open paren", ATTACH_OPEN_PAREN),
+            ("close paren", ATTACH_CLOSE_PAREN),
+            ("open bracket", ATTACH_OPEN_BRACKET),
+            ("close bracket", ATTACH_CLOSE_BRACKET),
+            ("open brace", ATTACH_OPEN_BRACE),
+            ("close brace", ATTACH_CLOSE_BRACE),
+            ("at sign", ATTACH_AT),
+            ("at symbol", ATTACH_AT),
+            ("dollar sign", ATTACH_DOLLAR),
             ("percent sign", "%"),
             ("plus sign", "+"),
             ("equals sign", "="),
@@ -245,8 +323,8 @@ impl TextProcessor {
             ("dash", "-"),
             ("hyphen", "-"),
             ("underscore", "_"),
-            ("hash", "#"),
-            ("hashtag", "#"),
+            ("hash", ATTACH_HASH),
+            ("hashtag", ATTACH_HASH),
             ("percent", "%"),
             ("ampersand", "&"),
             ("asterisk", "*"),
@@ -265,7 +343,7 @@ impl TextProcessor {
         }
 
         // Clean up spacing around punctuation
-        result = clean_punctuation_spacing(&result);
+        result = clean_punctuation_spacing(&result, self.tight_punctuation);
 
         result
     }
@@ -342,34 +420,70 @@ fn replace_phrase_case_insensitive(text: &str, from: &str, to: &str) -> String {
     }
 }
 
+/// Punctuation that takes no space before it, which is language-specific.
+///
+/// English closes up against `? ! : ;`. French does not: it requires a
+/// (narrow, non-breaking) space before them, so "Bonjour ! Ça va ?" is
+/// correct and stripping that space is a typographic error. Same defect
+/// class as #566 - a language-blind rule applied to every transcription.
+fn tight_punctuation(language: Option<&str>) -> &'static [char] {
+    match language.map(|l| l.split(['-', '_']).next().unwrap_or(l)) {
+        // French keeps its space before the "high" punctuation marks.
+        Some("fr") => &['.', ',', ')', ']', '}'],
+        _ => &['.', ',', '?', '!', ':', ';', ')', ']', '}'],
+    }
+}
+
+/// Sentinel-wrapped symbols. Spoken punctuation emits these so the spacing
+/// pass can tell "the user said 'dollar sign'" from "the engine wrote $25".
+/// U+E000..U+E002 are private-use, so they cannot occur in real transcription.
+const ATTACH_AT: &str = "\u{e000}@\u{e000}";
+const ATTACH_DOLLAR: &str = "\u{e001}$\u{e001}";
+const ATTACH_HASH: &str = "\u{e002}#\u{e002}";
+const ATTACH_OPEN_PAREN: &str = "\u{e003}(\u{e003}";
+const ATTACH_CLOSE_PAREN: &str = "\u{e004})\u{e004}";
+const ATTACH_OPEN_BRACKET: &str = "\u{e005}[\u{e005}";
+const ATTACH_CLOSE_BRACKET: &str = "\u{e006}]\u{e006}";
+const ATTACH_OPEN_BRACE: &str = "\u{e007}{\u{e007}";
+const ATTACH_CLOSE_BRACE: &str = "\u{e008}}\u{e008}";
+
+/// Collapse whitespace either side of a sentinel-wrapped symbol, then drop
+/// the sentinels. "hash include" -> "#include"; "cost $25" is untouched
+/// because nothing wrapped that dollar sign.
+fn glue_attached_symbols(text: &str) -> String {
+    let mut result = text.to_string();
+    for sentinel in [
+        '\u{e000}', '\u{e001}', '\u{e002}', '\u{e003}', '\u{e004}', '\u{e005}', '\u{e006}',
+        '\u{e007}', '\u{e008}',
+    ] {
+        let s = sentinel.to_string();
+        // Whitespace outside the sentinels goes away; repeat so runs collapse.
+        while result.contains(&format!(" {}", s)) {
+            result = result.replace(&format!(" {}", s), &s);
+        }
+        while result.contains(&format!("{} ", s)) {
+            result = result.replace(&format!("{} ", s), &s);
+        }
+        result = result.replace(&s, "");
+    }
+    result
+}
+
 /// Clean up spacing around punctuation marks
-fn clean_punctuation_spacing(text: &str) -> String {
+fn clean_punctuation_spacing(text: &str, tight: &[char]) -> String {
     let mut result = text.to_string();
 
-    // Remove space before punctuation that shouldn't have it
-    for punct in ['.', ',', '?', '!', ':', ';', ')', ']', '}'] {
+    // Remove space before punctuation that shouldn't have it. Which marks
+    // those are depends on the language: see tight_punctuation.
+    for punct in tight {
         result = result.replace(&format!(" {}", punct), &punct.to_string());
     }
 
-    // Remove space after opening brackets
-    for punct in ['(', '[', '{'] {
-        result = result.replace(&format!("{} ", punct), &punct.to_string());
-    }
-
-    // Remove space before opening brackets (for function calls, array access, etc.)
-    for punct in ['(', '[', '{'] {
-        result = result.replace(&format!(" {}", punct), &punct.to_string());
-    }
-
-    // Remove space before symbols that typically attach to the next word (email, hashtags, etc.)
-    for sym in ['#', '@', '$'] {
-        result = result.replace(&format!(" {}", sym), &sym.to_string());
-    }
-
-    // Remove space after symbols that typically attach to the next word
-    for sym in ['#', '@', '$'] {
-        result = result.replace(&format!("{} ", sym), &sym.to_string());
-    }
+    // Glue #, @ and $ to their neighbours - but only the ones spoken
+    // punctuation just inserted, which are the only ones wrapped in
+    // sentinels. Stripping every " $" unconditionally also ate the space in
+    // an engine's own output ("it will cost $25" -> "cost$25").
+    result = glue_attached_symbols(&result);
 
     // Remove spaces around newlines and tabs
     result = result.replace(" \n", "\n");
@@ -460,6 +574,65 @@ mod tests {
     }
 
     #[test]
+    fn collapse_restarts_is_off_by_default() {
+        let config = TextConfig::default();
+        assert!(!config.collapse_restarts);
+        let processor = TextProcessor::new(&config);
+        let s = "in this migration? migration tool on the admin side?";
+        assert_eq!(processor.process(s), s);
+    }
+
+    #[test]
+    fn collapse_restarts_runs_in_the_pipeline_when_enabled() {
+        let config = TextConfig {
+            collapse_restarts: true,
+            ..Default::default()
+        };
+        let processor = TextProcessor::new(&config);
+        assert_eq!(
+            processor.process("in this migration? migration tool on the admin side?"),
+            "in this migration tool on the admin side?"
+        );
+    }
+
+    #[test]
+    fn restarts_see_boundaries_produced_by_spoken_punctuation() {
+        // With spoken_punctuation on, the boundary arrives as the word
+        // "period". Restart collapsing must run after the conversion or it
+        // sees no boundary at all and does nothing.
+        let config = TextConfig {
+            collapse_restarts: true,
+            spoken_punctuation: true,
+            ..Default::default()
+        };
+        let processor = TextProcessor::new(&config);
+        assert_eq!(
+            processor.process(
+                "are we looking at this migration period migration tool on the admin side period"
+            ),
+            "are we looking at this migration tool on the admin side."
+        );
+    }
+
+    #[test]
+    fn user_replacements_still_win_over_restart_collapsing() {
+        // The user's rules run after restart collapsing, so they always get
+        // the last word on the text.
+        let mut config = TextConfig {
+            collapse_restarts: true,
+            ..Default::default()
+        };
+        config
+            .replacements
+            .insert("admin side".to_string(), "admin console".to_string());
+        let processor = TextProcessor::new(&config);
+        assert_eq!(
+            processor.process("in this migration? migration tool on the admin side?"),
+            "in this migration tool on the admin console?"
+        );
+    }
+
+    #[test]
     fn test_spoken_punctuation_basic() {
         let config = make_config(true, &[]);
         let processor = TextProcessor::new(&config);
@@ -538,6 +711,76 @@ mod tests {
         );
         assert_eq!(processor.process("hash include"), "#include");
         assert_eq!(processor.process("user at sign example"), "user@example");
+    }
+
+    #[test]
+    fn french_keeps_its_space_before_high_punctuation() {
+        // French typography requires a space before ? ! : ; - stripping it
+        // is an error, the same language-blind class of bug as #566.
+        let config = TextConfig {
+            spoken_punctuation: true,
+            ..Default::default()
+        };
+        let fr = TextProcessor::new_for_language(&config, Some("fr"));
+        assert_eq!(fr.process("Bonjour ! Ça va ?"), "Bonjour ! Ça va ?");
+        assert_eq!(
+            fr.process("Attention : c'est important"),
+            "Attention : c'est important"
+        );
+        // A space before a full stop or comma is still wrong in French.
+        assert_eq!(fr.process("Bonjour , le monde ."), "Bonjour, le monde.");
+    }
+
+    #[test]
+    fn english_still_closes_up_high_punctuation() {
+        let config = TextConfig {
+            spoken_punctuation: true,
+            ..Default::default()
+        };
+        let en = TextProcessor::new_for_language(&config, Some("en"));
+        assert_eq!(en.process("Hello ! How are you ?"), "Hello! How are you?");
+        // And the language-agnostic constructor keeps English behaviour.
+        let any = TextProcessor::new(&config);
+        assert_eq!(any.process("Hello ! How are you ?"), "Hello! How are you?");
+    }
+
+    #[test]
+    fn prose_parentheses_keep_their_leading_space() {
+        // Gluing the space before "(" is a coding convention ("function(").
+        // Applied to prose it produced "the result(see below)".
+        let config = make_config(true, &[]);
+        let processor = TextProcessor::new(&config);
+
+        assert_eq!(
+            processor.process("the result (see below) is fine"),
+            "the result (see below) is fine"
+        );
+        assert_eq!(
+            processor.process("we shipped it [finally] last week"),
+            "we shipped it [finally] last week"
+        );
+    }
+
+    #[test]
+    fn engine_emitted_symbols_keep_their_spacing() {
+        // Parakeet emits "$25" itself. The spoken-punctuation spacing pass
+        // used to strip the space before any $, # or @, turning "it will
+        // cost $25" into "cost$25".
+        let config = make_config(true, &[]);
+        let processor = TextProcessor::new(&config);
+
+        assert_eq!(
+            processor.process("It will cost $25 a month."),
+            "It will cost $25 a month."
+        );
+        assert_eq!(
+            processor.process("We have 50% coverage and #3 is open."),
+            "We have 50% coverage and #3 is open."
+        );
+        assert_eq!(
+            processor.process("Mail me at pete@tern.travel"),
+            "Mail me at pete@tern.travel"
+        );
     }
 
     #[test]
@@ -796,6 +1039,35 @@ mod tests {
         assert_eq!(processor.process("UM hello"), "hello");
         assert_eq!(processor.process("Um hello"), "hello");
         assert_eq!(processor.process("Hmm I see"), "I see");
+    }
+
+    #[test]
+    fn filler_filter_catches_held_fillers() {
+        // The case users actually report: a drawn-out filler while thinking.
+        let config = make_filler_config(true, None);
+        let processor = TextProcessor::new(&config);
+
+        assert_eq!(processor.process("uhhhh hello world"), "hello world");
+        assert_eq!(processor.process("ummm hello world"), "hello world");
+        assert_eq!(processor.process("uhh ok then"), "ok then");
+        assert_eq!(processor.process("hmmm let me think"), "let me think");
+        assert_eq!(processor.process("well ahhh I see"), "well I see");
+    }
+
+    #[test]
+    fn elongation_does_not_swallow_real_words() {
+        let config = make_filler_config(true, None);
+        let processor = TextProcessor::new(&config);
+
+        // "er" stays exact: to err is human.
+        assert_eq!(processor.process("to err is human"), "to err is human");
+        // The classic boundary cases still hold with elongation enabled.
+        assert_eq!(processor.process("an umbrella"), "an umbrella");
+        assert_eq!(
+            processor.process("summer hummingbird"),
+            "summer hummingbird"
+        );
+        assert_eq!(processor.process("ahead of time"), "ahead of time");
     }
 
     #[test]
