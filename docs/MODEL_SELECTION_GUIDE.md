@@ -180,6 +180,7 @@ NVIDIA's FastConformer model via the parakeet-rs crate. State-of-the-art accurac
 |-------|------|-------------|
 | parakeet-tdt-0.6b-v3 | 2.6 GB | TDT with punctuation (recommended) |
 | parakeet-tdt-0.6b-v3-int8 | 670 MB | Quantized, smaller and faster |
+| nemotron-3.5-asr-streaming-0.6b-int8 | 651 MB | Multilingual cache-aware streaming, punctuation |
 
 **TDT vs CTC:** The TDT model includes punctuation and capitalization. The CTC variant is slightly faster but outputs raw text without punctuation. Use TDT unless you have a specific reason not to.
 
@@ -207,7 +208,7 @@ model = "parakeet-tdt-0.6b-v3-int8"
 - GPU acceleration via CUDA, MIGraphX, or TensorRT
 
 **Cons:**
-- Limited to 25 European languages (no CJK, Arabic, Hindi, etc.)
+- TDT models are limited to 25 European languages; Nemotron 3.5 adds 40 locales
 - Requires ONNX binary
 - Only one model size (0.6B parameters)
 

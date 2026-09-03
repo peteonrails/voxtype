@@ -19,7 +19,7 @@ use super::common::{
     self, FeedbackLevel as CommonFeedback, FormRowSpec, TextInput, TextInputResult,
 };
 use super::config_editor::{ConfigEditor, EditorError};
-use crate::config::TranscriptionEngine;
+use crate::config::{TranscriptionEngine, NEMOTRON_LANGUAGE_CHOICES};
 use crate::model_catalog::{default_model, installed_models_for, model_catalog};
 use crate::setup::binary::{self, EngineFamily, InstallKind, Variant};
 use crate::setup::model;
@@ -70,7 +70,8 @@ pub struct AllFields {
 
     // Parakeet
     pub pk_model: String,
-    pub pk_model_type: Option<String>, // "tdt", "ctc", or None for auto-detect
+    pub pk_model_type: Option<String>, // "tdt", "ctc", "nemotron", or auto-detect
+    pub pk_language: String,
     pub pk_on_demand_loading: bool,
     /// True if the [parakeet] table existed in the config at load time. We
     /// only write back to it on save if either this is true or parakeet is
@@ -159,6 +160,7 @@ pub enum FieldId {
     // Parakeet
     PkModel,
     PkModelType,
+    PkLanguage,
     PkOnDemandLoading,
 
     // Moonshine
@@ -215,7 +217,7 @@ const LANG_CHOICES: &[&str] = &[
     "auto", "en", "fr", "de", "it", "es", "pt", "nl", "pl", "zh", "ja", "ko", "ru", "ar",
 ];
 const SV_LANG_CHOICES: &[&str] = &["auto", "zh", "en", "ja", "ko", "yue"];
-const PARAKEET_MODEL_TYPES: &[Option<&str>] = &[None, Some("tdt"), Some("ctc")];
+const PARAKEET_MODEL_TYPES: &[Option<&str>] = &[None, Some("tdt"), Some("ctc"), Some("nemotron")];
 /// Inference device OpenVINO GenAI tries first; falls back to CPU if the
 /// requested device fails to initialize (see `OpenVinoTranscriber::new`).
 /// AUTO is a real OpenVINO device value too (see `installation_guidance`'s
@@ -248,6 +250,7 @@ fn rows_for_engine_with_mode(engine: &str, whisper_mode: &str) -> Vec<FieldId> {
         "parakeet" => rows.extend_from_slice(&[
             FieldId::PkModel,
             FieldId::PkModelType,
+            FieldId::PkLanguage,
             FieldId::PkOnDemandLoading,
         ]),
         "moonshine" => rows.extend_from_slice(&[
@@ -328,6 +331,9 @@ impl EngineState {
                 .get_string("parakeet", "model")
                 .unwrap_or_else(|| default_model("parakeet").to_string()),
             pk_model_type: ed.get_string("parakeet", "model_type"),
+            pk_language: ed
+                .get_string("parakeet", "language")
+                .unwrap_or_else(|| "auto".to_string()),
             pk_on_demand_loading: ed
                 .get_bool("parakeet", "on_demand_loading")
                 .unwrap_or(false),
@@ -575,6 +581,7 @@ impl EngineState {
                 Some(m) => ed.set_string("parakeet", "model_type", m),
                 None => ed.unset("parakeet", "model_type"),
             }
+            ed.set_string("parakeet", "language", &f.pk_language);
             ed.set_bool("parakeet", "on_demand_loading", f.pk_on_demand_loading);
         }
 
@@ -861,6 +868,9 @@ impl EngineState {
                     .unwrap_or(0);
                 let n = (idx + delta).rem_euclid(PARAKEET_MODEL_TYPES.len() as i32);
                 f.pk_model_type = PARAKEET_MODEL_TYPES[n as usize].map(|s| s.to_string());
+            }
+            FieldId::PkLanguage => {
+                f.pk_language = cycle_str(NEMOTRON_LANGUAGE_CHOICES, &f.pk_language, delta)
             }
             FieldId::PkOnDemandLoading => f.pk_on_demand_loading = !f.pk_on_demand_loading,
 
@@ -1213,6 +1223,7 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
                 .unwrap_or("auto-detect")
                 .to_string(),
         ),
+        FieldId::PkLanguage => ("Parakeet · Nemotron language", f.pk_language.clone()),
         FieldId::PkOnDemandLoading => (
             "Parakeet · on-demand model load",
             yesno(f.pk_on_demand_loading),
@@ -1630,9 +1641,28 @@ fn guidance(state: &EngineState) -> Vec<Line<'_>> {
             ),
             Line::from(""),
             Line::from(Span::styled(
+                "nemotron: ",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(
+                "Cache-aware RNNT model for native streaming. Registered \
+                 Nemotron models are detected automatically.",
+            ),
+            Line::from(""),
+            Line::from(Span::styled(
                 "Leave at auto-detect unless you have reason to override.",
                 Style::default().fg(Color::Gray),
             )),
+        ],
+        FieldId::PkLanguage => vec![
+            heading("Parakeet · Nemotron language"),
+            Line::from(""),
+            Line::from(
+                "Target locale for multilingual Nemotron models. A specific \
+                 locale is more accurate; `auto` enables language detection.",
+            ),
+            Line::from(""),
+            Line::from("Ignored by TDT, CTC, and English-only Nemotron models."),
         ],
         FieldId::PkOnDemandLoading => vec![
             heading("Parakeet · on-demand model loading"),

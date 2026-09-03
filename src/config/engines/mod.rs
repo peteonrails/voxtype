@@ -18,7 +18,7 @@ pub use moonshine::MoonshineConfig;
 pub use omnilingual::OmnilingualConfig;
 pub use openvino::OpenVinoConfig;
 pub use paraformer::ParaformerConfig;
-pub use parakeet::{ParakeetConfig, ParakeetModelType};
+pub use parakeet::{ParakeetConfig, ParakeetModelType, NEMOTRON_LANGUAGE_CHOICES};
 pub use sensevoice::SenseVoiceConfig;
 pub use soniox::SonioxConfig;
 
