@@ -761,18 +761,8 @@ fn stable_prefix(result: &Value, text: &str) -> String {
         return String::new();
     };
 
-    let definite: String = utterances
-        .iter()
-        .take_while(|utterance| {
-            utterance
-                .get("definite")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        })
-        .filter_map(|utterance| utterance.get("text").and_then(Value::as_str))
-        .collect();
-    if !definite.is_empty() && text.starts_with(&definite) {
-        return definite;
+    if let Some(definite) = align_definite_prefix(utterances, text) {
+        return definite.to_string();
     }
 
     utterances
@@ -787,6 +777,57 @@ fn stable_prefix(result: &Value, text: &str) -> String {
         .max_by_key(|prefix| prefix.len())
         .unwrap_or_default()
         .to_string()
+}
+
+/// Align the leading definite utterances with the cumulative transcript and
+/// return the exact prefix from `text` that they cover.
+///
+/// Seed-ASR can insert whitespace between utterances in `result.text` even
+/// though that whitespace is absent from the individual `utterance.text`
+/// values. Concatenating utterance strings directly therefore turns
+/// `"hello"` + `"world"` into `"helloworld"`, which does not match the
+/// authoritative cumulative transcript `"hello world"`. Match each utterance
+/// in sequence instead, allowing only whitespace between them, and retain the
+/// exact separator chosen by the service in the returned prefix.
+fn align_definite_prefix<'a>(utterances: &[Value], text: &'a str) -> Option<&'a str> {
+    let mut offset = 0;
+    let mut matched_any = false;
+
+    for utterance in utterances.iter().take_while(|utterance| {
+        utterance
+            .get("definite")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }) {
+        let utterance_text = utterance.get("text").and_then(Value::as_str)?;
+        if utterance_text.is_empty() {
+            continue;
+        }
+
+        let remaining = &text[offset..];
+        if remaining.starts_with(utterance_text) {
+            // The utterance text already contains exactly the separator used
+            // by the cumulative transcript, so consume it verbatim.
+            offset += utterance_text.len();
+        } else if matched_any {
+            // Some responses keep inter-utterance whitespace only in the
+            // cumulative transcript. Skip that separator and try again.
+            let candidate = remaining.trim_start_matches(char::is_whitespace);
+            if !candidate.starts_with(utterance_text) {
+                // Stability metadata for later utterances can be temporarily
+                // inconsistent. Keep the prefix aligned so far instead of
+                // regressing the entire stable prefix to empty.
+                break;
+            }
+            let separator_len = remaining.len() - candidate.len();
+            offset += separator_len + utterance_text.len();
+        } else {
+            return None;
+        }
+        matched_any = true;
+    }
+
+    matched_any.then(|| &text[..offset])
 }
 
 #[derive(Debug, Default)]
@@ -810,14 +851,29 @@ impl Reconciler {
                 "server revised text that was already finalized",
             ));
         }
-        if !snapshot.stable_text.starts_with(&self.committed) {
+
+        // `utterances` stability metadata is not monotonic: intermediate
+        // responses can temporarily omit it or report a shorter prefix. The
+        // cumulative transcript is authoritative for protecting text already
+        // committed to the output, so retain that prefix while the transcript
+        // itself still extends it.
+        let stable_text = if snapshot.stable_text.starts_with(&self.committed) {
+            snapshot.stable_text
+        } else if self.committed.starts_with(&snapshot.stable_text) {
+            tracing::debug!(
+                reported = %snapshot.stable_text,
+                committed = %self.committed,
+                "Seed-ASR stable prefix regressed; retaining committed text"
+            );
+            self.committed.clone()
+        } else {
             return Err(inference_error(
                 "server stable prefix does not extend finalized text",
             ));
-        }
+        };
 
-        if snapshot.stable_text.len() > self.committed.len() {
-            let stable_tail = &snapshot.stable_text[self.committed.len()..];
+        if stable_text.len() > self.committed.len() {
+            let stable_tail = &stable_text[self.committed.len()..];
             let segment_id = self.next_segment_id;
             self.next_segment_id += 1;
 
@@ -835,7 +891,7 @@ impl Reconciler {
                     segment_id,
                 });
             }
-            self.committed = snapshot.stable_text.clone();
+            self.committed = stable_text;
             self.typed_partial.clear();
         }
 
@@ -1014,6 +1070,81 @@ mod tests {
     }
 
     #[test]
+    fn stable_prefix_preserves_whitespace_between_definite_utterances() {
+        let snapshot = parse_recognition_payload(
+            br#"{"result":{"text":"hello world","utterances":[{"text":"hello","definite":true},{"text":"world","definite":true}]}}"#,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.stable_text, "hello world");
+    }
+
+    #[test]
+    fn stable_prefix_accepts_whitespace_already_present_in_utterance_text() {
+        let snapshot = parse_recognition_payload(
+            br#"{"result":{"text":"hello world","utterances":[{"text":"hello","definite":true},{"text":" world","definite":true}]}}"#,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.stable_text, "hello world");
+    }
+
+    #[test]
+    fn stable_prefix_keeps_the_last_aligned_utterance_on_a_later_mismatch() {
+        let snapshot = parse_recognition_payload(
+            br#"{"result":{"text":"hello world","utterances":[{"text":"hello","definite":true},{"text":"there","definite":true}]}}"#,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.stable_text, "hello");
+    }
+
+    #[test]
+    fn stable_prefix_stops_before_a_provisional_utterance_and_its_separator() {
+        let snapshot = parse_recognition_payload(
+            br#"{"result":{"text":"hello world","utterances":[{"text":"hello","definite":true},{"text":"world","definite":false}]}}"#,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.stable_text, "hello");
+    }
+
+    #[test]
+    fn reconciler_commits_a_whitespace_separated_definite_utterance() {
+        let mut reconciler = Reconciler::default();
+        let first = reconciler
+            .process(
+                RecognitionSnapshot {
+                    text: "hello".into(),
+                    stable_text: "hello".into(),
+                    is_last: false,
+                },
+                false,
+            )
+            .unwrap();
+        assert!(matches!(
+            &first[0],
+            StreamingEvent::Final { text, .. } if text == "hello"
+        ));
+
+        let snapshot = parse_recognition_payload(
+            br#"{"result":{"text":"hello world","utterances":[{"text":"hello","definite":true},{"text":"world","definite":true}]}}"#,
+            false,
+        )
+        .unwrap();
+        let second = reconciler.process(snapshot, false).unwrap();
+
+        assert!(matches!(
+            &second[0],
+            StreamingEvent::Final { text, .. } if text == " world"
+        ));
+    }
+
+    #[test]
     fn reconciler_emits_deltas_and_final_promotion() {
         let mut reconciler = Reconciler::default();
         let partial = reconciler
@@ -1073,6 +1204,72 @@ mod tests {
                 ..
             } if text == "。"
         ));
+    }
+
+    #[test]
+    fn reconciler_tolerates_regressed_stability_metadata() {
+        let mut reconciler = Reconciler::default();
+        reconciler
+            .process(
+                RecognitionSnapshot {
+                    text: "hello".into(),
+                    stable_text: "hello".into(),
+                    is_last: false,
+                },
+                false,
+            )
+            .unwrap();
+
+        let regressed = reconciler
+            .process(
+                RecognitionSnapshot {
+                    text: "hello world".into(),
+                    stable_text: String::new(),
+                    is_last: false,
+                },
+                false,
+            )
+            .unwrap();
+        assert!(regressed.is_empty());
+        assert_eq!(reconciler.committed, "hello");
+
+        let recovered = reconciler
+            .process(
+                RecognitionSnapshot {
+                    text: "hello world".into(),
+                    stable_text: "hello world".into(),
+                    is_last: true,
+                },
+                false,
+            )
+            .unwrap();
+        assert!(matches!(
+            &recovered[0],
+            StreamingEvent::Final { text, .. } if text == " world"
+        ));
+        assert!(reconciler.finished);
+    }
+
+    #[test]
+    fn reconciler_still_rejects_revision_of_committed_text() {
+        let mut reconciler = Reconciler {
+            committed: "hello".into(),
+            ..Reconciler::default()
+        };
+        let error = reconciler
+            .process(
+                RecognitionSnapshot {
+                    text: "hullo".into(),
+                    stable_text: "hullo".into(),
+                    is_last: false,
+                },
+                false,
+            )
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("server revised text that was already finalized"));
     }
 
     #[test]
