@@ -3,7 +3,8 @@
 # Location: ~/.config/voxtype/config.toml
 # All settings can be overridden via CLI flags
 
-# Transcription engine: "whisper" (default) or "parakeet"
+# Transcription engine: "whisper" (default), "parakeet", or another engine
+# reported by `voxtype info engines`, including the cloud-hosted "seedasr".
 # Whisper: whisper.cpp via whisper-rs (most compatible)
 # Parakeet: NVIDIA FastConformer via ONNX Runtime (requires --features parakeet)
 # engine = "whisper"
