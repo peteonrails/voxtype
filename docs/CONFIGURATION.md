@@ -177,6 +177,34 @@ key = "SCROLLLOCK"
 mode = "toggle"  # Press to start, press again to stop
 ```
 
+### min_hold_ms
+
+**Type:** Integer (milliseconds)
+**Default:** `0` (every release transcribes)
+**Required:** No
+
+Minimum hold time for a push-to-talk press to count as dictation. When the
+hotkey is released before this duration, the recording is discarded instead
+of transcribed, so accidental short taps of the hotkey produce no transcript
+and no output. (Streaming/eager engines may still have shipped audio while
+the key was held; the tap only suppresses the result.) A too-short tap never
+aborts an in-flight transcription of a previous dictation, unlike the cancel
+key. Only applies in `push_to_talk` mode; in `toggle` mode a short press is
+the intended start action and the setting is ignored. Like the other evdev
+hotkey options, this only applies when using evdev hotkey detection (Linux);
+the macOS listener always treats a release as a transcription trigger.
+
+Useful when the hotkey is a key that also gets tapped incidentally, e.g. a
+repurposed CapsLock (paired with an xkb option like `caps:none`) or a shared
+modifier key.
+
+**Example:**
+```toml
+[hotkey]
+key = "CAPSLOCK"
+min_hold_ms = 1500  # taps shorter than 1.5s are discarded
+```
+
 ### enabled
 
 **Type:** Boolean

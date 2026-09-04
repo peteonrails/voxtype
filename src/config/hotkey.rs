@@ -34,6 +34,15 @@ pub struct HotkeyConfig {
     #[serde(default)]
     pub mode: ActivationMode,
 
+    /// Minimum hold time in milliseconds for a push-to-talk press to count as
+    /// dictation. Releasing the hotkey earlier sends a TooShort (discard)
+    /// instead of a Released, so the recording is discarded rather than
+    /// transcribed: short accidental taps of the hotkey produce no text. Only
+    /// applies in push_to_talk mode. 0 (default) keeps the previous behavior
+    /// where every release transcribes.
+    #[serde(default)]
+    pub min_hold_ms: u64,
+
     /// Enable built-in hotkey detection (default: true)
     /// Set to false when using compositor keybindings (Hyprland, Sway) instead
     /// When disabled, use `voxtype record start/stop/toggle` to control recording
@@ -65,6 +74,7 @@ impl Default for HotkeyConfig {
             key: default_hotkey_key(),
             modifiers: Vec::new(),
             mode: ActivationMode::default(),
+            min_hold_ms: 0,
             enabled: true,
             cancel_key: None,
             model_modifier: None,
@@ -146,6 +156,53 @@ mod tests {
         assert!(config.audio.feedback.enabled);
         assert_eq!(config.audio.feedback.theme, "subtle");
         assert_eq!(config.audio.feedback.volume, 0.5);
+    }
+
+    #[test]
+    fn test_parse_min_hold_ms() {
+        let toml_str = r#"
+            [hotkey]
+            key = "CAPSLOCK"
+            min_hold_ms = 1500
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.hotkey.min_hold_ms, 1500);
+    }
+
+    #[test]
+    fn test_min_hold_ms_defaults_to_zero() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 60
+
+            [whisper]
+            model = "base.en"
+            language = "en"
+
+            [output]
+            mode = "type"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.hotkey.min_hold_ms, 0);
     }
 
     #[test]

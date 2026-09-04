@@ -3697,9 +3697,21 @@ impl Daemon {
                             tracing::trace!("Ignoring HotkeyEvent::Released in toggle mode");
                         }
 
-                        // === CANCEL KEY (works in both modes) ===
-                        (HotkeyEvent::Cancel, _) => {
-                            tracing::debug!("Received HotkeyEvent::Cancel");
+                        // === CANCEL KEY (both modes) and min_hold tap ===
+                        // A too-short tap discards a recording like the cancel
+                        // key, but must NOT abort an in-flight transcription of
+                        // a previous dictation; the guard arm above swallows it.
+                        (HotkeyEvent::TooShort, _)
+                            if matches!(state, State::Transcribing { .. }) =>
+                        {
+                            tracing::trace!(
+                                "Too-short tap during transcription: ignored \
+                                 (does not abort the in-flight result)"
+                            );
+                        }
+
+                        (cancel_or_tap @ (HotkeyEvent::Cancel | HotkeyEvent::TooShort), _) => {
+                            tracing::debug!("Received hotkey event: {:?}", cancel_or_tap);
 
                             if state.is_streaming() {
                                 tracing::info!("Streaming cancelled via hotkey");
