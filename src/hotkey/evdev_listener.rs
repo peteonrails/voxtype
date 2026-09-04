@@ -33,6 +33,9 @@ pub struct EvdevListener {
     secondary_model: Option<String>,
     /// Modifier keys that activate named profiles for post-processing
     profile_modifiers: HashMap<Key, String>,
+    /// Minimum hold time before a release counts as dictation (push-to-talk
+    /// only); earlier releases send TooShort (discard) instead. Zero disables.
+    min_hold: Duration,
     /// Signal to stop the listener task
     stop_signal: Option<oneshot::Sender<()>>,
 }
@@ -93,6 +96,24 @@ impl EvdevListener {
         std::fs::read_dir("/dev/input")
             .map_err(|e| HotkeyError::DeviceAccess(format!("/dev/input: {}", e)))?;
 
+        // min_hold only makes sense in push-to-talk mode: in toggle mode a
+        // short press IS the intended action (start recording).
+        let min_hold = if config.mode == crate::config::ActivationMode::PushToTalk {
+            Duration::from_millis(config.min_hold_ms)
+        } else {
+            if config.min_hold_ms > 0 {
+                tracing::warn!("hotkey.min_hold_ms is ignored in toggle mode");
+            }
+            Duration::ZERO
+        };
+        if !min_hold.is_zero() {
+            tracing::info!(
+                "Hotkey releases before {:?} will cancel the recording (min_hold_ms = {})",
+                min_hold,
+                config.min_hold_ms
+            );
+        }
+
         Ok(Self {
             target_key,
             modifier_keys,
@@ -100,6 +121,7 @@ impl EvdevListener {
             model_modifier,
             secondary_model: None, // Set later via set_secondary_model
             profile_modifiers,
+            min_hold,
             stop_signal: None,
         })
     }
@@ -122,6 +144,7 @@ impl HotkeyListener for EvdevListener {
         let model_modifier = self.model_modifier;
         let secondary_model = self.secondary_model.clone();
         let profile_modifiers = self.profile_modifiers.clone();
+        let min_hold = self.min_hold;
 
         // Spawn the listener task
         tokio::task::spawn_blocking(move || {
@@ -132,6 +155,7 @@ impl HotkeyListener for EvdevListener {
                 model_modifier,
                 secondary_model,
                 profile_modifiers,
+                min_hold,
                 tx,
                 stop_rx,
             ) {
@@ -440,6 +464,22 @@ fn reset_for_device_change(
     was_pressed.then_some(HotkeyEvent::Released)
 }
 
+/// Decide what a hotkey release means given how long it was held.
+///
+/// Held for at least `min_hold` (or `min_hold` disabled): a normal release,
+/// transcribe. Shorter: the press was not dictation intent, so the daemon
+/// should discard the recording (if any) without aborting an in-flight
+/// transcription of a previous dictation (hence TooShort, not Cancel).
+/// Exactly `min_hold` counts as long enough: the doc promises cancellation
+/// only for releases *before* the duration.
+fn release_event_for(held_for: Duration, min_hold: Duration) -> HotkeyEvent {
+    if held_for < min_hold {
+        HotkeyEvent::TooShort
+    } else {
+        HotkeyEvent::Released
+    }
+}
+
 /// Main listener loop running in a blocking task
 #[allow(clippy::too_many_arguments)]
 fn evdev_listener_loop(
@@ -449,6 +489,7 @@ fn evdev_listener_loop(
     model_modifier: Option<Key>,
     secondary_model: Option<String>,
     profile_modifiers: HashMap<Key, String>,
+    min_hold: Duration,
     tx: mpsc::Sender<HotkeyEvent>,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<(), HotkeyError> {
@@ -466,6 +507,9 @@ fn evdev_listener_loop(
 
     // Track if we're currently "pressed" (to handle repeat events)
     let mut is_pressed = false;
+
+    // When the current press started (for min_hold tap filtering)
+    let mut pressed_at: Option<Instant> = None;
 
     if let Some(cancel) = cancel_key {
         tracing::info!(
@@ -506,6 +550,7 @@ fn evdev_listener_loop(
 
         // Check inotify for device changes
         if manager.check_for_device_changes() {
+            pressed_at = None; // keep the invariant explicit beside is_pressed
             if let Some(event) = reset_for_device_change(
                 &mut is_pressed,
                 &mut active_modifiers,
@@ -533,6 +578,7 @@ fn evdev_listener_loop(
                 held_profile_modifiers.clear();
                 last_pressed_profile = None;
                 is_pressed = false;
+                pressed_at = None;
                 tracing::debug!("Stale devices removed during validation");
             }
             manager.last_validation = Instant::now();
@@ -613,6 +659,7 @@ fn evdev_listener_loop(
                         1 if !is_pressed => {
                             // Key press (not repeat)
                             is_pressed = true;
+                            pressed_at = Some(Instant::now());
 
                             // Determine model override based on model_modifier state
                             let model_override = if model_modifier_held {
@@ -648,8 +695,13 @@ fn evdev_listener_loop(
                         0 if is_pressed => {
                             // Key release
                             is_pressed = false;
-                            tracing::debug!("Hotkey released");
-                            if tx.blocking_send(HotkeyEvent::Released).is_err() {
+                            let held_for = pressed_at
+                                .take()
+                                .map(|at| at.elapsed())
+                                .unwrap_or(Duration::ZERO);
+                            let event = release_event_for(held_for, min_hold);
+                            tracing::debug!("Hotkey released after {:?}: {:?}", held_for, event);
+                            if tx.blocking_send(event).is_err() {
                                 return Ok(()); // Channel closed
                             }
                         }
@@ -874,6 +926,39 @@ fn fd_is_hung_up(fd: RawFd) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_before_min_hold_is_too_short() {
+        assert_eq!(
+            release_event_for(Duration::from_millis(400), Duration::from_millis(1500)),
+            HotkeyEvent::TooShort
+        );
+    }
+
+    #[test]
+    fn release_at_exactly_min_hold_transcribes() {
+        // The doc promises cancellation only for releases BEFORE the duration.
+        assert_eq!(
+            release_event_for(Duration::from_millis(1500), Duration::from_millis(1500)),
+            HotkeyEvent::Released
+        );
+    }
+
+    #[test]
+    fn release_after_min_hold_transcribes() {
+        assert_eq!(
+            release_event_for(Duration::from_secs(4), Duration::from_millis(1500)),
+            HotkeyEvent::Released
+        );
+    }
+
+    #[test]
+    fn min_hold_disabled_keeps_previous_behavior() {
+        assert_eq!(
+            release_event_for(Duration::from_millis(1), Duration::ZERO),
+            HotkeyEvent::Released
+        );
+    }
 
     /// #556: a device change while the hotkey is held must synthesize a
     /// release. Without it the real key-up is dropped by the `0 if is_pressed`
