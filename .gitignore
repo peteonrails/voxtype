@@ -56,3 +56,6 @@ website/docs
 # Local agent worktrees and ephemeral plans
 .claude/worktrees/
 PLAN-*.md
+
+# CodeGraph index + machine-local runtime state (daemon.pid, sockets)
+.codegraph/
