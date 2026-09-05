@@ -150,6 +150,15 @@ If the service revises text already marked definite and committed, voxtype ends
 the session with an error. The existing streaming contract can revise the active
 partial tail but intentionally cannot rewrite arbitrary older output.
 
+Both streaming and buffered modes require a final recognition response to
+confirm completion. If the connection closes before that response, voxtype
+reports an error even when earlier text was received or the WebSocket close
+code indicates a normal closure. Streamed file output retains the available
+text, but `record stop --wait` reports the error and exits with code 1.
+
+This check does not resume keyboard output after `record stop` has disabled it.
+Explicit cancellation still ends the session without requiring a final response.
+
 ## Wire protocol
 
 The engine implements Volcengine's binary WebSocket framing directly:
