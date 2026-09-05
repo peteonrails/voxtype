@@ -20,6 +20,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
@@ -194,8 +195,9 @@ impl SeedAsrTranscriber {
         }
 
         let deadline = tokio::time::Instant::now() + BATCH_TIMEOUT;
-        let mut transcript = String::new();
-        loop {
+        // Only a final recognition response establishes the complete result.
+        // Earlier snapshots may still change, including becoming empty.
+        let transcript = loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 return Err(inference_error("batch response timeout"));
@@ -206,7 +208,7 @@ impl SeedAsrTranscriber {
                 Ok(Some(Err(error))) => {
                     return Err(inference_error(format!("WebSocket error: {error}")))
                 }
-                Ok(None) => break,
+                Ok(None) => return Err(closed_before_final_response(None)),
                 Err(_) => return Err(inference_error("batch response timeout")),
             };
 
@@ -216,11 +218,8 @@ impl SeedAsrTranscriber {
                     match frame {
                         ServerFrame::Response { payload, is_last } => {
                             let snapshot = parse_recognition_payload(&payload, is_last)?;
-                            if !snapshot.text.is_empty() {
-                                transcript = snapshot.text;
-                            }
                             if snapshot.is_last {
-                                break;
+                                break snapshot.text;
                             }
                         }
                         ServerFrame::Error { code, message } => {
@@ -230,14 +229,11 @@ impl SeedAsrTranscriber {
                 }
                 Message::Text(text) => {
                     let snapshot = parse_recognition_payload(text.as_bytes(), false)?;
-                    if !snapshot.text.is_empty() {
-                        transcript = snapshot.text;
-                    }
                     if snapshot.is_last {
-                        break;
+                        break snapshot.text;
                     }
                 }
-                Message::Close(_) => break,
+                Message::Close(frame) => return Err(closed_before_final_response(frame)),
                 Message::Ping(payload) => {
                     write
                         .send(Message::Pong(payload))
@@ -246,7 +242,7 @@ impl SeedAsrTranscriber {
                 }
                 _ => {}
             }
-        }
+        };
 
         let _ = write.send(Message::Close(None)).await;
         Ok(transcript.trim().to_string())
@@ -320,7 +316,6 @@ async fn run_streaming_session(
     let mut reconciler = Reconciler::default();
     let mut audio_buffer = Vec::with_capacity(AUDIO_FRAME_SAMPLES * 4);
     let mut input_closed = false;
-    let mut last_packet_sent = false;
     let mut drain_deadline = None;
 
     loop {
@@ -364,7 +359,6 @@ async fn run_streaming_session(
                             .await
                             .map_err(|e| inference_error(format!("send final audio failed: {e}")))?;
                         audio_buffer.clear();
-                        last_packet_sent = true;
                         drain_deadline = Some(tokio::time::Instant::now() + DRAIN_TIMEOUT);
                     }
                 }
@@ -374,8 +368,7 @@ async fn run_streaming_session(
                 let message = match message {
                     Some(Ok(message)) => message,
                     Some(Err(error)) => return Err(inference_error(format!("WebSocket error: {error}"))),
-                    None if last_packet_sent => break,
-                    None => return Err(inference_error("WebSocket closed before end of audio")),
+                    None => return Err(closed_before_final_response(None)),
                 };
 
                 let snapshot = match message {
@@ -388,8 +381,7 @@ async fn run_streaming_session(
                         }
                     },
                     Message::Text(text) => parse_recognition_payload(text.as_bytes(), false)?,
-                    Message::Close(_) if last_packet_sent => break,
-                    Message::Close(_) => return Err(inference_error("server closed the stream early")),
+                    Message::Close(frame) => return Err(closed_before_final_response(frame)),
                     Message::Ping(payload) => {
                         write
                             .send(Message::Pong(payload))
@@ -546,6 +538,19 @@ fn resolve_authentication(config: &SeedAsrConfig) -> Result<Authentication, Tran
 
 fn inference_error(message: impl Into<String>) -> TranscribeError {
     TranscribeError::InferenceFailed(format!("Seed-ASR: {}", message.into()))
+}
+
+fn closed_before_final_response(frame: Option<CloseFrame<'_>>) -> TranscribeError {
+    if let Some(frame) = frame {
+        tracing::debug!(
+            code = %frame.code,
+            reason = %frame.reason,
+            "Seed-ASR connection closed before final recognition response"
+        );
+    }
+    inference_error(
+        "connection closed before final recognition response; transcript may be incomplete",
+    )
 }
 
 fn encode_full_client_request(request: &Value) -> Result<Vec<u8>, TranscribeError> {
@@ -944,6 +949,7 @@ mod tests {
     use tokio_tungstenite::tungstenite::handshake::server::{
         Callback, ErrorResponse, Request, Response,
     };
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
     struct AssertAuthenticationHeaders;
 
@@ -1348,8 +1354,40 @@ mod tests {
         assert_eq!(i16::from_le_bytes([bytes[4], bytes[5]]), 32767);
     }
 
-    #[tokio::test]
-    async fn streaming_round_trip_with_local_websocket_server() {
+    fn recognition_response(text: &str, is_last: bool) -> Message {
+        let payload = json!({
+            "result": {
+                "text": text,
+                "utterances": [{"text": text, "definite": true}]
+            }
+        });
+        let compressed = gzip(&serde_json::to_vec(&payload).unwrap()).unwrap();
+        let mut response = vec![0x11, if is_last { 0x93 } else { 0x91 }, 0x11, 0x00];
+        let sequence = if is_last { -1_i32 } else { 1_i32 };
+        response.extend_from_slice(&sequence.to_be_bytes());
+        response.extend_from_slice(&(compressed.len() as u32).to_be_bytes());
+        response.extend_from_slice(&compressed);
+        Message::Binary(response)
+    }
+
+    fn early_closures() -> [Option<Message>; 4] {
+        [
+            Some(Message::Close(None)),
+            Some(Message::Close(Some(CloseFrame {
+                code: CloseCode::Normal,
+                reason: "done".into(),
+            }))),
+            Some(Message::Close(Some(CloseFrame {
+                code: CloseCode::Error,
+                reason: "internal failure".into(),
+            }))),
+            None, // Drop the TCP connection without a WebSocket close frame.
+        ]
+    }
+
+    async fn mock_response_server(
+        responses: Vec<Message>,
+    ) -> (SeedAsrTranscriber, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -1375,14 +1413,9 @@ mod tests {
                 }
             }
 
-            let payload =
-                br#"{"result":{"text":"hello","utterances":[{"text":"hello","definite":true}]}}"#;
-            let compressed = gzip(payload).unwrap();
-            let mut response = vec![0x11, 0x93, 0x11, 0x00];
-            response.extend_from_slice(&(-1_i32).to_be_bytes());
-            response.extend_from_slice(&(compressed.len() as u32).to_be_bytes());
-            response.extend_from_slice(&compressed);
-            stream.send(Message::Binary(response)).await.unwrap();
+            for response in responses {
+                stream.send(response).await.unwrap();
+            }
         });
 
         let transcriber = SeedAsrTranscriber::new(SeedAsrConfig {
@@ -1391,24 +1424,186 @@ mod tests {
             ..config()
         })
         .unwrap();
-        let (samples_tx, samples_rx) = mpsc::channel(2);
-        let mut handle = transcriber.start_stream(samples_rx).unwrap();
-        samples_tx.send(vec![0.1; 400]).await.unwrap();
-        drop(samples_tx);
+        (transcriber, server)
+    }
 
-        let event = tokio::time::timeout(Duration::from_secs(2), handle.events.recv())
+    async fn collect_events(events_rx: &mut mpsc::Receiver<StreamingEvent>) -> Vec<StreamingEvent> {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut events = Vec::new();
+            while let Some(event) = events_rx.recv().await {
+                events.push(event);
+            }
+            events
+        })
+        .await
+        .expect("streaming session did not finish")
+    }
+
+    #[tokio::test]
+    async fn streaming_round_trip_with_local_websocket_server() {
+        for final_response in [
+            recognition_response("hello", true),
+            Message::Text(
+                json!({
+                    "code": 0,
+                    "is_last_package": true,
+                    "payload_msg": {"result": {"text": "hello"}}
+                })
+                .to_string(),
+            ),
+        ] {
+            // Once a final response arrives, even an abrupt disconnect is harmless.
+            let (transcriber, server) = mock_response_server(vec![final_response]).await;
+            let (samples_tx, samples_rx) = mpsc::channel(2);
+            let mut handle = transcriber.start_stream(samples_rx).unwrap();
+            samples_tx.send(vec![0.1; 400]).await.unwrap();
+            drop(samples_tx);
+
+            let events = collect_events(&mut handle.events).await;
+            assert!(matches!(
+                events.as_slice(),
+                [StreamingEvent::Final { text, .. }, StreamingEvent::Ended] if text == "hello"
+            ));
+            handle.task.await.unwrap().unwrap();
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_requires_final_response_after_end_of_audio() {
+        for has_interim in [false, true] {
+            for closure in early_closures() {
+                let has_close_frame = closure.is_some();
+                let mut responses = Vec::new();
+                if has_interim {
+                    // A definite utterance is not the final response for the session.
+                    responses.push(recognition_response("hello", false));
+                }
+                responses.extend(closure);
+                let (transcriber, server) = mock_response_server(responses).await;
+                let (samples_tx, samples_rx) = mpsc::channel(2);
+                let mut handle = transcriber.start_stream(samples_rx).unwrap();
+                samples_tx.send(vec![0.1; 400]).await.unwrap();
+                drop(samples_tx);
+
+                let events = collect_events(&mut handle.events).await;
+                let remaining = if has_interim {
+                    assert!(matches!(
+                        &events[0], StreamingEvent::Final { text, .. } if text == "hello"
+                    ));
+                    &events[1..]
+                } else {
+                    events.as_slice()
+                };
+                let [StreamingEvent::Error(error), StreamingEvent::Ended] = remaining else {
+                    panic!("expected an error before Ended, got {events:?}");
+                };
+                if has_close_frame {
+                    assert!(error
+                        .to_string()
+                        .contains("before final recognition response"));
+                }
+                handle.task.await.unwrap().unwrap();
+                server.await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_requires_final_response_after_end_of_audio() {
+        for has_interim in [false, true] {
+            for closure in early_closures() {
+                let has_close_frame = closure.is_some();
+                let mut responses = Vec::new();
+                if has_interim {
+                    responses.push(recognition_response("hello", false));
+                }
+                responses.extend(closure);
+                let (transcriber, server) = mock_response_server(responses).await;
+                let error = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    transcriber.transcribe_async(&[0.1; 400]),
+                )
+                .await
+                .unwrap()
+                .unwrap_err();
+                if has_close_frame {
+                    assert!(error
+                        .to_string()
+                        .contains("before final recognition response"));
+                }
+                server.await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_returns_only_the_final_snapshot() {
+        for final_text in ["hello", ""] {
+            for final_response in [
+                recognition_response(final_text, true),
+                Message::Text(
+                    json!({
+                        "code": 0,
+                        "is_last_package": true,
+                        "payload_msg": {"result": {"text": final_text}}
+                    })
+                    .to_string(),
+                ),
+            ] {
+                let (transcriber, server) = mock_response_server(vec![
+                    recognition_response("draft", false),
+                    final_response,
+                ])
+                .await;
+                let transcript = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    transcriber.transcribe_async(&[0.1; 400]),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(transcript, final_text);
+                server.await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_cancellation_does_not_require_a_final_response() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut stream = tokio_tungstenite::accept_async(socket).await.unwrap();
+            assert!(matches!(
+                stream.next().await.unwrap().unwrap(),
+                Message::Binary(_)
+            ));
+            ready_tx.send(()).unwrap();
+            let close = tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(matches!(close, Message::Close(_)));
+        });
+        let transcriber = SeedAsrTranscriber::new(SeedAsrConfig {
+            url: format!("ws://{address}"),
+            ..config()
+        })
+        .unwrap();
+        // Keep the audio input open; explicit cancellation must not wait for EOF.
+        let (_samples_tx, samples_rx) = mpsc::channel(2);
+        let mut handle = transcriber.start_stream(samples_rx).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), ready_rx)
             .await
             .unwrap()
             .unwrap();
-        assert!(matches!(
-            event,
-            StreamingEvent::Final { text, .. } if text == "hello"
-        ));
-        let ended = tokio::time::timeout(Duration::from_secs(2), handle.events.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(matches!(ended, StreamingEvent::Ended));
+        handle.cancel.send(()).unwrap();
+        let events = collect_events(&mut handle.events).await;
+        assert!(matches!(events.as_slice(), [StreamingEvent::Ended]));
         handle.task.await.unwrap().unwrap();
         server.await.unwrap();
     }
