@@ -872,7 +872,12 @@ impl Reconciler {
             ));
         };
 
-        if stable_text.len() > self.committed.len() {
+        // A final snapshot can retract the entire provisional tail without
+        // extending the committed prefix. Reconcile that empty tail too so
+        // the output does not retain text the service discarded.
+        if stable_text.len() > self.committed.len()
+            || (snapshot.is_last && !self.typed_partial.is_empty())
+        {
             let stable_tail = &stable_text[self.committed.len()..];
             let segment_id = self.next_segment_id;
             self.next_segment_id += 1;
@@ -1204,6 +1209,69 @@ mod tests {
                 ..
             } if text == "。"
         ));
+    }
+
+    #[test]
+    fn reconciler_removes_a_retracted_partial_on_final_response() {
+        use crate::output::streaming::StreamingSession;
+
+        // Cover both a trailing retraction and a wholly retracted result.
+        for committed in ["你好", ""] {
+            let mut reconciler = Reconciler::default();
+            let mut session = StreamingSession::new();
+            let events = reconciler
+                .process(
+                    RecognitionSnapshot {
+                        text: format!("{committed}啊呀"),
+                        stable_text: committed.to_string(),
+                        is_last: false,
+                    },
+                    true,
+                )
+                .unwrap();
+            for event in events {
+                match event {
+                    StreamingEvent::Final { text, .. } => session.commit_segment_silent(&text),
+                    StreamingEvent::Partial { text, .. } => session.observe_partial_delta(&text),
+                    other => panic!("unexpected initial event: {other:?}"),
+                }
+            }
+            assert_eq!(session.finalized_text(), committed);
+            assert_eq!(session.partial(), "啊呀");
+
+            let mut snapshot = RecognitionSnapshot {
+                text: committed.to_string(),
+                stable_text: committed.to_string(),
+                is_last: false,
+            };
+            // Intermediate revisions are still deferred until finalization.
+            assert!(reconciler
+                .process(snapshot.clone(), true)
+                .unwrap()
+                .is_empty());
+            assert_eq!(reconciler.typed_partial, "啊呀");
+
+            snapshot.is_last = true;
+            let events = reconciler.process(snapshot, true).unwrap();
+            let [StreamingEvent::Replace {
+                backspace,
+                text,
+                segment_id,
+            }] = events.as_slice()
+            else {
+                panic!("expected a retraction, got {events:?}");
+            };
+            assert_eq!(*backspace, 2); // Unicode scalars, not UTF-8 bytes.
+            assert!(text.is_empty());
+            assert_eq!(*segment_id, u64::from(!committed.is_empty()));
+            session.replace_and_commit_silent(*backspace, text);
+            session.finalize_pending_partial();
+            assert_eq!(session.finalized_text(), committed);
+            assert!(session.partial().is_empty());
+            assert_eq!(reconciler.committed, committed);
+            assert!(reconciler.typed_partial.is_empty());
+            assert!(reconciler.finished);
+        }
     }
 
     #[test]
