@@ -18,6 +18,37 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 pub struct WhisperTranscriber {
     /// Whisper context (holds the model)
     ctx: WhisperContext,
+    /// CPU fallback context, built lazily on the first GPU failure.
+    ///
+    /// Why this exists: the GPU context holds the model persistently, but every
+    /// transcription re-creates a *state* (KV cache + compute buffers) and that
+    /// allocation can fail when another process has taken the VRAM. Measured on a
+    /// RTX 3070 Laptop (8 GiB) shared with a batch indexer:
+    ///
+    /// ```text
+    /// ggml_vulkan: Device memory allocation of size 18874368 failed.
+    /// ggml_vulkan: vk::Device::allocateMemory: ErrorOutOfDeviceMemory
+    /// whisper_kv_cache_init: failed to allocate memory for the kv cache
+    /// ERROR Transcription failed: Failed to create a new whisper context.
+    /// ```
+    ///
+    /// The model itself was still resident on the card — only the 18 MB of
+    /// per-transcription scratch could not be found. The user loses the sentence
+    /// they just spoke, which no amount of retrying afterwards can give back.
+    ///
+    /// `None` inside the mutex means "not built yet"; a build failure is not cached,
+    /// so a transient condition (page cache pressure while reading the model) does
+    /// not poison the fallback for the rest of the process lifetime.
+    ///
+    /// Cost when nothing ever fails: zero. Nothing is loaded until the first failure.
+    cpu_fallback: Mutex<Option<WhisperContext>>,
+    /// Model path, kept to build the CPU fallback without re-resolving.
+    model_path: PathBuf,
+    /// Flash attention setting, mirrored onto the fallback context.
+    flash_attention: bool,
+    /// Whether the primary context was asked to use a GPU. When false there is
+    /// nothing to fall back *from*, and the fallback is never attempted.
+    gpu_requested: bool,
     /// Language configuration (single, auto, or array)
     language: LanguageConfig,
     /// Whether to translate to English
@@ -68,6 +99,10 @@ impl WhisperTranscriber {
 
         Ok(Self {
             ctx,
+            cpu_fallback: Mutex::new(None),
+            model_path,
+            flash_attention: config.flash_attention,
+            gpu_requested: config.gpu_device.is_some(),
             language: config.language.clone(),
             translate: config.translate,
             threads,
@@ -144,13 +179,13 @@ impl WhisperTranscriber {
 
     fn run_full(
         &self,
+        ctx: &WhisperContext,
         samples: &[f32],
         selected_language: Option<&str>,
         duration_secs: f32,
         retry: bool,
     ) -> Result<String, TranscribeError> {
-        let mut state = self
-            .ctx
+        let mut state = ctx
             .create_state()
             .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
         let params = self.build_params(selected_language, duration_secs, retry);
@@ -232,15 +267,19 @@ impl WhisperTranscriber {
     }
 }
 
-impl Transcriber for WhisperTranscriber {
-    fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
-        if samples.is_empty() {
-            return Err(TranscribeError::AudioFormat(
-                "Empty audio buffer".to_string(),
-            ));
-        }
-
-        let duration_secs = samples.len() as f32 / 16000.0;
+impl WhisperTranscriber {
+    /// Run one full transcription on the given context.
+    ///
+    /// Split out of `transcribe()` so that the *entire* run can be retried on the
+    /// CPU fallback, not just the state creation. `state.full()` allocates its own
+    /// compute buffers and can fail the same way `create_state()` does; wrapping
+    /// only the latter would leave that path uncovered for the same amount of code.
+    fn transcribe_on(
+        &self,
+        ctx: &WhisperContext,
+        samples: &[f32],
+        duration_secs: f32,
+    ) -> Result<String, TranscribeError> {
         tracing::debug!(
             "Transcribing {:.2}s of audio ({} samples)",
             duration_secs,
@@ -249,13 +288,13 @@ impl Transcriber for WhisperTranscriber {
 
         let start = std::time::Instant::now();
 
-        // Create state for this transcription
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
-
-        // Determine language based on configuration mode
+        // Determine language based on configuration mode.
+        //
+        // The state is created INSIDE the branch that needs it. It used to be created
+        // unconditionally here, and in single-language mode — the common case — it was
+        // then dropped without a single call being made on it. That is a full KV-cache
+        // allocation (18 MB of VRAM, measured) per transcription, for nothing, and it
+        // doubled the number of chances to hit an out-of-memory condition on a busy card.
         let selected_language: Option<String> = if self.language.is_auto() {
             // Unconstrained auto-detection: let Whisper detect from all languages
             tracing::debug!("Using unconstrained language auto-detection");
@@ -264,6 +303,9 @@ impl Transcriber for WhisperTranscriber {
             // Constrained auto-detection: detect from allowed set only
             let allowed = self.language.as_vec();
             tracing::debug!("Using constrained language detection from: {:?}", allowed);
+            let mut state = ctx
+                .create_state()
+                .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
             Some(self.select_language_from_allowed(&mut state, samples, &allowed)?)
         } else {
             // Single language: use it directly
@@ -281,8 +323,13 @@ impl Transcriber for WhisperTranscriber {
             *guard = selected_language.clone();
         }
 
-        let mut result =
-            self.run_full(samples, selected_language.as_deref(), duration_secs, false)?;
+        let mut result = self.run_full(
+            ctx,
+            samples,
+            selected_language.as_deref(),
+            duration_secs,
+            false,
+        )?;
 
         if duration_secs >= 1.0 && is_degenerate_transcript(&result) {
             tracing::warn!(
@@ -290,8 +337,13 @@ impl Transcriber for WhisperTranscriber {
                 result,
                 duration_secs
             );
-            let retry_result =
-                self.run_full(samples, selected_language.as_deref(), duration_secs, true)?;
+            let retry_result = self.run_full(
+                ctx,
+                samples,
+                selected_language.as_deref(),
+                duration_secs,
+                true,
+            )?;
             if is_degenerate_transcript(&retry_result) {
                 tracing::warn!(
                     "Whisper retry also returned degenerate transcript {:?}; treating as empty",
@@ -315,6 +367,118 @@ impl Transcriber for WhisperTranscriber {
         );
 
         Ok(result)
+    }
+
+    /// Build the CPU fallback context on first use.
+    ///
+    /// Deliberately NOT cached on failure: if loading the model fails once because the
+    /// machine was momentarily out of page cache, the next dictation should try again
+    /// rather than inherit a permanent "no fallback" verdict.
+    fn with_cpu_fallback<R>(
+        &self,
+        f: impl FnOnce(&WhisperContext) -> R,
+    ) -> Result<R, TranscribeError> {
+        let mut guard = self
+            .cpu_fallback
+            .lock()
+            .map_err(|_| TranscribeError::InitFailed("CPU fallback mutex poisoned".to_string()))?;
+
+        if guard.is_none() {
+            tracing::warn!(
+                "Building CPU fallback context from {:?} — the GPU could not serve this transcription",
+                self.model_path
+            );
+            let start = std::time::Instant::now();
+
+            let mut params = WhisperContextParameters::default();
+            params.use_gpu(false);
+            params.flash_attn(self.flash_attention);
+
+            let ctx = WhisperContext::new_with_params(
+                self.model_path
+                    .to_str()
+                    .ok_or_else(|| TranscribeError::ModelNotFound("Invalid path".to_string()))?,
+                params,
+            )
+            .map_err(|e| TranscribeError::InitFailed(e.to_string()))?;
+
+            tracing::info!(
+                "CPU fallback context ready in {:.2}s",
+                start.elapsed().as_secs_f32()
+            );
+            *guard = Some(ctx);
+        }
+
+        let ctx = guard
+            .as_ref()
+            .expect("CPU fallback context was just built or already present");
+        Ok(f(ctx))
+    }
+}
+
+impl Transcriber for WhisperTranscriber {
+    /// Transcribe, and do not fail because the GPU is busy.
+    ///
+    /// The GPU holds the model persistently, but each transcription allocates a fresh
+    /// state on the card. On a shared GPU that allocation can fail at any moment —
+    /// measured here with a batch indexer holding 6.1 GB of an 8 GB card. When it does,
+    /// the sentence the user just spoke is gone, and no later retry can recover it:
+    /// the audio buffer is not kept, and the user has already stopped talking.
+    ///
+    /// So the CPU is the guaranteed floor and the GPU is an optimisation that is never
+    /// allowed to carry the load. A CPU transcription is slower — seconds instead of
+    /// tenths — but slow is a different category of outcome from lost.
+    ///
+    /// ANY inference error triggers the fallback, not just a recognised out-of-memory
+    /// string. Matching on driver messages would mean a new ggml release, a different
+    /// backend, or a reworded error silently turning "never fails" back into "fails".
+    /// The cost of falling back when it was not strictly needed is one slow dictation;
+    /// the cost of not falling back is a lost one.
+    fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
+        if samples.is_empty() {
+            return Err(TranscribeError::AudioFormat(
+                "Empty audio buffer".to_string(),
+            ));
+        }
+
+        let duration_secs = samples.len() as f32 / 16000.0;
+
+        let gpu_error = match self.transcribe_on(&self.ctx, samples, duration_secs) {
+            Ok(text) => return Ok(text),
+            Err(e) => e,
+        };
+
+        // No GPU was requested: the primary context IS the CPU one, and there is
+        // nothing to fall back to. Report the real error rather than loading the
+        // model a second time to fail identically.
+        if !self.gpu_requested {
+            return Err(gpu_error);
+        }
+
+        tracing::warn!(
+            "GPU transcription failed ({}), falling back to CPU for this {:.2}s clip",
+            gpu_error,
+            duration_secs
+        );
+
+        match self.with_cpu_fallback(|ctx| self.transcribe_on(ctx, samples, duration_secs)) {
+            Ok(Ok(text)) => {
+                tracing::info!("CPU fallback transcribed the clip the GPU could not");
+                Ok(text)
+            }
+            // The fallback ran and still failed: report ITS error, which describes what
+            // actually stopped the transcription, not the GPU condition that led here.
+            Ok(Err(cpu_error)) => {
+                tracing::error!("CPU fallback also failed: {}", cpu_error);
+                Err(cpu_error)
+            }
+            // The fallback could not even be built. The GPU error is the one worth
+            // reporting — it is the cause; this is a consequence.
+            Err(build_error) => {
+                tracing::error!("Could not build the CPU fallback: {}", build_error);
+                Err(gpu_error)
+            }
+        }
     }
 
     fn last_detected_language(&self) -> Option<String> {
