@@ -354,6 +354,9 @@ pub enum OutputDriver {
     Wtype,
     /// eitype - Wayland via libei/EI protocol, works on GNOME/KDE
     Eitype,
+    /// portal - persistent XDG RemoteDesktop session (NotifyKeyboardKeysym)
+    #[cfg(feature = "portal")]
+    Portal,
     /// dotool - Works on X11/Wayland/TTY, supports keyboard layouts
     Dotool,
     /// ydotool - Works on X11/Wayland/TTY, requires daemon
@@ -369,6 +372,8 @@ impl std::fmt::Display for OutputDriver {
         match self {
             OutputDriver::Wtype => write!(f, "wtype"),
             OutputDriver::Eitype => write!(f, "eitype"),
+            #[cfg(feature = "portal")]
+            OutputDriver::Portal => write!(f, "portal"),
             OutputDriver::Dotool => write!(f, "dotool"),
             OutputDriver::Ydotool => write!(f, "ydotool"),
             OutputDriver::Clipboard => write!(f, "clipboard"),
@@ -384,6 +389,8 @@ impl std::str::FromStr for OutputDriver {
         match s.to_lowercase().as_str() {
             "wtype" => Ok(OutputDriver::Wtype),
             "eitype" => Ok(OutputDriver::Eitype),
+            #[cfg(feature = "portal")]
+            "portal" => Ok(OutputDriver::Portal),
             "dotool" => Ok(OutputDriver::Dotool),
             "ydotool" => Ok(OutputDriver::Ydotool),
             "clipboard" => Ok(OutputDriver::Clipboard),

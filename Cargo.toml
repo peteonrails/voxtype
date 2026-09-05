@@ -165,10 +165,17 @@ nix = { version = "0.29", features = ["signal", "process"] }  # Unix signals for
 # MPRIS media-player control over the session bus. Talking D-Bus directly
 # instead of shelling out to playerctl lets us see MPRIS-compliant players
 # that playerctl silently filters out, and surfaces real errors on resume.
-zbus = { version = "4", default-features = false, features = ["tokio"] }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [features]
-default = []
+default = ["portal"]
+
+# Portal typing driver: a persistent XDG RemoteDesktop session spoken to
+# directly over zbus (no wrapper crate; reuses the zbus already used for
+# MPRIS). On by default; `--no-default-features` drops it. The portal's
+# Request/Response signal stream needs futures-util, which is already an
+# unconditional dependency (Soniox), so this feature pulls in no new crates.
+portal = []
 # OSD frontends. Each binary is gated on its own feature so users can
 # build only the rendering stack they need. Real GUI deps land in
 # Commits 4a/4b; the lists below grow then.

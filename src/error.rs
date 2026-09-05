@@ -151,6 +151,10 @@ pub enum OutputError {
     #[error("Text injection failed: {0}")]
     InjectionFailed(String),
 
+    #[cfg(feature = "portal")]
+    #[error("Portal typing failed: {0}")]
+    PortalFailed(String),
+
     #[error("Ctrl+V simulation failed: {0}")]
     CtrlVFailed(String),
 
