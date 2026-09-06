@@ -197,6 +197,19 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             .get_or_insert_with(SonioxConfig::default)
             .api_key = Some(key);
     }
+
+    // Muse Voice Transcribe (Meta Model API)
+    // VOXTYPE_MUSE_API_KEY is primary; also accept MUSE_API_KEY / META_API_KEY / META_MODEL_API_KEY
+    if let Ok(key) = std::env::var("VOXTYPE_MUSE_API_KEY")
+        .or_else(|_| std::env::var("MUSE_API_KEY"))
+        .or_else(|_| std::env::var("META_API_KEY"))
+        .or_else(|_| std::env::var("META_MODEL_API_KEY"))
+    {
+        config
+            .muse
+            .get_or_insert_with(crate::config::MuseConfig::default)
+            .api_key = Some(key);
+    }
     if let Ok(val) = std::env::var("VOXTYPE_RESTORE_CLIPBOARD") {
         config.output.restore_clipboard = parse_bool_env(&val);
     }

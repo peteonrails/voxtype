@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 mod cohere;
 mod dolphin;
 mod moonshine;
+mod muse;
 mod omnilingual;
 mod openvino;
 mod paraformer;
@@ -15,6 +16,7 @@ mod soniox;
 pub use cohere::CohereConfig;
 pub use dolphin::DolphinConfig;
 pub use moonshine::MoonshineConfig;
+pub use muse::{MuseConfig, DEFAULT_STOP_DRAIN_TIMEOUT_MS};
 pub use omnilingual::OmnilingualConfig;
 pub use openvino::OpenVinoConfig;
 pub use paraformer::ParaformerConfig;
@@ -70,6 +72,8 @@ pub enum TranscriptionEngine {
     OpenVino,
     /// Use Soniox (cloud streaming WebSocket STT).
     Soniox,
+    /// Use Muse Voice Transcribe (Meta hosted streaming STT via Model API).
+    Muse,
 }
 
 impl TranscriptionEngine {

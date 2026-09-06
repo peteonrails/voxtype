@@ -1,8 +1,8 @@
 use super::{
     AudioConfig, CohereConfig, DolphinConfig, HotkeyConfig, MeetingConfig, MoonshineConfig,
-    OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig, ParakeetConfig, Profile,
-    SenseVoiceConfig, SonioxConfig, StatusConfig, StreamingConfig, TextConfig, TranscriptionEngine,
-    VadConfig, WhisperConfig,
+    MuseConfig, OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig, ParakeetConfig,
+    Profile, SenseVoiceConfig, SonioxConfig, StatusConfig, StreamingConfig, TextConfig,
+    TranscriptionEngine, VadConfig, WhisperConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -66,6 +66,11 @@ pub struct Config {
     #[serde(default)]
     pub soniox: Option<SonioxConfig>,
 
+    /// Muse Voice Transcribe configuration (hosted API)
+    /// (optional, only used when engine = "muse")
+    #[serde(default)]
+    pub muse: Option<MuseConfig>,
+
     /// Shared sliding-window streaming engine tuning, used by every batch
     /// backend wrapped in `transcribe::sliding_window` (currently `whisper`
     /// and `openvino`). `None` when config.toml has no `[streaming]`
@@ -127,6 +132,7 @@ impl Default for Config {
             cohere: None,
             openvino: None,
             soniox: None,
+            muse: None,
             streaming: None,
             text: TextConfig::default(),
             vad: VadConfig::default(),
@@ -177,6 +183,7 @@ impl Config {
             TranscriptionEngine::OpenVino => {
                 self.openvino.as_ref().map(|o| o.streaming).unwrap_or(false)
             }
+            TranscriptionEngine::Muse => self.muse.as_ref().map(|m| m.streaming).unwrap_or(false),
             _ => false,
         }
     }
@@ -374,8 +381,9 @@ impl Config {
                 .as_ref()
                 .map(|o| o.on_demand_loading)
                 .unwrap_or(false),
-            // Soniox is a cloud backend; nothing to load on demand.
+            // Soniox and Muse are cloud backends; nothing to load on demand.
             TranscriptionEngine::Soniox => false,
+            TranscriptionEngine::Muse => false,
         }
     }
 
@@ -460,6 +468,11 @@ impl Config {
                 .as_ref()
                 .map(|s| s.model.as_str())
                 .unwrap_or("soniox (not configured)"),
+            TranscriptionEngine::Muse => self
+                .muse
+                .as_ref()
+                .map(|m| m.model.as_str())
+                .unwrap_or("muse (not configured)"),
         }
     }
 
