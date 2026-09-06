@@ -1896,6 +1896,31 @@ keywords = ["Omarchy", "Hyprland"]
 
 Use for proper names, brands, and technical terms spelled exactly as they should appear. Keep the list tight; biasing helps recognition but cannot conjure words the acoustic model never heard (Meta: "Biasing does not guarantee an exact spelling").
 
+### polish_command
+
+**Type:** String (optional)
+**Default:** unset (polish disabled)
+**Required:** No
+
+End-of-stream cleanup command. When set, the full stream transcript is piped through this shell command when the stream ends (stdin in, cleaned text on stdout — same contract as `[output.post_process]`) and the cleaned result replaces what was typed via a single `Replace`. This is where filler-word removal (`um`, `uh`), grammar, and casing fixes happen: the STT model itself transcribes faithfully, and in `PUSH_TO_TALK` it sends no turn-final event at all, so without this nothing ever revises disfluencies. Fail-open: on error, timeout, or empty output the raw transcript is kept.
+
+```toml
+[muse]
+polish_command = "python3 -c 'import json,sys,urllib.request,re; t=sys.stdin.read(); p=\"Clean up this voice dictation. Remove filler words (um, uh, ah). Fix punctuation and casing. If the dictation contains instructions about how to format or reword the text, such as all caps, lowercase, sounding more formal, or stage directions of any kind, apply them to the whole text and never transcribe the instruction words themselves. Respond with ONLY the cleaned text, no introduction or explanation. Text: \"+t; r=urllib.request.urlopen(urllib.request.Request(\"http://localhost:11434/api/generate\", data=json.dumps({\"model\":\"qwen2.5:3b\",\"prompt\":p,\"stream\":False}).encode(), headers={\"Content-Type\":\"application/json\"}), timeout=15); out=json.load(r)[\"response\"]; out=re.sub(r\"\\s+([.,!?;:])\", r\"\\1\", out); out=re.sub(r\"(?i)^\\s*(sure[.,!]\\s*)?here(?:\\x27s| is)\\s+the\\s+(?:cleaned(?:-up)?|polished)\\s+(?:text|transcript|result)\\s*[:.]\\s*\", \"\", out); sys.stdout.write(out.strip())'"
+```
+
+Recommended: a small local model via ollama's `/api/generate` HTTP endpoint (free, private, no extra API key). Measured ~0.6s per stream warm on CPU (a few seconds cold, right after ollama loads the model) while streaming stays instant. Use the API, not `ollama run`: the CLI renders streaming progress with cursor-movement escapes that leak into stdout (`TERM=dumb` does not fully prevent this) and would get typed into your text. Alternatives: `muse exec "..."` (same prompt, runs on your Muse subscription but takes 11-20s per turn) or `codex exec "..."` (~5s on a ChatGPT subscription).
+
+The example uses `qwen2.5:3b`, not the smaller 1.5B: the 1.5B model cleans well but ignores formatting directions (it drops `All caps.` as if it were filler), while the 3B follows them (`All caps. The golden age of software!` becomes `THE GOLDEN AGE OF SOFTWARE!`). The prompt grants open-ended direction-following rather than an allowlist, so any phrasing works; the only code around the model call is hygiene (strip `Sure. Here's the cleaned-up text:`-style preambles and stray spaces before punctuation). Open-ended rewording requests (e.g. `make this sound more formal`) are best-effort at this size: the model applies them partially.
+
+### polish_timeout_ms
+
+**Type:** Integer
+**Default:** `20000`
+**Required:** No
+
+Timeout for the polish command in milliseconds. The raw transcript is kept on timeout.
+
 ### stop_drain_timeout_ms
 
 **Type:** Integer
@@ -1917,6 +1942,8 @@ Grace period after stop during which trailing server finals are still typed inst
 | `diarization` | - | - | `false` | Speaker diarization (`DIARIZATION` mode) |
 | `language` | - | - | none | Language hint (`languageBias`) |
 | `keywords` | - | - | none | Vocabulary bias terms (`keywords`) |
+| `polish_command` | - | - | none | End-of-turn cleanup command |
+| `polish_timeout_ms` | - | - | `20000` | Polish command timeout |
 | `stop_drain_timeout_ms` | - | - | `3000` | Trailing-finals grace period on stop |
 
 ### Complete Example

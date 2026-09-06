@@ -1198,6 +1198,12 @@ The server is receiving fewer audio samples per second than the declared encodin
 
 Expected protocol behavior, not a stall. In `PUSH_TO_TALK` mode the server emits the `Final` (`speechComplete`) only after voxtype sends `endStream` on release. Cumulative partials already cover the text, so a final with an empty delta is skipped rather than retyped. If you want per-utterance finals without waiting for release, that is what a future endpointing mode would provide.
 
+### Filler words (um, uh) are never cleaned up
+
+The STT model transcribes faithfully: disfluencies appear identically in partials and finals, so no server revision ever fires. Cleanup needs the polish step: set `[muse] polish_command` (see CONFIGURATION.md). Without it, nothing revises disfluencies by design. Failures there are fail-open: on error, timeout (`polish_timeout_ms`), or empty output the raw transcript is kept, and `journalctl --user -u voxtype` shows a `Muse polish:` line with char counts and seconds when it runs.
+
+If the overlay hangs at the end of a turn and the raw text is kept, the polish command itself is too slow: `muse exec` takes 11-20s per call and routinely loses the 20s timeout race. Prefer a small local model via ollama's `/api/generate` endpoint (~0.4s on CPU) — see CONFIGURATION.md. Do not point polish at `ollama run`: its streaming-progress escapes leak into stdout and would get typed.
+
 ---
 
 ## Media Does Not Pause While Recording (Omarchy Quattro)

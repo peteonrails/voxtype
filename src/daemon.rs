@@ -5,7 +5,7 @@
 
 use crate::audio::feedback::{AudioFeedback, SoundEvent};
 use crate::audio::{self, AudioCapture};
-use crate::config::{ActivationMode, Config, FileMode, OutputMode};
+use crate::config::{ActivationMode, Config, FileMode, OutputMode, PostProcessConfig};
 use crate::eager::{self, EagerConfig};
 use crate::error::Result;
 #[cfg(target_os = "linux")]
@@ -880,6 +880,25 @@ pub struct Daemon {
     media_fade_task: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// Diff a polished transcript against the raw transcript that was typed,
+/// for the Muse end-of-stream polish step. Returns `None` when the polish
+/// changed nothing (skip the replace), otherwise `(backspace, revised)` where
+/// `backspace` counts Unicode scalars to delete and `revised` is the suffix
+/// to type. Common-prefix keeps the churn minimal.
+fn muse_polish_diff(raw: &str, cleaned: &str) -> Option<(usize, String)> {
+    if cleaned == raw {
+        return None;
+    }
+    let common: usize = raw
+        .chars()
+        .zip(cleaned.chars())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let backspace = raw.chars().count() - common;
+    let revised: String = cleaned.chars().skip(common).collect();
+    Some((backspace, revised))
+}
+
 impl Daemon {
     /// Create a new daemon with the given configuration
     pub fn new(config: Config, config_path: Option<PathBuf>) -> Self {
@@ -1535,16 +1554,84 @@ impl Daemon {
         self.restore_recording_media();
     }
 
+    /// Muse end-of-stream polish: when `[muse] polish_command` is set, run
+    /// the stream's full transcript through it and replace what was typed
+    /// with the cleaned result. The STT server never revises disfluencies
+    /// itself, and in PUSH_TO_TALK it sends no turn-final event at all
+    /// (just cumulative partials, then close) — so stream end is the only
+    /// reliable "full context available" point. Fail-open: without a
+    /// command, or on error/timeout/empty output, the raw transcript stands
+    /// as typed. Safe to call with an already-disowned (`None`) session.
+    async fn polish_streaming_session(
+        &self,
+        streaming_session: &mut Option<StreamingSession>,
+        streaming_chain: &Option<Vec<Box<dyn TextOutput>>>,
+    ) {
+        if self.config.engine != crate::config::TranscriptionEngine::Muse {
+            return;
+        }
+        let Some(muse_cfg) = self.config.muse.as_ref() else {
+            return;
+        };
+        let Some(cmd) = muse_cfg
+            .polish_command
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+        else {
+            return;
+        };
+        if let (Some(s), Some(chain)) = (streaming_session.as_mut(), streaming_chain.as_ref()) {
+            s.finalize_pending_partial();
+            let raw = s.finalized_text().to_string();
+            if !raw.trim().is_empty() {
+                let pp = PostProcessor::new(&PostProcessConfig {
+                    command: cmd,
+                    timeout_ms: muse_cfg.polish_timeout_ms,
+                    trim: true,
+                    fallback_on_empty: true,
+                });
+                let start = std::time::Instant::now();
+                let cleaned = pp.process(&raw).await;
+                if let Some((backspace, revised)) = muse_polish_diff(&raw, &cleaned) {
+                    if let Err(e) = s
+                        .replace_and_commit(
+                            chain,
+                            backspace,
+                            &revised,
+                            self.config.output.pre_output_command.as_deref(),
+                            self.config.output.post_output_command.as_deref(),
+                        )
+                        .await
+                    {
+                        tracing::warn!("Muse polish replace failed: {}", e);
+                    } else {
+                        tracing::info!(
+                            "Muse polish: {} -> {} chars in {:.1}s",
+                            raw.chars().count(),
+                            cleaned.chars().count(),
+                            start.elapsed().as_secs_f32(),
+                        );
+                    }
+                } else {
+                    tracing::debug!("Muse polish: no changes");
+                }
+            }
+        }
+    }
+
     /// Disown the streaming typing surface immediately: take the session
     /// (so post-stop backend flush events are discarded instead of typed
-    /// into whatever window has focus) and drop the chain. Used on stop
-    /// paths that do not drain, and when a grace-period drain expires.
+    /// into whatever window has focus), run the Muse end-of-stream polish
+    /// on the accumulated transcript, and drop the chain. Used on stop
+    /// paths that don't drain, and when a grace-period drain expires.
     async fn disown_streaming_session(
         &mut self,
         streaming_session: &mut Option<StreamingSession>,
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
     ) {
-        let _owned_session = streaming_session.take();
+        let mut owned_session = streaming_session.take();
+        self.polish_streaming_session(&mut owned_session, streaming_chain)
+            .await;
         *streaming_chain = None;
     }
 
@@ -1568,7 +1655,6 @@ impl Daemon {
             // completed. We drop events implicitly here.
             let _ = h.task.await;
         }
-        self.stop_streaming_drain_pump();
 
         // File-output sessions (`--file=path`) never typed anything as
         // they went — see the event pump's `file_output` branch — so the
@@ -1621,11 +1707,25 @@ impl Daemon {
 
             *state = State::Idle;
             self.update_state("idle");
+            self.stop_streaming_drain_pump();
             return;
         }
 
+        // Muse end-of-stream polish (live path only); see
+        // `polish_streaming_session` for the rationale. The drain pump
+        // keeps feeding silence frames through polish so the OSD stays up
+        // (showing the processing throb) instead of hiding before the
+        // rewrite lands; it stops here, after the typing is done. Restart
+        // it first: the normal flow already runs it (started at stop), but
+        // the backend-error path arrives here with no pump, and starting
+        // is a no-op when one runs.
+        self.start_streaming_drain_pump();
+        self.polish_streaming_session(streaming_session, streaming_chain)
+            .await;
+
         *streaming_session = None;
         *streaming_chain = None;
+        self.stop_streaming_drain_pump();
 
         self.play_feedback(SoundEvent::TranscriptionComplete);
 
@@ -4683,6 +4783,30 @@ mod tests {
         // We can't easily mock Config::runtime_dir(), so we test the file operations
         // directly using the same logic as the functions under test
         f(runtime_dir)
+    }
+
+    #[test]
+    fn muse_polish_diff_skips_identical_text() {
+        assert_eq!(muse_polish_diff("hello", "hello"), None);
+    }
+
+    #[test]
+    fn muse_polish_diff_backspaces_only_the_divergent_tail() {
+        // Filler removal at the front: whole typed tail goes, cleaned comes in.
+        assert_eq!(
+            muse_polish_diff("um hello world", "Hello world."),
+            Some((14, "Hello world.".to_string()))
+        );
+        // Pure append: nothing to delete.
+        assert_eq!(
+            muse_polish_diff("hello world", "hello world."),
+            Some((0, ".".to_string()))
+        );
+        // Unicode scalars, not bytes.
+        assert_eq!(
+            muse_polish_diff("caf\u{e9} um", "caf\u{e9}"),
+            Some((3, "".to_string()))
+        );
     }
 
     #[test]
