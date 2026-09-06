@@ -14,6 +14,7 @@
 //! - Optionally OpenVINO Whisper for Intel NPU/CPU/GPU (when `openvino-whisper` feature is enabled)
 
 pub mod cli;
+pub mod muse;
 #[cfg(feature = "parakeet")]
 pub mod parakeet_streaming;
 pub mod remote;
@@ -301,6 +302,18 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
             })?;
             Ok(Box::new(soniox::SonioxTranscriber::new(cfg.clone())?))
         }
+        TranscriptionEngine::Muse => {
+            let cfg = config.muse.as_ref().ok_or_else(|| {
+                TranscribeError::InitFailed(
+                    "Muse engine selected but [muse] config section is missing (add [muse] api_key = \"...\" to config.toml)"
+                        .to_string(),
+                )
+            })?;
+            // Muse natively implements StreamingTranscriber (WebSocket).
+            // When streaming=false, the daemon will use the batch Transcriber path.
+            // We always return the same object; the daemon gates on as_streaming().
+            Ok(Box::new(muse::MuseTranscriber::new(cfg)?))
+        }
         #[cfg(feature = "openvino-whisper")]
         TranscriptionEngine::OpenVino => {
             let default_config = crate::config::OpenVinoConfig::default();
@@ -369,6 +382,13 @@ fn sliding_window_config_from_whisper(config: &Config) -> SlidingWindowConfig {
         revision_mode: config.whisper.streaming_revision_mode,
     };
     sliding_window_config(config, legacy, "whisper")
+}
+
+/// Muse has no per-engine `streaming_*` legacy fields; it always uses the
+/// shared `[streaming]` section, falling back to defaults.
+#[allow(dead_code)]
+fn sliding_window_config_from_muse(config: &Config) -> SlidingWindowConfig {
+    sliding_window_config(config, StreamingConfig::default(), "muse")
 }
 
 /// Build the sliding-window engine config from `[openvino]`'s deprecated

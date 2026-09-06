@@ -843,6 +843,12 @@ pub fn compiled_features() -> Vec<&'static str> {
     if cfg!(feature = "openvino-whisper") {
         f.push("openvino");
     }
+    // Muse Voice Transcribe is unconditional (like Soniox): its deps
+    // (tokio-tungstenite, reqwest, ureq) are non-optional, so it is always
+    // compiled in and must always be listed — otherwise the source-build
+    // engine validator spuriously warns about an engine that is actually
+    // compiled in (#383 pattern).
+    f.push("muse");
     // Meeting-mode capability: ML-based speaker diarization (ECAPA-TDNN).
     // When absent, meeting mode falls back to source-based attribution.
     if cfg!(feature = "ml-diarization") {

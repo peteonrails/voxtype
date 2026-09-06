@@ -12,9 +12,11 @@
 //! - [`visual`] — peak-hold decay, waveform envelope helpers, palette types.
 //! - [`config`] — `[osd]` config block (`OsdConfig`).
 //! - [`theme`] — Omarchy theme parsing + change watcher.
+//! - [`mic_wait`] — mic-readiness flag for the waiting state.
 
 pub mod config;
 pub mod ipc;
+pub mod mic_wait;
 pub mod style;
 pub mod supervisor;
 pub mod theme;

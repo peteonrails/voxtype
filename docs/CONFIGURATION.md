@@ -1800,6 +1800,178 @@ The Soniox backend pulls in a small WebSocket client (tokio-tungstenite + rustls
 
 ---
 
+## [muse]
+
+Configuration for the Muse Voice Transcribe engine (Meta Model API). This section is only used when `engine = "muse"`.
+
+Muse is Meta's streaming ASR model (80 ms audio chunks, speaker diarization, endpointing) available hosted-only through the Meta Model API as `muse-voice-transcribe-1.0`. Like Soniox, no model runs on your machine — audio streams to Meta's servers over WebSocket and transcripts stream back. See [Meta speech-to-text docs](https://dev.meta.ai/docs/speech-to-text).
+
+**Privacy:** Audio is sent to a third-party service. Use the local engines (Whisper, Parakeet, etc.) if you cannot send dictation off-device.
+
+### api_key
+
+**Type:** String (optional)
+**Default:** unset (falls back to `VOXTYPE_MUSE_API_KEY`, then `MUSE_API_KEY`, `META_API_KEY`, `META_MODEL_API_KEY`)
+**Required:** Yes (via this field or env var)
+
+Meta Model API key. Generate one at https://dev.meta.ai (a Muse subscription login alone is not enough — third-party clients need a Model API key, billed per audio minute).
+
+Prefer the env var so the key never lands in shell history or a checked-in config file:
+
+```bash
+export VOXTYPE_MUSE_API_KEY="your-key-here"
+```
+
+### model
+
+**Type:** String
+**Default:** `"muse-voice-transcribe-1.0"`
+**Required:** No
+
+Muse model identifier.
+
+### endpoint
+
+**Type:** String (optional)
+**Default:** `"https://api.meta.ai/v1"`
+**Required:** No
+
+Base REST endpoint override, used for testing or proxies. Batch transcription posts to `<endpoint>/asr/transcribe`.
+
+### ws_endpoint
+
+**Type:** String (optional)
+**Default:** derived from `endpoint` (`wss://api.meta.ai/v1/asr/realtime`)
+**Required:** No
+
+WebSocket streaming endpoint override. Only set this if Meta publishes a different realtime path.
+
+### streaming
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+- `true` — Native WebSocket session. Partials stream back during recording and are typed at the cursor as they arrive. **Requires `[hotkey] mode = "toggle"`** (same auto-promotion rule as Soniox: typing while a push-to-talk key is held clobbers libinput state on Hyprland/Sway/River).
+- `false` — Batch mode. Audio buffered while recording; on release one `POST <endpoint>/asr/transcribe` returns the transcript, typed in one shot. Push-to-talk compatible.
+
+In `PUSH_TO_TALK` mode the server emits the `Final` (`speechComplete`) only after voxtype sends `endStream` on release — finals arriving late is expected protocol behavior, not a stall. Cumulative partials already cover the text, so a `Final` with an empty delta is skipped rather than retyped.
+
+### interim_results
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Request interim (partial) results from the server. Only used when `streaming = true`.
+
+### diarization
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Request speaker diarization. Mapped to the server's `DIARIZATION` mode (default is `PUSH_TO_TALK`).
+
+### language
+
+**Type:** String (optional)
+**Default:** unset (auto-detect)
+**Required:** No
+
+Language hint (ISO 639-1, e.g. `"en"`). Mapped to the server's `languageBias`.
+
+### keywords
+
+**Type:** Array of strings (optional)
+**Default:** unset
+**Required:** No
+
+Vocabulary bias terms. Mapped 1:1 to the server's `keywords` array in the handshake.
+
+```toml
+[muse]
+keywords = ["Omarchy", "Hyprland"]
+```
+
+Use for proper names, brands, and technical terms spelled exactly as they should appear. Keep the list tight; biasing helps recognition but cannot conjure words the acoustic model never heard (Meta: "Biasing does not guarantee an exact spelling").
+
+### polish_command
+
+**Type:** String (optional)
+**Default:** unset (polish disabled)
+**Required:** No
+
+End-of-stream cleanup command. When set, the full stream transcript is piped through this shell command when the stream ends (stdin in, cleaned text on stdout — same contract as `[output.post_process]`) and the cleaned result replaces what was typed via a single `Replace`. This is where filler-word removal (`um`, `uh`), grammar, and casing fixes happen: the STT model itself transcribes faithfully, and in `PUSH_TO_TALK` it sends no turn-final event at all, so without this nothing ever revises disfluencies. Fail-open: on error, timeout, or empty output the raw transcript is kept.
+
+```toml
+[muse]
+polish_command = "python3 -c 'import json,sys,urllib.request,re; t=sys.stdin.read(); p=\"Clean up this voice dictation. Remove filler words (um, uh, ah). Fix punctuation and casing. If the dictation contains instructions about how to format or reword the text, such as all caps, lowercase, sounding more formal, or stage directions of any kind, apply them to the whole text and never transcribe the instruction words themselves. Respond with ONLY the cleaned text, no introduction or explanation. Text: \"+t; r=urllib.request.urlopen(urllib.request.Request(\"http://localhost:11434/api/generate\", data=json.dumps({\"model\":\"qwen2.5:3b\",\"prompt\":p,\"stream\":False}).encode(), headers={\"Content-Type\":\"application/json\"}), timeout=15); out=json.load(r)[\"response\"]; out=re.sub(r\"\\s+([.,!?;:])\", r\"\\1\", out); out=re.sub(r\"(?i)^\\s*(sure[.,!]\\s*)?here(?:\\x27s| is)\\s+the\\s+(?:cleaned(?:-up)?|polished)\\s+(?:text|transcript|result)\\s*[:.]\\s*\", \"\", out); sys.stdout.write(out.strip())'"
+```
+
+Recommended: a small local model via ollama's `/api/generate` HTTP endpoint (free, private, no extra API key). Measured ~0.6s per stream warm on CPU (a few seconds cold, right after ollama loads the model) while streaming stays instant. Use the API, not `ollama run`: the CLI renders streaming progress with cursor-movement escapes that leak into stdout (`TERM=dumb` does not fully prevent this) and would get typed into your text. Alternatives: `muse exec "..."` (same prompt, runs on your Muse subscription but takes 11-20s per turn) or `codex exec "..."` (~5s on a ChatGPT subscription).
+
+The example uses `qwen2.5:3b`, not the smaller 1.5B: the 1.5B model cleans well but ignores formatting directions (it drops `All caps.` as if it were filler), while the 3B follows them (`All caps. The golden age of software!` becomes `THE GOLDEN AGE OF SOFTWARE!`). The prompt grants open-ended direction-following rather than an allowlist, so any phrasing works; the only code around the model call is hygiene (strip `Sure. Here's the cleaned-up text:`-style preambles and stray spaces before punctuation). Open-ended rewording requests (e.g. `make this sound more formal`) are best-effort at this size: the model applies them partially.
+
+### polish_timeout_ms
+
+**Type:** Integer
+**Default:** `20000`
+**Required:** No
+
+Timeout for the polish command in milliseconds. The raw transcript is kept on timeout.
+
+### stop_drain_timeout_ms
+
+**Type:** Integer
+**Default:** `3000`
+**Required:** No
+
+Grace period after stop during which trailing server finals are still typed instead of discarded. Audio spoken just before the stop chord is still inside the server pipeline; without the drain those finals arrive after the session is disowned and are dropped, losing the last words. The wait ends early when the server closes the stream; a second stop while draining disowns immediately. Applies to Muse streaming sessions only.
+
+### Configuration Summary
+
+| Option | CLI Flag | Environment Variable | Default | Description |
+|--------|----------|---------------------|---------|-------------|
+| `api_key` | - | `VOXTYPE_MUSE_API_KEY` (also `MUSE_API_KEY`, `META_API_KEY`, `META_MODEL_API_KEY`) | none (required) | Meta Model API key |
+| `model` | - | - | `"muse-voice-transcribe-1.0"` | Muse model |
+| `endpoint` | - | - | `"https://api.meta.ai/v1"` | REST base endpoint |
+| `ws_endpoint` | - | - | derived `wss://.../asr/realtime` | WebSocket endpoint |
+| `streaming` | - | - | `true` | Native WebSocket vs batch-on-release |
+| `interim_results` | - | - | `true` | Request partial results |
+| `diarization` | - | - | `false` | Speaker diarization (`DIARIZATION` mode) |
+| `language` | - | - | none | Language hint (`languageBias`) |
+| `keywords` | - | - | none | Vocabulary bias terms (`keywords`) |
+| `polish_command` | - | - | none | End-of-turn cleanup command |
+| `polish_timeout_ms` | - | - | `20000` | Polish command timeout |
+| `stop_drain_timeout_ms` | - | - | `3000` | Trailing-finals grace period on stop |
+
+### Complete Example
+
+```toml
+engine = "muse"
+
+[hotkey]
+mode = "toggle"   # Required when [muse] streaming = true
+
+[muse]
+# api_key set via VOXTYPE_MUSE_API_KEY env var
+# streaming = true
+# language = "en"
+```
+
+### Building from Source
+
+Muse is built unconditionally; no Cargo feature flag is required:
+
+```bash
+cargo build --release
+```
+
+It reuses the same WebSocket (tokio-tungstenite) and HTTP (reqwest, ureq) clients as the Soniox backend.
+
+---
+
 ## [openvino]
 
 Configuration for the OpenVINO Whisper speech-to-text engine. This section is only used when `engine = "openvino"`. The x86_64 ONNX release binaries include the feature, and source builds can enable it with `--features openvino-whisper`. OpenVINO is loaded at runtime only when this engine is selected, so a missing runtime does not affect other engines.
@@ -3804,6 +3976,16 @@ voxtype setup --download --model medium.en
 
 The on-screen display has multiple frontend implementations. Pick which one
 the `voxtype-osd` wrapper launches via `[osd] frontend`.
+
+When a recording starts on a Bluetooth mic, the GTK4 frontend shows a
+dimmed "preparing mic..." waiting state until real samples arrive (the
+A2DP to HSP/HFP profile flip means ~700ms of digital silence first) or
+2.5 seconds pass, whichever comes first. Wired mics never show it. After
+you stop, the overlay stays up with a throbbing "polishing..." treatment
+while the end-of-turn cleanup runs, so the rewrite never lands on a dark
+screen. Both states are driven by runtime flags the daemon manages, so no
+configuration is needed. The Quickshell and native frontends do not render
+either state yet.
 
 ```toml
 [osd]

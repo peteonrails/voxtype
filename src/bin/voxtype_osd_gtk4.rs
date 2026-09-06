@@ -13,12 +13,17 @@
 //! window is hidden so the binary does no rendering work and consumes
 //! effectively zero CPU. It reappears when frames resume.
 //!
+//! While the daemon's mic-readiness flag is fresh (Bluetooth profile flip)
+//! and no real signal has arrived, the waveform renders a dimmed "preparing
+//! mic..." waiting state instead of the live envelope.
+//!
 //! Run with `RUST_LOG=debug` for verbose logs.
 
 use std::cell::Cell;
+use std::f64::consts::PI;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cairo::{Context, RectangleInt, Region};
 use clap::Parser;
@@ -31,6 +36,7 @@ use voxtype::audio::levels::{AudioFrame, FRAME_HZ};
 use voxtype::config::Config as VoxtypeConfig;
 use voxtype::osd::config::{OsdConfig, OsdPosition};
 use voxtype::osd::ipc::{resolve_socket_path, run_ipc_loop, FrameRing, DEFAULT_RING_DEPTH};
+use voxtype::osd::mic_wait;
 use voxtype::osd::theme::ThemeWatcher;
 use voxtype::osd::visual::{peak_meter_fraction, project_envelope, MeterZone, Palette, PeakHold};
 
@@ -152,6 +158,10 @@ struct SharedState {
     peak: Mutex<PeakHold>,
     last_seq: Mutex<u64>,
     last_frame_at: Mutex<Instant>,
+    /// mtime of the mic-waiting flag as of the last paint. Compared each
+    /// paint so a fresh flag resets the ring baseline (stale loud frames
+    /// must not suppress the waiting state).
+    wait_flag: Mutex<Option<SystemTime>>,
 }
 
 impl SharedState {
@@ -161,7 +171,68 @@ impl SharedState {
             peak: Mutex::new(PeakHold::new(decay_db_per_sec)),
             last_seq: Mutex::new(0),
             last_frame_at: Mutex::new(Instant::now() - Duration::from_secs(3600)),
+            wait_flag: Mutex::new(None),
         }
+    }
+}
+
+/// What the overlay shows instead of the live waveform.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Overlay {
+    Live,
+    /// Bluetooth mic not yet ready: dimmed "preparing mic...".
+    Waiting,
+    /// End-of-turn polish running: throbbing "polishing...".
+    Processing,
+}
+
+/// Overlay state for this paint. Processing wins over waiting (they never
+/// co-occur: the waiting flag is removed at stop, before polish starts).
+fn overlay_state(state: &Arc<SharedState>) -> Overlay {
+    if mic_wait::processing_active() {
+        return Overlay::Processing;
+    }
+    if mic_waiting(state) {
+        Overlay::Waiting
+    } else {
+        Overlay::Live
+    }
+}
+
+/// Mic-waiting state for this paint: true while the daemon's Bluetooth
+/// readiness flag is fresh and no frame above the silence floor arrived
+/// after the flag. Has no effect without the flag (wired mics).
+fn mic_waiting(state: &Arc<SharedState>) -> bool {
+    let mtime = match mic_wait::flag_mtime() {
+        Some(t) => t,
+        None => {
+            if let Ok(mut seen) = state.wait_flag.lock() {
+                *seen = None;
+            }
+            return false;
+        }
+    };
+    let fresh = mtime
+        .elapsed()
+        .map(|d| d.as_secs_f32() < mic_wait::WAIT_CAP_SECS)
+        .unwrap_or(false);
+    if !fresh {
+        if let Ok(mut seen) = state.wait_flag.lock() {
+            *seen = None;
+        }
+        return false;
+    }
+    if let Ok(mut seen) = state.wait_flag.lock() {
+        if *seen != Some(mtime) {
+            *seen = Some(mtime);
+            if let Ok(mut r) = state.ring.lock() {
+                r.clear();
+            }
+        }
+    }
+    match state.ring.lock() {
+        Ok(r) => r.iter().all(|f| f.peak_dbfs < mic_wait::SILENCE_DBFS),
+        Err(_) => false,
     }
 }
 
@@ -415,7 +486,15 @@ fn build_window(app: &Application, cfg: &OsdConfig, palette: Palette, state: Arc
     let state_for_draw = state.clone();
     let gain = cfg.waveform_gain as f64;
     drawing_area.set_draw_func(move |_area, cr, w, h| {
-        draw(cr, w, h, &palette, &state_for_draw, gain);
+        draw(
+            cr,
+            w,
+            h,
+            &palette,
+            &state_for_draw,
+            gain,
+            overlay_state(&state_for_draw),
+        );
     });
     window.set_child(Some(&drawing_area));
 
@@ -511,6 +590,9 @@ fn apply_click_through(window: &ApplicationWindow) {
 }
 
 /// Render the waveform + peak meter into the given Cairo context.
+/// Non-`Live` overlays replace the waveform area: [`Overlay::Waiting`]
+/// shows a dimmed "preparing mic...", [`Overlay::Processing`] a throbbing
+/// "polishing...".
 fn draw(
     cr: &Context,
     width: i32,
@@ -518,6 +600,7 @@ fn draw(
     palette: &Palette,
     state: &Arc<SharedState>,
     gain: f64,
+    overlay: Overlay,
 ) {
     let w = width as f64;
     let h = height as f64;
@@ -542,10 +625,20 @@ fn draw(
     let gap = (w * 0.01).max(2.0);
     let wave_width = (w - meter_width - gap).max(0.0);
 
-    draw_waveform(cr, 0.0, 0.0, wave_width, h, palette, state, gain);
-    draw_peak_meter(cr, wave_width + gap, 0.0, meter_width, h, palette, state);
+    draw_waveform(cr, 0.0, 0.0, wave_width, h, palette, state, gain, overlay);
+    draw_peak_meter(
+        cr,
+        wave_width + gap,
+        0.0,
+        meter_width,
+        h,
+        palette,
+        state,
+        overlay,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_waveform(
     cr: &Context,
     x: f64,
@@ -555,9 +648,27 @@ fn draw_waveform(
     palette: &Palette,
     state: &Arc<SharedState>,
     gain: f64,
+    overlay: Overlay,
 ) {
     if w < 1.0 {
         return;
+    }
+    match overlay {
+        Overlay::Live => {}
+        Overlay::Waiting => {
+            draw_waiting(cr, x, y, w, h, palette, "preparing mic...", 0.75);
+            return;
+        }
+        Overlay::Processing => {
+            // 1.5 Hz throb while the rewrite is being computed.
+            let phase = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| (d.as_millis() % 1000) as f64 / 1000.0)
+                .unwrap_or(0.0);
+            let alpha = 0.45 + 0.35 * (2.0 * PI * 1.5 * phase).sin();
+            draw_waiting(cr, x, y, w, h, palette, "polishing...", alpha);
+            return;
+        }
     }
     let n_columns = w.floor() as usize;
     if n_columns == 0 {
@@ -622,6 +733,50 @@ fn sample_to_pixels(sample: f32, half_height: f64, gain: f64) -> f64 {
     s * half_height
 }
 
+/// Waiting/working treatment: flat dimmed centerline plus a centered
+/// label instead of the live envelope.
+#[allow(clippy::too_many_arguments)]
+fn draw_waiting(
+    cr: &Context,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    palette: &Palette,
+    label: &str,
+    alpha: f64,
+) {
+    let mid = y + h * 0.5;
+    cr.set_source_rgba(
+        palette.foreground.r as f64,
+        palette.foreground.g as f64,
+        palette.foreground.b as f64,
+        0.25,
+    );
+    cr.set_line_width(1.0);
+    cr.move_to(x, mid);
+    cr.line_to(x + w, mid);
+    cr.stroke().ok();
+
+    cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+    cr.set_font_size(13.0);
+    cr.set_source_rgba(
+        palette.foreground.r as f64,
+        palette.foreground.g as f64,
+        palette.foreground.b as f64,
+        alpha,
+    );
+    if let Ok(ext) = cr.text_extents(label) {
+        let tx = x + (w - ext.width()) / 2.0 - ext.x_bearing();
+        let ty = mid - (ext.height() / 2.0 + ext.y_bearing());
+        cr.move_to(tx, ty);
+    } else {
+        cr.move_to(x + 8.0, mid - 5.0);
+    }
+    cr.show_text(label).ok();
+}
+
+#[allow(clippy::too_many_arguments)]
 fn draw_peak_meter(
     cr: &Context,
     x: f64,
@@ -630,8 +785,13 @@ fn draw_peak_meter(
     h: f64,
     palette: &Palette,
     state: &Arc<SharedState>,
+    overlay: Overlay,
 ) {
     if w < 1.0 || h < 1.0 {
+        return;
+    }
+    if overlay != Overlay::Live {
+        // Meter stays empty (background only) for waiting/working states.
         return;
     }
 

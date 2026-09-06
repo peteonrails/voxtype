@@ -5,7 +5,7 @@
 
 use crate::audio::feedback::{AudioFeedback, SoundEvent};
 use crate::audio::{self, AudioCapture};
-use crate::config::{ActivationMode, Config, FileMode, OutputMode};
+use crate::config::{ActivationMode, Config, FileMode, OutputMode, PostProcessConfig};
 use crate::eager::{self, EagerConfig};
 use crate::error::Result;
 #[cfg(target_os = "linux")]
@@ -821,6 +821,12 @@ pub struct Daemon {
     /// streaming session is draining server-side after the mic stopped.
     /// Aborted in `end_streaming`.
     streaming_drain_pump: Option<tokio::task::JoinHandle<()>>,
+    /// Deadline until which a stopped Muse streaming session keeps its
+    /// typing surface so trailing server finals are typed instead of
+    /// discarded (grace-period drain). Set on stop, cleared on `Ended`,
+    /// new session start, or cancel. Expiry disowns the session via
+    /// `disown_streaming_session`.
+    stream_drain_until: Option<Instant>,
     /// OSD child supervisor task. Holds the JoinHandle so dropping it (on
     /// daemon shutdown) kill_on_drop's the spawned voxtype-osd process.
     osd_supervisor_task: Option<tokio::task::JoinHandle<()>>,
@@ -872,6 +878,43 @@ pub struct Daemon {
     // so the next duck/restore can serialize against it; see
     // `duck_media_streams` for why capturing originals mid-fade is unsafe.
     media_fade_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Diff a polished transcript against the raw transcript that was typed,
+/// for the Muse end-of-stream polish step. Returns `None` when the polish
+/// changed nothing (skip the replace), otherwise `(backspace, revised)` where
+/// `backspace` counts Unicode scalars to delete and `revised` is the suffix
+/// to type. Common-prefix keeps the churn minimal.
+fn muse_polish_diff(raw: &str, cleaned: &str) -> Option<(usize, String)> {
+    if cleaned == raw {
+        return None;
+    }
+    let common: usize = raw
+        .chars()
+        .zip(cleaned.chars())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let backspace = raw.chars().count() - common;
+    let revised: String = cleaned.chars().skip(common).collect();
+    Some((backspace, revised))
+}
+
+/// Best-effort check: is PipeWire's default source a Bluetooth mic?
+/// Used to gate the OSD mic-waiting flag. Fail-open (false) on missing
+/// pactl, timeout, or parse failure so recording never waits on it.
+async fn default_source_is_bluetooth() -> bool {
+    let probe = tokio::process::Command::new("pactl")
+        .arg("get-default-source")
+        .output();
+    let Ok(out) = tokio::time::timeout(Duration::from_millis(500), probe).await else {
+        return false;
+    };
+    match out {
+        Ok(o) if o.status.success() => {
+            crate::osd::mic_wait::is_bluetooth_source(&String::from_utf8_lossy(&o.stdout))
+        }
+        _ => false,
+    }
 }
 
 impl Daemon {
@@ -964,6 +1007,7 @@ impl Daemon {
             silence_tracker: None,
             is_external_trigger: false,
             streaming_drain_pump: None,
+            stream_drain_until: None,
             osd_supervisor_task: None,
             model_manager: None,
             model_load_task: None,
@@ -1158,6 +1202,9 @@ impl Daemon {
                     if let Some(handle) = handle {
                         self.level_emitter_task = Some(handle);
                     }
+                    if self.level_hub.is_some() {
+                        self.update_mic_waiting_flag().await;
+                    }
                     Ok(capture)
                 }
                 Err(e) => {
@@ -1278,6 +1325,9 @@ impl Daemon {
 
         *audio_capture = Some(capture);
         *streaming_handle = Some(handle);
+        // A previous session may still be inside its stop drain; the new
+        // session replaces it, so the stale deadline must not disown this one.
+        self.stream_drain_until = None;
         *streaming_session = Some(StreamingSession::new());
         *streaming_chain = Some(output::create_output_chain(&self.config.output));
         *state = State::Streaming {
@@ -1383,14 +1433,29 @@ impl Daemon {
             }
             self.stop_streaming_capture(audio_capture).await;
             if !file_output {
-                // Drop the typing surface synchronously so any
-                // Final/Partial events the backend emits while
-                // draining its internal buffer reach the event-pump
-                // arm with `streaming_session = None` and get
-                // discarded instead of typed into whatever window
-                // has focus by then.
-                *streaming_session = None;
-                *streaming_chain = None;
+                let is_muse = self.config.engine == crate::config::TranscriptionEngine::Muse;
+                if is_muse && self.stream_drain_until.is_none() {
+                    // Grace-period drain: keep the typing surface so
+                    // trailing Finals for audio sent before the stop are
+                    // typed instead of discarded. The backend already got
+                    // endStream (its input closed with the pump); `Ended`
+                    // or the deadline below ends the drain. A second stop
+                    // while draining disowns immediately.
+                    let ms = self
+                        .config
+                        .muse
+                        .as_ref()
+                        .map(|c| c.stop_drain_timeout_ms)
+                        .unwrap_or(crate::config::DEFAULT_STOP_DRAIN_TIMEOUT_MS);
+                    self.stream_drain_until = Some(Instant::now() + Duration::from_millis(ms));
+                    tracing::info!(
+                        "Streaming stop: draining trailing finals for up to {}ms",
+                        ms
+                    );
+                } else {
+                    self.disown_streaming_session(streaming_session, streaming_chain)
+                        .await;
+                }
             }
         } else if let State::Recording { model_override, .. } = &*state {
             let model_override = model_override.clone();
@@ -1504,10 +1569,114 @@ impl Daemon {
     async fn stop_streaming_capture(&mut self, audio_capture: &mut Option<Box<dyn AudioCapture>>) {
         self.cut_streaming_audio();
         self.start_streaming_drain_pump();
+        // Frames stop here (or switch to the drain pump's silence), so any
+        // mic-waiting state ends with the recording. Covers every streaming
+        // stop path: explicit stop, silence timeout, max duration, cancel.
+        crate::osd::mic_wait::clear_waiting();
         if let Some(mut c) = audio_capture.take() {
             let _ = c.stop().await;
         }
         self.restore_recording_media();
+    }
+
+    /// Arm or clear the OSD mic-waiting flag for a recording that just
+    /// started capturing. Bluetooth sources get the flag (profile flip
+    /// means ~700ms of digital silence first); anything else clears a
+    /// stale flag. Fail-open: any probe failure behaves like a wired mic.
+    async fn update_mic_waiting_flag(&self) {
+        if default_source_is_bluetooth().await {
+            crate::osd::mic_wait::mark_waiting();
+            tracing::info!("Bluetooth mic source; OSD waiting state armed");
+        } else {
+            crate::osd::mic_wait::clear_waiting();
+        }
+    }
+
+    /// Muse end-of-stream polish: when `[muse] polish_command` is set, run
+    /// the stream's full transcript through it and replace what was typed
+    /// with the cleaned result. The STT server never revises disfluencies
+    /// itself, and in PUSH_TO_TALK it sends no turn-final event at all
+    /// (just cumulative partials, then close) — so stream end is the only
+    /// reliable "full context available" point. Fail-open: without a
+    /// command, or on error/timeout/empty output, the raw transcript stands
+    /// as typed. Safe to call with an already-disowned (`None`) session.
+    async fn polish_streaming_session(
+        &self,
+        streaming_session: &mut Option<StreamingSession>,
+        streaming_chain: &Option<Vec<Box<dyn TextOutput>>>,
+    ) {
+        if self.config.engine != crate::config::TranscriptionEngine::Muse {
+            return;
+        }
+        let Some(muse_cfg) = self.config.muse.as_ref() else {
+            return;
+        };
+        let Some(cmd) = muse_cfg
+            .polish_command
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+        else {
+            return;
+        };
+        if let (Some(s), Some(chain)) = (streaming_session.as_mut(), streaming_chain.as_ref()) {
+            s.finalize_pending_partial();
+            let raw = s.finalized_text().to_string();
+            if !raw.trim().is_empty() {
+                let pp = PostProcessor::new(&PostProcessConfig {
+                    command: cmd,
+                    timeout_ms: muse_cfg.polish_timeout_ms,
+                    trim: true,
+                    fallback_on_empty: true,
+                });
+                let start = std::time::Instant::now();
+                // Signal the OSD working state around the subprocess: the
+                // drain pump keeps frames flowing through polish, so the
+                // overlay stays up with a throb instead of going dark
+                // before the rewrite lands.
+                crate::osd::mic_wait::mark_processing();
+                let cleaned = pp.process(&raw).await;
+                crate::osd::mic_wait::clear_processing();
+                if let Some((backspace, revised)) = muse_polish_diff(&raw, &cleaned) {
+                    if let Err(e) = s
+                        .replace_and_commit(
+                            chain,
+                            backspace,
+                            &revised,
+                            self.config.output.pre_output_command.as_deref(),
+                            self.config.output.post_output_command.as_deref(),
+                        )
+                        .await
+                    {
+                        tracing::warn!("Muse polish replace failed: {}", e);
+                    } else {
+                        tracing::info!(
+                            "Muse polish: {} -> {} chars in {:.1}s",
+                            raw.chars().count(),
+                            cleaned.chars().count(),
+                            start.elapsed().as_secs_f32(),
+                        );
+                    }
+                } else {
+                    tracing::debug!("Muse polish: no changes");
+                }
+            }
+        }
+    }
+
+    /// Disown the streaming typing surface immediately: take the session
+    /// (so post-stop backend flush events are discarded instead of typed
+    /// into whatever window has focus), run the Muse end-of-stream polish
+    /// on the accumulated transcript, and drop the chain. Used on stop
+    /// paths that don't drain, and when a grace-period drain expires.
+    async fn disown_streaming_session(
+        &mut self,
+        streaming_session: &mut Option<StreamingSession>,
+        streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
+    ) {
+        let mut owned_session = streaming_session.take();
+        self.polish_streaming_session(&mut owned_session, streaming_chain)
+            .await;
+        *streaming_chain = None;
     }
 
     async fn end_streaming(
@@ -1518,6 +1687,9 @@ impl Daemon {
         streaming_session: &mut Option<StreamingSession>,
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
     ) {
+        // The backend closed: any grace-period drain is over regardless of
+        // whether the deadline was reached.
+        self.stream_drain_until = None;
         if let Some(mut c) = audio_capture.take() {
             let _ = c.stop().await;
         }
@@ -1527,7 +1699,6 @@ impl Daemon {
             // completed. We drop events implicitly here.
             let _ = h.task.await;
         }
-        self.stop_streaming_drain_pump();
 
         // File-output sessions (`--file=path`) never typed anything as
         // they went — see the event pump's `file_output` branch — so the
@@ -1580,11 +1751,25 @@ impl Daemon {
 
             *state = State::Idle;
             self.update_state("idle");
+            self.stop_streaming_drain_pump();
             return;
         }
 
+        // Muse end-of-stream polish (live path only); see
+        // `polish_streaming_session` for the rationale. The drain pump
+        // keeps feeding silence frames through polish so the OSD stays up
+        // (showing the processing throb) instead of hiding before the
+        // rewrite lands; it stops here, after the typing is done. Restart
+        // it first: the normal flow already runs it (started at stop), but
+        // the backend-error path arrives here with no pump, and starting
+        // is a no-op when one runs.
+        self.start_streaming_drain_pump();
+        self.polish_streaming_session(streaming_session, streaming_chain)
+            .await;
+
         *streaming_session = None;
         *streaming_chain = None;
+        self.stop_streaming_drain_pump();
 
         self.play_feedback(SoundEvent::TranscriptionComplete);
 
@@ -1629,6 +1814,7 @@ impl Daemon {
             }
         }
         self.stop_streaming_drain_pump();
+        self.stream_drain_until = None;
         *streaming_session = None;
         *streaming_chain = None;
 
@@ -1717,6 +1903,9 @@ impl Daemon {
                         })
                     };
                     self.level_emitter_task = Some(handle);
+                    if self.level_hub.is_some() {
+                        self.update_mic_waiting_flag().await;
+                    }
                     Ok((capture, streaming_rx))
                 }
                 Err(e) => {
@@ -1779,7 +1968,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Muse => {
                     if let Some(ref t) = transcriber_preloaded {
                         Ok(t.clone())
                     } else {
@@ -3005,6 +3195,9 @@ impl Daemon {
         Config::ensure_directories().map_err(|e| {
             crate::error::VoxtypeError::Config(format!("Failed to create directories: {}", e))
         })?;
+        // Drop a stale mic-waiting flag (e.g. crash mid-recording); the OSD
+        // also expires it by age, but a clean start shouldn't show waiting.
+        crate::osd::mic_wait::clear_waiting();
 
         // Start the audio-level broadcaster for the OSD. Failure to bind
         // the socket is not fatal: the daemon still runs without an OSD
@@ -3201,8 +3394,9 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
-                    // Non-Whisper engines do their own setup; Soniox just validates
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Muse => {
+                    // Non-Whisper engines do their own setup; Soniox/Muse just validate
                     // API key + endpoint at construction (no model to download).
                     transcriber_preloaded = Some(Arc::from(crate::transcribe::create_transcriber(
                         &self.config,
@@ -3322,7 +3516,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Muse => {
                                             let config = self.config.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                                 crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -3353,7 +3548,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Muse => {
                                             if let Some(ref t) = transcriber_preloaded {
                                                 let transcriber = t.clone();
                                                 tokio::task::spawn_blocking(move || {
@@ -3536,7 +3732,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Muse => {
                                             let config = self.config.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                                 crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -3567,7 +3764,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Muse => {
                                             if let Some(ref t) = transcriber_preloaded {
                                                 let transcriber = t.clone();
                                                 tokio::task::spawn_blocking(move || {
@@ -3787,6 +3985,25 @@ impl Daemon {
 
                 // Check for recording timeout and cancel requests
                 _ = tokio::time::sleep(Duration::from_millis(100)), if state.is_recording() => {
+                    // Grace-period drain expiry: stop waiting for trailing
+                    // finals and disown the session (the immediate-stop
+                    // behavior). `Ended` arriving first ends the drain via
+                    // `end_streaming` instead.
+                    if let Some(deadline) = self.stream_drain_until {
+                        if Instant::now() >= deadline {
+                            self.stream_drain_until = None;
+                            if state.is_streaming() {
+                                tracing::info!(
+                                    "Streaming drain expired; disowning session"
+                                );
+                                self.disown_streaming_session(
+                                    &mut streaming_session,
+                                    &mut streaming_chain,
+                                )
+                                .await;
+                            }
+                        }
+                    }
                     // Check for cancel request first
                     if check_cancel_requested() {
                         tracing::info!("Recording cancelled");
@@ -4058,7 +4275,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Muse => {
                                     let config = self.config.clone();
                                     self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                         crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -4088,7 +4306,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Muse => {
                                     if let Some(ref t) = transcriber_preloaded {
                                         let transcriber = t.clone();
                                         tokio::task::spawn_blocking(move || {
@@ -4614,6 +4833,30 @@ mod tests {
         // We can't easily mock Config::runtime_dir(), so we test the file operations
         // directly using the same logic as the functions under test
         f(runtime_dir)
+    }
+
+    #[test]
+    fn muse_polish_diff_skips_identical_text() {
+        assert_eq!(muse_polish_diff("hello", "hello"), None);
+    }
+
+    #[test]
+    fn muse_polish_diff_backspaces_only_the_divergent_tail() {
+        // Filler removal at the front: whole typed tail goes, cleaned comes in.
+        assert_eq!(
+            muse_polish_diff("um hello world", "Hello world."),
+            Some((14, "Hello world.".to_string()))
+        );
+        // Pure append: nothing to delete.
+        assert_eq!(
+            muse_polish_diff("hello world", "hello world."),
+            Some((0, ".".to_string()))
+        );
+        // Unicode scalars, not bytes.
+        assert_eq!(
+            muse_polish_diff("caf\u{e9} um", "caf\u{e9}"),
+            Some((3, "".to_string()))
+        );
     }
 
     #[test]
