@@ -3975,6 +3975,16 @@ voxtype setup --download --model medium.en
 The on-screen display has multiple frontend implementations. Pick which one
 the `voxtype-osd` wrapper launches via `[osd] frontend`.
 
+When a recording starts on a Bluetooth mic, the GTK4 frontend shows a
+dimmed "preparing mic..." waiting state until real samples arrive (the
+A2DP to HSP/HFP profile flip means ~700ms of digital silence first) or
+2.5 seconds pass, whichever comes first. Wired mics never show it. After
+you stop, the overlay stays up with a throbbing "polishing..." treatment
+while the end-of-turn cleanup runs, so the rewrite never lands on a dark
+screen. Both states are driven by runtime flags the daemon manages, so no
+configuration is needed. The Quickshell and native frontends do not render
+either state yet.
+
 ```toml
 [osd]
 frontend = "gtk4"           # Default. Uses voxtype-osd-gtk4.

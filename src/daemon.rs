@@ -899,6 +899,24 @@ fn muse_polish_diff(raw: &str, cleaned: &str) -> Option<(usize, String)> {
     Some((backspace, revised))
 }
 
+/// Best-effort check: is PipeWire's default source a Bluetooth mic?
+/// Used to gate the OSD mic-waiting flag. Fail-open (false) on missing
+/// pactl, timeout, or parse failure so recording never waits on it.
+async fn default_source_is_bluetooth() -> bool {
+    let probe = tokio::process::Command::new("pactl")
+        .arg("get-default-source")
+        .output();
+    let Ok(out) = tokio::time::timeout(Duration::from_millis(500), probe).await else {
+        return false;
+    };
+    match out {
+        Ok(o) if o.status.success() => {
+            crate::osd::mic_wait::is_bluetooth_source(&String::from_utf8_lossy(&o.stdout))
+        }
+        _ => false,
+    }
+}
+
 impl Daemon {
     /// Create a new daemon with the given configuration
     pub fn new(config: Config, config_path: Option<PathBuf>) -> Self {
@@ -1183,6 +1201,9 @@ impl Daemon {
                     };
                     if let Some(handle) = handle {
                         self.level_emitter_task = Some(handle);
+                    }
+                    if self.level_hub.is_some() {
+                        self.update_mic_waiting_flag().await;
                     }
                     Ok(capture)
                 }
@@ -1548,10 +1569,27 @@ impl Daemon {
     async fn stop_streaming_capture(&mut self, audio_capture: &mut Option<Box<dyn AudioCapture>>) {
         self.cut_streaming_audio();
         self.start_streaming_drain_pump();
+        // Frames stop here (or switch to the drain pump's silence), so any
+        // mic-waiting state ends with the recording. Covers every streaming
+        // stop path: explicit stop, silence timeout, max duration, cancel.
+        crate::osd::mic_wait::clear_waiting();
         if let Some(mut c) = audio_capture.take() {
             let _ = c.stop().await;
         }
         self.restore_recording_media();
+    }
+
+    /// Arm or clear the OSD mic-waiting flag for a recording that just
+    /// started capturing. Bluetooth sources get the flag (profile flip
+    /// means ~700ms of digital silence first); anything else clears a
+    /// stale flag. Fail-open: any probe failure behaves like a wired mic.
+    async fn update_mic_waiting_flag(&self) {
+        if default_source_is_bluetooth().await {
+            crate::osd::mic_wait::mark_waiting();
+            tracing::info!("Bluetooth mic source; OSD waiting state armed");
+        } else {
+            crate::osd::mic_wait::clear_waiting();
+        }
     }
 
     /// Muse end-of-stream polish: when `[muse] polish_command` is set, run
@@ -1591,7 +1629,13 @@ impl Daemon {
                     fallback_on_empty: true,
                 });
                 let start = std::time::Instant::now();
+                // Signal the OSD working state around the subprocess: the
+                // drain pump keeps frames flowing through polish, so the
+                // overlay stays up with a throb instead of going dark
+                // before the rewrite lands.
+                crate::osd::mic_wait::mark_processing();
                 let cleaned = pp.process(&raw).await;
+                crate::osd::mic_wait::clear_processing();
                 if let Some((backspace, revised)) = muse_polish_diff(&raw, &cleaned) {
                     if let Err(e) = s
                         .replace_and_commit(
@@ -1859,6 +1903,9 @@ impl Daemon {
                         })
                     };
                     self.level_emitter_task = Some(handle);
+                    if self.level_hub.is_some() {
+                        self.update_mic_waiting_flag().await;
+                    }
                     Ok((capture, streaming_rx))
                 }
                 Err(e) => {
@@ -3148,6 +3195,9 @@ impl Daemon {
         Config::ensure_directories().map_err(|e| {
             crate::error::VoxtypeError::Config(format!("Failed to create directories: {}", e))
         })?;
+        // Drop a stale mic-waiting flag (e.g. crash mid-recording); the OSD
+        // also expires it by age, but a clean start shouldn't show waiting.
+        crate::osd::mic_wait::clear_waiting();
 
         // Start the audio-level broadcaster for the OSD. Failure to bind
         // the socket is not fatal: the daemon still runs without an OSD
