@@ -1896,6 +1896,14 @@ keywords = ["Omarchy", "Hyprland"]
 
 Use for proper names, brands, and technical terms spelled exactly as they should appear. Keep the list tight; biasing helps recognition but cannot conjure words the acoustic model never heard (Meta: "Biasing does not guarantee an exact spelling").
 
+### stop_drain_timeout_ms
+
+**Type:** Integer
+**Default:** `3000`
+**Required:** No
+
+Grace period after stop during which trailing server finals are still typed instead of discarded. Audio spoken just before the stop chord is still inside the server pipeline; without the drain those finals arrive after the session is disowned and are dropped, losing the last words. The wait ends early when the server closes the stream; a second stop while draining disowns immediately. Applies to Muse streaming sessions only.
+
 ### Configuration Summary
 
 | Option | CLI Flag | Environment Variable | Default | Description |
@@ -1909,6 +1917,7 @@ Use for proper names, brands, and technical terms spelled exactly as they should
 | `diarization` | - | - | `false` | Speaker diarization (`DIARIZATION` mode) |
 | `language` | - | - | none | Language hint (`languageBias`) |
 | `keywords` | - | - | none | Vocabulary bias terms (`keywords`) |
+| `stop_drain_timeout_ms` | - | - | `3000` | Trailing-finals grace period on stop |
 
 ### Complete Example
 
@@ -3938,16 +3947,6 @@ voxtype setup --download --model medium.en
 
 The on-screen display has multiple frontend implementations. Pick which one
 the `voxtype-osd` wrapper launches via `[osd] frontend`.
-
-When a recording starts on a Bluetooth mic, the GTK4 frontend shows a
-dimmed "preparing mic..." waiting state until real samples arrive (the
-A2DP to HSP/HFP profile flip means ~700ms of digital silence first) or
-2.5 seconds pass, whichever comes first. Wired mics never show it. After
-you stop, the overlay stays up with a throbbing "polishing..." treatment
-while the end-of-turn cleanup runs, so the rewrite never lands on a dark
-screen. Both states are driven by runtime flags the daemon manages, so no
-configuration is needed. The Quickshell and native frontends do not render
-either state yet.
 
 ```toml
 [osd]

@@ -67,9 +67,15 @@ pub struct MuseConfig {
     pub polish_command: Option<String>,
 
     /// Timeout for the polish command in milliseconds.
-    /// Read by the daemon's end-of-stream polish step when configured.
     #[serde(default = "default_polish_timeout")]
     pub polish_timeout_ms: u64,
+
+    /// Grace period after stop during which trailing server finals are
+    /// still typed instead of discarded. The backend already got endStream
+    /// when the mic stopped; this only bounds how long the session waits
+    /// for the server to flush before disowning it.
+    #[serde(default = "default_stop_drain_timeout")]
+    pub stop_drain_timeout_ms: u64,
 }
 
 /// Default grace period for the stop drain (see `stop_drain_timeout_ms`).
@@ -87,6 +93,10 @@ fn default_polish_timeout() -> u64 {
     20000 // 20 seconds — one cheap-model call per turn, fail-open on timeout
 }
 
+fn default_stop_drain_timeout() -> u64 {
+    DEFAULT_STOP_DRAIN_TIMEOUT_MS
+}
+
 impl Default for MuseConfig {
     fn default() -> Self {
         Self {
@@ -101,6 +111,7 @@ impl Default for MuseConfig {
             keywords: None,
             polish_command: None,
             polish_timeout_ms: default_polish_timeout(),
+            stop_drain_timeout_ms: default_stop_drain_timeout(),
         }
     }
 }
@@ -169,6 +180,16 @@ mod tests {
         let cfg: MuseConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.api_key.as_deref(), Some("sk_test"));
         assert!(cfg.streaming);
+    }
+
+    #[test]
+    fn stop_drain_timeout_defaults_and_parses() {
+        assert_eq!(
+            MuseConfig::default().stop_drain_timeout_ms,
+            DEFAULT_STOP_DRAIN_TIMEOUT_MS
+        );
+        let cfg: MuseConfig = toml::from_str("stop_drain_timeout_ms = 1500").unwrap();
+        assert_eq!(cfg.stop_drain_timeout_ms, 1500);
     }
 
     #[test]

@@ -821,6 +821,12 @@ pub struct Daemon {
     /// streaming session is draining server-side after the mic stopped.
     /// Aborted in `end_streaming`.
     streaming_drain_pump: Option<tokio::task::JoinHandle<()>>,
+    /// Deadline until which a stopped Muse streaming session keeps its
+    /// typing surface so trailing server finals are typed instead of
+    /// discarded (grace-period drain). Set on stop, cleared on `Ended`,
+    /// new session start, or cancel. Expiry disowns the session via
+    /// `disown_streaming_session`.
+    stream_drain_until: Option<Instant>,
     /// OSD child supervisor task. Holds the JoinHandle so dropping it (on
     /// daemon shutdown) kill_on_drop's the spawned voxtype-osd process.
     osd_supervisor_task: Option<tokio::task::JoinHandle<()>>,
@@ -964,6 +970,7 @@ impl Daemon {
             silence_tracker: None,
             is_external_trigger: false,
             streaming_drain_pump: None,
+            stream_drain_until: None,
             osd_supervisor_task: None,
             model_manager: None,
             model_load_task: None,
@@ -1278,6 +1285,9 @@ impl Daemon {
 
         *audio_capture = Some(capture);
         *streaming_handle = Some(handle);
+        // A previous session may still be inside its stop drain; the new
+        // session replaces it, so the stale deadline must not disown this one.
+        self.stream_drain_until = None;
         *streaming_session = Some(StreamingSession::new());
         *streaming_chain = Some(output::create_output_chain(&self.config.output));
         *state = State::Streaming {
@@ -1383,14 +1393,29 @@ impl Daemon {
             }
             self.stop_streaming_capture(audio_capture).await;
             if !file_output {
-                // Drop the typing surface synchronously so any
-                // Final/Partial events the backend emits while
-                // draining its internal buffer reach the event-pump
-                // arm with `streaming_session = None` and get
-                // discarded instead of typed into whatever window
-                // has focus by then.
-                *streaming_session = None;
-                *streaming_chain = None;
+                let is_muse = self.config.engine == crate::config::TranscriptionEngine::Muse;
+                if is_muse && self.stream_drain_until.is_none() {
+                    // Grace-period drain: keep the typing surface so
+                    // trailing Finals for audio sent before the stop are
+                    // typed instead of discarded. The backend already got
+                    // endStream (its input closed with the pump); `Ended`
+                    // or the deadline below ends the drain. A second stop
+                    // while draining disowns immediately.
+                    let ms = self
+                        .config
+                        .muse
+                        .as_ref()
+                        .map(|c| c.stop_drain_timeout_ms)
+                        .unwrap_or(crate::config::DEFAULT_STOP_DRAIN_TIMEOUT_MS);
+                    self.stream_drain_until = Some(Instant::now() + Duration::from_millis(ms));
+                    tracing::info!(
+                        "Streaming stop: draining trailing finals for up to {}ms",
+                        ms
+                    );
+                } else {
+                    self.disown_streaming_session(streaming_session, streaming_chain)
+                        .await;
+                }
             }
         } else if let State::Recording { model_override, .. } = &*state {
             let model_override = model_override.clone();
@@ -1510,6 +1535,19 @@ impl Daemon {
         self.restore_recording_media();
     }
 
+    /// Disown the streaming typing surface immediately: take the session
+    /// (so post-stop backend flush events are discarded instead of typed
+    /// into whatever window has focus) and drop the chain. Used on stop
+    /// paths that do not drain, and when a grace-period drain expires.
+    async fn disown_streaming_session(
+        &mut self,
+        streaming_session: &mut Option<StreamingSession>,
+        streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
+    ) {
+        let _owned_session = streaming_session.take();
+        *streaming_chain = None;
+    }
+
     async fn end_streaming(
         &mut self,
         state: &mut State,
@@ -1518,6 +1556,9 @@ impl Daemon {
         streaming_session: &mut Option<StreamingSession>,
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
     ) {
+        // The backend closed: any grace-period drain is over regardless of
+        // whether the deadline was reached.
+        self.stream_drain_until = None;
         if let Some(mut c) = audio_capture.take() {
             let _ = c.stop().await;
         }
@@ -1629,6 +1670,7 @@ impl Daemon {
             }
         }
         self.stop_streaming_drain_pump();
+        self.stream_drain_until = None;
         *streaming_session = None;
         *streaming_chain = None;
 
@@ -3793,6 +3835,25 @@ impl Daemon {
 
                 // Check for recording timeout and cancel requests
                 _ = tokio::time::sleep(Duration::from_millis(100)), if state.is_recording() => {
+                    // Grace-period drain expiry: stop waiting for trailing
+                    // finals and disown the session (the immediate-stop
+                    // behavior). `Ended` arriving first ends the drain via
+                    // `end_streaming` instead.
+                    if let Some(deadline) = self.stream_drain_until {
+                        if Instant::now() >= deadline {
+                            self.stream_drain_until = None;
+                            if state.is_streaming() {
+                                tracing::info!(
+                                    "Streaming drain expired; disowning session"
+                                );
+                                self.disown_streaming_session(
+                                    &mut streaming_session,
+                                    &mut streaming_chain,
+                                )
+                                .await;
+                            }
+                        }
+                    }
                     // Check for cancel request first
                     if check_cancel_requested() {
                         tracing::info!("Recording cancelled");
