@@ -30,6 +30,7 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use voxtype::audio::levels::{AudioFrame, FRAME_HZ};
 use voxtype::config::Config as VoxtypeConfig;
 use voxtype::osd::config::{OsdConfig, OsdPosition};
+use voxtype::osd::partial;
 use voxtype::osd::ipc::{resolve_socket_path, run_ipc_loop, FrameRing, DEFAULT_RING_DEPTH};
 use voxtype::osd::theme::ThemeWatcher;
 use voxtype::osd::visual::{peak_meter_fraction, project_envelope, MeterZone, Palette, PeakHold};
@@ -319,13 +320,21 @@ fn focused_monitor_height_px() -> Option<i32> {
 /// Build the GTK window, attach layer-shell config, mount the DrawingArea,
 /// and start the redraw tick.
 fn build_window(app: &Application, cfg: &OsdConfig, palette: Palette, state: Arc<SharedState>) {
-    let window = ApplicationWindow::builder()
+    // The panel is a fixed-size surface; the edge glow is whatever size the
+    // compositor hands us. Asking for 400x48 and pinning `resizable(false)`
+    // keeps the surface at panel size no matter how many edges it anchors to.
+    let mut builder = ApplicationWindow::builder()
         .application(app)
-        .default_width(cfg.width_px as i32)
-        .default_height(cfg.height_px as i32)
-        .resizable(false)
-        .decorated(false)
-        .build();
+        .decorated(false);
+    builder = if cfg.edge_glow {
+        builder.resizable(true)
+    } else {
+        builder
+            .default_width(cfg.width_px as i32)
+            .default_height(cfg.height_px as i32)
+            .resizable(false)
+    };
+    let window = builder.build();
 
     // Layer-shell setup: top layer, no keyboard, anchored per config.
     window.init_layer_shell();
@@ -346,7 +355,15 @@ fn build_window(app: &Application, cfg: &OsdConfig, palette: Palette, state: Arc
         OsdPosition::BottomCenter | OsdPosition::TopCenter
     );
 
-    if centered {
+    if cfg.edge_glow {
+        // Cover the output: the glow is painted at the edges of the surface,
+        // so the surface has to be the screen. Still click-through, still
+        // zero exclusive zone — nothing reflows underneath it.
+        for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+            window.set_anchor(edge, true);
+            window.set_margin(edge, 0);
+        }
+    } else if centered {
         // Resolve monitor height to translate the fractional offset into
         // pixels. Falls back to a conservative 1080 if the display can't be
         // queried (extremely rare on Wayland-only systems where layer-shell
@@ -390,17 +407,45 @@ fn build_window(app: &Application, cfg: &OsdConfig, palette: Palette, state: Arc
         }
     }
 
-    // Don't reserve space on the output: the OSD floats over windows.
-    window.set_exclusive_zone(0);
+    if cfg.edge_glow {
+        // -1, not 0: 0 still respects other layers' exclusive zones, which
+        // would stop the glow short of the bar and leave it hugging the bar's
+        // edge instead of the screen's.
+        window.set_exclusive_zone(-1);
+
+        // GTK paints the window's own themed background behind the drawing
+        // area. On a panel-sized surface nothing shows through it; stretched
+        // over the whole output it is an opaque sheet over the desktop.
+        if let Some(display) = gtk4::gdk::Display::default() {
+            let css = gtk4::CssProvider::new();
+            css.load_from_data("window { background: transparent; }");
+            gtk4::style_context_add_provider_for_display(
+                &display,
+                &css,
+                gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        }
+    } else {
+        // Don't reserve space on the output: the OSD floats over windows.
+        window.set_exclusive_zone(0);
+    }
 
     // The drawing area fills the window.
     let drawing_area = DrawingArea::new();
-    drawing_area.set_content_width(cfg.width_px as i32);
-    drawing_area.set_content_height(cfg.height_px as i32);
+    if !cfg.edge_glow {
+        drawing_area.set_content_width(cfg.width_px as i32);
+        drawing_area.set_content_height(cfg.height_px as i32);
+    }
     let state_for_draw = state.clone();
     let gain = cfg.waveform_gain as f64;
+    let edge_glow = cfg.edge_glow;
+    let started = Instant::now();
     drawing_area.set_draw_func(move |_area, cr, w, h| {
-        draw(cr, w, h, &palette, &state_for_draw, gain);
+        if edge_glow {
+            draw_edge_glow(cr, w, h, &state_for_draw, started.elapsed().as_secs_f64());
+        } else {
+            draw(cr, w, h, &palette, &state_for_draw, gain);
+        }
     });
     window.set_child(Some(&drawing_area));
 
@@ -493,6 +538,171 @@ fn apply_click_through(window: &ApplicationWindow) {
     };
     let empty = Region::create_rectangle(&RectangleInt::new(0, 0, 0, 0));
     surface.set_input_region(Some(&empty));
+}
+
+/// Render a voice-reactive rainbow hugging the edges of the screen.
+///
+/// The shape phone dictation uses: unmissable, and it sits where text never
+/// is. Cairo has no blur, so the softness comes from masking a colour ramp
+/// running *along* each edge with an alpha ramp running *inward* from it —
+/// one pass per edge, no offscreen surfaces, no shader.
+///
+/// The hue is mapped to position along the perimeter (weighted by the real
+/// edge lengths, so the wrap at each corner is seamless on any aspect ratio)
+/// and rotated slowly over time. Voice level drives both thickness and
+/// opacity, so it breathes with speech instead of sitting there as a band.
+fn draw_edge_glow(cr: &Context, width: i32, height: i32, state: &Arc<SharedState>, t: f64) {
+    let w = width as f64;
+    let h = height as f64;
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    static LOG_SIZE: std::sync::Once = std::sync::Once::new();
+    LOG_SIZE.call_once(|| tracing::info!("edge glow surface: {}x{}", width, height));
+
+    cr.set_operator(cairo::Operator::Source);
+    cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
+    cr.paint().ok();
+    cr.set_operator(cairo::Operator::Over);
+
+    let level = state
+        .peak
+        .lock()
+        .map(|p| peak_meter_fraction(p.held_dbfs, PEAK_FLOOR_DBFS))
+        .unwrap_or(0.0) as f64;
+    let band = (w.min(h) * 0.06).clamp(28.0, 110.0) * (0.55 + 0.45 * level);
+    let alpha = 0.30 + 0.55 * level;
+
+    let perimeter = 2.0 * (w + h);
+    // Per edge: the colour ramp's endpoints, the inward fade's endpoints,
+    // where this edge starts around the perimeter, and how much of it it owns.
+    let edges = [
+        ((0.0, 0.0, w, 0.0), (0.0, 0.0, 0.0, band), 0.0, w),
+        ((w, 0.0, w, h), (w, 0.0, w - band, 0.0), w, h),
+        ((w, h, 0.0, h), (0.0, h, 0.0, h - band), w + h, w),
+        ((0.0, h, 0.0, 0.0), (0.0, 0.0, band, 0.0), 2.0 * w + h, h),
+    ];
+
+    for ((cx0, cy0, cx1, cy1), (mx0, my0, mx1, my1), offset, length) in edges {
+        let colour = cairo::LinearGradient::new(cx0, cy0, cx1, cy1);
+        for k in 0..=HUE_STOPS {
+            let f = k as f64 / HUE_STOPS as f64;
+            let hue = ((offset + f * length) / perimeter + t * HUE_DRIFT_PER_SEC).rem_euclid(1.0);
+            let (r, g, b) = hsv_to_rgb(hue, 0.80, 1.0);
+            colour.add_color_stop_rgba(f, r, g, b, alpha);
+        }
+
+        let fade = cairo::LinearGradient::new(mx0, my0, mx1, my1);
+        fade.add_color_stop_rgba(0.0, 0.0, 0.0, 0.0, 1.0);
+        fade.add_color_stop_rgba(1.0, 0.0, 0.0, 0.0, 0.0);
+
+        if cr.set_source(&colour).is_ok() {
+            cr.mask(&fade).ok();
+        }
+    }
+
+    // Words being spoken, previewed while the model is still deciding them.
+    // They live only here — nothing on screen is what will land at the cursor
+    // until it is committed, so revisions cost the reader nothing.
+    if let Some(text) = partial::read() {
+        draw_partial_text(cr, w, h, &text, band);
+    }
+}
+
+/// Draw the in-progress transcript above the bottom edge, centered.
+///
+/// Cairo's toy text API rather than Pango: one line of centered text needs
+/// no shaping engine, and pangocairo is not in the tree. Every line gets a
+/// dark shadow so it stays readable over whatever is on screen.
+fn draw_partial_text(cr: &Context, w: f64, h: f64, text: &str, band: f64) {
+    let size = (h * 0.030).clamp(18.0, 34.0);
+    cr.select_font_face(
+        "sans-serif",
+        cairo::FontSlant::Normal,
+        cairo::FontWeight::Normal,
+    );
+    cr.set_font_size(size);
+
+    let lines = wrap_words(cr, text, w * 0.66);
+    let shown = lines
+        .iter()
+        .skip(lines.len().saturating_sub(MAX_PARTIAL_LINES))
+        .collect::<Vec<_>>();
+    if shown.is_empty() {
+        return;
+    }
+
+    let line_h = size * 1.35;
+    let mut y = h - band - size - (shown.len() - 1) as f64 * line_h;
+    for line in shown {
+        let width = cr.text_extents(line).map(|e| e.width()).unwrap_or(0.0);
+        let x = (w - width) / 2.0;
+
+        cr.set_source_rgba(0.0, 0.0, 0.0, 0.65);
+        cr.move_to(x + 2.0, y + 2.0);
+        cr.show_text(line).ok();
+
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
+        cr.move_to(x, y);
+        cr.show_text(line).ok();
+
+        y += line_h;
+    }
+}
+
+/// Greedy word wrap against the measured width of the current font.
+fn wrap_words(cr: &Context, text: &str, max_width: f64) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let candidate = if current.is_empty() {
+            word.to_string()
+        } else {
+            format!("{} {}", current, word)
+        };
+        let width = cr.text_extents(&candidate).map(|e| e.width()).unwrap_or(0.0);
+        if width > max_width && !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+            current = word.to_string();
+        } else {
+            current = candidate;
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// Lines of preview kept on screen. Enough to follow a sentence, few enough
+/// that the screen stays the user's, not the OSD's.
+const MAX_PARTIAL_LINES: usize = 3;
+
+/// Colour stops per edge. Eight is enough for a smooth ramp and keeps the
+/// gradient cheap to rebuild every frame.
+const HUE_STOPS: u32 = 8;
+
+/// Full turns of the hue wheel per second. Slow on purpose: this is an
+/// indicator, not a party.
+const HUE_DRIFT_PER_SEC: f64 = 0.06;
+
+/// dBFS mapped to a dark glow. Matches the peak meter's usable range.
+const PEAK_FLOOR_DBFS: f32 = -60.0;
+
+fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (f64, f64, f64) {
+    let i = (h * 6.0).floor();
+    let f = h * 6.0 - i;
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - f * s);
+    let t = v * (1.0 - (1.0 - f) * s);
+    match (i as i64).rem_euclid(6) {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    }
 }
 
 /// Render the waveform + peak meter into the given Cairo context.

@@ -692,6 +692,16 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Load the model when recording starts and unload at idle.",
     )
     .for_onnx_engine("gigaam"),
+    spec(
+        "gigaam.streaming",
+        "gigaam",
+        "streaming",
+        KeyType::Bool,
+        "Engine",
+        "Stream while speaking",
+        "Emit each phrase as its pause arrives instead of everything on release.",
+    )
+    .for_onnx_engine("gigaam"),
     // -- Hotkey -------------------------------------------------------------
     spec(
         "hotkey.enabled",
@@ -1032,6 +1042,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "OSD",
         "On-screen display",
         "Spawn the floating waveform panel while recording.",
+    ),
+    spec(
+        "osd.edge_glow",
+        "osd",
+        "edge_glow",
+        KeyType::Bool,
+        "OSD",
+        "Edge glow",
+        "Glow along the screen edges instead of the floating panel (gtk4 only).",
     ),
     spec(
         "osd.frontend",
@@ -1628,6 +1647,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             None => Json::Null,
         },
         "gigaam.on_demand_loading" => json!(ga().on_demand_loading),
+        "gigaam.streaming" => json!(ga().streaming),
 
         "dolphin.model" => json!(dol().model),
         "dolphin.threads" => match dol().threads {
@@ -1713,6 +1733,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "output.notification.show_engine_icon" => json!(cfg.output.notification.show_engine_icon),
 
         "osd.enabled" => json!(cfg.osd.enabled),
+        "osd.edge_glow" => json!(cfg.osd.edge_glow),
         "osd.frontend" => serde_json::to_value(cfg.osd.frontend).ok()?,
         "osd.style" => json!(cfg.osd.style),
         "osd.palette" => match cfg.osd.palette {

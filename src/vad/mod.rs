@@ -14,7 +14,9 @@ use crate::config::{Config, TranscriptionEngine, VadBackend};
 use crate::error::VadError;
 use std::path::PathBuf;
 
-pub use energy::EnergyVad;
+pub use energy::{
+    frame_rms, noise_floor, split_on_silence, split_on_silence_at, EnergyVad, SpeechRange,
+};
 pub use whisper_vad::WhisperVad;
 
 /// Result of voice activity detection

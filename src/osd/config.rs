@@ -303,6 +303,11 @@ impl Default for OsdPackageManifest {
 pub struct OsdConfig {
     /// Run the OSD at all. When `false`, both binaries exit immediately.
     pub enabled: bool,
+    /// Draw a voice-reactive glow hugging the screen edges instead of the
+    /// floating panel — the shape phone dictation uses, where the whole
+    /// display shows it is listening and nothing covers the text.
+    /// gtk4 frontend only.
+    pub edge_glow: bool,
     /// Surface width in physical pixels.
     pub width_px: u32,
     /// Surface height in physical pixels.
@@ -364,6 +369,7 @@ impl Default for OsdConfig {
             position: OsdPosition::BottomCenter,
             margin_px: 24,
             top_margin: 0.85,
+            edge_glow: false,
             opacity: 0.95,
             waveform_window_secs: 3.0,
             peak_decay_db_per_sec: 6.0,

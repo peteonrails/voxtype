@@ -21,6 +21,13 @@ pub struct GigaAMConfig {
     /// Load model on-demand when recording starts (true) or keep loaded (false)
     #[serde(default = "default_on_demand_loading")]
     pub on_demand_loading: bool,
+
+    /// Emit text while you speak instead of after the key is released.
+    /// Reuses the pause splitting GigaAM needs anyway for long clips: each
+    /// phrase is transcribed and typed as soon as its pause arrives.
+    /// Default: false (batch pipeline, identical to pre-streaming behavior).
+    #[serde(default)]
+    pub streaming: bool,
 }
 
 impl Default for GigaAMConfig {
@@ -29,6 +36,7 @@ impl Default for GigaAMConfig {
             model: "gigaam-v3-e2e-rnnt".to_string(),
             threads: None,
             on_demand_loading: false,
+            streaming: false,
         }
     }
 }

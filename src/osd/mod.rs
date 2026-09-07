@@ -9,12 +9,14 @@
 //! ## Module layout
 //!
 //! - [`ipc`] — Unix-socket connection, frame decode, ring buffer, reconnect.
+//! - [`partial`] — live partial transcript, published for the OSD to draw.
 //! - [`visual`] — peak-hold decay, waveform envelope helpers, palette types.
 //! - [`config`] — `[osd]` config block (`OsdConfig`).
 //! - [`theme`] — Omarchy theme parsing + change watcher.
 
 pub mod config;
 pub mod ipc;
+pub mod partial;
 pub mod style;
 pub mod supervisor;
 pub mod theme;
