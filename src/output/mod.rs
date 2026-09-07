@@ -32,6 +32,8 @@ pub mod osascript;
 pub mod paste;
 #[cfg(target_os = "macos")]
 pub mod pbcopy;
+#[cfg(all(feature = "preedit", target_os = "linux"))]
+pub mod preedit;
 pub mod post_process;
 pub mod session;
 pub mod streaming;
@@ -301,6 +303,10 @@ fn create_driver_output(
             Box::new(clipboard::ClipboardOutput::new(config.append_text.clone()))
         }
         OutputDriver::Xclip => Box::new(xclip::XclipOutput::new(config.append_text.clone())),
+        #[cfg(all(feature = "preedit", target_os = "linux"))]
+        OutputDriver::Preedit => Box::new(preedit::PreeditOutput),
+        #[cfg(not(all(feature = "preedit", target_os = "linux")))]
+        OutputDriver::Preedit => Box::new(xclip::XclipOutput::new(config.append_text.clone())),
     }
 }
 

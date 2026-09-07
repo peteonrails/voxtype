@@ -120,6 +120,8 @@ wayland-client = { version = "0.31", optional = true, features = ["system"] }
 wayland-backend = { version = "0.3", optional = true, features = ["client_system"] }
 wayland-protocols = { version = "0.32", optional = true, features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3", optional = true, features = ["client"] }
+# Preedit output (gated on `preedit`): zwp_input_method_v2 lives here.
+wayland-protocols-misc = { version = "0.3", optional = true, features = ["client"] }
 wgpu = { version = "29", optional = true, default-features = false, features = ["vulkan", "gles", "wgsl", "std"] }
 egui = { version = "0.34", optional = true }
 egui-wgpu = { version = "0.34", optional = true, default-features = false }
@@ -180,6 +182,9 @@ osd-native = [
     "dep:bytemuck",
 ]
 osd-gtk4 = ["dep:gtk4", "dep:gtk4-layer-shell", "dep:cairo-rs", "dep:glib"]
+# Preedit output: uncommitted text via the Wayland input-method protocol,
+# so a transcript can be revised in place and committed once it is final.
+preedit = ["dep:wayland-client", "dep:wayland-protocols-misc"]
 gpu-vulkan = ["whisper-rs/vulkan"]
 gpu-cuda = ["whisper-rs/cuda"]
 gpu-metal = ["whisper-rs/metal"]

@@ -24,7 +24,7 @@
 //! scripts/export_gigaam_onnx.py from the GigaAM repository.
 
 use super::gigaam_mel::GigaAMMelExtractor;
-use super::streaming::{SegmentId, StreamHandle, StreamingEvent, StreamingTranscriber};
+use super::streaming::{StreamHandle, StreamingEvent, StreamingTranscriber};
 use super::Transcriber;
 use crate::config::GigaAMConfig;
 use crate::error::TranscribeError;
@@ -397,6 +397,14 @@ impl StreamingTranscriber for GigaAMTranscriber {
         let (events_tx, events) = mpsc::channel(32);
         let (cancel, mut cancel_rx) = oneshot::channel();
 
+        // Bind the input method off the hot path: the first `preview` call
+        // would otherwise wait on the Wayland thread's handshake while audio
+        // is already arriving.
+        #[cfg(all(feature = "preedit", target_os = "linux"))]
+        tokio::task::spawn_blocking(|| {
+            let _ = crate::output::preedit::global();
+        });
+
         let task = tokio::spawn(async move {
             let mut pending: Vec<f32> = Vec::new();
             // Frame energies for the whole session. The floor must be measured
@@ -405,14 +413,16 @@ impl StreamingTranscriber for GigaAMTranscriber {
             // sits inside speech, and the threshold derived from it shreds the
             // next phrase into fragments that transcribe to nothing.
             let mut session_rms: Vec<f32> = Vec::new();
-            let mut segment_id: SegmentId = 0;
             let mut cancelled = false;
+            // The transcript so far. Phrases are *not* committed as they are
+            // recognised: they accumulate here and go to the cursor in one
+            // commit at the end. That is what lets the cleanup pass see the
+            // whole utterance — cleaning phrase by phrase measurably wrecks
+            // short fragments — and what makes the preview free to revise,
+            // since nothing has been typed yet.
+            let mut transcript = String::new();
             let mut last_partial = Instant::now();
             let mut partial_cost = Duration::ZERO;
-            // Segments are decoded independently, so nothing carries the space
-            // that separates one from the last. The output layer types what it
-            // is given, verbatim.
-            let mut committed_any = false;
 
             loop {
                 tokio::select! {
@@ -461,13 +471,8 @@ impl StreamingTranscriber for GigaAMTranscriber {
                             .await;
                             match done {
                                 Ok(Ok(text)) if !text.trim().is_empty() => {
-                                    let text = separated(text.trim(), committed_any);
-                                    committed_any = true;
-                                    let event = StreamingEvent::Final { text, segment_id };
-                                    segment_id += 1;
-                                    if events_tx.send(event).await.is_err() {
-                                        return Ok(());
-                                    }
+                                    append(&mut transcript, text.trim());
+                                    preview(&transcript);
                                 }
                                 Ok(Ok(_)) => {}
                                 Ok(Err(e)) => {
@@ -485,19 +490,13 @@ impl StreamingTranscriber for GigaAMTranscriber {
                                 }
                             }
                         }
-                        if !segments[..segments.len() - 1].is_empty() {
-                            // Those words are at the cursor now; the preview
-                            // must not keep showing them.
-                            crate::osd::partial::clear();
-                        }
                         pending.drain(..tail_start);
 
-                        // Sliding-window preview. The tail is re-transcribed
-                        // whole — a full-utterance export has no cache to
-                        // extend — so this is deliberately rate-limited and
-                        // capped, and it never leaves the OSD: the daemon
-                        // types Partial events, and these are cumulative
-                        // revisions, not the deltas that contract expects.
+                        // Sliding-window preview of the phrase still being
+                        // spoken, shown after everything recognised so far. The
+                        // tail is re-transcribed whole — a full-utterance
+                        // export has no cache to extend — so this is
+                        // deliberately rate-limited and capped.
                         if last_partial.elapsed() >= PARTIAL_EVERY.max(partial_cost * 2)
                             && pending.len() >= SAMPLE_RATE / 2
                         {
@@ -511,7 +510,9 @@ impl StreamingTranscriber for GigaAMTranscriber {
                                 tokio::task::spawn_blocking(move || model.transcribe_segment(&audio))
                                     .await
                             {
-                                crate::osd::partial::publish(text.trim());
+                                let mut shown = transcript.clone();
+                                append(&mut shown, text.trim());
+                                preview(&shown);
                             }
                             partial_cost = started.elapsed();
                             last_partial = Instant::now();
@@ -523,26 +524,34 @@ impl StreamingTranscriber for GigaAMTranscriber {
             // Flush what is left: on a clean end that is the last phrase, and
             // it is the only thing standing between the user and their words.
             // A cancel discards it — the daemon rewinds typed text on cancel.
-            if !cancelled && !pending.is_empty() {
-                let model = Arc::clone(&inner);
-                let floor = crate::vad::noise_floor(&session_rms);
-                if let Ok(Ok(text)) = tokio::task::spawn_blocking(move || {
-                    model.transcribe_split(&pending, floor, STREAM_SEGMENT_SECS)
-                })
-                .await
-                {
-                    if !text.trim().is_empty() {
-                        let _ = events_tx
-                            .send(StreamingEvent::Final {
-                                text: separated(text.trim(), committed_any),
-                                segment_id,
-                            })
-                            .await;
+            if !cancelled {
+                if !pending.is_empty() {
+                    let model = Arc::clone(&inner);
+                    let floor = crate::vad::noise_floor(&session_rms);
+                    if let Ok(Ok(text)) = tokio::task::spawn_blocking(move || {
+                        model.transcribe_split(&pending, floor, STREAM_SEGMENT_SECS)
+                    })
+                    .await
+                    {
+                        append(&mut transcript, text.trim());
                     }
+                }
+
+                // One commit for the whole utterance. Clear the preview first:
+                // what replaces it may differ everywhere, because the cleanup
+                // pass runs between here and the cursor.
+                if !transcript.is_empty() {
+                    preview("");
+                    let _ = events_tx
+                        .send(StreamingEvent::Final {
+                            text: transcript.clone(),
+                            segment_id: 0,
+                        })
+                        .await;
                 }
             }
 
-            crate::osd::partial::clear();
+            preview("");
             let _ = events_tx.send(StreamingEvent::Ended).await;
             Ok(())
         });
@@ -743,11 +752,36 @@ mod tests {
     }
 }
 
-/// Prefix the separator the output layer will not add for us.
-fn separated(text: &str, after_previous: bool) -> String {
-    if after_previous {
-        format!(" {}", text)
+/// Show in-progress text wherever it can be seen.
+///
+/// Preedit is preferred when a text field has focus: the words appear at the
+/// cursor, where the user is already looking, and cost nothing to revise. The
+/// OSD is the fallback for everything else — a terminal without input-method
+/// support, another IME holding the seat, no focused field at all.
+#[cfg(all(feature = "preedit", target_os = "linux"))]
+fn preview(text: &str) {
+    if crate::output::preedit::show(text) {
+        crate::osd::partial::clear();
     } else {
-        text.to_string()
+        crate::osd::partial::publish(text);
     }
+}
+
+#[cfg(not(all(feature = "preedit", target_os = "linux")))]
+fn preview(text: &str) {
+    crate::osd::partial::publish(text);
+}
+
+/// Append a recognised phrase to the transcript, spacing it from the last.
+///
+/// Phrases are decoded independently, so nothing carries the space between
+/// them.
+fn append(transcript: &mut String, phrase: &str) {
+    if phrase.is_empty() {
+        return;
+    }
+    if !transcript.is_empty() {
+        transcript.push(' ');
+    }
+    transcript.push_str(phrase);
 }

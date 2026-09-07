@@ -163,7 +163,7 @@ impl StreamingSession {
         &mut self,
         chain: &[Box<dyn TextOutput>],
         text: &str,
-        _post_process: Option<&PostProcessor>,
+        post_process: Option<&PostProcessor>,
         pre_output_command: Option<&str>,
         post_output_command: Option<&str>,
     ) -> Result<(), OutputError> {
@@ -177,11 +177,50 @@ impl StreamingSession {
         // a delta, not a cumulative transcript. So type it directly,
         // same as a partial.
         //
-        // post_process is intentionally bypassed during streaming.
-        // Per-segment cleanup would run only against the final tail
-        // (not the cumulative transcript visible at the cursor) and
-        // produce inconsistent output. Users who rely on post_process
-        // should disable streaming for now.
+        // Cleanup runs here, on the whole utterance. Backends that commit
+        // once per phrase must not enable it: cleaning fragments in isolation
+        // loses the context the model needs and it starts inventing — measured
+        // in cleanup-bench, where the same model that fixes a full message
+        // mangles a four-word phrase. Backends that accumulate and commit once
+        // (GigaAM) get exactly the whole-utterance pass this needs.
+        // Cleanup takes seconds, and until it returns the field shows
+        // nothing at all — the recording indicator is long gone. Spin in the
+        // preedit instead: the words stay visible, a spinner says the machine
+        // is still thinking, and none of it is ever committed.
+        #[cfg(all(feature = "preedit", target_os = "linux"))]
+        let spinner = post_process.is_some().then(|| {
+            let base = text.to_string();
+            tokio::spawn(async move {
+                const FRAMES: [&str; 10] =
+                    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                let mut frame = 0usize;
+                loop {
+                    crate::output::preedit::show(&format!(
+                        "{} {}",
+                        base,
+                        FRAMES[frame % FRAMES.len()]
+                    ));
+                    frame += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+                }
+            })
+        });
+
+        let cleaned = match post_process {
+            Some(pp) => pp.process(text).await,
+            None => text.to_string(),
+        };
+        let text = cleaned.as_str();
+
+        #[cfg(all(feature = "preedit", target_os = "linux"))]
+        if let Some(handle) = spinner {
+            handle.abort();
+            // Clear explicitly rather than relying on the commit to do it: the
+            // chain may fall through to a backend that knows nothing about
+            // preedit, and a stranded spinner would sit in the field forever.
+            crate::output::preedit::show("");
+        }
+
         let opts = OutputOptions {
             pre_output_command,
             post_output_command,

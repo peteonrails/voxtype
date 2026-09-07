@@ -362,6 +362,9 @@ pub enum OutputDriver {
     Clipboard,
     /// Clipboard via xclip (X11)
     Xclip,
+    /// Uncommitted text via the Wayland input-method protocol. Revisable in
+    /// place and committed only once final; requires `--features preedit`.
+    Preedit,
 }
 
 impl std::fmt::Display for OutputDriver {
@@ -373,6 +376,7 @@ impl std::fmt::Display for OutputDriver {
             OutputDriver::Ydotool => write!(f, "ydotool"),
             OutputDriver::Clipboard => write!(f, "clipboard"),
             OutputDriver::Xclip => write!(f, "xclip"),
+            OutputDriver::Preedit => write!(f, "preedit"),
         }
     }
 }
@@ -388,6 +392,7 @@ impl std::str::FromStr for OutputDriver {
             "ydotool" => Ok(OutputDriver::Ydotool),
             "clipboard" => Ok(OutputDriver::Clipboard),
             "xclip" => Ok(OutputDriver::Xclip),
+            "preedit" => Ok(OutputDriver::Preedit),
             _ => Err(format!(
                 "Unknown driver '{}'. Valid options: wtype, eitype, dotool, ydotool, clipboard, xclip",
                 s
