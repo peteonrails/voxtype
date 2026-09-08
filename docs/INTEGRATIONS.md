@@ -144,8 +144,12 @@ One maintained implementation of this pattern is
 Rust/egui popup that shows the transcript for editing, runs configurable
 actions (tidy, translate, bullets — local LLM or HTTP), keeps a per-round
 instruction box that accepts spoken input, and steps back through every
-round with `Alt+arrow`. `Esc` always emits the raw transcript; `Enter`
-commits what the box holds.
+round with `Alt+arrow`. With `fallback_on_empty = false`, `Esc` aborts to
+nothing — no paste, no original — while `Enter` commits what the box holds.
+Beyond the gate itself it has grown a canned-prompt library (pick one with a
+single digit and it steers the next action), an in-app configuration page
+for actions and the daemon settings, a history of everything dictated, and a
+start/stop recording key that ends a long dictation on silence.
 
 ## What Voxtype will not do for you
 
