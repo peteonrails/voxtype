@@ -339,6 +339,20 @@ curl -Lo ~/.local/share/voxtype/models/<model-dir>/preprocessor_config.json \
     https://huggingface.co/<org>/<model-repo>/resolve/main/preprocessor_config.json
 ```
 
+### OpenVINO: setup prints "Compiling ... for Intel NPU" and takes minutes, or ends with a warning
+
+**Cause:** When config.toml has an `[openvino]` section with `device = "NPU"`, `voxtype setup` compiles the model for the NPU right after downloading or activating it, so the one-time compile wait happens during setup instead of during your first recording. Large models genuinely take minutes to compile (about 15 minutes for `large-v3-int4` on Lunar Lake); this is the NPU compiler working, not a hang.
+
+If the compile fails, setup prints a warning and continues. This is not a broken install: the model files are downloaded, the config is updated, and the daemon compiles the model on first use, falling back to GPU or CPU when the NPU is unavailable. The warning usually means the OpenVINO GenAI runtime or the NPU driver is missing, and it includes the package list for the configured device (also documented under `[openvino]` in the configuration guide).
+
+**Solution:** Install the packages named in the warning, verify the NPU device exists (`ls /dev/accel/accel*`), then rerun setup:
+
+```bash
+voxtype setup --download --model <model-name>
+```
+
+Setup skips the compile when the model's cache blob already exists, so rerunning after a successful compile is cheap.
+
 ### Voxtype crashes during transcription (Linux)
 
 **Cause:** On some Linux systems (particularly with glibc 2.42+ like Ubuntu 25.10), the whisper-rs FFI bindings crash due to C++ exceptions crossing the FFI boundary.
