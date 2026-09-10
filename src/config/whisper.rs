@@ -155,11 +155,11 @@ pub struct WhisperConfig {
     /// DEPRECATED: use the shared `[streaming] revision_mode` instead. See
     /// `streaming_interval_secs`.
     ///
-    /// Experimental: type the current best-guess tail immediately and
-    /// correct it later via backspace + retype if a later tick disagrees,
-    /// instead of withholding it until two consecutive ticks agree. See
-    /// `transcribe::sliding_window`'s "Revision mode" doc section.
-    #[serde(default)]
+    /// Type the current best-guess tail immediately and correct it later via
+    /// backspace + retype if a later tick disagrees (default true), instead
+    /// of withholding the tail until it's stable across a few ticks. See
+    /// `transcribe::sliding_window`'s "Commit policy" doc section.
+    #[serde(default = "default_streaming_revision_mode")]
     pub streaming_revision_mode: bool,
 
     /// Initial prompt to provide context for transcription
@@ -278,7 +278,7 @@ impl Default for WhisperConfig {
             streaming_min_audio_secs: default_streaming_min_audio_secs(),
             streaming_partial_min_words: default_streaming_partial_min_words(),
             streaming_type_partials: default_streaming_type_partials(),
-            streaming_revision_mode: false,
+            streaming_revision_mode: default_streaming_revision_mode(),
             initial_prompt: None,
             secondary_model: None,
             available_models: vec![],
@@ -332,6 +332,10 @@ fn default_streaming_min_audio_secs() -> f32 {
 
 fn default_streaming_partial_min_words() -> usize {
     1
+}
+
+fn default_streaming_revision_mode() -> bool {
+    true
 }
 
 fn default_streaming_type_partials() -> bool {
