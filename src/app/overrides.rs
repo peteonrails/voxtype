@@ -50,10 +50,30 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         config.output.restore_clipboard_delay_ms = delay;
     }
     if let Some(ref model) = cli.model {
-        if setup::model::is_valid_model(model) {
+        let selected_engine = cli
+            .engine
+            .as_deref()
+            .and_then(|engine| engine.parse::<config::TranscriptionEngine>().ok())
+            .unwrap_or(config.engine);
+        if selected_engine == config::TranscriptionEngine::Parakeet
+            && (setup::model::is_parakeet_model(model) || std::path::Path::new(model).exists())
+        {
+            let parakeet = config
+                .parakeet
+                .get_or_insert_with(config::ParakeetConfig::default);
+            parakeet.model = model.clone();
+        } else if setup::model::is_valid_model(model) {
             config.whisper.model = model.clone();
         } else {
-            let default_model = &config.whisper.model;
+            let default_model = if selected_engine == config::TranscriptionEngine::Parakeet {
+                config
+                    .parakeet
+                    .as_ref()
+                    .map(|p| p.model.as_str())
+                    .unwrap_or("parakeet-tdt-0.6b-v3")
+            } else {
+                &config.whisper.model
+            };
             tracing::warn!(
                 "Unknown model '{}', using default model '{}'",
                 model,
@@ -112,7 +132,14 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         config.whisper.initial_prompt = Some(prompt.clone());
     }
     if let Some(ref lang) = cli.language {
-        config.whisper.language = config::LanguageConfig::from_comma_separated(lang);
+        if config.engine == config::TranscriptionEngine::Parakeet {
+            config
+                .parakeet
+                .get_or_insert_with(config::ParakeetConfig::default)
+                .language = lang.clone();
+        } else {
+            config.whisper.language = config::LanguageConfig::from_comma_separated(lang);
+        }
     }
     if cli.translate {
         config.whisper.translate = true;
@@ -130,7 +157,14 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         config.whisper.flash_attention = true;
     }
     if cli.on_demand_loading {
-        config.whisper.on_demand_loading = true;
+        if config.engine == config::TranscriptionEngine::Parakeet {
+            config
+                .parakeet
+                .get_or_insert_with(config::ParakeetConfig::default)
+                .on_demand_loading = true;
+        } else {
+            config.whisper.on_demand_loading = true;
+        }
     }
     if let Some(ref mode) = cli.whisper_mode {
         match mode.to_lowercase().as_str() {
