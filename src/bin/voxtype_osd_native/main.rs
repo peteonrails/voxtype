@@ -10,7 +10,7 @@
 //! - The main thread runs the Wayland event loop (calloop + SCTK), creates
 //!   the wlr-layer-shell surface on demand when frames start arriving, and
 //!   destroys it after a configurable idle timeout. While the surface is
-//!   alive, a calloop timer drives ~60 Hz redraws.
+//!   alive, Wayland frame callbacks pace redraws at the display refresh rate.
 //! - When no daemon is running, the IPC thread sleeps in its reconnect loop
 //!   and the main thread sleeps in `EventLoop::run`. Idle CPU is essentially
 //!   zero rendering work.
@@ -31,7 +31,7 @@ use clap::Parser;
 
 use voxtype::audio::levels::{AudioFrame, FRAME_HZ};
 use voxtype::osd::config::OsdConfig;
-use voxtype::osd::ipc::{resolve_socket_path, run_ipc_loop, FrameRing, DEFAULT_RING_DEPTH};
+use voxtype::osd::ipc::{resolve_socket_path, run_ipc_loop, FrameRing};
 use voxtype::osd::theme::ThemeWatcher;
 use voxtype::osd::visual::PeakHold;
 
@@ -157,7 +157,9 @@ fn main() -> anyhow::Result<()> {
     let palette = theme.palette();
 
     let shared = SharedState {
-        ring: Arc::new(Mutex::new(FrameRing::new(DEFAULT_RING_DEPTH))),
+        ring: Arc::new(Mutex::new(FrameRing::for_window(
+            osd_config.waveform_window_secs,
+        ))),
         peak_hold: Arc::new(Mutex::new(PeakHold::new(osd_config.peak_decay_db_per_sec))),
         last_frame_at: Arc::new(Mutex::new(None)),
         palette,

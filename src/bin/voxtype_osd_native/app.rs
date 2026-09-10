@@ -68,9 +68,8 @@ pub struct SharedState {
 /// second as "instant," and 0.5s is well above the recording boundary
 /// gaps the daemon naturally produces.
 const IDLE_TEARDOWN_SECS: f32 = 0.5;
-/// Target render rate. 60 Hz is enough for a smooth scrolling waveform; we
-/// can't render faster than the underlying frame rate (100 Hz IPC) gains us.
-const REDRAW_INTERVAL_MS: u64 = 16;
+/// Idle/recovery checks only; animation is paced by Wayland frame callbacks.
+const IDLE_CHECK_INTERVAL_MS: u64 = 50;
 
 /// Outer state owned by the calloop event loop. Implements the SCTK delegate
 /// traits via `delegate_*` macros.
@@ -99,6 +98,7 @@ struct RenderSurface {
     height: u32,
     /// Whether we've received the first configure (and thus may render).
     configured: bool,
+    frame_pending: bool,
 
     // wgpu plumbing.
     _instance: wgpu::Instance,
@@ -157,12 +157,12 @@ pub fn run(
         })
         .map_err(|e| anyhow!("insert ping source: {}", e))?;
 
-    // Periodic redraw timer + idle teardown. Re-arms each fire.
-    let timer = calloop::timer::Timer::from_duration(Duration::from_millis(REDRAW_INTERVAL_MS));
+    // Periodic idle teardown and recovery after a skipped surface acquisition.
+    let timer = calloop::timer::Timer::from_duration(Duration::from_millis(IDLE_CHECK_INTERVAL_MS));
     loop_handle
         .insert_source(timer, |_deadline, _, app: &mut App| {
             app.tick();
-            calloop::timer::TimeoutAction::ToDuration(Duration::from_millis(REDRAW_INTERVAL_MS))
+            calloop::timer::TimeoutAction::ToDuration(Duration::from_millis(IDLE_CHECK_INTERVAL_MS))
         })
         .map_err(|e| anyhow!("insert redraw timer: {}", e))?;
 
@@ -313,6 +313,7 @@ impl App {
             width: cfg.width_px,
             height: cfg.height_px,
             configured: false,
+            frame_pending: false,
             _instance: instance,
             surface,
             device,
@@ -351,7 +352,7 @@ impl App {
 
     fn render_frame(&mut self) -> anyhow::Result<()> {
         let rs = match self.surface.as_mut() {
-            Some(s) if s.configured => s,
+            Some(s) if s.configured && !s.frame_pending => s,
             _ => return Ok(()),
         };
 
@@ -390,14 +391,13 @@ impl App {
 
         let envelope_cols = {
             let ring = self.shared.ring.lock().expect("ring poisoned");
-            let frames_in_window =
-                (waveform_window_secs * voxtype::audio::levels::FRAME_HZ as f32) as usize;
-            let mut buf: Vec<AudioFrame> = ring.iter().collect();
-            if buf.len() > frames_in_window {
-                let skip = buf.len() - frames_in_window;
-                buf = buf.split_off(skip);
-            }
-            project_envelope(&buf, n_columns)
+            let buf: Vec<AudioFrame> = ring.iter().collect();
+            project_envelope(
+                &buf,
+                n_columns,
+                waveform_window_secs as f64 * voxtype::audio::levels::FRAME_HZ as f64,
+                ring.scroll_offset(Instant::now()),
+            )
         };
 
         let (peak_dbfs, held_dbfs) = {
@@ -492,6 +492,7 @@ impl App {
 
         rs.queue.submit(Some(encoder.finish()));
         rs.wl_surface.frame(&self.qh, rs.wl_surface.clone());
+        rs.frame_pending = true;
         surface_texture.present();
         Ok(())
     }
@@ -525,6 +526,7 @@ fn position_to_anchor_and_margins(pos: OsdPosition, margin: i32) -> (Anchor, i32
 
 /// Render the egui UI: scrolling waveform on the left, segmented vertical
 /// peak meter on the right.
+#[allow(clippy::too_many_arguments)]
 fn draw_ui(
     ui: &mut egui::Ui,
     width: u32,
@@ -564,32 +566,37 @@ fn draw_waveform(
     let mid_y = rect.center().y;
     let half_h = rect.height() * 0.45;
 
-    let mut top_pts = Vec::with_capacity(n);
-    let mut bot_pts = Vec::with_capacity(n);
+    // A waveform is concave. Triangulate each strip explicitly instead of
+    // passing the whole outline to egui's convex-polygon tessellator.
+    let mut mesh = egui::Mesh::default();
+    let fill = color_to_egui(palette.accent);
+    let mut top_edge = Vec::with_capacity(n);
+    let mut bottom_edge = Vec::with_capacity(n);
     for (i, col) in envelope.iter().enumerate() {
         let x = rect.left() + (i as f32 + 0.5) * col_w;
-        // Apply visual gain, then clamp to -1.0..=1.0, then map to pixel y.
-        // y grows downward so we subtract from mid_y for the top edge.
         let top = mid_y - (col.max * gain).clamp(-1.0, 1.0) * half_h;
         let bot = mid_y - (col.min * gain).clamp(-1.0, 1.0) * half_h;
-        top_pts.push(pos2(x, top));
-        bot_pts.push(pos2(x, bot));
+        mesh.colored_vertex(pos2(x, top), fill);
+        mesh.colored_vertex(pos2(x, bot), fill);
+        top_edge.push(pos2(x, top));
+        bottom_edge.push(pos2(x, bot));
+        if i > 0 {
+            let v = (i * 2) as u32;
+            mesh.add_triangle(v - 2, v - 1, v);
+            mesh.add_triangle(v, v - 1, v + 1);
+        }
     }
-
-    // Build a closed polygon: top points left-to-right, bottom right-to-left.
-    let mut polygon = top_pts;
-    for p in bot_pts.iter().rev() {
-        polygon.push(*p);
-    }
-
-    let fill = color_to_egui(palette.accent);
-    painter.add(Shape::convex_polygon(polygon, fill, egui::Stroke::NONE));
+    painter.add(Shape::mesh(mesh));
+    // Mesh edges are not antialiased by egui. Its stroked paths keep the
+    // silhouette smooth as it moves through fractional pixel positions.
+    painter.add(Shape::line(top_edge, egui::Stroke::new(1.0_f32, fill)));
+    painter.add(Shape::line(bottom_edge, egui::Stroke::new(1.0_f32, fill)));
 
     // Centerline tick for visual reference at low levels.
     let line_color = color_to_egui(palette.foreground.with_alpha(0.25));
     painter.line_segment(
         [pos2(rect.left(), mid_y), pos2(rect.right(), mid_y)],
-        egui::Stroke::new(1.0, line_color),
+        egui::Stroke::new(1.0_f32, line_color),
     );
 }
 
@@ -679,9 +686,16 @@ impl CompositorHandler for App {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &WlSurface,
+        surface: &WlSurface,
         _time: u32,
     ) {
+        if let Some(rs) = self.surface.as_mut() {
+            if rs.wl_surface != *surface {
+                return;
+            }
+            rs.frame_pending = false;
+            self.tick();
+        }
     }
 
     fn surface_enter(

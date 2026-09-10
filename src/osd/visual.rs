@@ -158,65 +158,59 @@ impl EnvelopeColumn {
     pub const SILENT: Self = Self { min: 0.0, max: 0.0 };
 }
 
-/// Project the most recent `frames.len()` audio frames onto `n_columns`
-/// pixel columns by aggregating min/max over the frames that map to each
-/// column. Columns are oldest-on-left, newest-on-right.
+/// Project a fixed time window onto pixel columns, oldest on the left.
 ///
-/// Every column is mapped proportionally to the available frame range,
-/// which means the waveform always fills the entire display width. When
-/// the ring contains fewer frames than columns, frames stretch to cover
-/// the extra columns (one frame may map to several adjacent columns) —
-/// preferable to leaving a permanent dead zone on the left edge that
-/// never receives data.
-pub fn project_envelope(frames: &[AudioFrame], n_columns: usize) -> Vec<EnvelopeColumn> {
+/// `right_offset` is the fractional frame position relative to the newest
+/// sample. Interpolation lets the window scroll between audio deliveries.
+/// Missing history is silence, so starting a recording does not stretch or
+/// rescale the time axis. When zoomed out, retain every peak within a column.
+pub fn project_envelope(
+    frames: &[AudioFrame],
+    n_columns: usize,
+    window_frames: f64,
+    right_offset: f64,
+) -> Vec<EnvelopeColumn> {
     let mut out = vec![EnvelopeColumn::SILENT; n_columns];
     if frames.is_empty() || n_columns == 0 {
         return out;
     }
-
-    let n_frames = frames.len();
-    // Index-based loop: `col` is needed both to compute the bucket bounds and
-    // to write into `out[col]`. Suggested `iter_mut().enumerate()` would still
-    // need the index, so the index form reads more cleanly.
-    #[allow(clippy::needless_range_loop)]
-    for col in 0..n_columns {
-        // Bucket-map column index to a half-open frame range. When
-        // n_frames >= n_columns, each bucket covers >=1 frame and we
-        // aggregate min/max over the bucket. When n_frames < n_columns,
-        // start..end ends up empty for some buckets (start == end);
-        // we sample-and-hold the previous column's value so the
-        // waveform stretches across the full width instead of leaving
-        // gaps.
-        let start = (col * n_frames) / n_columns;
-        let end = ((col + 1) * n_frames) / n_columns;
-        let mut min = 0.0_f32;
-        let mut max = 0.0_f32;
-        let mut any = false;
-        for f in &frames[start..end] {
-            if !any {
-                min = f.min;
-                max = f.max;
-                any = true;
-            } else {
-                if f.min < min {
-                    min = f.min;
-                }
-                if f.max > max {
-                    max = f.max;
-                }
+    let right = (frames.len() - 1) as f64 + right_offset;
+    let step = window_frames.max(1.0) / n_columns.saturating_sub(1).max(1) as f64;
+    let sample = |index: isize| {
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| frames.get(i))
+            .map(|f| EnvelopeColumn {
+                min: f.min,
+                max: f.max,
+            })
+            .unwrap_or(EnvelopeColumn::SILENT)
+    };
+    let interpolate = |position: f64| {
+        let index = position.floor() as isize;
+        let fraction = (position - position.floor()) as f32;
+        let a = sample(index);
+        let b = sample(index + 1);
+        EnvelopeColumn {
+            min: a.min + (b.min - a.min) * fraction,
+            max: a.max + (b.max - a.max) * fraction,
+        }
+    };
+    for (col, out) in out.iter_mut().enumerate() {
+        let position = right - (n_columns - 1 - col) as f64 * step;
+        *out = interpolate(position);
+        if step > 1.0 {
+            let start = position - step;
+            let edge = interpolate(start);
+            out.min = out.min.min(edge.min);
+            out.max = out.max.max(edge.max);
+            let first = (start.ceil().max(0.0) as usize).min(frames.len());
+            let end = ((position.floor() + 1.0).max(0.0) as usize).min(frames.len());
+            for f in &frames[first..end] {
+                out.min = out.min.min(f.min);
+                out.max = out.max.max(f.max);
             }
         }
-        out[col] = if any {
-            EnvelopeColumn { min, max }
-        } else {
-            // Empty bucket: sample-and-hold the nearest frame so the
-            // visualization stretches rather than going silent.
-            let idx = ((col * n_frames) / n_columns).min(n_frames - 1);
-            EnvelopeColumn {
-                min: frames[idx].min,
-                max: frames[idx].max,
-            }
-        };
     }
     out
 }
@@ -300,55 +294,39 @@ mod tests {
     }
 
     #[test]
-    fn envelope_partial_stretches_to_fill() {
-        // 2 frames into 5 columns: every column must be populated (no
-        // silent left edge). Frames stretch via sample-and-hold.
+    fn envelope_partial_preserves_time_scale() {
         let frames = vec![frame(0, -0.1, 0.1, -20.0), frame(1, -0.2, 0.2, -14.0)];
-        let cols = project_envelope(&frames, 5);
-        assert_eq!(cols.len(), 5);
-        for (i, c) in cols.iter().enumerate() {
-            assert_ne!(*c, EnvelopeColumn::SILENT, "column {i} was silent");
-        }
-        // The newest frame should appear in the last column.
-        assert_eq!(
-            cols[4],
-            EnvelopeColumn {
-                min: -0.2,
-                max: 0.2
-            }
-        );
-        // The oldest frame should appear in the first column.
-        assert_eq!(
-            cols[0],
-            EnvelopeColumn {
-                min: -0.1,
-                max: 0.1
-            }
-        );
+        let cols = project_envelope(&frames, 5, 4.0, 0.0);
+        assert_eq!(&cols[..3], &[EnvelopeColumn::SILENT; 3]);
+        assert_eq!(cols[3].max, 0.1);
+        assert_eq!(cols[4].max, 0.2);
     }
 
     #[test]
-    fn envelope_aggregates_when_full() {
-        // 10 frames into 5 columns: each column covers 2 frames.
-        let frames: Vec<AudioFrame> = (0..10)
-            .map(|i| frame(i, -(i as f32) * 0.1, (i as f32) * 0.1, -20.0))
-            .collect();
-        let cols = project_envelope(&frames, 5);
-        assert_eq!(cols.len(), 5);
-        // First column: frames 0..=1 -> min = -0.1, max = 0.1
-        assert!((cols[0].min - -0.1).abs() < 1e-6);
-        assert!((cols[0].max - 0.1).abs() < 1e-6);
-        // Last column: frames 8..=9 -> min = -0.9, max = 0.9
-        assert!((cols[4].min - -0.9).abs() < 1e-6);
-        assert!((cols[4].max - 0.9).abs() < 1e-6);
+    fn envelope_interpolates_fractional_scroll() {
+        let frames = vec![frame(0, -0.2, 0.4, -8.0), frame(1, -0.6, 0.8, -2.0)];
+        let cols = project_envelope(&frames, 3, 1.0, -0.25);
+        assert!((cols[2].max - 0.7).abs() < 1e-6);
+        assert!((cols[2].min + 0.5).abs() < 1e-6);
+        assert!((cols[1].max - 0.5).abs() < 1e-6);
     }
 
     #[test]
-    fn envelope_empty_input_yields_silence() {
-        let cols = project_envelope(&[], 4);
-        assert_eq!(cols.len(), 4);
-        for c in cols {
-            assert_eq!(c, EnvelopeColumn::SILENT);
-        }
+    fn envelope_preserves_transients_when_zoomed_out() {
+        let mut frames = vec![frame(0, 0.0, 0.0, -120.0); 101];
+        frames[47] = frame(47, -0.9, 1.0, 0.0);
+        let cols = project_envelope(&frames, 5, 100.0, -0.5);
+        assert!(cols.iter().any(|c| c.max == 1.0 && c.min == -0.9));
+    }
+
+    #[test]
+    fn envelope_handles_empty_and_single_column() {
+        assert_eq!(
+            project_envelope(&[], 4, 300.0, 0.0),
+            vec![EnvelopeColumn::SILENT; 4]
+        );
+        let frames = [frame(0, -0.1, 0.2, -14.0)];
+        assert!(project_envelope(&frames, 0, 300.0, 0.0).is_empty());
+        assert_eq!(project_envelope(&frames, 1, 300.0, 0.0)[0].max, 0.2);
     }
 }
