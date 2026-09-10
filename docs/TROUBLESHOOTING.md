@@ -16,6 +16,7 @@ Solutions to common issues when using Voxtype.
   - [Wrong characters on non-US keyboard layouts](#wrong-characters-on-non-us-keyboard-layouts-yz-swapped-qwertz-azerty)
 - [Performance Issues](#performance-issues)
 - [Soniox Backend Issues](#soniox-backend-issues)
+- [Muse Backend Issues](#muse-backend-issues)
 - [Media Does Not Pause While Recording (Omarchy Quattro)](#media-does-not-pause-while-recording-omarchy-quattro)
 - [Quickshell OSD Issues](#quickshell-osd-issues)
 - [Systemd Service Issues](#systemd-service-issues)
@@ -1177,6 +1178,39 @@ async_max_wait_secs = 300
 ### Post-stop "Streaming Error: Soniox server error (408): Request timeout"
 
 This notification used to appear when you released the hotkey and Soniox's server-side timer fired before the connection fully closed. Voxtype now suppresses 408s that arrive **after** you've signalled end-of-audio, so this should be silent. If you still see it, your build predates the fix (any release v0.7.5 or later includes it).
+
+---
+
+## Muse Backend Issues
+
+### "Muse API key required: set [muse] api_key or VOXTYPE_MUSE_API_KEY"
+
+The backend can't find a credential. Either set an env var (`VOXTYPE_MUSE_API_KEY` is preferred; `MUSE_API_KEY`, `META_API_KEY`, and `META_MODEL_API_KEY` are also accepted):
+
+```bash
+export VOXTYPE_MUSE_API_KEY="your-key-here"
+```
+
+…or add it to `~/.config/voxtype/config.toml`:
+
+```toml
+[muse]
+api_key = "your-key-here"   # less safe: lands in dotfiles
+```
+
+Note that a Muse subscription login alone is not enough. Third-party clients need a Model API key from https://dev.meta.ai, billed per audio minute.
+
+### "Muse WS connect failed: HTTP error: 401 Unauthorized"
+
+The WebSocket endpoint rejected the handshake. The live endpoint (`wss://api.meta.ai/v1/asr/realtime`) ignores the `Authorization` header: auth belongs in the handshake JSON (`authorization.accessToken`). Voxtype already does this, so a 401 normally means the API key itself is invalid or revoked. Generate a fresh key at https://dev.meta.ai.
+
+### "Streaming Error: Ingress audio slower than real-time", transcription stops mid-dictation
+
+The server is receiving fewer audio samples per second than the declared encoding requires, and it closes the stream. Cause: the declared `audioEncoding` does not match what voxtype actually sends. Voxtype's pipeline is 16 kHz and declares `PCM_16KHZ`. If you see this error on a current build, check `journalctl --user -u voxtype` for the `Configured Muse transcriber` line and confirm the running binary includes the fix (builds after 2026-09-02). Older dev builds declared `PCM_24KHZ` while sending 16 kHz audio, which produced exactly this error: rebuild, reinstall, restart.
+
+### Finals arrive late in PUSH_TO_TALK mode
+
+Expected protocol behavior, not a stall. In `PUSH_TO_TALK` mode the server emits the `Final` (`speechComplete`) only after voxtype sends `endStream` on release. Cumulative partials already cover the text, so a final with an empty delta is skipped rather than retyped. If you want per-utterance finals without waiting for release, that is what a future endpointing mode would provide.
 
 ---
 
