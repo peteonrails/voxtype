@@ -689,6 +689,51 @@ fn write_result_sidecar(transcript: &std::path::Path, outcome: &TranscriptOutcom
     }
 }
 
+/// Path of the live transcript mirror: `$XDG_RUNTIME_DIR/voxtype/transcript`.
+///
+/// While a streaming session runs, the daemon rewrites this file with the
+/// text of the session so far after every partial, final and revision
+/// event, so an OSD or the program that started the recording can show the
+/// words as they arrive instead of waiting for the end. It sits beside the
+/// `state` file and follows the same lifecycle: created empty when the
+/// session starts, removed when the daemon returns to idle. Batch sessions
+/// never create it.
+pub fn live_transcript_path() -> PathBuf {
+    Config::runtime_dir().join("transcript")
+}
+
+/// Replace the live transcript mirror with `text`, atomically.
+///
+/// Staged in a sibling file and renamed into place so a reader never sees a
+/// half-written line. Failures are logged and otherwise ignored: the mirror
+/// is advisory, and the session's own output does not depend on it.
+fn write_live_transcript(path: &Path, text: &str) {
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!("Failed to create live transcript directory: {}", e);
+            return;
+        }
+    }
+    let staged = temp_sibling(path);
+    if let Err(e) = std::fs::write(&staged, text) {
+        tracing::warn!("Failed to stage live transcript {:?}: {}", staged, e);
+        return;
+    }
+    if let Err(e) = std::fs::rename(&staged, path) {
+        tracing::warn!("Failed to publish live transcript {:?}: {}", path, e);
+        let _ = std::fs::remove_file(&staged);
+    }
+}
+
+/// Remove the live transcript mirror once the session it described is over.
+fn clear_live_transcript(path: &Path) {
+    if let Err(e) = std::fs::remove_file(path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!("Failed to remove live transcript {:?}: {}", path, e);
+        }
+    }
+}
+
 /// Sibling temporary path used to stage an atomic transcript write.
 ///
 /// Kept in the same directory as the target so the rename stays within one
@@ -1084,6 +1129,16 @@ impl Daemon {
                 }
             }
             "idle" | "stopped" => set_osd_suppressed(false),
+            _ => {}
+        }
+
+        // The live transcript mirror follows the state file: an empty file
+        // marks the start of a streaming session so a reader can tell "no
+        // words yet" from "no session", and it is removed with the return
+        // to idle, whichever path (stop, cancel, timeout) took us there.
+        match state_name {
+            "streaming" => write_live_transcript(&live_transcript_path(), ""),
+            "idle" | "stopped" => clear_live_transcript(&live_transcript_path()),
             _ => {}
         }
     }
@@ -1559,6 +1614,22 @@ impl Daemon {
             *streaming_session = None;
             *streaming_chain = None;
 
+            // A client blocked in `record stop --wait` needs the completion
+            // sidecar whichever engine produced the text; without it the
+            // wait can only end at its own timeout or, once the daemon is
+            // idle, as a spurious `empty`. Nothing transcribed is reported
+            // the way the batch path reports it: no file, an `empty` record.
+            if final_text.trim().is_empty() {
+                tracing::info!(
+                    "Streamed transcription was empty; nothing written to {:?}",
+                    output_path
+                );
+                write_result_sidecar(&output_path, &TranscriptOutcome::empty());
+                *state = State::Idle;
+                self.update_state("idle");
+                return;
+            }
+
             let file_mode = &self.config.output.file_mode;
             match write_transcription_to_file(&output_path, &final_text, file_mode).await {
                 Ok(()) => {
@@ -1567,6 +1638,10 @@ impl Daemon {
                         FileMode::Append => "appended",
                     };
                     tracing::info!("{} streamed transcription to {:?}", mode_str, output_path);
+                    write_result_sidecar(
+                        &output_path,
+                        &TranscriptOutcome::ok(final_text.chars().count()),
+                    );
                     self.play_feedback(SoundEvent::TranscriptionComplete);
                 }
                 Err(e) => {
@@ -1575,6 +1650,7 @@ impl Daemon {
                         output_path,
                         e
                     );
+                    write_result_sidecar(&output_path, &TranscriptOutcome::error(&e.to_string()));
                 }
             }
 
@@ -4212,6 +4288,7 @@ impl Daemon {
                                 if let State::Streaming { typed_chars, .. } = &mut state {
                                     *typed_chars = s.typed_chars();
                                 }
+                                write_live_transcript(&live_transcript_path(), &s.live_text());
                             }
                         }
                         Some(StreamingEvent::Final { text, .. }) => {
@@ -4236,6 +4313,7 @@ impl Daemon {
                                     finalized_text.clear();
                                     finalized_text.push_str(s.finalized_text());
                                 }
+                                write_live_transcript(&live_transcript_path(), &s.live_text());
                             }
                         }
                         Some(StreamingEvent::Replace { backspace, text, .. }) => {
@@ -4258,6 +4336,7 @@ impl Daemon {
                                     finalized_text.clear();
                                     finalized_text.push_str(s.finalized_text());
                                 }
+                                write_live_transcript(&live_transcript_path(), &s.live_text());
                             }
                         }
                         Some(StreamingEvent::Error(err)) => {
@@ -4691,6 +4770,40 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
         assert_eq!(parsed["status"], "error");
         assert_eq!(parsed["message"], "disk went away");
+    }
+
+    #[test]
+    fn live_transcript_sits_beside_the_state_file() {
+        assert_eq!(
+            live_transcript_path(),
+            Config::runtime_dir().join("transcript")
+        );
+    }
+
+    #[test]
+    fn live_transcript_is_replaced_whole_and_cleared() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("voxtype").join("transcript");
+
+        write_live_transcript(&path, "");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "",
+            "a session starts with no words"
+        );
+
+        write_live_transcript(&path, "open the");
+        write_live_transcript(&path, "open the browser");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "open the browser");
+        assert_eq!(
+            fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1,
+            "the staging file is renamed away, never left behind"
+        );
+
+        clear_live_transcript(&path);
+        assert!(!path.exists());
+        clear_live_transcript(&path); // a second clear is not an error
     }
 
     #[test]

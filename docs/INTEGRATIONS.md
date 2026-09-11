@@ -65,6 +65,28 @@ Programs that must poll should watch for `<transcript>.done`, a JSON completion
 record written after the transcript itself is complete, and only then. It is
 written exactly once per file-mode recording and is consumed by `--wait`.
 
+### Showing the words as they arrive
+
+With a streaming engine (`[whisper] streaming = true`, Parakeet unified, Soniox)
+the text exists long before the recording ends, and a UI that waits for
+`--wait` to return throws that away. The daemon mirrors the session so far to
+`$XDG_RUNTIME_DIR/voxtype/transcript`, beside the `state` file:
+
+- created empty the moment the state becomes `streaming`, so "no words yet" is
+  distinguishable from "no session";
+- rewritten after every partial, final and revision event with the whole text
+  so far, committed segments first, then the pending tail, which is exactly what
+  a typing session has at the cursor and what a file session will write;
+- replaced atomically (staged in a sibling file, then renamed), never appended
+  to, so a reader that re-reads the file on every change sees complete text;
+- removed when the daemon returns to idle, whichever way it got there.
+
+Read it with a file watcher, or poll it a few times a second while your own
+recording is active; it is a few hundred bytes at most. Batch engines never
+create it, so its absence during `recording` means nothing is coming until the
+end. The final transcript still arrives through `--wait` (or `<transcript>.done`);
+the mirror is for display, and the two may differ by the last tail.
+
 ### Cancelling
 
 ```sh

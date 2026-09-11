@@ -153,6 +153,14 @@ impl StreamingSession {
         &self.finalized_text
     }
 
+    /// The session's text so far: committed segments followed by the
+    /// pending partial. This is what sits at the cursor in a typing
+    /// session and what a file session will write once it ends, so it is
+    /// what the daemon mirrors to the live transcript file.
+    pub fn live_text(&self) -> String {
+        format!("{}{}", self.finalized_text, self.partial)
+    }
+
     /// Number of Unicode scalar values typed to the output. Used by the
     /// daemon to populate `State::Streaming.typed_chars`.
     pub fn typed_chars(&self) -> usize {
@@ -565,6 +573,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(session.partial(), "");
+    }
+
+    #[test]
+    fn live_text_is_committed_plus_pending() {
+        let mut session = StreamingSession::new();
+        assert_eq!(session.live_text(), "");
+        session.observe_partial_delta("open the");
+        assert_eq!(session.live_text(), "open the");
+        session.commit_segment_silent(" browser");
+        assert_eq!(session.live_text(), "open the browser");
+        session.observe_partial_delta(" please");
+        assert_eq!(session.live_text(), "open the browser please");
     }
 
     #[test]
