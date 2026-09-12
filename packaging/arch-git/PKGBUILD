@@ -1,0 +1,167 @@
+# Maintainer: Peter Jackson <pete@peteonrails.com>
+# Based on the stable voxtype AUR source package.
+
+pkgname=voxtype-git
+pkgver=1.0.1.r52.g320a737
+pkgrel=1
+pkgdesc="Push-to-talk voice-to-text for Linux (development version)"
+arch=('x86_64' 'aarch64')
+url="https://voxtype.io"
+license=('MIT')
+depends=('alsa-lib' 'bash' 'curl' 'glibc' 'libgcc' 'libstdc++')
+makedepends=(
+    'cargo'
+    'clang'
+    'cmake'
+    'git'
+    'pkgconf'
+    'shaderc'
+    'vulkan-headers'
+    'vulkan-icd-loader'
+    'gtk4'
+    'gtk4-layer-shell'
+    'wayland'
+    'libxkbcommon'
+)
+optdepends=(
+    'wtype: keyboard simulation for Wayland (recommended, best CJK support)'
+    'dotool: keyboard simulation with layout support (KDE/GNOME compatible)'
+    'ydotool: keyboard simulation fallback (X11/TTY support)'
+    'wl-clipboard: Wayland clipboard support'
+    'xdotool: X11 keyboard simulation'
+    'xclip: X11 clipboard support'
+    'libnotify: desktop notifications'
+    'pipewire-alsa: ALSA compatibility for PipeWire'
+    'pulseaudio-alsa: ALSA compatibility for PulseAudio'
+    'vulkan-icd-loader: GPU acceleration for Whisper and native OSD rendering'
+    'onnxruntime>=1.24.0: CPU inference for the ONNX engines'
+    'gtk4: GTK4 OSD frontend'
+    'gtk4-layer-shell: GTK4 OSD frontend'
+    'cairo: GTK4 OSD frontend'
+    'glib2: GTK4 OSD frontend'
+    'wayland: native OSD frontend'
+    'libxkbcommon: native OSD frontend'
+    'libglvnd: OpenGL rendering for the native OSD frontend'
+    'quickshell: Quickshell OSD frontend'
+    'qt6-declarative: Quickshell OSD frontend'
+    'ollama: local AI summarization for meeting mode'
+)
+provides=("voxtype=${pkgver}")
+conflicts=('voxtype')
+backup=('etc/voxtype/config.toml')
+# whisper.cpp mixes C/C++ with Rust; avoid cross-language LTO and the
+# large debug package when repeatedly rebuilding the development version.
+options=('!lto' '!debug')
+install=voxtype-git.install
+source=(
+    'voxtype::git+https://github.com/peteonrails/voxtype.git#branch=dev'
+    'voxtype-git.install'
+)
+sha256sums=('SKIP' '9471946285e36f4d30c94d6e353a690259c99a287011fc7a4ce9795997dd3da0')
+
+pkgver() {
+    cd voxtype
+    # Use stable release tags; RC tags contain hyphens and can sort after
+    # the final release in pacman's version comparison.
+    git describe --tags --long --abbrev=7 --match 'v[0-9]*' --exclude '*-*' |
+        sed 's/^v//;s/-/.r/;s/-/./'
+}
+
+prepare() {
+    cd voxtype
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd voxtype
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    export CARGO_PROFILE_RELEASE_LTO=false
+    export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8
+    export CC=clang
+    export CXX=clang++
+    export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-4}"
+    # Rust panic locations and whisper.cpp diagnostics otherwise embed
+    # the packager's working directory even in stripped release binaries.
+    export RUSTFLAGS="${RUSTFLAGS} --remap-path-prefix=$srcdir/="
+    export CFLAGS="${CFLAGS} -ffile-prefix-map=$srcdir/="
+    export CXXFLAGS="${CXXFLAGS} -ffile-prefix-map=$srcdir/="
+
+    # Keep the source package's native CPU and Vulkan layout. Save each
+    # daemon before the next feature set overwrites target/release/voxtype;
+    # Cargo can reuse dependencies without a cargo clean between builds.
+    cargo build --frozen --release --bin voxtype
+    cp target/release/voxtype voxtype-native
+
+    cargo build --frozen --release --bin voxtype --features gpu-vulkan
+    cp target/release/voxtype voxtype-vulkan
+
+    # Dynamic loading needs no ONNX Runtime at build time. Always build
+    # the same engines; users install the optional runtime to use them.
+    cargo build --frozen --release --bin voxtype \
+        --features parakeet-load-dynamic,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere
+    cp target/release/voxtype voxtype-onnx
+
+    cargo build --frozen --release \
+        --bin voxtype-osd \
+        --bin voxtype-osd-gtk4 \
+        --bin voxtype-osd-native \
+        --bin voxtype-osd-quickshell \
+        --bin voxtype-audio-bridge \
+        --features osd-gtk4,osd-native
+}
+
+check() {
+    cd voxtype
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    export CC=clang
+    export CXX=clang++
+    export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-4}"
+    # Include both waveform implementations. Model-dependent inference
+    # tests remain opt-in, as in upstream's regular test suite.
+    cargo test --frozen --lib --bins --tests --features osd-gtk4,osd-native
+}
+
+package() {
+    cd voxtype
+
+    install -Dm755 -t "$pkgdir/usr/lib/voxtype" \
+        voxtype-native voxtype-vulkan voxtype-onnx \
+        target/release/voxtype-osd \
+        target/release/voxtype-osd-gtk4 \
+        target/release/voxtype-osd-native \
+        target/release/voxtype-osd-quickshell
+    install -Dm755 target/release/voxtype-audio-bridge \
+        "$pkgdir/usr/bin/voxtype-audio-bridge"
+    ln -s /usr/lib/voxtype/voxtype-native "$pkgdir/usr/bin/voxtype"
+    ln -s /usr/lib/voxtype/voxtype-osd "$pkgdir/usr/bin/voxtype-osd"
+
+    # Copy the complete QML module, including recipe/theme helpers.
+    install -Dm644 -t "$pkgdir/usr/share/voxtype/quickshell" quickshell/*.qml
+    install -Dm644 -t "$pkgdir/usr/share/voxtype/quickshell/voxtype-shared" \
+        quickshell/voxtype-shared/*.qml quickshell/voxtype-shared/qmldir
+
+    install -Dm755 packaging/scripts/voxtype-configure-launcher \
+        "$pkgdir/usr/bin/voxtype-configure-launcher"
+    install -Dm644 packaging/voxtype-configure.desktop \
+        "$pkgdir/usr/share/applications/voxtype-configure.desktop"
+    install -Dm644 config/default.toml "$pkgdir/etc/voxtype/config.toml"
+    install -Dm644 packaging/systemd/voxtype.service \
+        "$pkgdir/usr/lib/systemd/user/voxtype.service"
+    install -Dm644 -t "$pkgdir/usr/share/doc/$pkgname" README.md docs/INSTALL.md
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+    install -Dm644 packaging/completions/voxtype.bash \
+        "$pkgdir/usr/share/bash-completion/completions/voxtype"
+    install -Dm644 packaging/completions/voxtype.zsh \
+        "$pkgdir/usr/share/zsh/site-functions/_voxtype"
+    install -Dm644 packaging/completions/voxtype.fish \
+        "$pkgdir/usr/share/fish/vendor_completions.d/voxtype.fish"
+
+    # Each feature set generates the same man pages. Use one set and
+    # fail if build.rs stopped generating them.
+    local _man_dirs=(target/release/build/voxtype-*/out/man)
+    install -Dm644 -t "$pkgdir/usr/share/man/man1" "${_man_dirs[0]}"/*.1
+}
