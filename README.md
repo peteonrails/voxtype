@@ -4,6 +4,8 @@
 
 **[voxtype.io](https://voxtype.io)**
 
+**[English](README.md)** | [简体中文](README.zh-CN.md)
+
 Voice-to-text for Linux. 9-11× realtime on your CPU. Local by default.
 
 Hold a hotkey (default: ScrollLock) while speaking, release to transcribe and output the text at your cursor position. Voxtype runs Cohere Transcribe (#1 on the Open ASR Leaderboard) faster than realtime on a plain Zen 4 CPU. Parakeet, Whisper, and six more engines if you want them. No cloud, no subscription, no telemetry.
@@ -756,6 +758,7 @@ We want to hear from you! Voxtype is a young project and your feedback helps mak
 - [graysky](https://github.com/graysky2) - Flash attention config fix
 - [OldJobobo](https://github.com/OldJobobo) - Quickshell OSD theming, Omarchy theme state path support, configurable media ducking, degenerate Whisper transcript retry; co-owns `quickshell/`
 - [Matthias Breddin](https://github.com/lunetics) - IBus non-ASCII reordering troubleshooting, Rust 1.98 clippy fix, media ducking fade, cubic-scale ducking volume correction
+- [Franklinyung](https://github.com/Franklinyung) - Simplified Chinese README, troubleshooting docs for conda-linked binaries that fail to start audio
 
 ## License
 
