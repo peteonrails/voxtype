@@ -215,3 +215,85 @@ Include:
 - Which binary you're using (avx2/avx512/cuda)
 - The Parakeet model version
 - Sample audio if possible (for accuracy issues)
+
+## Orukeet r3 INT8 (local ONNX import)
+
+Orukeet is a Parakeet TDT v3 adaptation. Its published Sherpa-ONNX archive
+contains a compatible encoder but separate decoder and joiner graphs. Renaming
+those files alone does not make the archive loadable by `parakeet-rs`.
+
+The offline importer composes the decoder and joiner, maps their tensor names to
+the existing Parakeet interface, and copies the encoder and vocabulary unchanged.
+It does not retrain or requantize the model. Python is needed only for this import;
+normal transcription uses Voxtype's existing CPU/ONNX runtime.
+
+Download the pinned r3 archive (about 487 MB):
+
+```bash
+curl --fail --location \
+  'https://huggingface.co/oruk/orukeet/resolve/55a984d46f68323301837194ce647c702f55facc/onnx/sherpa-onnx-orukeet-v0.1.0-int8.tar.bz2' \
+  --output sherpa-onnx-orukeet-v0.1.0-int8.tar.bz2
+```
+
+From the Voxtype source checkout, import it with `uv` (Python 3.12 or newer):
+
+```bash
+uv run --script scripts/import-orukeet-onnx.py \
+  --archive sherpa-onnx-orukeet-v0.1.0-int8.tar.bz2 \
+  --output "$HOME/.local/share/voxtype/models/orukeet-r3-int8"
+```
+
+The importer verifies SHA256
+`f9191f30178cc9122ce2f023bf9fefafc822028307b0efa4caff645ba3fe8d0a`,
+refuses existing output directories, and checks eight decoder/joiner steps on
+CPU before publishing the converted directory. Allow about 2 GB of temporary
+free disk space during import, in addition to the downloaded archive. A
+`VOXTYPE-CONVERSION.json` file records provenance, tool versions, file hashes,
+and the numerical check results. This check is not an ASR accuracy benchmark.
+
+Use an ONNX-enabled Voxtype binary with a separate trial config:
+
+```toml
+engine = "parakeet"
+
+[parakeet]
+model = "/absolute/path/to/orukeet-r3-int8"
+model_type = "tdt"
+streaming = false
+```
+
+Smoke-test saved audio without changing the running daemon:
+
+```bash
+voxtype --config /path/to/orukeet-trial.toml transcribe /path/to/mono-16khz.wav
+```
+
+The one-shot command prints the transcript: do not capture private audio or
+transcripts in public issue/PR artifacts. Measure warmed inference separately
+from model startup when comparing resident dictation latency.
+
+Limitations and licensing:
+
+- This is a local custom-model import, not a new engine or a download-picker entry.
+  Voxtype's model catalog uses maintainer-controlled, checksum-verified hosting;
+  a catalog entry requires a separately published converted artifact and manifest.
+- The import targets this exact archive. Other Orukeet exports need their own
+  compatibility checks. GPU execution and cache-aware streaming are not validated.
+- Orukeet's weights and fitted kernels are CC BY-SA 4.0. The importer preserves
+  `LICENSE-WEIGHTS` and `NOTICE.md`; retain those notices with redistributed models.
+- Keep the previous Parakeet model/config until a paired benchmark with reviewed
+  reference transcripts establishes an accuracy benefit for your own speech.
+
+Run the converter's small, model-free CPU tests in an environment containing the
+script's pinned dependencies:
+
+```bash
+python -m unittest discover -s scripts/tests -p 'test_import_orukeet_onnx.py' -v
+```
+
+### Orukeet CPU benchmark evidence
+
+See the [September 12, 2026 comparison](benchmarks/orukeet-onnx-20260912.md)
+for public reference-scored accuracy, pinned dataset links, per-clip evidence,
+and separate warm CPU and whole-CLI timings. The small convenience sample is
+not a recommendation to change the default model.
