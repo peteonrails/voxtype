@@ -48,6 +48,7 @@ use crate::error::OutputError;
 use crate::output::post_process::PostProcessor;
 use crate::output::{output_with_fallback, OutputOptions, TextOutput};
 use std::process::Stdio;
+use std::time::Duration;
 use tokio::process::Command;
 
 /// A streaming output session: types finalized segments incrementally,
@@ -65,7 +66,8 @@ pub struct StreamingSession {
     /// post-processor returned (since the post-processor is allowed to
     /// reformat). For accurate rewinding we count *typed* output.
     typed_chars: usize,
-    /// Most recent partial text (for status only; never typed).
+    /// Most recent partial text. Snapshot/delta backends also render it;
+    /// commit-only backends may use it for status without typing.
     partial: String,
 }
 
@@ -76,6 +78,67 @@ impl StreamingSession {
             finalized_text: String::new(),
             typed_chars: 0,
             partial: String::new(),
+        }
+    }
+
+    /// Reconcile a full hypothesis against the text this session rendered.
+    /// Keep the shared prefix and replace only the divergent suffix.
+    /// Output hooks wrap the inserted suffix; post-processing runs once on
+    /// the full transcript at finalization, never on provisional snapshots.
+    pub async fn apply_snapshot(
+        &mut self,
+        chain: &[Box<dyn TextOutput>],
+        text: &str,
+        is_final: bool,
+        post_processor: Option<&PostProcessor>,
+        pre_output_command: Option<&str>,
+        post_output_command: Option<&str>,
+    ) -> Result<(), OutputError> {
+        let processed;
+        let text = if let Some(pp) = post_processor.filter(|_| is_final && !text.is_empty()) {
+            processed = pp.process(text).await;
+            &processed
+        } else {
+            text
+        };
+        let previous = self.rendered_text();
+        let (backspace, replacement) = snapshot_edit(&previous, text);
+        if backspace > 0 && emit_backspaces(backspace).await != backspace {
+            return Err(OutputError::InjectionFailed(
+                "streaming snapshot rewind failed".into(),
+            ));
+        }
+        if !replacement.is_empty() {
+            output_with_fallback(
+                chain,
+                &replacement,
+                OutputOptions {
+                    pre_output_command,
+                    post_output_command,
+                    wait_for_modifier_release: false,
+                    modifier_release_timeout: Duration::ZERO,
+                },
+            )
+            .await?;
+        }
+        self.observe_snapshot(text, is_final);
+        self.typed_chars = text.chars().count();
+        Ok(())
+    }
+
+    pub fn rendered_text(&self) -> String {
+        format!("{}{}", self.finalized_text, self.partial)
+    }
+
+    /// File-output counterpart: replace the accumulated hypothesis without
+    /// incrementing typed_chars (nothing was injected into an application).
+    pub fn observe_snapshot(&mut self, text: &str, is_final: bool) {
+        self.finalized_text.clear();
+        self.partial.clear();
+        if is_final {
+            self.finalized_text.push_str(text);
+        } else {
+            self.partial.push_str(text);
         }
     }
 
@@ -364,6 +427,18 @@ impl Default for StreamingSession {
     }
 }
 
+fn snapshot_edit(previous: &str, next: &str) -> (usize, String) {
+    let common = previous
+        .chars()
+        .zip(next.chars())
+        .take_while(|(a, b)| a == b)
+        .count();
+    (
+        previous.chars().count() - common,
+        next.chars().skip(common).collect(),
+    )
+}
+
 /// Backspace `count` chars using the first available method.
 /// Returns the actual number of backspaces emitted.
 async fn emit_backspaces(count: usize) -> usize {
@@ -445,6 +520,109 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use std::sync::Mutex;
+
+    #[test]
+    fn authoritative_snapshots_reconstruct_every_revision_exactly() {
+        let mut screen = String::new();
+        for next in [
+            "这个云书法",
+            "这个语音输入法",
+            "这个语音输入法，很好",
+            "这个语音输入法。很好用！",
+            "这个语音输入法。",
+            "",
+            "hello 世界",
+        ] {
+            let (delete, insert) = snapshot_edit(&screen, next);
+            let keep = screen.chars().count() - delete;
+            screen = screen.chars().take(keep).collect();
+            screen.push_str(&insert);
+            assert_eq!(screen, next);
+        }
+        assert_eq!(snapshot_edit("你好", "你好"), (0, String::new()));
+        assert_eq!(snapshot_edit("你好世", "你好界"), (1, "界".into()));
+    }
+
+    #[test]
+    fn silent_snapshots_replace_text_without_counting_keyboard_output() {
+        let mut session = StreamingSession::new();
+        session.observe_snapshot("这个云书法", false);
+        session.observe_snapshot("这个语音输入法", false);
+        assert_eq!(session.rendered_text(), "这个语音输入法");
+        assert_eq!(session.typed_chars(), 0);
+        session.observe_snapshot("这个语音输入法。", true);
+        assert_eq!(session.finalized_text(), "这个语音输入法。");
+        assert!(session.partial().is_empty());
+        assert_eq!(session.typed_chars(), 0);
+    }
+
+    #[test]
+    fn silent_snapshot_survives_stream_end_without_another_final() {
+        let mut session = StreamingSession::new();
+        session.observe_snapshot("保留最后一句", false);
+        session.finalize_pending_partial();
+        assert_eq!(session.finalized_text(), "保留最后一句");
+        assert_eq!(session.typed_chars(), 0);
+    }
+
+    #[tokio::test]
+    async fn snapshots_append_only_the_new_suffix_and_promote_unchanged_final() {
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        let mut session = StreamingSession::new();
+        session
+            .apply_snapshot(&chain, "你好", false, None, None, None)
+            .await
+            .unwrap();
+        session
+            .apply_snapshot(&chain, "你好世界", false, None, None, None)
+            .await
+            .unwrap();
+        session
+            .apply_snapshot(&chain, "你好世界", true, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(rec.typed(), vec!["你好", "世界"]);
+        assert_eq!(session.typed_chars(), 4);
+        assert_eq!(session.finalized_text(), "你好世界");
+        assert!(session.partial().is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_snapshot_output_does_not_advance_bookkeeping() {
+        let mut session = StreamingSession::new();
+        assert!(session
+            .apply_snapshot(&[], "你好", false, None, None, None)
+            .await
+            .is_err());
+        assert_eq!(session.typed_chars(), 0);
+        assert!(session.rendered_text().is_empty());
+    }
+
+    #[tokio::test]
+    async fn snapshot_post_processing_waits_for_the_final_response() {
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        let pp = PostProcessor::new(&crate::config::PostProcessConfig {
+            command: "tr '[:lower:]' '[:upper:]'".into(),
+            timeout_ms: 1000,
+            trim: true,
+            fallback_on_empty: true,
+        });
+        let mut partial_session = StreamingSession::new();
+        partial_session
+            .apply_snapshot(&chain, "hello", false, Some(&pp), None, None)
+            .await
+            .unwrap();
+        assert_eq!(partial_session.rendered_text(), "hello");
+        let mut final_session = StreamingSession::new();
+        final_session
+            .apply_snapshot(&chain, "hello", true, Some(&pp), None, None)
+            .await
+            .unwrap();
+        assert_eq!(final_session.finalized_text(), "HELLO");
+        assert_eq!(rec.typed(), vec!["hello", "HELLO"]);
+    }
 
     /// In-memory output that records every typed string. Used to
     /// verify session bookkeeping without spawning subprocesses.

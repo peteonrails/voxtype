@@ -129,26 +129,31 @@ wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async
 
 ## Result reconciliation
 
-Seed-ASR returns cumulative transcript snapshots. Text in the current utterance
-can change until its `definite` flag becomes true. Voxtype converts those
-snapshots to cursor-oriented deltas:
+Seed-ASR returns cumulative transcript snapshots. With `type_partials = true`,
+voxtype reconciles each nonempty snapshot against the full text rendered by
+the current session. It keeps the common prefix, backspaces the divergent
+suffix, and types its replacement. Revisions do not wait for an utterance's
+`definite` flag, and later punctuation corrections can update earlier text.
 
 | Seed-ASR state | Voxtype event | Purpose |
 |---|---|---|
-| Stable prefix extends committed text | `Final` | Types and commits only the new stable suffix |
-| Optional provisional prefix extends the typed tail | `Partial` | Types only the new provisional suffix |
-| Stable text revises a typed provisional tail | `Replace` | Backspaces the divergent Unicode characters and commits the replacement |
+| Stable prefix extends committed text (`type_partials = false`) | `Final` | Types and commits only the new stable suffix |
+| Cumulative text changes (`type_partials = true`) | `Snapshot` | Reconciles the full session text, including provisional revisions |
+| Final response in live mode | `Snapshot { is_final: true }` | Reconciles and finalizes the last hypothesis, even if unchanged |
 | Final response package | `Ended` after reconciliation | Closes the session cleanly |
 | Protocol, server, or network failure | `Error`, then `Ended` | Surfaces the failure and resets daemon state |
 
-`type_partials = false` is the default. This emits stable text only and avoids
-visible corrections. When enabled, voxtype types only monotonic extensions of a
-partial result; it suppresses provisional revisions until Seed-ASR finalizes the
-utterance.
+`type_partials = false` remains the default. It emits stable text only and
+rejects revisions to an already committed prefix. Live mode keeps the last
+nonempty hypothesis through empty acknowledgement or final packets, matching
+the buffered transcription path. File output replaces its accumulated text
+without emitting keystrokes or incrementing the cancel-rewind count.
 
-If the service revises text already marked definite and committed, voxtype ends
-the session with an error. The existing streaming contract can revise the active
-partial tail but intentionally cannot rewrite arbitrary older output.
+In live mode, a configured post-processor runs on the complete transcript at
+the final response, not on each provisional update. Output hooks still wrap
+inserted text. As with existing live typing, keep the caret at the end of the
+dictation while it is being revised. This reconciliation change does not add
+focus tracking or change the daemon's handling of results after manual stop.
 
 ## Wire protocol
 
@@ -181,7 +186,7 @@ Official protocol references:
 | `resource_id` | `SEEDASR_RESOURCE_ID` | `volc.seedasr.sauc.duration` | Service/resource identifier |
 | `url` | `SEEDASR_URL` | Seed-ASR 2.0 bidirectional endpoint | WebSocket endpoint |
 | `streaming` | - | `true` | Use native live streaming |
-| `type_partials` | - | `false` | Type monotonic provisional text |
+| `type_partials` | - | `false` | Type and reconcile revisable cumulative text |
 | `language` | - | unset | Recognition language; unset or `auto` enables detection |
 | `enable_itn` | - | `true` | Enable inverse text normalization |
 | `enable_punc` | - | `true` | Enable punctuation |

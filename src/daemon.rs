@@ -4210,6 +4210,37 @@ impl Daemon {
                         State::Streaming { file_output_path: Some(_), .. }
                     );
                     match event {
+                        Some(StreamingEvent::Snapshot { text, is_final }) => {
+                            let mut output_failed = false;
+                            if let Some(s) = streaming_session.as_mut() {
+                                if file_output {
+                                    s.observe_snapshot(&text, is_final);
+                                } else if let Some(chain) = streaming_chain.as_ref() {
+                                    if let Err(e) = s.apply_snapshot(
+                                        chain,
+                                        &text,
+                                        is_final,
+                                        self.post_processor.as_ref(),
+                                        self.config.output.pre_output_command.as_deref(),
+                                        self.config.output.post_output_command.as_deref(),
+                                    ).await {
+                                        // A failed edit may have applied only in part. Do
+                                        // not issue more rewinds against an unknown state.
+                                        output_failed = true;
+                                        tracing::error!("Streaming snapshot output failed: {}", e);
+                                    }
+                                }
+                                if let State::Streaming { typed_chars, finalized_text, partial_buffer, .. } = &mut state {
+                                    *typed_chars = s.typed_chars();
+                                    *finalized_text = s.finalized_text().to_string();
+                                    *partial_buffer = s.partial().to_string();
+                                }
+                            }
+                            if output_failed {
+                                streaming_session = None;
+                                streaming_chain = None;
+                            }
+                        }
                         Some(StreamingEvent::Partial { text, .. }) => {
                             if let Some(s) = streaming_session.as_mut() {
                                 if file_output {

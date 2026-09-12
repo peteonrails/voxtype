@@ -846,6 +846,29 @@ impl Reconciler {
     ) -> Result<Vec<StreamingEvent>, TranscribeError> {
         let mut events = Vec::new();
 
+        // Live dictation needs every cumulative hypothesis, including edits
+        // to provisional words and punctuation in earlier utterances. Let the
+        // output session compare it with what was actually rendered instead
+        // of treating stability metadata as an immutable commit boundary.
+        if type_partials {
+            self.finished = snapshot.is_last;
+            // Empty acknowledgements/end markers must not erase a visible
+            // hypothesis. This also matches the buffered transcription path.
+            let text = if snapshot.text.is_empty() {
+                self.typed_partial.clone()
+            } else {
+                snapshot.text
+            };
+            if text != self.typed_partial || snapshot.is_last {
+                self.typed_partial = text.clone();
+                events.push(StreamingEvent::Snapshot {
+                    text,
+                    is_final: snapshot.is_last,
+                });
+            }
+            return Ok(events);
+        }
+
         if !snapshot.text.starts_with(&self.committed) {
             return Err(inference_error(
                 "server revised text that was already finalized",
@@ -1145,7 +1168,7 @@ mod tests {
     }
 
     #[test]
-    fn reconciler_emits_deltas_and_final_promotion() {
+    fn reconciler_emits_full_snapshots_and_final_promotion() {
         let mut reconciler = Reconciler::default();
         let partial = reconciler
             .process(
@@ -1159,7 +1182,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             &partial[0],
-            StreamingEvent::Partial { text, .. } if text == "hello"
+            StreamingEvent::Snapshot { text, is_final: false } if text == "hello"
         ));
 
         let final_events = reconciler
@@ -1174,7 +1197,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             &final_events[0],
-            StreamingEvent::Final { text, .. } if text == " world"
+            StreamingEvent::Snapshot { text, is_final: true } if text == "hello world"
         ));
         assert!(reconciler.finished);
     }
@@ -1198,11 +1221,7 @@ mod tests {
 
         assert!(matches!(
             &events[0],
-            StreamingEvent::Replace {
-                backspace: 1,
-                text,
-                ..
-            } if text == "。"
+            StreamingEvent::Snapshot { text, is_final: true } if text == "你好。"
         ));
     }
 
@@ -1278,6 +1297,78 @@ mod tests {
         assert_eq!(i16::from_le_bytes([bytes[0], bytes[1]]), -32767);
         assert_eq!(i16::from_le_bytes([bytes[2], bytes[3]]), 0);
         assert_eq!(i16::from_le_bytes([bytes[4], bytes[5]]), 32767);
+    }
+
+    #[test]
+    fn live_revisions_continue_without_waiting_for_definite_metadata() {
+        let mut reconciler = Reconciler::default();
+        for (text, stable) in [
+            ("这个云书法", ""),
+            ("这个语音输入法", ""),
+            ("这个语音输入法，", "这个语音输入法，"),
+            ("这个语音输入法。很好用", ""),
+        ] {
+            let events = reconciler
+                .process(
+                    RecognitionSnapshot {
+                        text: text.into(),
+                        stable_text: stable.into(),
+                        is_last: false,
+                    },
+                    true,
+                )
+                .unwrap();
+            assert!(
+                matches!(&events[..], [StreamingEvent::Snapshot { text: actual, is_final: false }] if actual == text)
+            );
+        }
+    }
+
+    #[test]
+    fn empty_markers_preserve_the_last_visible_hypothesis() {
+        let mut reconciler = Reconciler::default();
+        let snapshot = |text: &str, is_last| RecognitionSnapshot {
+            text: text.into(),
+            stable_text: String::new(),
+            is_last,
+        };
+        assert!(reconciler
+            .process(snapshot("", false), true)
+            .unwrap()
+            .is_empty());
+        reconciler
+            .process(snapshot("保留这句话", false), true)
+            .unwrap();
+        assert!(reconciler
+            .process(snapshot("", false), true)
+            .unwrap()
+            .is_empty());
+        let events = reconciler.process(snapshot("", true), true).unwrap();
+        assert!(
+            matches!(&events[..], [StreamingEvent::Snapshot { text, is_final: true }] if text == "保留这句话")
+        );
+        assert!(reconciler.finished);
+    }
+
+    #[test]
+    fn unchanged_final_still_finishes_live_composition() {
+        let mut reconciler = Reconciler::default();
+        for is_last in [false, true] {
+            let events = reconciler
+                .process(
+                    RecognitionSnapshot {
+                        text: "你好".into(),
+                        stable_text: String::new(),
+                        is_last,
+                    },
+                    true,
+                )
+                .unwrap();
+            assert!(
+                matches!(&events[..], [StreamingEvent::Snapshot { is_final, .. }] if *is_final == is_last)
+            );
+        }
+        assert!(reconciler.finished);
     }
 
     #[tokio::test]

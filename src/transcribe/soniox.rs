@@ -1434,6 +1434,7 @@ mod tests {
                 StreamingEvent::Replace {
                     backspace, text, ..
                 } => ("Replace", format!("-{}+{}", backspace, text)),
+                StreamingEvent::Snapshot { text, .. } => ("Snapshot", text.clone()),
                 StreamingEvent::Ended => ("Ended", String::new()),
                 StreamingEvent::Error(e) => ("Error", e.to_string()),
             })

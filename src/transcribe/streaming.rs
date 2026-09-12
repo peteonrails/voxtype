@@ -64,6 +64,11 @@ pub type SegmentId = u64;
 /// is not needed in normal use.
 #[derive(Debug)]
 pub enum StreamingEvent {
+    /// Complete, revisable transcript for this session, not a suffix delta.
+    /// The consumer reconciles it against the text it has actually rendered.
+    /// `is_final` marks the final response, not an utterance stability hint.
+    Snapshot { text: String, is_final: bool },
+
     /// In-progress text for a segment. May be revised by later partials
     /// or superseded by a `Final` event with the same `segment_id`.
     Partial { text: String, segment_id: SegmentId },
