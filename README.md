@@ -1,10 +1,10 @@
 # Voxtype
 
+**[English](README.md)** | **[简体中文](README.zh-CN.md)**
+
 [![Voxtype - Voice to Text for Linux](website/images/og-preview.png)](https://voxtype.io)
 
 **[voxtype.io](https://voxtype.io)**
-
-**[English](README.md)** | [简体中文](README.zh-CN.md)
 
 Voice-to-text for Linux. 9-11× realtime on your CPU. Local by default.
 
