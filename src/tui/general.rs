@@ -142,10 +142,14 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(recommended, Style::default().fg(Color::Cyan)),
             Span::styled("   (Whisper / ONNX)", Style::default().fg(Color::Gray)),
         ]),
-        Line::from(format!(
-            "CPU:           AVX2={}  AVX-512={}",
-            inv.cpu.avx2, inv.cpu.avx512
-        )),
+        Line::from(if inv.cpu.is_x86_64() {
+            format!(
+                "CPU:           AVX2={}  AVX-512={}",
+                inv.cpu.avx2, inv.cpu.avx512
+            )
+        } else {
+            format!("CPU:           {}", inv.cpu.arch)
+        }),
         Line::from(format!(
             "GPU:           NVIDIA={}  AMD={}",
             inv.gpus.nvidia, inv.gpus.amd

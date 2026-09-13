@@ -405,10 +405,14 @@ fn print_variants_text(inv: &setup::binary::Inventory) {
 
     println!();
     println!("Hardware");
-    println!(
-        "  CPU:           AVX2={}, AVX-512={}",
-        inv.cpu.avx2, inv.cpu.avx512
-    );
+    if inv.cpu.is_x86_64() {
+        println!(
+            "  CPU:           AVX2={}, AVX-512={}",
+            inv.cpu.avx2, inv.cpu.avx512
+        );
+    } else {
+        println!("  CPU:           {}", inv.cpu.arch);
+    }
     println!(
         "  GPU:           NVIDIA={}, AMD={}",
         inv.gpus.nvidia, inv.gpus.amd
