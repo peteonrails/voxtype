@@ -752,6 +752,40 @@ async fn write_transcription_to_file(
     Ok(())
 }
 
+/// Save available streaming text and publish its outcome. A successful file
+/// write must not hide a backend failure that left an incomplete transcript.
+async fn finish_streaming_file_output(
+    path: &Path,
+    text: &str,
+    file_mode: &FileMode,
+    backend_error: Option<&crate::error::TranscribeError>,
+) -> TranscriptOutcome {
+    let outcome = match write_transcription_to_file(path, text, file_mode).await {
+        Ok(()) => {
+            let mode_str = match file_mode {
+                FileMode::Overwrite => "wrote",
+                FileMode::Append => "appended",
+            };
+            tracing::info!("{} streamed transcription to {:?}", mode_str, path);
+            match backend_error {
+                Some(error) => TranscriptOutcome::error(&error.to_string()),
+                None if text.trim().is_empty() => TranscriptOutcome::empty(),
+                None => TranscriptOutcome::ok(text.chars().count()),
+            }
+        }
+        Err(error) => {
+            tracing::error!(
+                "Failed to write streamed transcription to {:?}: {}",
+                path,
+                error
+            );
+            TranscriptOutcome::error(&error.to_string())
+        }
+    };
+    write_result_sidecar(path, &outcome);
+    outcome
+}
+
 /// Read and consume the model override file
 /// Returns the model name if the file exists, None otherwise
 fn read_model_override() -> Option<String> {
@@ -1517,6 +1551,7 @@ impl Daemon {
         streaming_handle: &mut Option<StreamHandle>,
         streaming_session: &mut Option<StreamingSession>,
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
+        backend_error: Option<&crate::error::TranscribeError>,
     ) {
         if let Some(mut c) = audio_capture.take() {
             let _ = c.stop().await;
@@ -1559,24 +1594,18 @@ impl Daemon {
             *streaming_session = None;
             *streaming_chain = None;
 
-            let file_mode = &self.config.output.file_mode;
-            match write_transcription_to_file(&output_path, &final_text, file_mode).await {
-                Ok(()) => {
-                    let mode_str = match file_mode {
-                        FileMode::Overwrite => "wrote",
-                        FileMode::Append => "appended",
-                    };
-                    tracing::info!("{} streamed transcription to {:?}", mode_str, output_path);
-                    self.play_feedback(SoundEvent::TranscriptionComplete);
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to write streamed transcription to {:?}: {}",
-                        output_path,
-                        e
-                    );
-                }
-            }
+            let outcome = finish_streaming_file_output(
+                &output_path,
+                &final_text,
+                &self.config.output.file_mode,
+                backend_error,
+            )
+            .await;
+            self.play_feedback(if outcome.status == "error" {
+                SoundEvent::Error
+            } else {
+                SoundEvent::TranscriptionComplete
+            });
 
             *state = State::Idle;
             self.update_state("idle");
@@ -1586,7 +1615,11 @@ impl Daemon {
         *streaming_session = None;
         *streaming_chain = None;
 
-        self.play_feedback(SoundEvent::TranscriptionComplete);
+        self.play_feedback(if backend_error.is_some() {
+            SoundEvent::Error
+        } else {
+            SoundEvent::TranscriptionComplete
+        });
 
         if let Some(cmd) = &self.config.output.post_output_command {
             if let Err(e) = output::run_hook(cmd, "post_output").await {
@@ -1779,7 +1812,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::SeedAsr => {
                     if let Some(ref t) = transcriber_preloaded {
                         Ok(t.clone())
                     } else {
@@ -3201,9 +3235,10 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
-                    // Non-Whisper engines do their own setup; Soniox just validates
-                    // API key + endpoint at construction (no model to download).
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::SeedAsr => {
+                    // Non-Whisper engines do their own setup; cloud engines only
+                    // validate credentials and endpoints at construction.
                     transcriber_preloaded = Some(Arc::from(crate::transcribe::create_transcriber(
                         &self.config,
                     )?));
@@ -3322,7 +3357,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::SeedAsr => {
                                             let config = self.config.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                                 crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -3353,7 +3389,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::SeedAsr => {
                                             if let Some(ref t) = transcriber_preloaded {
                                                 let transcriber = t.clone();
                                                 tokio::task::spawn_blocking(move || {
@@ -3536,7 +3573,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::SeedAsr => {
                                             let config = self.config.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                                 crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -3567,7 +3605,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::SeedAsr => {
                                             if let Some(ref t) = transcriber_preloaded {
                                                 let transcriber = t.clone();
                                                 tokio::task::spawn_blocking(move || {
@@ -4058,7 +4097,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::SeedAsr => {
                                     let config = self.config.clone();
                                     self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                         crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -4088,7 +4128,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::SeedAsr => {
                                     if let Some(ref t) = transcriber_preloaded {
                                         let transcriber = t.clone();
                                         tokio::task::spawn_blocking(move || {
@@ -4214,6 +4255,26 @@ impl Daemon {
                                 }
                             }
                         }
+                        Some(StreamingEvent::ReplacePartial { backspace, text, .. }) => {
+                            if let Some(s) = streaming_session.as_mut() {
+                                if file_output {
+                                    s.replace_partial_silent(backspace, &text);
+                                } else if let Some(chain) = streaming_chain.as_ref() {
+                                    if let Err(e) = s.replace_partial(
+                                        chain,
+                                        backspace,
+                                        &text,
+                                        self.config.output.pre_output_command.as_deref(),
+                                        self.config.output.post_output_command.as_deref(),
+                                    ).await {
+                                        tracing::warn!("Streaming partial replace failed: {}", e);
+                                    }
+                                }
+                                if let State::Streaming { typed_chars, .. } = &mut state {
+                                    *typed_chars = s.typed_chars();
+                                }
+                            }
+                        }
                         Some(StreamingEvent::Final { text, .. }) => {
                             if let Some(s) = streaming_session.as_mut() {
                                 if file_output {
@@ -4275,6 +4336,7 @@ impl Daemon {
                                 &mut streaming_handle,
                                 &mut streaming_session,
                                 &mut streaming_chain,
+                                Some(&err),
                             ).await;
                         }
                         Some(StreamingEvent::Ended) | None => {
@@ -4284,6 +4346,7 @@ impl Daemon {
                                 &mut streaming_handle,
                                 &mut streaming_session,
                                 &mut streaming_chain,
+                                None,
                             ).await;
                         }
                     }
@@ -4691,6 +4754,66 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
         assert_eq!(parsed["status"], "error");
         assert_eq!(parsed["message"], "disk went away");
+    }
+
+    #[tokio::test]
+    async fn streaming_file_output_preserves_backend_errors() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("dictation.txt");
+        let error = crate::error::TranscribeError::InferenceFailed("stream interrupted".into());
+
+        // Neither an empty buffer nor saved partial text constitutes success
+        // when the backend failed. Keep the available text for recovery.
+        for text in ["", "半句话"] {
+            let outcome =
+                finish_streaming_file_output(&target, text, &FileMode::Overwrite, Some(&error))
+                    .await;
+            assert_eq!(outcome, TranscriptOutcome::error(&error.to_string()));
+            assert_eq!(fs::read_to_string(&target).unwrap(), format!("{text}\n"));
+            let sidecar = fs::read_to_string(result_sidecar_path(&target)).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&sidecar).unwrap();
+            assert_eq!(parsed["status"], "error");
+            assert_eq!(parsed["chars"], 0);
+            assert_eq!(parsed["message"], error.to_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_file_output_reports_success_and_empty() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("dictation.txt");
+
+        for (text, expected) in [
+            ("你好", TranscriptOutcome::ok(2)),
+            ("  ", TranscriptOutcome::empty()),
+        ] {
+            let outcome =
+                finish_streaming_file_output(&target, text, &FileMode::Overwrite, None).await;
+            assert_eq!(outcome, expected);
+            assert_eq!(fs::read_to_string(&target).unwrap(), format!("{text}\n"));
+            let sidecar = fs::read_to_string(result_sidecar_path(&target)).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&sidecar).unwrap();
+            assert_eq!(parsed, serde_json::to_value(expected).unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_file_output_reports_write_failure() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("dictation.txt");
+        fs::create_dir(&target).unwrap();
+
+        let outcome =
+            finish_streaming_file_output(&target, "hello", &FileMode::Overwrite, None).await;
+        assert_eq!(outcome.status, "error");
+        assert!(outcome
+            .message
+            .as_ref()
+            .is_some_and(|message| !message.is_empty()));
+        let sidecar = fs::read_to_string(result_sidecar_path(&target)).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&sidecar).unwrap();
+        assert_eq!(parsed, serde_json::to_value(outcome).unwrap());
+        assert!(target.is_dir());
     }
 
     #[test]

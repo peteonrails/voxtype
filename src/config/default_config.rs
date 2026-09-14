@@ -13,6 +13,13 @@ pub const DEFAULT_CONFIG: &str = r#"# Voxtype Configuration
 # Required for `voxtype record toggle` and `voxtype status` commands.
 state_file = "auto"
 
+# Volcengine Seed-ASR example (uncomment and set engine = "seedasr"):
+# [seedasr]
+# api_key = "your-api-key" # Or use SEEDASR_API_KEY
+# resource_id = "volc.seedasr.sauc.duration"
+# streaming = true
+# type_partials = false
+
 [hotkey]
 # Key to hold for push-to-talk
 # Common choices: SCROLLLOCK, PAUSE, RIGHTALT, F13-F24
