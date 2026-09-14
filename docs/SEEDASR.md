@@ -119,7 +119,10 @@ the latter selects voxtype's live pipeline.
 
 Set `streaming = false` to keep push-to-talk behavior. Voxtype buffers the
 recording, opens the configured WebSocket after release, sends the complete
-audio stream, and returns the last cumulative transcript.
+audio stream while reading recognition responses concurrently, and returns the
+final cumulative transcript. A 60-second deadline covers connection setup,
+upload, and the final response; each write also has a 10-second timeout. Closing
+the connection waits at most 250 ms before dropping the socket.
 
 Both modes use `url`. The default endpoint is:
 
