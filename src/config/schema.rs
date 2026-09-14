@@ -782,6 +782,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "push_to_talk records while the key is held; toggle starts and stops on separate taps.",
     ),
     spec(
+        "hotkey.min_hold_ms",
+        "hotkey",
+        "min_hold_ms",
+        KeyType::Int { min: 0, max: 10_000 },
+        "Hotkey",
+        "Min hold time",
+        "Push-to-talk only: releases before this many milliseconds cancel the recording, so short accidental taps produce no text.",
+    ),
+    spec(
         "hotkey.cancel_key",
         "hotkey",
         "cancel_key",
@@ -1724,6 +1733,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             ActivationMode::PushToTalk => "push_to_talk",
             ActivationMode::Toggle => "toggle",
         }),
+        "hotkey.min_hold_ms" => json!(cfg.hotkey.min_hold_ms),
         "hotkey.cancel_key" => opt_str(cfg.hotkey.cancel_key.as_ref()),
         "hotkey.model_modifier" => opt_str(cfg.hotkey.model_modifier.as_ref()),
 
