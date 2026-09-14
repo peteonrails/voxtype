@@ -177,77 +177,9 @@ impl SeedAsrTranscriber {
 
     async fn transcribe_async(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         let connection = self.connection_config()?;
-        let (stream, _) = connect(&connection).await?;
-        let (mut write, mut read) = stream.split();
-
-        write
-            .send(Message::Binary(connection.request_payload.clone()))
-            .await
-            .map_err(|e| inference_error(format!("send request failed: {e}")))?;
-
-        let pcm = f32_to_s16le_bytes(samples);
-        let frame_bytes = AUDIO_FRAME_SAMPLES * 2;
-        let mut chunks = pcm.chunks(frame_bytes).peekable();
-        while let Some(chunk) = chunks.next() {
-            let last = chunks.peek().is_none();
-            write
-                .send(Message::Binary(encode_audio_request(chunk, last)?))
-                .await
-                .map_err(|e| inference_error(format!("send audio failed: {e}")))?;
-        }
-
         let deadline = tokio::time::Instant::now() + BATCH_TIMEOUT;
-        // Only a final recognition response establishes the complete result.
-        // Earlier snapshots may still change, including becoming empty.
-        let transcript = loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                return Err(inference_error("batch response timeout"));
-            }
-
-            let message = match tokio::time::timeout(remaining, read.next()).await {
-                Ok(Some(Ok(message))) => message,
-                Ok(Some(Err(error))) => {
-                    return Err(inference_error(format!("WebSocket error: {error}")))
-                }
-                Ok(None) => return Err(closed_before_final_response(None)),
-                Err(_) => return Err(inference_error("batch response timeout")),
-            };
-
-            match message {
-                Message::Binary(bytes) => {
-                    let frame = decode_server_frame(&bytes)?;
-                    match frame {
-                        ServerFrame::Response { payload, is_last } => {
-                            let snapshot = parse_recognition_payload(&payload, is_last)?;
-                            if snapshot.is_last {
-                                break snapshot.text;
-                            }
-                        }
-                        ServerFrame::Error { code, message } => {
-                            return Err(inference_error(format!("server error {code}: {message}")))
-                        }
-                    }
-                }
-                Message::Text(text) => {
-                    let snapshot = parse_recognition_payload(text.as_bytes(), false)?;
-                    if snapshot.is_last {
-                        break snapshot.text;
-                    }
-                }
-                Message::Close(frame) => return Err(closed_before_final_response(frame)),
-                Message::Ping(payload) => {
-                    write
-                        .send(Message::Pong(payload))
-                        .await
-                        .map_err(|e| inference_error(format!("send pong failed: {e}")))?;
-                }
-                _ => {}
-            }
-        };
-
-        let _ = write.send(Message::Close(None)).await;
-        Ok(transcript.trim().to_string())
+        let (mut stream, _) = connect(&connection).await?;
+        run_batch_session(&mut stream, connection.request_payload, samples, deadline).await
     }
 }
 
@@ -300,6 +232,77 @@ impl StreamingTranscriber for SeedAsrTranscriber {
             task,
         })
     }
+}
+
+/// Poll both halves throughout upload so cumulative responses cannot block the
+/// server from reading more audio. One deadline covers upload and final response.
+async fn run_batch_session<S>(
+    stream: &mut tokio_tungstenite::WebSocketStream<S>,
+    request_payload: Vec<u8>,
+    samples: &[f32],
+    deadline: tokio::time::Instant,
+) -> Result<String, TranscribeError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let session = async {
+        let (mut write, mut read) = (&mut *stream).split();
+        let upload = async {
+            send_stream_message(&mut write, Message::Binary(request_payload), "send request")
+                .await?;
+            let pcm = f32_to_s16le_bytes(samples);
+            let mut chunks = pcm.chunks(AUDIO_FRAME_SAMPLES * 2).peekable();
+            while let Some(chunk) = chunks.next() {
+                send_stream_message(
+                    &mut write,
+                    Message::Binary(encode_audio_request(chunk, chunks.peek().is_none())?),
+                    "send audio",
+                )
+                .await?;
+            }
+            Ok::<_, TranscribeError>(())
+        };
+        let receive = async {
+            // Only a final recognition response establishes the complete result.
+            // Earlier snapshots may still change, including becoming empty.
+            loop {
+                let message = match read.next().await {
+                    Some(Ok(message)) => message,
+                    Some(Err(error)) => {
+                        return Err(inference_error(format!("WebSocket error: {error}")))
+                    }
+                    None => return Err(closed_before_final_response(None)),
+                };
+                let snapshot = match message {
+                    Message::Binary(bytes) => match decode_server_frame(&bytes)? {
+                        ServerFrame::Response { payload, is_last } => {
+                            parse_recognition_payload(&payload, is_last)?
+                        }
+                        ServerFrame::Error { code, message } => {
+                            return Err(inference_error(format!("server error {code}: {message}")))
+                        }
+                    },
+                    Message::Text(text) => parse_recognition_payload(text.as_bytes(), false)?,
+                    Message::Close(frame) => return Err(closed_before_final_response(frame)),
+                    // Tungstenite queues automatic Pong replies and flushes them
+                    // on the next read/write poll, including after upload ends.
+                    _ => continue,
+                };
+                if snapshot.is_last {
+                    return Ok(snapshot.text);
+                }
+            }
+        };
+        let ((), transcript) = tokio::try_join!(upload, receive)?;
+        Ok(transcript.trim().to_string())
+    };
+    let result = tokio::time::timeout_at(deadline, session)
+        .await
+        .map_err(|_| inference_error("batch transcription timeout"))
+        .and_then(|result| result);
+    // Close can be blocked behind pending audio or control frames as well.
+    let _ = tokio::time::timeout(CLOSE_TIMEOUT, stream.close(None)).await;
+    result
 }
 
 async fn run_streaming_session(
@@ -1600,6 +1603,153 @@ mod tests {
                 server.await.unwrap();
             }
         }
+    }
+
+    async fn batch_test_streams() -> (
+        tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>,
+        tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>,
+    ) {
+        use tokio_tungstenite::tungstenite::protocol::Role;
+        let (client, server) = tokio::io::duplex(1024);
+        tokio::join!(
+            tokio_tungstenite::WebSocketStream::from_raw_socket(client, Role::Client, None),
+            tokio_tungstenite::WebSocketStream::from_raw_socket(server, Role::Server, None),
+        )
+    }
+
+    #[tokio::test]
+    async fn batch_drains_responses_during_upload_and_answers_pings() {
+        let (mut client, mut server) = batch_test_streams().await;
+        let peer = tokio::spawn(async move {
+            assert!(matches!(server.next().await, Some(Ok(Message::Binary(_)))));
+            let mut frames = 0;
+            loop {
+                let Some(Ok(Message::Binary(audio))) = server.next().await else {
+                    panic!("expected audio frame");
+                };
+                frames += 1;
+                // Each response exceeds the transport capacity. A client that
+                // waits until upload finishes to read will deadlock here.
+                server
+                    .send(Message::Text(
+                        json!({"result": {"text": "draft ".repeat(frames * 512)}}).to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                if audio[1] & 0x0f == FLAG_LAST {
+                    break;
+                }
+            }
+            assert_eq!(frames, 64);
+            // The reader must still flush automatic Pong replies once there
+            // are no more audio writes to drive the socket.
+            server.send(Message::Ping(vec![1, 2, 3])).await.unwrap();
+            assert_eq!(
+                server.next().await.unwrap().unwrap(),
+                Message::Pong(vec![1, 2, 3])
+            );
+            server
+                .send(recognition_response("final", true))
+                .await
+                .unwrap();
+            assert!(matches!(server.next().await, Some(Ok(Message::Close(_)))));
+        });
+        let transcript = tokio::time::timeout(Duration::from_secs(3), async {
+            run_batch_session(
+                &mut client,
+                encode_full_client_request(&json!({})).unwrap(),
+                &vec![0.1; AUDIO_FRAME_SAMPLES * 64],
+                tokio::time::Instant::now() + BATCH_TIMEOUT,
+            )
+            .await
+        })
+        .await
+        .expect("batch upload stopped draining responses")
+        .unwrap();
+        assert_eq!(transcript, "final");
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn batch_deadline_covers_request_audio_and_response() {
+        for phase in ["request", "audio", "response"] {
+            let (mut client, mut server) = batch_test_streams().await;
+            let (ready_tx, ready_rx) = oneshot::channel();
+            let peer = tokio::spawn(async move {
+                if phase != "request" {
+                    assert!(matches!(server.next().await, Some(Ok(Message::Binary(_)))));
+                }
+                if phase == "response" {
+                    loop {
+                        let Some(Ok(Message::Binary(audio))) = server.next().await else {
+                            panic!("expected audio frame");
+                        };
+                        if audio[1] & 0x0f == FLAG_LAST {
+                            break;
+                        }
+                    }
+                }
+                ready_tx.send(()).unwrap();
+                // Retain the socket without polling it, including during Close.
+                std::future::pending::<()>().await;
+                drop(server);
+            });
+            let request = if phase == "request" {
+                vec![0; 2048]
+            } else {
+                encode_full_client_request(&json!({})).unwrap()
+            };
+            let error = tokio::time::timeout(Duration::from_secs(2), async {
+                run_batch_session(
+                    &mut client,
+                    request,
+                    &vec![0.1; AUDIO_FRAME_SAMPLES * 64],
+                    tokio::time::Instant::now() + Duration::from_millis(100),
+                )
+                .await
+            })
+            .await
+            .expect("batch deadline or close stalled")
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("batch transcription timeout"),
+                "{phase}: {error}"
+            );
+            ready_rx.await.unwrap();
+            peer.abort();
+            let _ = peer.await;
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_reports_server_errors_while_upload_is_blocked() {
+        let (mut client, mut server) = batch_test_streams().await;
+        let peer = tokio::spawn(async move {
+            assert!(matches!(server.next().await, Some(Ok(Message::Binary(_)))));
+            server
+                .send(Message::Text(
+                    json!({"code": 45000001, "message": "invalid audio"}).to_string(),
+                ))
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+            drop(server);
+        });
+        let error = tokio::time::timeout(Duration::from_secs(2), async {
+            run_batch_session(
+                &mut client,
+                encode_full_client_request(&json!({})).unwrap(),
+                &vec![0.1; AUDIO_FRAME_SAMPLES * 64],
+                tokio::time::Instant::now() + BATCH_TIMEOUT,
+            )
+            .await
+        })
+        .await
+        .expect("server error was blocked behind audio upload")
+        .unwrap_err();
+        assert!(error.to_string().contains("45000001"));
+        peer.abort();
+        let _ = peer.await;
     }
 
     #[tokio::test]
