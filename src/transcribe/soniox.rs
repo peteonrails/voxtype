@@ -1430,6 +1430,9 @@ mod tests {
             .iter()
             .map(|e| match e {
                 StreamingEvent::Partial { text, .. } => ("Partial", text.clone()),
+                StreamingEvent::ReplacePartial {
+                    backspace, text, ..
+                } => ("ReplacePartial", format!("-{}+{}", backspace, text)),
                 StreamingEvent::Final { text, .. } => ("Final", text.clone()),
                 StreamingEvent::Replace {
                     backspace, text, ..

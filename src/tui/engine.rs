@@ -2175,7 +2175,7 @@ fn seedasr_guidance(field: FieldId) -> Vec<Line<'static>> {
         ),
         FieldId::SeedTypePartials => (
             "Seed-ASR · type partial results",
-            "Type stable partial text before the server finalizes the utterance.",
+            "Type provisional text and its revisions before the utterance is finalized.",
             "Keep this off if the target application does not handle cursor-based text revisions well.",
         ),
         FieldId::SeedLanguage => (
