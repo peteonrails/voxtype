@@ -420,16 +420,21 @@ fn print_variants_text(inv: &setup::binary::Inventory) {
 
     println!();
     println!("Recommended for this hardware");
-    println!(
-        "  Whisper:       ★ {}  — {}",
-        inv.recommendation.whisper.display(),
-        inv.recommendation.whisper_reason
-    );
-    println!(
-        "  ONNX:          ★ {}  — {}",
-        inv.recommendation.onnx.display(),
-        inv.recommendation.onnx_reason
-    );
+    if cfg!(target_os = "macos") {
+        // The variants are Linux release binaries; macOS ships one build.
+        println!("  Not applicable on macOS, which ships a single build with no variants.");
+    } else {
+        println!(
+            "  Whisper:       ★ {}  — {}",
+            inv.recommendation.whisper.display(),
+            inv.recommendation.whisper_reason
+        );
+        println!(
+            "  ONNX:          ★ {}  — {}",
+            inv.recommendation.onnx.display(),
+            inv.recommendation.onnx_reason
+        );
+    }
 
     println!();
     if matches!(inv.install_kind, InstallKind::Source) {

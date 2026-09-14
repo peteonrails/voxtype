@@ -122,7 +122,12 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
         .unwrap_or_else(|| "unknown (symlink missing or unrecognized)".to_string());
 
     let rec = &inv.recommendation;
-    let recommended = format!("{}  /  {}", rec.whisper.display(), rec.onnx.display());
+    let recommended = if cfg!(target_os = "macos") {
+        // The variants are Linux release binaries; macOS ships one build.
+        "not applicable on macOS".to_string()
+    } else {
+        format!("{}  /  {}", rec.whisper.display(), rec.onnx.display())
+    };
 
     let lines = vec![
         Line::from(vec![
