@@ -978,11 +978,15 @@ pub fn inventory() -> Inventory {
         None
     };
 
-    let installed: Vec<Variant> = variants
-        .iter()
-        .filter(|s| s.installed)
-        .map(|s| s.variant)
-        .collect();
+    // `variants` is empty for source installs, so read the lib dir directly,
+    // and count a source build that has Vulkan compiled in.
+    let mut installed = enumerate_installed();
+    if install_kind == InstallKind::Source
+        && cfg!(feature = "gpu-vulkan")
+        && !installed.contains(&Variant::WhisperVulkan)
+    {
+        installed.push(Variant::WhisperVulkan);
+    }
     let recommendation = recommend(&cpu, &gpus, &installed);
 
     Inventory {
