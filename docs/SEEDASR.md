@@ -158,6 +158,9 @@ text, but `record stop --wait` reports the error and exits with code 1.
 
 This check does not resume keyboard output after `record stop` has disabled it.
 Explicit cancellation still ends the session without requiring a final response.
+Cancellation also interrupts connection setup and pending sends. Streaming
+writes time out after 10 seconds; closing the connection waits at most 250 ms
+before dropping the socket so an unresponsive peer cannot block shutdown.
 
 ## Wire protocol
 
