@@ -122,7 +122,12 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
         .unwrap_or_else(|| "unknown (symlink missing or unrecognized)".to_string());
 
     let rec = &inv.recommendation;
-    let recommended = format!("{}  /  {}", rec.whisper.display(), rec.onnx.display());
+    let recommended = if cfg!(target_os = "macos") {
+        // The variants are Linux release binaries; macOS ships one build.
+        "not applicable on macOS".to_string()
+    } else {
+        format!("{}  /  {}", rec.whisper.display(), rec.onnx.display())
+    };
 
     let lines = vec![
         Line::from(vec![
@@ -142,10 +147,14 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(recommended, Style::default().fg(Color::Cyan)),
             Span::styled("   (Whisper / ONNX)", Style::default().fg(Color::Gray)),
         ]),
-        Line::from(format!(
-            "CPU:           AVX2={}  AVX-512={}",
-            inv.cpu.avx2, inv.cpu.avx512
-        )),
+        Line::from(if inv.cpu.is_x86_64() {
+            format!(
+                "CPU:           AVX2={}  AVX-512={}",
+                inv.cpu.avx2, inv.cpu.avx512
+            )
+        } else {
+            format!("CPU:           {}", inv.cpu.arch)
+        }),
         Line::from(format!(
             "GPU:           NVIDIA={}  AMD={}",
             inv.gpus.nvidia, inv.gpus.amd

@@ -132,6 +132,7 @@ mod tests {
             cpu: Cpu {
                 avx2: true,
                 avx512: false,
+                arch: "x86_64",
             },
             gpus: Gpus {
                 nvidia: false,
