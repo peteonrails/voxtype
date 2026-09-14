@@ -190,7 +190,7 @@ When set to `false`, voxtype will not listen for keyboard events via evdev. Inst
 **When to disable:**
 - You prefer using your compositor's native keybindings (Hyprland, Sway)
 - You don't want to add your user to the `input` group
-- You want to use key combinations not supported by evdev (e.g., Super+V)
+- The chord you want is already owned by your compositor or desktop (e.g., Super+V), and you would rather bind it there than make voxtype capture it with [`grab`](#grab)
 
 **Example:**
 ```toml
@@ -314,6 +314,40 @@ post_process_command = "my-script.sh --formal"
 - `LEFTMETA`, `RIGHTMETA`
 
 **Note:** This only applies when using evdev hotkey detection (`enabled = true`). When using compositor keybindings, use `voxtype record start --profile <name>` instead. Avoid using the same key in both `modifiers` and `profile_modifiers` -- every hotkey press would always activate that profile.
+
+### grab
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Take every keyboard device exclusively and re-emit its events through a virtual keyboard that voxtype owns. Applications receive those events exactly as before, minus the hotkey chord, which voxtype withholds.
+
+**Why use it:** with the evdev listener the hotkey chord reaches voxtype *and* the focused window. Most applications ignore an unusual chord, but some act on it: Chromium inserts the letter when it sees Meta+V, so dictating in a browser leaves stray characters behind. `grab = true` is how voxtype stops the chord from arriving at the application at all.
+
+**Requirements:**
+- Write access to `/dev/uinput` -- the same `input` group membership `dotool` and `ydotool` need, with the `uinput` module loaded
+- A keyboard can be held by only one program. If another already holds it (keyd, kmonad, interception-tools), voxtype logs a warning and leaves that keyboard alone
+
+**Behaviour and trade-offs:**
+- While capture is on, every keystroke passes through voxtype on its way to the compositor. Kill voxtype and the kernel releases the grab with its file descriptors; typing works normally again.
+- A keyboard voxtype could not capture (no `/dev/uinput`, or already held elsewhere) still delivers the chord to applications. The hotkey itself also keeps working, so a failed capture degrades to the old behaviour rather than to no keyboard.
+- Only the hotkey chord is withheld. The cancel key, `model_modifier` and `profile_modifiers` are delivered to applications as usual.
+- Keyboard LEDs are not mirrored: Caps Lock and Num Lock still work, but their lamps may not follow the lock state.
+- The captured keyboard reaches the compositor under a new name, `voxtype key mirror`. Compositor settings that match a keyboard by name (a per-device layout, for example) have to be repeated for that name.
+- With no `modifiers` configured, every press of the hotkey key is withheld, not just a chord. That suits a dedicated key; voxtype warns at startup when you do it.
+
+**Example:**
+```toml
+[hotkey]
+key = "EVTEST_47"        # kernel keycode for V; see the key option above
+modifiers = ["LEFTMETA"]
+grab = true              # Meta+V reaches voxtype only
+```
+
+Without `grab`, the same config still records, but pressing Meta+V in Chromium also types "v" into the page.
+
+**Command line:** `voxtype --hotkey-grab` forces capture on for that run.
 
 ---
 
@@ -3467,6 +3501,7 @@ Most configuration options can be overridden via command line:
 |--------------|----------|
 | Config file | `-c`, `--config` |
 | hotkey.key | `--hotkey` |
+| hotkey.grab | `--hotkey-grab` |
 | whisper.model | `--model` |
 | output.mode = "clipboard" | `--clipboard` |
 | output.mode = "paste" | `--paste` |
@@ -3520,6 +3555,7 @@ Any config file setting can be overridden via environment variable. These are ap
 |----------|------|-------------------|
 | `VOXTYPE_HOTKEY` | string | `hotkey.key` |
 | `VOXTYPE_HOTKEY_ENABLED` | bool | `hotkey.enabled` |
+| `VOXTYPE_HOTKEY_GRAB` | bool | `hotkey.grab` |
 | `VOXTYPE_CANCEL_KEY` | string | `hotkey.cancel_key` |
 
 **Whisper / Engine:**

@@ -629,6 +629,32 @@ With this config, bare ScrollLock uses default post-processing, while Right Shif
 
 When using compositor keybindings instead of evdev, use `voxtype record start --profile <name>` to achieve the same effect.
 
+### Exclusive Capture (Withholding the Chord)
+
+With the evdev listener, the hotkey chord reaches voxtype *and* the focused window. Most applications ignore an unusual chord, but some act on it: Chromium inserts a letter when it receives Meta+V, so dictating in a browser leaves a stray "v" behind.
+
+`grab = true` makes voxtype take the keyboard devices exclusively, then re-emit their events through a virtual keyboard it owns. Applications receive every other key as before; only the hotkey chord is withheld:
+
+```toml
+[hotkey]
+key = "EVTEST_47"        # V, as a kernel keycode
+modifiers = ["LEFTMETA"]
+grab = true
+```
+
+With this config, Meta+V starts a recording in voxtype and does nothing in Chromium.
+
+**Requirements and trade-offs:**
+
+- Your user must be able to write to `/dev/uinput`, which is the same `input` group membership `dotool` and `ydotool` need
+- Every keystroke passes through voxtype on its way to the compositor. Stop the daemon and the kernel releases the keyboards; typing works normally again
+- Only the chord is withheld. The cancel key, `model_modifier` and `profile_modifiers` still reach applications
+- If voxtype cannot capture a keyboard (no `/dev/uinput`, or another program holds it), it logs a warning and carries on: the hotkey records and the chord also reaches the application, which is the behaviour without `grab`
+
+The daemon logs what it managed: `Exclusive capture active: 2 of 2 keyboard(s) grabbed`. See `voxtype -v` output or `journalctl --user -u voxtype`.
+
+To force capture on for a single run, pass `--hotkey-grab`.
+
 ---
 
 ## Compositor Keybindings

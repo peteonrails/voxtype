@@ -201,6 +201,10 @@ pub struct Cli {
     #[arg(long, help_heading = "Hotkey")]
     pub no_hotkey: bool,
 
+    /// Capture keyboards so the hotkey chord never reaches applications (requires /dev/uinput)
+    #[arg(long, help_heading = "Hotkey")]
+    pub hotkey_grab: bool,
+
     /// Cancel key for aborting recording or transcription (e.g., ESC, BACKSPACE, F12)
     #[arg(long, value_name = "KEY", help_heading = "Hotkey")]
     pub cancel_key: Option<String>,
