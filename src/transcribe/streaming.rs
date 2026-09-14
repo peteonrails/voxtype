@@ -64,9 +64,18 @@ pub type SegmentId = u64;
 /// is not needed in normal use.
 #[derive(Debug)]
 pub enum StreamingEvent {
-    /// In-progress text for a segment. May be revised by later partials
-    /// or superseded by a `Final` event with the same `segment_id`.
+    /// Append an in-progress text delta to the current segment. Later
+    /// `ReplacePartial` events may revise it before `Final` commits it.
     Partial { text: String, segment_id: SegmentId },
+
+    /// Backspace `backspace` Unicode scalars from the provisional tail and
+    /// append `text`, keeping the segment open for further partials or a
+    /// final event with the same `segment_id`. Never edits committed text.
+    ReplacePartial {
+        backspace: usize,
+        text: String,
+        segment_id: SegmentId,
+    },
 
     /// Committed text for a segment. The daemon's default output policy
     /// is to type only `Final` segments, so revision-style providers do

@@ -140,14 +140,16 @@ snapshots to cursor-oriented deltas:
 |---|---|---|
 | Stable prefix extends committed text | `Final` | Types and commits only the new stable suffix |
 | Optional provisional prefix extends the typed tail | `Partial` | Types only the new provisional suffix |
+| Provisional text revises or retracts the typed tail | `ReplacePartial` | Backspaces the divergent Unicode characters and keeps the tail provisional |
 | Stable text revises a typed provisional tail | `Replace` | Backspaces the divergent Unicode characters and commits the replacement |
 | Final response package | `Ended` after reconciliation | Closes the session cleanly |
 | Protocol, server, or network failure | `Error`, then `Ended` | Surfaces the failure and resets daemon state |
 
 `type_partials = false` is the default. This emits stable text only and avoids
-visible corrections. When enabled, voxtype types only monotonic extensions of a
-partial result; it suppresses provisional revisions until Seed-ASR finalizes the
-utterance.
+visible corrections. When enabled, voxtype types provisional text and applies
+revisions immediately, including shortened or fully retracted tails. Corrections
+keep the current segment provisional until Seed-ASR finalizes it. File output
+applies the same corrections to its buffered text without typing keystrokes.
 
 If the service revises text already marked definite and committed, voxtype ends
 the session with an error. The existing streaming contract can revise the active
@@ -196,7 +198,7 @@ Official protocol references:
 | `resource_id` | `SEEDASR_RESOURCE_ID` | `volc.seedasr.sauc.duration` | Service/resource identifier |
 | `url` | `SEEDASR_URL` | Seed-ASR 2.0 bidirectional endpoint | WebSocket endpoint |
 | `streaming` | - | `true` | Use native live streaming |
-| `type_partials` | - | `false` | Type monotonic provisional text |
+| `type_partials` | - | `false` | Type provisional text and apply revisions immediately |
 | `language` | - | unset | Recognition language; unset or `auto` enables detection |
 | `enable_itn` | - | `true` | Enable inverse text normalization |
 | `enable_punc` | - | `true` | Enable punctuation |

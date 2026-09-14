@@ -4255,6 +4255,26 @@ impl Daemon {
                                 }
                             }
                         }
+                        Some(StreamingEvent::ReplacePartial { backspace, text, .. }) => {
+                            if let Some(s) = streaming_session.as_mut() {
+                                if file_output {
+                                    s.replace_partial_silent(backspace, &text);
+                                } else if let Some(chain) = streaming_chain.as_ref() {
+                                    if let Err(e) = s.replace_partial(
+                                        chain,
+                                        backspace,
+                                        &text,
+                                        self.config.output.pre_output_command.as_deref(),
+                                        self.config.output.post_output_command.as_deref(),
+                                    ).await {
+                                        tracing::warn!("Streaming partial replace failed: {}", e);
+                                    }
+                                }
+                                if let State::Streaming { typed_chars, .. } = &mut state {
+                                    *typed_chars = s.typed_chars();
+                                }
+                            }
+                        }
                         Some(StreamingEvent::Final { text, .. }) => {
                             if let Some(s) = streaming_session.as_mut() {
                                 if file_output {

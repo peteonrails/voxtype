@@ -42,8 +42,8 @@ pub struct SeedAsrConfig {
     #[serde(default = "default_true")]
     pub streaming: bool,
 
-    /// Type stable partial results while recording. Disabled by default to
-    /// avoid visible cursor churn when the model revises its current sentence.
+    /// Type provisional results and their revisions while recording. Disabled
+    /// by default to avoid visible cursor churn when the model revises text.
     #[serde(default)]
     pub type_partials: bool,
 

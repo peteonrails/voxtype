@@ -832,7 +832,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Bool,
         "Engine",
         "Type partials",
-        "Type stable partial results while recording. Revised text may cause visible cursor edits.",
+        "Type provisional results and their revisions while recording. Revised text may cause visible cursor edits.",
     )
     .for_engine("seedasr"),
     spec(

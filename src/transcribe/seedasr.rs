@@ -942,15 +942,21 @@ impl Reconciler {
         }
 
         let candidate_tail = &snapshot.text[self.committed.len()..];
-        if type_partials && candidate_tail.starts_with(&self.typed_partial) {
-            let delta = &candidate_tail[self.typed_partial.len()..];
-            if !delta.is_empty() {
+        if type_partials && candidate_tail != self.typed_partial {
+            if candidate_tail.starts_with(&self.typed_partial) {
                 events.push(StreamingEvent::Partial {
-                    text: delta.to_string(),
+                    text: candidate_tail[self.typed_partial.len()..].to_string(),
                     segment_id: self.next_segment_id,
                 });
-                self.typed_partial = candidate_tail.to_string();
+            } else {
+                let common_chars = common_prefix_char_count(&self.typed_partial, candidate_tail);
+                events.push(StreamingEvent::ReplacePartial {
+                    backspace: self.typed_partial.chars().count() - common_chars,
+                    text: candidate_tail.chars().skip(common_chars).collect(),
+                    segment_id: self.next_segment_id,
+                });
             }
+            self.typed_partial = candidate_tail.to_string();
         }
 
         self.finished = snapshot.is_last;
@@ -1281,19 +1287,11 @@ mod tests {
             assert_eq!(session.finalized_text(), committed);
             assert_eq!(session.partial(), "啊呀");
 
-            let mut snapshot = RecognitionSnapshot {
+            let snapshot = RecognitionSnapshot {
                 text: committed.to_string(),
                 stable_text: committed.to_string(),
-                is_last: false,
+                is_last: true,
             };
-            // Intermediate revisions are still deferred until finalization.
-            assert!(reconciler
-                .process(snapshot.clone(), true)
-                .unwrap()
-                .is_empty());
-            assert_eq!(reconciler.typed_partial, "啊呀");
-
-            snapshot.is_last = true;
             let events = reconciler.process(snapshot, true).unwrap();
             let [StreamingEvent::Replace {
                 backspace,
@@ -1312,6 +1310,111 @@ mod tests {
             assert!(session.partial().is_empty());
             assert_eq!(reconciler.committed, committed);
             assert!(reconciler.typed_partial.is_empty());
+            assert!(reconciler.finished);
+        }
+    }
+
+    #[test]
+    fn reconciler_applies_provisional_revisions_before_finalization() {
+        use crate::output::streaming::StreamingSession;
+
+        for type_partials in [true, false] {
+            let mut reconciler = Reconciler::default();
+            let mut session = StreamingSession::new();
+            let initial = reconciler
+                .process(
+                    RecognitionSnapshot {
+                        text: "前文。".into(),
+                        stable_text: "前文。".into(),
+                        is_last: false,
+                    },
+                    type_partials,
+                )
+                .unwrap();
+            let [StreamingEvent::Final {
+                text,
+                segment_id: 0,
+            }] = initial.as_slice()
+            else {
+                panic!("expected the stable prefix, got {initial:?}");
+            };
+            session.commit_segment_silent(text);
+
+            for (tail, backspace, delta) in [
+                ("你好世界", None, "你好世界"),
+                ("你好时间", Some(2), "时间"),
+                ("你好时间啊", None, "啊"),
+                ("你好", Some(3), ""),
+                ("您好🙂", Some(2), "您好🙂"),
+                ("", Some(3), ""),
+                ("新句", None, "新句"),
+            ] {
+                let snapshot = RecognitionSnapshot {
+                    text: format!("前文。{tail}"),
+                    stable_text: "前文。".into(),
+                    is_last: false,
+                };
+                let events = reconciler.process(snapshot.clone(), type_partials).unwrap();
+                if type_partials {
+                    match events.as_slice() {
+                        [StreamingEvent::Partial {
+                            text,
+                            segment_id: 1,
+                        }] => {
+                            assert_eq!(backspace, None);
+                            assert_eq!(text, delta);
+                            session.observe_partial_delta(text);
+                        }
+                        [StreamingEvent::ReplacePartial {
+                            backspace: count,
+                            text,
+                            segment_id: 1,
+                        }] => {
+                            assert_eq!(backspace, Some(*count));
+                            assert_eq!(text, delta);
+                            session.replace_partial_silent(*count, text);
+                        }
+                        _ => panic!("unexpected revision events: {events:?}"),
+                    }
+                    assert_eq!(session.partial(), tail);
+                    assert_eq!(reconciler.typed_partial, tail);
+                } else {
+                    assert!(events.is_empty());
+                    assert!(session.partial().is_empty());
+                    assert!(reconciler.typed_partial.is_empty());
+                }
+                // Revisions must not commit text or advance the segment ID.
+                assert_eq!(session.finalized_text(), "前文。");
+                assert_eq!(session.typed_chars(), 0);
+                assert_eq!(reconciler.committed, "前文。");
+                assert_eq!(reconciler.next_segment_id, 1);
+                assert!(reconciler
+                    .process(snapshot, type_partials)
+                    .unwrap()
+                    .is_empty());
+            }
+
+            let final_events = reconciler
+                .process(
+                    RecognitionSnapshot {
+                        text: "前文。新句".into(),
+                        stable_text: "前文。新句".into(),
+                        is_last: true,
+                    },
+                    type_partials,
+                )
+                .unwrap();
+            let [StreamingEvent::Final {
+                text,
+                segment_id: 1,
+            }] = final_events.as_slice()
+            else {
+                panic!("expected final promotion, got {final_events:?}");
+            };
+            assert_eq!(text, if type_partials { "" } else { "新句" });
+            session.commit_segment_silent(text);
+            assert_eq!(session.finalized_text(), "前文。新句");
+            assert!(session.partial().is_empty());
             assert!(reconciler.finished);
         }
     }
