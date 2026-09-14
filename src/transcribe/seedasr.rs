@@ -27,6 +27,8 @@ use uuid::Uuid;
 const SAMPLE_RATE: u32 = 16_000;
 const AUDIO_FRAME_SAMPLES: usize = 3_200; // 200 ms at 16 kHz.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+const CLOSE_TIMEOUT: Duration = Duration::from_millis(250);
 const BATCH_TIMEOUT: Duration = Duration::from_secs(60);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -304,115 +306,146 @@ async fn run_streaming_session(
     connection: ConnectionConfig,
     mut samples_rx: mpsc::Receiver<Vec<f32>>,
     events_tx: &mpsc::Sender<StreamingEvent>,
-    mut cancel_rx: oneshot::Receiver<()>,
+    cancel_rx: oneshot::Receiver<()>,
 ) -> Result<(), TranscribeError> {
-    let (stream, _) = connect(&connection).await?;
-    let (mut write, mut read) = stream.split();
-    write
-        .send(Message::Binary(connection.request_payload))
-        .await
-        .map_err(|e| inference_error(format!("send request failed: {e}")))?;
+    // Keep the socket outside the cancellable future so cancellation can
+    // attempt a bounded close even when a send was interrupted.
+    let mut stream = None;
+    let session = async {
+        let connected = stream.insert(connect(&connection).await?.0);
+        let (mut write, mut read) = connected.split();
+        send_stream_message(
+            &mut write,
+            Message::Binary(connection.request_payload),
+            "send request",
+        )
+        .await?;
 
-    let mut reconciler = Reconciler::default();
-    let mut audio_buffer = Vec::with_capacity(AUDIO_FRAME_SAMPLES * 4);
-    let mut input_closed = false;
-    let mut drain_deadline = None;
+        let mut reconciler = Reconciler::default();
+        let mut audio_buffer = Vec::with_capacity(AUDIO_FRAME_SAMPLES * 4);
+        let mut input_closed = false;
+        let mut drain_deadline = None;
 
-    loop {
-        let drain_timer = async {
-            match drain_deadline {
-                Some(deadline) => tokio::time::sleep_until(deadline).await,
-                None => std::future::pending::<()>().await,
-            }
-        };
+        loop {
+            let drain_timer = async {
+                match drain_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
 
-        tokio::select! {
-            biased;
+            tokio::select! {
+                biased;
 
-            _ = &mut cancel_rx => {
-                tracing::debug!("Seed-ASR streaming session cancelled");
-                break;
-            }
+                _ = drain_timer, if drain_deadline.is_some() => {
+                    return Err(inference_error("drain timeout after end of audio"));
+                }
 
-            _ = drain_timer, if drain_deadline.is_some() => {
-                return Err(inference_error("drain timeout after end of audio"));
-            }
-
-            chunk = samples_rx.recv(), if !input_closed => {
-                match chunk {
-                    Some(samples) => {
-                        append_pcm_s16le(&mut audio_buffer, &samples);
-                        let frame_bytes = AUDIO_FRAME_SAMPLES * 2;
-                        while audio_buffer.len() >= frame_bytes {
-                            let remainder = audio_buffer.split_off(frame_bytes);
-                            let frame = std::mem::replace(&mut audio_buffer, remainder);
-                            write
-                                .send(Message::Binary(encode_audio_request(&frame, false)?))
-                                .await
-                                .map_err(|e| inference_error(format!("send audio failed: {e}")))?;
+                chunk = samples_rx.recv(), if !input_closed => {
+                    match chunk {
+                        Some(samples) => {
+                            append_pcm_s16le(&mut audio_buffer, &samples);
+                            let frame_bytes = AUDIO_FRAME_SAMPLES * 2;
+                            while audio_buffer.len() >= frame_bytes {
+                                let remainder = audio_buffer.split_off(frame_bytes);
+                                let frame = std::mem::replace(&mut audio_buffer, remainder);
+                                send_stream_message(
+                                    &mut write,
+                                    Message::Binary(encode_audio_request(&frame, false)?),
+                                    "send audio",
+                                ).await?;
+                            }
                         }
-                    }
-                    None => {
-                        input_closed = true;
-                        write
-                            .send(Message::Binary(encode_audio_request(&audio_buffer, true)?))
-                            .await
-                            .map_err(|e| inference_error(format!("send final audio failed: {e}")))?;
-                        audio_buffer.clear();
-                        drain_deadline = Some(tokio::time::Instant::now() + DRAIN_TIMEOUT);
+                        None => {
+                            input_closed = true;
+                            send_stream_message(
+                                &mut write,
+                                Message::Binary(encode_audio_request(&audio_buffer, true)?),
+                                "send final audio",
+                            ).await?;
+                            audio_buffer.clear();
+                            drain_deadline = Some(tokio::time::Instant::now() + DRAIN_TIMEOUT);
+                        }
                     }
                 }
-            }
 
-            message = read.next() => {
-                let message = match message {
-                    Some(Ok(message)) => message,
-                    Some(Err(error)) => return Err(inference_error(format!("WebSocket error: {error}"))),
-                    None => return Err(closed_before_final_response(None)),
-                };
+                message = read.next() => {
+                    let message = match message {
+                        Some(Ok(message)) => message,
+                        Some(Err(error)) => return Err(inference_error(format!("WebSocket error: {error}"))),
+                        None => return Err(closed_before_final_response(None)),
+                    };
 
-                let snapshot = match message {
-                    Message::Binary(bytes) => match decode_server_frame(&bytes)? {
-                        ServerFrame::Response { payload, is_last } => {
-                            parse_recognition_payload(&payload, is_last)?
+                    let snapshot = match message {
+                        Message::Binary(bytes) => match decode_server_frame(&bytes)? {
+                            ServerFrame::Response { payload, is_last } => {
+                                parse_recognition_payload(&payload, is_last)?
+                            }
+                            ServerFrame::Error { code, message } => {
+                                return Err(inference_error(format!("server error {code}: {message}")))
+                            }
+                        },
+                        Message::Text(text) => parse_recognition_payload(text.as_bytes(), false)?,
+                        Message::Close(frame) => return Err(closed_before_final_response(frame)),
+                        Message::Ping(payload) => {
+                            send_stream_message(&mut write, Message::Pong(payload), "send pong").await?;
+                            continue;
                         }
-                        ServerFrame::Error { code, message } => {
-                            return Err(inference_error(format!("server error {code}: {message}")))
-                        }
-                    },
-                    Message::Text(text) => parse_recognition_payload(text.as_bytes(), false)?,
-                    Message::Close(frame) => return Err(closed_before_final_response(frame)),
-                    Message::Ping(payload) => {
-                        write
-                            .send(Message::Pong(payload))
-                            .await
-                            .map_err(|e| inference_error(format!("send pong failed: {e}")))?;
-                        continue;
-                    }
-                    _ => continue,
-                };
+                        _ => continue,
+                    };
 
-                tracing::trace!(
-                    target: "voxtype::seedasr::wire",
-                    text = %snapshot.text,
-                    stable = %snapshot.stable_text,
-                    is_last = snapshot.is_last,
-                    "Seed-ASR transcript snapshot"
-                );
-                for event in reconciler.process(snapshot, connection.type_partials)? {
-                    if events_tx.send(event).await.is_err() {
-                        return Ok(());
+                    tracing::trace!(
+                        target: "voxtype::seedasr::wire",
+                        text = %snapshot.text,
+                        stable = %snapshot.stable_text,
+                        is_last = snapshot.is_last,
+                        "Seed-ASR transcript snapshot"
+                    );
+                    for event in reconciler.process(snapshot, connection.type_partials)? {
+                        if events_tx.send(event).await.is_err() {
+                            return Ok(());
+                        }
                     }
-                }
-                if reconciler.finished {
-                    break;
+                    if reconciler.finished {
+                        break;
+                    }
                 }
             }
         }
-    }
 
-    let _ = write.send(Message::Close(None)).await;
-    Ok(())
+        Ok(())
+    };
+
+    let result = tokio::select! {
+        biased;
+        // Dropping the sender is a no-op; only an explicit signal cancels.
+        Ok(()) = cancel_rx => {
+            tracing::debug!("Seed-ASR streaming session cancelled");
+            Ok(())
+        }
+        result = session => result,
+    };
+
+    if let Some(mut stream) = stream {
+        // A peer that stopped reading may also block Close behind buffered
+        // audio. Give a healthy connection a chance to close, then drop it.
+        let _ = tokio::time::timeout(CLOSE_TIMEOUT, stream.close(None)).await;
+    }
+    result
+}
+
+async fn send_stream_message<S>(
+    write: &mut S,
+    message: Message,
+    operation: &str,
+) -> Result<(), TranscribeError>
+where
+    S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    tokio::time::timeout(SEND_TIMEOUT, write.send(message))
+        .await
+        .map_err(|_| inference_error(format!("{operation} timeout")))?
+        .map_err(|e| inference_error(format!("{operation} failed: {e}")))
 }
 
 async fn connect(
@@ -1604,6 +1637,142 @@ mod tests {
         handle.cancel.send(()).unwrap();
         let events = collect_events(&mut handle.events).await;
         assert!(matches!(events.as_slice(), [StreamingEvent::Ended]));
+        handle.task.await.unwrap().unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn streaming_cancellation_interrupts_the_handshake() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            // Read the HTTP upgrade request, but never complete the handshake.
+            let mut request = [0; 4096];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            ready_tx.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(2), socket.read_to_end(&mut Vec::new()))
+                .await
+                .expect("cancelled connection was not dropped")
+                .unwrap();
+        });
+        let transcriber = SeedAsrTranscriber::new(SeedAsrConfig {
+            url: format!("ws://{address}"),
+            ..config()
+        })
+        .unwrap();
+        let (_samples_tx, samples_rx) = mpsc::channel(2);
+        let mut handle = transcriber.start_stream(samples_rx).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), ready_rx)
+            .await
+            .unwrap()
+            .unwrap();
+
+        handle.cancel.send(()).unwrap();
+        let events = collect_events(&mut handle.events).await;
+        assert!(matches!(events.as_slice(), [StreamingEvent::Ended]));
+        handle.task.await.unwrap().unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn streaming_cancellation_interrupts_a_blocked_audio_send_and_close() {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(1024).unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = socket.listen(1).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut stream = tokio_tungstenite::accept_async(socket).await.unwrap();
+            assert!(matches!(stream.next().await, Some(Ok(Message::Binary(_)))));
+            ready_tx.send(()).unwrap();
+            // Leave the connection open without reading any more data, including
+            // Close. Both audio writes and graceful shutdown will back up.
+            let _ = release_rx.await;
+            drop(stream);
+        });
+        let transcriber = SeedAsrTranscriber::new(SeedAsrConfig {
+            url: format!("ws://{address}"),
+            ..config()
+        })
+        .unwrap();
+        let (samples_tx, samples_rx) = mpsc::channel(2);
+        let mut handle = transcriber.start_stream(samples_rx).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), ready_rx)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Incompressible PCM fills the TCP send buffer. Wait for backpressure
+        // to propagate to the audio producer before sending the cancel signal.
+        let mut seed = 1234567_u32;
+        let samples: Vec<f32> = (0..AUDIO_FRAME_SAMPLES)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                ((seed & 0xffff) as i32 - 32768) as f32 / 32768.0
+            })
+            .collect();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Ok(result) =
+                tokio::time::timeout(Duration::from_millis(100), samples_tx.send(samples.clone()))
+                    .await
+            {
+                result.unwrap();
+            }
+        })
+        .await
+        .expect("audio writes never encountered backpressure");
+
+        handle.cancel.send(()).unwrap();
+        let events = collect_events(&mut handle.events).await;
+        assert!(matches!(events.as_slice(), [StreamingEvent::Ended]));
+        handle.task.await.unwrap().unwrap();
+        release_tx.send(()).unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn blocked_streaming_send_times_out_without_cancellation() {
+        let (client, _server) = tokio::io::duplex(1);
+        let mut stream = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            client,
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let error = tokio::time::timeout(
+            SEND_TIMEOUT + Duration::from_secs(1),
+            send_stream_message(&mut stream, Message::Binary(vec![0; 32]), "send audio"),
+        )
+        .await
+        .expect("send timeout did not fire")
+        .unwrap_err();
+        assert!(error.to_string().contains("send audio timeout"));
+    }
+
+    #[tokio::test]
+    async fn dropping_the_cancel_sender_still_drains_the_final_response() {
+        let (transcriber, server) =
+            mock_response_server(vec![recognition_response("hello", true)]).await;
+        let (samples_tx, samples_rx) = mpsc::channel(2);
+        let mut handle = transcriber.start_stream(samples_rx).unwrap();
+        drop(handle.cancel);
+        samples_tx.send(vec![0.1; 400]).await.unwrap();
+        drop(samples_tx);
+
+        let events = collect_events(&mut handle.events).await;
+        assert!(matches!(
+            events.as_slice(),
+            [StreamingEvent::Final { text, .. }, StreamingEvent::Ended] if text == "hello"
+        ));
         handle.task.await.unwrap().unwrap();
         server.await.unwrap();
     }
