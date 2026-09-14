@@ -344,12 +344,35 @@ impl DeviceManager {
         changed
     }
 
-    /// Handle device changes - wait for settle and re-enumerate
+    /// Handle device changes - wait for settle, then close and reopen ALL
+    /// keyboards (not just new ones).
+    ///
+    /// Re-enumeration alone (skip-already-open) leaves the SAME file
+    /// descriptors in place. When an input device appears or disappears in
+    /// rapid succession (uinput create/destroy, USB replug), the kernel-side
+    /// state of an existing fd can become stale: the fd is technically open
+    /// and poll() reports it readable, but fetch_events() silently stops
+    /// delivering key events. The daemon logs "Listening for hotkey" and
+    /// "N keyboard(s) active" while deaf, and only a restart fixes it
+    /// (observed 2026-09-14: ydotoold's uinput lifecycle triggered a device
+    /// change that left the AT keyboard's fd permanently deaf).
+    ///
+    /// The fix: drop all open devices (closing their fds), then re-enumerate
+    /// from scratch. This is cheap (opens are microseconds) and guarantees
+    /// the fds are fresh after any topology change.
     fn handle_device_changes(&mut self) {
         // Wait for devices to settle (USB enumeration can be slow)
         std::thread::sleep(Duration::from_millis(150));
 
-        // Re-enumerate to pick up new devices
+        // Close all open devices: forces a fresh open on re-enumeration
+        let count = self.devices.len();
+        self.devices.clear();
+        tracing::debug!(
+            "Device change: closed {} keyboard(s), re-opening all",
+            count
+        );
+
+        // Re-enumerate from scratch (no skip-already-open: the map is empty)
         if let Err(e) = self.enumerate_devices() {
             tracing::warn!("Device enumeration failed: {}", e);
         }
