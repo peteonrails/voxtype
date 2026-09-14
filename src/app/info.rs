@@ -357,10 +357,14 @@ fn print_variants_text(inv: &setup::binary::Inventory) {
 
     println!();
     println!("Hardware");
-    println!(
-        "  CPU:           AVX2={}, AVX-512={}",
-        inv.cpu.avx2, inv.cpu.avx512
-    );
+    if inv.cpu.is_x86_64() {
+        println!(
+            "  CPU:           AVX2={}, AVX-512={}",
+            inv.cpu.avx2, inv.cpu.avx512
+        );
+    } else {
+        println!("  CPU:           {}", inv.cpu.arch);
+    }
     println!(
         "  GPU:           NVIDIA={}, AMD={}",
         inv.gpus.nvidia, inv.gpus.amd
@@ -368,16 +372,42 @@ fn print_variants_text(inv: &setup::binary::Inventory) {
 
     println!();
     println!("Recommended for this hardware");
-    println!(
-        "  Whisper:       ★ {}  — {}",
-        inv.recommendation.whisper.display(),
-        inv.recommendation.whisper_reason
-    );
-    println!(
-        "  ONNX:          ★ {}  — {}",
-        inv.recommendation.onnx.display(),
-        inv.recommendation.onnx_reason
-    );
+    if cfg!(target_os = "macos") {
+        // The variants are Linux release binaries; macOS ships one build.
+        println!("  Not applicable on macOS, which ships a single build with no variants.");
+    } else {
+        println!(
+            "  Whisper:       ★ {}  — {}",
+            inv.recommendation.whisper.display(),
+            inv.recommendation.whisper_reason
+        );
+        println!(
+            "  ONNX:          ★ {}  — {}",
+            inv.recommendation.onnx.display(),
+            inv.recommendation.onnx_reason
+        );
+        match setup::benchmark::load_report() {
+            Some(report) => {
+                let eligible = setup::benchmark::eligible(
+                    &setup::binary::enumerate_installed(),
+                    &inv.cpu,
+                    &inv.gpus,
+                    &report.engine,
+                );
+                match setup::benchmark::summary(&report, setup::benchmark::now_secs()) {
+                    Some(s) if report.is_stale(&eligible) => println!(
+                        "  Measured:      {}  (installed builds changed; rerun voxtype setup benchmark)",
+                        s
+                    ),
+                    Some(s) => println!("  Measured:      ★ {}", s),
+                    None => println!(
+                        "  Measured:      no usable result; rerun voxtype setup benchmark"
+                    ),
+                }
+            }
+            None => println!("  Measured:      not yet; run voxtype setup benchmark"),
+        }
+    }
 
     println!();
     if matches!(inv.install_kind, InstallKind::Source) {

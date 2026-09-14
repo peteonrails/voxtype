@@ -7,6 +7,7 @@
 mod advanced_section;
 mod app;
 mod audio;
+mod benchmark_screen;
 mod common;
 mod compositor_bindings;
 mod config_editor;
@@ -115,7 +116,10 @@ fn event_loop(terminal: &mut Tui, force_package_mode: bool) -> anyhow::Result<bo
             // Idle tick. Refresh the General-screen state (daemon status,
             // active variant, inventory) so the green/red dot stays current
             // without the user pressing `r`.
+            // Paused while the benchmark screen is open: the refresh runs
+            // nvidia-smi and lspci, which would skew the timed runs.
             if app.current_section == Section::General
+                && app.benchmark.is_none()
                 && last_general_refresh.elapsed() >= general_refresh_interval
             {
                 app.refresh_inventory();
@@ -320,6 +324,11 @@ fn handle_global_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         return Some(handle_quit_prompt_key(app, key));
     }
 
+    // Benchmark screen: owns every key while it is open.
+    if app.benchmark.is_some() {
+        return Some(benchmark_screen::handle_key(app, key));
+    }
+
     // Help overlay: any key dismisses it (including ?).
     if app.help_open {
         app.help_open = false;
@@ -337,6 +346,12 @@ fn handle_global_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         // lives. Mentioned in the variant-mismatch banner so a user landing
         // on (say) Audio can fix the engine/binary mismatch without
         // navigating the sidebar by hand. See #450.
+        // `b` opens the benchmark from General whether the sidebar or the
+        // content pane has focus; the TUI starts with the sidebar focused.
+        (KeyCode::Char('b'), KeyModifiers::NONE) if app.current_section == Section::General => {
+            app.open_benchmark();
+            Some(Action::None)
+        }
         (KeyCode::F(2), _) => {
             app.jump_to_section(Section::General);
             Some(Action::None)
@@ -385,7 +400,7 @@ fn handle_sidebar_key(app: &mut App, key: KeyEvent) -> Action {
 
 fn handle_mouse(app: &mut App, mouse: MouseEvent) {
     // Ignore mouse input while help overlay is open or a text field is editing.
-    if app.help_open || app.is_editing() {
+    if app.help_open || app.is_editing() || app.benchmark.is_some() {
         return;
     }
     if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -461,6 +476,9 @@ fn draw(f: &mut Frame, app: &App) {
 
     render_footer(f, outer[3], app);
 
+    if let Some(screen) = &app.benchmark {
+        benchmark_screen::render(f, screen, app);
+    }
     if app.help_open {
         render_help_overlay(f);
     }
@@ -552,6 +570,7 @@ fn render_help_overlay(f: &mut Frame) {
         Line::from("  ↑↓←→ / hjkl Navigate variant matrix"),
         Line::from("  Enter        Switch to variant under cursor"),
         Line::from("  D            Start or restart the voxtype daemon"),
+        Line::from("  b            Benchmark the installed builds on this machine"),
         Line::from("  r            Refresh inventory"),
         Line::from(""),
         Line::from(Span::styled("Section forms", bold)),
@@ -685,7 +704,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         ])
     } else {
         let section_keys = match app.current_section {
-            Section::General => " D start/restart daemon · r refresh ",
+            Section::General => " b benchmark · D start/restart daemon · r refresh ",
             _ => " s save · r revert ",
         };
         Line::from(Span::styled(

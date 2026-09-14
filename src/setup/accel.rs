@@ -618,7 +618,7 @@ pub(crate) fn report_for(pid: Option<i32>) -> AccelReport {
 
 /// Drop terminal colour codes so evidence lines are readable in JSON. The
 /// daemon's `tracing` output carries them even when it writes to the journal.
-fn strip_ansi(line: &str) -> String {
+pub(crate) fn strip_ansi(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut chars = line.chars();
     while let Some(c) = chars.next() {

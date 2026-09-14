@@ -286,6 +286,18 @@ impl Config {
         .unwrap_or_else(|| PathBuf::from("."))
     }
 
+    /// Voxtype's user state directory (saved benchmark results), honoring
+    /// `$XDG_STATE_HOME` (default `~/.local/state`); same scheme as [`Config::config_dir`].
+    pub fn state_dir() -> PathBuf {
+        Self::xdg_dir(
+            "XDG_STATE_HOME",
+            ".local/state",
+            directories::ProjectDirs::from("", "", "voxtype")
+                .and_then(|d| d.state_dir().map(std::path::Path::to_path_buf)),
+        )
+        .unwrap_or_else(|| PathBuf::from("."))
+    }
+
     /// Resolve a `voxtype` user dir. An explicit absolute `$xdg_var` wins;
     /// otherwise `$HOME/<default_rel>/voxtype`. Falls back to an existing
     /// `legacy` platform-native dir so an upgrade never orphans a prior install.

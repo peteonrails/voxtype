@@ -173,6 +173,44 @@ pub enum SetupAction {
         status: bool,
     },
 
+    /// Benchmark the installed binary variants on this machine
+    #[command(long_about = "\
+Benchmark the installed binary variants on this machine.
+
+Records you reading a short passage, transcribes it with every installed
+variant that can run here, and recommends the fastest one that got the words
+right. A variant that is already slower than an accurate one is stopped early.
+Results are saved and shown by `voxtype configure` and `voxtype info
+variants`. Nothing is switched.
+
+Examples:
+  voxtype setup benchmark
+  voxtype setup benchmark --runs 5
+  voxtype setup benchmark --audio recording.wav --json")]
+    Benchmark {
+        /// Benchmark an existing WAV file instead of recording (accuracy is not scored)
+        #[arg(long, value_name = "FILE")]
+        audio: Option<std::path::PathBuf>,
+
+        /// Timed runs per variant, after one warm-up run (at least 1)
+        #[arg(long, default_value_t = 3, value_name = "N")]
+        runs: usize,
+
+        /// Save the recording to this path
+        #[arg(long, value_name = "FILE")]
+        save_audio: Option<std::path::PathBuf>,
+
+        /// Print the results as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Internal: record until a line arrives on stdin, write the WAV here,
+        /// and exit. `voxtype configure` records through this so audio device
+        /// access stays out of the TUI process.
+        #[arg(long, value_name = "FILE", hide = true)]
+        record_to: Option<std::path::PathBuf>,
+    },
+
     /// Hidden alias for 'onnx' (backwards compatibility)
     #[command(hide = true)]
     Parakeet {
@@ -550,6 +588,52 @@ mod tests {
                 assert!(quiet, "should have quiet=true");
             }
             _ => panic!("Expected Setup command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_benchmark_flags() {
+        let cli = Cli::parse_from([
+            "voxtype",
+            "setup",
+            "benchmark",
+            "--audio",
+            "clip.wav",
+            "--runs",
+            "5",
+            "--json",
+        ]);
+        match cli.command {
+            Some(Commands::Setup {
+                action:
+                    Some(SetupAction::Benchmark {
+                        audio,
+                        runs,
+                        save_audio,
+                        json,
+                        record_to,
+                    }),
+                ..
+            }) => {
+                assert_eq!(audio, Some(std::path::PathBuf::from("clip.wav")));
+                assert_eq!(runs, 5);
+                assert_eq!(save_audio, None);
+                assert!(json);
+                assert_eq!(record_to, None, "recording child mode is off by default");
+            }
+            _ => panic!("Expected Setup Benchmark command"),
+        }
+
+        let cli = Cli::parse_from(["voxtype", "setup", "benchmark"]);
+        match cli.command {
+            Some(Commands::Setup {
+                action: Some(SetupAction::Benchmark { runs, audio, .. }),
+                ..
+            }) => {
+                assert_eq!(runs, 3, "three timed runs by default");
+                assert_eq!(audio, None, "records by default");
+            }
+            _ => panic!("Expected Setup Benchmark command"),
         }
     }
 
