@@ -125,7 +125,16 @@ fn main() -> ExitCode {
             return ExitCode::from(3);
         }
     };
-    let runtime_style = match style::resolve_runtime_style(&config.osd, style_override) {
+    // Effective auto-stop limit: daemon-supervised children inherit
+    // VOXTYPE_OSD_MAX_DURATION_SECS from the supervisor (which knows the
+    // file < env < CLI resolution), otherwise fall back to this
+    // process's resolved config.
+    let max_duration_secs = env::var("VOXTYPE_OSD_MAX_DURATION_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(config.audio.max_duration_secs);
+    let runtime_style =
+        match style::resolve_runtime_style(&config.osd, style_override, max_duration_secs) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("voxtype-osd-quickshell: failed to resolve OSD style: {e}");

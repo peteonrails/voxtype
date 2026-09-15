@@ -3028,7 +3028,9 @@ impl Daemon {
         // the socket the frontend has nothing to render, so skip the spawn
         // rather than burning a slot in the launcher's restart logic.
         if self.config.osd.enabled && self.level_hub.is_some() {
-            self.osd_supervisor_task = Some(crate::osd::supervisor::spawn());
+            self.osd_supervisor_task = Some(crate::osd::supervisor::spawn(
+                self.config.audio.max_duration_secs,
+            ));
         }
 
         // Check if another instance is already running (single-instance safeguard)
