@@ -51,6 +51,9 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     if let Ok(val) = std::env::var("VOXTYPE_HOTKEY_ENABLED") {
         config.hotkey.enabled = parse_bool_env(&val);
     }
+    if let Ok(val) = std::env::var("VOXTYPE_HOTKEY_GRAB") {
+        config.hotkey.grab = parse_bool_env(&val);
+    }
     if let Ok(key) = std::env::var("VOXTYPE_CANCEL_KEY") {
         config.hotkey.cancel_key = Some(key);
     }

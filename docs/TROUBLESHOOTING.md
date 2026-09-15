@@ -235,6 +235,44 @@ echo "uinput" | sudo tee /etc/modules-load.d/uinput.conf
 systemctl --user status ydotool
 ```
 
+### Hotkey chord also reaches the application (Chromium types "v" on Meta+V)
+
+**Symptoms:** Recording works, but the chord does something in the focused window as well. Chromium inserts a "v" when you press Meta+V, so text ends up in the page.
+
+**Cause:** The evdev listener reads the keyboard without taking it away from the compositor, so the chord reaches both voxtype and the focused application. Most applications ignore an unusual chord; Chromium does not.
+
+**Solution:** Let voxtype capture the keyboards, which withholds the chord:
+
+```toml
+[hotkey]
+key = "EVTEST_47"        # V as a kernel keycode (`evtest`)
+modifiers = ["LEFTMETA"]
+grab = true
+```
+
+Then restart the daemon and check what happened:
+
+```bash
+journalctl --user -u voxtype --since "1 minute ago" | grep -i "exclusive capture"
+```
+
+| Log line | Meaning |
+|---|---|
+| `Exclusive capture active: 5 of 5 keyboard(s) grabbed` | Working. The chord no longer reaches applications |
+| `Exclusive capture active: 3 of 5 keyboard(s) grabbed` | Some keyboards were not captured; see below |
+| `hotkey.grab: no keyboard could be captured` | Nothing was captured, so the chord still leaks |
+
+**When capture fails:**
+
+- **`/dev/uinput` missing or not writable** - load the uinput module and make sure the user is in the `input` group (same requirement as dotool/ydotool, see above). The daemon logs `cannot create the mirror device`.
+- **Another program already holds the keyboard** (`keyd`, `kmonad`, `interception-tools`) - the daemon logs `cannot grab`. Only one program can hold a keyboard exclusively; disable the other one, or let it handle the chord instead.
+- **Configuration not reloaded** - `grab` is read when the daemon starts. Restart it after editing the config.
+
+**If you would rather not capture:** keep `grab = false` and bind the chord in your environment instead, which also keeps the chord away from applications:
+
+- Hyprland/Sway/River/Niri: `voxtype setup compositor <name>`, then set `[hotkey] enabled = false`
+- X11 window managers (Qtile, i3, bspwm): bind `voxtype record toggle` to the chord in the window manager's own config
+
 ---
 
 ## Audio Problems
