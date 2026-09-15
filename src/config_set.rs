@@ -134,6 +134,7 @@ pub fn engine_feature_compiled(name: &str) -> bool {
     match engine {
         TranscriptionEngine::Whisper => true,
         TranscriptionEngine::Soniox => true,
+        TranscriptionEngine::Muse => true,
         TranscriptionEngine::Parakeet => cfg!(feature = "parakeet"),
         TranscriptionEngine::Moonshine => cfg!(feature = "moonshine"),
         TranscriptionEngine::SenseVoice => cfg!(feature = "sensevoice"),
@@ -266,7 +267,7 @@ mod tests {
             .collect();
         assert_eq!(
             excluded,
-            [&"soniox"],
+            [&"soniox", &"muse"],
             "new engine variants must be added to ENGINE_NAMES or documented as excluded"
         );
     }
