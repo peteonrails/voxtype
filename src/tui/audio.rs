@@ -23,6 +23,7 @@ use crate::config::AudioConfig;
 
 #[derive(Debug)]
 pub struct AudioState {
+    pub keep_ready: bool,
     pub device: String,
     pub max_duration_secs: u32,
     pub pause_media: bool,
@@ -73,6 +74,7 @@ pub enum FeedbackLevel {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
+    KeepReady,
     Device,
     MaxDuration,
     PauseMedia,
@@ -86,6 +88,7 @@ pub enum Field {
 
 impl Field {
     const ALL: &'static [Field] = &[
+        Field::KeepReady,
         Field::Device,
         Field::MaxDuration,
         Field::PauseMedia,
@@ -114,6 +117,7 @@ impl AudioState {
     pub fn load() -> Result<Self, EditorError> {
         let ed = ConfigEditor::load()?;
         Ok(Self {
+            keep_ready: ed.get_bool("audio", "keep_ready").unwrap_or(false),
             device: ed
                 .get_string("audio", "device")
                 .unwrap_or_else(|| "default".to_string()),
@@ -136,7 +140,7 @@ impl AudioState {
                 .get_string("audio.feedback", "theme")
                 .unwrap_or_else(|| "default".to_string()),
             feedback_volume: ed.get_f32_or("audio.feedback", "volume", 0.7),
-            field: Field::Device,
+            field: Field::KeepReady,
             feedback: None,
             dirty_since_load: false,
             device_choices: initial_device_choices(&ed),
@@ -211,6 +215,7 @@ impl AudioState {
                 return Action::None;
             }
         };
+        ed.set_bool("audio", "keep_ready", self.keep_ready);
         ed.set_string("audio", "device", &self.device);
         ed.set_int("audio", "max_duration_secs", self.max_duration_secs as i64);
         ed.set_bool("audio", "pause_media", self.pause_media);
@@ -287,6 +292,7 @@ impl AudioState {
 
     fn cycle(&mut self, delta: i32) {
         match self.field {
+            Field::KeepReady => self.keep_ready = !self.keep_ready,
             Field::Device => {
                 if !self.device_choices.is_empty() {
                     let idx = self
@@ -450,6 +456,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
     let rows = vec![
         FormRowSpec::new(
+            state.field == Field::KeepReady,
+            "Keep microphone ready",
+            yesno(state.keep_ready),
+        ),
+        FormRowSpec::new(
             state.field == Field::Device,
             "Input device",
             match state.editing.as_ref() {
@@ -547,6 +558,12 @@ fn heading<'a>(text: &'a str) -> Line<'a> {
 
 fn guidance_for_field(state: &AudioState) -> Vec<Line<'_>> {
     match state.field {
+        Field::KeepReady => vec![
+            Line::from("Keep the microphone active for faster recording startup."),
+            Line::from("Idle audio is discarded, never buffered or transcribed."),
+            Line::from("The microphone indicator may stay on and power use may increase."),
+            Line::from("Restart Voxtype after saving to apply this setting."),
+        ],
         Field::Device => {
             let count = state.device_choices.len().saturating_sub(1);
             let scan_line = match state.scan_status {
@@ -806,6 +823,7 @@ mod tests {
         let covered: Vec<&str> = Field::ALL
             .iter()
             .map(|f| match f {
+                Field::KeepReady => "audio.keep_ready",
                 Field::Device => "audio.device",
                 Field::MaxDuration => "audio.max_duration_secs",
                 Field::PauseMedia => "audio.pause_media",

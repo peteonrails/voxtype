@@ -321,6 +321,39 @@ post_process_command = "my-script.sh --formal"
 
 Controls audio capture settings.
 
+### keep_ready
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Keep the microphone input stream open while the daemon runs, so recording can
+start without waking the device each time. Audio received while idle is discarded
+before conversion, buffering, or transcription; there is no pre-recording buffer.
+Each recording starts with fresh samples and resampler state.
+
+Use `--keep-microphone-ready` or `--no-keep-microphone-ready` when launching
+the daemon, or set `VOXTYPE_AUDIO_KEEP_READY=true` / `false` in its environment.
+CLI flags override the environment and config file.
+
+This keeps the microphone active: the system microphone indicator may stay on,
+power use may increase, and Bluetooth headsets may remain in headset mode.
+The speedup depends on your audio hardware and backend. Restart Voxtype after
+changing the setting. Turning it off restores opening the microphone only for
+recordings.
+
+Readiness is suspended while meeting mode owns the microphone and restored
+when the meeting ends, so it does not compete with meeting capture on devices
+that allow only one connection.
+
+```toml
+[audio]
+keep_ready = true
+```
+
+In the Omarchy settings panel, open **Audio → Keep microphone ready**, then use
+**Restart Voxtype** to apply the change. The bar icon opens this section directly.
+
 ### device
 
 **Type:** String
@@ -3545,6 +3578,7 @@ Any config file setting can be overridden via environment variable. These are ap
 |----------|------|-------------------|
 | `VOXTYPE_AUDIO_DEVICE` | string | `audio.device` |
 | `VOXTYPE_MAX_DURATION_SECS` | integer | `audio.max_duration_secs` |
+| `VOXTYPE_AUDIO_KEEP_READY` | bool | `audio.keep_ready` |
 | `VOXTYPE_PAUSE_MEDIA` | bool | `audio.pause_media` |
 | `VOXTYPE_DUCK_MEDIA` | bool | `audio.duck_media` |
 | `VOXTYPE_DUCK_MEDIA_VOLUME_PERCENT` | integer | `audio.duck_media_volume_percent` |

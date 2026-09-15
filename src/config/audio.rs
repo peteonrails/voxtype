@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 /// Audio capture configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AudioConfig {
+    /// Keep the input stream open between recordings; discard all idle audio.
+    #[serde(default)]
+    pub keep_ready: bool,
+
     /// PipeWire/PulseAudio device name, or "default"
     #[serde(default = "default_audio_device")]
     pub device: String,
@@ -90,6 +94,7 @@ pub struct AudioConfig {
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
+            keep_ready: false,
             device: default_audio_device(),
             sample_rate: default_audio_sample_rate(),
             max_duration_secs: default_audio_max_duration_secs(),

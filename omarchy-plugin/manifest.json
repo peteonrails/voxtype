@@ -9,10 +9,19 @@
   "category": "Audio",
   "description": "Graphical settings panel for the Voxtype dictation daemon. Summon it with: omarchy-shell shell toggle io.voxtype.settings '{}'",
   "kinds": [
-    "panel"
+    "panel",
+    "bar-widget"
   ],
   "keepLoaded": true,
   "entryPoints": {
-    "panel": "Panel.qml"
+    "panel": "Panel.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Voxtype settings",
+    "description": "Microphone shortcut to Voxtype audio settings",
+    "category": "Audio",
+    "allowMultiple": false,
+    "defaultSection": "right"
   }
 }

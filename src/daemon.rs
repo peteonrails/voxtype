@@ -793,6 +793,8 @@ type TranscriptionResult = std::result::Result<String, crate::error::TranscribeE
 
 /// Main daemon that orchestrates all components
 pub struct Daemon {
+    capture_factory: audio::CaptureFactory,
+    recording_session: u64,
     config: Config,
     config_path: Option<PathBuf>,
     state_file_path: Option<PathBuf>,
@@ -951,6 +953,11 @@ impl Daemon {
         };
 
         Self {
+            capture_factory: audio::CaptureFactory::new(&config.audio),
+            recording_session: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64,
             config,
             config_path,
             state_file_path,
@@ -1068,10 +1075,6 @@ impl Daemon {
 
     /// Update the state file if configured
     fn update_state(&self, state_name: &str) {
-        if let Some(ref path) = self.state_file_path {
-            write_state_file(path, state_name);
-        }
-
         // OSD suppression marker lifecycle. Consuming the sentinel here rather
         // than at output time is deliberate: the OSD appears when recording
         // starts, so the decision has to be made before the surface is drawn.
@@ -1086,6 +1089,31 @@ impl Daemon {
             "idle" | "stopped" => set_osd_suppressed(false),
             _ => {}
         }
+
+        // State watchers can show startup feedback before the first audio
+        // frame. Publish only after suppression is ready to avoid flashing
+        // the OSD for a --no-osd recording.
+        if let Some(ref path) = self.state_file_path {
+            let feedback = crate::osd::recording::RecordingState {
+                state: state_name.to_owned(),
+                session: self.recording_session,
+            };
+            if let Err(e) = feedback.write(path) {
+                tracing::warn!("Failed to publish OSD recording identity: {e}");
+            }
+            write_state_file(path, state_name);
+        }
+    }
+
+    /// Announce one recording attempt before any asynchronous setup. Streaming
+    /// fallback keeps this identity and suppression decision until final failure.
+    fn begin_recording(&mut self) {
+        // Consume stale cancellation once; a cancel during device setup or a
+        // streaming-to-batch fallback must remain pending for this recording.
+        cleanup_cancel_file();
+        self.stop_level_emitter();
+        self.recording_session = self.recording_session.wrapping_add(1);
+        self.update_state("recording");
     }
 
     /// Build a `SpeechTracker` for silence-based auto-stop, if `armed` and
@@ -1120,16 +1148,7 @@ impl Daemon {
         &mut self,
         track_silence: bool,
     ) -> std::result::Result<Box<dyn AudioCapture>, ()> {
-        // A `record cancel` issued while idle leaves its trigger file behind,
-        // and the idle-time sweep that was meant to consume it never runs:
-        // its 500ms timer sits in a select! loop whose unconditional 100ms
-        // poll arm recreates every timer each iteration, so the 500ms sleep
-        // restarts forever. A stale trigger then kills this recording (and
-        // each one after it) ~100-400ms in. Consume it here, at the single
-        // point every recording path passes through, so a cancel can only
-        // ever apply to a recording that was live when it was issued (#606).
-        cleanup_cancel_file();
-        match audio::create_capture(&self.config.audio) {
+        match self.capture_factory.create_capture().await {
             Ok(mut capture) => match capture.start().await {
                 Ok(chunk_rx) => {
                     self.is_external_trigger = track_silence;
@@ -1143,7 +1162,7 @@ impl Daemon {
                     let handle = if let Some(hub) = &self.level_hub {
                         Some(audio::levels::spawn_emitter_with_streaming_tap(
                             chunk_rx,
-                            hub.frame_sink(),
+                            hub.frame_sink_for_session(self.recording_session),
                             None,
                             speech_tracker,
                         ))
@@ -1162,12 +1181,14 @@ impl Daemon {
                 }
                 Err(e) => {
                     tracing::error!("Failed to start audio: {}", e);
+                    self.update_state("idle");
                     self.play_feedback(SoundEvent::Error);
                     Err(())
                 }
             },
             Err(e) => {
                 tracing::error!("Failed to create audio capture: {}", e);
+                self.update_state("idle");
                 self.play_feedback(SoundEvent::Error);
                 Err(())
             }
@@ -1239,10 +1260,6 @@ impl Daemon {
         model_override: Option<String>,
         track_silence: bool,
     ) -> bool {
-        // Same stale-trigger hazard as start_recording_capture: Streaming is
-        // an is_recording() state, so a leftover cancel file would kill the
-        // session moments after it starts. See #606.
-        cleanup_cancel_file();
         let Some(transcriber) = transcriber_preloaded.as_ref() else {
             return false;
         };
@@ -1473,7 +1490,9 @@ impl Daemon {
             return;
         }
         if let Some(hub) = &self.level_hub {
-            self.streaming_drain_pump = Some(audio::levels::spawn_silence_pump(hub.frame_sink()));
+            self.streaming_drain_pump = Some(audio::levels::spawn_silence_pump(
+                hub.frame_sink_for_session(self.recording_session),
+            ));
         }
     }
 
@@ -1674,7 +1693,7 @@ impl Daemon {
         track_silence: bool,
     ) -> std::result::Result<(Box<dyn AudioCapture>, tokio::sync::mpsc::Receiver<Vec<f32>>), ()>
     {
-        match audio::create_capture(&self.config.audio) {
+        match self.capture_factory.create_capture().await {
             Ok(mut capture) => match capture.start().await {
                 Ok(chunk_rx) => {
                     // Bounded; backed-up streaming backend drops chunks
@@ -1690,7 +1709,7 @@ impl Daemon {
                     let handle = if let Some(hub) = &self.level_hub {
                         audio::levels::spawn_emitter_with_streaming_tap(
                             chunk_rx,
-                            hub.frame_sink(),
+                            hub.frame_sink_for_session(self.recording_session),
                             Some(streaming_tx),
                             speech_tracker,
                         )
@@ -1834,7 +1853,29 @@ impl Daemon {
             tracing::warn!("Meeting already in progress");
             return Ok(());
         }
+        self.capture_factory.set_suspended(true);
+        let result = self.start_meeting_inner(title, diarization_override).await;
+        if self.meeting_daemon.is_none() {
+            self.resume_ready_microphone().await;
+        }
+        result
+    }
 
+    async fn resume_ready_microphone(&mut self) {
+        self.capture_factory.set_suspended(false);
+        if let Err(e) = self.capture_factory.prepare().await {
+            tracing::warn!(
+                "Could not keep microphone ready; will retry when recording: {}",
+                e
+            );
+        }
+    }
+
+    async fn start_meeting_inner(
+        &mut self,
+        title: Option<String>,
+        diarization_override: Option<String>,
+    ) -> Result<()> {
         // CLI override (validated against ["simple", "ml"] by clap) wins over config.
         let backend = diarization_override
             .clone()
@@ -2041,6 +2082,7 @@ impl Daemon {
             self.meeting_event_rx = None;
         }
 
+        self.resume_ready_microphone().await;
         Ok(())
     }
 
@@ -3028,7 +3070,8 @@ impl Daemon {
         // the socket the frontend has nothing to render, so skip the spawn
         // rather than burning a slot in the launcher's restart logic.
         if self.config.osd.enabled && self.level_hub.is_some() {
-            self.osd_supervisor_task = Some(crate::osd::supervisor::spawn());
+            self.osd_supervisor_task =
+                Some(crate::osd::supervisor::spawn(self.config_path.clone()));
         }
 
         // Check if another instance is already running (single-instance safeguard)
@@ -3243,7 +3286,17 @@ impl Daemon {
         // Current state
         let mut state = State::Idle;
 
-        // Audio capture (created fresh for each recording)
+        // Prepare the optional idle microphone before accepting recordings.
+        // A disconnected device must not prevent the daemon from starting;
+        // create_capture retries on the next recording attempt.
+        if let Err(e) = self.capture_factory.prepare().await {
+            tracing::warn!(
+                "Could not keep microphone ready; will retry when recording: {}",
+                e
+            );
+        }
+
+        // Audio capture (a fresh recording session, optionally reusing the input)
         let mut audio_capture: Option<Box<dyn AudioCapture>> = None;
 
         // Recording timeout
@@ -3366,6 +3419,7 @@ impl Daemon {
 
                                 // Pause or duck playback before either capture path opens
                                 // the microphone.
+                                self.begin_recording();
                                 self.suppress_recording_media().await;
 
                                 // Try streaming first; fall through to batch if the engine
@@ -3578,6 +3632,7 @@ impl Daemon {
                                     }
                                 }
 
+                                self.begin_recording();
                                 self.suppress_recording_media().await;
 
                                 if self.try_start_streaming(
@@ -4099,6 +4154,7 @@ impl Daemon {
                             }
                         }
 
+                        self.begin_recording();
                         self.suppress_recording_media().await;
 
                         if self.try_start_streaming(
@@ -4548,6 +4604,7 @@ impl Daemon {
         // Remove state file on shutdown
         if let Some(ref path) = self.state_file_path {
             cleanup_state_file(path);
+            let _ = std::fs::remove_file(crate::osd::recording::sidecar_path(path));
         }
 
         // Remove meeting state file on shutdown
@@ -4602,6 +4659,143 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn startup_and_meeting_readiness_in_isolated_runtime() {
+        const CHILD: &str = "VOXTYPE_TEST_STARTUP_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let dir = TempDir::new().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "daemon::tests::startup_and_meeting_readiness_in_isolated_runtime",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("XDG_RUNTIME_DIR", dir.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout).to_string()
+                    + &String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("state");
+            let mut config = Config {
+                state_file: Some(path.to_string_lossy().into()),
+                ..Config::default()
+            };
+            config.audio.keep_ready = true;
+            config.audio.feedback.enabled = false;
+            config.vad.enabled = false;
+            let mut daemon = Daemon::new(config, None);
+            fs::create_dir_all(Config::runtime_dir()).unwrap();
+            let release = Arc::new(tokio::sync::Notify::new());
+            let permit = release.clone();
+            daemon.capture_factory.set_test_opener(move || {
+                let permit = permit.clone();
+                async move {
+                    permit.notified().await;
+                    Ok(())
+                }
+            });
+            fs::write(Config::runtime_dir().join("cancel"), "1").unwrap();
+            fs::write(Config::runtime_dir().join("no_osd_override"), "true").unwrap();
+            daemon.begin_recording();
+            assert!(
+                !check_cancel_requested(),
+                "stale cancel cleared before startup"
+            );
+            assert!(osd_suppressed_path().exists());
+            let session = daemon.recording_session;
+            let mut opening = Box::pin(daemon.start_streaming_capture(false));
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(opening.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            assert_eq!(fs::read_to_string(&path).unwrap().trim(), "recording");
+            assert_eq!(
+                crate::osd::recording::RecordingState::read(&path)
+                    .unwrap()
+                    .session,
+                session
+            );
+            // The CLI's active-state predicate must send stop while opening.
+            assert!(matches!(
+                fs::read_to_string(&path).unwrap().trim(),
+                "recording" | "streaming"
+            ));
+            fs::write(Config::runtime_dir().join("cancel"), "1").unwrap();
+            release.notify_one();
+            let (capture, _samples) = opening.await.unwrap();
+            drop(capture);
+            // A streaming-to-batch fallback shares the ready input and does
+            // not consume a new cancellation or clear --no-osd suppression.
+            let capture = daemon.start_recording_capture(false).await.unwrap();
+            assert!(check_cancel_requested());
+            assert!(osd_suppressed_path().exists());
+            assert_eq!(daemon.recording_session, session);
+            drop(capture);
+            daemon.stop_level_emitter();
+            daemon.capture_factory.set_suspended(true);
+            daemon.capture_factory.set_suspended(false);
+            daemon
+                .capture_factory
+                .set_test_opener(|| async { Err(crate::error::AudioError::Timeout(5)) });
+            daemon.begin_recording();
+            assert!(daemon.start_recording_capture(false).await.is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap().trim(), "idle");
+            assert_eq!(
+                crate::osd::recording::RecordingState::read(&path)
+                    .unwrap()
+                    .state,
+                "idle"
+            );
+            assert!(!osd_suppressed_path().exists());
+
+            // Meeting failure must restore readiness even before meeting audio
+            // starts. A file in place of its storage directory fails locally.
+            let opened = Arc::new(AtomicUsize::new(0));
+            let count = opened.clone();
+            daemon.capture_factory.set_test_opener(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+                async { Ok(()) }
+            });
+            daemon.capture_factory.prepare().await.unwrap();
+            let blocked = dir.path().join("not-a-directory");
+            fs::write(&blocked, "x").unwrap();
+            daemon.config.meeting.storage_path = blocked.to_string_lossy().into();
+            assert!(daemon.start_meeting(None, None).await.is_err());
+            assert_eq!(opened.load(Ordering::SeqCst), 2);
+            // Exercise a real meeting lifecycle with no captured audio. Its
+            // remote transcriber is constructed but never called.
+            daemon.capture_factory.set_suspended(true);
+            daemon.config.whisper.mode = Some(crate::config::WhisperMode::Remote);
+            daemon.config.whisper.remote_endpoint = Some("http://127.0.0.1:1".into());
+            daemon.config.output.notification.on_recording_stop = false;
+            let meeting_config = meeting::MeetingConfig {
+                storage: StorageConfig {
+                    storage_path: dir.path().join("meetings"),
+                    ..StorageConfig::default()
+                },
+                ..meeting::MeetingConfig::default()
+            };
+            let (events, _rx) = tokio::sync::mpsc::channel(8);
+            let mut meeting = MeetingDaemon::new(meeting_config, &daemon.config, events).unwrap();
+            meeting.start(None).await.unwrap();
+            daemon.meeting_daemon = Some(meeting);
+            daemon.stop_meeting().await.unwrap();
+            assert!(daemon.meeting_daemon.is_none());
+            assert_eq!(opened.load(Ordering::SeqCst), 3);
+        });
+    }
 
     // Helper to create a test runtime directory and set it up
     fn with_test_runtime_dir<F, R>(f: F) -> R

@@ -210,6 +210,19 @@ pub struct Cli {
     pub model_modifier: Option<String>,
 
     // -- Audio --
+    /// Keep the microphone active between recordings for faster startup (idle audio is discarded)
+    #[arg(long, help_heading = "Audio")]
+    pub keep_microphone_ready: bool,
+
+    /// Release the microphone between recordings
+    #[arg(
+        long,
+        help_heading = "Audio",
+        hide_short_help = true,
+        conflicts_with = "keep_microphone_ready"
+    )]
+    pub no_keep_microphone_ready: bool,
+
     /// Audio input device name (or "default" for system default)
     #[arg(long, value_name = "DEVICE", help_heading = "Audio")]
     pub audio_device: Option<String>,

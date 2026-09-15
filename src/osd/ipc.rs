@@ -204,6 +204,34 @@ where
     }
 }
 
+/// Read session-tagged frames, falling back to the legacy socket for older
+/// daemons. `None` identifies legacy frames that have no recording identity.
+pub async fn run_session_ipc_loop<F>(
+    socket_path: PathBuf,
+    reconnect_secs: f32,
+    mut on_frame: F,
+) -> !
+where
+    F: FnMut(Option<u64>, AudioFrame) + Send,
+{
+    use crate::audio::levels::{session_socket_path, SessionFrame, SESSION_FRAME_BYTES};
+    loop {
+        match UnixStream::connect(session_socket_path(&socket_path)).await {
+            Ok(mut stream) => {
+                let mut bytes = [0; SESSION_FRAME_BYTES];
+                while stream.read_exact(&mut bytes).await.is_ok() {
+                    let tagged = SessionFrame::from_bytes(&bytes);
+                    on_frame(Some(tagged.session), tagged.frame);
+                }
+            }
+            Err(_) => {
+                run_one_connection(&socket_path, |frame| on_frame(None, frame)).await;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs_f32(reconnect_secs)).await;
+    }
+}
+
 /// Run the connect / read / reconnect loop forever.
 ///
 /// `reconnect_secs` controls the gap between retry attempts when the
