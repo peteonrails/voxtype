@@ -239,6 +239,38 @@ systemctl --user status ydotool
 
 ## Audio Problems
 
+### Microphone indicator stays on, Bluetooth audio changes, or another app cannot use the mic
+
+Check **Audio > Keep microphone ready** in `voxtype configure` or the Omarchy
+Voxtype settings panel. With `audio.keep_ready = true`, Voxtype holds the input
+device open to reduce recording startup delay. Idle audio is discarded, but the
+system still reports an active microphone. This can use more power and keep a
+Bluetooth headset in its lower-quality call profile.
+
+To release the device between recordings:
+
+```bash
+voxtype config set audio.keep_ready false
+systemctl --user restart voxtype
+```
+
+Also remove a `--keep-microphone-ready` service flag or a
+`VOXTYPE_AUDIO_KEEP_READY=true` environment override if present. Those override
+the config file. The next start may take longer on hardware that sleeps.
+
+Voxtype's meeting mode temporarily releases the ready stream and restores it
+when the meeting ends or fails to start. An unrelated application may still need
+exclusive microphone access; disable readiness while using it. If a device is
+unplugged, reconnect it and start a new recording so Voxtype can reopen the input.
+
+### Popup says “Starting microphone…” but the meter does not move
+
+The startup message acknowledges the key press before the audio device is ready;
+it does not mean speech is being captured yet. Wait for the meter before speaking.
+If it never responds, check the selected device and daemon logs
+(`journalctl --user -u voxtype -n 50`). A failed open returns the daemon to idle.
+Enabling readiness can reduce wake-up delay, but cannot fix a missing or busy device.
+
 ### "No audio captured" or empty transcriptions
 
 **Possible causes and solutions:**

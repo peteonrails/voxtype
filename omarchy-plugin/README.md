@@ -29,6 +29,22 @@ omarchy-shell shell rescanPlugins
 omarchy plugin enable io.voxtype.settings
 ```
 
+Add the microphone settings icon to the bar:
+
+```bash
+omarchy bar put io.voxtype.settings --section right
+```
+
+Click it to open the **Audio** section; click again to close the panel. The
+tooltip reads **Voxtype settings · Audio**. The icon uses the native bar theme
+and sizing, including vertical bars.
+
+On builds that support `audio.keep_ready`, Audio begins with **Keep microphone
+ready**. Enabling it keeps the microphone stream active between dictations to
+reduce recording startup delay; idle samples are discarded. The microphone
+indicator can stay on and power usage can increase. Use the panel's restart
+banner to restart Voxtype after changing this setting.
+
 Optionally add a **Setup → Dictation** row to the Omarchy menu:
 
 ```bash
@@ -257,6 +273,7 @@ Layout of the QML:
 
 | File | Role |
 |---|---|
+| `BarWidget.qml` | native microphone icon opening the existing panel on Audio |
 | `Panel.qml` | plugin entry point: state, the layer-shell window, IPC, CLI wiring |
 | `components/SettingsCard.qml` | scrim + centered card + key catcher |
 | `components/HeaderBar.qml` | title, accel badge, restart / TUI / edit config / close |

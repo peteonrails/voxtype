@@ -28,7 +28,7 @@
 //! `kill_on_drop` would have nothing to kill, and the supervisor would
 //! respawn in a loop thinking the child died (see issue #395).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::task::JoinHandle;
@@ -55,11 +55,22 @@ fn resolve_osd_binary() -> PathBuf {
 /// Spawn a tokio task that supervises `voxtype-osd`. The returned handle's
 /// drop kills the child via `kill_on_drop`. Holding the handle keeps the
 /// supervisor alive for the daemon's lifetime.
-pub fn spawn() -> JoinHandle<()> {
-    tokio::spawn(supervise())
+pub fn spawn(config_path: Option<PathBuf>) -> JoinHandle<()> {
+    tokio::spawn(supervise(config_path))
 }
 
-async fn supervise() {
+fn osd_command(binary: &Path, config_path: Option<&Path>) -> Command {
+    let mut cmd = Command::new(binary);
+    cmd.kill_on_drop(true);
+    // Suppress Quickshell daemonization so the supervisor owns the child.
+    cmd.env("VOXTYPE_OSD_SUPERVISED", "1");
+    if let Some(path) = config_path {
+        cmd.arg("--config").arg(path);
+    }
+    cmd
+}
+
+async fn supervise(config_path: Option<PathBuf>) {
     let mut backoff = RESTART_MIN;
     let mut rapid_fails: u32 = 0;
     let mut rapid_window_start = Instant::now();
@@ -67,13 +78,7 @@ async fn supervise() {
     loop {
         let started = Instant::now();
         let osd_binary = resolve_osd_binary();
-        let mut cmd = Command::new(&osd_binary);
-        cmd.kill_on_drop(true);
-        // Tell the dispatcher this child is supervised. The dispatcher
-        // uses this to suppress qs's daemonize fork when handing off to
-        // the Quickshell launcher (otherwise kill_on_drop has nothing
-        // to kill — see #395).
-        cmd.env("VOXTYPE_OSD_SUPERVISED", "1");
+        let mut cmd = osd_command(&osd_binary, config_path.as_deref());
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -124,5 +129,27 @@ async fn supervise() {
 
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(RESTART_MAX);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supervised_osd_receives_the_daemons_explicit_config_path() {
+        let path = Path::new("/tmp/custom config/voxtype.toml");
+        let command = osd_command(Path::new(OSD_BINARY), Some(path));
+        let args: Vec<_> = command.as_std().get_args().collect();
+        assert_eq!(args, [std::ffi::OsStr::new("--config"), path.as_os_str()]);
+        assert!(command.as_std().get_envs().any(|(name, value)| {
+            name == "VOXTYPE_OSD_SUPERVISED" && value == Some(std::ffi::OsStr::new("1"))
+        }));
+    }
+
+    #[test]
+    fn supervised_osd_keeps_default_config_discovery_without_override() {
+        let command = osd_command(Path::new(OSD_BINARY), None);
+        assert_eq!(command.as_std().get_args().count(), 0);
     }
 }

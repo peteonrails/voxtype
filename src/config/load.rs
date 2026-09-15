@@ -98,6 +98,9 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     }
 
     // Audio
+    if let Ok(val) = std::env::var("VOXTYPE_AUDIO_KEEP_READY") {
+        config.audio.keep_ready = parse_bool_env(&val);
+    }
     if let Ok(device) = std::env::var("VOXTYPE_AUDIO_DEVICE") {
         config.audio.device = device;
     }
@@ -236,6 +239,42 @@ pub fn save_config(config: &Config, path: &Path) -> Result<(), VoxtypeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readiness_environment_overrides_file_in_isolated_process() {
+        const CHILD: &str = "VOXTYPE_TEST_ENV_CONFIG";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let expected = std::env::var("VOXTYPE_AUDIO_KEEP_READY").unwrap() == "true";
+            assert_eq!(
+                load_config(Some(Path::new(&path)))
+                    .unwrap()
+                    .audio
+                    .keep_ready,
+                expected
+            );
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for value in [true, false] {
+            std::fs::write(&path, format!("[audio]\nkeep_ready = {}\n", !value)).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "config::load::tests::readiness_environment_overrides_file_in_isolated_process",
+                    "--nocapture",
+                ])
+                .env(CHILD, &path)
+                .env("VOXTYPE_AUDIO_KEEP_READY", value.to_string())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+    }
 
     #[test]
     fn test_load_config_explicit_path() {

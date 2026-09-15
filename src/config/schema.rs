@@ -801,6 +801,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
     ),
     // -- Audio --------------------------------------------------------------
     spec(
+        "audio.keep_ready",
+        "audio",
+        "keep_ready",
+        KeyType::Bool,
+        "Audio",
+        "Keep microphone ready",
+        "Start recording faster by keeping the microphone active between recordings. Idle audio is discarded. The microphone indicator may stay on and power use may increase. Restart Voxtype to apply.",
+    ),
+    spec(
         "audio.device",
         "audio",
         "device",
@@ -1727,6 +1736,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "hotkey.cancel_key" => opt_str(cfg.hotkey.cancel_key.as_ref()),
         "hotkey.model_modifier" => opt_str(cfg.hotkey.model_modifier.as_ref()),
 
+        "audio.keep_ready" => json!(cfg.audio.keep_ready),
         "audio.device" => json!(cfg.audio.device),
         "audio.max_duration_secs" => json!(cfg.audio.max_duration_secs),
         "audio.pause_media" => json!(cfg.audio.pause_media),
@@ -1963,6 +1973,18 @@ mod tests {
         let path = dir.path().join("config.toml");
         fs::write(&path, crate::config::default_config_content()).unwrap();
         (dir, path)
+    }
+
+    #[test]
+    fn keep_microphone_ready_is_an_opt_in_audio_setting() {
+        let setting = CONFIG_KEYS
+            .iter()
+            .find(|s| s.key == "audio.keep_ready")
+            .expect("microphone readiness must be available to graphical settings");
+        assert_eq!(setting.section, "Audio");
+        assert!(setting.restart_required);
+        let serialized = serde_json::to_value(crate::config::AudioConfig::default()).unwrap();
+        assert_eq!(serialized["keep_ready"], json!(false));
     }
 
     /// A valid value to write when exercising a key generically.

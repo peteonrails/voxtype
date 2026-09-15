@@ -10,6 +10,13 @@
 //! struct AudioFrame { seq: u32, min: f32, max: f32, peak_dbfs: f32 }
 //! ```
 //!
+//! Session-aware clients use the companion `audio.sock.v2`: each 24-byte
+//! frame contains a native-order u64 recording ID followed by the unchanged
+//! 16-byte payload above. The ID is published before microphone setup in
+//! `<state_file>.osd.json` alongside the state name. Both sockets share the
+//! same broadcaster; queued frames retain the ID of their producer. The
+//! original socket and its clients remain compatible.
+//!
 //! This is a lossy, best-effort broadcast: subscribers that fall behind get
 //! disconnected. The daemon never blocks on slow consumers.
 //!
@@ -127,6 +134,44 @@ pub fn default_socket_path() -> PathBuf {
     Config::runtime_dir().join("audio.sock")
 }
 
+/// A recording-tagged frame on the companion v2 socket. The original socket
+/// retains its 16-byte protocol for older frontends and third-party clients.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SessionFrame {
+    /// Unique identifier published with the recording's startup state.
+    pub session: u64,
+    /// Original audio meter payload.
+    pub frame: AudioFrame,
+}
+
+/// Wire size on the session-aware socket: u64 session, then the legacy frame.
+pub const SESSION_FRAME_BYTES: usize = 8 + FRAME_BYTES;
+
+impl SessionFrame {
+    /// Encode a v2 frame in native byte order, like the legacy protocol.
+    pub fn to_bytes(self) -> [u8; SESSION_FRAME_BYTES] {
+        let mut bytes = [0; SESSION_FRAME_BYTES];
+        bytes[..8].copy_from_slice(&self.session.to_ne_bytes());
+        bytes[8..].copy_from_slice(&self.frame.to_bytes());
+        bytes
+    }
+
+    /// Decode one complete v2 frame.
+    pub fn from_bytes(bytes: &[u8; SESSION_FRAME_BYTES]) -> Self {
+        Self {
+            session: u64::from_ne_bytes(bytes[..8].try_into().unwrap()),
+            frame: AudioFrame::from_bytes(bytes[8..].try_into().unwrap()),
+        }
+    }
+}
+
+/// Companion socket path, also honoring a custom legacy socket location.
+pub fn session_socket_path(path: &std::path::Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".v2");
+    PathBuf::from(name)
+}
+
 /// Per-subscriber bounded queue. 30 frames = 300 ms at 100 Hz; if a client
 /// can't keep up over that window, drop it.
 const SUBSCRIBER_QUEUE_DEPTH: usize = 30;
@@ -153,7 +198,7 @@ pub struct LevelHub {
 struct HubState {
     /// Bounded mpsc channel: recording-session producers send frames here,
     /// the broadcaster task drains it and fans out to clients.
-    broadcast_tx: mpsc::Sender<AudioFrame>,
+    broadcast_tx: mpsc::Sender<SessionFrame>,
     /// Running count of attached subscribers, for telemetry/logging.
     subscriber_count: Mutex<usize>,
 }
@@ -211,6 +256,15 @@ impl LevelHub {
     pub fn frame_sink(&self) -> FrameSink {
         FrameSink {
             inner: self.inner.clone(),
+            session: 0,
+        }
+    }
+
+    /// Create a sink whose queued frames retain this recording's identity.
+    pub fn frame_sink_for_session(&self, session: u64) -> FrameSink {
+        FrameSink {
+            inner: self.inner.clone(),
+            session,
         }
     }
 
@@ -222,6 +276,7 @@ impl LevelHub {
     /// Best-effort cleanup of the socket file. Called on shutdown.
     pub fn cleanup(&self) {
         let _ = std::fs::remove_file(&self.inner.socket_path);
+        let _ = std::fs::remove_file(session_socket_path(&self.inner.socket_path));
     }
 }
 
@@ -239,10 +294,13 @@ fn bind_and_spawn(
     }
 
     let listener = UnixListener::bind(socket_path)?;
+    let session_path = session_socket_path(socket_path);
+    let _ = std::fs::remove_file(&session_path);
+    let session_listener = UnixListener::bind(session_path)?;
 
     // Frame fan-in: any number of recording-session producers can send.
     // 200 frames = 2 seconds of buffered headroom at 100 Hz, plenty.
-    let (broadcast_tx, broadcast_rx) = mpsc::channel::<AudioFrame>(200);
+    let (broadcast_tx, broadcast_rx) = mpsc::channel::<SessionFrame>(200);
 
     let state = Arc::new(HubState {
         broadcast_tx,
@@ -253,7 +311,7 @@ fn bind_and_spawn(
 
     let state_for_accept = state.clone();
     let accept_handle = tokio::spawn(async move {
-        run_accept_loop(listener, sub_tx, state_for_accept).await;
+        run_accept_loop(listener, session_listener, sub_tx, state_for_accept).await;
     });
 
     let broadcast_handle = tokio::spawn(async move {
@@ -338,6 +396,7 @@ fn spawn_watchdog(
 #[derive(Clone)]
 pub struct FrameSink {
     inner: Arc<HubInner>,
+    session: u64,
 }
 
 impl FrameSink {
@@ -350,18 +409,22 @@ impl FrameSink {
     #[inline]
     pub fn publish(&self, frame: AudioFrame) {
         let state = self.inner.current();
-        let _ = state.broadcast_tx.try_send(frame);
+        let _ = state.broadcast_tx.try_send(SessionFrame {
+            session: self.session,
+            frame,
+        });
     }
 }
 
 /// One subscriber's per-connection mailbox.
 struct SubscriberSlot {
     /// Sender feeding the per-client writer task.
-    tx: mpsc::Sender<AudioFrame>,
+    tx: mpsc::Sender<SessionFrame>,
 }
 
 async fn run_accept_loop(
     listener: UnixListener,
+    session_listener: UnixListener,
     sub_tx: mpsc::UnboundedSender<SubscriberSlot>,
     state: Arc<HubState>,
 ) {
@@ -378,9 +441,13 @@ async fn run_accept_loop(
             }
         }
 
-        match listener.accept().await {
+        let (accepted, session_aware) = tokio::select! {
+            result = listener.accept() => (result, false),
+            result = session_listener.accept() => (result, true),
+        };
+        match accepted {
             Ok((stream, _addr)) => {
-                let (tx, rx) = mpsc::channel::<AudioFrame>(SUBSCRIBER_QUEUE_DEPTH);
+                let (tx, rx) = mpsc::channel::<SessionFrame>(SUBSCRIBER_QUEUE_DEPTH);
                 let slot = SubscriberSlot { tx };
                 if sub_tx.send(slot).is_err() {
                     // Broadcaster has shut down; close the new connection.
@@ -395,7 +462,7 @@ async fn run_accept_loop(
                         *count += 1;
                         tracing::debug!("Audio subscriber connected (count={})", *count);
                     }
-                    run_subscriber_writer(stream, rx).await;
+                    run_subscriber_writer(stream, rx, session_aware).await;
                     {
                         let mut count = state_for_writer.subscriber_count.lock().await;
                         *count = count.saturating_sub(1);
@@ -412,10 +479,15 @@ async fn run_accept_loop(
     }
 }
 
-async fn run_subscriber_writer(mut stream: UnixStream, mut rx: mpsc::Receiver<AudioFrame>) {
+async fn run_subscriber_writer(
+    mut stream: UnixStream,
+    mut rx: mpsc::Receiver<SessionFrame>,
+    session_aware: bool,
+) {
     while let Some(frame) = rx.recv().await {
         let bytes = frame.to_bytes();
-        if let Err(e) = stream.write_all(&bytes).await {
+        let wire: &[u8] = if session_aware { &bytes } else { &bytes[8..] };
+        if let Err(e) = stream.write_all(wire).await {
             tracing::trace!("Audio subscriber write error: {}", e);
             break;
         }
@@ -424,10 +496,10 @@ async fn run_subscriber_writer(mut stream: UnixStream, mut rx: mpsc::Receiver<Au
 }
 
 async fn run_broadcast_loop(
-    mut frame_rx: mpsc::Receiver<AudioFrame>,
+    mut frame_rx: mpsc::Receiver<SessionFrame>,
     mut new_subs: mpsc::UnboundedReceiver<SubscriberSlot>,
 ) {
-    let mut subscribers: Vec<mpsc::Sender<AudioFrame>> = Vec::new();
+    let mut subscribers: Vec<mpsc::Sender<SessionFrame>> = Vec::new();
 
     loop {
         tokio::select! {
@@ -821,6 +893,41 @@ mod tests {
         (dir, path)
     }
 
+    #[tokio::test]
+    async fn subscriber_queues_preserve_sessions_and_legacy_wire_format() {
+        for session_aware in [false, true] {
+            let (writer, mut reader) = UnixStream::pair().unwrap();
+            let (tx, rx) = mpsc::channel(2);
+            let frame = AudioFrame {
+                seq: 7,
+                min: -0.2,
+                max: 0.3,
+                peak_dbfs: -8.0,
+            };
+            // Queue two recordings before the subscriber writer gets to run.
+            for session in [41, 42] {
+                tx.send(SessionFrame { session, frame }).await.unwrap();
+            }
+            drop(tx);
+            let task = tokio::spawn(run_subscriber_writer(writer, rx, session_aware));
+            for session in [41, 42] {
+                if session_aware {
+                    let mut bytes = [0; SESSION_FRAME_BYTES];
+                    reader.read_exact(&mut bytes).await.unwrap();
+                    assert_eq!(
+                        SessionFrame::from_bytes(&bytes),
+                        SessionFrame { session, frame }
+                    );
+                } else {
+                    let mut bytes = [0; FRAME_BYTES];
+                    reader.read_exact(&mut bytes).await.unwrap();
+                    assert_eq!(AudioFrame::from_bytes(&bytes), frame);
+                }
+            }
+            task.await.unwrap();
+        }
+    }
+
     /// Smoke: starting the hub binds the socket and a client can connect.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
@@ -837,8 +944,18 @@ mod tests {
         // Connect a client.
         let _client = UnixStream::connect(&path).await.expect("client connect");
 
-        // Drive a frame through; the client should see 16 bytes.
-        hub.frame_sink().publish(AudioFrame {
+        let mut tagged_client = UnixStream::connect(session_socket_path(&path))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while *hub.inner.current().subscriber_count.lock().await < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // Both clients receive the same audio; only v2 receives its identity.
+        hub.frame_sink_for_session(41).publish(AudioFrame {
             seq: 7,
             min: -0.1,
             max: 0.2,
@@ -853,6 +970,21 @@ mod tests {
         read_res.unwrap().expect("read frame bytes");
         let got = AudioFrame::from_bytes(&buf);
         assert_eq!(got.seq, 7);
+        let mut tagged_bytes = [0; SESSION_FRAME_BYTES];
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            tagged_client.read_exact(&mut tagged_bytes),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            SessionFrame::from_bytes(&tagged_bytes),
+            SessionFrame {
+                session: 41,
+                frame: got
+            }
+        );
 
         // Cleanup.
         hub.cleanup();

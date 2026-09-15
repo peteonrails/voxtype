@@ -171,6 +171,11 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     }
 
     // Audio overrides
+    apply_bool_override(
+        &mut config.audio.keep_ready,
+        cli.keep_microphone_ready,
+        cli.no_keep_microphone_ready,
+    );
     if let Some(ref device) = cli.audio_device {
         config.audio.device = device.clone();
     }
@@ -319,4 +324,37 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     }
 
     top_level_model
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn microphone_readiness_flags_override_both_config_values() {
+        for initial in [false, true] {
+            for (flag, expected) in [
+                ("--keep-microphone-ready", true),
+                ("--no-keep-microphone-ready", false),
+            ] {
+                let cli = Cli::try_parse_from(["voxtype", flag]).unwrap();
+                let mut config = config::Config::default();
+                config.audio.keep_ready = initial;
+                apply_cli_overrides(&mut config, &cli);
+                assert_eq!(config.audio.keep_ready, expected);
+            }
+            let cli = Cli::try_parse_from(["voxtype"]).unwrap();
+            let mut config = config::Config::default();
+            config.audio.keep_ready = initial;
+            apply_cli_overrides(&mut config, &cli);
+            assert_eq!(config.audio.keep_ready, initial);
+        }
+        assert!(Cli::try_parse_from([
+            "voxtype",
+            "--keep-microphone-ready",
+            "--no-keep-microphone-ready"
+        ])
+        .is_err());
+    }
 }

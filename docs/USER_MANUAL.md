@@ -62,6 +62,36 @@ The setup command will:
 4. **Release the hotkey**: Your speech is transcribed
 5. **Text appears**: Either typed at cursor or copied to clipboard
 
+### Keep the Microphone Ready
+
+If the microphone takes time to wake up, enable **Keep microphone ready** in
+`voxtype configure` under Audio. On Omarchy, the optional Voxtype toolbar icon
+opens the graphical Audio settings panel. The setting is off by default.
+
+You can also set it from the command line:
+
+```bash
+voxtype config set audio.keep_ready true
+systemctl --user restart voxtype
+```
+
+Restart the daemon after changing this setting (the graphical panel offers a
+restart action). For a foreground daemon, use `voxtype --keep-microphone-ready`
+or `VOXTYPE_AUDIO_KEEP_READY=true voxtype`. To disable it, set the option to
+`false`, use `--no-keep-microphone-ready`, or set the environment variable to
+`false`; command-line flags take precedence over environment and config values.
+
+Readiness holds the input device open between recordings. Idle audio is discarded
+without buffering or transcription; a fresh buffer starts when you record.
+The system microphone indicator may stay on, power use may increase, and Bluetooth
+headsets may stay in their microphone/call profile. Voxtype releases the idle
+stream while meeting mode owns the microphone and restores readiness afterward.
+
+The GTK popup acknowledges recording startup before microphone setup completes.
+Wait for the live meter before speaking; a visible “Starting microphone…” message
+means the input is still waking up. See [Audio Configuration](CONFIGURATION.md#audio)
+and [Audio Problems](TROUBLESHOOTING.md#audio-problems) for details.
+
 ### Example Session
 
 ```

@@ -39,6 +39,11 @@ modifiers = []
 # model_modifier = "LEFTSHIFT"
 
 [audio]
+# Keep the microphone active between recordings for faster startup.
+# Idle audio is discarded, never buffered or transcribed. The microphone
+# indicator may stay on and power use may increase. Restart to apply.
+keep_ready = false
+
 # Audio input device ("default" uses system default)
 # List devices with: voxtype info devices
 # (or `arecord -L`). This takes an ALSA device name, not a PulseAudio
