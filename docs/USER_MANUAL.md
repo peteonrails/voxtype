@@ -1662,7 +1662,7 @@ When enabled, voxtype saves your clipboard content before pasting, then restores
 
 ### Fallback Behavior
 
-Voxtype uses a fallback chain: wtype → eitype → dotool → ydotool → clipboard (wl-copy) → xclip
+Voxtype uses a fallback chain: portal → wtype → eitype → dotool → ydotool → clipboard (wl-copy) → xclip
 
 ```toml
 [output]

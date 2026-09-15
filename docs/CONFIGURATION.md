@@ -2054,7 +2054,7 @@ fallback_to_clipboard = true  # Use clipboard if typing drivers fail
 ### driver_order
 
 **Type:** Array of strings
-**Default:** `["wtype", "eitype", "dotool", "ydotool", "clipboard", "xclip"]`
+**Default:** `["portal", "wtype", "eitype", "dotool", "ydotool", "clipboard", "xclip"]`
 **Required:** No
 
 Custom order of output drivers to try when `mode = "type"`. Each driver is tried in sequence until one succeeds. This allows you to prefer specific drivers or exclude others entirely.
@@ -2062,13 +2062,14 @@ Custom order of output drivers to try when `mode = "type"`. Each driver is tried
 **Available drivers:**
 - `wtype` - Wayland virtual keyboard protocol (best CJK/Unicode support, wlroots compositors only)
 - `eitype` - Wayland via libei/EI protocol (works on GNOME, KDE, and compositors with libei support). On KDE Plasma 6, each invocation briefly registers via the XDG RemoteDesktop portal, which can cause a system-tray icon to flicker during streaming dictation (many fast typing calls). Prefer `dotool` for streaming if you're on KDE.
+- `portal` - persistent XDG RemoteDesktop portal session (e.g. KDE Plasma 6, GNOME, wlroots). Like `eitype` it needs no uinput or `input` group, but it holds ONE portal session for the life of the daemon instead of re-registering per call, so it avoids the eitype tray flicker and per-call latency during streaming dictation on KDE. Layout-independent: it sends Unicode keysyms directly and ignores the `*_xkb_layout`/`*_xkb_variant` hints. First use shows a one-time consent dialog; the grant persists via a restore token cached under `$XDG_CACHE_HOME/voxtype/`.
 - `dotool` - uinput-based typing (supports keyboard layouts, works on X11/Wayland/TTY). For streaming backends (Parakeet, Soniox), run `dotoold` to make this **much** faster when no per-call layout or variant hint is needed — see [Streaming performance: dotoold fast path](#streaming-performance-dotoold-fast-path) below.
 - `ydotool` - uinput-based typing (requires `ydotoold` daemon, X11/Wayland/TTY). Fast spawn, but **does not support keyboard layouts** — sends raw US keycodes. Wrong output on non-US layouts (e.g. Hungarian Z/Y swap).
 - `clipboard` - Wayland clipboard via wl-copy
 - `xclip` - X11 clipboard via xclip
 
 **Default behavior (no driver_order set):**
-The default chain is: wtype → eitype → dotool → ydotool → clipboard → xclip
+The default chain is: portal → wtype → eitype → dotool → ydotool → clipboard → xclip
 
 **Examples:**
 
