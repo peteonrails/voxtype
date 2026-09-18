@@ -820,6 +820,23 @@ impl TranscriptOutcome {
     }
 }
 
+/// Timing captured when recording stops, held on the daemon until the
+/// transcription result arrives so `handle_transcription_result` can log
+/// dictation stats (word count and WPM of the final text).
+#[derive(Debug, Clone, Copy)]
+struct DictationTiming {
+    /// Total captured audio, from sample count.
+    audio_secs: f32,
+    /// Speech-only duration from voice-activity detection, if VAD ran.
+    speech_secs: Option<f32>,
+}
+
+/// Word count of `text` for the dictation stats log: whitespace-separated
+/// non-empty chunks.
+fn count_words(text: &str) -> usize {
+    text.split_whitespace().count()
+}
+
 /// Path of the completion sidecar for a transcript.
 pub fn result_sidecar_path(transcript: &std::path::Path) -> std::path::PathBuf {
     let mut sidecar = transcript.as_os_str().to_os_string();
@@ -1097,6 +1114,9 @@ pub struct Daemon {
     // instance (#643) — get_transcriber_for_recording re-creates it on the
     // next recording when it finds this empty.
     transcriber_preloaded: Option<Arc<dyn Transcriber>>,
+    // Timing for the dictation in flight (see DictationTiming). Set when
+    // recording stops, consumed by handle_transcription_result.
+    dictation_timing: Option<DictationTiming>,
     // Background tasks for eager chunk transcriptions (chunk_index, task)
     eager_chunk_tasks: Vec<(
         usize,
@@ -1228,6 +1248,7 @@ impl Daemon {
             transcription_task: None,
             active_transcriber: None,
             transcriber_preloaded: None,
+            dictation_timing: None,
             eager_chunk_tasks: Vec::new(),
             vad,
             meeting_daemon: None,
@@ -3137,6 +3158,10 @@ impl Daemon {
         };
 
         let audio_duration = accumulated_audio.len() as f32 / 16000.0;
+        self.dictation_timing = Some(DictationTiming {
+            audio_secs: audio_duration,
+            speech_secs: None,
+        });
         tracing::info!(
             "Finishing eager recording: {:.1}s of audio, {} chunks already transcribed",
             audio_duration,
@@ -3266,6 +3291,7 @@ impl Daemon {
                     }
 
                     // Voice Activity Detection: skip if no speech detected
+                    let mut speech_secs: Option<f32> = None;
                     if let Some(ref vad) = self.vad {
                         match vad.detect(&samples) {
                             Ok(result) if !result.has_speech => {
@@ -3275,6 +3301,7 @@ impl Daemon {
                                 return false;
                             }
                             Ok(result) => {
+                                speech_secs = Some(result.speech_duration_secs);
                                 tracing::debug!(
                                     "Speech detected: {:.2}s ({:.1}%)",
                                     result.speech_duration_secs,
@@ -3289,6 +3316,10 @@ impl Daemon {
                     }
 
                     tracing::info!("Transcribing {:.1}s of audio...", audio_duration);
+                    self.dictation_timing = Some(DictationTiming {
+                        audio_secs: audio_duration,
+                        speech_secs,
+                    });
                     *state = State::Transcribing {
                         audio: samples.clone(),
                     };
@@ -3353,6 +3384,9 @@ impl Daemon {
         // task error). The Ok(Ok(_)) branch consults it for the language
         // layout hint before letting it drop.
         let active_transcriber = self.active_transcriber.take();
+        // Consumed regardless of outcome so it never leaks into the next
+        // recording if we bail out early.
+        let timing = self.dictation_timing.take();
         match result {
             Ok(Ok(text)) => {
                 if text.is_empty() {
@@ -3476,6 +3510,36 @@ impl Daemon {
 
                     // Track last dictation for context in subsequent post-processing
                     self.last_dictation = Some((final_text.clone(), Instant::now()));
+
+                    // Dictation stats: word count of the final (post-processed)
+                    // text over speech time when VAD ran, else total audio time.
+                    if let Some(timing) = timing {
+                        let words = count_words(&final_text);
+                        // WPM denominator: VAD speech time when meaningful,
+                        // else total audio, else none (recording too short
+                        // for a meaningful rate). The speech value is always
+                        // the truth: `none` only when VAD didn't run.
+                        let wpm = if let Some(s) = timing.speech_secs.filter(|s| *s > 0.1) {
+                            Some(words as f32 / s * 60.0)
+                        } else {
+                            (timing.audio_secs > 0.1)
+                                .then(|| words as f32 / timing.audio_secs * 60.0)
+                        };
+                        let speech_str = match timing.speech_secs {
+                            Some(s) => format!("{:.2}s", s),
+                            None => "none".to_string(),
+                        };
+                        let wpm_str = wpm
+                            .map(|w| format!("{:.0}", w))
+                            .unwrap_or_else(|| "none".to_string());
+                        tracing::info!(
+                            "DictationStats: words={} audio={:.2}s speech={} wpm={}",
+                            words,
+                            timing.audio_secs,
+                            speech_str,
+                            wpm_str
+                        );
+                    }
 
                     if smart_submit {
                         tracing::debug!(
@@ -4424,6 +4488,7 @@ impl Daemon {
                                 // Drop the cloned transcriber Arc so it isn't
                                 // held until the next transcription.
                                 self.active_transcriber = None;
+                                self.dictation_timing = None;
 
                                 discard_recording_overrides();
                                 state = State::Idle;
@@ -4900,6 +4965,7 @@ impl Daemon {
                 // Check for cancel during transcription
                 _ = transcribing_poll.tick(), if matches!(state, State::Transcribing { .. }) => {
                     if check_cancel_requested() {
+                        self.dictation_timing = None;
                         self.cancel_requested_session(
                             &mut state,
                             &mut audio_capture,
@@ -5436,6 +5502,15 @@ mod tests {
             .expect_err("an aborted task must yield a JoinError");
         assert!(abort_err.is_cancelled());
         assert!(!join_error_poisons_engine(&abort_err));
+    }
+
+    #[test]
+    fn count_words_counts_whitespace_separated_words() {
+        assert_eq!(count_words("hello world"), 2);
+        assert_eq!(count_words("  hello   world  "), 2);
+        assert_eq!(count_words("don't stop, keep going"), 4);
+        assert_eq!(count_words(""), 0);
+        assert_eq!(count_words("   "), 0);
     }
 
     // Helper to create a test runtime directory and set it up
