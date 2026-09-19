@@ -97,6 +97,17 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             .openvino_dir = Some(dir);
     }
 
+    // Cohere: invalid selections must not silently use another backend.
+    if let Ok(backend) = std::env::var("VOXTYPE_COHERE_ENCODER_BACKEND") {
+        let backend = backend.parse().map_err(|error| {
+            VoxtypeError::Config(format!("VOXTYPE_COHERE_ENCODER_BACKEND: {}", error))
+        })?;
+        config
+            .cohere
+            .get_or_insert_with(super::CohereConfig::default)
+            .encoder_backend = backend;
+    }
+
     // Audio
     if let Ok(device) = std::env::var("VOXTYPE_AUDIO_DEVICE") {
         config.audio.device = device;

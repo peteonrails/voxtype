@@ -849,6 +849,9 @@ pub fn compiled_features() -> Vec<&'static str> {
         f.push("ml-diarization");
     }
     // GPU acceleration backends
+    if cfg!(feature = "cohere-openvino") {
+        f.push("cohere-openvino");
+    }
     if cfg!(feature = "gpu-vulkan") {
         f.push("gpu-vulkan");
     }
@@ -1190,6 +1193,7 @@ mod tests {
         require_feature_listed!("dolphin");
         require_feature_listed!("omnilingual");
         require_feature_listed!("cohere");
+        require_feature_listed!("cohere-openvino");
         if cfg!(feature = "openvino-whisper") {
             assert!(f.contains(&"openvino"));
         }

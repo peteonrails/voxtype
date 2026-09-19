@@ -1473,6 +1473,66 @@ Configuration for the Cohere Transcribe speech-to-text engine. This section is o
 
 Cohere Transcribe is an encoder-decoder ASR model from Cohere Labs. It currently sits at #1 on the Open ASR Leaderboard. Whisper-style task tokens give it punctuation, capitalization, and inverse text normalization out of the box.
 
+### encoder_backend
+
+**Type:** String (`"onnx"` or `"openvino_gpu"`)
+**Default:** `"onnx"`
+**CLI:** `--cohere-encoder-backend`
+**Environment:** `VOXTYPE_COHERE_ENCODER_BACKEND`
+
+Selects the Cohere encoder implementation. Existing configurations keep `onnx`, the
+current ONNX Runtime path. `openvino_gpu` is an **experimental**, opt-in Intel GPU
+backend requiring a binary built with `cohere-openvino`. It uses the native
+OpenVINO Rust integration, **not** ONNX Runtime's OpenVINO execution provider.
+Only the encoder moves to GPU; the original ONNX Runtime CPU decoder is unchanged.
+The installed `cohere-transcribe-q4f16` ONNX files and weights are used unchanged,
+without a separate conversion or requantization step. OpenVINO uses explicit
+`ACCURACY` execution mode and `LATENCY` scheduling. Different runtimes can still
+produce numerically different results; unchanged weights do not imply bitwise
+identical inference.
+
+Native OpenVINO **2026.4** has been validated on Intel Arc B390. Install the Intel
+compute drivers and make the native OpenVINO dynamic library and GPU plugin
+available to the voxtype process (including its systemd service, if used).
+ONNX Runtime's bundled OpenVINO 2025.4 is not a substitute for this runtime.
+
+This is a **strict GPU** selection: missing support, runtime/driver errors, or GPU
+compilation failures produce an error, not a silent CPU fallback. Select `onnx`
+explicitly to return to the existing path. Unknown backend names are rejected.
+For valid values, precedence is CLI > environment > config file > default.
+Malformed file or environment values are rejected during loading, before CLI
+overrides are applied; a valid CLI flag does not hide a typo in those inputs.
+
+```toml
+engine = "cohere"
+
+[cohere]
+model = "cohere-transcribe-q4f16"
+encoder_backend = "openvino_gpu"
+```
+
+```bash
+voxtype --engine cohere --cohere-encoder-backend openvino_gpu daemon
+VOXTYPE_COHERE_ENCODER_BACKEND=openvino_gpu voxtype --engine cohere daemon
+voxtype config get cohere.encoder_backend
+voxtype config set cohere.encoder_backend openvino_gpu
+```
+
+The handwritten `voxtype configure` TUI does not yet expose this experimental
+selector; it preserves an existing value. Use the interfaces above instead.
+`config set` rejects GPU selection when `cohere-openvino` is absent, and
+`config schema --json` exposes per-choice `choice_availability` metadata.
+`voxtype info variants` lists `cohere-openvino` when compiled.
+
+Cohere runs in-process; Whisper's `gpu_isolation` does not isolate this backend.
+A shared OpenVINO core avoids repeated device-context allocation on model reloads.
+Runtime/device caches can remain resident until process exit, even with
+`on_demand_loading = true`; model unload does not guarantee zero GPU allocation.
+After successful encoder inference, `voxtype info accel` can recognize its
+journal marker as `openvino_gpu`. Before the first inference it may be unknown.
+See the [benchmark guide](COHERE_GPU_BENCHMARK.md) for isolated build/runtime setup,
+first-load costs, and a reproducible CPU/GPU comparison.
+
 ### model
 
 **Type:** String
@@ -1569,6 +1629,7 @@ on_demand_loading = true
 | Option | CLI Flag | Environment Variable | Default | Description |
 |--------|----------|---------------------|---------|-------------|
 | `model` | `--model` | `VOXTYPE_MODEL` | `"cohere-transcribe-q4f16"` | Cohere model name or path |
+| `encoder_backend` | `--cohere-encoder-backend` | `VOXTYPE_COHERE_ENCODER_BACKEND` | `"onnx"` | `onnx` or experimental strict Intel GPU `openvino_gpu` (encoder only) |
 | `language` | `--language` | `VOXTYPE_LANGUAGE` | `"en"` | One of the 14 supported language codes |
 | `threads` | - | - | auto | ONNX intra-op thread count |
 | `on_demand_loading` | - | - | `false` | Load model only when recording starts |
@@ -1592,9 +1653,10 @@ Source builds need the `cohere` Cargo feature. Optional GPU acceleration via `co
 cargo build --release --features cohere           # CPU
 cargo build --release --features cohere-cuda      # NVIDIA GPU
 cargo build --release --features cohere-tensorrt  # NVIDIA + TensorRT EP
+cargo build --release --features cohere-openvino,onnx-load-dynamic  # Experimental Intel GPU encoder
 ```
 
-The prebuilt `voxtype-*-onnx-*` release binaries already include `cohere`, so users installing via AUR/.deb/.rpm don't need to rebuild.
+The prebuilt `voxtype-*-onnx-*` release binaries already include `cohere`, so users installing via AUR/.deb/.rpm don't need to rebuild for the default backend. This does not imply `cohere-openvino` support; that experimental backend requires its own feature-enabled build.
 
 ---
 
@@ -3523,6 +3585,15 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_HOTKEY` | string | `hotkey.key` |
 | `VOXTYPE_HOTKEY_ENABLED` | bool | `hotkey.enabled` |
 | `VOXTYPE_CANCEL_KEY` | string | `hotkey.cancel_key` |
+
+**Cohere:**
+
+| Variable | Type | Config equivalent |
+|----------|------|-------------------|
+| `VOXTYPE_COHERE_ENCODER_BACKEND` | `onnx` or `openvino_gpu` | `cohere.encoder_backend` |
+
+`openvino_gpu` is experimental, encoder-only, and requires `cohere-openvino` plus
+native OpenVINO and Intel compute drivers. It never silently falls back to CPU.
 
 **Whisper / Engine:**
 

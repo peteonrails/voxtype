@@ -163,6 +163,23 @@ impl KeySpec {
         self
     }
 
+    /// Additional feature required by a particular value, beyond the key's gate.
+    /// Parsing remains feature-independent so configs stay portable across builds.
+    pub fn choice_requires_feature(&self, value: &str) -> Option<&'static str> {
+        match (self.key, value) {
+            ("cohere.encoder_backend", "openvino_gpu") => Some("cohere-openvino"),
+            _ => None,
+        }
+    }
+
+    /// Whether this binary supports the key and the selected choice.
+    pub fn choice_compiled(&self, value: &str) -> bool {
+        self.compiled()
+            && self
+                .choice_requires_feature(value)
+                .is_none_or(feature_compiled)
+    }
+
     /// Is the Cargo feature this key depends on compiled into this binary?
     pub fn compiled(&self) -> bool {
         match self.requires_feature {
@@ -186,6 +203,7 @@ pub fn feature_compiled(feature: &str) -> bool {
         "dolphin" => cfg!(feature = "dolphin"),
         "omnilingual" => cfg!(feature = "omnilingual"),
         "cohere" => cfg!(feature = "cohere"),
+        "cohere-openvino" => cfg!(feature = "cohere-openvino"),
         "openvino" => cfg!(feature = "openvino-whisper"),
         _ => false,
     }
@@ -621,7 +639,18 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Load the model when recording starts and unload at idle.",
     )
     .for_onnx_engine("omnilingual"),
-    // cohere
+    // cohere. The experimental backend selector is deliberately ahead of the
+    // handwritten TUI; configure it through CLI/env/TOML or this settings API.
+    spec(
+        "cohere.encoder_backend",
+        "cohere",
+        "encoder_backend",
+        closed(&["onnx", "openvino_gpu"]),
+        "Engine",
+        "Encoder backend",
+        "onnx keeps the existing encoder. Experimental openvino_gpu requires cohere-openvino, native OpenVINO (validated 2026.4), and Intel compute drivers. Strict GPU, no CPU fallback; unchanged q4f16 weights. Decoder stays on ONNX Runtime CPU.",
+    )
+    .for_onnx_engine("cohere"),
     spec(
         "cohere.model",
         "cohere",
@@ -1697,6 +1726,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         },
         "omnilingual.on_demand_loading" => json!(om().on_demand_loading),
 
+        "cohere.encoder_backend" => json!(co().encoder_backend),
         "cohere.model" => json!(co().model),
         "cohere.language" => json!(co().language),
         "cohere.threads" => match co().threads {
@@ -1858,6 +1888,26 @@ fn key_json(spec: &KeySpec, cfg: &Config, editor: &ConfigEditor) -> Json {
         }
         KeyType::Enum { choices, open } => {
             o.insert("choices".into(), json!(choices));
+            // Keep the string array stable for existing consumers. Only keys
+            // with additional per-choice gates need this additive metadata.
+            if choices
+                .iter()
+                .any(|c| spec.choice_requires_feature(c).is_some())
+            {
+                let availability: Map<String, Json> = choices
+                    .iter()
+                    .map(|c| {
+                        (
+                            (*c).to_string(),
+                            json!({
+                                "compiled": spec.choice_compiled(c),
+                                "requires_feature": spec.choice_requires_feature(c),
+                            }),
+                        )
+                    })
+                    .collect();
+                o.insert("choice_availability".into(), Json::Object(availability));
+            }
             if open {
                 o.insert("open".into(), json!(true));
             }
@@ -2236,6 +2286,52 @@ mod tests {
             validate_value(dur, "1.5"),
             Err(ValueError::NotInt { .. })
         ));
+    }
+
+    #[test]
+    fn cohere_encoder_backend_schema_choices_and_getter() {
+        let found = find_key("cohere.encoder_backend").unwrap();
+        let mut config = Config::default();
+        assert_eq!(resolve_found(&found, &config), json!("onnx"));
+        for name in ["onnx", "openvino_gpu"] {
+            assert_eq!(
+                validate_value(found.spec(), name).unwrap(),
+                TypedValue::Str(name.into())
+            );
+            config
+                .cohere
+                .get_or_insert_with(Default::default)
+                .encoder_backend = name.parse().unwrap();
+            assert_eq!(resolve_found(&found, &config), json!(name));
+        }
+        assert!(matches!(
+            validate_value(found.spec(), "gpu"),
+            Err(ValueError::NotAChoice { .. })
+        ));
+    }
+
+    #[test]
+    fn cohere_backend_schema_reports_per_choice_availability() {
+        let (_dir, path) = temp_config();
+        let ed = ConfigEditor::load_from_path(path).unwrap();
+        let found = find_key("cohere.encoder_backend").unwrap();
+        let doc = key_json(found.spec(), &Config::default(), &ed);
+        assert_eq!(doc["choices"], json!(["onnx", "openvino_gpu"]));
+        assert_eq!(doc["compiled"], json!(cfg!(feature = "cohere")));
+        assert_eq!(
+            doc["choice_availability"],
+            json!({
+                "onnx": {"compiled": cfg!(feature = "cohere"), "requires_feature": null},
+                "openvino_gpu": {
+                    "compiled": cfg!(feature = "cohere-openvino"),
+                    "requires_feature": "cohere-openvino",
+                },
+            })
+        );
+        assert_eq!(
+            feature_compiled("cohere-openvino"),
+            cfg!(feature = "cohere-openvino")
+        );
     }
 
     #[test]
