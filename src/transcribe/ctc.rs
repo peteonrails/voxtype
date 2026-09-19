@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// Configuration for CTC greedy decoding
+#[derive(Default)]
 pub struct CtcConfig {
     /// Token ID used for CTC blank (usually 0)
     pub blank_id: u32,
@@ -20,16 +21,6 @@ pub struct CtcConfig {
     pub num_metadata_tokens: usize,
     /// Replace SentencePiece word boundary markers (U+2581) with spaces
     pub sentencepiece_cleanup: bool,
-}
-
-impl Default for CtcConfig {
-    fn default() -> Self {
-        Self {
-            blank_id: 0,
-            num_metadata_tokens: 0,
-            sentencepiece_cleanup: false,
-        }
-    }
 }
 
 impl CtcConfig {
@@ -257,8 +248,8 @@ mod tests {
         let time_steps = 2;
         let mut logits = vec![0.0f32; time_steps * vocab_size];
 
-        logits[0 * vocab_size + 1] = 10.0; // hello
-        logits[1 * vocab_size + 2] = 10.0; // world
+        logits[1] = 10.0; // hello
+        logits[vocab_size + 2] = 10.0; // world
 
         let config = CtcConfig {
             sentencepiece_cleanup: true,
