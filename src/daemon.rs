@@ -1162,16 +1162,31 @@ impl Daemon {
                 }
                 Err(e) => {
                     tracing::error!("Failed to start audio: {}", e);
+                    self.notify_recording_failure().await;
                     self.play_feedback(SoundEvent::Error);
                     Err(())
                 }
             },
             Err(e) => {
                 tracing::error!("Failed to create audio capture: {}", e);
+                self.notify_recording_failure().await;
                 self.play_feedback(SoundEvent::Error);
                 Err(())
             }
         }
+    }
+
+    /// Failures must remain visible even when routine status banners are disabled.
+    async fn notify_recording_failure(&self) {
+        send_notification_with_lifetime(
+            "Recording failed",
+            "Could not open the microphone. Check that it is connected and selected in your audio settings, then try again.",
+            self.config.output.notification.show_engine_icon,
+            self.config.engine,
+            "critical",
+            Lifetime::Millis(10000),
+        )
+        .await;
     }
 
     /// Stop the level emitter task (if running). The capture's chunk
@@ -1721,12 +1736,14 @@ impl Daemon {
                 }
                 Err(e) => {
                     tracing::error!("Failed to start audio: {}", e);
+                    self.notify_recording_failure().await;
                     self.play_feedback(SoundEvent::Error);
                     Err(())
                 }
             },
             Err(e) => {
                 tracing::error!("Failed to create audio capture: {}", e);
+                self.notify_recording_failure().await;
                 self.play_feedback(SoundEvent::Error);
                 Err(())
             }
