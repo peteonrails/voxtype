@@ -11,13 +11,18 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
 
-        # Separate pkgs instance with allowUnfree for CUDA-dependent packages.
+        # Separate pkgs instance for CUDA-dependent packages.
         # legacyPackages doesn't support config overrides, so consumer flakes
         # can't pass allowUnfree=true through. CUDA has a non-free license
         # (CUDA EULA) that requires this. See: https://github.com/peteonrails/voxtype/issues/135
-        pkgsUnfree = import nixpkgs {
+        # Enabling CUDA globally also matches the NixOS-CUDA binary cache's
+        # package set (including CUDA-sensitive dependencies like OpenVINO).
+        pkgsCuda = import nixpkgs {
           inherit system;
-          config.allowUnfree = true;
+          config = {
+            allowUnfree = true;
+            cudaSupport = true;
+          };
         };
 
         # Common build inputs for all variants
@@ -132,7 +137,7 @@
         '';
 
         # ONNX Runtime variants for different GPU backends
-        onnxruntimeCuda = pkgsUnfree.onnxruntime.override { cudaSupport = true; };
+        onnxruntimeCuda = pkgsCuda.onnxruntime;
         onnxruntimeRocm = pkgs.onnxruntime.override { rocmSupport = true; };
 
 
@@ -263,16 +268,16 @@
         });
 
         # Build the ONNX + CUDA variant for NVIDIA GPUs
-        # Uses pkgsUnfree because CUDA has a non-free license (CUDA EULA)
+        # Uses pkgsCuda because CUDA has a non-free license (CUDA EULA)
         onnxCudaUnwrapped = let
           pkg = mkVoxtypeUnwrapped {
             pname = "voxtype-onnx-cuda";
             features = onnxCudaFeatures;
-            extraNativeBuildInputs = [ pkgsUnfree.cudaPackages.cuda_nvcc ];
+            extraNativeBuildInputs = [ pkgsCuda.cudaPackages.cuda_nvcc ];
             extraBuildInputs = [
               onnxruntimeCuda
-              pkgsUnfree.cudaPackages.cudatoolkit
-              pkgsUnfree.cudaPackages.cudnn
+              pkgsCuda.cudaPackages.cudatoolkit
+              pkgsCuda.cudaPackages.cudnn
             ];
           };
         in pkg.overrideAttrs (old: {
