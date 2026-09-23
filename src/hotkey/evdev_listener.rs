@@ -709,6 +709,8 @@ fn parse_key_name(name: &str) -> Result<Key, HotkeyError> {
         "KEY_CAPSLOCK" => Key::KEY_CAPSLOCK,
         "KEY_NUMLOCK" => Key::KEY_NUMLOCK,
         "KEY_INSERT" => Key::KEY_INSERT,
+        // PC keyboards send PrintScreen as KEY_SYSRQ
+        "KEY_PRINTSCREEN" | "KEY_SYSRQ" => Key::KEY_SYSRQ,
 
         // Modifier keys
         "KEY_LEFTALT" | "KEY_LALT" => Key::KEY_LEFTALT,
@@ -1191,6 +1193,13 @@ mod tests {
         assert_eq!(parse_key_name("RECORD").unwrap(), Key::KEY_RECORD);
         assert_eq!(parse_key_name("FASTFORWARD").unwrap(), Key::KEY_FASTFORWARD);
         assert_eq!(parse_key_name("REWIND").unwrap(), Key::KEY_REWIND);
+    }
+
+    #[test]
+    fn test_parse_printscreen() {
+        assert_eq!(parse_key_name("PRINTSCREEN").unwrap(), Key::KEY_SYSRQ);
+        assert_eq!(parse_key_name("SYSRQ").unwrap(), Key::KEY_SYSRQ);
+        assert_eq!(parse_key_name("KEY_SYSRQ").unwrap(), Key::KEY_SYSRQ);
     }
 
     #[test]
