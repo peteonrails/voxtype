@@ -26,6 +26,15 @@ pub struct OutputConfig {
     /// Custom driver order for type mode (overrides default: wtype -> dotool -> ydotool -> clipboard)
     /// Specify which drivers to try and in what order.
     /// Example: ["ydotool", "wtype"] to prefer ydotool over wtype
+    ///
+    /// Paste mode (`mode = "paste"`) also honours this for its keystroke
+    /// step, filtered to the drivers that can simulate a keystroke (wtype,
+    /// eitype, ydotool); dotool/clipboard/xclip entries are ignored there.
+    /// If the order contains none of those three, paste mode falls back to
+    /// wtype -> eitype -> ydotool. See #750: wtype's keymap remapping makes
+    /// keycode-based XWayland clients (xfreerdp and similar) receive Escape
+    /// instead of the paste keystroke, so putting ydotool first here is the
+    /// workaround for that class of client.
     #[serde(default)]
     pub driver_order: Option<Vec<OutputDriver>>,
 
