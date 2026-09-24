@@ -486,7 +486,7 @@ pub(crate) fn read_state_file_at(path: &Path, pid: i32) -> Option<AccelStateFile
 pub(crate) fn gpu_capable(variant: Option<Variant>) -> Option<bool> {
     match variant.map(|v| v.acceleration()) {
         Some(Acceleration::Vulkan | Acceleration::Cuda | Acceleration::Migraphx) => Some(true),
-        Some(Acceleration::Avx2 | Acceleration::Avx512) => Some(false),
+        Some(Acceleration::Baseline | Acceleration::Avx2 | Acceleration::Avx512) => Some(false),
         Some(Acceleration::Native) | None => None,
     }
 }

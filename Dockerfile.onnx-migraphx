@@ -106,7 +106,7 @@ WORKDIR /build/voxtype
 # can't compile their graphs (per-engine notes in src/transcribe/*.rs and
 # Cargo.toml). Cohere is held back until an int4/FP16 model variant ships.
 RUN cargo build --release \
-        --features parakeet-migraphx,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,ml-diarization \
+        --features parakeet-migraphx,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,openvino-whisper,ml-diarization \
         --config 'profile.release.lto=false' \
         --config 'profile.release.codegen-units=8' \
     && cp target/release/voxtype /tmp/voxtype-onnx-migraphx

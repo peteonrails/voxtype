@@ -120,12 +120,12 @@ English models are MIT-licensed and can be used freely for any purpose, includin
 |-------|----------|------|------------------|
 | `base-ja` | Japanese | 237 MB | onnx-community/moonshine-base-ja-ONNX |
 | `base-zh` | Mandarin Chinese | 237 MB | onnx-community/moonshine-base-zh-ONNX |
-| `tiny-ja` | Japanese | 100 MB | onnx-community/moonshine-tiny-ja-ONNX |
-| `tiny-zh` | Mandarin Chinese | 100 MB | onnx-community/moonshine-tiny-zh-ONNX |
 | `tiny-ko` | Korean | 100 MB | onnx-community/moonshine-tiny-ko-ONNX |
 | `tiny-ar` | Arabic | 100 MB | onnx-community/moonshine-tiny-ar-ONNX |
 
 Additional languages (Spanish, Vietnamese, Ukrainian) exist as PyTorch models but do not yet have ONNX exports available for direct use with voxtype.
+
+Tiny variants for Japanese and Mandarin exist upstream, but their ONNX repos ship only a plain decoder without the merged (with-past) export voxtype's decoder loop requires, so they are not offered. Use `base-ja` or `base-zh` instead.
 
 ## Licensing
 

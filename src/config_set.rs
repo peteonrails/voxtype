@@ -100,6 +100,7 @@ pub const ENGINE_NAMES: &[&str] = &[
     "dolphin",
     "omnilingual",
     "cohere",
+    "openvino",
 ];
 
 /// Is the engine name one we recognize at all?
@@ -120,9 +121,8 @@ pub fn parse_engine(name: &str) -> Option<TranscriptionEngine> {
 /// This is the source-of-truth check that matches what the TUI shows on
 /// source builds (see `EngineState::refresh_binary_match` in
 /// `src/tui/engine.rs`). The TUI's `compiled_features()` list in
-/// `src/setup/binary.rs` is incomplete (it only enumerates parakeet + GPU
-/// features), so we evaluate `cfg!` directly here rather than going
-/// through that helper.
+/// `src/setup/binary.rs`, so we evaluate `cfg!` directly here rather than
+/// coupling validation to its user-facing labels.
 ///
 /// Matches `TranscriptionEngine` exhaustively so adding a new variant
 /// produces a compile error here, not a silent `false` at runtime. The
@@ -141,6 +141,7 @@ pub fn engine_feature_compiled(name: &str) -> bool {
         TranscriptionEngine::Dolphin => cfg!(feature = "dolphin"),
         TranscriptionEngine::Omnilingual => cfg!(feature = "omnilingual"),
         TranscriptionEngine::Cohere => cfg!(feature = "cohere"),
+        TranscriptionEngine::OpenVino => cfg!(feature = "openvino-whisper"),
     }
 }
 
@@ -456,6 +457,36 @@ mod tests {
         assert_eq!(
             cfg.whisper.initial_prompt.as_deref(),
             Some("Voxtype, Omarchy")
+        );
+    }
+
+    /// The OSD styling keys (#501) must be reachable through `config set`,
+    /// not just by hand-editing the TOML: a style package path, the
+    /// development plugin_path (set and unset), and the nested [osd.frame]
+    /// table.
+    #[test]
+    fn set_key_covers_the_osd_styling_keys() {
+        let (_dir, path) = full_config();
+
+        set_key(path.clone(), "osd.style", "~/.config/voxtype/osd/aegis-hud").unwrap();
+        set_key(path.clone(), "osd.plugin_path", "~/dev/my-style").unwrap();
+        set_key(path.clone(), "osd.frame.border", "accent").unwrap();
+        set_key(path.clone(), "osd.frame.glow", "false").unwrap();
+
+        let cfg = reload(&path);
+        assert_eq!(cfg.osd.style, "~/.config/voxtype/osd/aegis-hud");
+        assert_eq!(
+            cfg.osd.plugin_path.as_deref(),
+            Some(std::path::Path::new("~/dev/my-style"))
+        );
+        assert_eq!(cfg.osd.frame.border, "accent");
+        assert!(!cfg.osd.frame.glow);
+
+        unset_key(path.clone(), "osd.plugin_path").unwrap();
+        let cfg = reload(&path);
+        assert_eq!(
+            cfg.osd.plugin_path, None,
+            "unset must fall back to the serde default"
         );
     }
 

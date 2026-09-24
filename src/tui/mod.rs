@@ -587,7 +587,7 @@ fn render_title(f: &mut Frame, area: Rect) {
     let daemon = crate::daemon_status::running_version();
     let (version_text, version_style) = match &daemon {
         crate::daemon_status::DaemonVersion::Running(v) if daemon.differs_from_caller() => (
-            format!("daemon {} · this TUI {}", v, env!("CARGO_PKG_VERSION")),
+            format!("daemon {} · this TUI {}", v, crate::cli::VERSION),
             Style::default().fg(Color::Yellow),
         ),
         crate::daemon_status::DaemonVersion::Running(v) => (

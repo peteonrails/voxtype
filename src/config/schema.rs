@@ -63,9 +63,8 @@ pub enum KeyType {
     /// Closed set of values. `open` means the listed choices are the useful
     /// presets but any non-empty string is accepted — used where the config
     /// field is a free-form string that also has canonical values (an evdev
-    /// key name, a sound theme that may be a directory path, an OSD style
-    /// that may be a package path). A UI should render these as an editable
-    /// combo box rather than a fixed picker.
+    /// key name, a sound theme that may be a directory path). A UI should
+    /// render these as an editable combo box rather than a fixed picker.
     Enum {
         choices: &'static [&'static str],
         open: bool,
@@ -186,6 +185,7 @@ pub fn feature_compiled(feature: &str) -> bool {
         "dolphin" => cfg!(feature = "dolphin"),
         "omnilingual" => cfg!(feature = "omnilingual"),
         "cohere" => cfg!(feature = "cohere"),
+        "openvino" => cfg!(feature = "openvino-whisper"),
         _ => false,
     }
 }
@@ -209,6 +209,7 @@ const SENSEVOICE_LANG_CHOICES: &[&str] = &["auto", "zh", "en", "ja", "ko", "yue"
 const COHERE_LANG_CHOICES: &[&str] = &[
     "ar", "de", "en", "es", "fr", "hi", "it", "ja", "ko", "nl", "pt", "ru", "tr", "zh",
 ];
+const OPENVINO_DEVICE_CHOICES: &[&str] = &["NPU", "GPU", "CPU", "AUTO"];
 const PARAKEET_MODEL_TYPE_CHOICES: &[&str] = &["tdt", "ctc"];
 
 const HOTKEY_MODE_CHOICES: &[&str] = &["push_to_talk", "toggle"];
@@ -238,10 +239,12 @@ const LOOPBACK_CHOICES: &[&str] = &["auto", "disabled"];
 const ECHO_CANCEL_CHOICES: &[&str] = &["auto", "disabled"];
 
 const OSD_FRONTEND_CHOICES: &[&str] = &["gtk4", "native", "quickshell"];
-const OSD_STYLE_CHOICES: &[&str] = &["default"];
 /// `auto` is absent on purpose: the config field is `Option`, and "auto"
 /// means absent. Use `voxtype config unset osd.palette`.
 const OSD_PALETTE_CHOICES: &[&str] = &["omarchy", "fallback", "package", "custom"];
+/// Canonical hints only — any palette role name or literal color is accepted.
+const OSD_FRAME_BACKGROUND_CHOICES: &[&str] = &["background", "none"];
+const OSD_FRAME_BORDER_CHOICES: &[&str] = &["state", "accent", "none"];
 const OSD_LAYOUT_CHOICES: &[&str] = &["compact", "wide", "minimal", "tile", "orb", "custom"];
 const OSD_POSITION_CHOICES: &[&str] = &[
     "bottom-center",
@@ -660,6 +663,97 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Load the model when recording starts and unload at idle.",
     )
     .for_onnx_engine("cohere"),
+    // openvino
+    spec(
+        "openvino.model",
+        "openvino",
+        "model",
+        KeyType::DynamicEnum { source: "models" },
+        "Engine",
+        "Model",
+        "OpenVINO Whisper model name or model directory.",
+    )
+    .for_onnx_engine("openvino"),
+    spec(
+        "openvino.device",
+        "openvino",
+        "device",
+        closed(OPENVINO_DEVICE_CHOICES),
+        "Engine",
+        "Device",
+        "OpenVINO inference device to try first.",
+    )
+    .for_onnx_engine("openvino"),
+    spec(
+        "openvino.quantized",
+        "openvino",
+        "quantized",
+        KeyType::Bool,
+        "Engine",
+        "Quantized",
+        "Prefer int8 quantized model variants.",
+    )
+    .for_onnx_engine("openvino"),
+    spec(
+        "openvino.threads",
+        "openvino",
+        "threads",
+        KeyType::Int { min: 1, max: 256 },
+        "Engine",
+        "Threads",
+        "CPU inference threads. Unset lets voxtype pick.",
+    )
+    .for_onnx_engine("openvino"),
+    spec(
+        "openvino.language",
+        "openvino",
+        "language",
+        open(WHISPER_LANG_CHOICES),
+        "Engine",
+        "Language",
+        "Whisper language code.",
+    )
+    .for_onnx_engine("openvino"),
+    spec(
+        "openvino.translate",
+        "openvino",
+        "translate",
+        KeyType::Bool,
+        "Engine",
+        "Translate",
+        "Translate non-English speech to English.",
+    )
+    .for_onnx_engine("openvino"),
+    spec(
+        "openvino.on_demand_loading",
+        "openvino",
+        "on_demand_loading",
+        KeyType::Bool,
+        "Engine",
+        "Load on demand",
+        "Load the model when recording starts and unload at idle.",
+    )
+    .for_onnx_engine("openvino"),
+    spec(
+        "openvino.openvino_dir",
+        "openvino",
+        "openvino_dir",
+        KeyType::String,
+        "Engine",
+        "Runtime directory",
+        "OpenVINO GenAI installation directory containing shared libraries.",
+    )
+    .for_onnx_engine("openvino"),
+    spec(
+        "openvino.streaming",
+        "openvino",
+        "streaming",
+        KeyType::Bool,
+        "Engine",
+        "Streaming",
+        "Enable live transcription through the shared sliding-window engine.",
+    )
+    .for_onnx_engine("openvino"),
     // -- Hotkey -------------------------------------------------------------
     spec(
         "hotkey.enabled",
@@ -1014,10 +1108,19 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "osd.style",
         "osd",
         "style",
-        open(OSD_STYLE_CHOICES),
+        KeyType::DynamicEnum { source: "styles" },
         "OSD",
         "Style",
-        "Quickshell style name, package name, or package path.",
+        "Quickshell style name, package name, or package path. `voxtype info styles` lists what is installed.",
+    ),
+    spec(
+        "osd.plugin_path",
+        "osd",
+        "plugin_path",
+        KeyType::String,
+        "OSD",
+        "Plugin path",
+        "Directory of a Quickshell style package under development. QML in this path is trusted. Unset once the package is installed to a search path.",
     ),
     spec(
         "osd.palette",
@@ -1120,6 +1223,42 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "OSD",
         "Waveform gain",
         "Visual gain applied before drawing. Lower for hot mics, raise for quiet ones.",
+    ),
+    spec(
+        "osd.frame.background",
+        "osd.frame",
+        "background",
+        open(OSD_FRAME_BACKGROUND_CHOICES),
+        "OSD",
+        "Frame background",
+        "Card background of the Quickshell frame: a palette role name, a literal color like #1e1e2e, or none.",
+    ),
+    spec(
+        "osd.frame.border",
+        "osd.frame",
+        "border",
+        open(OSD_FRAME_BORDER_CHOICES),
+        "OSD",
+        "Frame border",
+        "Border of the Quickshell frame: state follows the daemon state color, or use a palette role, a literal color, or none.",
+    ),
+    spec(
+        "osd.frame.glow",
+        "osd.frame",
+        "glow",
+        KeyType::Bool,
+        "OSD",
+        "Frame glow",
+        "Voice-reactive soft glow around the Quickshell frame.",
+    ),
+    spec(
+        "osd.frame.halo",
+        "osd.frame",
+        "halo",
+        KeyType::Bool,
+        "OSD",
+        "Frame halo",
+        "Extra outline halo the orb layout renders around the frame.",
     ),
     // -- Status -------------------------------------------------------------
     spec(
@@ -1528,6 +1667,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
     let dol = || cfg.dolphin.clone().unwrap_or_default();
     let om = || cfg.omnilingual.clone().unwrap_or_default();
     let co = || cfg.cohere.clone().unwrap_or_default();
+    let ov = || cfg.openvino.clone().unwrap_or_default();
 
     let v = match key {
         "engine" => json!(cfg.engine.name()),
@@ -1611,6 +1751,19 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         },
         "cohere.on_demand_loading" => json!(co().on_demand_loading),
 
+        "openvino.model" => json!(ov().model),
+        "openvino.device" => json!(ov().device),
+        "openvino.quantized" => json!(ov().quantized),
+        "openvino.threads" => match ov().threads {
+            Some(n) => json!(n),
+            None => Json::Null,
+        },
+        "openvino.language" => json!(ov().language),
+        "openvino.translate" => json!(ov().translate),
+        "openvino.on_demand_loading" => json!(ov().on_demand_loading),
+        "openvino.openvino_dir" => opt_str(ov().openvino_dir.as_ref()),
+        "openvino.streaming" => json!(ov().streaming),
+
         "hotkey.enabled" => json!(cfg.hotkey.enabled),
         "hotkey.key" => json!(cfg.hotkey.key),
         "hotkey.mode" => json!(match cfg.hotkey.mode {
@@ -1675,6 +1828,10 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "osd.enabled" => json!(cfg.osd.enabled),
         "osd.frontend" => serde_json::to_value(cfg.osd.frontend).ok()?,
         "osd.style" => json!(cfg.osd.style),
+        "osd.plugin_path" => match &cfg.osd.plugin_path {
+            Some(p) => json!(p.display().to_string()),
+            None => Json::Null,
+        },
         "osd.palette" => match cfg.osd.palette {
             Some(p) => serde_json::to_value(p).ok()?,
             None => Json::Null,
@@ -1689,6 +1846,10 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "osd.waveform_window_secs" => f32_json(cfg.osd.waveform_window_secs),
         "osd.peak_decay_db_per_sec" => f32_json(cfg.osd.peak_decay_db_per_sec),
         "osd.waveform_gain" => f32_json(cfg.osd.waveform_gain),
+        "osd.frame.background" => json!(cfg.osd.frame.background),
+        "osd.frame.border" => json!(cfg.osd.frame.border),
+        "osd.frame.glow" => json!(cfg.osd.frame.glow),
+        "osd.frame.halo" => json!(cfg.osd.frame.halo),
 
         "status.icon_theme" => json!(cfg.status.icon_theme),
         "status.icons.idle" => opt_str(cfg.status.icons.idle.as_ref()),
@@ -1757,6 +1918,11 @@ fn key_json(spec: &KeySpec, cfg: &Config, editor: &ConfigEditor) -> Json {
         }
         KeyType::DynamicEnum { source } => {
             o.insert("source".into(), json!(source));
+            // Styles accept values outside the discovered list (package
+            // paths, packages installed later); models and devices do not.
+            if source == "styles" {
+                o.insert("open".into(), json!(true));
+            }
         }
         _ => {}
     }
@@ -2045,7 +2211,7 @@ mod tests {
             other => panic!("expected a map entry, got {:?}", other),
         }
         // The placeholder form is documentation, not a settable key.
-        assert!(find_key("text.replacements.<from>").is_none() || true);
+        assert!(find_key("text.replacements.<from>").is_none());
         // A dotted tail would be ambiguous with a nested table.
         assert!(find_key("text.replacements.a.b").is_none());
         assert!(find_key("text.replacements.").is_none());

@@ -20,6 +20,7 @@ mod profile;
 mod root;
 pub mod schema;
 mod status;
+mod streaming;
 pub(crate) mod text;
 mod vad;
 mod whisper;
@@ -27,8 +28,9 @@ mod whisper;
 pub use audio::{AudioConfig, AudioFeedbackConfig};
 pub use default_config::{default_config_content, DEFAULT_CONFIG};
 pub use engines::{
-    CohereConfig, DolphinConfig, MoonshineConfig, OmnilingualConfig, ParaformerConfig,
-    ParakeetConfig, ParakeetModelType, SenseVoiceConfig, SonioxConfig, TranscriptionEngine,
+    CohereConfig, DolphinConfig, MoonshineConfig, OmnilingualConfig, OpenVinoConfig,
+    ParaformerConfig, ParakeetConfig, ParakeetModelType, SenseVoiceConfig, SonioxConfig,
+    TranscriptionEngine,
 };
 pub use hotkey::{ActivationMode, HotkeyConfig};
 pub use language::LanguageConfig;
@@ -44,6 +46,7 @@ pub use output::{
 pub use profile::{PostProcessConfig, Profile};
 pub use root::Config;
 pub use status::{ResolvedIcons, StatusConfig, StatusIconOverrides};
+pub use streaming::StreamingConfig;
 pub use text::TextConfig;
 pub use vad::{VadBackend, VadConfig};
 pub use whisper::{WhisperConfig, WhisperMode};

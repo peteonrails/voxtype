@@ -46,6 +46,45 @@ pub struct AudioConfig {
     /// Audio feedback settings
     #[serde(default)]
     pub feedback: AudioFeedbackConfig,
+
+    /// Auto-stop an external-trigger (`voxtype record start`, e.g. from a
+    /// wake-word integration) recording after this many seconds of
+    /// silence. Unset (default) disables it — the recording only ends on
+    /// an explicit `record stop`/`record toggle`, same as before this
+    /// option existed. Never applies to hotkey-driven push-to-talk or
+    /// toggle recordings, which already have an explicit user-driven stop;
+    /// only sessions started via `record start` (SIGUSR1) arm this.
+    #[serde(default)]
+    pub external_trigger_silence_timeout_secs: Option<f32>,
+
+    /// Peak level (dBFS) at or above which a frame counts as speech for
+    /// `external_trigger_silence_timeout_secs`. Only meaningful when that
+    /// option is set. -20 dBFS sits clearly above the ambient noise floor
+    /// of typical laptop mics (measured here at ~-30 dBFS median) while
+    /// still catching normal dictation speech; raise it (toward 0) on a
+    /// noisier mic, lower it (more negative) if soft speech isn't resetting
+    /// the silence timer. A single frame only counts as speech once a short
+    /// burst sustains it (see `SPEECH_BURST_FRAMES`), so the exact value is
+    /// not spike-sensitive.
+    #[serde(default = "default_external_trigger_speech_threshold_dbfs")]
+    pub external_trigger_speech_threshold_dbfs: f32,
+
+    /// Shell command run whenever an external-trigger (`record start` /
+    /// SIGUSR1) recording ends, for *any* reason: an explicit `record
+    /// stop`/`record toggle`, `external_trigger_silence_timeout_secs`
+    /// firing, or the `max_duration_secs` hard cap. Never fires for
+    /// hotkey-driven push-to-talk/toggle recordings.
+    ///
+    /// External-trigger integrations (a wake-word daemon, a voice
+    /// assistant plugin) typically start recording and then wait for
+    /// *themselves* to be told to stop it — but silence-timeout means
+    /// voxtype can now end the session on its own, with no way for the
+    /// caller to know unless something tells it. Point this at whatever
+    /// re-signals your integration (for OmaPilot's wake-word plugin:
+    /// `omarchy-shell -q io.github.spencerbull.omapilot voiceToggle`,
+    /// the same command a second wake word would send).
+    #[serde(default)]
+    pub external_trigger_stop_command: Option<String>,
 }
 
 impl Default for AudioConfig {
@@ -60,6 +99,10 @@ impl Default for AudioConfig {
             duck_media_volume_percent: default_duck_media_volume_percent(),
             duck_media_fade_ms: default_duck_media_fade_ms(),
             feedback: AudioFeedbackConfig::default(),
+            external_trigger_silence_timeout_secs: None,
+            external_trigger_speech_threshold_dbfs: default_external_trigger_speech_threshold_dbfs(
+            ),
+            external_trigger_stop_command: None,
         }
     }
 }
@@ -88,6 +131,10 @@ fn default_duck_media_volume_percent() -> u8 {
 
 fn default_duck_media_fade_ms() -> u32 {
     150
+}
+
+fn default_external_trigger_speech_threshold_dbfs() -> f32 {
+    -20.0
 }
 
 /// Audio feedback configuration for sound cues

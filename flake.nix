@@ -34,6 +34,19 @@
           openssl
         ];
 
+        # Cargo.lock contains four crates from the same pinned openvino-rs Git
+        # revision. Nix requires an explicit fixed-output hash for every Git
+        # dependency before it can vendor the lockfile.
+        commonCargoLock = {
+          lockFile = ./Cargo.lock;
+          outputHashes = {
+            "openvino-finder-0.11.0" = "sha256-nQWeHNdLlRk+owh3B6VpArAG2dr66HeBI2RHfDhyvvU=";
+            "openvino-genai-0.11.0" = "sha256-nQWeHNdLlRk+owh3B6VpArAG2dr66HeBI2RHfDhyvvU=";
+            "openvino-genai-sys-0.11.0" = "sha256-nQWeHNdLlRk+owh3B6VpArAG2dr66HeBI2RHfDhyvvU=";
+            "openvino-sys-0.11.0" = "sha256-nQWeHNdLlRk+owh3B6VpArAG2dr66HeBI2RHfDhyvvU=";
+          };
+        };
+
         # Runtime dependencies wrapped into PATH
         runtimeDeps = with pkgs; [
           wtype         # Wayland typing
@@ -130,7 +143,7 @@
             version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
 
             src = ./.;
-            cargoLock.lockFile = ./Cargo.lock;
+            cargoLock = commonCargoLock;
 
             nativeBuildInputs = commonNativeBuildInputs ++ extraNativeBuildInputs;
             buildInputs = commonBuildInputs ++ extraBuildInputs;
@@ -293,7 +306,7 @@
           version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
 
           src = ./.;
-          cargoLock.lockFile = ./Cargo.lock;
+          cargoLock = commonCargoLock;
 
           nativeBuildInputs = commonNativeBuildInputs ++ [ pkgs.makeWrapper ];
           buildInputs = commonBuildInputs ++ [ pkgs.libxkbcommon ];
@@ -330,7 +343,7 @@
           version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
 
           src = ./.;
-          cargoLock.lockFile = ./Cargo.lock;
+          cargoLock = commonCargoLock;
 
           nativeBuildInputs = commonNativeBuildInputs ++ [ pkgs.wrapGAppsHook4 ];
           buildInputs = commonBuildInputs ++ [ pkgs.gtk4-layer-shell ];

@@ -306,8 +306,7 @@ impl MlDiarizer {
         }
     }
 
-    /// Convert samples window to milliseconds
-    #[cfg(feature = "ml-diarization")]
+    #[cfg(all(test, feature = "ml-diarization"))]
     fn samples_to_ms(&self, samples: usize) -> u64 {
         (samples as u64 * 1000) / self.sample_rate as u64
     }

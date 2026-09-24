@@ -135,6 +135,21 @@ pub enum SetupAction {
         status: bool,
     },
 
+    /// Manage Intel NPU acceleration through OpenVINO
+    Npu {
+        /// Enable NPU acceleration and configure OpenVINO
+        #[arg(long)]
+        enable: bool,
+
+        /// Disable NPU acceleration and revert to Whisper
+        #[arg(long)]
+        disable: bool,
+
+        /// Show NPU hardware and configuration status
+        #[arg(long)]
+        status: bool,
+    },
+
     /// Switch the active binary variant (used by `voxtype configure` via pkexec)
     #[command(hide = true)]
     Variant {

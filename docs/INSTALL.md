@@ -153,7 +153,7 @@ Recommended optional packages:
 sudo apt install wtype wl-clipboard libnotify-bin pipewire-alsa
 ```
 
-The .deb ships every Linux binary variant (avx2, avx512, vulkan, plus ONNX CPU/CUDA/MIGraphX) under `/usr/lib/voxtype/`. Run `sudo voxtype setup gpu --enable` after install to pick a GPU binary.
+The .deb ships every Linux binary variant (baseline for pre-AVX2 CPUs, avx2, avx512, vulkan, plus ONNX CPU/CUDA/MIGraphX) under `/usr/lib/voxtype/`. Run `sudo voxtype setup gpu --enable` after install to pick a GPU binary.
 
 ### Fedora / RHEL
 

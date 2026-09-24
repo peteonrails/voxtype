@@ -321,6 +321,38 @@ curl -L -o ~/.local/share/voxtype/models/ggml-base.en.bin \
     https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
 ```
 
+### OpenVINO: transcription fails with "unknown exception" (but the daemon starts fine)
+
+**Cause:** The model directory is missing `preprocessor_config.json` (mel-spectrogram feature-extraction parameters). This file isn't needed to *load* the model — only the `.xml`/`.bin` graph files are — so the daemon starts and logs "Model loaded, ready for voice input" with no complaint. OpenVINO GenAI's `WhisperPipeline` only reads it on the *first real transcription call*, where its absence surfaces as an opaque `unknown exception` instead of a clear error.
+
+Models downloaded by older Voxtype versions may be missing it because the downloader's file list did not include it. Current builds check for this file at startup and fail with a clear message and fix command rather than letting the model reach this confusing runtime error.
+
+**Solution:**
+```bash
+# Re-download the model (fetches the missing file along with everything else)
+voxtype setup --download --model <model-name>
+
+# Or fetch just the missing file directly (note: NOT identical across model
+# sizes -- large-v3/large-v3-turbo use 128 mel bins, everything else uses 80,
+# so fetch it from the specific model's own repo, not a different one's)
+curl -Lo ~/.local/share/voxtype/models/<model-dir>/preprocessor_config.json \
+    https://huggingface.co/<org>/<model-repo>/resolve/main/preprocessor_config.json
+```
+
+### OpenVINO: setup prints "Compiling ... for Intel NPU" and takes minutes, or ends with a warning
+
+**Cause:** When config.toml has an `[openvino]` section with `device = "NPU"`, `voxtype setup` compiles the model for the NPU right after downloading or activating it, so the one-time compile wait happens during setup instead of during your first recording. Large models genuinely take minutes to compile (about 15 minutes for `large-v3-int4` on Lunar Lake); this is the NPU compiler working, not a hang.
+
+If the compile fails, setup prints a warning and continues. This is not a broken install: the model files are downloaded, the config is updated, and the daemon compiles the model on first use, falling back to GPU or CPU when the NPU is unavailable. The warning usually means the OpenVINO GenAI runtime or the NPU driver is missing, and it includes the package list for the configured device (also documented under `[openvino]` in the configuration guide).
+
+**Solution:** Install the packages named in the warning, verify the NPU device exists (`ls /dev/accel/accel*`), then rerun setup:
+
+```bash
+voxtype setup --download --model <model-name>
+```
+
+Setup skips the compile when the model's cache blob already exists, so rerunning after a successful compile is cheap.
+
 ### Voxtype crashes during transcription (Linux)
 
 **Cause:** On some Linux systems (particularly with glibc 2.42+ like Ubuntu 25.10), the whisper-rs FFI bindings crash due to C++ exceptions crossing the FFI boundary.
@@ -1213,6 +1245,19 @@ in the foreground to see the QML error:
 
 ```bash
 voxtype-osd-quickshell --no-daemonize
+```
+
+### OSD looks or behaves like an older version after a binary upgrade
+
+The Quickshell frontend is two parts: the launcher binary and the QML tree it
+runs (installed to `~/.local/share/voxtype/quickshell/`). Package upgrades
+keep them in sync through `/usr/share/voxtype/quickshell`, but a manual
+binary swap upgrades only the launcher, and the stale QML keeps rendering old
+behavior. The launcher's manifest check catches missing files, not outdated
+ones. After any manual binary upgrade, re-sync the tree:
+
+```bash
+voxtype setup quickshell --force
 ```
 
 ### Style or recipe changes don't show up

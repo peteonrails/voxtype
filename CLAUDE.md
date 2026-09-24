@@ -338,12 +338,13 @@ Milestone-aligned with GitHub so the two don't drift. Based on the 29 Aug 2026 b
 **1.0.1 (fast follow-up):** Defects that shipped in 1.0.0 - SIGILL guidance on pre-AVX2 CPUs ([#612](https://github.com/peteonrails/voxtype/issues/612)), `configure --config` overwriting the real config ([#595](https://github.com/peteonrails/voxtype/issues/595)), impossible install instructions ([#604](https://github.com/peteonrails/voxtype/issues/604), [#622](https://github.com/peteonrails/voxtype/issues/622)), stuck push-to-talk ([#556](https://github.com/peteonrails/voxtype/issues/556)), and `voxtype info accel` reading a state file nothing writes. Plus docs corrections (#526, #528, #564).
 
 **1.1.x (incremental):**
+- 1.1.0 Daemon core, model plumbing and OSD: #581, #612, #646, #656, #669, #687, #692, #694, #705
 - 1.1.1 GPU selection and display: #577, #611, #430, #578, #580
 - 1.1.2 Output drivers: #530, #538, #543, #507, #552
 - 1.1.3 macOS: #522, #576, #452, #632
-- 1.1.5 Compatibility: #612, #603
+- 1.1.5 Compatibility: #603
 
-**1.2.0 (architecture):** Model registry out of Rust structs into versioned data ([#648](https://github.com/peteonrails/voxtype/issues/648)), owning the model download transfer layer ([#647](https://github.com/peteonrails/voxtype/issues/647)), long-audio windowing for Cohere and Parakeet (#551, #288), Nemotron ([#47](https://github.com/peteonrails/voxtype/issues/47)).
+**1.2.0 (architecture):** Model registry out of Rust structs into versioned data ([#648](https://github.com/peteonrails/voxtype/issues/648)), owning the model download transfer layer ([#647](https://github.com/peteonrails/voxtype/issues/647)), long-audio windowing for Cohere and Parakeet (#551, #288), Nemotron ([#47](https://github.com/peteonrails/voxtype/issues/47)). Dictation cleanup pipeline ([#696](https://github.com/peteonrails/voxtype/issues/696)): staged labelers and rules instead of LLM rewriting - vocabulary, disfluency tagging (LARD-trained, CC-BY), punctuation/casing for the CTC engines that emit neither, ITN via text-processing-rs, user rules last; the LLM keeps only tone/restructuring behind an edit-list contract. Absorbs #535 and the filler-word half of #566; profile vocabularies feed #519.
 
 **1.3.0:** parakeet.cpp as a ggml/Vulkan Parakeet backend ([#483](https://github.com/peteonrails/voxtype/issues/483)) - 5-6x faster steady-state than ONNX/MIGraphX on AMD, and the only GPU path for AMD and Intel Arc since ORT has no Vulkan EP. Subprocess-isolated so whisper-rs's ggml and parakeet.cpp's ggml never share an address space. Unified profiles ([#519](https://github.com/peteonrails/voxtype/issues/519)) absorbing Dictation Intents and per-record language (#484).
 
@@ -446,14 +447,15 @@ Building on hosts with newer glibc (e.g. 2.43 on CachyOS/Arch) can produce binar
 
 ### Build Strategy
 
-A full release requires **8 Linux binaries** (3 Whisper variants and 5 ONNX variants) plus a macOS arm64 DMG.
+A full release requires **9 Linux binaries** (4 Whisper variants and 5 ONNX variants) plus a macOS arm64 DMG.
 
 **CRITICAL: Every binary must be built in Docker.** Never build release binaries directly on the host, even for AVX-512 or MIGraphX builds that require specific hardware. Run Docker locally on the machine with the required hardware instead.
 
-**Whisper Binaries (3):**
+**Whisper Binaries (4):**
 
 | Binary | Dockerfile | Docker Context | Base Image | Max glibc |
 |--------|-----------|----------------|------------|-----------|
+| baseline | `Dockerfile.baseline` | CI (runner CPU irrelevant: GGML_NATIVE=OFF) | Ubuntu 22.04 | 2.35 |
 | AVX2 | `Dockerfile.build` | Remote (pre-AVX-512) | Ubuntu 22.04 | 2.35 |
 | Vulkan | `Dockerfile.vulkan` | Remote (pre-AVX-512) | Ubuntu 24.04 | 2.39 |
 | AVX-512 | `Dockerfile.avx512` | Local (AVX-512 host) | Ubuntu 22.04 | 2.35 |
@@ -622,6 +624,32 @@ journalctl --user -u voxtype --since "10 seconds ago" | grep -iE "(rocm|executio
 ```
 
 If GPU detection fails but the binary otherwise works, the build used stale artifacts. Run `cargo clean` and rebuild.
+
+### Validating the Baseline Binary (x86-64-v2 Floor)
+
+The baseline variant promises x86-64-v2 and has its own contamination class:
+BMI2/FMA/AVX2 leaking in through ggml when the CMake toolchain constraints
+don't take (#740 - env vars like `GGML_NATIVE=OFF` and `CMAKE_C_FLAGS` are
+read by nothing; the only reliable channel into whisper-rs-sys's CMake is
+`CMAKE_TOOLCHAIN_FILE`, see `cmake/x86-64-v2-toolchain.cmake`).
+
+No static count can gate the v2 floor: a correct build legitimately carries
+~370 BMI2 instructions (ring's CPUID-dispatched assembly) and ~1800 FMA
+(rustfft's runtime-dispatched AVX kernels), and #740's ggml contamination
+added only ~60 BMI2 on top - inside the noise. The decisive gate is
+behavioral:
+
+```bash
+# REAL INFERENCE under a v2-modeled CPU. Model load succeeds on a
+# contaminated build; only the first ggml matmul executes the bad code, so
+# --version and `setup check` prove nothing. TCG cannot decode out-of-floor
+# instructions, so this reproduces the Ivy Bridge SIGILL exactly.
+qemu-x86_64-static -cpu Nehalem voxtype-*-baseline transcribe tests/fixtures/vad/speech_hello.wav
+```
+
+CI runs both (build-linux.yml). For hardware-path verification, use the
+Ivy Bridge VM described in CLAUDE.local.md, and run `transcribe`, not just
+startup commands.
 
 ### Validating Binaries (AVX-512 Detection)
 

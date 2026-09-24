@@ -45,8 +45,8 @@
 //! cleanup.
 
 use crate::error::OutputError;
-use crate::output::post_process::PostProcessor;
 use crate::output::{output_with_fallback, OutputOptions, TextOutput};
+use crate::text::TextProcessor;
 use std::process::Stdio;
 use tokio::process::Command;
 
@@ -132,6 +132,17 @@ impl StreamingSession {
         self.partial.clear();
     }
 
+    /// File-output counterpart to `type_partial_delta`: accumulate the
+    /// delta into the partial buffer without typing anything. File-mode
+    /// sessions have no cursor to type into, but the delta still has to
+    /// be held until the next commit — partials are deltas, not a
+    /// cumulative transcript (see `type_partial_delta`), so dropping
+    /// this would silently lose whatever text was only ever seen as an
+    /// unfinalized partial.
+    pub fn observe_partial_delta(&mut self, new_partial: &str) {
+        self.partial.push_str(new_partial);
+    }
+
     /// Current partial buffer.
     pub fn partial(&self) -> &str {
         &self.partial
@@ -149,8 +160,13 @@ impl StreamingSession {
     }
 
     /// Type a finalized segment to the output, optionally running it
-    /// through `post_process` first (with `VOXTYPE_CONTEXT` =
-    /// `finalized_text_so_far`).
+    /// through the daemon's [`TextProcessor`] (replacements, spoken
+    /// punctuation) first — a segment becoming final is the one point in
+    /// a streaming session where text stops being provisional, so this is
+    /// where the batch pipeline's processing applies (#669). Partials are
+    /// never processed: they get revised by backend-supplied backspace
+    /// counts that reference the raw text, and transforming them would
+    /// desynchronize that accounting.
     ///
     /// On output error, the session's internal state is **not**
     /// updated; the caller can retry or surface the error.
@@ -163,10 +179,18 @@ impl StreamingSession {
         &mut self,
         chain: &[Box<dyn TextOutput>],
         text: &str,
-        _post_process: Option<&PostProcessor>,
+        text_processor: Option<&TextProcessor>,
         pre_output_command: Option<&str>,
         post_output_command: Option<&str>,
     ) -> Result<(), OutputError> {
+        let processed;
+        let text = match text_processor {
+            Some(tp) => {
+                processed = tp.process(text);
+                processed.as_str()
+            }
+            None => text,
+        };
         if text.is_empty() {
             self.clear_partial();
             return Ok(());
@@ -177,11 +201,12 @@ impl StreamingSession {
         // a delta, not a cumulative transcript. So type it directly,
         // same as a partial.
         //
-        // post_process is intentionally bypassed during streaming.
-        // Per-segment cleanup would run only against the final tail
-        // (not the cumulative transcript visible at the cursor) and
-        // produce inconsistent output. Users who rely on post_process
-        // should disable streaming for now.
+        // The LLM post_process hook (unlike TextProcessor above) is
+        // intentionally bypassed during streaming. Per-segment cleanup
+        // would run only against the final tail (not the cumulative
+        // transcript visible at the cursor) and produce inconsistent
+        // output. Users who rely on post_process should disable
+        // streaming for now.
         let opts = OutputOptions {
             pre_output_command,
             post_output_command,
@@ -199,6 +224,37 @@ impl StreamingSession {
         Ok(())
     }
 
+    /// Fold any still-pending `partial` into `finalized_text` without a
+    /// trailing Final segment. For file-output sessions, `commit_segment_silent`
+    /// only runs when the engine happens to emit a `Final` event — but the
+    /// sliding-window engine can legitimately confirm an entire utterance as
+    /// a single `Partial` mid-session (e.g. a short phrase transcribed
+    /// identically on back-to-back ticks) and then have nothing left for
+    /// `final_flush` to send as `Final` at end-of-stream. Without this, that
+    /// text sits in `partial` forever and the session ends with an empty
+    /// `finalized_text`, silently discarding a correct transcription. Call
+    /// this once, at stream end, before reading `finalized_text()`.
+    pub fn finalize_pending_partial(&mut self) {
+        if !self.partial.is_empty() {
+            self.finalized_text.push_str(&self.partial);
+            self.partial.clear();
+        }
+    }
+
+    /// File-output counterpart to `commit_segment`: same finalized_text
+    /// bookkeeping, but skips `output_with_fallback` entirely — there's
+    /// no cursor/focused window to type into when the session's target
+    /// is a file.
+    pub fn commit_segment_silent(&mut self, text: &str) {
+        if text.is_empty() {
+            self.clear_partial();
+            return;
+        }
+        let finalized_tail = format!("{}{}", self.partial, text);
+        self.finalized_text.push_str(&finalized_tail);
+        self.clear_partial();
+    }
+
     /// Backspace `backspace` chars then commit `text`. Used by streaming
     /// backends that revise the previously-typed partial tail when
     /// finalizing (e.g. Soniox punctuation flips).
@@ -207,11 +263,17 @@ impl StreamingSession {
     /// `text` is appended to both cursor and finalized_text. Net effect:
     /// the cursor ends up with the truncated partial + new text, matching
     /// what the daemon's commit_segment would do for a plain Final.
+    ///
+    /// Like `commit_segment`, the committed `text` runs through the
+    /// [`TextProcessor`] when one is given — it is becoming final here —
+    /// while `backspace` stays untouched: it counts raw chars of the
+    /// previously-typed partial, which was never processed.
     pub async fn replace_and_commit(
         &mut self,
         chain: &[Box<dyn TextOutput>],
         backspace: usize,
         text: &str,
+        text_processor: Option<&TextProcessor>,
         pre_output_command: Option<&str>,
         post_output_command: Option<&str>,
     ) -> Result<(), OutputError> {
@@ -239,6 +301,14 @@ impl StreamingSession {
             }
         }
 
+        let processed;
+        let text = match text_processor {
+            Some(tp) => {
+                processed = tp.process(text);
+                processed.as_str()
+            }
+            None => text,
+        };
         if !text.is_empty() {
             let opts = OutputOptions {
                 pre_output_command,
@@ -255,6 +325,32 @@ impl StreamingSession {
         }
         self.clear_partial();
         Ok(())
+    }
+
+    /// File-output counterpart to `replace_and_commit`: no real cursor to
+    /// send backspace keystrokes to, but `backspace` still means the same
+    /// thing — trim that many trailing chars off the accumulated
+    /// `partial` (a plain string edit, not a keystroke) before folding
+    /// the (now-truncated) partial tail plus `text` into `finalized_text`.
+    ///
+    /// Originally shipped ignoring `backspace` entirely under the
+    /// assumption that "no cursor" meant "nothing to revise" — wrong:
+    /// `backspace` describes how much of the already-accumulated string
+    /// is stale, independent of whether removing it is a keystroke or a
+    /// string truncation. Found live: revision mode's file-output
+    /// corrections landed as literal concatenations ("Open blue button.
+    /// bubbles." instead of "Open blue bubbles.") because the wrong
+    /// tail was never actually removed.
+    pub fn replace_and_commit_silent(&mut self, backspace: usize, text: &str) {
+        if backspace > 0 {
+            let new_partial_len = self.partial.chars().count().saturating_sub(backspace);
+            self.partial = self.partial.chars().take(new_partial_len).collect();
+        }
+        if !text.is_empty() {
+            let finalized_tail = format!("{}{}", self.partial, text);
+            self.finalized_text.push_str(&finalized_tail);
+        }
+        self.clear_partial();
     }
 
     /// Best-effort rewind: emit `typed_chars` BackSpace key events via
@@ -445,6 +541,43 @@ mod tests {
         assert_eq!(session.finalized_text(), "hello world");
     }
 
+    /// #669: a segment becoming final is where streaming text stops being
+    /// provisional, so the daemon's replacements and spoken punctuation
+    /// apply there — what reaches the cursor is the processed text, and
+    /// typed_chars/finalized_text account for what was actually typed.
+    #[tokio::test]
+    async fn final_segments_apply_text_processing() {
+        let config = crate::config::TextConfig {
+            spoken_punctuation: true,
+            replacements: [("vox type".to_string(), "voxtype".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let tp = TextProcessor::new(&config);
+
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        let mut session = StreamingSession::new();
+        session
+            .commit_segment(&chain, "I use vox type period", Some(&tp), None, None)
+            .await
+            .unwrap();
+        assert_eq!(rec.typed(), vec!["I use voxtype.".to_string()]);
+        assert_eq!(session.finalized_text(), "I use voxtype.");
+        assert_eq!(session.typed_chars(), "I use voxtype.".chars().count());
+
+        // Replace commits are finals too: the correction text is processed,
+        // while the backspace count still refers to the raw partial tail.
+        let mut session = StreamingSession::new();
+        session.observe_partial_delta("raw partial");
+        session
+            .replace_and_commit(&chain, 8, "vox type comma", Some(&tp), None, None)
+            .await
+            .unwrap();
+        assert_eq!(rec.typed().last().unwrap(), "voxtype,");
+    }
+
     #[tokio::test]
     async fn typed_chars_counts_unicode_scalars_not_bytes() {
         // Three CJK chars = 3 scalars but 9 UTF-8 bytes. Cancel rewind
@@ -497,6 +630,70 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(session.partial(), "");
+    }
+
+    #[test]
+    fn finalize_pending_partial_folds_leftover_partial() {
+        // Reproduces the empty-transcript bug: the sliding-window engine
+        // can confirm an entire short utterance as a single Partial
+        // mid-session (see `on_tick`'s growing-mode branch) and then have
+        // nothing left for `final_flush` to send as a terminal Final. A
+        // file-output session that only ever calls `commit_segment_silent`
+        // on a Final event would strand that text in `partial` forever and
+        // write an empty file despite a correct transcription.
+        let mut session = StreamingSession::new();
+        session.observe_partial_delta("turn on Sophie's room.");
+        assert_eq!(session.finalized_text(), "");
+
+        session.finalize_pending_partial();
+
+        assert_eq!(session.finalized_text(), "turn on Sophie's room.");
+        assert_eq!(session.partial(), "");
+    }
+
+    #[test]
+    fn finalize_pending_partial_is_noop_when_already_final() {
+        let mut session = StreamingSession::new();
+        session.commit_segment_silent("hello");
+        session.finalize_pending_partial();
+        assert_eq!(session.finalized_text(), "hello");
+    }
+
+    #[test]
+    fn replace_and_commit_silent_trims_the_wrong_tail_before_appending() {
+        // Reproduces a real bug found live: revision mode's file-output
+        // corrections landed as literal concatenations instead of actual
+        // corrections, because replace_and_commit_silent ignored its
+        // `backspace` argument entirely. "Open blue button." (partial)
+        // then a Replace{backspace: 8, text: " bubbles."} correcting
+        // "button." (7 chars) + its leading space (1) must produce
+        // "Open blue bubbles.", not "Open blue button. bubbles.".
+        let mut session = StreamingSession::new();
+        session.observe_partial_delta("Open blue button.");
+        session.replace_and_commit_silent(8, " bubbles.");
+        assert_eq!(session.finalized_text(), "Open blue bubbles.");
+    }
+
+    #[test]
+    fn replace_and_commit_silent_zero_backspace_is_a_plain_append() {
+        let mut session = StreamingSession::new();
+        session.observe_partial_delta("hello");
+        session.replace_and_commit_silent(0, " world");
+        assert_eq!(session.finalized_text(), "hello world");
+    }
+
+    #[test]
+    fn replace_and_commit_silent_backspace_capped_at_partial_length() {
+        // A backspace count larger than what's actually pending in
+        // `partial` should not panic or reach into already-finalized
+        // text — same invariant `replace_and_commit` (the live-typing
+        // counterpart) relies on: corrections only ever touch the
+        // still-open partial tail, never truly-finalized content.
+        let mut session = StreamingSession::new();
+        session.commit_segment_silent("hello");
+        session.observe_partial_delta(" wor");
+        session.replace_and_commit_silent(999, "world");
+        assert_eq!(session.finalized_text(), "helloworld");
     }
 
     #[tokio::test]

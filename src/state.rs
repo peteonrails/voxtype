@@ -3,6 +3,7 @@
 //! Defines the states for the push-to-talk workflow:
 //! Idle → Recording → Transcribing → Outputting → Idle
 
+use std::path::PathBuf;
 use std::time::Instant;
 
 /// Audio samples collected during recording (f32, mono, 16kHz)
@@ -75,6 +76,13 @@ pub enum State {
         /// daemon's cancel path to send N backspaces and rewind text
         /// that was already delivered to the user.
         typed_chars: usize,
+        /// When set, this session targets file output (`--file=path` or
+        /// a `mode = "file"` config/profile), not the live cursor.
+        /// Segments accumulate into `finalized_text` without typing —
+        /// see `StreamingSession::commit_segment_silent` — and the
+        /// daemon writes the accumulated text to this path once the
+        /// backend reports `Ended`.
+        file_output_path: Option<PathBuf>,
     },
 }
 
@@ -274,6 +282,7 @@ mod tests {
             partial_buffer: String::new(),
             finalized_text: String::new(),
             typed_chars: 0,
+            file_output_path: None,
         };
         assert!(state.is_recording());
         assert!(state.is_streaming());
@@ -290,6 +299,7 @@ mod tests {
             partial_buffer: "hel".into(),
             finalized_text: "hello".into(),
             typed_chars: 5,
+            file_output_path: None,
         };
         let display = format!("{}", state);
         assert!(display.starts_with("Streaming"));
