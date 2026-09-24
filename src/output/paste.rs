@@ -258,6 +258,7 @@ impl PasteOutput {
 
         // Spawn wl-copy with stdin pipe
         let mut child = Command::new("wl-copy")
+            .args(["--type", "text/plain;charset=utf-8"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
