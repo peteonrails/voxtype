@@ -249,7 +249,11 @@ pub fn show_status() {
     if !gpus.nvidia && !gpus.amd {
         println!("GPU: not detected");
     }
-    if (gpus.nvidia || gpus.amd) && !cpu.avx512 {
+    if (gpus.nvidia || gpus.amd) && !cpu.is_x86_64() {
+        println!("\nNote: ONNX GPU binaries (CUDA/MIGraphX) are only built for x86-64.");
+        println!("  Use ONNX (native) for CPU-based inference,");
+        println!("  or use the Whisper engine with Vulkan for GPU acceleration.");
+    } else if (gpus.nvidia || gpus.amd) && !cpu.avx512 {
         println!("\nNote: ONNX GPU binaries (CUDA/MIGraphX) require AVX-512 CPU support.");
         println!("  Your CPU supports AVX2 only. Use ONNX (AVX2) for CPU-based inference,");
         println!("  or use the Whisper engine with Vulkan for GPU acceleration.");
