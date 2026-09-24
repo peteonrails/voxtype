@@ -11,6 +11,9 @@ Parakeet is NVIDIA's FastConformer-based speech recognition model. The TDT (Toke
 - Good accuracy for English dictation
 - No GPU required (though CUDA acceleration is available)
 
+Voxtype also supports Nemotron 3.5 through the same ONNX/parakeet-rs backend.
+Nemotron adds cache-aware streaming, native punctuation, and 40 language locales.
+
 ## Requirements
 
 - An ONNX-enabled voxtype binary (see below)
@@ -98,6 +101,20 @@ model = "parakeet-tdt-0.6b-v3"
 # model_path = "/path/to/parakeet-tdt-0.6b-v3"
 ```
 
+For Nemotron streaming:
+
+```toml
+engine = "parakeet"
+
+[parakeet]
+model = "nemotron-3.5-asr-streaming-0.6b-int8"
+language = "en-US" # or "auto"
+streaming = true
+
+[hotkey]
+mode = "toggle"
+```
+
 Restart the daemon:
 
 ```bash
@@ -146,9 +163,11 @@ Uncommon names and technical terms may be substituted with phonetically similar 
 - "Krzyzewski" → "Krasiewski"
 - "Nguyen" → "Gwen"
 
-### English Only
+### Language Support
 
-Parakeet TDT models are English-only. For multilingual support, use Whisper.
+Parakeet TDT v3 supports 25 languages. Nemotron 3.5 supports 40 locales,
+including CJK, Arabic, and Hindi. Whisper remains the broadest multilingual
+option.
 
 ### Model Size
 

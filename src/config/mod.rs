@@ -30,7 +30,7 @@ pub use default_config::{default_config_content, DEFAULT_CONFIG};
 pub use engines::{
     CohereConfig, DolphinConfig, MoonshineConfig, OmnilingualConfig, OpenVinoConfig,
     ParaformerConfig, ParakeetConfig, ParakeetModelType, SenseVoiceConfig, SonioxConfig,
-    TranscriptionEngine,
+    TranscriptionEngine, NEMOTRON_LANGUAGE_CHOICES,
 };
 pub use hotkey::{ActivationMode, HotkeyConfig};
 pub use language::LanguageConfig;
