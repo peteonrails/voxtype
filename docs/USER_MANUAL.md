@@ -1749,6 +1749,16 @@ auto_submit = true  # Press Enter after transcription
 
 Useful for chat applications or command lines where you want to submit immediately after dictating.
 
+**Per-app auto-submit rules:**
+
+```toml
+[output.auto_submit_apps]
+Slack = true    # submit in chat apps
+kitty = false   # never submit in the terminal
+```
+
+Overrides `auto_submit` based on the focused window's class or title (case-insensitive substring match, longest pattern wins). Windows that match no rule use the global setting. Works on Hyprland, Sway, Niri, and macOS. See [auto_submit_apps](CONFIGURATION.md#auto_submit_apps) for details.
+
 **Smart auto-submit (say "submit" to press Enter):**
 
 ```toml

@@ -964,6 +964,36 @@ restore_clipboard_delay_ms = 500  # Try 300-500ms for slow applications
 notify-send "Test" "This is a test"
 ```
 
+### Per-app auto-submit rules never apply
+
+**Symptom:** `[output.auto_submit_apps]` is configured, but every dictation still follows the global `auto_submit` setting.
+
+**Cause:** Voxtype finds the focused window through the compositor's IPC socket, located via `HYPRLAND_INSTANCE_SIGNATURE` (Hyprland), `SWAYSOCK` (Sway), or `NIRI_SOCKET` (Niri). A systemd user service only sees those variables if the compositor exported them to systemd. Without them the daemon logs a warning at startup and the rules are skipped.
+
+**Solution:**
+
+1. Check the daemon log for the warning:
+```bash
+journalctl --user -u voxtype | grep auto_submit_apps
+```
+
+2. Export the variable from your compositor config, then restart the service:
+```
+# Hyprland (~/.config/hypr/hyprland.conf)
+exec-once = systemctl --user import-environment HYPRLAND_INSTANCE_SIGNATURE
+
+# Sway (~/.config/sway/config)
+exec systemctl --user import-environment SWAYSOCK
+
+# Niri (~/.config/niri/config.kdl)
+spawn-at-startup "systemctl" "--user" "import-environment" "NIRI_SOCKET"
+```
+```bash
+systemctl --user restart voxtype
+```
+
+Compositors other than Hyprland, Sway, and Niri are not supported; the global `auto_submit` applies there.
+
 ---
 
 ## Performance Issues

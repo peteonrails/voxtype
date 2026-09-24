@@ -22,6 +22,7 @@ use crate::output::TextOutput;
 use crate::state::{ChunkResult, State};
 use crate::text::TextProcessor;
 use crate::transcribe::{StreamHandle, StreamingEvent, Transcriber};
+use crate::window;
 use pidlock::Pidlock;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1268,6 +1269,14 @@ impl Daemon {
             return false;
         }
 
+        // Streaming drivers bake auto_submit in at chain construction, so
+        // per-app rules resolve here, at session start. Query before
+        // capture starts so a slow compositor can't delay the start cue.
+        let mut streaming_output_config = self.config.output.clone();
+        if let Some(submit) = window::auto_submit_override(&streaming_output_config).await {
+            streaming_output_config.auto_submit = submit;
+        }
+
         let (capture, samples_rx) = match self.start_streaming_capture(track_silence).await {
             Ok(v) => v,
             Err(()) => return false,
@@ -1297,7 +1306,7 @@ impl Daemon {
         *audio_capture = Some(capture);
         *streaming_handle = Some(handle);
         *streaming_session = Some(StreamingSession::new());
-        *streaming_chain = Some(output::create_output_chain(&self.config.output));
+        *streaming_chain = Some(output::create_output_chain(&streaming_output_config));
         *state = State::Streaming {
             started_at: std::time::Instant::now(),
             model_override,
@@ -2812,6 +2821,14 @@ impl Daemon {
                         }
                     };
 
+                    // Per-app auto-submit rules ([output.auto_submit_apps])
+                    // sit between the config default and the per-recording
+                    // overrides below, so --auto-submit/--no-auto-submit and
+                    // the smart "submit" keyword still win for one dictation.
+                    if let Some(submit) = window::auto_submit_override(&output_config).await {
+                        output_config.auto_submit = submit;
+                    }
+
                     // Apply per-recording boolean overrides
                     if let Some(auto_submit) = auto_submit_override {
                         output_config.auto_submit = auto_submit;
@@ -3011,6 +3028,16 @@ impl Daemon {
     /// Run the daemon main loop
     pub async fn run(&mut self) -> Result<()> {
         tracing::info!("Starting voxtype daemon");
+
+        if !self.config.output.auto_submit_apps.is_empty() && !window::compositor_supported() {
+            tracing::warn!(
+                "[output.auto_submit_apps] is configured but no supported compositor was \
+                 detected (HYPRLAND_INSTANCE_SIGNATURE, SWAYSOCK, or NIRI_SOCKET is not set \
+                 in the daemon's environment), so the rules will not apply. If voxtype runs \
+                 as a systemd user service, import the variable from your compositor: \
+                 systemctl --user import-environment HYPRLAND_INSTANCE_SIGNATURE"
+            );
+        }
 
         // Engine-vs-binary mismatch check at startup so users see a desktop
         // notification before the first transcription attempt would fail.

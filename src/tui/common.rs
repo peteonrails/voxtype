@@ -388,6 +388,9 @@ pub struct FormRowSpec {
     pub dimmed: bool,
     pub label: String,
     pub value: String,
+    /// Headings are non-selectable section separators rendered without the
+    /// toggle chrome; navigation skips them (cursor indexes selectable rows).
+    pub is_heading: bool,
 }
 
 impl FormRowSpec {
@@ -397,6 +400,18 @@ impl FormRowSpec {
             dimmed: false,
             label: label.into(),
             value: value.into(),
+            is_heading: false,
+        }
+    }
+
+    /// Non-selectable subheading row used to group related settings.
+    pub fn heading(label: impl Into<String>) -> Self {
+        Self {
+            focused: false,
+            dimmed: false,
+            label: label.into(),
+            value: String::new(),
+            is_heading: true,
         }
     }
 
@@ -458,7 +473,21 @@ fn render_settings_panel(f: &mut Frame, area: Rect, rows: &[FormRowSpec]) {
 
     let lines: Vec<Line> = rows
         .iter()
-        .map(|r| form_row_dimmed(r.focused, r.dimmed, &r.label, &r.value))
+        .flat_map(|r| {
+            if r.is_heading {
+                vec![
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        r.label.clone(),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                ]
+            } else {
+                vec![form_row_dimmed(r.focused, r.dimmed, &r.label, &r.value)]
+            }
+        })
         .collect();
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }

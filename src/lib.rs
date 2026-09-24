@@ -96,6 +96,7 @@ pub mod text;
 pub mod transcribe;
 pub mod tui;
 pub mod vad;
+pub mod window;
 
 pub use cli::{
     Cli, Commands, CompositorType, ConfigAction, InfoAction, MeetingAction, OutputModeOverride,

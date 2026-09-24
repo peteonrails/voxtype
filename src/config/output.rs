@@ -52,6 +52,14 @@ pub struct OutputConfig {
     #[serde(default)]
     pub auto_submit: bool,
 
+    /// Per-application auto-submit overrides: window pattern -> whether
+    /// auto_submit applies in that app. Patterns are case-insensitive
+    /// substrings matched against the focused window's class (e.g. "Slack",
+    /// "kitty") or title; the longest matching pattern wins. When no pattern
+    /// matches, the global `auto_submit` setting applies.
+    #[serde(default)]
+    pub auto_submit_apps: HashMap<String, bool>,
+
     /// Text to append after each transcription (e.g., " " for a space)
     /// Appended after the transcription but before auto_submit
     /// Useful for separating sentences when dictating paragraphs incrementally
@@ -189,6 +197,7 @@ impl Default for OutputConfig {
             pre_type_delay_ms: 0,
             wtype_delay_ms: 0,
             auto_submit: false,
+            auto_submit_apps: HashMap::new(),
             append_text: None,
             shift_enter_newlines: false,
             wtype_shift_prefix: false,
@@ -269,6 +278,35 @@ pub fn default_language_to_layout() -> std::collections::HashMap<String, String>
 }
 
 impl OutputConfig {
+    /// Resolve the per-app auto-submit override for a focused window.
+    ///
+    /// Patterns are case-insensitive substrings matched against the window
+    /// class or title; the longest matching pattern wins so specific rules
+    /// beat broad ones (e.g. "neovim" beats "kitty"). On equal length a
+    /// class match beats a title-only match, then lexical order decides, so
+    /// the result never depends on HashMap iteration order. Returns `None`
+    /// when no pattern matches, in which case the global `auto_submit`
+    /// applies.
+    pub fn resolve_auto_submit_apps(&self, class: &str, title: &str) -> Option<bool> {
+        let lower_class = class.to_lowercase();
+        let lower_title = title.to_lowercase();
+        self.auto_submit_apps
+            .iter()
+            .filter_map(|(pattern, submit)| {
+                let lower = pattern.to_lowercase();
+                let class_hit = lower_class.contains(&lower);
+                let title_hit = lower_title.contains(&lower);
+                (class_hit || title_hit).then_some((pattern, class_hit, *submit))
+            })
+            .max_by(|(a, a_class, _), (b, b_class, _)| {
+                a.len()
+                    .cmp(&b.len())
+                    .then(a_class.cmp(b_class))
+                    .then(b.cmp(a))
+            })
+            .map(|(_, _, submit)| submit)
+    }
+
     /// Apply per-language XKB layout/variant hints to eitype and dotool.
     ///
     /// Explicit driver-specific settings win independently per field:
@@ -457,6 +495,120 @@ mod tests {
 
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(!config.output.auto_submit);
+    }
+
+    #[test]
+    fn test_parse_auto_submit_apps() {
+        let toml_str = r#"
+            [output]
+            mode = "type"
+
+            [output.auto_submit_apps]
+            Slack = true
+            kitty = false
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.output.auto_submit_apps.len(), 2);
+        assert!(config.output.auto_submit_apps["Slack"]);
+        assert!(!config.output.auto_submit_apps["kitty"]);
+    }
+
+    #[test]
+    fn test_auto_submit_apps_defaults_empty() {
+        let config: Config = toml::from_str(
+            r#"
+            [output]
+            mode = "type"
+        "#,
+        )
+        .unwrap();
+        assert!(config.output.auto_submit_apps.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_auto_submit_apps_no_match() {
+        let cfg = OutputConfig {
+            auto_submit_apps: HashMap::from([("Slack".to_string(), true)]),
+            ..OutputConfig::default()
+        };
+        assert_eq!(cfg.resolve_auto_submit_apps("kitty", "zsh"), None);
+    }
+
+    #[test]
+    fn test_resolve_auto_submit_apps_class_match() {
+        let cfg = OutputConfig {
+            auto_submit_apps: HashMap::from([
+                ("Slack".to_string(), true),
+                ("kitty".to_string(), false),
+            ]),
+            ..OutputConfig::default()
+        };
+        assert_eq!(cfg.resolve_auto_submit_apps("Slack", "channel"), Some(true));
+        assert_eq!(cfg.resolve_auto_submit_apps("kitty", "zsh"), Some(false));
+    }
+
+    #[test]
+    fn test_resolve_auto_submit_apps_case_insensitive() {
+        let cfg = OutputConfig {
+            auto_submit_apps: HashMap::from([("slack".to_string(), true)]),
+            ..OutputConfig::default()
+        };
+        assert_eq!(cfg.resolve_auto_submit_apps("SLACK", ""), Some(true));
+    }
+
+    #[test]
+    fn test_resolve_auto_submit_apps_title_match() {
+        let cfg = OutputConfig {
+            auto_submit_apps: HashMap::from([("todo.md".to_string(), false)]),
+            ..OutputConfig::default()
+        };
+        assert_eq!(
+            cfg.resolve_auto_submit_apps("kitty", "TODO.md - nvim"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_resolve_auto_submit_apps_longest_pattern_wins() {
+        let cfg = OutputConfig {
+            auto_submit_apps: HashMap::from([
+                ("kitty".to_string(), false),
+                ("config.toml".to_string(), true),
+            ]),
+            ..OutputConfig::default()
+        };
+        // Both patterns match this title; the more specific one should win.
+        assert_eq!(
+            cfg.resolve_auto_submit_apps("kitty", "config.toml - nvim"),
+            Some(true)
+        );
+        assert_eq!(cfg.resolve_auto_submit_apps("kitty", "zsh"), Some(false));
+    }
+
+    #[test]
+    fn test_resolve_auto_submit_apps_tie_break_is_deterministic() {
+        // Same length, one hits the class and one only the title: class wins.
+        let cfg = OutputConfig {
+            auto_submit_apps: HashMap::from([
+                ("discord".to_string(), true),
+                ("firefox".to_string(), false),
+            ]),
+            ..OutputConfig::default()
+        };
+        assert_eq!(
+            cfg.resolve_auto_submit_apps("firefox", "Discord | #general"),
+            Some(false)
+        );
+
+        // Same length, both hit the class: lexically first wins, every time.
+        let cfg = OutputConfig {
+            auto_submit_apps: HashMap::from([("ab".to_string(), true), ("ac".to_string(), false)]),
+            ..OutputConfig::default()
+        };
+        for _ in 0..20 {
+            assert_eq!(cfg.resolve_auto_submit_apps("abac", ""), Some(true));
+        }
     }
 
     #[test]

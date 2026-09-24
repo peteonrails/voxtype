@@ -232,6 +232,22 @@ type_delay_ms = 0
 # to auto-submit after dictation
 # auto_submit = true
 
+# Per-application auto-submit overrides. Maps a window pattern to whether
+# auto_submit applies in that app. Patterns are case-insensitive substrings
+# matched against the focused window's class (e.g. "Slack", "kitty") or
+# title; the longest matching pattern wins. When no pattern matches, the
+# global auto_submit setting above applies. An empty pattern ("") matches
+# every window and can act as a catch-all.
+# The focused window is queried from the compositor (hyprctl, swaymsg, or
+# niri msg; on macOS the frontmost app name). On unsupported compositors
+# the global setting applies.
+#
+# [output.auto_submit_apps]
+# Slack = true    # chat: submit after every dictation
+# discord = true
+# obsidian = false
+# kitty = false   # terminal running neovim: never submit
+
 # Convert newlines to Shift+Enter instead of regular Enter
 # Useful for applications where Enter submits (e.g., Cursor IDE, Slack, Discord)
 # shift_enter_newlines = false
