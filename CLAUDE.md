@@ -625,6 +625,32 @@ journalctl --user -u voxtype --since "10 seconds ago" | grep -iE "(rocm|executio
 
 If GPU detection fails but the binary otherwise works, the build used stale artifacts. Run `cargo clean` and rebuild.
 
+### Validating the Baseline Binary (x86-64-v2 Floor)
+
+The baseline variant promises x86-64-v2 and has its own contamination class:
+BMI2/FMA/AVX2 leaking in through ggml when the CMake toolchain constraints
+don't take (#740 - env vars like `GGML_NATIVE=OFF` and `CMAKE_C_FLAGS` are
+read by nothing; the only reliable channel into whisper-rs-sys's CMake is
+`CMAKE_TOOLCHAIN_FILE`, see `cmake/x86-64-v2-toolchain.cmake`).
+
+No static count can gate the v2 floor: a correct build legitimately carries
+~370 BMI2 instructions (ring's CPUID-dispatched assembly) and ~1800 FMA
+(rustfft's runtime-dispatched AVX kernels), and #740's ggml contamination
+added only ~60 BMI2 on top - inside the noise. The decisive gate is
+behavioral:
+
+```bash
+# REAL INFERENCE under a v2-modeled CPU. Model load succeeds on a
+# contaminated build; only the first ggml matmul executes the bad code, so
+# --version and `setup check` prove nothing. TCG cannot decode out-of-floor
+# instructions, so this reproduces the Ivy Bridge SIGILL exactly.
+qemu-x86_64-static -cpu Nehalem voxtype-*-baseline transcribe tests/fixtures/vad/speech_hello.wav
+```
+
+CI runs both (build-linux.yml). For hardware-path verification, use the
+Ivy Bridge VM described in CLAUDE.local.md, and run `transcribe`, not just
+startup commands.
+
 ### Validating Binaries (AVX-512 Detection)
 
 Use `objdump` to verify binaries don't contain forbidden instructions:

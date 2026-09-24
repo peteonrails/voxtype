@@ -143,6 +143,10 @@ fn git(args: &[&str]) -> Option<String> {
 /// the parakeet code path uses to short-circuit graceful fallback.
 fn expose_cuda_build_major() {
     println!("cargo:rerun-if-env-changed=ORT_CUDA_VERSION");
+    // src/cpu.rs reads this via option_env! to pick the baseline SIGILL
+    // message; without the rerun hint an incremental build keeps the stale
+    // value when the env changes.
+    println!("cargo:rerun-if-env-changed=VOXTYPE_VARIANT");
     let major = match env::var("ORT_CUDA_VERSION").as_deref() {
         Ok("12") => "12",
         Ok("13") => "13",

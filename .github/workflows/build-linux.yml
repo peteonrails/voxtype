@@ -283,6 +283,55 @@ jobs:
             exit 1
           fi
 
+      - name: Verify ISA floor (x86-64-v2) on the baseline variant
+        if: matrix.variant == 'baseline'
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.version.outputs.version }}'
+          BIN="releases/${VERSION}/voxtype-${VERSION}-linux-${{ matrix.arch }}-${{ matrix.variant }}"
+          # The baseline promises x86-64-v2 (Nehalem 2008+). No static count
+          # can gate that promise: a correct build legitimately carries ~370
+          # BMI2 instructions (ring's CPUID-dispatched assembly) and ~1800
+          # FMA (rustfft's runtime-dispatched AVX kernels), while #740's ggml
+          # contamination added only ~60 BMI2 on top - inside the noise. The
+          # counts below are a drift alarm, not a gate; the decisive check is
+          # the QEMU inference step that follows.
+          DUMP=$(objdump -d "${BIN}")
+          BMI2=$(echo "$DUMP" | grep -cP '\t(shrx|sarx|shlx|mulx|pdep|pext|bzhi|rorx)[ \t]' || true)
+          FMA=$(echo "$DUMP" | grep -cP '\t(vfmadd|vfmsub|vfnmadd|vfnmsub)' || true)
+          YMM=$(echo "$DUMP" | grep -c ymm || true)
+          printf '  BMI2 (informational, ~370 expected from ring):    %s\n' "$BMI2"
+          printf '  FMA  (informational, ~1800 expected from rustfft): %s\n' "$FMA"
+          printf '  ymm  (informational):                              %s\n' "$YMM"
+
+      - name: Run inference on a QEMU-modeled v2 CPU (baseline variant)
+        if: matrix.variant == 'baseline'
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.version.outputs.version }}'
+          BIN="releases/${VERSION}/voxtype-${VERSION}-linux-${{ matrix.arch }}-${{ matrix.variant }}"
+          # Static counts cannot separate an unconditional instruction from a
+          # runtime-dispatched one, and #740 proved that a baseline binary can
+          # load a model fine and only SIGILL at the first ggml matmul. TCG
+          # software emulation genuinely cannot decode instructions outside
+          # the modeled CPU, so running REAL INFERENCE under -cpu Nehalem
+          # (SSE4.2+POPCNT, no AVX: the v2 floor) is a true behavioral test
+          # of the exact artifact being shipped. Slow under TCG, but tiny.en
+          # on a two-second clip stays well inside the step timeout.
+          sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static libasound2 || \
+            sudo apt-get install -y -qq qemu-user-static libasound2t64
+          chmod +x "${BIN}"
+          export XDG_DATA_HOME="${RUNNER_TEMP}/xdg-data"
+          export XDG_CONFIG_HOME="${RUNNER_TEMP}/xdg-config"
+          mkdir -p "${XDG_DATA_HOME}/voxtype/models" "${XDG_CONFIG_HOME}/voxtype"
+          curl -sSL --retry 3 -o "${XDG_DATA_HOME}/voxtype/models/ggml-tiny.en.bin" \
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
+          printf 'engine = "whisper"\n\n[whisper]\nmodel = "tiny.en"\n' \
+            > "${XDG_CONFIG_HOME}/voxtype/config.toml"
+          qemu-x86_64-static -cpu Nehalem "${BIN}" transcribe tests/fixtures/vad/speech_hello.wav
+          echo "✓ baseline binary completed inference on a v2-floor CPU model."
+
       - name: Stage companion libraries
         if: matrix.companion_libs != ''
         run: |
@@ -323,6 +372,25 @@ jobs:
       # floor, because this upload was keyed to onnx-avx2 alone. Asahi users
       # were told to build the OSD from source for a binary CI had already
       # produced (#579).
+      - name: Verify OSD binaries start on a QEMU-modeled v2 CPU
+        if: matrix.variant == 'onnx-avx2'
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.version.outputs.version }}'
+          # The OSD dispatcher, frontends, and audio bridge build at
+          # x86-64-v2 so pre-Haswell machines running the baseline daemon
+          # get an OSD too (#740 reported them SIGILLing at --version).
+          # They are pure Rust with no ggml, so a startup check under a
+          # v2-floor CPU model covers their whole risk surface.
+          sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static libasound2t64 || \
+            sudo apt-get install -y -qq qemu-user-static libasound2
+          for suffix in osd osd-quickshell audio-bridge; do
+            BIN="releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-${suffix}"
+            chmod +x "${BIN}"
+            qemu-x86_64-static -cpu Nehalem "${BIN}" --version
+          done
+          echo "✓ OSD binaries start on a v2-floor CPU model."
+
       - name: Upload OSD binaries + audio bridge (ONNX jobs only)
         if: matrix.variant == 'onnx-avx2' || (matrix.arch == 'aarch64' && matrix.variant == 'onnx')
         uses: actions/upload-artifact@v4
