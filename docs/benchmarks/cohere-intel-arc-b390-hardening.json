@@ -1,0 +1,2517 @@
+{
+  "date": "2026-09-19",
+  "hardware": "Intel Core Ultra X7 358H / Arc B390 integrated GPU",
+  "model": "cohere-transcribe-q4f16",
+  "runtime": "OpenVINO 2026.4.0 / ONNX Runtime 1.24.4",
+  "policy": "ACCURACY execution mode, LATENCY scheduling, strict GPU encoder / CPU decoder",
+  "method": "One first inference, one warmup, three measured calls per backend/sample; fresh process for each backend. Final shared-core build separately rechecked transcripts; timing table predates the context-reuse fix, which affects repeated construction rather than inference. Timings excluded all concurrent builds/inference jobs. Final transcript/memory checks are not timing benchmarks.",
+  "license": {
+    "reference_text": "Google FLEURS and contributors, CC-BY-4.0",
+    "url": "https://creativecommons.org/licenses/by/4.0/"
+  },
+  "samples": [
+    {
+      "id": "es-fleurs-test-1",
+      "language": "es",
+      "locale": "es_419",
+      "duration_seconds": 21.36,
+      "sha256": "de8e80484b841529965b10c618426118f2decbd0038ba8363edd104f42915d49",
+      "sentence_id": 1852,
+      "gender": "MALE",
+      "speaker_id": null,
+      "reference_transcript": "El uso adecuado de los blogs «puede empoderar a los alumnos para que sean más analíticos y críticos, a través de la respuesta activa a los contenidos de internet, pueden definir sus posturas en el contexto de los escritos de otros, además de establecer sus perspectivas sobre temas específicos» (Oravec, 2002).",
+      "official_clip_filename": "10050510856477907332.wav",
+      "reference_verification": "Exact normalized transcript and sample-count match against pinned official test.tsv; single official clip matched; mirror lacks original filename, so recording identity is inferred, not byte-verified.",
+      "source_revisions": {
+        "official": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+        "mirror": "18eb12c7e68cc2ef2793345edb333eececd19a21"
+      },
+      "source_urls": {
+        "rows": "https://datasets-server.huggingface.co/rows?dataset=Lingeng/fleurs_es&config=default&split=test&offset=1&length=1",
+        "viewer": "https://huggingface.co/datasets/Lingeng/fleurs_es/viewer/default/test?row=1",
+        "official_reference": "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/es_419/test.tsv",
+        "official_dataset": "https://huggingface.co/datasets/google/fleurs/tree/70bb2e84b976b7e960aa89f1c648e09c59f894dd"
+      },
+      "onnx": {
+        "warm_median_seconds": 6.280559235,
+        "measurements": [
+          {
+            "kind": "first",
+            "seconds": 4.79869386,
+            "text": "El uso adecuado de los blogs puede empoderar a los alumnos para que sean más analíticos y críticos a través de la respuesta activa a los contenidos de Internet. Pueden definir sus posturas en el contexto de los escritos de otros, además de establecer sus perspectivas sobre temas específicos (Toto, 2002).",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 51,
+              "wer": 0.0196078431372549
+            }
+          },
+          {
+            "kind": "warmup",
+            "seconds": 5.223445845,
+            "text": "El uso adecuado de los blogs puede empoderar a los alumnos para que sean más analíticos y críticos a través de la respuesta activa a los contenidos de Internet. Pueden definir sus posturas en el contexto de los escritos de otros, además de establecer sus perspectivas sobre temas específicos (Toto, 2002).",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 51,
+              "wer": 0.0196078431372549
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 6.280559235,
+            "text": "El uso adecuado de los blogs puede empoderar a los alumnos para que sean más analíticos y críticos a través de la respuesta activa a los contenidos de Internet. Pueden definir sus posturas en el contexto de los escritos de otros, además de establecer sus perspectivas sobre temas específicos (Toto, 2002).",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 51,
+              "wer": 0.0196078431372549
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 6.207034178,
+            "text": "El uso adecuado de los blogs puede empoderar a los alumnos para que sean más analíticos y críticos a través de la respuesta activa a los contenidos de Internet. Pueden definir sus posturas en el contexto de los escritos de otros, además de establecer sus perspectivas sobre temas específicos (Toto, 2002).",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 51,
+              "wer": 0.0196078431372549
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 6.305704083,
+            "text": "El uso adecuado de los blogs puede empoderar a los alumnos para que sean más analíticos y críticos a través de la respuesta activa a los contenidos de Internet. Pueden definir sus posturas en el contexto de los escritos de otros, además de establecer sus perspectivas sobre temas específicos (Toto, 2002).",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 51,
+              "wer": 0.0196078431372549
+            }
+          }
+        ]
+      },
+      "openvino_gpu": {
+        "warm_median_seconds": 1.816244544,
+        "measurements": [
+          {
+            "kind": "first",
+            "seconds": 2.953075063,
+            "text": "El uso adecuado de los blogs puede empoderar a los alumnos para que sean más analíticos y críticos a través de la respuesta activa a los contenidos de Internet. Pueden definir sus posturas en el contexto de los escritos de otros, además de establecer sus perspectivas sobre temas específicos (Toto, 2002).",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 51,
+              "wer": 0.0196078431372549
+            }
+          },
+          {
+            "kind": "warmup",
+            "seconds": 1.840026644,
+            "text": "El uso adecuado de los blogs puede empoderar a los alumnos para que sean más analíticos y críticos a través de la respuesta activa a los contenidos de Internet. Pueden definir sus posturas en el contexto de los escritos de otros, además de establecer sus perspectivas sobre temas específicos (Toto, 2002).",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 51,
+              "wer": 0.0196078431372549
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 1.8158646809999999,
+            "text": "El uso adecuado de los blogs puede empoderar a los alumnos para que sean más analíticos y críticos a través de la respuesta activa a los contenidos de Internet. Pueden definir sus posturas en el contexto de los escritos de otros, además de establecer sus perspectivas sobre temas específicos (Toto, 2002).",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 51,
+              "wer": 0.0196078431372549
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 1.817551538,
+            "text": "El uso adecuado de los blogs puede empoderar a los alumnos para que sean más analíticos y críticos a través de la respuesta activa a los contenidos de Internet. Pueden definir sus posturas en el contexto de los escritos de otros, además de establecer sus perspectivas sobre temas específicos (Toto, 2002).",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 51,
+              "wer": 0.0196078431372549
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 1.816244544,
+            "text": "El uso adecuado de los blogs puede empoderar a los alumnos para que sean más analíticos y críticos a través de la respuesta activa a los contenidos de Internet. Pueden definir sus posturas en el contexto de los escritos de otros, además de establecer sus perspectivas sobre temas específicos (Toto, 2002).",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 51,
+              "wer": 0.0196078431372549
+            }
+          }
+        ]
+      },
+      "matched_warm_speedup": 3.457992072569717,
+      "all_transcripts_identical": true
+    },
+    {
+      "id": "es-fleurs-test-103",
+      "language": "es",
+      "locale": "es_419",
+      "duration_seconds": 18.12,
+      "sha256": "b33e46b1e55a67603197eb0ed09d13c48949ea53fc041d0d8fd2fea420e27e0a",
+      "sentence_id": 1732,
+      "gender": "FEMALE",
+      "speaker_id": null,
+      "reference_transcript": "El período histórico europeo en el que se sitúan estos acontecimientos se conoce habitualmente como Alta Edad Media, entre los siglos XI, XII y XIII (es decir, entre los años 1000 y 1300 d. C.).",
+      "official_clip_filename": "13025413708961497641.wav",
+      "reference_verification": "Exact normalized transcript and sample-count match against pinned official test.tsv; single official clip matched; mirror lacks original filename, so recording identity is inferred, not byte-verified.",
+      "source_revisions": {
+        "official": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+        "mirror": "18eb12c7e68cc2ef2793345edb333eececd19a21"
+      },
+      "source_urls": {
+        "rows": "https://datasets-server.huggingface.co/rows?dataset=Lingeng/fleurs_es&config=default&split=test&offset=103&length=1",
+        "viewer": "https://huggingface.co/datasets/Lingeng/fleurs_es/viewer/default/test?row=103",
+        "official_reference": "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/es_419/test.tsv",
+        "official_dataset": "https://huggingface.co/datasets/google/fleurs/tree/70bb2e84b976b7e960aa89f1c648e09c59f894dd"
+      },
+      "onnx": {
+        "warm_median_seconds": 4.684889196,
+        "measurements": [
+          {
+            "kind": "first",
+            "seconds": 4.251231393,
+            "text": "El período histórico europeo en el que se sitúan estos acontecimientos se conoce habitualmente como Alta Edad Media, entre los siglos XI-XI y XIII, es decir, entre los años 1000 y 1300.",
+            "accuracy": {
+              "word_errors": 3,
+              "reference_words": 35,
+              "wer": 0.08571428571428572
+            }
+          },
+          {
+            "kind": "warmup",
+            "seconds": 4.745223215,
+            "text": "El período histórico europeo en el que se sitúan estos acontecimientos se conoce habitualmente como Alta Edad Media, entre los siglos XI-XI y XIII, es decir, entre los años 1000 y 1300.",
+            "accuracy": {
+              "word_errors": 3,
+              "reference_words": 35,
+              "wer": 0.08571428571428572
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 4.682086349,
+            "text": "El período histórico europeo en el que se sitúan estos acontecimientos se conoce habitualmente como Alta Edad Media, entre los siglos XI-XI y XIII, es decir, entre los años 1000 y 1300.",
+            "accuracy": {
+              "word_errors": 3,
+              "reference_words": 35,
+              "wer": 0.08571428571428572
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 4.742761691,
+            "text": "El período histórico europeo en el que se sitúan estos acontecimientos se conoce habitualmente como Alta Edad Media, entre los siglos XI-XI y XIII, es decir, entre los años 1000 y 1300.",
+            "accuracy": {
+              "word_errors": 3,
+              "reference_words": 35,
+              "wer": 0.08571428571428572
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 4.684889196,
+            "text": "El período histórico europeo en el que se sitúan estos acontecimientos se conoce habitualmente como Alta Edad Media, entre los siglos XI-XI y XIII, es decir, entre los años 1000 y 1300.",
+            "accuracy": {
+              "word_errors": 3,
+              "reference_words": 35,
+              "wer": 0.08571428571428572
+            }
+          }
+        ]
+      },
+      "openvino_gpu": {
+        "warm_median_seconds": 1.491252161,
+        "measurements": [
+          {
+            "kind": "first",
+            "seconds": 1.8100191030000001,
+            "text": "El período histórico europeo en el que se sitúan estos acontecimientos se conoce habitualmente como Alta Edad Media, entre los siglos XI-XI y XIII, es decir, entre los años 1000 y 1300.",
+            "accuracy": {
+              "word_errors": 3,
+              "reference_words": 35,
+              "wer": 0.08571428571428572
+            }
+          },
+          {
+            "kind": "warmup",
+            "seconds": 1.118452125,
+            "text": "El período histórico europeo en el que se sitúan estos acontecimientos se conoce habitualmente como Alta Edad Media, entre los siglos XI-XI y XIII, es decir, entre los años 1000 y 1300.",
+            "accuracy": {
+              "word_errors": 3,
+              "reference_words": 35,
+              "wer": 0.08571428571428572
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 1.397290076,
+            "text": "El período histórico europeo en el que se sitúan estos acontecimientos se conoce habitualmente como Alta Edad Media, entre los siglos XI-XI y XIII, es decir, entre los años 1000 y 1300.",
+            "accuracy": {
+              "word_errors": 3,
+              "reference_words": 35,
+              "wer": 0.08571428571428572
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 1.505069473,
+            "text": "El período histórico europeo en el que se sitúan estos acontecimientos se conoce habitualmente como Alta Edad Media, entre los siglos XI-XI y XIII, es decir, entre los años 1000 y 1300.",
+            "accuracy": {
+              "word_errors": 3,
+              "reference_words": 35,
+              "wer": 0.08571428571428572
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 1.491252161,
+            "text": "El período histórico europeo en el que se sitúan estos acontecimientos se conoce habitualmente como Alta Edad Media, entre los siglos XI-XI y XIII, es decir, entre los años 1000 y 1300.",
+            "accuracy": {
+              "word_errors": 3,
+              "reference_words": 35,
+              "wer": 0.08571428571428572
+            }
+          }
+        ]
+      },
+      "matched_warm_speedup": 3.141580826181951,
+      "all_transcripts_identical": true
+    },
+    {
+      "id": "es-fleurs-test-104",
+      "language": "es",
+      "locale": "es_419",
+      "duration_seconds": 16.2,
+      "sha256": "e7a83d2a88d3ce4c6ab8c1291494f02fbd22d0feb1204b3ee10879344bac08de",
+      "sentence_id": 1689,
+      "gender": "FEMALE",
+      "speaker_id": null,
+      "reference_transcript": "Europa es un continente relativamente pequeño, pero con muchos países independientes. Bajo circunstancias normales, viajar por varios países significaría tener que gestionar solicitudes de visa y controles de pasaporte varias veces.",
+      "official_clip_filename": "13061407383664831974.wav",
+      "reference_verification": "Exact normalized transcript and sample-count match against pinned official test.tsv; single official clip matched; mirror lacks original filename, so recording identity is inferred, not byte-verified.",
+      "source_revisions": {
+        "official": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+        "mirror": "18eb12c7e68cc2ef2793345edb333eececd19a21"
+      },
+      "source_urls": {
+        "rows": "https://datasets-server.huggingface.co/rows?dataset=Lingeng/fleurs_es&config=default&split=test&offset=104&length=1",
+        "viewer": "https://huggingface.co/datasets/Lingeng/fleurs_es/viewer/default/test?row=104",
+        "official_reference": "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/es_419/test.tsv",
+        "official_dataset": "https://huggingface.co/datasets/google/fleurs/tree/70bb2e84b976b7e960aa89f1c648e09c59f894dd"
+      },
+      "onnx": {
+        "warm_median_seconds": 4.260632469,
+        "measurements": [
+          {
+            "kind": "first",
+            "seconds": 3.630371643,
+            "text": "Europa es un continente relativamente pequeño pero con muchos países independientes. Bajo circunstancias normales, viajar por varios países significaría tener que gestionar solicitudes de visa y controles de pasaporte varias veces.",
+            "accuracy": {
+              "word_errors": 0,
+              "reference_words": 31,
+              "wer": 0.0
+            }
+          },
+          {
+            "kind": "warmup",
+            "seconds": 4.220673722,
+            "text": "Europa es un continente relativamente pequeño pero con muchos países independientes. Bajo circunstancias normales, viajar por varios países significaría tener que gestionar solicitudes de visa y controles de pasaporte varias veces.",
+            "accuracy": {
+              "word_errors": 0,
+              "reference_words": 31,
+              "wer": 0.0
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 4.196202586,
+            "text": "Europa es un continente relativamente pequeño pero con muchos países independientes. Bajo circunstancias normales, viajar por varios países significaría tener que gestionar solicitudes de visa y controles de pasaporte varias veces.",
+            "accuracy": {
+              "word_errors": 0,
+              "reference_words": 31,
+              "wer": 0.0
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 4.300885838,
+            "text": "Europa es un continente relativamente pequeño pero con muchos países independientes. Bajo circunstancias normales, viajar por varios países significaría tener que gestionar solicitudes de visa y controles de pasaporte varias veces.",
+            "accuracy": {
+              "word_errors": 0,
+              "reference_words": 31,
+              "wer": 0.0
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 4.260632469,
+            "text": "Europa es un continente relativamente pequeño pero con muchos países independientes. Bajo circunstancias normales, viajar por varios países significaría tener que gestionar solicitudes de visa y controles de pasaporte varias veces.",
+            "accuracy": {
+              "word_errors": 0,
+              "reference_words": 31,
+              "wer": 0.0
+            }
+          }
+        ]
+      },
+      "openvino_gpu": {
+        "warm_median_seconds": 1.259414988,
+        "measurements": [
+          {
+            "kind": "first",
+            "seconds": 1.5484120620000001,
+            "text": "Europa es un continente relativamente pequeño pero con muchos países independientes. Bajo circunstancias normales, viajar por varios países significaría tener que gestionar solicitudes de visa y controles de pasaporte varias veces.",
+            "accuracy": {
+              "word_errors": 0,
+              "reference_words": 31,
+              "wer": 0.0
+            }
+          },
+          {
+            "kind": "warmup",
+            "seconds": 0.956385001,
+            "text": "Europa es un continente relativamente pequeño pero con muchos países independientes. Bajo circunstancias normales, viajar por varios países significaría tener que gestionar solicitudes de visa y controles de pasaporte varias veces.",
+            "accuracy": {
+              "word_errors": 0,
+              "reference_words": 31,
+              "wer": 0.0
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 1.112743136,
+            "text": "Europa es un continente relativamente pequeño pero con muchos países independientes. Bajo circunstancias normales, viajar por varios países significaría tener que gestionar solicitudes de visa y controles de pasaporte varias veces.",
+            "accuracy": {
+              "word_errors": 0,
+              "reference_words": 31,
+              "wer": 0.0
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 1.259414988,
+            "text": "Europa es un continente relativamente pequeño pero con muchos países independientes. Bajo circunstancias normales, viajar por varios países significaría tener que gestionar solicitudes de visa y controles de pasaporte varias veces.",
+            "accuracy": {
+              "word_errors": 0,
+              "reference_words": 31,
+              "wer": 0.0
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 1.272775977,
+            "text": "Europa es un continente relativamente pequeño pero con muchos países independientes. Bajo circunstancias normales, viajar por varios países significaría tener que gestionar solicitudes de visa y controles de pasaporte varias veces.",
+            "accuracy": {
+              "word_errors": 0,
+              "reference_words": 31,
+              "wer": 0.0
+            }
+          }
+        ]
+      },
+      "matched_warm_speedup": 3.383025062903253,
+      "all_transcripts_identical": true
+    },
+    {
+      "id": "es-fleurs-test-105",
+      "language": "es",
+      "locale": "es_419",
+      "duration_seconds": 29.46,
+      "sha256": "0c67cc788656f301f03e3f2e5e0312e53fb6d04d7223e0981c4140651aa8bf7f",
+      "sentence_id": 1670,
+      "gender": "MALE",
+      "speaker_id": null,
+      "reference_transcript": "«Si bien su comportamiento térmico no es tan regular como las grandes cuevas en nuestro planeta, que suelen sostener una temperatura bastante estable, es consistente con estas profundas cavidades en el suelo», sostuvo Glen Cushing, del equipo de arqueología del Servicio Geológico Estadounidense (USGS) y de la Universidad del Norte de Arizona, en Flagstaff, Arizona.",
+      "official_clip_filename": "13066583163751268675.wav",
+      "reference_verification": "Exact normalized transcript and sample-count match against pinned official test.tsv; single official clip matched; mirror lacks original filename, so recording identity is inferred, not byte-verified.",
+      "source_revisions": {
+        "official": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+        "mirror": "18eb12c7e68cc2ef2793345edb333eececd19a21"
+      },
+      "source_urls": {
+        "rows": "https://datasets-server.huggingface.co/rows?dataset=Lingeng/fleurs_es&config=default&split=test&offset=105&length=1",
+        "viewer": "https://huggingface.co/datasets/Lingeng/fleurs_es/viewer/default/test?row=105",
+        "official_reference": "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/es_419/test.tsv",
+        "official_dataset": "https://huggingface.co/datasets/google/fleurs/tree/70bb2e84b976b7e960aa89f1c648e09c59f894dd"
+      },
+      "onnx": {
+        "warm_median_seconds": 9.012521868,
+        "measurements": [
+          {
+            "kind": "first",
+            "seconds": 8.475009418,
+            "text": "(Si bien su comportamiento térmico no es tan regular como las grandes cuevas en nuestro planeta, que suelen sostener una temperatura bastante estável, es consistente con estas profundas cavidades en el suelo—, sostuvo Glenn Kushin, del equipo de arqueología del Servicio Geológico Estadounidense (USGS) y de la Universidad del Norte de Arizona, en Flagstaff, Arizona.",
+            "accuracy": {
+              "word_errors": 3,
+              "reference_words": 55,
+              "wer": 0.05454545454545454
+            }
+          },
+          {
+            "kind": "warmup",
+            "seconds": 9.031023761,
+            "text": "(Si bien su comportamiento térmico no es tan regular como las grandes cuevas en nuestro planeta, que suelen sostener una temperatura bastante estável, es consistente con estas profundas cavidades en el suelo—, sostuvo Glenn Kushin, del equipo de arqueología del Servicio Geológico Estadounidense (USGS) y de la Universidad del Norte de Arizona, en Flagstaff, Arizona.",
+            "accuracy": {
+              "word_errors": 3,
+              "reference_words": 55,
+              "wer": 0.05454545454545454
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 9.142708955,
+            "text": "(Si bien su comportamiento térmico no es tan regular como las grandes cuevas en nuestro planeta, que suelen sostener una temperatura bastante estável, es consistente con estas profundas cavidades en el suelo—, sostuvo Glenn Kushin, del equipo de arqueología del Servicio Geológico Estadounidense (USGS) y de la Universidad del Norte de Arizona, en Flagstaff, Arizona.",
+            "accuracy": {
+              "word_errors": 3,
+              "reference_words": 55,
+              "wer": 0.05454545454545454
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 9.012521868,
+            "text": "(Si bien su comportamiento térmico no es tan regular como las grandes cuevas en nuestro planeta, que suelen sostener una temperatura bastante estável, es consistente con estas profundas cavidades en el suelo—, sostuvo Glenn Kushin, del equipo de arqueología del Servicio Geológico Estadounidense (USGS) y de la Universidad del Norte de Arizona, en Flagstaff, Arizona.",
+            "accuracy": {
+              "word_errors": 3,
+              "reference_words": 55,
+              "wer": 0.05454545454545454
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 9.009711974,
+            "text": "(Si bien su comportamiento térmico no es tan regular como las grandes cuevas en nuestro planeta, que suelen sostener una temperatura bastante estável, es consistente con estas profundas cavidades en el suelo—, sostuvo Glenn Kushin, del equipo de arqueología del Servicio Geológico Estadounidense (USGS) y de la Universidad del Norte de Arizona, en Flagstaff, Arizona.",
+            "accuracy": {
+              "word_errors": 3,
+              "reference_words": 55,
+              "wer": 0.05454545454545454
+            }
+          }
+        ]
+      },
+      "openvino_gpu": {
+        "warm_median_seconds": 3.669162162,
+        "measurements": [
+          {
+            "kind": "first",
+            "seconds": 3.736872241,
+            "text": "\"Si bien su comportamiento térmico no es tan regular como las grandes cuevas en nuestro planeta, que suelen sostener una temperatura bastante estable, es consistente con estas profundas cavidades en el suelo\", sostuvo Glenn Kushin, del equipo de arqueología del Servicio Geológico Estadounidense (USGS) y de la Universidad del Norte de Arizona, en Flagstaff, Arizona.",
+            "accuracy": {
+              "word_errors": 2,
+              "reference_words": 55,
+              "wer": 0.03636363636363636
+            }
+          },
+          {
+            "kind": "warmup",
+            "seconds": 3.663169282,
+            "text": "\"Si bien su comportamiento térmico no es tan regular como las grandes cuevas en nuestro planeta, que suelen sostener una temperatura bastante estable, es consistente con estas profundas cavidades en el suelo\", sostuvo Glenn Kushin, del equipo de arqueología del Servicio Geológico Estadounidense (USGS) y de la Universidad del Norte de Arizona, en Flagstaff, Arizona.",
+            "accuracy": {
+              "word_errors": 2,
+              "reference_words": 55,
+              "wer": 0.03636363636363636
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 3.669162162,
+            "text": "\"Si bien su comportamiento térmico no es tan regular como las grandes cuevas en nuestro planeta, que suelen sostener una temperatura bastante estable, es consistente con estas profundas cavidades en el suelo\", sostuvo Glenn Kushin, del equipo de arqueología del Servicio Geológico Estadounidense (USGS) y de la Universidad del Norte de Arizona, en Flagstaff, Arizona.",
+            "accuracy": {
+              "word_errors": 2,
+              "reference_words": 55,
+              "wer": 0.03636363636363636
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 3.6997883849999997,
+            "text": "\"Si bien su comportamiento térmico no es tan regular como las grandes cuevas en nuestro planeta, que suelen sostener una temperatura bastante estable, es consistente con estas profundas cavidades en el suelo\", sostuvo Glenn Kushin, del equipo de arqueología del Servicio Geológico Estadounidense (USGS) y de la Universidad del Norte de Arizona, en Flagstaff, Arizona.",
+            "accuracy": {
+              "word_errors": 2,
+              "reference_words": 55,
+              "wer": 0.03636363636363636
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 3.636650364,
+            "text": "\"Si bien su comportamiento térmico no es tan regular como las grandes cuevas en nuestro planeta, que suelen sostener una temperatura bastante estable, es consistente con estas profundas cavidades en el suelo\", sostuvo Glenn Kushin, del equipo de arqueología del Servicio Geológico Estadounidense (USGS) y de la Universidad del Norte de Arizona, en Flagstaff, Arizona.",
+            "accuracy": {
+              "word_errors": 2,
+              "reference_words": 55,
+              "wer": 0.03636363636363636
+            }
+          }
+        ]
+      },
+      "matched_warm_speedup": 2.456288784763719,
+      "all_transcripts_identical": false
+    },
+    {
+      "id": "en-fleurs-test-0",
+      "language": "en",
+      "locale": "en_us",
+      "duration_seconds": 10.56,
+      "sha256": "21d0364b65851762ce4987195a6a2684aff957157c99697e50042a7e2b4504c9",
+      "sentence_id": 1904,
+      "gender": "MALE",
+      "speaker_id": null,
+      "reference_transcript": "However, due to the slow communication channels, styles in the west could lag behind by 25 to 30 year.",
+      "official_clip_filename": "1003119935936341070.wav",
+      "reference_verification": "Exact normalized transcript and sample-count match against pinned official test.tsv; original filename and sentence ID also match mirror metadata.",
+      "source_revisions": {
+        "official": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+        "mirror": "5f808ac67a6dc96b8bd2f0509e6e4c13b39dba26"
+      },
+      "source_urls": {
+        "rows": "https://datasets-server.huggingface.co/rows?dataset=lmms-lab-audio/fleurs&config=en_us&split=test&offset=0&length=1",
+        "viewer": "https://huggingface.co/datasets/lmms-lab-audio/fleurs/viewer/en_us/test?row=0",
+        "official_reference": "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/en_us/test.tsv",
+        "official_dataset": "https://huggingface.co/datasets/google/fleurs/tree/70bb2e84b976b7e960aa89f1c648e09c59f894dd"
+      },
+      "onnx": {
+        "warm_median_seconds": 2.610701815,
+        "measurements": [
+          {
+            "kind": "first",
+            "seconds": 1.986755433,
+            "text": "However, due to the slow communication channels, styles in the West could lag behind by 25 to 30 years.",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 19,
+              "wer": 0.05263157894736842
+            }
+          },
+          {
+            "kind": "warmup",
+            "seconds": 2.193318866,
+            "text": "However, due to the slow communication channels, styles in the West could lag behind by 25 to 30 years.",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 19,
+              "wer": 0.05263157894736842
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 2.610701815,
+            "text": "However, due to the slow communication channels, styles in the West could lag behind by 25 to 30 years.",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 19,
+              "wer": 0.05263157894736842
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 2.600012973,
+            "text": "However, due to the slow communication channels, styles in the West could lag behind by 25 to 30 years.",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 19,
+              "wer": 0.05263157894736842
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 2.646971391,
+            "text": "However, due to the slow communication channels, styles in the West could lag behind by 25 to 30 years.",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 19,
+              "wer": 0.05263157894736842
+            }
+          }
+        ]
+      },
+      "openvino_gpu": {
+        "warm_median_seconds": 0.393530979,
+        "measurements": [
+          {
+            "kind": "first",
+            "seconds": 0.967130796,
+            "text": "However, due to the slow communication channels, styles in the West could lag behind by 25 to 30 years.",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 19,
+              "wer": 0.05263157894736842
+            }
+          },
+          {
+            "kind": "warmup",
+            "seconds": 0.389793679,
+            "text": "However, due to the slow communication channels, styles in the West could lag behind by 25 to 30 years.",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 19,
+              "wer": 0.05263157894736842
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 0.391742198,
+            "text": "However, due to the slow communication channels, styles in the West could lag behind by 25 to 30 years.",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 19,
+              "wer": 0.05263157894736842
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 0.394566134,
+            "text": "However, due to the slow communication channels, styles in the West could lag behind by 25 to 30 years.",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 19,
+              "wer": 0.05263157894736842
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 0.393530979,
+            "text": "However, due to the slow communication channels, styles in the West could lag behind by 25 to 30 years.",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 19,
+              "wer": 0.05263157894736842
+            }
+          }
+        ]
+      },
+      "matched_warm_speedup": 6.634043961758853,
+      "all_transcripts_identical": true
+    },
+    {
+      "id": "en-fleurs-test-4",
+      "language": "en",
+      "locale": "en_us",
+      "duration_seconds": 4.32,
+      "sha256": "2f0024ef7ea2fc4e4f16848fe8c0897da43a6a3db8f86fbebcb31a5d933a79f5",
+      "sentence_id": 1972,
+      "gender": "FEMALE",
+      "speaker_id": null,
+      "reference_transcript": "Many people don't think about them as dinosaurs because they have feathers and can fly.",
+      "official_clip_filename": "10233995782544396174.wav",
+      "reference_verification": "Exact normalized transcript and sample-count match against pinned official test.tsv; original filename and sentence ID also match mirror metadata.",
+      "source_revisions": {
+        "official": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+        "mirror": "5f808ac67a6dc96b8bd2f0509e6e4c13b39dba26"
+      },
+      "source_urls": {
+        "rows": "https://datasets-server.huggingface.co/rows?dataset=lmms-lab-audio/fleurs&config=en_us&split=test&offset=4&length=1",
+        "viewer": "https://huggingface.co/datasets/lmms-lab-audio/fleurs/viewer/en_us/test?row=4",
+        "official_reference": "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/en_us/test.tsv",
+        "official_dataset": "https://huggingface.co/datasets/google/fleurs/tree/70bb2e84b976b7e960aa89f1c648e09c59f894dd"
+      },
+      "onnx": {
+        "warm_median_seconds": 0.886500547,
+        "measurements": [
+          {
+            "kind": "first",
+            "seconds": 0.977958926,
+            "text": "Many people don’t think about them as dinosaurs because they have feathers and can fly.",
+            "accuracy": {
+              "word_errors": 0,
+              "reference_words": 16,
+              "wer": 0.0
+            }
+          },
+          {
+            "kind": "warmup",
+            "seconds": 0.885040912,
+            "text": "Many people don’t think about them as dinosaurs because they have feathers and can fly.",
+            "accuracy": {
+              "word_errors": 0,
+              "reference_words": 16,
+              "wer": 0.0
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 0.881412614,
+            "text": "Many people don’t think about them as dinosaurs because they have feathers and can fly.",
+            "accuracy": {
+              "word_errors": 0,
+              "reference_words": 16,
+              "wer": 0.0
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 0.886500547,
+            "text": "Many people don’t think about them as dinosaurs because they have feathers and can fly.",
+            "accuracy": {
+              "word_errors": 0,
+              "reference_words": 16,
+              "wer": 0.0
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 0.930612629,
+            "text": "Many people don’t think about them as dinosaurs because they have feathers and can fly.",
+            "accuracy": {
+              "word_errors": 0,
+              "reference_words": 16,
+              "wer": 0.0
+            }
+          }
+        ]
+      },
+      "openvino_gpu": {
+        "warm_median_seconds": 0.212562318,
+        "measurements": [
+          {
+            "kind": "first",
+            "seconds": 0.894174946,
+            "text": "Many people don’t think about them as dinosaurs because they have feathers and can fly.",
+            "accuracy": {
+              "word_errors": 0,
+              "reference_words": 16,
+              "wer": 0.0
+            }
+          },
+          {
+            "kind": "warmup",
+            "seconds": 0.215997203,
+            "text": "Many people don’t think about them as dinosaurs because they have feathers and can fly.",
+            "accuracy": {
+              "word_errors": 0,
+              "reference_words": 16,
+              "wer": 0.0
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 0.212520149,
+            "text": "Many people don’t think about them as dinosaurs because they have feathers and can fly.",
+            "accuracy": {
+              "word_errors": 0,
+              "reference_words": 16,
+              "wer": 0.0
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 0.212562318,
+            "text": "Many people don’t think about them as dinosaurs because they have feathers and can fly.",
+            "accuracy": {
+              "word_errors": 0,
+              "reference_words": 16,
+              "wer": 0.0
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 0.214501302,
+            "text": "Many people don’t think about them as dinosaurs because they have feathers and can fly.",
+            "accuracy": {
+              "word_errors": 0,
+              "reference_words": 16,
+              "wer": 0.0
+            }
+          }
+        ]
+      },
+      "matched_warm_speedup": 4.170544221295141,
+      "all_transcripts_identical": true
+    },
+    {
+      "id": "en-fleurs-test-15",
+      "language": "en",
+      "locale": "en_us",
+      "duration_seconds": 15.56,
+      "sha256": "27759bb3778edc2b245c0095f8523df4dd9c8850c785c4683071a21d4b6bcfcb",
+      "sentence_id": 1711,
+      "gender": "MALE",
+      "speaker_id": null,
+      "reference_transcript": "These theories look at what it is about certain people that make them want the things that they do and what things in their environment will make them do or not do certain things.",
+      "official_clip_filename": "1043394666292127188.wav",
+      "reference_verification": "Exact normalized transcript and sample-count match against pinned official test.tsv; original filename and sentence ID also match mirror metadata.",
+      "source_revisions": {
+        "official": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+        "mirror": "5f808ac67a6dc96b8bd2f0509e6e4c13b39dba26"
+      },
+      "source_urls": {
+        "rows": "https://datasets-server.huggingface.co/rows?dataset=lmms-lab-audio/fleurs&config=en_us&split=test&offset=15&length=1",
+        "viewer": "https://huggingface.co/datasets/lmms-lab-audio/fleurs/viewer/en_us/test?row=15",
+        "official_reference": "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/en_us/test.tsv",
+        "official_dataset": "https://huggingface.co/datasets/google/fleurs/tree/70bb2e84b976b7e960aa89f1c648e09c59f894dd"
+      },
+      "onnx": {
+        "warm_median_seconds": 3.786785257,
+        "measurements": [
+          {
+            "kind": "first",
+            "seconds": 3.330579297,
+            "text": "These pillars look at what it is about certain people that make them want the things that they do and what things in their environment will make them do or not do certain things.",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 34,
+              "wer": 0.029411764705882353
+            }
+          },
+          {
+            "kind": "warmup",
+            "seconds": 3.819577638,
+            "text": "These pillars look at what it is about certain people that make them want the things that they do and what things in their environment will make them do or not do certain things.",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 34,
+              "wer": 0.029411764705882353
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 3.775321086,
+            "text": "These pillars look at what it is about certain people that make them want the things that they do and what things in their environment will make them do or not do certain things.",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 34,
+              "wer": 0.029411764705882353
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 3.786785257,
+            "text": "These pillars look at what it is about certain people that make them want the things that they do and what things in their environment will make them do or not do certain things.",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 34,
+              "wer": 0.029411764705882353
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 3.8233274760000002,
+            "text": "These pillars look at what it is about certain people that make them want the things that they do and what things in their environment will make them do or not do certain things.",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 34,
+              "wer": 0.029411764705882353
+            }
+          }
+        ]
+      },
+      "openvino_gpu": {
+        "warm_median_seconds": 0.663558348,
+        "measurements": [
+          {
+            "kind": "first",
+            "seconds": 1.68662089,
+            "text": "These pillars look at what it is about certain people that make them want the things that they do and what things in their environment will make them do or not do certain things.",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 34,
+              "wer": 0.029411764705882353
+            }
+          },
+          {
+            "kind": "warmup",
+            "seconds": 0.650296732,
+            "text": "These pillars look at what it is about certain people that make them want the things that they do and what things in their environment will make them do or not do certain things.",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 34,
+              "wer": 0.029411764705882353
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 0.63695971,
+            "text": "These pillars look at what it is about certain people that make them want the things that they do and what things in their environment will make them do or not do certain things.",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 34,
+              "wer": 0.029411764705882353
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 0.663558348,
+            "text": "These pillars look at what it is about certain people that make them want the things that they do and what things in their environment will make them do or not do certain things.",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 34,
+              "wer": 0.029411764705882353
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 0.748571543,
+            "text": "These pillars look at what it is about certain people that make them want the things that they do and what things in their environment will make them do or not do certain things.",
+            "accuracy": {
+              "word_errors": 1,
+              "reference_words": 34,
+              "wer": 0.029411764705882353
+            }
+          }
+        ]
+      },
+      "matched_warm_speedup": 5.7067856480346775,
+      "all_transcripts_identical": true
+    },
+    {
+      "id": "en-fleurs-test-16",
+      "language": "en",
+      "locale": "en_us",
+      "duration_seconds": 13.92,
+      "sha256": "5cd8aa301e4919890e00bc537e8aaaaf04217fa710bbd79761192690ac16a5ea",
+      "sentence_id": 1685,
+      "gender": "FEMALE",
+      "speaker_id": null,
+      "reference_transcript": "For example, the most common still image photography format in the world is 35mm, which was the dominant film size at the close of the analog film era.",
+      "official_clip_filename": "1045619486290403122.wav",
+      "reference_verification": "Exact normalized transcript and sample-count match against pinned official test.tsv; original filename and sentence ID also match mirror metadata.",
+      "source_revisions": {
+        "official": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+        "mirror": "5f808ac67a6dc96b8bd2f0509e6e4c13b39dba26"
+      },
+      "source_urls": {
+        "rows": "https://datasets-server.huggingface.co/rows?dataset=lmms-lab-audio/fleurs&config=en_us&split=test&offset=16&length=1",
+        "viewer": "https://huggingface.co/datasets/lmms-lab-audio/fleurs/viewer/en_us/test?row=16",
+        "official_reference": "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/en_us/test.tsv",
+        "official_dataset": "https://huggingface.co/datasets/google/fleurs/tree/70bb2e84b976b7e960aa89f1c648e09c59f894dd"
+      },
+      "onnx": {
+        "warm_median_seconds": 3.419557152,
+        "measurements": [
+          {
+            "kind": "first",
+            "seconds": 2.9855778539999998,
+            "text": "For example, the most common still-image photography format in the world is 35 mm, which was the dominant film size at the close of the analog film era.",
+            "accuracy": {
+              "word_errors": 2,
+              "reference_words": 28,
+              "wer": 0.07142857142857142
+            }
+          },
+          {
+            "kind": "warmup",
+            "seconds": 3.511769687,
+            "text": "For example, the most common still-image photography format in the world is 35 mm, which was the dominant film size at the close of the analog film era.",
+            "accuracy": {
+              "word_errors": 2,
+              "reference_words": 28,
+              "wer": 0.07142857142857142
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 3.4202956540000002,
+            "text": "For example, the most common still-image photography format in the world is 35 mm, which was the dominant film size at the close of the analog film era.",
+            "accuracy": {
+              "word_errors": 2,
+              "reference_words": 28,
+              "wer": 0.07142857142857142
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 3.419557152,
+            "text": "For example, the most common still-image photography format in the world is 35 mm, which was the dominant film size at the close of the analog film era.",
+            "accuracy": {
+              "word_errors": 2,
+              "reference_words": 28,
+              "wer": 0.07142857142857142
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 3.389718592,
+            "text": "For example, the most common still-image photography format in the world is 35 mm, which was the dominant film size at the close of the analog film era.",
+            "accuracy": {
+              "word_errors": 2,
+              "reference_words": 28,
+              "wer": 0.07142857142857142
+            }
+          }
+        ]
+      },
+      "openvino_gpu": {
+        "warm_median_seconds": 0.603407001,
+        "measurements": [
+          {
+            "kind": "first",
+            "seconds": 1.1672991640000001,
+            "text": "For example, the most common still-image photography format in the world is 35 mm, which was the dominant film size at the close of the analog film era.",
+            "accuracy": {
+              "word_errors": 2,
+              "reference_words": 28,
+              "wer": 0.07142857142857142
+            }
+          },
+          {
+            "kind": "warmup",
+            "seconds": 0.599092242,
+            "text": "For example, the most common still-image photography format in the world is 35 mm, which was the dominant film size at the close of the analog film era.",
+            "accuracy": {
+              "word_errors": 2,
+              "reference_words": 28,
+              "wer": 0.07142857142857142
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 0.603407001,
+            "text": "For example, the most common still-image photography format in the world is 35 mm, which was the dominant film size at the close of the analog film era.",
+            "accuracy": {
+              "word_errors": 2,
+              "reference_words": 28,
+              "wer": 0.07142857142857142
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 0.598664007,
+            "text": "For example, the most common still-image photography format in the world is 35 mm, which was the dominant film size at the close of the analog film era.",
+            "accuracy": {
+              "word_errors": 2,
+              "reference_words": 28,
+              "wer": 0.07142857142857142
+            }
+          },
+          {
+            "kind": "measured",
+            "seconds": 0.619042793,
+            "text": "For example, the most common still-image photography format in the world is 35 mm, which was the dominant film size at the close of the analog film era.",
+            "accuracy": {
+              "word_errors": 2,
+              "reference_words": 28,
+              "wer": 0.07142857142857142
+            }
+          }
+        ]
+      },
+      "matched_warm_speedup": 5.667082328068646,
+      "all_transcripts_identical": true
+    }
+  ],
+  "startup_checks": [
+    {
+      "name": "cpu_without_openvino",
+      "returncode": 0,
+      "expected": 0,
+      "seconds": 2.0608195190034166,
+      "passed": true
+    },
+    {
+      "name": "gpu_without_openvino",
+      "returncode": 1,
+      "expected": 1,
+      "seconds": 0.05128942599912989,
+      "passed": true
+    },
+    {
+      "name": "gpu_bad_cache",
+      "returncode": 1,
+      "expected": 1,
+      "seconds": 0.06613402400034829,
+      "passed": true
+    },
+    {
+      "name": "gpu_bad_model",
+      "returncode": 1,
+      "expected": 1,
+      "seconds": 0.004929225000523729,
+      "passed": true
+    },
+    {
+      "name": "gpu_missing_weights",
+      "returncode": 1,
+      "expected": 1,
+      "seconds": 0.10544954099896131,
+      "passed": true
+    },
+    {
+      "name": "gpu_truncated_weights",
+      "returncode": 1,
+      "expected": 1,
+      "seconds": 0.0752406930005236,
+      "passed": true
+    },
+    {
+      "name": "gpu_missing_plugin",
+      "returncode": 1,
+      "expected": 1,
+      "seconds": 0.08682602999761002,
+      "passed": true
+    },
+    {
+      "name": "gpu_no_opencl_devices",
+      "returncode": 1,
+      "expected": 1,
+      "seconds": 0.7174395410002035,
+      "passed": true
+    },
+    {
+      "name": "gpu_valid_unrelated_cwd",
+      "returncode": 0,
+      "expected": 0,
+      "seconds": 1.9450956000000588,
+      "passed": true
+    }
+  ],
+  "final_gpu_transcript_verification": {
+    "purpose": "Transcript regression only; concurrent builds mean timings are not benchmark results",
+    "benchmark_sha256": "97cf66234f0eae12b7b319e111b6bd8bb198cdb86e7410c0b121241576c84842",
+    "samples": [
+      {
+        "audio": "es-fleurs-test-1.wav",
+        "sha256": "de8e80484b841529965b10c618426118f2decbd0038ba8363edd104f42915d49",
+        "transcripts_match_accuracy_run": true,
+        "texts": [
+          "El uso adecuado de los blogs puede empoderar a los alumnos para que sean más analíticos y críticos a través de la respuesta activa a los contenidos de Internet. Pueden definir sus posturas en el contexto de los escritos de otros, además de establecer sus perspectivas sobre temas específicos (Toto, 2002)."
+        ]
+      },
+      {
+        "audio": "es-fleurs-test-103.wav",
+        "sha256": "b33e46b1e55a67603197eb0ed09d13c48949ea53fc041d0d8fd2fea420e27e0a",
+        "transcripts_match_accuracy_run": true,
+        "texts": [
+          "El período histórico europeo en el que se sitúan estos acontecimientos se conoce habitualmente como Alta Edad Media, entre los siglos XI-XI y XIII, es decir, entre los años 1000 y 1300."
+        ]
+      },
+      {
+        "audio": "es-fleurs-test-104.wav",
+        "sha256": "e7a83d2a88d3ce4c6ab8c1291494f02fbd22d0feb1204b3ee10879344bac08de",
+        "transcripts_match_accuracy_run": true,
+        "texts": [
+          "Europa es un continente relativamente pequeño pero con muchos países independientes. Bajo circunstancias normales, viajar por varios países significaría tener que gestionar solicitudes de visa y controles de pasaporte varias veces."
+        ]
+      },
+      {
+        "audio": "es-fleurs-test-105.wav",
+        "sha256": "0c67cc788656f301f03e3f2e5e0312e53fb6d04d7223e0981c4140651aa8bf7f",
+        "transcripts_match_accuracy_run": true,
+        "texts": [
+          "\"Si bien su comportamiento térmico no es tan regular como las grandes cuevas en nuestro planeta, que suelen sostener una temperatura bastante estable, es consistente con estas profundas cavidades en el suelo\", sostuvo Glenn Kushin, del equipo de arqueología del Servicio Geológico Estadounidense (USGS) y de la Universidad del Norte de Arizona, en Flagstaff, Arizona."
+        ]
+      },
+      {
+        "audio": "en-fleurs-test-0.wav",
+        "sha256": "21d0364b65851762ce4987195a6a2684aff957157c99697e50042a7e2b4504c9",
+        "transcripts_match_accuracy_run": true,
+        "texts": [
+          "However, due to the slow communication channels, styles in the West could lag behind by 25 to 30 years."
+        ]
+      },
+      {
+        "audio": "en-fleurs-test-4.wav",
+        "sha256": "2f0024ef7ea2fc4e4f16848fe8c0897da43a6a3db8f86fbebcb31a5d933a79f5",
+        "transcripts_match_accuracy_run": true,
+        "texts": [
+          "Many people don’t think about them as dinosaurs because they have feathers and can fly."
+        ]
+      },
+      {
+        "audio": "en-fleurs-test-15.wav",
+        "sha256": "27759bb3778edc2b245c0095f8523df4dd9c8850c785c4683071a21d4b6bcfcb",
+        "transcripts_match_accuracy_run": true,
+        "texts": [
+          "These pillars look at what it is about certain people that make them want the things that they do and what things in their environment will make them do or not do certain things."
+        ]
+      },
+      {
+        "audio": "en-fleurs-test-16.wav",
+        "sha256": "5cd8aa301e4919890e00bc537e8aaaaf04217fa710bbd79761192690ac16a5ea",
+        "transcripts_match_accuracy_run": true,
+        "texts": [
+          "For example, the most common still-image photography format in the world is 35 mm, which was the dominant film size at the close of the analog film era."
+        ]
+      }
+    ]
+  },
+  "structural_stress": {
+    "onnx": {
+      "reloads": 1,
+      "calls": 33,
+      "errors": [],
+      "transcripts": {
+        "speech-11s.wav": [
+          "And so, my fellow Americans, ask not what your country can do for you. Ask what you can do for your country."
+        ],
+        "empty.wav": [
+          ""
+        ],
+        "short-10ms.wav": [
+          ""
+        ],
+        "boundary-25ms.wav": [
+          ""
+        ],
+        "speech-1s.wav": [
+          "And so..."
+        ],
+        "short-50ms.wav": [
+          ""
+        ],
+        "speech-4s.wav": [
+          "And so, my fellow Americans, ask"
+        ],
+        "speech-repeat-30s.wav": [
+          "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country. And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country. And so, my fellow Americans, ask not what your country can do for you,"
+        ],
+        "silence-1s.wav": [
+          "؟"
+        ],
+        "noise-1s.wav": [
+          "؟"
+        ],
+        "speech-repeat-22s.wav": [
+          "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country."
+        ]
+      }
+    },
+    "openvino_gpu": {
+      "reloads": 3,
+      "calls": 99,
+      "errors": [],
+      "transcripts": {
+        "speech-11s.wav": [
+          "And so, my fellow Americans, ask not what your country can do for you. Ask what you can do for your country."
+        ],
+        "empty.wav": [
+          ""
+        ],
+        "short-10ms.wav": [
+          ""
+        ],
+        "boundary-25ms.wav": [
+          ""
+        ],
+        "speech-1s.wav": [
+          "And so..."
+        ],
+        "short-50ms.wav": [
+          ""
+        ],
+        "speech-4s.wav": [
+          "And so, my fellow Americans, ask"
+        ],
+        "speech-repeat-30s.wav": [
+          "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country. And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country. And so, my fellow Americans, ask not what your country can do for you,"
+        ],
+        "silence-1s.wav": [
+          "؟"
+        ],
+        "noise-1s.wav": [
+          "؟"
+        ],
+        "speech-repeat-22s.wav": [
+          "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country."
+        ]
+      }
+    }
+  },
+  "reload_memory": {
+    "gpu_fresh_core": [
+      {
+        "rss_after_load_kib": 524428,
+        "rss_before_drop_kib": 452348,
+        "rss_after_drop_kib": 285568,
+        "drm_before_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2580868,
+              "drm-resident-gtt": 2583080,
+              "drm-total-gtt": 2583080
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1423744,
+              "drm-resident-gtt": 1425892,
+              "drm-total-gtt": 1425892
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1158188,
+        "rss_before_drop_kib": 479012,
+        "rss_after_drop_kib": 335264,
+        "drm_before_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2607504,
+              "drm-resident-gtt": 2611764,
+              "drm-total-gtt": 2611764
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1448332,
+              "drm-resident-gtt": 1452528,
+              "drm-total-gtt": 1452528
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1190180,
+        "rss_before_drop_kib": 494104,
+        "rss_after_drop_kib": 360032,
+        "drm_before_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2632092,
+              "drm-resident-gtt": 2638400,
+              "drm-total-gtt": 2638400
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1472924,
+              "drm-resident-gtt": 1479168,
+              "drm-total-gtt": 1479168
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1224988,
+        "rss_before_drop_kib": 513468,
+        "rss_after_drop_kib": 382068,
+        "drm_before_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2656680,
+              "drm-resident-gtt": 2665036,
+              "drm-total-gtt": 2665036
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1497512,
+              "drm-resident-gtt": 1505804,
+              "drm-total-gtt": 1505804
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1242416,
+        "rss_before_drop_kib": 536084,
+        "rss_after_drop_kib": 406924,
+        "drm_before_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2681268,
+              "drm-resident-gtt": 2691672,
+              "drm-total-gtt": 2691672
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1522100,
+              "drm-resident-gtt": 1532440,
+              "drm-total-gtt": 1532440
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1261312,
+        "rss_before_drop_kib": 555276,
+        "rss_after_drop_kib": 428060,
+        "drm_before_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2705856,
+              "drm-resident-gtt": 2718308,
+              "drm-total-gtt": 2718308
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1546688,
+              "drm-resident-gtt": 1559076,
+              "drm-total-gtt": 1559076
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1279620,
+        "rss_before_drop_kib": 574468,
+        "rss_after_drop_kib": 448308,
+        "drm_before_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2730444,
+              "drm-resident-gtt": 2744944,
+              "drm-total-gtt": 2744944
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1571276,
+              "drm-resident-gtt": 1585712,
+              "drm-total-gtt": 1585712
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1296592,
+        "rss_before_drop_kib": 593112,
+        "rss_after_drop_kib": 469088,
+        "drm_before_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2755032,
+              "drm-resident-gtt": 2771580,
+              "drm-total-gtt": 2771580
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1595864,
+              "drm-resident-gtt": 1612348,
+              "drm-total-gtt": 1612348
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1311224,
+        "rss_before_drop_kib": 613816,
+        "rss_after_drop_kib": 489848,
+        "drm_before_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2779620,
+              "drm-resident-gtt": 2798216,
+              "drm-total-gtt": 2798216
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1620452,
+              "drm-resident-gtt": 1638984,
+              "drm-total-gtt": 1638984
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1322884,
+        "rss_before_drop_kib": 634384,
+        "rss_after_drop_kib": 511520,
+        "drm_before_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2804208,
+              "drm-resident-gtt": 2824852,
+              "drm-total-gtt": 2824852
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1645040,
+              "drm-resident-gtt": 1665620,
+              "drm-total-gtt": 1665620
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1339264,
+        "rss_before_drop_kib": 653776,
+        "rss_after_drop_kib": 532452,
+        "drm_before_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2828796,
+              "drm-resident-gtt": 2851488,
+              "drm-total-gtt": 2851488
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1669628,
+              "drm-resident-gtt": 1692256,
+              "drm-total-gtt": 1692256
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1352452,
+        "rss_before_drop_kib": 672596,
+        "rss_after_drop_kib": 552408,
+        "drm_before_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2853384,
+              "drm-resident-gtt": 2878124,
+              "drm-total-gtt": 2878124
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1694216,
+              "drm-resident-gtt": 1718892,
+              "drm-total-gtt": 1718892
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1371268,
+        "rss_before_drop_kib": 691056,
+        "rss_after_drop_kib": 572440,
+        "drm_before_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2877972,
+              "drm-resident-gtt": 2904760,
+              "drm-total-gtt": 2904760
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1718804,
+              "drm-resident-gtt": 1745528,
+              "drm-total-gtt": 1745528
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1392268,
+        "rss_before_drop_kib": 710576,
+        "rss_after_drop_kib": 593260,
+        "drm_before_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2902560,
+              "drm-resident-gtt": 2931396,
+              "drm-total-gtt": 2931396
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1743392,
+              "drm-resident-gtt": 1772164,
+              "drm-total-gtt": 1772164
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1411184,
+        "rss_before_drop_kib": 730668,
+        "rss_after_drop_kib": 613672,
+        "drm_before_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2927148,
+              "drm-resident-gtt": 2958032,
+              "drm-total-gtt": 2958032
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "397",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1767980,
+              "drm-resident-gtt": 1798800,
+              "drm-total-gtt": 1798800
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      }
+    ],
+    "cpu": [
+      {
+        "rss_after_load_kib": 2180780,
+        "rss_before_drop_kib": 2337692,
+        "rss_after_drop_kib": 1516540,
+        "drm_before_drop": [],
+        "drm_after_drop": []
+      },
+      {
+        "rss_after_load_kib": 2188752,
+        "rss_before_drop_kib": 2341960,
+        "rss_after_drop_kib": 2118172,
+        "drm_before_drop": [],
+        "drm_after_drop": []
+      },
+      {
+        "rss_after_load_kib": 2191044,
+        "rss_before_drop_kib": 2341876,
+        "rss_after_drop_kib": 2124700,
+        "drm_before_drop": [],
+        "drm_after_drop": []
+      },
+      {
+        "rss_after_load_kib": 2191428,
+        "rss_before_drop_kib": 2342144,
+        "rss_after_drop_kib": 2125212,
+        "drm_before_drop": [],
+        "drm_after_drop": []
+      },
+      {
+        "rss_after_load_kib": 2191244,
+        "rss_before_drop_kib": 2342072,
+        "rss_after_drop_kib": 2165224,
+        "drm_before_drop": [],
+        "drm_after_drop": []
+      },
+      {
+        "rss_after_load_kib": 2231144,
+        "rss_before_drop_kib": 2342192,
+        "rss_after_drop_kib": 2098520,
+        "drm_before_drop": [],
+        "drm_after_drop": []
+      },
+      {
+        "rss_after_load_kib": 2190784,
+        "rss_before_drop_kib": 2341612,
+        "rss_after_drop_kib": 2119192,
+        "drm_before_drop": [],
+        "drm_after_drop": []
+      },
+      {
+        "rss_after_load_kib": 2192168,
+        "rss_before_drop_kib": 2343028,
+        "rss_after_drop_kib": 2135956,
+        "drm_before_drop": [],
+        "drm_after_drop": []
+      },
+      {
+        "rss_after_load_kib": 2201788,
+        "rss_before_drop_kib": 2342264,
+        "rss_after_drop_kib": 2120444,
+        "drm_before_drop": [],
+        "drm_after_drop": []
+      },
+      {
+        "rss_after_load_kib": 2191528,
+        "rss_before_drop_kib": 2342364,
+        "rss_after_drop_kib": 2135316,
+        "drm_before_drop": [],
+        "drm_after_drop": []
+      },
+      {
+        "rss_after_load_kib": 2201228,
+        "rss_before_drop_kib": 2341956,
+        "rss_after_drop_kib": 2132324,
+        "drm_before_drop": [],
+        "drm_after_drop": []
+      },
+      {
+        "rss_after_load_kib": 2198156,
+        "rss_before_drop_kib": 2343684,
+        "rss_after_drop_kib": 2132452,
+        "drm_before_drop": [],
+        "drm_after_drop": []
+      },
+      {
+        "rss_after_load_kib": 2198284,
+        "rss_before_drop_kib": 2342084,
+        "rss_after_drop_kib": 2132452,
+        "drm_before_drop": [],
+        "drm_after_drop": []
+      },
+      {
+        "rss_after_load_kib": 2198284,
+        "rss_before_drop_kib": 2343624,
+        "rss_after_drop_kib": 2132452,
+        "drm_before_drop": [],
+        "drm_after_drop": []
+      },
+      {
+        "rss_after_load_kib": 2198284,
+        "rss_before_drop_kib": 2342572,
+        "rss_after_drop_kib": 2132452,
+        "drm_before_drop": [],
+        "drm_after_drop": []
+      }
+    ],
+    "gpu_shared_core": [
+      {
+        "rss_after_load_kib": 524464,
+        "rss_before_drop_kib": 452444,
+        "rss_after_drop_kib": 236508,
+        "drm_before_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2580864,
+              "drm-resident-gtt": 2583076,
+              "drm-total-gtt": 2583076
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1423744,
+              "drm-resident-gtt": 1425892,
+              "drm-total-gtt": 1425892
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1158312,
+        "rss_before_drop_kib": 431172,
+        "rss_after_drop_kib": 314340,
+        "drm_before_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2582916,
+              "drm-resident-gtt": 2585128,
+              "drm-total-gtt": 2585128
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1423748,
+              "drm-resident-gtt": 1425896,
+              "drm-total-gtt": 1425896
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1161536,
+        "rss_before_drop_kib": 432060,
+        "rss_after_drop_kib": 273772,
+        "drm_before_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2603396,
+              "drm-resident-gtt": 2605608,
+              "drm-total-gtt": 2605608
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1444228,
+              "drm-resident-gtt": 1446376,
+              "drm-total-gtt": 1446376
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1160464,
+        "rss_before_drop_kib": 433148,
+        "rss_after_drop_kib": 277008,
+        "drm_before_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2603396,
+              "drm-resident-gtt": 2605608,
+              "drm-total-gtt": 2605608
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1444228,
+              "drm-resident-gtt": 1446376,
+              "drm-total-gtt": 1446376
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1160364,
+        "rss_before_drop_kib": 433280,
+        "rss_after_drop_kib": 277356,
+        "drm_before_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2603400,
+              "drm-resident-gtt": 2605612,
+              "drm-total-gtt": 2605612
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1444228,
+              "drm-resident-gtt": 1446376,
+              "drm-total-gtt": 1446376
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1164028,
+        "rss_before_drop_kib": 433852,
+        "rss_after_drop_kib": 277936,
+        "drm_before_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2603400,
+              "drm-resident-gtt": 2605612,
+              "drm-total-gtt": 2605612
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1444228,
+              "drm-resident-gtt": 1446376,
+              "drm-total-gtt": 1446376
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1162988,
+        "rss_before_drop_kib": 434732,
+        "rss_after_drop_kib": 278920,
+        "drm_before_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2603400,
+              "drm-resident-gtt": 2605612,
+              "drm-total-gtt": 2605612
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1444228,
+              "drm-resident-gtt": 1446376,
+              "drm-total-gtt": 1446376
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1162416,
+        "rss_before_drop_kib": 434284,
+        "rss_after_drop_kib": 280296,
+        "drm_before_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2603400,
+              "drm-resident-gtt": 2605612,
+              "drm-total-gtt": 2605612
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1444228,
+              "drm-resident-gtt": 1446376,
+              "drm-total-gtt": 1446376
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1163904,
+        "rss_before_drop_kib": 434244,
+        "rss_after_drop_kib": 280520,
+        "drm_before_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2603404,
+              "drm-resident-gtt": 2605616,
+              "drm-total-gtt": 2605616
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1444228,
+              "drm-resident-gtt": 1446376,
+              "drm-total-gtt": 1446376
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1162444,
+        "rss_before_drop_kib": 434304,
+        "rss_after_drop_kib": 318460,
+        "drm_before_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-resident-gtt": 2605616,
+              "drm-total-gtt": 2605616
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-resident-gtt": 1446376,
+              "drm-total-gtt": 1446376
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1161928,
+        "rss_before_drop_kib": 434768,
+        "rss_after_drop_kib": 281080,
+        "drm_before_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2603400,
+              "drm-resident-gtt": 2605612,
+              "drm-total-gtt": 2605612
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1444228,
+              "drm-resident-gtt": 1446376,
+              "drm-total-gtt": 1446376
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1160864,
+        "rss_before_drop_kib": 434356,
+        "rss_after_drop_kib": 280780,
+        "drm_before_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2603400,
+              "drm-resident-gtt": 2605612,
+              "drm-total-gtt": 2605612
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1444228,
+              "drm-resident-gtt": 1446376,
+              "drm-total-gtt": 1446376
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1161548,
+        "rss_before_drop_kib": 434600,
+        "rss_after_drop_kib": 280732,
+        "drm_before_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2603400,
+              "drm-resident-gtt": 2605612,
+              "drm-total-gtt": 2605612
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-resident-gtt": 1446376,
+              "drm-total-gtt": 1446376
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1160884,
+        "rss_before_drop_kib": 434464,
+        "rss_after_drop_kib": 280948,
+        "drm_before_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2603404,
+              "drm-resident-gtt": 2605616,
+              "drm-total-gtt": 2605616
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1444228,
+              "drm-resident-gtt": 1446376,
+              "drm-total-gtt": 1446376
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      },
+      {
+        "rss_after_load_kib": 1162808,
+        "rss_before_drop_kib": 434268,
+        "rss_after_drop_kib": 280928,
+        "drm_before_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 2603400,
+              "drm-resident-gtt": 2605612,
+              "drm-total-gtt": 2605612
+            },
+            "pci": "0000:00:02.0"
+          }
+        ],
+        "drm_after_drop": [
+          {
+            "client_id": "409",
+            "driver": "xe",
+            "memory_kib": {
+              "drm-active-gtt": 1444228,
+              "drm-resident-gtt": 1446376,
+              "drm-total-gtt": 1446376
+            },
+            "pci": "0000:00:02.0"
+          }
+        ]
+      }
+    ]
+  },
+  "native_runtime_reproducer": {
+    "fresh": [
+      {
+        "iteration": 0,
+        "active": {
+          "rss_kib": 2599844,
+          "drm_resident_kib": 2579824
+        },
+        "after_drop": {
+          "rss_kib": 250348,
+          "drm_resident_kib": 1422640
+        }
+      },
+      {
+        "iteration": 1,
+        "active": {
+          "rss_kib": 2617848,
+          "drm_resident_kib": 2608508
+        },
+        "after_drop": {
+          "rss_kib": 1086296,
+          "drm_resident_kib": 1449272
+        }
+      },
+      {
+        "iteration": 2,
+        "active": {
+          "rss_kib": 2638888,
+          "drm_resident_kib": 2635144
+        },
+        "after_drop": {
+          "rss_kib": 1108160,
+          "drm_resident_kib": 1475912
+        }
+      },
+      {
+        "iteration": 3,
+        "active": {
+          "rss_kib": 2656652,
+          "drm_resident_kib": 2661784
+        },
+        "after_drop": {
+          "rss_kib": 1129248,
+          "drm_resident_kib": 1502552
+        }
+      },
+      {
+        "iteration": 4,
+        "active": {
+          "rss_kib": 2677560,
+          "drm_resident_kib": 2688420
+        },
+        "after_drop": {
+          "rss_kib": 1149756,
+          "drm_resident_kib": 1529184
+        }
+      },
+      {
+        "iteration": 5,
+        "active": {
+          "rss_kib": 2697144,
+          "drm_resident_kib": 2715056
+        },
+        "after_drop": {
+          "rss_kib": 1170132,
+          "drm_resident_kib": 1555820
+        }
+      },
+      {
+        "iteration": 6,
+        "active": {
+          "rss_kib": 2716228,
+          "drm_resident_kib": 2741688
+        },
+        "after_drop": {
+          "rss_kib": 1190492,
+          "drm_resident_kib": 1582456
+        }
+      },
+      {
+        "iteration": 7,
+        "active": {
+          "rss_kib": 2735680,
+          "drm_resident_kib": 2768324
+        },
+        "after_drop": {
+          "rss_kib": 1211092,
+          "drm_resident_kib": 1609092
+        }
+      },
+      {
+        "iteration": 8,
+        "active": {
+          "rss_kib": 2755584,
+          "drm_resident_kib": 2794964
+        },
+        "after_drop": {
+          "rss_kib": 1231664,
+          "drm_resident_kib": 1635728
+        }
+      },
+      {
+        "iteration": 9,
+        "active": {
+          "rss_kib": 2775068,
+          "drm_resident_kib": 2821596
+        },
+        "after_drop": {
+          "rss_kib": 1252296,
+          "drm_resident_kib": 1662364
+        }
+      }
+    ],
+    "shared": [
+      {
+        "iteration": 0,
+        "active": {
+          "rss_kib": 2600088,
+          "drm_resident_kib": 2579836
+        },
+        "after_drop": {
+          "rss_kib": 250292,
+          "drm_resident_kib": 1422652
+        }
+      },
+      {
+        "iteration": 1,
+        "active": {
+          "rss_kib": 2570700,
+          "drm_resident_kib": 2581888
+        },
+        "after_drop": {
+          "rss_kib": 1063496,
+          "drm_resident_kib": 1422652
+        }
+      },
+      {
+        "iteration": 2,
+        "active": {
+          "rss_kib": 2570776,
+          "drm_resident_kib": 2581888
+        },
+        "after_drop": {
+          "rss_kib": 1064400,
+          "drm_resident_kib": 1422648
+        }
+      },
+      {
+        "iteration": 3,
+        "active": {
+          "rss_kib": 2572596,
+          "drm_resident_kib": 2581884
+        },
+        "after_drop": {
+          "rss_kib": 1064476,
+          "drm_resident_kib": 1422652
+        }
+      },
+      {
+        "iteration": 4,
+        "active": {
+          "rss_kib": 2570752,
+          "drm_resident_kib": 2581888
+        },
+        "after_drop": {
+          "rss_kib": 1064608,
+          "drm_resident_kib": 1422648
+        }
+      },
+      {
+        "iteration": 5,
+        "active": {
+          "rss_kib": 2572688,
+          "drm_resident_kib": 2581888
+        },
+        "after_drop": {
+          "rss_kib": 1064612,
+          "drm_resident_kib": 1422652
+        }
+      },
+      {
+        "iteration": 6,
+        "active": {
+          "rss_kib": 2570792,
+          "drm_resident_kib": 2581888
+        },
+        "after_drop": {
+          "rss_kib": 1064584,
+          "drm_resident_kib": 1422648
+        }
+      },
+      {
+        "iteration": 7,
+        "active": {
+          "rss_kib": 2570772,
+          "drm_resident_kib": 2581888
+        },
+        "after_drop": {
+          "rss_kib": 1064652,
+          "drm_resident_kib": 1422652
+        }
+      },
+      {
+        "iteration": 8,
+        "active": {
+          "rss_kib": 2570784,
+          "drm_resident_kib": 2581892
+        },
+        "after_drop": {
+          "rss_kib": 1064744,
+          "drm_resident_kib": 1422648
+        }
+      },
+      {
+        "iteration": 9,
+        "active": {
+          "rss_kib": 2570828,
+          "drm_resident_kib": 2581892
+        },
+        "after_drop": {
+          "rss_kib": 1064676,
+          "drm_resident_kib": 1422652
+        }
+      }
+    ]
+  }
+}

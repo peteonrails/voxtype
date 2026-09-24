@@ -73,6 +73,9 @@ pub mod omnilingual;
 #[cfg(feature = "cohere")]
 pub mod cohere;
 
+#[cfg(feature = "cohere-openvino")]
+mod cohere_openvino;
+
 /// Cohere-specific log-mel feature extractor (NeMo conventions, 128 mels).
 #[cfg(feature = "cohere")]
 pub mod cohere_fbank;

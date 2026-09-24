@@ -3882,6 +3882,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "openvino"
+version = "0.11.0"
+source = "git+https://github.com/voxtype/openvino-rs?branch=whisper-pipeline-with-properties#8109638cfc78eb16953316627bf194d59ca521ab"
+dependencies = [
+ "openvino-finder",
+ "openvino-sys",
+]
+
+[[package]]
 name = "openvino-finder"
 version = "0.11.0"
 source = "git+https://github.com/voxtype/openvino-rs?branch=whisper-pipeline-with-properties#8109638cfc78eb16953316627bf194d59ca521ab"
@@ -6129,6 +6138,7 @@ dependencies = [
  "nix",
  "notify",
  "num_cpus",
+ "openvino",
  "openvino-genai",
  "ort",
  "parakeet-rs",

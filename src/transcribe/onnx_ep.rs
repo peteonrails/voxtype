@@ -24,7 +24,7 @@
 #[cfg(feature = "onnx-common")]
 use ort::execution_providers::ExecutionProviderDispatch;
 #[cfg(feature = "onnx-common")]
-use ort::session::builder::{BuilderResult, SessionBuilder};
+use ort::session::builder::SessionBuilder;
 
 /// Register GPU EPs onto a session builder.
 ///
@@ -37,7 +37,7 @@ pub fn register_gpu_eps(
     builder: SessionBuilder,
     engine_label: &str,
     session_label: &str,
-) -> BuilderResult {
+) -> ort::Result<SessionBuilder> {
     let providers = compiled_providers();
     if providers.is_empty() {
         return Ok(builder);
@@ -45,7 +45,10 @@ pub fn register_gpu_eps(
     let names: Vec<&'static str> = providers.iter().map(|(n, _)| *n).collect();
     tracing::info!("{engine_label} {session_label}: registering execution providers {names:?}");
     let dispatches: Vec<_> = providers.into_iter().map(|(_, ep)| ep).collect();
-    builder.with_execution_providers(dispatches)
+    // Callers propagate initialization errors rather than recovering the builder.
+    builder
+        .with_execution_providers(dispatches)
+        .map_err(Into::into)
 }
 
 #[cfg(feature = "onnx-common")]

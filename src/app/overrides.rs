@@ -162,6 +162,22 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         config.whisper.remote_api_key = Some(key.clone());
     }
 
+    // Cohere overrides (after file and environment configuration).
+    if let Some(ref backend) = cli.cohere_encoder_backend {
+        match backend.parse::<config::CohereEncoderBackend>() {
+            Ok(backend) => {
+                config
+                    .cohere
+                    .get_or_insert_with(config::CohereConfig::default)
+                    .encoder_backend = backend;
+            }
+            Err(error) => {
+                eprintln!("Error: {}", error);
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Soniox overrides
     if let Some(ref key) = cli.soniox_api_key {
         config
@@ -319,4 +335,47 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     }
 
     top_level_model
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn cohere_encoder_backend_cli_overrides_loaded_config() {
+        for (loaded, selected) in [
+            (config::CohereEncoderBackend::Onnx, "openvino_gpu"),
+            (config::CohereEncoderBackend::OpenvinoGpu, "onnx"),
+        ] {
+            let mut config = config::Config {
+                cohere: Some(config::CohereConfig {
+                    encoder_backend: loaded,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let cli = Cli::parse_from(["voxtype", "--cohere-encoder-backend", selected]);
+            apply_cli_overrides(&mut config, &cli);
+            assert_eq!(
+                config.cohere.unwrap().encoder_backend,
+                selected.parse().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn cohere_encoder_backend_cli_creates_section_only_when_selected() {
+        let mut config = config::Config::default();
+        let cli = Cli::parse_from(["voxtype"]);
+        apply_cli_overrides(&mut config, &cli);
+        assert!(config.cohere.is_none());
+
+        let cli = Cli::parse_from(["voxtype", "--cohere-encoder-backend", "openvino_gpu"]);
+        apply_cli_overrides(&mut config, &cli);
+        assert_eq!(
+            config.cohere.unwrap().encoder_backend,
+            config::CohereEncoderBackend::OpenvinoGpu
+        );
+    }
 }

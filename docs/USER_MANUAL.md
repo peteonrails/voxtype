@@ -1096,6 +1096,39 @@ voxtype setup model      # Pick the Cohere section, confirm the size warning
 
 The download fetches five files from the `cstr/cohere-transcribe-onnx-int8` HuggingFace repository (Apache 2.0 licensed, not gated): the encoder/decoder ONNX graphs, their weight sidecars, and `tokens.txt`.
 
+#### Experimental Intel GPU encoder
+
+A build with `cohere-openvino` can run the Cohere encoder on Intel GPU using native
+OpenVINO. The decoder remains the original ONNX Runtime CPU implementation.
+The existing `cohere-transcribe-q4f16` model files and weights are used unchanged;
+no conversion or requantization is needed.
+
+This path has been validated with native OpenVINO **2026.4** on Intel Arc B390.
+It requires system Intel compute drivers and a loadable native OpenVINO dynamic
+library with its GPU plugin. It does not use ONNX Runtime's OpenVINO execution
+provider or its older bundled runtime.
+
+```toml
+engine = "cohere"
+
+[cohere]
+model = "cohere-transcribe-q4f16"
+encoder_backend = "openvino_gpu"
+language = "en"
+```
+
+Alternatively, use `voxtype --engine cohere --cohere-encoder-backend openvino_gpu daemon`
+or set `VOXTYPE_COHERE_ENCODER_BACKEND=openvino_gpu`. CLI takes precedence over the
+environment, which takes precedence over the file (all supplied values must be
+valid). `voxtype config set cohere.encoder_backend openvino_gpu` also exposes the
+choice and checks compiled support. The TUI does not yet have a backend picker.
+
+**No silent CPU fallback:** if GPU setup or compilation fails, transcription
+fails with an error. Return to the existing backend by selecting `onnx`.
+Old configurations default to `onnx` and do not opt into this experiment.
+See [configuration](CONFIGURATION.md#encoder_backend) and
+[troubleshooting](TROUBLESHOOTING.md#cohere-intel-gpu-encoder-experimental).
+
 ---
 
 ## Multi-Model Support
