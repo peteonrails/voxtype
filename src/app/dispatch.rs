@@ -12,6 +12,7 @@ use super::config_schema::run_config_schema;
 use super::config_set::{run_config_set, run_config_unset};
 use super::config_show::show_config;
 use super::info::run_info_command;
+use super::learn::run_learn;
 use super::meeting::run_meeting_command;
 use super::record::send_record_command;
 use super::status::run_status;
@@ -447,6 +448,14 @@ pub(crate) async fn dispatch(
 
         Commands::Meeting { action } => {
             run_meeting_command(&config, action).await?;
+        }
+
+        Commands::Learn {
+            from_selection: _,
+            from_clipboard,
+            from_stdin,
+        } => {
+            run_learn(cli.config.clone(), from_clipboard, from_stdin).await?;
         }
 
         Commands::CheckUpdate => {

@@ -669,4 +669,30 @@ mod tests {
             _ => panic!("Expected Transcribe command"),
         }
     }
+
+    #[test]
+    fn test_learn_default_is_selection() {
+        let cli = Cli::parse_from(["voxtype", "learn"]);
+        match cli.command {
+            Some(Commands::Learn {
+                from_selection,
+                from_clipboard,
+                from_stdin,
+            }) => {
+                assert!(!from_selection);
+                assert!(!from_clipboard);
+                assert!(!from_stdin);
+            }
+            _ => panic!("Expected Learn command"),
+        }
+    }
+
+    #[test]
+    fn test_learn_from_stdin() {
+        let cli = Cli::parse_from(["voxtype", "learn", "--from-stdin"]);
+        match cli.command {
+            Some(Commands::Learn { from_stdin, .. }) => assert!(from_stdin),
+            _ => panic!("Expected Learn command"),
+        }
+    }
 }

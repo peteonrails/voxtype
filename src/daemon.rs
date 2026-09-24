@@ -2611,6 +2611,7 @@ impl Daemon {
                     self.reset_to_idle(state).await;
                 } else {
                     tracing::info!("Transcribed: {:?}", text);
+                    crate::text::learn::record_last_transcript(&text);
 
                     // Apply text processing (replacements, punctuation)
                     let processed_text = self.text_processor.process(&text);
