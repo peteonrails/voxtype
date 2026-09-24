@@ -403,10 +403,14 @@ fn print_variants_text(inv: &setup::binary::Inventory) {
 
     println!();
     println!("Hardware");
-    println!(
-        "  CPU:           AVX2={}, AVX-512={}",
-        inv.cpu.avx2, inv.cpu.avx512
-    );
+    if inv.cpu.is_x86_64() {
+        println!(
+            "  CPU:           AVX2={}, AVX-512={}",
+            inv.cpu.avx2, inv.cpu.avx512
+        );
+    } else {
+        println!("  CPU:           {}", inv.cpu.arch);
+    }
     println!(
         "  GPU:           NVIDIA={}, AMD={}",
         inv.gpus.nvidia, inv.gpus.amd
@@ -414,16 +418,21 @@ fn print_variants_text(inv: &setup::binary::Inventory) {
 
     println!();
     println!("Recommended for this hardware");
-    println!(
-        "  Whisper:       ★ {}  — {}",
-        inv.recommendation.whisper.display(),
-        inv.recommendation.whisper_reason
-    );
-    println!(
-        "  ONNX:          ★ {}  — {}",
-        inv.recommendation.onnx.display(),
-        inv.recommendation.onnx_reason
-    );
+    if cfg!(target_os = "macos") {
+        // The variants are Linux release binaries; macOS ships one build.
+        println!("  Not applicable on macOS, which ships a single build with no variants.");
+    } else {
+        println!(
+            "  Whisper:       ★ {}  — {}",
+            inv.recommendation.whisper.display(),
+            inv.recommendation.whisper_reason
+        );
+        println!(
+            "  ONNX:          ★ {}  — {}",
+            inv.recommendation.onnx.display(),
+            inv.recommendation.onnx_reason
+        );
+    }
 
     println!();
     if matches!(inv.install_kind, InstallKind::Source) {
