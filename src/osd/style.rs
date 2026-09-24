@@ -32,6 +32,10 @@ pub struct RuntimeOsdStyle {
     pub position: OsdPosition,
     pub margin_px: u32,
     pub top_margin: f32,
+    /// Effective recording auto-stop limit in seconds. Threaded through
+    /// from the daemon (file < env < CLI) so the QML countdown matches
+    /// the actual auto-stop instead of re-parsing config files.
+    pub max_duration_secs: u32,
     pub package_dir: Option<PathBuf>,
     pub asset_root: Option<PathBuf>,
     pub custom_qml: Option<PathBuf>,
@@ -44,6 +48,7 @@ pub struct RuntimeOsdStyle {
 pub fn resolve_runtime_style(
     osd: &OsdConfig,
     style_override: Option<&str>,
+    max_duration_secs: u32,
 ) -> Result<RuntimeOsdStyle, VoxtypeError> {
     let style_name = style_override
         .filter(|s| !s.trim().is_empty())
@@ -107,6 +112,7 @@ pub fn resolve_runtime_style(
         position: osd.position,
         margin_px: osd.margin_px,
         top_margin: osd.top_margin,
+        max_duration_secs,
         package_dir,
         asset_root,
         custom_qml,
@@ -425,12 +431,18 @@ mod tests {
 
     #[test]
     fn default_style_has_no_package_and_uses_omarchy_palette() {
-        let style = resolve_runtime_style(&OsdConfig::default(), None).unwrap();
+        let style = resolve_runtime_style(&OsdConfig::default(), None, 60).unwrap();
         assert_eq!(style.style, "default");
         assert_eq!(style.palette, OsdPaletteSource::Omarchy);
         assert!(style.package_dir.is_none());
         assert!(style.custom_qml.is_none());
         assert!(style.colors.contains_key("accent"));
+    }
+
+    #[test]
+    fn runtime_style_carries_effective_max_duration() {
+        let style = resolve_runtime_style(&OsdConfig::default(), None, 120).unwrap();
+        assert_eq!(style.max_duration_secs, 120);
     }
 
     #[test]
@@ -467,7 +479,7 @@ mod tests {
             plugin_path: Some(tmp.path().to_path_buf()),
             ..OsdConfig::default()
         };
-        let style = resolve_runtime_style(&cfg, None).unwrap();
+        let style = resolve_runtime_style(&cfg, None, 60).unwrap();
         assert_eq!(style.palette, OsdPaletteSource::Fallback);
         assert_eq!(style.layout, OsdLayout::Wide);
         assert_eq!(style.frame.background, "none");
@@ -500,7 +512,7 @@ mod tests {
             plugin_path: Some(tmp.path().to_path_buf()),
             ..OsdConfig::default()
         };
-        let style = resolve_runtime_style(&cfg, None).unwrap();
+        let style = resolve_runtime_style(&cfg, None, 60).unwrap();
         assert_eq!(style.palette, OsdPaletteSource::Package);
         assert_eq!(
             style.colors.get("accent").map(String::as_str),
@@ -534,7 +546,7 @@ mod tests {
             palette: Some(OsdPaletteSource::Omarchy),
             ..OsdConfig::default()
         };
-        let style = resolve_runtime_style(&cfg, None).unwrap();
+        let style = resolve_runtime_style(&cfg, None, 60).unwrap();
         assert_eq!(style.palette, OsdPaletteSource::Omarchy);
         assert_ne!(
             style.colors.get("accent").map(String::as_str),
@@ -542,7 +554,7 @@ mod tests {
         );
 
         cfg.palette = None;
-        let style = resolve_runtime_style(&cfg, None).unwrap();
+        let style = resolve_runtime_style(&cfg, None, 60).unwrap();
         assert_eq!(style.palette, OsdPaletteSource::Package);
         assert_eq!(
             style.colors.get("accent").map(String::as_str),
@@ -560,7 +572,7 @@ mod tests {
         assert!(qml_entry.is_file());
 
         let style_name = package_dir.to_string_lossy().to_string();
-        let style = resolve_runtime_style(&OsdConfig::default(), Some(&style_name)).unwrap();
+        let style = resolve_runtime_style(&OsdConfig::default(), Some(&style_name), 60).unwrap();
 
         assert_eq!(style.palette, OsdPaletteSource::Package);
         assert_eq!(style.layout, OsdLayout::Custom);
@@ -605,7 +617,7 @@ mod tests {
             visual: user_visual,
             ..OsdConfig::default()
         };
-        let style = resolve_runtime_style(&cfg, None).unwrap();
+        let style = resolve_runtime_style(&cfg, None, 60).unwrap();
         assert_eq!(style.layout, OsdLayout::Orb);
         assert_eq!(style.frame.background, "none");
         assert_eq!(style.visual.layers.len(), 1);
@@ -617,7 +629,7 @@ mod tests {
             style: "definitely-not-installed".to_string(),
             ..OsdConfig::default()
         };
-        let err = resolve_runtime_style(&cfg, None).unwrap_err();
+        let err = resolve_runtime_style(&cfg, None, 60).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("definitely-not-installed"), "got: {msg}");
         assert!(msg.contains("Searched"), "got: {msg}");
@@ -730,7 +742,7 @@ mod tests {
             plugin_path: Some(tmp.path().join("nope")),
             ..OsdConfig::default()
         };
-        let err = resolve_runtime_style(&cfg, None).unwrap_err();
+        let err = resolve_runtime_style(&cfg, None, 60).unwrap_err();
         assert!(err.to_string().contains(PACKAGE_MANIFEST));
     }
 
@@ -751,7 +763,7 @@ mod tests {
             plugin_path: Some(tmp.path().to_path_buf()),
             ..OsdConfig::default()
         };
-        let err = resolve_runtime_style(&cfg, None).unwrap_err();
+        let err = resolve_runtime_style(&cfg, None, 60).unwrap_err();
         assert!(err.to_string().contains("Missing.qml"));
     }
 
