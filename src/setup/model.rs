@@ -644,6 +644,49 @@ const COHERE_MODELS: &[CohereModelInfo] = &[
     },
 ];
 
+/// Curated transcribe.cpp Cohere weights. The repository revision and SHA-256
+/// values come from the official handy-computer Hugging Face file metadata.
+/// Q4_K_M is the small, Vulkan-tested default; Q8_0 is the larger reference
+/// quantization. The intermediate and 4 GB variants are still usable by path.
+pub(crate) struct CohereGgufModelInfo {
+    pub name: &'static str,
+    pub size: u64,
+    pub sha256: &'static str,
+    pub description: &'static str,
+}
+
+const COHERE_GGUF_REPO: &str = "handy-computer/cohere-transcribe-03-2026-gguf";
+const COHERE_GGUF_REVISION: &str = "ab667acedcb5d8d56837ef3ed3568c3ad50dde47";
+const COHERE_GGUF_MODELS: &[CohereGgufModelInfo] = &[
+    CohereGgufModelInfo {
+        name: "cohere-transcribe-03-2026-Q4_K_M.gguf",
+        size: 1_558_162_944,
+        sha256: "0ea56826d8bd5d74b7143a4a04e022dc1bb75452cfae49d98b6acb0c1d16a1fb",
+        description: "Q4_K_M, smaller and tested on Intel Vulkan",
+    },
+    CohereGgufModelInfo {
+        name: "cohere-transcribe-03-2026-Q8_0.gguf",
+        size: 2_410_655_232,
+        sha256: "931916663432fd895423a4291a8400221802b288967ca2d435fc5e3141c9e71e",
+        description: "Q8_0, larger reference quantization",
+    },
+];
+
+pub(crate) fn cohere_gguf_models() -> &'static [CohereGgufModelInfo] {
+    COHERE_GGUF_MODELS
+}
+
+pub(crate) fn find_cohere_gguf_model(name: &str) -> Option<&'static CohereGgufModelInfo> {
+    COHERE_GGUF_MODELS.iter().find(|model| model.name == name)
+}
+
+fn cohere_gguf_url(model: &CohereGgufModelInfo) -> String {
+    format!(
+        "https://huggingface.co/{COHERE_GGUF_REPO}/resolve/{COHERE_GGUF_REVISION}/{}",
+        model.name
+    )
+}
+
 // =============================================================================
 // ModelArtifact implementations
 // =============================================================================
@@ -1254,9 +1297,7 @@ fn curl_download(url: &str, dest: &Path) -> anyhow::Result<std::path::PathBuf> {
                 s.code().unwrap_or(-1)
             ));
             anyhow::bail!(
-                "Download failed for {} from {}.\n  \
-                 If this persists, check models.voxtype.io status: \
-                 https://www.cloudflarestatus.com/",
+                "Download failed for {} from {}. Check the source and network connection.",
                 dest.display(),
                 url
             )
@@ -1328,9 +1369,8 @@ fn download_to_part(
             Some(status) => {
                 let _ = std::fs::remove_file(&part);
                 anyhow::bail!(
-                    "Download failed for {} from {} (curl exited with code {}).\n  \
-                     If this persists, check models.voxtype.io status: \
-                     https://www.cloudflarestatus.com/",
+                    "Download failed for {} from {} (curl exited with code {}). \
+                     Check the source and network connection.",
                     dest.display(),
                     url,
                     status.code().unwrap_or(-1)
@@ -1442,6 +1482,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let dolphin_available = cfg!(feature = "dolphin");
     let omnilingual_available = cfg!(feature = "omnilingual");
     let cohere_available = cfg!(feature = "cohere");
+    let cohere_gguf_available = cfg!(feature = "cohere-gguf");
     let openvino_available = cfg!(feature = "openvino-whisper");
     let whisper_count = MODELS.len();
     let parakeet_count = PARAKEET_MODELS.len();
@@ -1451,6 +1492,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let dolphin_count = DOLPHIN_MODELS.len();
     let omnilingual_count = OMNILINGUAL_MODELS.len();
     let cohere_count = COHERE_MODELS.len();
+    let cohere_gguf_count = COHERE_GGUF_MODELS.len();
     let openvino_count = OPENVINO_MODELS.len();
 
     let available_count = |available: bool, count: usize| if available { count } else { 0 };
@@ -1462,6 +1504,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         + available_count(dolphin_available, dolphin_count)
         + available_count(omnilingual_available, omnilingual_count)
         + available_count(cohere_available, cohere_count)
+        + available_count(cohere_gguf_available, cohere_gguf_count)
         + available_count(openvino_available, openvino_count);
 
     // --- Whisper Section ---
@@ -1728,10 +1771,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     // --- Cohere Section ---
     let cohere_offset =
         omnilingual_offset + available_count(omnilingual_available, omnilingual_count);
-    println!(
-        "\n--- Cohere Transcribe (Cohere Labs, #1 Open ASR Leaderboard){} ---\n",
-        AMD_CPU_ONLY_TAG
-    );
+    println!("\n--- Cohere Transcribe ONNX{} ---\n", AMD_CPU_ONLY_TAG);
 
     if cohere_available {
         for (i, model) in COHERE_MODELS.iter().enumerate() {
@@ -1762,8 +1802,36 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         println!("  \x1b[90m(not available - rebuild with --features cohere)\x1b[0m");
     }
 
+    let cohere_gguf_offset = cohere_offset + available_count(cohere_available, cohere_count);
+    println!("\n--- Cohere Transcribe GGUF (transcribe.cpp, Vulkan-capable) ---\n");
+    if cohere_gguf_available {
+        for (i, model) in COHERE_GGUF_MODELS.iter().enumerate() {
+            let path = models_dir.join(model.name);
+            let installed = validate_cohere_gguf_model(&path, model).is_ok();
+            let is_current = is_cohere_engine && current_cohere_model == Some(model.name);
+            let star = if is_current { "*" } else { " " };
+            let status = if installed {
+                "\x1b[32m[installed]\x1b[0m"
+            } else {
+                ""
+            };
+            println!(
+                " {}[{:>2}] {:<44} ({:.2} GB) {} {}",
+                star,
+                cohere_gguf_offset + i + 1,
+                model.name,
+                model.size as f64 / 1_000_000_000.0,
+                model.description,
+                status
+            );
+        }
+    } else {
+        println!("  \x1b[90m(not available - rebuild with --features cohere-gguf)\x1b[0m");
+    }
+
     // --- OpenVINO Section ---
-    let openvino_offset = cohere_offset + available_count(cohere_available, cohere_count);
+    let openvino_offset =
+        cohere_gguf_offset + available_count(cohere_gguf_available, cohere_gguf_count);
     println!("\n--- OpenVINO Whisper (Intel NPU/CPU/GPU via OpenVINO) ---\n");
 
     if openvino_available {
@@ -1847,6 +1915,9 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     } else if cohere_available && selection <= cohere_offset + cohere_count {
         let idx = selection - cohere_offset;
         handle_cohere_selection(idx).await
+    } else if cohere_gguf_available && selection <= cohere_gguf_offset + cohere_gguf_count {
+        let idx = selection - cohere_gguf_offset;
+        handle_cohere_gguf_selection(idx).await
     } else if openvino_available && selection <= openvino_offset + openvino_count {
         let idx = selection - openvino_offset;
         handle_openvino_selection(idx, &config).await
@@ -2082,6 +2153,8 @@ const GGML_MAGIC: [u8; 4] = *b"lmgg";
 pub(crate) enum ContentCheck {
     /// ggml container: whisper models and the Silero VAD model.
     Ggml,
+    /// GGUF container used by transcribe.cpp models.
+    Gguf,
     /// No format marker worth checking (ONNX protobufs); completeness only.
     SizeOnly,
 }
@@ -2111,16 +2184,27 @@ pub(crate) fn validate_download(
         }
     }
 
-    if check == ContentCheck::Ggml {
+    if matches!(check, ContentCheck::Ggml | ContentCheck::Gguf) {
         let mut magic = [0u8; 4];
         std::fs::File::open(path)
             .and_then(|mut f| f.read_exact(&mut magic))
             .map_err(|e| anyhow::anyhow!("could not read the download: {}", e))?;
-        if magic != GGML_MAGIC {
+        let expected_magic = if check == ContentCheck::Gguf {
+            *b"GGUF"
+        } else {
+            GGML_MAGIC
+        };
+        if magic != expected_magic {
+            let format = if check == ContentCheck::Gguf {
+                "not a GGUF model"
+            } else {
+                "not a ggml model"
+            };
             anyhow::bail!(
-                "not a ggml model: expected magic {:02x?}, got {:02x?}. \
+                "{}: expected magic {:02x?}, got {:02x?}. \
                  The server likely returned an error page instead of the model.",
-                GGML_MAGIC,
+                format,
+                expected_magic,
                 magic
             );
         }
@@ -2857,7 +2941,11 @@ pub fn cohere_dir_name(name: &str) -> Option<&'static str> {
 
 /// Cohere names to show for `voxtype setup --model`.
 pub fn cohere_setup_model_names() -> Vec<&'static str> {
-    COHERE_MODELS.iter().map(|m| m.dir_name).collect()
+    COHERE_MODELS
+        .iter()
+        .map(|m| m.dir_name)
+        .chain(COHERE_GGUF_MODELS.iter().map(|m| m.name))
+        .collect()
 }
 
 /// Validate that a Cohere model directory has the required files.
@@ -2924,6 +3012,110 @@ pub fn download_cohere_model(model_name: &str) -> anyhow::Result<()> {
     );
     download_artifact(model, &models_dir)?;
     validate_cohere_model(&model_path)?;
+    Ok(())
+}
+
+/// Cheap GGUF presence check for catalog listings; full verification hashes
+/// the file and is used before setup skips a download or activates a model.
+pub(crate) fn validate_cohere_gguf_model(
+    path: &Path,
+    model: &CohereGgufModelInfo,
+) -> anyhow::Result<()> {
+    validate_download(path, Some(model.size), ContentCheck::Gguf)
+}
+
+pub(crate) fn verify_cohere_gguf_model(
+    path: &Path,
+    model: &CohereGgufModelInfo,
+) -> anyhow::Result<()> {
+    validate_cohere_gguf_model(path, model)?;
+    let observed = sha256_file(path)?;
+    if observed != model.sha256 {
+        anyhow::bail!(
+            "sha256 mismatch for {}: expected {}, got {}",
+            model.name,
+            model.sha256,
+            observed
+        );
+    }
+    Ok(())
+}
+
+/// Download one pinned, checksum-verified Cohere GGUF from the official
+/// transcribe.cpp publisher. R2 does not mirror these files yet, so this is
+/// an explicit source rather than a fallback from the manifest downloader.
+pub fn download_cohere_gguf_model(name: &str) -> anyhow::Result<()> {
+    let model = find_cohere_gguf_model(name)
+        .ok_or_else(|| anyhow::anyhow!("Unknown Cohere GGUF model: {name}"))?;
+    let models_dir = Config::models_dir();
+    std::fs::create_dir_all(&models_dir)?;
+    let dest = models_dir.join(model.name);
+    let url = cohere_gguf_url(model);
+    if !progress::is_json() {
+        println!(
+            "\nDownloading {} ({:.2} GB)...",
+            model.name,
+            model.size as f64 / 1_000_000_000.0
+        );
+    }
+    let part = download_to_part(&url, &dest, model.name, model.name, Some(model.size))?;
+    if let Err(e) = verify_cohere_gguf_model(&part, model) {
+        let _ = std::fs::remove_file(&part);
+        anyhow::bail!("Downloaded Cohere GGUF failed verification: {e}");
+    }
+    promote_part(&part, &dest)?;
+    if !progress::is_json() {
+        print_success(&format!("Model '{}' downloaded to {:?}", model.name, dest));
+    }
+    Ok(())
+}
+
+async fn handle_cohere_gguf_selection(selection: usize) -> anyhow::Result<()> {
+    let Some(model) = selection
+        .checked_sub(1)
+        .and_then(|index| COHERE_GGUF_MODELS.get(index))
+    else {
+        println!("\nCancelled.");
+        return Ok(());
+    };
+    let path = Config::models_dir().join(model.name);
+    if verify_cohere_gguf_model(&path, model).is_ok() {
+        println!("\nModel '{}' is already installed.\n", model.name);
+        println!("  [1] Set as default model (update config)");
+        println!("  [2] Re-download");
+        println!("  [0] Cancel\n");
+        print!("Select option [1]: ");
+        io::stdout().flush()?;
+        let mut choice = String::new();
+        io::stdin().read_line(&mut choice)?;
+        match choice.trim() {
+            "" | "1" => {
+                update_config_cohere(model.name)?;
+                restart_daemon_if_running().await;
+                return Ok(());
+            }
+            "2" => {}
+            _ => return Ok(()),
+        }
+    }
+    println!();
+    print_warning(&format!(
+        "{} requires {:.2} GB of disk space.",
+        model.name,
+        model.size as f64 / 1_000_000_000.0
+    ));
+    print_info("This Apache-2.0 model runs entirely on your device.");
+    print!("Continue? [Y/n]: ");
+    io::stdout().flush()?;
+    let mut confirm = String::new();
+    io::stdin().read_line(&mut confirm)?;
+    if matches!(confirm.trim().to_ascii_lowercase().as_str(), "n" | "no") {
+        println!("Cancelled.");
+        return Ok(());
+    }
+    download_cohere_gguf_model(model.name)?;
+    update_config_cohere(model.name)?;
+    restart_daemon_if_running().await;
     Ok(())
 }
 
@@ -5379,6 +5571,37 @@ mode = "type"
         std::fs::write(&empty, b"").unwrap();
         let err = validate_download(&empty, None, ContentCheck::Ggml).unwrap_err();
         assert!(err.to_string().contains("empty"), "got: {}", err);
+    }
+
+    #[test]
+    fn cohere_gguf_validation_checks_size_magic_and_publisher_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cohere.gguf");
+        let model = CohereGgufModelInfo {
+            name: "cohere.gguf",
+            size: 11,
+            sha256: "70d5523972d92139e4d1f62ee3d7cd79054f08ac90b5ba3b87df19c08adb3b17",
+            description: "test fixture",
+        };
+
+        std::fs::write(&path, b"GGUFpayload").unwrap();
+        verify_cohere_gguf_model(&path, &model).unwrap();
+
+        std::fs::write(&path, b"GGUFshort").unwrap();
+        assert!(validate_cohere_gguf_model(&path, &model).is_err());
+
+        std::fs::write(&path, b"HTMLpayload").unwrap();
+        assert!(validate_cohere_gguf_model(&path, &model)
+            .unwrap_err()
+            .to_string()
+            .contains("not a GGUF model"));
+
+        std::fs::write(&path, b"GGUFpayloae").unwrap();
+        validate_cohere_gguf_model(&path, &model).unwrap();
+        assert!(verify_cohere_gguf_model(&path, &model)
+            .unwrap_err()
+            .to_string()
+            .contains("sha256 mismatch"));
     }
 
     /// The whole staging sequence, offline: bytes land on the `.part` path,

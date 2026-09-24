@@ -512,6 +512,7 @@ pub(crate) enum ModelKind {
     Dolphin,
     Omnilingual,
     Cohere,
+    CohereGguf,
     OpenVino,
 }
 
@@ -543,6 +544,8 @@ pub(crate) fn classify_model_override(name: &str) -> anyhow::Result<ModelKind> {
         Ok(ModelKind::Omnilingual)
     } else if model::is_cohere_model(name) {
         Ok(ModelKind::Cohere)
+    } else if model::find_cohere_gguf_model(name).is_some() {
+        Ok(ModelKind::CohereGguf)
     } else if model::is_openvino_model(name) {
         Ok(ModelKind::OpenVino)
     } else {
@@ -716,6 +719,7 @@ pub async fn run_setup(
     let is_parakeet = kind == Some(ModelKind::Parakeet);
     let is_sensevoice = kind == Some(ModelKind::SenseVoice);
     let is_openvino = kind == Some(ModelKind::OpenVino);
+    let is_cohere_gguf = kind == Some(ModelKind::CohereGguf);
 
     if let Some(route) = kind.and_then(onnx_setup_route) {
         // Engines whose downloads were picker-only until #687: routed
@@ -783,6 +787,50 @@ pub async fn run_setup(
                 "       Run: voxtype setup --download --model {}",
                 model_name
             );
+        }
+    } else if is_cohere_gguf {
+        let name = model_override.unwrap(); // Safe: classifier matched GGUF
+        let model = model::find_cohere_gguf_model(name).unwrap();
+        let path = models_dir.join(model.name);
+        if !cfg!(feature = "cohere-gguf") {
+            anyhow::bail!(
+                "Cohere GGUF model '{}' requires the 'cohere-gguf' feature",
+                name
+            );
+        }
+        let verification = model::verify_cohere_gguf_model(&path, model);
+        if verification.is_ok() {
+            if !quiet {
+                print_success(&format!(
+                    "Model ready: {} ({:.2} GB)",
+                    name,
+                    model.size as f64 / 1e9
+                ));
+            }
+        } else if download {
+            model::download_cohere_gguf_model(name)?;
+        } else if path.exists() {
+            left_damaged = true;
+            if !quiet {
+                print_failure(&format!(
+                    "Model '{}' failed verification: {}",
+                    name,
+                    verification.as_ref().unwrap_err()
+                ));
+                println!("       Run: voxtype setup --download --model {}", name);
+            }
+        } else if !quiet {
+            print_info(&format!("Model '{}' not downloaded yet", name));
+            println!("       Run: voxtype setup --download --model {}", name);
+        }
+        if activate && (verification.is_ok() || download) {
+            model::set_engine_model_config("cohere", model.name)?;
+            if !quiet {
+                print_success(&format!(
+                    "Config updated: engine = \"cohere\", model = \"{}\"",
+                    model.name
+                ));
+            }
         }
     } else if is_openvino {
         // Handle OpenVINO model
@@ -1402,6 +1450,10 @@ mod tests {
             ("omnilingual-300m", ModelKind::Omnilingual),
             ("cohere-transcribe-q4f16", ModelKind::Cohere),
             ("cohere-transcribe-fp16", ModelKind::Cohere),
+            (
+                "cohere-transcribe-03-2026-Q4_K_M.gguf",
+                ModelKind::CohereGguf,
+            ),
         ] {
             assert_eq!(classify_model_override(name).unwrap(), expected, "{}", name);
         }
@@ -1420,6 +1472,9 @@ mod tests {
             "cohere",
         ] {
             for model in crate::model_catalog::model_catalog(engine) {
+                if engine == "cohere" && model.ends_with(".gguf") {
+                    continue; // GGUF uses the single-file setup branch below.
+                }
                 let arg = crate::model_catalog::download_arg(engine, model).unwrap();
                 let kind = classify_model_override(&arg).unwrap();
                 let route = onnx_setup_route(kind)
@@ -1495,6 +1550,7 @@ mod tests {
                     "paraformer" => ModelKind::Paraformer,
                     "dolphin" => ModelKind::Dolphin,
                     "omnilingual" => ModelKind::Omnilingual,
+                    "cohere" if model.ends_with(".gguf") => ModelKind::CohereGguf,
                     "cohere" => ModelKind::Cohere,
                     "openvino" => ModelKind::OpenVino,
                     other => panic!(

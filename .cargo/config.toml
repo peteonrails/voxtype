@@ -1,2 +1,8 @@
 [alias]
 xtask = "run --package xtask --"
+
+[env]
+# The transcribe.cpp static crate does not carry the optional system BLAS
+# library through to Voxtype's final link on Linux. Its scalar decoder path
+# needs no extra runtime dependency and matches upstream's distributable build.
+TRANSCRIBE_CMAKE_ARGS = "-DTRANSCRIBE_USE_SYSTEM_BLAS=OFF"

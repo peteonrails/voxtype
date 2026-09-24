@@ -140,7 +140,7 @@ pub fn engine_feature_compiled(name: &str) -> bool {
         TranscriptionEngine::Paraformer => cfg!(feature = "paraformer"),
         TranscriptionEngine::Dolphin => cfg!(feature = "dolphin"),
         TranscriptionEngine::Omnilingual => cfg!(feature = "omnilingual"),
-        TranscriptionEngine::Cohere => cfg!(feature = "cohere"),
+        TranscriptionEngine::Cohere => cfg!(any(feature = "cohere", feature = "cohere-gguf")),
         TranscriptionEngine::OpenVino => cfg!(feature = "openvino-whisper"),
     }
 }
