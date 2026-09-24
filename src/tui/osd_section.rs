@@ -33,6 +33,7 @@ pub struct OsdState {
     pub plugin_path: String,
     pub palette: String,
     pub layout: String,
+    pub card_scale: f64,
     pub position: String,
     pub width_px: i64,
     pub height_px: i64,
@@ -67,6 +68,7 @@ pub enum Field {
     PluginPath,
     Palette,
     Layout,
+    CardScale,
     Position,
     WidthPx,
     HeightPx,
@@ -86,6 +88,7 @@ impl Field {
         Field::PluginPath,
         Field::Palette,
         Field::Layout,
+        Field::CardScale,
         Field::Position,
         Field::WidthPx,
         Field::HeightPx,
@@ -125,6 +128,7 @@ const OPACITY_CHOICES: &[f64] = &[0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 1.0];
 const WAVEFORM_SECS_CHOICES: &[f64] = &[1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0];
 const PEAK_DECAY_CHOICES: &[f64] = &[1.0, 2.0, 4.0, 6.0, 8.0, 12.0, 20.0];
 const GAIN_CHOICES: &[f64] = &[1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 15.0, 20.0];
+const CARD_SCALE_CHOICES: &[f64] = &[0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
 
 impl OsdState {
     pub fn load() -> Result<Self, EditorError> {
@@ -145,6 +149,7 @@ impl OsdState {
             layout: ed
                 .get_string(TABLE, "layout")
                 .unwrap_or_else(|| "compact".to_string()),
+            card_scale: ed.get_float(TABLE, "card_scale").unwrap_or(1.0),
             position: ed
                 .get_string(TABLE, "position")
                 .unwrap_or_else(|| "bottom-center".to_string()),
@@ -186,6 +191,7 @@ impl OsdState {
             ed.set_string(TABLE, "palette", &self.palette);
         }
         ed.set_string(TABLE, "layout", &self.layout);
+        ed.set_float(TABLE, "card_scale", self.card_scale);
         ed.set_string(TABLE, "position", &self.position);
         ed.set_int(TABLE, "width_px", self.width_px);
         ed.set_int(TABLE, "height_px", self.height_px);
@@ -244,6 +250,9 @@ impl OsdState {
             Field::PluginPath => return,
             Field::Palette => self.palette = cycle_str(PALETTE_CHOICES, &self.palette, delta),
             Field::Layout => self.layout = cycle_str(LAYOUT_CHOICES, &self.layout, delta),
+            Field::CardScale => {
+                self.card_scale = cycle_float(CARD_SCALE_CHOICES, self.card_scale, delta)
+            }
             Field::Position => self.position = cycle_str(POSITION_CHOICES, &self.position, delta),
             Field::WidthPx => self.width_px = cycle_int(WIDTH_CHOICES, self.width_px, delta),
             Field::HeightPx => self.height_px = cycle_int(HEIGHT_CHOICES, self.height_px, delta),
@@ -429,6 +438,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             state.palette.clone(),
         ),
         FormRowSpec::new(state.field == Field::Layout, "Layout", state.layout.clone()),
+        FormRowSpec::new(
+            state.field == Field::CardScale,
+            "Card size (multiplier)",
+            format!("{:.2}", state.card_scale),
+        ),
         FormRowSpec::new(
             state.field == Field::Position,
             "Position",
@@ -616,6 +630,13 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
             Line::from("  tile     square card for centered visualizations"),
             Line::from("  orb      circular frame for ring-focused recipes"),
             Line::from("  custom   reserved for package-provided QML layouts"),
+        ],
+        Field::CardScale => vec![
+            heading("Card size (multiplier)"),
+            Line::from(""),
+            Line::from("Scales the OSD card in every layout. 0.5 halves it, 2.0 doubles it."),
+            Line::from(""),
+            dim("Default: 1.0 (each layout's built-in size). Quickshell only."),
         ],
         Field::Position => vec![
             heading("Position"),
@@ -827,6 +848,7 @@ mod tests {
                 Field::PluginPath => "osd.plugin_path",
                 Field::Palette => "osd.palette",
                 Field::Layout => "osd.layout",
+                Field::CardScale => "osd.card_scale",
                 Field::Position => "osd.position",
                 Field::WidthPx => "osd.width_px",
                 Field::HeightPx => "osd.height_px",
@@ -871,6 +893,7 @@ mod tests {
             plugin_path: String::new(),
             palette: "auto".to_string(),
             layout: "compact".to_string(),
+            card_scale: 1.0,
             position: "bottom-center".to_string(),
             width_px: 400,
             height_px: 48,
@@ -921,6 +944,7 @@ mod tests {
             plugin_path: String::new(),
             palette: "auto".to_string(),
             layout: "compact".to_string(),
+            card_scale: 1.0,
             position: "bottom-center".to_string(),
             width_px: 400,
             height_px: 48,

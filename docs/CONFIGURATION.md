@@ -3867,6 +3867,7 @@ frontend = "quickshell"
 style = "default"      # Built-in style, package name, or package path
 # palette = "omarchy" # omit for auto, or use omarchy, fallback, package, custom
 layout = "compact"    # compact, wide, minimal, tile, orb, custom
+card_scale = 1.0      # Size multiplier for the host card (0.5..=4.0)
 
 # Explicit trusted package path. Custom QML is not sandboxed.
 # plugin_path = "~/.config/voxtype/osd/my-style"
@@ -3916,7 +3917,9 @@ gradient stops keep the `warning`/`error` roles; on `shadow` layers,
 
 `layout` controls the outer OSD frame. `compact`, `wide`, and `minimal` are
 strip layouts; `tile` is a square card; `orb` is a circular frame intended for
-ring-focused recipes.
+ring-focused recipes. `card_scale` multiplies the card's size in every layout
+(0.5..=4.0): `0.5` halves it and `2.0` doubles it. It applies to the Quickshell
+frontend only; the GTK4 frontend uses `width_px` and `height_px`.
 
 `[osd.frame]` controls the host frame around the recipe. Set
 `background = "none"` or `border = "none"` for frameless recipes; the visual

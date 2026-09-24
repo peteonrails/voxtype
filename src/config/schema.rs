@@ -1141,6 +1141,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Arrangement preset for the Quickshell OSD host.",
     ),
     spec(
+        "osd.card_scale",
+        "osd",
+        "card_scale",
+        KeyType::Float { min: 0.5, max: 4.0 },
+        "OSD",
+        "Card size",
+        "Size multiplier for the Quickshell OSD card. 1.0 keeps each layout's built-in size.",
+    ),
+    spec(
         "osd.position",
         "osd",
         "position",
@@ -1837,6 +1846,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             None => Json::Null,
         },
         "osd.layout" => serde_json::to_value(cfg.osd.layout).ok()?,
+        "osd.card_scale" => f32_json(cfg.osd.card_scale),
         "osd.position" => serde_json::to_value(cfg.osd.position).ok()?,
         "osd.width_px" => json!(cfg.osd.width_px),
         "osd.height_px" => json!(cfg.osd.height_px),
