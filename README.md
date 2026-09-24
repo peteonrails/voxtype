@@ -636,6 +636,16 @@ sudo usermod -aG input $USER
 # Log out and back in
 ```
 
+### Microphone startup failures
+
+If the microphone cannot be opened or started, Voxtype reports a recording
+failure through the desktop notification service, even when routine recording
+start/stop notifications are disabled. On Linux this uses `notify-send`
+(libnotify) and a desktop notification server; no Omarchy-specific service is
+required. Notification delivery is best-effort, and the detailed audio error
+remains in the daemon log.
+
+
 ### Text not appearing / typing not working
 
 Voxtype uses wtype (preferred), dotool, or ydotool for typing output:
