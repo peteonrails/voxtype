@@ -244,12 +244,19 @@ fn spawn_theme_follower(
         }
     };
     let mut fds = [0i32; 2];
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+    // pipe + fcntl instead of pipe2: macOS has no pipe2. Both ends must be
+    // CLOEXEC before the follower spawns, or it inherits its own write end
+    // and never sees EOF.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
         let e = std::io::Error::last_os_error();
         tracing::warn!(error = %e, "pipe for theme follower failed; theme changes need an OSD restart");
         return;
     }
     let (read_fd, write_fd) = (fds[0], fds[1]);
+    unsafe {
+        libc::fcntl(read_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        libc::fcntl(write_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+    }
 
     let mut cmd = Command::new(exe);
     cmd.arg("--theme-follow");

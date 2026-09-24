@@ -25,6 +25,7 @@ Item {
   property var engineAvailability: ({})
   property var modelOptions: []
   property var deviceOptions: []
+  property var styleOptions: []
   property var replacements: ({})
 
   // key → message from the last failed `config set`.
@@ -123,6 +124,7 @@ Item {
   function optionsForSource(source) {
     if (String(source) === "models") return root.modelOptions
     if (String(source) === "devices") return root.deviceOptions
+    if (String(source) === "styles") return root.styleOptions
     return []
   }
 

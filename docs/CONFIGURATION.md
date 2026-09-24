@@ -25,6 +25,18 @@ A macOS install that predates this and stored files under
 `~/Library/Application Support/voxtype` keeps working until you move them into
 `~/.config/voxtype` and `~/.local/share/voxtype`.
 
+## What Happens When the Config Has an Error
+
+Since 1.1.0 the config parses section by section. One unreadable value no
+longer stops the daemon: the section holding it falls back to its defaults,
+the log names that section, and everything else loads. The log names sections
+only, never values, because sections like `[soniox]` hold API keys.
+
+Two things are still fatal: TOML syntax errors (the file cannot be parsed at
+all) and duplicate keys, which are a syntax error in TOML. Both produce a
+parse error with a line number. Unknown fields are ignored silently, so a
+config written for a newer voxtype still loads on an older one.
+
 ## Configuration Sections
 
 ---

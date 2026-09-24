@@ -49,50 +49,73 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 WORKDIR /build
 COPY . .
 
-# The whole point of the variant. GGML_NATIVE=OFF stops ggml probing the build
-# host, and every SIMD level above the floor is turned off explicitly rather
-# than left to CMake's detection, because detection reads the builder's CPU.
+# The whole point of the variant. Three channels, one per compiler route
+# (#740 shipped because only the first of these existed - GGML_* and
+# CMAKE_C_FLAGS as plain ENV are read by nothing in the build chain, and
+# ggml silently fell back to -march=native on an AVX2 build host):
+#
+#   RUSTFLAGS               - the Rust half of the binary
+#   CFLAGS/CXXFLAGS         - C/C++ built via the cc crate, and the base
+#                             flags the cmake crate passes as CMAKE_C_FLAGS
+#   CMAKE_TOOLCHAIN_FILE    - ggml's own CMake options (GGML_NATIVE and the
+#                             per-ISA switches); CMake >= 3.21 reads this
+#                             from the environment, and it is the only way
+#                             to reach option() values inside whisper-rs-sys
 ENV RUSTFLAGS="-C target-cpu=x86-64-v2 -C target-feature=-avx2,-fma,-bmi2,-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl,-gfni"
-ENV GGML_NATIVE=OFF
-ENV GGML_AVX=OFF
-ENV GGML_AVX2=OFF
-ENV GGML_FMA=OFF
-ENV GGML_F16C=OFF
-ENV GGML_AVX512=OFF
-ENV GGML_AVX_VNNI=OFF
-ENV GGML_AVX512_VNNI=OFF
-ENV CMAKE_C_FLAGS="-march=x86-64-v2 -mno-avx -mno-avx2 -mno-fma -mno-f16c -mno-bmi2 -mno-avx512f -mno-gfni -mno-avxvnni"
-ENV CMAKE_CXX_FLAGS="-march=x86-64-v2 -mno-avx -mno-avx2 -mno-fma -mno-f16c -mno-bmi2 -mno-avx512f -mno-gfni -mno-avxvnni"
+ENV CFLAGS="-march=x86-64-v2"
+ENV CXXFLAGS="-march=x86-64-v2"
+ENV CMAKE_TOOLCHAIN_FILE=/build/cmake/x86-64-v2-toolchain.cmake
+# Lets the SIGILL banner know it is the baseline build, so it never advises
+# switching to itself.
+ENV VOXTYPE_VARIANT=baseline
 
 RUN cargo build --release \
     && cp target/release/voxtype /tmp/voxtype-baseline
 
 # What this can and cannot prove.
 #
-# AVX-512 is a hard gate: ggml compiles it in only when asked, so any zmm here
-# means the flags above did not take and the binary is wrong.
+# Hard gate: AVX-512 (zmm) - ggml compiles it only when asked, so any zmm
+# means the toolchain constraints did not take.
 #
-# AVX2, FMA and BMI counts are reported but NOT gated, because a static count
-# cannot tell an unconditionally-executed instruction from one inside a
-# `#[target_feature(enable = "avx2")]` function that only runs after
-# `is_x86_feature_detected!`. Rust crates and ggml both ship runtime-dispatched
-# kernels, so a correct baseline binary still contains thousands of AVX2
-# instructions it will never execute on a pre-Haswell CPU. Gating on the count
-# would reject every buildable binary.
-#
-# The real test is booting it on a CPU without AVX2. See the voxtype-ivybridge
-# VM in CLAUDE.local.md, which exists for exactly this.
+# BMI2, FMA, and ymm counts are reported but NOT gated. A correct baseline
+# binary legitimately contains all three behind runtime CPUID dispatch:
+# ring's hand-written assembly carries ~370 BMI2 instructions (mulx/rorx in
+# bn_mulx4x_mont, the chacha20 AVX2 path, the curve25519 ADX path) and
+# rustfft's AVX kernels carry ~1800 FMA - none of which execute on a CPU
+# whose CPUID lacks the feature. #740's ggml contamination added only ~60
+# BMI2 on top of ring's baseline, so no static count can separate a broken
+# build from a correct one. The decisive check is BEHAVIORAL: the QEMU step
+# below runs the binary on a modeled v2 CPU where TCG genuinely cannot
+# decode out-of-floor instructions, and CI runs full inference the same way
+# (verified: the rc4 binary SIGILLs there exactly as it did on real Ivy
+# Bridge; the fixed build transcribes).
 RUN echo "=== Verifying baseline binary ===" \
-    && zmm=$(objdump -d /tmp/voxtype-baseline | grep -c zmm || echo 0) \
-    && ymm=$(objdump -d /tmp/voxtype-baseline | grep -c ymm || echo 0) \
-    && fma=$(objdump -d /tmp/voxtype-baseline | grep -cE 'vfmadd|vfmsub|vfnmadd' || echo 0) \
-    && echo "  zmm (AVX-512, gated):        $zmm" \
-    && echo "  ymm (AVX/AVX2, informational): $ymm" \
-    && echo "  FMA (informational):           $fma" \
+    && objdump -d /tmp/voxtype-baseline > /tmp/baseline.dis \
+    && zmm=$(grep -c zmm /tmp/baseline.dis || true) \
+    && bmi2=$(grep -cP '\t(shrx|sarx|shlx|mulx|pdep|pext|bzhi|rorx)[ \t]' /tmp/baseline.dis || true) \
+    && ymm=$(grep -c ymm /tmp/baseline.dis || true) \
+    && fma=$(grep -cP '\t(vfmadd|vfmsub|vfnmadd|vfnmsub)' /tmp/baseline.dis || true) \
+    && echo "  zmm  (AVX-512, gated):          $zmm" \
+    && echo "  BMI2 (informational, ~370 expected from ring): $bmi2" \
+    && echo "  ymm  (AVX/AVX2, informational): $ymm" \
+    && echo "  FMA  (informational, ~1800 expected from rustfft): $fma" \
+    && rm /tmp/baseline.dis \
     && if [ "$zmm" -gt 0 ]; then \
-         echo "ERROR: AVX-512 present; target-cpu/GGML flags did not take effect" && exit 1; \
+         echo "ERROR: AVX-512 present; the toolchain constraints did not take effect" && exit 1; \
        fi \
-    && echo "✓ no AVX-512. Runtime behaviour on a pre-AVX2 CPU must be confirmed on hardware."
+    && echo "✓ no AVX-512. Behavioral floor check follows."
+
+# Behavioral floor check: execute the binary on a QEMU-modeled Nehalem
+# (x86-64-v2: SSE4.2 + POPCNT, no AVX). TCG software emulation genuinely
+# cannot decode instructions outside the modeled CPU, so an unconditional
+# v3 instruction on any startup path dies here instead of on a user's
+# machine. Inference is exercised separately in CI, where a model is
+# available - this catches the load-and-dispatch paths.
+RUN apt-get update && apt-get install -y qemu-user-static && rm -rf /var/lib/apt/lists/* \
+    && echo "=== QEMU Nehalem floor check ===" \
+    && qemu-x86_64-static -cpu Nehalem /tmp/voxtype-baseline --version \
+    && qemu-x86_64-static -cpu Nehalem /tmp/voxtype-baseline --help > /dev/null \
+    && echo "✓ starts on a v2-floor CPU model."
 
 CMD mkdir -p /output \
     && cp /tmp/voxtype-baseline /output/voxtype-${VERSION}-linux-x86_64-baseline \

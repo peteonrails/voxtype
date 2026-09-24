@@ -62,7 +62,12 @@ pub fn install_sigill_handler() {
 extern "C" fn sigill_handler(_sig: i32) {
     // SAFETY: We can only use async-signal-safe functions here.
     // write() to stderr is safe, println! is not.
-    let msg = if !CPU_HAS_AVX2.load(Ordering::Relaxed) {
+    let msg = if is_baseline_build() {
+        // The baseline variant must never advise switching to itself (#740).
+        // A SIGILL here means the build carries something above its own
+        // x86-64-v2 floor, which is our bug, not the user's setup.
+        BASELINE_SIGILL_MESSAGE
+    } else if !CPU_HAS_AVX2.load(Ordering::Relaxed) {
         PRE_AVX2_MESSAGE
     } else {
         concat!(
@@ -187,6 +192,37 @@ pub fn check_cpu_compatibility() -> Option<String> {
 /// Shown when the CPU lacks AVX2, where no shipped x86-64 binary can run:
 /// every variant is built with `-C target-cpu=haswell` or higher. The old
 /// message sent these users to the AVX2 binary, which was the problem (#612).
+/// True when this binary is the baseline (x86-64-v2) variant.
+/// Dockerfile.baseline sets VOXTYPE_VARIANT=baseline at build time; every
+/// other build leaves it unset. Comparing two 'static strs is pure memory
+/// access, so this is safe to call from the signal handler.
+fn is_baseline_build() -> bool {
+    matches!(option_env!("VOXTYPE_VARIANT"), Some("baseline"))
+}
+
+/// SIGILL inside the baseline build itself. The generic messages both point
+/// at another variant; from the baseline there is nowhere lower to go, and
+/// the correct advice is to report it (#740 was found by a user this message
+/// would have saved a round trip).
+const BASELINE_SIGILL_MESSAGE: &str = concat!(
+    "\n",
+    "═══════════════════════════════════════════════════════════════════\n",
+    "  FATAL: Illegal CPU instruction (SIGILL)\n",
+    "═══════════════════════════════════════════════════════════════════\n",
+    "\n",
+    "  This is the baseline variant, built for x86-64-v2, and it should\n",
+    "  run on your CPU. A SIGILL here is a bug in the build, not a\n",
+    "  problem with your machine.\n",
+    "\n",
+    "  Please report it, including your CPU model (from /proc/cpuinfo):\n",
+    "\n",
+    "        https://github.com/peteonrails/voxtype/issues\n",
+    "\n",
+    "  If this is a VM, also note the hypervisor and CPU model setting.\n",
+    "\n",
+    "═══════════════════════════════════════════════════════════════════\n",
+);
+
 const PRE_AVX2_MESSAGE: &str = concat!(
     "\n",
     "═══════════════════════════════════════════════════════════════════\n",
