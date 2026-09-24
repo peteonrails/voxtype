@@ -28,6 +28,7 @@ mod meeting;
 mod overrides;
 mod record;
 pub(crate) mod sigpipe;
+mod stats;
 mod status;
 mod transcribe_file;
 mod updates;
