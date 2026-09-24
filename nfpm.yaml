@@ -26,6 +26,16 @@ contents:
     file_info:
       mode: 0644
 
+  - src: packaging/io.voxtype.Voxtype.desktop
+    dst: /usr/share/applications/io.voxtype.Voxtype.desktop
+    file_info:
+      mode: 0644
+
+  - src: packaging/voxtype-configure.desktop
+    dst: /usr/share/applications/voxtype-configure.desktop
+    file_info:
+      mode: 0644
+
   - src: README.md
     dst: /usr/share/doc/voxtype/README.md
     file_info:

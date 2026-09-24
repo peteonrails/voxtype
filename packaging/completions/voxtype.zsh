@@ -18,6 +18,7 @@ _voxtype() {
         '--clipboard[Force clipboard mode]'
         '--model[Override whisper model]:model:(tiny tiny.en base base.en small small.en medium medium.en large-v3)'
         '--hotkey[Override hotkey]:key:(SCROLLLOCK PAUSE RIGHTALT F13 F14 F15 F16 F17 F18 F19 F20 F21 F22 F23 F24)'
+        '--hotkey-backend[Override Linux hotkey backend]:backend:(evdev portal auto)'
         '(-h --help)'{-h,--help}'[Print help]'
         '(-V --version)'{-V,--version}'[Print version]'
     )

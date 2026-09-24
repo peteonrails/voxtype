@@ -36,6 +36,8 @@ override_dh_auto_install:
 	# Install configuration TUI launcher (.desktop entry + terminal-picker script)
 	install -D -m 644 packaging/voxtype-configure.desktop \
 		debian/voxtype/usr/share/applications/voxtype-configure.desktop
+	install -D -m 644 packaging/io.voxtype.Voxtype.desktop \
+		debian/voxtype/usr/share/applications/io.voxtype.Voxtype.desktop
 	install -D -m 755 packaging/scripts/voxtype-configure-launcher \
 		debian/voxtype/usr/bin/voxtype-configure-launcher
 
