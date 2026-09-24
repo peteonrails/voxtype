@@ -130,7 +130,14 @@ pub fn combine_chunk_results(mut results: Vec<ChunkResult>) -> String {
             combined = result.text.clone();
         } else {
             // Subsequent chunks: deduplicate at boundary
-            let new_text = deduplicate_boundary(&combined, &result.text);
+            let overlap = boundary_overlap(&combined, &result.text);
+            if overlap > 0 {
+                // The next chunk contains speech beyond this boundary, so use
+                // its punctuation instead of the previous chunk's forced ending.
+                let words: Vec<&str> = combined.split_whitespace().collect();
+                combined = words[..words.len() - overlap].join(" ");
+            }
+            let new_text = &result.text;
             if !new_text.is_empty() {
                 if !combined.is_empty() && !combined.ends_with(' ') && !new_text.starts_with(' ') {
                     combined.push(' ');
@@ -154,12 +161,22 @@ pub fn combine_chunk_results(mut results: Vec<ChunkResult>) -> String {
 ///
 /// # Returns
 /// The portion of `new_text` that isn't a duplicate of `previous`
+#[cfg(test)]
 fn deduplicate_boundary(previous: &str, new_text: &str) -> String {
+    let overlap = boundary_overlap(previous, new_text);
+    if overlap > 0 {
+        new_text.split_whitespace().skip(overlap).collect::<Vec<_>>().join(" ")
+    } else {
+        new_text.to_string()
+    }
+}
+
+fn boundary_overlap(previous: &str, new_text: &str) -> usize {
     let previous_words: Vec<&str> = previous.split_whitespace().collect();
     let new_words: Vec<&str> = new_text.split_whitespace().collect();
 
     if previous_words.is_empty() || new_words.is_empty() {
-        return new_text.to_string();
+        return 0;
     }
 
     // Look for overlap: find the longest suffix of previous that matches
@@ -171,27 +188,45 @@ fn deduplicate_boundary(previous: &str, new_text: &str) -> String {
         let prev_suffix = &previous_words[previous_words.len() - overlap_len..];
         let new_prefix = &new_words[..overlap_len];
 
-        // Case-insensitive comparison for robustness
+        // Case-insensitive comparison for robustness; ignore punctuation so
+        // chunk-forced endings do not block real speech overlap matches.
         if prev_suffix
             .iter()
             .zip(new_prefix.iter())
-            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+            .all(|(a, b)| {
+                let a = a.trim_matches(|c: char| !c.is_alphanumeric());
+                let b = b.trim_matches(|c: char| !c.is_alphanumeric());
+                !a.is_empty() && a.eq_ignore_ascii_case(b)
+            })
         {
             best_overlap = overlap_len;
         }
     }
 
-    if best_overlap > 0 {
-        // Remove the overlapping prefix from new_text
-        new_words[best_overlap..].join(" ")
-    } else {
-        new_text.to_string()
-    }
+    best_overlap
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn punctuation_does_not_duplicate_real_chunk_overlap() {
+        let results = vec![
+            ChunkResult { text: "Set a timer for 15 minutes, then remind me to check...".into(), chunk_index: 0 },
+            ChunkResult { text: "minutes, then remind me to check port 8445.".into(), chunk_index: 1 },
+        ];
+        assert_eq!(combine_chunk_results(results),
+            "Set a timer for 15 minutes, then remind me to check port 8445.");
+        assert_eq!(deduplicate_boundary("can do for you.", "for you, ask what"), "ask what");
+    }
+
+    #[test]
+    fn punctuation_only_and_distinct_words_are_not_overlaps() {
+        assert_eq!(boundary_overlap("hello ...", "... world"), 0);
+        assert_eq!(boundary_overlap("September 12th.", "September 12."), 0);
+        assert_eq!(boundary_overlap("do not", "do delete"), 0);
+    }
 
     fn test_config() -> EagerConfig {
         EagerConfig {
