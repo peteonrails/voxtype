@@ -196,22 +196,51 @@ pub fn sanitize_urgency(urgency: &str) -> &str {
 /// Send a transcription notification with optional engine icon
 pub async fn send_transcription_notification(
     text: &str,
+    original: Option<&str>,
     show_engine_icon: bool,
     engine: crate::config::TranscriptionEngine,
     urgency: &str,
 ) {
-    // Truncate preview for notification (use chars() to handle multi-byte UTF-8)
-    let preview = if text.chars().count() > 80 {
-        format!("{}...", text.chars().take(80).collect::<String>())
-    } else {
-        text.to_string()
-    };
+    use crate::text::diff;
 
-    let title = if show_engine_icon {
+    // When cleanup changed the transcription, show *what* it changed rather
+    // than only the result: deletions struck through, replacements coloured.
+    // Falls back to a plain preview when nothing changed, or when the
+    // notification server does not parse markup.
+    let changed = original
+        .map(|o| o.split_whitespace().ne(text.split_whitespace()))
+        .unwrap_or(false);
+
+    let (body, edits) = if changed {
+        let markup = crate::notification::body_markup().await;
+        let spans = diff::word_diff(original.unwrap_or_default(), text);
+        (
+            diff::render_for_notification(&spans, markup, 160),
+            diff::edit_count(&spans),
+        )
+    } else {
+        // Truncate preview for notification (use chars() to handle multi-byte UTF-8)
+        let preview = if text.chars().count() > 80 {
+            format!("{}...", text.chars().take(80).collect::<String>())
+        } else {
+            text.to_string()
+        };
+        (preview, 0)
+    };
+    let preview = body;
+
+    let mut title = if show_engine_icon {
         format!("{} Transcribed", engine_icon(engine))
     } else {
         "Transcribed".to_string()
     };
+    if edits > 0 {
+        title.push_str(&format!(
+            " \u{270e} {} edit{}",
+            edits,
+            if edits == 1 { "" } else { "s" }
+        ));
+    }
 
     // Through the notification module rather than straight to notify-send:
     // that module owns the --replace-id bookkeeping that keeps every Voxtype

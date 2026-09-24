@@ -313,11 +313,31 @@ on_transcription = true
 # The word "submit" is stripped from the output text and Enter is pressed.
 # smart_auto_submit = false
 #
-# Remove filler words like "uh" and "um" from transcribed text.
+# Remove filler words like "uh" and "um" from transcribed text. Held
+# pronunciations ("uhhhh", "ummm", "hmmm") are matched too.
 # Enabled by default. Set filter_filler_words = false to disable, or override
 # the word list via filler_words.
 # filter_filler_words = true
 # filler_words = ["uh", "um", "er", "ah", "eh", "hmm", "hm", "mm", "mhm"]
+#
+# Collapse restart disfluencies: a phrase you interrupt and restart by
+# repeating a word ("the independent tool. the independent booking tool"),
+# back-to-back stutters ("the the the"), and explicit retractions
+# ("scratch that", "I'm sorry"). Off by default, because a wrong guess
+# deletes words you actually said.
+# collapse_restarts = false
+#
+# Convert dictated quantities to written form: "twenty five dollars" becomes
+# "$25", "three thirty p m" becomes "3:30 p.m.". Only sentences that look like
+# they are about a quantity are touched, and a lone number word is never made
+# a digit, so "one of the things" and "no one knows" are left alone.
+# Requires a build with the `itn` feature.
+# format_numbers = false
+#
+# Repair sentence boundaries the engine placed at a pause: join a fragment
+# split off mid-sentence ("what are the other phases? we have here.") and
+# give a structurally interrogative sentence its question mark.
+# repair_sentence_breaks = false
 
 [osd]
 # On-screen display frontend.
