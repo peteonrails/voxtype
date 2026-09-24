@@ -52,6 +52,7 @@ Item {
   property var engines: ({})
   property var engineAvailability: ({})
   property var devices: []
+  property var styles: []
 
   property string schemaError: ""
   property var errors: ({})
@@ -106,6 +107,17 @@ Item {
     return out
   }
 
+  readonly property var styleOptions: {
+    var out = []
+    for (var i = 0; i < root.styles.length; i++) {
+      var entry = root.styles[i]
+      if (!entry) continue
+      var name = String(entry.name)
+      out.push({ value: name, label: name })
+    }
+    return out
+  }
+
   // Which key holds the model for the engine in effect, and what it says.
   // Resolved here rather than in the form because the runtime facts line needs
   // the same answer, and two copies of this loop would be two chances to
@@ -155,6 +167,7 @@ Item {
     cli.fetchModels()
     cli.fetchEngines()
     cli.fetchDevices()
+    cli.fetchStyles()
 
     // The layer surface is mapped after this returns, so focus has to be taken
     // once the window exists or Escape and typing land nowhere. The card's key
@@ -420,6 +433,7 @@ Item {
     }
     onModelsLoaded: function(engines) { root.engines = engines }
     onDevicesLoaded: function(devices) { root.devices = devices }
+    onStylesLoaded: function(styles) { root.styles = styles }
     onEnginesLoaded: function(list) {
       var next = ({})
       for (var i = 0; i < list.length; i++) {
@@ -783,6 +797,7 @@ Item {
             engineAvailability: root.engineAvailability
             modelOptions: root.modelOptions
             deviceOptions: root.deviceOptions
+            styleOptions: root.styleOptions
             modelKey: root.modelKey
             modelValue: root.modelValue
             downloadingModel: cli.downloadModel
