@@ -800,6 +800,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Secondary-model modifier",
         "Hold this alongside the hotkey to transcribe with whisper.secondary_model.",
     ),
+    spec(
+        "hotkey.grab",
+        "hotkey",
+        "grab",
+        KeyType::Bool,
+        "Hotkey",
+        "Exclusive keyboard capture",
+        "Grab keyboards and re-emit their events so the hotkey chord never reaches applications. Requires /dev/uinput.",
+    ),
     // -- Audio --------------------------------------------------------------
     spec(
         "audio.device",
@@ -1772,6 +1781,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         }),
         "hotkey.cancel_key" => opt_str(cfg.hotkey.cancel_key.as_ref()),
         "hotkey.model_modifier" => opt_str(cfg.hotkey.model_modifier.as_ref()),
+        "hotkey.grab" => json!(cfg.hotkey.grab),
 
         "audio.device" => json!(cfg.audio.device),
         "audio.max_duration_secs" => json!(cfg.audio.max_duration_secs),

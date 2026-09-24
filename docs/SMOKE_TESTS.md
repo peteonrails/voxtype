@@ -36,6 +36,12 @@ verification.
 | [Rapid Successive Recordings](smoke_tests/rapid-successive-recordings.md) | Back-to-back recordings don't leak state |
 | [Long Recording](smoke_tests/long-recording.md) | Multi-minute recordings transcribe cleanly without OOM |
 
+## Hotkeys
+
+| Test | What it covers |
+|------|----------------|
+| [Hotkey Capture](smoke_tests/hotkey-capture.md) | `[hotkey] grab` holds keyboards exclusively and withholds the chord from applications |
+
 ## Voice activity detection
 
 | Test | What it covers |
