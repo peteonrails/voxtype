@@ -2360,6 +2360,7 @@ Whisper attempts to add punctuation automatically. For explicit punctuation, say
 - "comma"
 - "question mark"
 - "exclamation point"
+- "quote" and "unquote" around the quoted words
 - "new line" or "new paragraph"
 
 ---

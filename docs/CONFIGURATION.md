@@ -2873,7 +2873,7 @@ When `true`, converts spoken punctuation words into their symbol equivalents. Us
 
 | Spoken | Symbol |
 |--------|--------|
-| `period` | `.` |
+| `period` / `full stop` | `.` |
 | `comma` | `,` |
 | `question mark` | `?` |
 | `exclamation mark` / `exclamation point` | `!` |
@@ -2902,6 +2902,8 @@ When `true`, converts spoken punctuation words into their symbol equivalents. Us
 | `backtick` | `` ` `` |
 | `single quote` | `'` |
 | `double quote` | `"` |
+| `quote` | `"` (opening) |
+| `unquote` | `"` (closing) |
 | `new line` | newline character |
 | `new paragraph` | double newline |
 | `tab` | tab character |
@@ -2913,6 +2915,52 @@ spoken_punctuation = true
 ```
 
 With this enabled, saying "function open paren close paren" produces `function()`.
+
+`quote` and `unquote` are a pair: the opening quote attaches to the word after
+it and the closing quote to the word before it, so "quote hello there unquote"
+produces `"hello there"`. A lone `double quote` is still available where you
+want the character on its own.
+
+**Engines that punctuate for themselves**
+
+Parakeet and other auto-punctuating engines add punctuation and capitalisation
+to the whole transcription, including to the command words themselves: saying
+"full stop" reaches voxtype as "Full stop.", as "world, full stop." when the
+engine reads the dictated pause as a clause boundary, or as "world. Full stop."
+when it has already ended the sentence. The conversion absorbs that decoration.
+It takes in one punctuation character after the phrase, and one punctuation
+character before a symbol that attaches to the word before it: a sentence
+terminator, a closing quote or bracket, or a comma, colon or semicolon. So you
+get `.` rather than `..` or `,.`, and "world, comma next" gives `world, next`.
+A free-standing symbol such as `new line` or `hash` keeps what comes before it,
+so "world. New line" gives `world.` followed by the newline. Each phrase
+absorbs only the characters touching it, so dictating "full stop comma" still
+produces `.,`.
+
+Because the engine did not know a sentence ended where you dictated one, it
+leaves the next word in lower case. Voxtype capitalises the first letter after
+a terminator it inserted, skipping any opening quote or bracket, so "quote, this
+is" becomes `"This is`. Casing elsewhere in the engine's text is left alone.
+
+The absorption and the capitalisation apply whichever engine produced the
+text. Whisper also punctuates, so its users gain from it too: "Hello world,
+period." previously produced `Hello world,.` and now produces `Hello world.`.
+
+This absorption applies to the conversions in the table above. A custom entry in
+[`replacements`](#replacements) that maps a spoken word to a punctuation
+character does not absorb the decoration, so prefer the built-in words on an
+auto-punctuating engine.
+
+**Behaviour changes for existing users**
+
+Three things changed for everyone with `spoken_punctuation` enabled:
+
+- The bare words `quote` and `unquote` now convert to `"`. If you dictate the
+  word "quote" as a noun, it becomes an opening quotation mark. Say
+  `double quote` when you want the character on its own.
+- The first letter after a sentence terminator you dictated is capitalised.
+- One punctuation character straight after any spoken phrase is dropped, so
+  "new line." produces only the newline.
 
 ### replacements
 

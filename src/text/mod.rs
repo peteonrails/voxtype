@@ -38,6 +38,9 @@ pub struct TextProcessor {
     /// up directly before a sentence terminator (".!?") after filler removal,
     /// e.g. "hello world, uh." -> "hello world,." -> "hello world.".
     filler_connector_before_term_re: Regex,
+    /// Pre-compiled regex matching every spoken punctuation phrase together
+    /// with the punctuation an engine may have added around it.
+    spoken_re: Regex,
 }
 
 /// Default filler entries that are ordinary vocabulary in a given language.
@@ -130,6 +133,8 @@ impl TextProcessor {
         let filler_connector_before_term_re = Regex::new(r"[,;:]+(\s*)([.!?])").expect(
             "BUG: connector-before-terminator regex is a compile-time constant and must be valid",
         );
+        let spoken_re = Regex::new(&spoken_punctuation_pattern())
+            .expect("BUG: spoken punctuation regex is a compile-time constant and must be valid");
 
         Self {
             spoken_punctuation: config.spoken_punctuation,
@@ -142,6 +147,7 @@ impl TextProcessor {
             filler_punct_re,
             filler_dup_punct_re,
             filler_connector_before_term_re,
+            spoken_re,
         }
     }
 
@@ -209,65 +215,7 @@ impl TextProcessor {
 
     /// Apply spoken punctuation conversions
     fn apply_spoken_punctuation(&self, text: &str) -> String {
-        let mut result = text.to_string();
-
-        // Order matters: longer phrases first to avoid partial matches
-        // Using word boundaries to avoid replacing parts of words
-        let punctuation_map: &[(&str, &str)] = &[
-            // Multi-word phrases first
-            ("question mark", "?"),
-            ("exclamation mark", "!"),
-            ("exclamation point", "!"),
-            ("open parenthesis", "("),
-            ("close parenthesis", ")"),
-            ("open paren", "("),
-            ("close paren", ")"),
-            ("open bracket", "["),
-            ("close bracket", "]"),
-            ("open brace", "{"),
-            ("close brace", "}"),
-            ("at sign", "@"),
-            ("at symbol", "@"),
-            ("dollar sign", "$"),
-            ("percent sign", "%"),
-            ("plus sign", "+"),
-            ("equals sign", "="),
-            ("forward slash", "/"),
-            ("single quote", "'"),
-            ("double quote", "\""),
-            ("new paragraph", "\n\n"),
-            ("new line", "\n"),
-            // Single words
-            ("period", "."),
-            ("comma", ","),
-            ("colon", ":"),
-            ("semicolon", ";"),
-            ("dash", "-"),
-            ("hyphen", "-"),
-            ("underscore", "_"),
-            ("hash", "#"),
-            ("hashtag", "#"),
-            ("percent", "%"),
-            ("ampersand", "&"),
-            ("asterisk", "*"),
-            ("plus", "+"),
-            ("equals", "="),
-            ("slash", "/"),
-            ("backslash", "\\"),
-            ("pipe", "|"),
-            ("tilde", "~"),
-            ("backtick", "`"),
-            ("tab", "\t"),
-        ];
-
-        for (phrase, symbol) in punctuation_map {
-            result = replace_phrase_case_insensitive(&result, phrase, symbol);
-        }
-
-        // Clean up spacing around punctuation
-        result = clean_punctuation_spacing(&result);
-
-        result
+        clean_punctuation_spacing(&self.convert_spoken_punctuation(text))
     }
 
     /// Remove filler words and clean up the punctuation/whitespace they leave
@@ -323,6 +271,181 @@ impl TextProcessor {
         for (word, replacement) in &self.replacements {
             result = replace_phrase_case_insensitive(&result, word, replacement);
         }
+
+        result
+    }
+}
+
+/// Where a converted symbol sits in relation to the words around it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Attachment {
+    /// `clean_punctuation_spacing` decides the spacing.
+    Free,
+    /// Attaches to the word that follows, like an opening quote.
+    Opening,
+    /// Attaches to the word before, like a closing quote or a comma.
+    Closing,
+    /// Ends a sentence: attaches to the word before, and the next letter is
+    /// capitalised.
+    Terminator,
+}
+
+/// Spoken phrases and the symbols they convert to.
+///
+/// The phrases become one regex alternation, which matches its branches in
+/// order. Where one phrase is a prefix of another, the longer phrase must come
+/// first, or only its prefix is matched.
+const PUNCTUATION_MAP: &[(&str, &str, Attachment)] = {
+    use Attachment::{Closing, Free, Opening, Terminator};
+
+    &[
+        // Multi-word phrases first
+        ("full stop", ".", Terminator),
+        ("question mark", "?", Terminator),
+        ("exclamation mark", "!", Terminator),
+        ("exclamation point", "!", Terminator),
+        ("open parenthesis", "(", Opening),
+        ("close parenthesis", ")", Closing),
+        ("open paren", "(", Opening),
+        ("close paren", ")", Closing),
+        ("open bracket", "[", Opening),
+        ("close bracket", "]", Closing),
+        ("open brace", "{", Opening),
+        ("close brace", "}", Closing),
+        ("at sign", "@", Free),
+        ("at symbol", "@", Free),
+        ("dollar sign", "$", Free),
+        ("percent sign", "%", Free),
+        ("plus sign", "+", Free),
+        ("equals sign", "=", Free),
+        ("forward slash", "/", Free),
+        ("single quote", "'", Free),
+        ("double quote", "\"", Free),
+        ("new paragraph", "\n\n", Free),
+        ("new line", "\n", Free),
+        // Single words
+        ("period", ".", Terminator),
+        ("comma", ",", Closing),
+        ("colon", ":", Closing),
+        ("semicolon", ";", Closing),
+        ("quote", "\"", Opening),
+        ("unquote", "\"", Closing),
+        ("dash", "-", Free),
+        ("hyphen", "-", Free),
+        ("underscore", "_", Free),
+        ("hash", "#", Free),
+        ("hashtag", "#", Free),
+        ("percent", "%", Free),
+        ("ampersand", "&", Free),
+        ("asterisk", "*", Free),
+        ("plus", "+", Free),
+        ("equals", "=", Free),
+        ("slash", "/", Free),
+        ("backslash", "\\", Free),
+        ("pipe", "|", Free),
+        ("tilde", "~", Free),
+        ("backtick", "`", Free),
+        ("tab", "\t", Free),
+    ]
+};
+
+/// Characters a sentence can open with before its first letter.
+const SENTENCE_OPENERS: [char; 5] = ['"', '\'', '(', '[', '{'];
+
+/// The pattern that finds every spoken phrase in one pass, together with the
+/// punctuation an engine may have added around it.
+///
+/// The punctuation around a phrase is captured rather than baked in, so one
+/// pattern serves every attachment and the caller decides what to keep.
+fn spoken_punctuation_pattern() -> String {
+    let phrases = PUNCTUATION_MAP
+        .iter()
+        .map(|(phrase, _, _)| regex::escape(phrase))
+        .collect::<Vec<_>>()
+        .join("|");
+
+    format!(r"(?i)(?P<lead>[.,;:!?]?[ \t]*)\b(?P<phrase>{phrases})\b[.,!?;:]?(?P<trail>[ \t]*)")
+}
+
+/// Push `text`, capitalising its first letter when a dictated terminator
+/// precedes it.
+///
+/// Whitespace and opening symbols are passed over, so the letter after
+/// `. "` is the one capitalised. Any other character ends the search, whether
+/// or not it has an upper-case form.
+fn push_capitalising(result: &mut String, capitalise_next: &mut bool, text: &str) {
+    if *capitalise_next {
+        for (offset, character) in text.char_indices() {
+            if character.is_whitespace() || SENTENCE_OPENERS.contains(&character) {
+                continue;
+            }
+
+            *capitalise_next = false;
+            result.push_str(&text[..offset]);
+            result.extend(character.to_uppercase());
+            result.push_str(&text[offset + character.len_utf8()..]);
+            return;
+        }
+    }
+
+    result.push_str(text);
+}
+
+impl TextProcessor {
+    /// Convert every spoken punctuation phrase in one pass.
+    ///
+    /// Engines that punctuate for themselves, such as Parakeet, decorate the
+    /// spoken command words too: "full stop" arrives as "Full stop.", and a
+    /// phrase at a clause boundary picks up a connector or the engine's own
+    /// sentence end, as in "world, full stop." or "world. Full stop.". Each
+    /// match therefore takes in one punctuation character after the phrase,
+    /// and for a symbol that attaches leftwards one punctuation character
+    /// before it, so the engine's decoration of the spoken word does not
+    /// survive alongside the symbol the user asked for.
+    ///
+    /// The engine had no way to know a sentence ended where the user dictated
+    /// one, so the first letter after an inserted terminator is capitalised.
+    /// Casing elsewhere in the engine's text is left alone.
+    ///
+    /// Converting the phrases one at a time would let a symbol inserted by an
+    /// earlier phrase be eaten as decoration by a later one, so "unquote full
+    /// stop" would lose its full stop.
+    fn convert_spoken_punctuation(&self, text: &str) -> String {
+        let mut result = String::with_capacity(text.len());
+        let mut capitalise_next = false;
+        let mut converted_to = 0;
+
+        for captures in self.spoken_re.captures_iter(text) {
+            let (Some(whole), Some(phrase)) = (captures.get(0), captures.name("phrase")) else {
+                continue;
+            };
+            let Some((_, symbol, attachment)) = PUNCTUATION_MAP
+                .iter()
+                .find(|(spoken, _, _)| spoken.eq_ignore_ascii_case(phrase.as_str()))
+            else {
+                continue;
+            };
+
+            push_capitalising(
+                &mut result,
+                &mut capitalise_next,
+                &text[converted_to..whole.start()],
+            );
+            if !matches!(attachment, Attachment::Closing | Attachment::Terminator) {
+                let lead = captures.name("lead").map_or("", |lead| lead.as_str());
+                push_capitalising(&mut result, &mut capitalise_next, lead);
+            }
+            push_capitalising(&mut result, &mut capitalise_next, symbol);
+            if matches!(attachment, Attachment::Terminator) {
+                capitalise_next = true;
+            }
+            if !matches!(attachment, Attachment::Opening) {
+                let trail = captures.name("trail").map_or("", |trail| trail.as_str());
+                push_capitalising(&mut result, &mut capitalise_next, trail);
+            }
+            converted_to = whole.end();
+        }
+        push_capitalising(&mut result, &mut capitalise_next, &text[converted_to..]);
 
         result
     }
@@ -500,6 +623,118 @@ mod tests {
 
         assert_eq!(processor.process("hello PERIOD"), "hello.");
         assert_eq!(processor.process("hello Period"), "hello.");
+    }
+
+    #[test]
+    fn test_spoken_punctuation_absorbs_engine_punctuation() {
+        let config = make_config(true, &[]);
+        let processor = TextProcessor::new(&config);
+
+        // Raw Parakeet output for "hello world full stop quote this is a
+        // really lovely piece of software unquote full stop". The engine
+        // punctuates and capitalises the spoken command words itself.
+        assert_eq!(
+            processor.process(
+                "Hello World Full Stop. Quote This is a really lovely piece of software, unquote. Full stop."
+            ),
+            "Hello World. \"This is a really lovely piece of software\"."
+        );
+    }
+
+    #[test]
+    fn test_spoken_punctuation_absorbs_a_connector_before_a_terminator() {
+        let config = make_config(true, &[]);
+        let processor = TextProcessor::new(&config);
+
+        // The same dictation as the previous test, transcribed on a later run.
+        // Parakeet put its comma at the clause boundary before each spoken
+        // command word this time, and left "this" lowercase because it did not
+        // know a sentence ended there.
+        assert_eq!(
+            processor.process(
+                "Hello world, full stop. Quote, this is a really lovely piece of software, unquote, full stop."
+            ),
+            "Hello world. \"This is a really lovely piece of software\"."
+        );
+    }
+
+    #[test]
+    fn test_spoken_terminator_capitalises_the_next_sentence() {
+        let config = make_config(true, &[]);
+        let processor = TextProcessor::new(&config);
+
+        assert_eq!(
+            processor.process("one thing period another thing"),
+            "one thing. Another thing"
+        );
+        // An opening symbol between the terminator and the next word is
+        // passed over.
+        assert_eq!(
+            processor.process("one thing full stop quote another thing"),
+            "one thing. \"Another thing"
+        );
+        // Casing elsewhere in the engine's text is left alone.
+        assert_eq!(
+            processor.process("one thing. another thing"),
+            "one thing. another thing"
+        );
+    }
+
+    #[test]
+    fn test_spoken_punctuation_period_absorbs_engine_punctuation() {
+        let config = make_config(true, &[]);
+        let processor = TextProcessor::new(&config);
+
+        assert_eq!(processor.process("Stop period. Next"), "Stop. Next");
+    }
+
+    #[test]
+    fn test_spoken_punctuation_words_in_sequence_keep_both_symbols() {
+        let config = make_config(true, &[]);
+        let processor = TextProcessor::new(&config);
+
+        // Each phrase absorbs only the character touching it, so dictating two
+        // punctuation words in a row still produces both symbols.
+        assert_eq!(processor.process("full stop comma"), ".,");
+        assert_eq!(processor.process("Full stop. Comma."), ".,");
+    }
+
+    #[test]
+    fn test_spoken_quotes_attach_to_the_quoted_words() {
+        let config = make_config(true, &[]);
+        let processor = TextProcessor::new(&config);
+
+        assert_eq!(
+            processor.process("he said quote hello there unquote and left"),
+            "he said \"hello there\" and left"
+        );
+        // "double quote" is a longer phrase and still converts on its own.
+        assert_eq!(processor.process("a double quote b"), "a \" b");
+    }
+
+    #[test]
+    fn test_spoken_punctuation_absorbs_decoration_around_each_phrase() {
+        let config = make_config(true, &[]);
+        let processor = TextProcessor::new(&config);
+
+        // (raw engine output, typed text)
+        let cases = [
+            // The engine ended the sentence before the dictated terminator.
+            ("Hello world. Full stop.", "Hello world."),
+            // A connector before a symbol that attaches to the word before it.
+            ("world, comma next", "world, next"),
+            ("world, colon next", "world: next"),
+            ("close paren.", ")"),
+            // A free-standing symbol drops only the decoration after it.
+            ("new line.", "\n"),
+            ("hash.", "#"),
+            // The engine's own sentence end survives before a free-standing
+            // symbol.
+            ("Hello world. New line", "Hello world.\n"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(processor.process(input), expected, "input: {input:?}");
+        }
     }
 
     #[test]
