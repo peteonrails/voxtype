@@ -16,6 +16,7 @@ state_file = "auto"
 [hotkey]
 # Key to hold for push-to-talk
 # Common choices: SCROLLLOCK, PAUSE, RIGHTALT, F13-F24
+# On macOS: F13-F20 supported (PrintScreen/ScrollLock/Pause arrive as F13/F14/F15)
 # Use `evtest` to find key names for your keyboard
 key = "SCROLLLOCK"
 

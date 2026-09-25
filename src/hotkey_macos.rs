@@ -200,6 +200,19 @@ fn parse_key_name(name: &str) -> Option<Key> {
         "F11" => Some(Key::F11),
         "F12" => Some(Key::F12),
 
+        // F13-F20: rdev 0.5.3 has no Key::F13+ variants on macOS, so keys
+        // beyond F12 arrive as Key::Unknown(keycode) using Apple's Carbon
+        // virtual keycodes (Events.h kVK_F13..kVK_F20). F21+ have no macOS
+        // virtual keycodes and stay unsupported (fall through to `None`).
+        "F13" => Some(Key::Unknown(105)),
+        "F14" => Some(Key::Unknown(107)),
+        "F15" => Some(Key::Unknown(113)),
+        "F16" => Some(Key::Unknown(106)),
+        "F17" => Some(Key::Unknown(64)),
+        "F18" => Some(Key::Unknown(79)),
+        "F19" => Some(Key::Unknown(80)),
+        "F20" => Some(Key::Unknown(90)),
+
         // Modifier keys
         "LEFTALT" | "LEFTOPT" | "LEFTOPTION" | "ALT" | "OPTION" => Some(Key::Alt),
         "RIGHTALT" | "RIGHTOPT" | "RIGHTOPTION" => Some(Key::AltGr),
@@ -231,9 +244,13 @@ fn parse_key_name(name: &str) -> Option<Key> {
         // Other
         "DELETE" => Some(Key::Delete),
         "INSERT" => Some(Key::Insert),
-        "PAUSE" => Some(Key::Pause),
-        "SCROLLLOCK" => Some(Key::ScrollLock),
-        "PRINTSCREEN" => Some(Key::PrintScreen),
+        // macOS's HID driver translates a PC keyboard's PrintScreen/ScrollLock/
+        // Pause keys into F13/F14/F15, so these alias the same F13/F14/F15
+        // Key::Unknown keycodes above rather than rdev's Key::PrintScreen/
+        // ScrollLock/Pause, which rdev never emits on macOS.
+        "PRINTSCREEN" => Some(Key::Unknown(105)),
+        "SCROLLLOCK" => Some(Key::Unknown(107)),
+        "PAUSE" => Some(Key::Unknown(113)),
         "FN" | "FUNCTION" | "GLOBE" => Some(Key::Function),
 
         // Letters (for completeness, though unusual for hotkeys)
@@ -327,7 +344,35 @@ mod tests {
         assert_eq!(parse_key_name("RIGHTALT"), Some(Key::AltGr));
         assert_eq!(parse_key_name("rightoption"), Some(Key::AltGr));
         assert_eq!(parse_key_name("CMD"), Some(Key::MetaLeft));
-        assert_eq!(parse_key_name("SCROLLLOCK"), Some(Key::ScrollLock));
         assert_eq!(parse_key_name("UNKNOWN"), None);
+    }
+
+    #[test]
+    fn test_parse_key_name_f13_f20_use_apple_virtual_keycodes() {
+        // rdev 0.5.3 has no Key::F13+ variants on macOS; keys beyond F12 arrive
+        // as Key::Unknown(keycode) using Apple's Carbon virtual keycodes.
+        assert_eq!(parse_key_name("F13"), Some(Key::Unknown(105)));
+        assert_eq!(parse_key_name("f20"), Some(Key::Unknown(90)));
+        assert_eq!(parse_key_name("F14"), Some(Key::Unknown(107)));
+        assert_eq!(parse_key_name("F15"), Some(Key::Unknown(113)));
+        assert_eq!(parse_key_name("F16"), Some(Key::Unknown(106)));
+        assert_eq!(parse_key_name("F17"), Some(Key::Unknown(64)));
+        assert_eq!(parse_key_name("F18"), Some(Key::Unknown(79)));
+        assert_eq!(parse_key_name("F19"), Some(Key::Unknown(80)));
+    }
+
+    #[test]
+    fn test_parse_key_name_printscreen_scrolllock_pause_alias_macos_f_keys() {
+        // macOS's HID driver translates a PC keyboard's PrintScreen/ScrollLock/Pause
+        // into F13/F14/F15, so these names must resolve to the same keycodes.
+        assert_eq!(parse_key_name("PRINTSCREEN"), Some(Key::Unknown(105)));
+        assert_eq!(parse_key_name("SCROLLLOCK"), Some(Key::Unknown(107)));
+        assert_eq!(parse_key_name("PAUSE"), Some(Key::Unknown(113)));
+    }
+
+    #[test]
+    fn test_parse_key_name_f21_unsupported() {
+        // macOS has no virtual keycodes for F21+; these must remain unsupported.
+        assert_eq!(parse_key_name("F21"), None);
     }
 }
