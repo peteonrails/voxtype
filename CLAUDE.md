@@ -333,7 +333,18 @@ Known gaps as of 1.0.0: the Omarchy `edge` repo still ships `voxtype-bin` 0.7.5-
 
 ### Feature Roadmap
 
-Milestone-aligned with GitHub so the two don't drift. Based on the 29 Aug 2026 backlog triage.
+Milestone-aligned with GitHub so the two don't drift. Based on the 29 Aug 2026 backlog triage,
+updated 25 Sep 2026 for the ggml/GGUF direction below.
+
+**Strategic shift (25 Sep 2026): native ggml/GGUF engines are now a near-term priority, not an
+exploratory item.** Omarchy's Ryan Hughes proved out Cohere Transcribe as a GGUF model on
+Vulkan via `transcribe.cpp` (running as an external loopback helper in
+[omarchy#13098](https://github.com/omacom/omarchy/pull/13098) /
+[omarchy-pkgs#617](https://github.com/omacom/omarchy-pkgs/pull/617)); voxtype is absorbing that
+natively instead of leaving it as an Omarchy-side workaround. **Voxtype 2.0 will remove ONNX
+Runtime support entirely.** Phase 3 risk (does every ONNX engine have a ggml/GGUF port) is
+resolved for the important ones; the rest (exact list TBD) get evaluated for porting or
+retirement closer to 2.0, not before.
 
 **1.0.1 (fast follow-up):** Defects that shipped in 1.0.0 - SIGILL guidance on pre-AVX2 CPUs ([#612](https://github.com/peteonrails/voxtype/issues/612)), `configure --config` overwriting the real config ([#595](https://github.com/peteonrails/voxtype/issues/595)), impossible install instructions ([#604](https://github.com/peteonrails/voxtype/issues/604), [#622](https://github.com/peteonrails/voxtype/issues/622)), stuck push-to-talk ([#556](https://github.com/peteonrails/voxtype/issues/556)), and `voxtype info accel` reading a state file nothing writes. Plus docs corrections (#526, #528, #564).
 
@@ -344,9 +355,9 @@ Milestone-aligned with GitHub so the two don't drift. Based on the 29 Aug 2026 b
 - 1.1.3 macOS: #522, #576, #452, #632
 - 1.1.5 Compatibility: #603
 
-**1.2.0 (architecture):** Model registry out of Rust structs into versioned data ([#648](https://github.com/peteonrails/voxtype/issues/648)), owning the model download transfer layer ([#647](https://github.com/peteonrails/voxtype/issues/647)), long-audio windowing for Cohere and Parakeet (#551, #288), Nemotron ([#47](https://github.com/peteonrails/voxtype/issues/47)). Dictation cleanup pipeline ([#696](https://github.com/peteonrails/voxtype/issues/696)): staged labelers and rules instead of LLM rewriting - vocabulary, disfluency tagging (LARD-trained, CC-BY), punctuation/casing for the CTC engines that emit neither, ITN via text-processing-rs, user rules last; the LLM keeps only tone/restructuring behind an edit-list contract. Absorbs #535 and the filler-word half of #566; profile vocabularies feed #519.
+**1.2.0 (architecture):** Model registry out of Rust structs into versioned data ([#648](https://github.com/peteonrails/voxtype/issues/648)), owning the model download transfer layer ([#647](https://github.com/peteonrails/voxtype/issues/647)), Nemotron ([#47](https://github.com/peteonrails/voxtype/issues/47)). **Resident Vulkan Cohere GGUF transcription** ([#792](https://github.com/peteonrails/voxtype/pull/792), Jacob Mink) - runs Cohere `.gguf` through the official `transcribe.cpp` Rust binding, model/session resident in-process (no subprocess worker) when `on_demand_loading = false`; also closes the Cohere half of the long-audio windowing gap (#551) via quiet-boundary chunk splitting, shared with the ONNX path. Parakeet's long-audio windowing (#288) is unrelated and still open. Before merge: reconcile the model source (currently a pinned HuggingFace revision from handy-computer's repo) against the R2-only model CDN policy - every other model is R2-mirrored, none are HF-direct - and note the PR explicitly does not implement an end-to-end GPU-probe/fallback policy, which overlaps #611/#577. Dictation cleanup pipeline ([#696](https://github.com/peteonrails/voxtype/issues/696)): staged labelers and rules instead of LLM rewriting - vocabulary, disfluency tagging (LARD-trained, CC-BY), punctuation/casing for the CTC engines that emit neither, ITN via text-processing-rs, user rules last; the LLM keeps only tone/restructuring behind an edit-list contract. Absorbs #535 and the filler-word half of #566; profile vocabularies feed #519.
 
-**1.3.0:** parakeet.cpp as a ggml/Vulkan Parakeet backend ([#483](https://github.com/peteonrails/voxtype/issues/483)) - 5-6x faster steady-state than ONNX/MIGraphX on AMD, and the only GPU path for AMD and Intel Arc since ORT has no Vulkan EP. Subprocess-isolated so whisper-rs's ggml and parakeet.cpp's ggml never share an address space. Unified profiles ([#519](https://github.com/peteonrails/voxtype/issues/519)) absorbing Dictation Intents and per-record language (#484).
+**1.3.0:** parakeet.cpp as a ggml/Vulkan Parakeet backend ([#483](https://github.com/peteonrails/voxtype/issues/483)) - 5-6x faster steady-state than ONNX/MIGraphX on AMD, and the only GPU path for AMD and Intel Arc since ORT has no Vulkan EP. Subprocess-isolated so whisper-rs's ggml and parakeet.cpp's ggml never share an address space (contrast #792's resident, non-subprocess Cohere design - the two GGUF engines take different memory-lifecycle approaches; worth reconciling once both have shipped). Unified profiles ([#519](https://github.com/peteonrails/voxtype/issues/519)) absorbing Dictation Intents and per-record language (#484).
 
 **1.3.1:** Internal cleanup (#477, #478, #470, #471) and xdotool as an opt-in driver (#559).
 
@@ -356,12 +367,14 @@ Milestone-aligned with GitHub so the two don't drift. Based on the 29 Aug 2026 b
 
 **1.5.0:** Audio and output retention as one feature - caching (#28), history (#209), meeting file import (#489), and fixing `retain_audio`'s dead wiring (#529). Off by default.
 
+**2.0 (major):** Remove ONNX Runtime support entirely, once every ONNX-backed engine that's staying either has a native ggml/GGUF port (Cohere via #792 lands first, in 1.2.0; parakeet.cpp via #483 in 1.3.0) or is dropped. Moonshine/SenseVoice/Paraformer/Dolphin/Omnilingual still need an explicit per-engine port-or-retire call - not yet made. This also retires the ONNX-specific build/packaging burden: the onnx-avx2/onnx-avx512/onnx-cuda-12/onnx-cuda-13/onnx-migraphx binary targets, the AVX-512-instruction-leakage checks that exist only because of bundled ONNX Runtime prebuilts, and both open items under Blocked/Waiting below become moot rather than needing to be solved.
+
 **Near Term (unscheduled):**
 - **Deterministic integration tests** - Automated smoke tests using pre-recorded audio files that can run in CI without LLM/human interaction
 - **Meeting echo cancellation edge trimming** - Remove residual bleed-through words at segment boundaries when loopback audio is active. GTCRN handles the bulk of echo removal, but 1-2 stray words can appear at the start/end of mic segments where the STFT window crosses a chunk boundary.
 
 **Exploratory:**
-- **Consolidated release binaries** - Reduce from 8 binaries today (avx2, avx512, vulkan, onnx-avx2, onnx-avx512, onnx-cuda-12, onnx-cuda-13, onnx-migraphx) to 3 (cpu, cuda, migraphx) by combining Whisper + Vulkan + ONNX engines into each binary. Vulkan and CUDA/MIGraphX fall back to CPU when no GPU is present, and ONNX Runtime does runtime CPU dispatch. Trade-off is losing AVX-512 Whisper performance (~10-30%) and larger binaries. Blocked on whisper.cpp/ggml adding runtime SIMD dispatch if AVX-512 performance must be preserved; otherwise, AVX2-only Whisper is safe on all x86-64 CPUs. This now interacts with #483: a shared-ggml refactor would serve both.
+- **Consolidated release binaries** - Superseded by the 2.0 ONNX removal above: once no engine depends on ONNX Runtime, the 5 onnx-* build targets disappear outright rather than needing a combined-binary redesign. What's left to decide is only the ggml-side split (cpu/vulkan/cuda/rocm vs today's avx2/avx512/vulkan), with the same AVX-512-vs-binary-count trade-off as today.
 - **Vibe Voice backend** ([#285](https://github.com/peteonrails/voxtype/issues/285)) - Microsoft's speech model
 - **Parakeet sortformer for meeting diarization** - Evaluate parakeet-rs's sortformer feature as alternative to the current ml-diarization ECAPA-TDNN pipeline
 - **Native StatusNotifierItem tray** ([#267](https://github.com/peteonrails/voxtype/issues/267)) - Awaiting a contributor rebase; two PRs (#291, #438) predate the `src/cli` and `src/main` refactors and no longer apply
@@ -371,8 +384,8 @@ Milestone-aligned with GitHub so the two don't drift. Based on the 29 Aug 2026 b
 **Output driver policy:** The default chain (wtype -> dotool -> ydotool -> clipboard) is onboarding, not a requirement - `driver_order` already pins a single driver, though `fallback_to_clipboard = false` is needed alongside it to suppress the clipboard append. New drivers are opt-in and never auto-inserted into the default chain, so an upgrade never silently changes which driver types a user's text.
 
 **Blocked/Waiting:**
-- **Nixpkgs onnxruntime MIGraphX support** - Verify the nixpkgs `onnxruntime` build (with `rocmSupport = true`) actually exposes the MIGraphX EP. The Nix flake's `parakeet-migraphx` output uses `onnxruntimeRocm` and sets `ORT_MIGRAPHX_MODEL_CACHE_PATH`; if MIGraphX isn't exposed in nixpkgs, ORT will fail to register the EP at runtime.
-- **Cohere decoder on CUDA** - Encoder runs on GPU; decoder pinned to CPU pending ORT's CUDA `GroupQueryAttention` kernel adding `attention_bias` support. Flip the second arg of `build_session(&decoder_file, threads, "decoder", false)` in `src/transcribe/cohere.rs` once ORT lands the kernel.
+- **Nixpkgs onnxruntime MIGraphX support** - Verify the nixpkgs `onnxruntime` build (with `rocmSupport = true`) actually exposes the MIGraphX EP. The Nix flake's `parakeet-migraphx` output uses `onnxruntimeRocm` and sets `ORT_MIGRAPHX_MODEL_CACHE_PATH`; if MIGraphX isn't exposed in nixpkgs, ORT will fail to register the EP at runtime. Moot once ONNX Runtime is removed at 2.0 - AMD GPU users move to ggml's Vulkan/ROCm-HIP path instead, which doesn't route through an ONNX execution provider at all.
+- **Cohere decoder on CUDA** - Encoder runs on GPU; decoder pinned to CPU pending ORT's CUDA `GroupQueryAttention` kernel adding `attention_bias` support. Flip the second arg of `build_session(&decoder_file, threads, "decoder", false)` in `src/transcribe/cohere.rs` once ORT lands the kernel. Unblocked outright by #792's native GGUF path once that ships in 1.2.0 - a ggml-native decoder doesn't inherit ORT's kernel gap.
 
 ### Non-Goals
 
