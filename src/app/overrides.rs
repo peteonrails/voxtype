@@ -65,6 +65,9 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
             config.whisper.model = model.clone();
         } else if let Some((engine, resolved)) = other_engine {
             config.set_model_for(engine, &resolved);
+        } else if matches!(cli.command, Some(voxtype::Commands::Record { .. })) {
+            // `record` forwards the name to the daemon, which rejects an unknown
+            // one with its own error; a "using default" warning would contradict it.
         } else {
             let default_model = &config.whisper.model;
             tracing::warn!(
