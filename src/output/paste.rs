@@ -12,12 +12,45 @@
 
 use super::session::{detect, DisplaySession};
 use super::TextOutput;
+use crate::config::OutputDriver;
 use crate::error::OutputError;
 use crate::output::find_ydotool_socket;
 use crate::output::xclip::copy_to_x11_clipboard;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+
+/// Keystroke-capable drivers, in the order tried when the configured
+/// `driver_order` doesn't name any of them. dotool/clipboard/xclip have no
+/// keystroke-simulation path, so they never appear here.
+const DEFAULT_KEYSTROKE_DRIVER_ORDER: [OutputDriver; 3] = [
+    OutputDriver::Wtype,
+    OutputDriver::Eitype,
+    OutputDriver::Ydotool,
+];
+
+/// Filter a configured `[output] driver_order` down to keystroke-capable
+/// drivers, preserving relative order. Falls back to
+/// `DEFAULT_KEYSTROKE_DRIVER_ORDER` when the configured order is absent or
+/// names none of wtype/eitype/ydotool (e.g. `["dotool", "clipboard"]`),
+/// since paste mode's keystroke step has nothing to run in that case.
+fn resolve_keystroke_driver_order(configured: Option<&[OutputDriver]>) -> Vec<OutputDriver> {
+    let filtered: Vec<OutputDriver> = configured
+        .map(|order| {
+            order
+                .iter()
+                .copied()
+                .filter(|d| DEFAULT_KEYSTROKE_DRIVER_ORDER.contains(d))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if filtered.is_empty() {
+        DEFAULT_KEYSTROKE_DRIVER_ORDER.to_vec()
+    } else {
+        filtered
+    }
+}
 
 /// Parsed paste keystroke (modifiers + key)
 #[derive(Debug, Clone)]
@@ -210,14 +243,20 @@ pub struct PasteOutput {
     restore_clipboard: bool,
     /// Delay after paste before restoring clipboard (milliseconds)
     restore_clipboard_delay_ms: u32,
+    /// Order in which keystroke-capable drivers (wtype/eitype/ydotool) are
+    /// tried for the paste keystroke and the auto-submit Enter. Derived from
+    /// `[output] driver_order`; see [`resolve_keystroke_driver_order`].
+    driver_order: Vec<OutputDriver>,
 }
 
 impl PasteOutput {
     /// Create a new paste output
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         auto_submit: bool,
         append_text: Option<String>,
         paste_keys: Option<String>,
+        driver_order: Option<Vec<OutputDriver>>,
         type_delay_ms: u32,
         pre_type_delay_ms: u32,
         restore_clipboard: bool,
@@ -235,6 +274,9 @@ impl PasteOutput {
 
         tracing::debug!("Paste keystroke configured: {:?}", keystroke);
 
+        let driver_order = resolve_keystroke_driver_order(driver_order.as_deref());
+        tracing::debug!("Paste keystroke driver order: {:?}", driver_order);
+
         Self {
             auto_submit,
             append_text,
@@ -243,6 +285,7 @@ impl PasteOutput {
             pre_type_delay_ms,
             restore_clipboard,
             restore_clipboard_delay_ms,
+            driver_order,
         }
     }
 
@@ -705,99 +748,99 @@ impl PasteOutput {
         Ok(())
     }
 
-    /// Simulate paste keystroke, trying wtype first, then eitype, then ydotool
+    /// Simulate paste keystroke, trying each driver in `self.driver_order`
+    /// (derived from `[output] driver_order`, defaulting to
+    /// wtype -> eitype -> ydotool) until one succeeds.
     async fn simulate_paste_keystroke(&self) -> Result<(), OutputError> {
-        // Try wtype first (preferred - no daemon needed)
-        if self.is_wtype_available().await {
-            match self.simulate_paste_wtype().await {
+        let mut tried = Vec::new();
+
+        for driver in &self.driver_order {
+            let (available, name) = match driver {
+                OutputDriver::Wtype => (self.is_wtype_available().await, "wtype"),
+                OutputDriver::Eitype => (self.is_eitype_available().await, "eitype"),
+                OutputDriver::Ydotool => (self.is_ydotool_available().await, "ydotool"),
+                // driver_order is pre-filtered to the three keystroke-capable
+                // drivers above; nothing else can reach this loop.
+                _ => continue,
+            };
+
+            if !available {
+                continue;
+            }
+            tried.push(name);
+
+            let result = match driver {
+                OutputDriver::Wtype => self.simulate_paste_wtype().await,
+                OutputDriver::Eitype => self.simulate_paste_eitype().await,
+                OutputDriver::Ydotool => self.simulate_paste_ydotool().await,
+                _ => unreachable!(),
+            };
+
+            match result {
                 Ok(()) => {
-                    tracing::debug!("Paste keystroke sent via wtype");
+                    tracing::debug!("Paste keystroke sent via {}", name);
                     return Ok(());
                 }
                 Err(e) => {
-                    tracing::debug!("wtype paste failed: {}, trying eitype", e);
+                    tracing::debug!("{} paste failed: {}", name, e);
                 }
             }
         }
 
-        // Try eitype (EI protocol - works on GNOME/KDE/Sway with libei)
-        if self.is_eitype_available().await {
-            match self.simulate_paste_eitype().await {
-                Ok(()) => {
-                    tracing::debug!("Paste keystroke sent via eitype");
-                    return Ok(());
-                }
-                Err(e) => {
-                    tracing::debug!("eitype paste failed: {}, trying ydotool", e);
-                }
+        Err(OutputError::CtrlVFailed(format!(
+            "No keystroke tool available (tried {})",
+            if tried.is_empty() {
+                "none".to_string()
+            } else {
+                tried.join(", ")
             }
-        }
-
-        // Fall back to ydotool
-        if self.is_ydotool_available().await {
-            match self.simulate_paste_ydotool().await {
-                Ok(()) => {
-                    tracing::debug!("Paste keystroke sent via ydotool");
-                    return Ok(());
-                }
-                Err(e) => {
-                    tracing::debug!("ydotool paste failed: {}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        Err(OutputError::CtrlVFailed(
-            "No keystroke tool available (tried wtype, eitype, ydotool)".to_string(),
-        ))
+        )))
     }
 
-    /// Send Enter key after paste
+    /// Send Enter key after paste, trying the same driver order as the paste
+    /// keystroke itself.
     async fn send_enter(&self) -> Result<(), OutputError> {
-        // Try wtype first
-        if self.is_wtype_available().await {
-            let output = Command::new("wtype")
-                .args(["-k", "Return"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .output()
-                .await;
+        for driver in &self.driver_order {
+            let available = match driver {
+                OutputDriver::Wtype => self.is_wtype_available().await,
+                OutputDriver::Eitype => self.is_eitype_available().await,
+                OutputDriver::Ydotool => self.is_ydotool_available().await,
+                _ => continue,
+            };
+            if !available {
+                continue;
+            }
 
-            if let Ok(out) = output {
-                if out.status.success() {
-                    return Ok(());
+            let output = match driver {
+                OutputDriver::Wtype => {
+                    Command::new("wtype")
+                        .args(["-k", "Return"])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::piped())
+                        .output()
+                        .await
                 }
-            }
-        }
-
-        // Try eitype
-        if self.is_eitype_available().await {
-            let output = Command::new("eitype")
-                .args(["-k", "return"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .output()
-                .await;
-
-            if let Ok(out) = output {
-                if out.status.success() {
-                    return Ok(());
+                OutputDriver::Eitype => {
+                    Command::new("eitype")
+                        .args(["-k", "return"])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::piped())
+                        .output()
+                        .await
                 }
-            }
-        }
-
-        // Fall back to ydotool
-        if self.is_ydotool_available().await {
-            let mut cmd = Command::new("ydotool");
-            if let Some(socket) = find_ydotool_socket() {
-                cmd.env("YDOTOOL_SOCKET", socket);
-            }
-            let output = cmd
-                .args(["key", "28:1", "28:0"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .output()
-                .await;
+                OutputDriver::Ydotool => {
+                    let mut cmd = Command::new("ydotool");
+                    if let Some(socket) = find_ydotool_socket() {
+                        cmd.env("YDOTOOL_SOCKET", socket);
+                    }
+                    cmd.args(["key", "28:1", "28:0"])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::piped())
+                        .output()
+                        .await
+                }
+                _ => continue,
+            };
 
             if let Ok(out) = output {
                 if out.status.success() {
@@ -973,16 +1016,75 @@ mod tests {
 
     #[test]
     fn test_new_stores_restore_clipboard_fields() {
-        let output = PasteOutput::new(false, None, None, 10, 100, true, 300);
+        let output = PasteOutput::new(false, None, None, None, 10, 100, true, 300);
         assert!(output.restore_clipboard);
         assert_eq!(output.restore_clipboard_delay_ms, 300);
     }
 
     #[test]
     fn test_new_defaults_restore_clipboard_disabled() {
-        let output = PasteOutput::new(false, None, None, 10, 100, false, 200);
+        let output = PasteOutput::new(false, None, None, None, 10, 100, false, 200);
         assert!(!output.restore_clipboard);
         assert_eq!(output.restore_clipboard_delay_ms, 200);
+    }
+
+    #[test]
+    fn test_driver_order_defaults_to_wtype_eitype_ydotool() {
+        let output = PasteOutput::new(false, None, None, None, 10, 100, false, 200);
+        assert_eq!(
+            output.driver_order,
+            vec![
+                OutputDriver::Wtype,
+                OutputDriver::Eitype,
+                OutputDriver::Ydotool
+            ]
+        );
+    }
+
+    #[test]
+    fn test_driver_order_honours_config_override() {
+        // #750: ydotool sends real evdev keycodes and survives XWayland/RDP
+        // keycode remapping that breaks wtype; a user who puts it first in
+        // driver_order must have paste mode actually try it first.
+        let output = PasteOutput::new(
+            false,
+            None,
+            None,
+            Some(vec![OutputDriver::Ydotool, OutputDriver::Wtype]),
+            10,
+            100,
+            false,
+            200,
+        );
+        assert_eq!(
+            output.driver_order,
+            vec![OutputDriver::Ydotool, OutputDriver::Wtype]
+        );
+    }
+
+    #[test]
+    fn test_driver_order_falls_back_when_config_has_no_keystroke_driver() {
+        // A driver_order of e.g. ["dotool", "clipboard"] (valid for type
+        // mode) names nothing paste mode can use for the keystroke step, so
+        // it must fall back to the default rather than trying nothing.
+        let output = PasteOutput::new(
+            false,
+            None,
+            None,
+            Some(vec![OutputDriver::Dotool, OutputDriver::Clipboard]),
+            10,
+            100,
+            false,
+            200,
+        );
+        assert_eq!(
+            output.driver_order,
+            vec![
+                OutputDriver::Wtype,
+                OutputDriver::Eitype,
+                OutputDriver::Ydotool
+            ]
+        );
     }
 
     #[test]

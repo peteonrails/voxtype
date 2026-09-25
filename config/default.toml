@@ -179,12 +179,16 @@ type_delay_ms = 0
 pre_type_delay_ms = 0
 
 # Keystroke for paste mode (when mode = "paste")
-# Default is "ctrl+v". Change for environments with different paste shortcuts.
+# Shipped default is "shift+insert": it works in terminal emulators as well
+# as GUI apps, unlike ctrl+v, which many terminals reserve for their own
+# bindings (readline's literal-insert, tmux/screen prefixes, etc.) instead
+# of treating as paste. If this key is removed from the file entirely, the
+# built-in fallback is "ctrl+v".
 # Examples:
-#   paste_keys = "ctrl+v"        # Standard (default)
-#   paste_keys = "shift+insert"  # Hyprland/Omarchy universal paste
+#   paste_keys = "shift+insert"  # Shipped default; universal paste shortcut
+#   paste_keys = "ctrl+v"        # Standard GUI shortcut
 #   paste_keys = "ctrl+shift+v"  # Some terminal emulators
-# paste_keys = "ctrl+v"
+paste_keys = "shift+insert"
 
 # Compositor integration hooks
 # Use `voxtype setup compositor hyprland|sway|river` for automatic setup.

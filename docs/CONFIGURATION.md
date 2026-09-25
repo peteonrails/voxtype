@@ -1999,16 +1999,16 @@ The `paste` mode is an alternative for non-US keyboard layouts. Instead of typin
 ### paste_keys
 
 **Type:** String
-**Default:** `"ctrl+v"`
+**Default:** `"shift+insert"` in the shipped `config.toml`; `"ctrl+v"` is the built-in fallback if the key is removed from the file entirely
 **Required:** No
 
-Keystroke to simulate for paste mode. Change this if your environment uses a different paste shortcut.
+Keystroke to simulate for paste mode. The shipped default is `shift+insert` because it pastes correctly in terminal emulators as well as GUI apps — many terminals bind `ctrl+v` to their own function (readline's literal-insert, a tmux/screen prefix, etc.) rather than treating it as paste. Change this if your environment uses a different paste shortcut.
 
 **Format:** `"modifier+key"` or `"modifier+modifier+key"` (case-insensitive)
 
 **Common values:**
-- `"ctrl+v"` - Standard paste (default)
-- `"shift+insert"` - Universal paste for Hyprland/Omarchy
+- `"shift+insert"` - Universal paste shortcut, works in terminals and GUI apps (shipped default)
+- `"ctrl+v"` - Standard GUI paste shortcut
 - `"ctrl+shift+v"` - Some terminal emulators
 
 **Example:**
@@ -2088,6 +2088,8 @@ fallback_to_clipboard = true  # Use clipboard if typing drivers fail
 **Required:** No
 
 Custom order of output drivers to try when `mode = "type"`. Each driver is tried in sequence until one succeeds. This allows you to prefer specific drivers or exclude others entirely.
+
+**Also applies to `mode = "paste"`:** paste mode uses this same setting for its keystroke-simulation step, filtered down to the drivers that can send a keystroke (`wtype`, `eitype`, `ydotool` — `dotool`/`clipboard`/`xclip` entries are ignored there). If `driver_order` doesn't name any of those three, paste mode falls back to `wtype → eitype → ydotool`. This matters for RDP/VNC clients under XWayland (e.g. `xfreerdp`): wtype uploads its own minimal XKB keymap, so its keycodes don't match what the remote session expects, and the paste keystroke can arrive as the wrong key entirely. `ydotool` sends real evdev keycodes and doesn't have this problem, so put it first for those clients: `driver_order = ["ydotool", "wtype"]`.
 
 **Available drivers:**
 - `wtype` - Wayland virtual keyboard protocol (best CJK/Unicode support, wlroots compositors only)
