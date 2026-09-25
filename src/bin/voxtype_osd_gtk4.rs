@@ -29,6 +29,7 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use voxtype::audio::levels::{AudioFrame, FRAME_HZ};
 use voxtype::config::Config as VoxtypeConfig;
 use voxtype::osd::config::{OsdConfig, OsdPosition};
+use voxtype::osd::gtk_env;
 use voxtype::osd::ipc::{resolve_socket_path, run_ipc_loop, FrameRing};
 use voxtype::osd::theme::ThemeWatcher;
 use voxtype::osd::visual::{peak_meter_fraction, project_envelope, MeterZone, Palette, PeakHold};
@@ -167,15 +168,31 @@ impl SharedState {
 }
 
 fn main() -> anyhow::Result<()> {
-    // Keep GDK off the Wayland linux-dmabuf path. GTK4's dmabuf-feedback
-    // handling corrupts its own heap under long-running sessions (GPtrArray
-    // refcount garbage inside the feedback listener), which SIGSEGVs this
-    // process every few minutes-to-hours on AMD iGPUs (#656). The OSD is a
-    // small overlay; shared-memory buffers cost nothing here. Respect an
-    // explicit GDK_DISABLE from the user (they may be working around
-    // something else, or testing the dmabuf path deliberately).
+    // Keep GDK off dmabuf rendering. The OSD is a small overlay;
+    // shared-memory buffers cost nothing here. Respect an explicit
+    // GDK_DISABLE from the user (they may be working around something else,
+    // or testing the dmabuf path deliberately).
     if std::env::var_os("GDK_DISABLE").is_none() {
         std::env::set_var("GDK_DISABLE", "dmabuf");
+    }
+
+    // GDK_DISABLE=dmabuf does not stop GDK binding zwp_linux_dmabuf_v1 and
+    // handling its feedback, which is where unfixed GTK releases munmap the
+    // wrong pointer on output hotplug (gtk#8366; #580, #656). Only
+    // GDK_WAYLAND_DISABLE keeps the interface unbound. Must run before GDK
+    // opens the display.
+    let (major, minor, micro) = (
+        gtk4::major_version(),
+        gtk4::minor_version(),
+        gtk4::micro_version(),
+    );
+    let skip_dmabuf = gtk_env::gtk_lacks_dmabuf_feedback_fix(major, minor, micro);
+    if skip_dmabuf {
+        let existing = std::env::var("GDK_WAYLAND_DISABLE").ok();
+        std::env::set_var(
+            "GDK_WAYLAND_DISABLE",
+            gtk_env::wayland_disable_with(existing.as_deref(), gtk_env::LINUX_DMABUF_INTERFACE),
+        );
     }
 
     tracing_subscriber::fmt()
@@ -184,6 +201,13 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+
+    if skip_dmabuf {
+        tracing::info!(
+            "GTK {major}.{minor}.{micro} predates the gtk#8366 fix; not binding {}",
+            gtk_env::LINUX_DMABUF_INTERFACE
+        );
+    }
 
     let args = Args::parse();
     let socket_path = resolve_socket_path(args.socket.clone());
