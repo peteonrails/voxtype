@@ -279,6 +279,7 @@ fn create_driver_output(
             config.type_delay_ms,
             pre_type_delay_ms,
             config.auto_submit,
+            config.shift_enter_newlines,
             config.append_text.clone(),
             config.dotool_xkb_layout.clone(),
             config.dotool_xkb_variant.clone(),
@@ -287,6 +288,7 @@ fn create_driver_output(
             config.type_delay_ms,
             pre_type_delay_ms,
             config.auto_submit,
+            config.shift_enter_newlines,
             config.append_text.clone(),
         )),
         OutputDriver::Clipboard => {
