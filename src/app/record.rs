@@ -198,7 +198,11 @@ pub(crate) fn send_record_command(
             RecordAction::Stop { json, timeout, .. } => (*json, *timeout),
             _ => (false, 120),
         };
-        let outcome = await_transcription(&transcript, Duration::from_secs(timeout));
+        let outcome = await_transcription(
+            &transcript,
+            config.resolve_state_file().as_deref(),
+            Duration::from_secs(timeout),
+        );
         report_outcome(&outcome, as_json);
         std::process::exit(outcome.exit_code());
     }
@@ -256,13 +260,19 @@ impl WaitOutcome {
 /// seeing the sidecar means the transcript is complete. A state file that
 /// returns to idle without one is the backstop: that means the recording ended
 /// down a path that produced no transcript.
-fn await_transcription(transcript: &Path, timeout: Duration) -> WaitOutcome {
+///
+/// `state_file` is the daemon's resolved state file. With `state_file` disabled
+/// there is no idle backstop, so only the sidecar or the timeout ends the wait.
+fn await_transcription(
+    transcript: &Path,
+    state_file: Option<&Path>,
+    timeout: Duration,
+) -> WaitOutcome {
     const POLL: Duration = Duration::from_millis(50);
     // How long to keep looking for a sidecar after the daemon reports idle.
     const SETTLE: Duration = Duration::from_millis(750);
 
     let sidecar = result_sidecar_path(transcript);
-    let state_file = config::Config::runtime_dir().join("state");
     let deadline = Instant::now() + timeout;
     let mut idle_since: Option<Instant> = None;
 
@@ -272,7 +282,8 @@ fn await_transcription(transcript: &Path, timeout: Duration) -> WaitOutcome {
             return finish(transcript, &body);
         }
 
-        let state = std::fs::read_to_string(&state_file)
+        let state = state_file
+            .and_then(|path| std::fs::read_to_string(path).ok())
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
         if state == "idle" {
@@ -301,7 +312,13 @@ fn await_transcription(transcript: &Path, timeout: Duration) -> WaitOutcome {
                 message: Some(format!(
                     "no outcome within {}s (daemon state: {})",
                     timeout.as_secs(),
-                    if state.is_empty() { "unknown" } else { &state }
+                    if state_file.is_none() {
+                        "unknown, state_file is disabled"
+                    } else if state.is_empty() {
+                        "unknown"
+                    } else {
+                        &state
+                    }
                 )),
             };
         }
@@ -367,5 +384,79 @@ fn report_outcome(outcome: &WaitOutcome, as_json: bool) {
         eprintln!("{}: {}", outcome.status, message);
     } else {
         eprintln!("{}", outcome.status);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_with_state_file(value: &str) -> config::Config {
+        config::Config {
+            state_file: Some(value.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn wait_reads_a_custom_state_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("custom-state");
+        std::fs::write(&state, "idle\n").unwrap();
+        let config = config_with_state_file(state.to_str().unwrap());
+
+        let outcome = await_transcription(
+            &dir.path().join("transcript.txt"),
+            config.resolve_state_file().as_deref(),
+            Duration::from_secs(10),
+        );
+
+        assert_eq!(outcome.status, "empty");
+    }
+
+    #[test]
+    fn wait_ignores_the_default_state_file_when_a_custom_one_is_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("custom-state");
+        std::fs::write(&state, "transcribing\n").unwrap();
+        let config = config_with_state_file(state.to_str().unwrap());
+
+        let outcome = await_transcription(
+            &dir.path().join("transcript.txt"),
+            config.resolve_state_file().as_deref(),
+            Duration::from_millis(200),
+        );
+
+        assert_eq!(outcome.status, "timeout");
+        assert!(outcome.message.unwrap().contains("transcribing"));
+    }
+
+    #[test]
+    fn wait_with_state_file_disabled_falls_back_to_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_state_file("disabled");
+        assert!(config.resolve_state_file().is_none());
+
+        let outcome = await_transcription(
+            &dir.path().join("transcript.txt"),
+            config.resolve_state_file().as_deref(),
+            Duration::from_millis(200),
+        );
+
+        assert_eq!(outcome.status, "timeout");
+        assert!(outcome.message.unwrap().contains("state_file is disabled"));
+    }
+
+    #[test]
+    fn wait_prefers_the_completion_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.txt");
+        std::fs::write(&transcript, "hello\n").unwrap();
+        std::fs::write(result_sidecar_path(&transcript), r#"{"status":"ok"}"#).unwrap();
+
+        let outcome = await_transcription(&transcript, None, Duration::from_secs(10));
+
+        assert_eq!(outcome.status, "ok");
+        assert_eq!(outcome.text, "hello");
     }
 }
