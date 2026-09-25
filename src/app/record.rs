@@ -27,9 +27,29 @@ pub(crate) fn send_record_command(
 
     // Handle cancel separately (uses file trigger instead of signal)
     if matches!(action, RecordAction::Cancel) {
+        let state_file = config.resolve_state_file();
+        let was_active = state_file
+            .as_deref()
+            .is_some_and(|path| state_is_cancellable(&read_state(path)));
+
         let cancel_file = config::Config::runtime_dir().join("cancel");
         std::fs::write(&cancel_file, "cancel")
             .map_err(|e| anyhow::anyhow!("Failed to write cancel file: {}", e))?;
+
+        // The daemon picks the trigger up on its next poll tick. Return only
+        // once it has, so a command that follows (a `record toggle` in
+        // particular, which decides start-vs-stop from the state file) sees
+        // the cancelled state instead of the session it just cancelled. A
+        // cancel sent while idle has nothing to wait for; its trigger is
+        // consumed when the next recording starts.
+        if let (true, Some(path)) = (was_active, state_file.as_deref()) {
+            if !await_cancel(path, CANCEL_ACK_TIMEOUT) {
+                eprintln!(
+                    "Warning: the daemon has not acknowledged the cancel after {}s",
+                    CANCEL_ACK_TIMEOUT.as_secs()
+                );
+            }
+        }
         return Ok(());
     }
 
@@ -387,9 +407,80 @@ fn report_outcome(outcome: &WaitOutcome, as_json: bool) {
     }
 }
 
+/// How long `record cancel` waits for the daemon to act on the trigger. The
+/// daemon polls every 100ms, so this only runs out if it is wedged.
+const CANCEL_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn read_state(state_file: &Path) -> String {
+    std::fs::read_to_string(state_file)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// States a `record cancel` acts on; mirrors the daemon's cancel handling.
+fn state_is_cancellable(state: &str) -> bool {
+    matches!(state, "recording" | "streaming" | "transcribing")
+}
+
+/// Wait until the daemon leaves the cancellable states. Returns `false` on
+/// timeout.
+fn await_cancel(state_file: &Path, timeout: Duration) -> bool {
+    const POLL: Duration = Duration::from_millis(20);
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !state_is_cancellable(&read_state(state_file)) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancel_waits_until_the_daemon_leaves_recording() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        std::fs::write(&state, "recording\n").unwrap();
+
+        let writer_state = state.clone();
+        let daemon = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            std::fs::write(&writer_state, "idle\n").unwrap();
+        });
+
+        let started = Instant::now();
+        assert!(await_cancel(&state, Duration::from_secs(2)));
+        // Returned only after the simulated daemon went idle, so a
+        // `record toggle` issued next reads idle and sends a start.
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        assert_eq!(read_state(&state), "idle");
+        daemon.join().unwrap();
+    }
+
+    #[test]
+    fn cancel_wait_gives_up_on_a_wedged_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        std::fs::write(&state, "transcribing\n").unwrap();
+
+        assert!(!await_cancel(&state, Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn only_active_states_are_cancellable() {
+        for s in ["recording", "streaming", "transcribing"] {
+            assert!(state_is_cancellable(s), "{s}");
+        }
+        for s in ["idle", "", "outputting", "stopped"] {
+            assert!(!state_is_cancellable(s), "{s}");
+        }
+    }
 
     fn config_with_state_file(value: &str) -> config::Config {
         config::Config {

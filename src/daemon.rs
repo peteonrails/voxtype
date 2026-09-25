@@ -242,6 +242,13 @@ fn check_cancel_requested() -> bool {
     }
 }
 
+/// Whether a pending `record cancel` has a session to act on. Idle and
+/// outputting states are left alone: a trigger written while idle is
+/// consumed when the next capture starts (#606), not by this path.
+fn cancel_applies_to(state: &State) -> bool {
+    state.is_recording() || matches!(state, State::Transcribing { .. })
+}
+
 /// Clean up any stale cancel file on startup
 fn cleanup_cancel_file() {
     let cancel_file = Config::runtime_dir().join("cancel");
@@ -1614,6 +1621,132 @@ impl Daemon {
 
         *state = State::Idle;
         self.update_state("idle");
+    }
+
+    /// Carry out a `voxtype record cancel` trigger against whatever session is
+    /// live: discard a recording (batch, eager, or streaming) or abort a
+    /// transcription. The caller has already consumed the trigger file.
+    #[allow(clippy::too_many_arguments)]
+    async fn cancel_requested_session(
+        &mut self,
+        state: &mut State,
+        audio_capture: &mut Option<Box<dyn AudioCapture>>,
+        streaming_handle: &mut Option<StreamHandle>,
+        streaming_session: &mut Option<StreamingSession>,
+        streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
+        eager_transcriber: &mut Option<Arc<dyn Transcriber>>,
+    ) {
+        if state.is_streaming() {
+            tracing::info!("Recording cancelled");
+            self.end_external_session(true).await;
+            self.cancel_streaming_to_idle(
+                state,
+                audio_capture,
+                streaming_handle,
+                streaming_session,
+                streaming_chain,
+                "Recording discarded",
+            )
+            .await;
+            return;
+        }
+
+        if state.is_recording() {
+            tracing::info!("Recording cancelled");
+
+            // Stop recording and discard audio
+            if let Some(mut capture) = audio_capture.take() {
+                let _ = capture.stop().await;
+            }
+            self.restore_recording_media();
+
+            // Cancel any pending model load task
+            if let Some(task) = self.model_load_task.take() {
+                task.abort();
+            }
+
+            // Cancel any pending eager chunk tasks
+            for (_, task) in self.eager_chunk_tasks.drain(..) {
+                task.abort();
+            }
+
+            if let State::EagerRecording {
+                accumulated_audio,
+                chunk_results,
+                chunks_sent,
+                tasks_in_flight,
+                ..
+            } = state
+            {
+                accumulated_audio.clear();
+                chunk_results.clear();
+                *chunks_sent = 0;
+                *tasks_in_flight = 0;
+            }
+
+            cleanup_output_mode_override();
+            cleanup_model_override();
+            cleanup_profile_override();
+            cleanup_bool_override("smart_auto_submit");
+            // A cancelled external-trigger session is still an ended
+            // session — tell the caller and disarm tracking.
+            self.end_external_session(true).await;
+            *state = State::Idle;
+            *eager_transcriber = None;
+            self.update_state("idle");
+            self.play_feedback(SoundEvent::Cancelled);
+
+            // Run post_output_command to reset compositor submap
+            if let Some(cmd) = &self.config.output.post_output_command {
+                if let Err(e) = output::run_hook(cmd, "post_output").await {
+                    tracing::warn!("{}", e);
+                }
+            }
+
+            end_recording_notification(
+                "Cancelled",
+                "Recording discarded",
+                &self.config.output.notification,
+                self.config.engine,
+            )
+            .await;
+            return;
+        }
+
+        if matches!(state, State::Transcribing { .. }) {
+            tracing::info!("Transcription cancelled");
+
+            // Abort the transcription task
+            if let Some(task) = self.transcription_task.take() {
+                task.abort();
+            }
+            // Drop the cloned transcriber Arc so it isn't held until the
+            // next transcription.
+            self.active_transcriber = None;
+
+            cleanup_output_mode_override();
+            cleanup_model_override();
+            cleanup_profile_override();
+            cleanup_bool_override("smart_auto_submit");
+            *state = State::Idle;
+            self.update_state("idle");
+            self.play_feedback(SoundEvent::Cancelled);
+
+            // Run post_output_command to reset compositor submap
+            if let Some(cmd) = &self.config.output.post_output_command {
+                if let Err(e) = output::run_hook(cmd, "post_output").await {
+                    tracing::warn!("{}", e);
+                }
+            }
+
+            end_recording_notification(
+                "Cancelled",
+                "Transcription aborted",
+                &self.config.output.notification,
+                self.config.engine,
+            )
+            .await;
+        }
     }
 
     /// Cancel an active streaming session: signal the backend, drop capture,
@@ -3337,6 +3470,18 @@ impl Daemon {
         let mut streaming_session: Option<StreamingSession> = None;
         let mut streaming_chain: Option<Vec<Box<dyn TextOutput>>> = None;
 
+        // Persistent poll timers for the recording and transcribing arms. A
+        // `sleep()` arm is rebuilt every loop iteration, so it competes with
+        // the unconditional 100ms poll below: both are due on the same tick,
+        // select! picks one at random, and the loser starts over. That turned
+        // the cancel check into a coin flip every 100ms (observed 0.1-0.5s
+        // before a `record cancel` took effect). An Interval keeps its
+        // deadline across iterations, so a missed tick fires on the next one.
+        let mut recording_poll = tokio::time::interval(Duration::from_millis(100));
+        recording_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut transcribing_poll = tokio::time::interval(Duration::from_millis(100));
+        transcribing_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
         loop {
             tokio::select! {
                 // Handle hotkey events (only if hotkey listener is enabled)
@@ -3843,62 +3988,17 @@ impl Daemon {
                 }
 
                 // Check for recording timeout and cancel requests
-                _ = tokio::time::sleep(Duration::from_millis(100)), if state.is_recording() => {
+                _ = recording_poll.tick(), if state.is_recording() => {
                     // Check for cancel request first
                     if check_cancel_requested() {
-                        tracing::info!("Recording cancelled");
-
-                        // Stop recording and discard audio
-                        if let Some(mut capture) = audio_capture.take() {
-                            let _ = capture.stop().await;
-                        }
-                        self.restore_recording_media();
-
-                        // Cancel any pending model load task
-                        if let Some(task) = self.model_load_task.take() {
-                            task.abort();
-                        }
-
-                        // Cancel any pending eager chunk tasks
-                        for (_, task) in self.eager_chunk_tasks.drain(..) {
-                            task.abort();
-                        }
-
-                        if let State::EagerRecording {
-                            accumulated_audio,
-                            chunk_results,
-                            chunks_sent,
-                            tasks_in_flight,
-                            ..
-                        } = &mut state
-                        {
-                            accumulated_audio.clear();
-                            chunk_results.clear();
-                            *chunks_sent = 0;
-                            *tasks_in_flight = 0;
-                        }
-
-                        cleanup_output_mode_override();
-                        cleanup_model_override();
-                        cleanup_profile_override();
-                        cleanup_bool_override("smart_auto_submit");
-                        // A cancelled external-trigger session is still an
-                        // ended session — tell the caller and disarm tracking.
-                        self.end_external_session(state.is_recording()).await;
-                        state = State::Idle;
-                        eager_transcriber = None;
-                        self.update_state("idle");
-                        self.play_feedback(SoundEvent::Cancelled);
-
-                        // Run post_output_command to reset compositor submap
-                        if let Some(cmd) = &self.config.output.post_output_command {
-                            if let Err(e) = output::run_hook(cmd, "post_output").await {
-                                tracing::warn!("{}", e);
-                            }
-                        }
-
-                        end_recording_notification("Cancelled", "Recording discarded", &self.config.output.notification, self.config.engine).await;
-
+                        self.cancel_requested_session(
+                            &mut state,
+                            &mut audio_capture,
+                            &mut streaming_handle,
+                            &mut streaming_session,
+                            &mut streaming_chain,
+                            &mut eager_transcriber,
+                        ).await;
                         continue;
                     }
 
@@ -4082,7 +4182,26 @@ impl Daemon {
                 // Handle SIGUSR1 - start recording (for compositor keybindings)
                 _ = sigusr1.recv() => {
                     tracing::debug!("Received SIGUSR1 (start recording)");
-                    if state.is_idle() {
+                    // A `record cancel` sent just before this start is still
+                    // waiting for its poll tick. Apply it first so commands
+                    // take effect in the order they were issued; otherwise
+                    // this start lands on the still-live session and is lost.
+                    if cancel_applies_to(&state) && check_cancel_requested() {
+                        self.cancel_requested_session(
+                            &mut state,
+                            &mut audio_capture,
+                            &mut streaming_handle,
+                            &mut streaming_session,
+                            &mut streaming_chain,
+                            &mut eager_transcriber,
+                        ).await;
+                    }
+                    if !state.is_idle() {
+                        tracing::info!(
+                            "Ignoring start request: daemon is {} (stop or cancel it first)",
+                            state
+                        );
+                    } else {
                         // Read model override from file (set by `voxtype record start --model X`)
                         let model_override = read_model_override();
                         tracing::info!("Recording started (external trigger), model_override = {:?}", model_override);
@@ -4209,6 +4328,19 @@ impl Daemon {
                 // Handle SIGUSR2 - stop recording (for compositor keybindings)
                 _ = sigusr2.recv() => {
                     tracing::debug!("Received SIGUSR2 (stop recording)");
+                    // Same ordering rule as SIGUSR1: a cancel issued before
+                    // this stop discards the recording instead of the stop
+                    // transcribing it.
+                    if cancel_applies_to(&state) && check_cancel_requested() {
+                        self.cancel_requested_session(
+                            &mut state,
+                            &mut audio_capture,
+                            &mut streaming_handle,
+                            &mut streaming_session,
+                            &mut streaming_chain,
+                            &mut eager_transcriber,
+                        ).await;
+                    }
                     self.stop_active_recording(
                         &mut state,
                         &mut audio_capture,
@@ -4347,34 +4479,16 @@ impl Daemon {
                 }
 
                 // Check for cancel during transcription
-                _ = tokio::time::sleep(Duration::from_millis(100)), if matches!(state, State::Transcribing { .. }) => {
+                _ = transcribing_poll.tick(), if matches!(state, State::Transcribing { .. }) => {
                     if check_cancel_requested() {
-                        tracing::info!("Transcription cancelled");
-
-                        // Abort the transcription task
-                        if let Some(task) = self.transcription_task.take() {
-                            task.abort();
-                        }
-                        // Drop the cloned transcriber Arc so it isn't held
-                        // until the next transcription.
-                        self.active_transcriber = None;
-
-                        cleanup_output_mode_override();
-                        cleanup_model_override();
-                        cleanup_profile_override();
-                        cleanup_bool_override("smart_auto_submit");
-                        state = State::Idle;
-                        self.update_state("idle");
-                        self.play_feedback(SoundEvent::Cancelled);
-
-                        // Run post_output_command to reset compositor submap
-                        if let Some(cmd) = &self.config.output.post_output_command {
-                            if let Err(e) = output::run_hook(cmd, "post_output").await {
-                                tracing::warn!("{}", e);
-                            }
-                        }
-
-                        end_recording_notification("Cancelled", "Transcription aborted", &self.config.output.notification, self.config.engine).await;
+                        self.cancel_requested_session(
+                            &mut state,
+                            &mut audio_capture,
+                            &mut streaming_handle,
+                            &mut streaming_session,
+                            &mut streaming_chain,
+                            &mut eager_transcriber,
+                        ).await;
                     }
                 }
 
@@ -4659,6 +4773,47 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    /// A cancel issued before a start/stop signal is applied first when the
+    /// daemon has a live session, so `record cancel; record start` records
+    /// again instead of the start landing on the session being cancelled.
+    #[test]
+    fn pending_cancel_applies_to_live_sessions_only() {
+        let now = std::time::Instant::now();
+        let live = [
+            State::Recording {
+                started_at: now,
+                model_override: None,
+            },
+            State::EagerRecording {
+                started_at: now,
+                model_override: None,
+                accumulated_audio: Vec::new(),
+                chunks_sent: 0,
+                chunk_results: Vec::new(),
+                tasks_in_flight: 0,
+            },
+            State::Streaming {
+                started_at: now,
+                model_override: None,
+                partial_buffer: String::new(),
+                finalized_text: String::new(),
+                typed_chars: 0,
+                file_output_path: None,
+            },
+            State::Transcribing { audio: Vec::new() },
+        ];
+        for state in &live {
+            assert!(cancel_applies_to(state), "{state}");
+        }
+
+        // Idle triggers are consumed at the next capture start (#606);
+        // output is already on its way and has no cancel path.
+        assert!(!cancel_applies_to(&State::Idle));
+        assert!(!cancel_applies_to(&State::Outputting {
+            text: String::new()
+        }));
+    }
 
     /// #643: the panic-recovery arm in handle_transcription_result must fire
     /// only for a real panic. Both JoinError flavors are constructed for real
