@@ -50,8 +50,21 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         config.output.restore_clipboard_delay_ms = delay;
     }
     if let Some(ref model) = cli.model {
+        // Another engine's model selects that engine too. A Whisper name
+        // only sets [whisper] model, as it always has, so scripts that pass
+        // one alongside another engine keep working.
+        let other_engine = voxtype::model_catalog::resolve_model(model)
+            .filter(|r| r.engine != "whisper")
+            .and_then(|r| {
+                r.engine
+                    .parse::<config::TranscriptionEngine>()
+                    .ok()
+                    .map(|engine| (engine, r.model))
+            });
         if setup::model::is_valid_model(model) {
             config.whisper.model = model.clone();
+        } else if let Some((engine, resolved)) = other_engine {
+            config.set_model_for(engine, &resolved);
         } else {
             let default_model = &config.whisper.model;
             tracing::warn!(

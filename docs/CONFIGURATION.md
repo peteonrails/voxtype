@@ -1034,7 +1034,7 @@ voxtype --initial-prompt "Discussion about Kubernetes and Terraform" daemon
 **Default:** None (disabled)
 **Required:** No
 
-A secondary Whisper model that can be triggered on-demand using the `model_modifier` hotkey or the `--model` CLI flag. Useful for having a fast model for everyday use and a more accurate model available when needed.
+A secondary model that can be triggered on-demand using the `model_modifier` hotkey or the `--model` CLI flag. Useful for having a fast model for everyday use and a more accurate model available when needed. It usually names a Whisper model, but any engine's model works (for example a Whisper model as the fallback for a Parakeet setup); a model from another engine is loaded alongside the default one.
 
 **Example:**
 ```toml
