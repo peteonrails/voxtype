@@ -199,6 +199,39 @@ pub enum SetupAction {
         status: bool,
     },
 
+    /// Apply or list OSD recipe presets
+    #[command(long_about = "\
+        Apply or list OSD recipe presets\n\n\
+        A recipe is a complete [osd] preset: layout, frame, and \
+        [[osd.visual.layers]]. Applying one writes its keys into config.toml \
+        through the same editor as `voxtype config set`: keys the recipe sets \
+        replace the existing ones (never duplicated), [osd] keys it doesn't \
+        set are kept, comments are preserved, and the result is validated \
+        before it is written. Every changed key is printed with its previous \
+        value.\n\n\
+        Recipes are looked up in ~/.config/voxtype/osd-recipes, \
+        ~/.local/share/voxtype/osd-recipes, then \
+        /usr/share/voxtype/osd-recipes; a user copy shadows a shipped one. \
+        With no --recipe name, lists the available recipes.\n\n\
+        Examples:\n  \
+        voxtype setup osd --list\n  \
+        voxtype setup osd --recipe showcase-bars --dry-run\n  \
+        voxtype setup osd --recipe showcase-bars\n  \
+        voxtype setup osd --recipe ./my-recipe.toml")]
+    Osd {
+        /// Recipe name from --list, or a path to a recipe .toml file
+        #[arg(long, value_name = "NAME", num_args = 0..=1, default_missing_value = "")]
+        recipe: Option<String>,
+
+        /// List available recipes
+        #[arg(long)]
+        list: bool,
+
+        /// Show what would change without writing config.toml
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Install the Quickshell QML tree for the voxtype-osd-quickshell launcher
     ///
     /// Copies shell.qml, OsdSurface.qml, EnginePicker.qml,

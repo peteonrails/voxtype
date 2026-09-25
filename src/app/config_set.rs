@@ -78,3 +78,79 @@ pub(crate) fn run_config_unset(cli_override: Option<PathBuf>, key: &str) -> anyh
         Err(e) => fail(e),
     }
 }
+
+/// Dispatcher for `voxtype setup osd [--list | --recipe NAME [--dry-run]]`.
+pub(crate) fn run_setup_osd(
+    cli_override: Option<PathBuf>,
+    recipe: Option<String>,
+    list: bool,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    use voxtype::osd::recipe;
+
+    let name = recipe.filter(|n| !n.is_empty());
+    let Some(name) = name.filter(|_| !list) else {
+        let recipes = recipe::list_recipes();
+        if recipes.is_empty() {
+            println!("No OSD recipes installed. Searched:");
+            for root in recipe::recipe_roots() {
+                println!("  {}", root.display());
+            }
+            return Ok(());
+        }
+        println!("Available OSD recipes:\n");
+        for r in &recipes {
+            match &r.description {
+                Some(d) => println!("  {:<24} {}", r.name, d),
+                None => println!("  {}", r.name),
+            }
+        }
+        println!("\nApply one with: voxtype setup osd --recipe <NAME> [--dry-run]");
+        return Ok(());
+    };
+
+    let recipe_path = recipe::resolve_recipe(&name).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let config_path = resolve_config_path_for_write(cli_override)?;
+    let out = recipe::apply_recipe(&recipe_path, config_path, dry_run)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    for key in &out.ignored {
+        eprintln!(
+            "warning: {} sets [{}], which recipes don't apply; only [osd] is written",
+            recipe_path.display(),
+            key
+        );
+    }
+    if out.changes.is_empty() {
+        println!(
+            "{} already matches recipe '{}'; nothing to change.",
+            out.config.display(),
+            name
+        );
+        return Ok(());
+    }
+
+    let verb = if dry_run { "Would change" } else { "Changed" };
+    println!(
+        "{} {} key(s) in {}:",
+        verb,
+        out.changes.len(),
+        out.config.display()
+    );
+    for c in &out.changes {
+        match &c.before {
+            Some(before) => println!("  {} = {}  (was {})", c.key, c.after, before),
+            None => println!("  {} = {}  (was unset)", c.key, c.after),
+        }
+    }
+    if dry_run {
+        println!("\nDry run: nothing written. Drop --dry-run to apply.");
+    } else {
+        println!(
+            "\nTo revert, set the previous values shown above; keys that were \
+             unset can be deleted from [osd]."
+        );
+        restart_hint(true);
+    }
+    Ok(())
+}

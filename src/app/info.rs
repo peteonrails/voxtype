@@ -378,7 +378,9 @@ fn run_styles(json: bool, config: &Config) -> anyhow::Result<()> {
     }
     println!();
     println!("Switch with: voxtype config set osd.style <NAME>");
-    println!("Recipe presets to copy from: /usr/share/voxtype/osd-recipes (or examples/osd-recipes in the source tree)");
+    println!(
+        "Recipe presets: `voxtype setup osd --list`, then `voxtype setup osd --recipe <name>`"
+    );
     Ok(())
 }
 

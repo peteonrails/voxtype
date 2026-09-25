@@ -271,22 +271,30 @@ fn candidate_package_dirs_with_system(name: &str, system_dir: &Path) -> Vec<Path
 /// by per-name resolution and [`list_installed_styles`] so the two can't
 /// disagree about where packages live.
 fn package_roots_with_system(system_dir: &Path) -> Vec<PathBuf> {
+    user_then_system_roots("osd", system_dir)
+}
+
+/// `voxtype/<subdir>` under user config, then user data, then `system_dir`.
+/// Style packages (`osd`) and OSD recipes (`osd-recipes`) share this order so
+/// a user copy of either always shadows the shipped one.
+pub(crate) fn user_then_system_roots(subdir: &str, system_dir: &Path) -> Vec<PathBuf> {
+    let rel = Path::new("voxtype").join(subdir);
     let mut roots = Vec::new();
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         if !xdg.is_empty() {
-            roots.push(PathBuf::from(xdg).join("voxtype/osd"));
+            roots.push(PathBuf::from(xdg).join(&rel));
         }
     }
     if let Some(home) = dirs::home_dir() {
-        roots.push(home.join(".config/voxtype/osd"));
+        roots.push(home.join(".config").join(&rel));
     }
     if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
         if !xdg.is_empty() {
-            roots.push(PathBuf::from(xdg).join("voxtype/osd"));
+            roots.push(PathBuf::from(xdg).join(&rel));
         }
     }
     if let Some(home) = dirs::home_dir() {
-        roots.push(home.join(".local/share/voxtype/osd"));
+        roots.push(home.join(".local/share").join(&rel));
     }
     roots.push(system_dir.to_path_buf());
     roots

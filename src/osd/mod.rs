@@ -15,6 +15,7 @@
 
 pub mod config;
 pub mod ipc;
+pub mod recipe;
 pub mod style;
 pub mod supervisor;
 pub mod theme;
