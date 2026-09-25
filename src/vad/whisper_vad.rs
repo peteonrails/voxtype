@@ -61,7 +61,10 @@ impl VoiceActivityDetector for WhisperVad {
         params.set_min_speech_duration(self.min_speech_duration_ms as i32);
         // Use defaults for silence duration (100ms) and padding (30ms)
 
-        // Run VAD detection
+        // whisper.cpp logs `vad time = ...` as a running total over every call
+        // on this context, so it climbs with each check even though per-check
+        // cost is flat (#578). Time the call ourselves for the real number.
+        let started = std::time::Instant::now();
         let segments = ctx
             .segments_from_samples(params, samples)
             .map_err(|e| VadError::DetectionFailed(format!("VAD detection failed: {}", e)))?;
@@ -99,11 +102,12 @@ impl VoiceActivityDetector for WhisperVad {
         let has_speech = num_segments > 0 && speech_duration_secs >= min_speech_secs;
 
         tracing::debug!(
-            "VAD result: {} segments, {:.2}s speech ({:.1}% of {:.2}s total)",
+            "VAD result: {} segments, {:.2}s speech ({:.1}% of {:.2}s total), check took {:.1} ms",
             num_segments,
             speech_duration_secs,
             speech_ratio * 100.0,
-            total_duration_secs
+            total_duration_secs,
+            started.elapsed().as_secs_f64() * 1000.0
         );
 
         Ok(VadResult {
@@ -149,5 +153,57 @@ mod tests {
         };
         let clamped2 = config2.threshold.clamp(0.0, 1.0);
         assert_eq!(clamped2, 0.0);
+    }
+
+    /// #578: repeated checks on one context must not get slower. whisper.cpp's
+    /// own `vad time = ...` log line prints a running total across every call
+    /// on the context, which reads as per-check growth; this measures the real
+    /// per-call wall time instead.
+    ///
+    /// Needs the Silero model at ~/.local/share/voxtype/models/ggml-silero-vad.bin:
+    /// `cargo test --lib vad::whisper_vad -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn repeated_checks_stay_flat() {
+        let model = crate::config::Config::models_dir().join("ggml-silero-vad.bin");
+        if !model.exists() {
+            eprintln!("skipping: {} not found", model.display());
+            return;
+        }
+        let config = VadConfig {
+            enabled: true,
+            backend: VadBackend::Whisper,
+            threshold: 0.5,
+            min_speech_duration_ms: 100,
+            model: None,
+        };
+        let vad = WhisperVad::new(&model, &config).unwrap();
+
+        // 2 s of a 220 Hz tone with amplitude modulation, roughly speech-shaped.
+        let samples: Vec<f32> = (0..32_000)
+            .map(|i| {
+                let t = i as f32 / 16_000.0;
+                0.3 * (2.0 * std::f32::consts::PI * 220.0 * t).sin()
+                    * (0.5 + 0.5 * (2.0 * std::f32::consts::PI * 4.0 * t).sin())
+            })
+            .collect();
+
+        let mut times_ms = Vec::new();
+        for _ in 0..60 {
+            let start = std::time::Instant::now();
+            vad.detect(&samples).unwrap();
+            times_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        let avg = |s: &[f64]| s.iter().sum::<f64>() / s.len() as f64;
+        let first = avg(&times_ms[..10]);
+        let last = avg(&times_ms[times_ms.len() - 10..]);
+        eprintln!("per-check ms: first10 avg {first:.2}, last10 avg {last:.2}");
+        // 70-90 ms of growth per check (as reported) would put the last ten
+        // checks seconds above the first ten.
+        assert!(
+            last < first * 3.0 + 20.0,
+            "VAD checks slowed down: first10 {first:.2} ms, last10 {last:.2} ms"
+        );
     }
 }
