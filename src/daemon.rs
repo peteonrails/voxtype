@@ -221,6 +221,50 @@ fn cleanup_stale_lockfile(lock_path: &std::path::Path) -> bool {
     false
 }
 
+/// Take the single-instance lock in `runtime_dir`, recovering a stale one
+/// left by a daemon that crashed.
+///
+/// This must be the daemon's first shared-state action. Everything else it
+/// touches at startup (PID file, OSD audio socket, cancel/override files,
+/// meeting state) belongs to whichever instance is already running, so a
+/// refused second instance has to leave before touching any of it.
+fn acquire_instance_lock(runtime_dir: &std::path::Path) -> Result<Pidlock> {
+    std::fs::create_dir_all(runtime_dir).map_err(|e| {
+        crate::error::VoxtypeError::Config(format!(
+            "Failed to create runtime directory {:?}: {}",
+            runtime_dir, e
+        ))
+    })?;
+
+    let lock_path = runtime_dir.join("voxtype.lock");
+    let lock_path_str = lock_path.to_string_lossy().to_string();
+    let mut pidlock = Pidlock::new(&lock_path_str);
+
+    if pidlock.acquire().is_ok() {
+        tracing::debug!("Acquired PID lock at {:?}", lock_path);
+        return Ok(pidlock);
+    }
+
+    #[cfg(unix)]
+    if cleanup_stale_lockfile(&lock_path) {
+        pidlock = Pidlock::new(&lock_path_str);
+        if let Err(e) = pidlock.acquire() {
+            tracing::error!("Failed to acquire lock after stale cleanup: {:?}", e);
+            return Err(crate::error::VoxtypeError::Config(format!(
+                "Another voxtype instance is already running (lock error: {:?})",
+                e
+            )));
+        }
+        tracing::debug!("Acquired PID lock at {:?} (after stale cleanup)", lock_path);
+        return Ok(pidlock);
+    }
+
+    tracing::error!("Failed to acquire lock: another voxtype instance is already running");
+    Err(crate::error::VoxtypeError::Config(
+        "Another voxtype instance is already running".to_string(),
+    ))
+}
+
 /// Remove PID file on shutdown
 fn cleanup_pid_file(path: &PathBuf) {
     if path.exists() {
@@ -3012,6 +3056,12 @@ impl Daemon {
     pub async fn run(&mut self) -> Result<()> {
         tracing::info!("Starting voxtype daemon");
 
+        // Single-instance lock before anything else. Pidlock has no Drop
+        // impl, so holding the binding for run()'s lifetime keeps it; a
+        // crashed daemon's leftover lockfile is recovered as stale on the
+        // next start.
+        let _instance_lock = acquire_instance_lock(&Config::runtime_dir())?;
+
         // Engine-vs-binary mismatch check at startup so users see a desktop
         // notification before the first transcription attempt would fail.
         // create_transcriber() below will surface the same error in logs,
@@ -3095,52 +3145,6 @@ impl Daemon {
             self.osd_supervisor_task = Some(crate::osd::supervisor::spawn());
         }
 
-        // Check if another instance is already running (single-instance safeguard)
-        let lock_path = Config::runtime_dir().join("voxtype.lock");
-        let lock_path_str = lock_path.to_string_lossy().to_string();
-        let mut pidlock = Pidlock::new(&lock_path_str);
-
-        match pidlock.acquire() {
-            Ok(_) => {
-                tracing::debug!("Acquired PID lock at {:?}", lock_path);
-            }
-            Err(_) => {
-                // Check if the lock is stale (previous daemon crashed)
-                #[cfg(unix)]
-                if cleanup_stale_lockfile(&lock_path) {
-                    // Try again after removing stale lock
-                    pidlock = Pidlock::new(&lock_path_str);
-                    if let Err(e) = pidlock.acquire() {
-                        tracing::error!("Failed to acquire lock after stale cleanup: {:?}", e);
-                        return Err(crate::error::VoxtypeError::Config(format!(
-                            "Another voxtype instance is already running (lock error: {:?})",
-                            e
-                        )));
-                    }
-                    tracing::debug!("Acquired PID lock at {:?} (after stale cleanup)", lock_path);
-                } else {
-                    tracing::error!(
-                        "Failed to acquire lock: another voxtype instance is already running"
-                    );
-                    return Err(crate::error::VoxtypeError::Config(
-                        "Another voxtype instance is already running".to_string(),
-                    ));
-                }
-                #[cfg(not(unix))]
-                {
-                    tracing::error!(
-                        "Failed to acquire lock: another voxtype instance is already running"
-                    );
-                    return Err(crate::error::VoxtypeError::Config(
-                        "Another voxtype instance is already running".to_string(),
-                    )
-                    .into());
-                }
-            }
-        }
-
-        // Only now that the lock is ours: a refused second instance must not
-        // overwrite the running daemon's answer with its own version.
         crate::daemon_status::publish_version();
 
         tracing::info!("Output mode: {:?}", self.config.output.mode);
@@ -5104,6 +5108,37 @@ mod tests {
             let cleaned = cleanup_stale_lockfile(&lock_path);
             assert!(!cleaned, "Lockfile with running PID should not be cleaned");
             assert!(lock_path.exists(), "Lockfile should still exist");
+        });
+    }
+
+    #[test]
+    fn instance_lock_creates_a_missing_runtime_dir() {
+        with_test_runtime_dir(|dir| {
+            let runtime = dir.join("voxtype");
+            assert!(acquire_instance_lock(&runtime).is_ok());
+            assert!(runtime.join("voxtype.lock").exists());
+        });
+    }
+
+    #[test]
+    fn instance_lock_refuses_a_live_holder_and_leaves_its_lockfile() {
+        with_test_runtime_dir(|dir| {
+            let lock_path = dir.join("voxtype.lock");
+            let live = std::process::id().to_string();
+            std::fs::write(&lock_path, &live).unwrap();
+
+            assert!(acquire_instance_lock(dir).is_err());
+            assert_eq!(std::fs::read_to_string(&lock_path).unwrap(), live);
+        });
+    }
+
+    #[test]
+    fn instance_lock_recovers_a_stale_lockfile() {
+        with_test_runtime_dir(|dir| {
+            std::fs::write(dir.join("voxtype.lock"), "99999999").unwrap();
+            assert!(acquire_instance_lock(dir).is_ok());
+            let holder = std::fs::read_to_string(dir.join("voxtype.lock")).unwrap();
+            assert_eq!(holder.trim(), std::process::id().to_string());
         });
     }
 }
