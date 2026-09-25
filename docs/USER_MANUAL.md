@@ -380,7 +380,9 @@ voxtype record start --model large-v3-turbo  # Use a specific model
 voxtype record stop                          # Transcribes with the model specified at start
 ```
 
-The model must be configured as `model`, `secondary_model`, or listed in `available_models` in your config. See [Multi-Model Configuration](CONFIGURATION.md#secondary_model) for setup.
+The override works on any engine, and it can name another engine's model: with Parakeet as your engine, `voxtype record start --model large-v3-turbo` transcribes that one recording with Whisper. Use the names `voxtype info models` shows (other engines use directory-form names such as `moonshine-base` or `cohere-transcribe-q4f16`). The model has to be downloaded; an unknown or missing model fails with an error sound and notification instead of quietly using your default model. The daemon keeps the override model loaded next to your default model for the next override, unless `on_demand_loading` is set. Streaming engines transcribe an override recording in one pass at stop rather than live.
+
+With Whisper as your engine, a Whisper override must be configured as `model`, `secondary_model`, or listed in `available_models`. See [Multi-Model Configuration](CONFIGURATION.md#secondary_model) for setup.
 
 **Output mode override:** Use `--type`, `--clipboard`, or `--paste` to override the output mode:
 

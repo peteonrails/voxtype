@@ -463,6 +463,49 @@ impl Config {
         }
     }
 
+    /// Make `engine` active with `model` as its model, materializing the
+    /// engine's section from defaults when the config doesn't have one.
+    pub fn set_model_for(&mut self, engine: TranscriptionEngine, model: &str) {
+        let model = model.to_string();
+        self.engine = engine;
+        match engine {
+            TranscriptionEngine::Whisper => self.whisper.model = model,
+            TranscriptionEngine::Parakeet => {
+                let parakeet = self.parakeet.get_or_insert_with(Default::default);
+                if parakeet.model != model {
+                    // A TDT/CTC hint belongs to the old model; let the new
+                    // one be auto-detected.
+                    parakeet.model_type = None;
+                }
+                parakeet.model = model;
+            }
+            TranscriptionEngine::Moonshine => {
+                self.moonshine.get_or_insert_with(Default::default).model = model
+            }
+            TranscriptionEngine::SenseVoice => {
+                self.sensevoice.get_or_insert_with(Default::default).model = model
+            }
+            TranscriptionEngine::Paraformer => {
+                self.paraformer.get_or_insert_with(Default::default).model = model
+            }
+            TranscriptionEngine::Dolphin => {
+                self.dolphin.get_or_insert_with(Default::default).model = model
+            }
+            TranscriptionEngine::Omnilingual => {
+                self.omnilingual.get_or_insert_with(Default::default).model = model
+            }
+            TranscriptionEngine::Cohere => {
+                self.cohere.get_or_insert_with(Default::default).model = model
+            }
+            TranscriptionEngine::OpenVino => {
+                self.openvino.get_or_insert_with(Default::default).model = model
+            }
+            TranscriptionEngine::Soniox => {
+                self.soniox.get_or_insert_with(Default::default).model = model
+            }
+        }
+    }
+
     /// Get a named profile by name
     /// Returns None if the profile doesn't exist
     pub fn get_profile(&self, name: &str) -> Option<&Profile> {
@@ -577,5 +620,25 @@ mod tests {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
         }
+    }
+
+    #[test]
+    fn set_model_for_switches_engine_and_fills_missing_sections() {
+        let mut config = Config::default();
+        assert!(config.moonshine.is_none());
+        config.set_model_for(TranscriptionEngine::Moonshine, "tiny");
+        assert_eq!(config.engine, TranscriptionEngine::Moonshine);
+        assert_eq!(config.model_name(), "tiny");
+
+        config.parakeet = Some(crate::config::ParakeetConfig {
+            model: "parakeet-tdt-0.6b-v2".to_string(),
+            model_type: Some(crate::config::ParakeetModelType::Tdt),
+            ..Default::default()
+        });
+        config.set_model_for(TranscriptionEngine::Parakeet, "parakeet-tdt-0.6b-v2");
+        assert!(config.parakeet.as_ref().unwrap().model_type.is_some());
+        // A different model's architecture is auto-detected, not inherited.
+        config.set_model_for(TranscriptionEngine::Parakeet, "parakeet-tdt-0.6b-v3");
+        assert!(config.parakeet.as_ref().unwrap().model_type.is_none());
     }
 }

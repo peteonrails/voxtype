@@ -53,6 +53,16 @@ pub(crate) fn send_record_command(
         return Ok(());
     }
 
+    // Subcommand --model takes priority over top-level --model. Check it
+    // before writing any override file, so a typo or an undownloaded model
+    // fails here rather than after the user has spoken.
+    let model_override = action.model_override().or(top_level_model);
+    if let Some(model) = model_override {
+        if let Err(problem) = voxtype::model_catalog::override_route(config, model) {
+            anyhow::bail!("{problem}");
+        }
+    }
+
     // Write output mode override file if specified
     // For file mode, format is "file" or "file:/path/to/file"
     if let Some(mode_override) = action.output_mode_override() {
@@ -73,8 +83,7 @@ pub(crate) fn send_record_command(
             .map_err(|e| anyhow::anyhow!("Failed to write output mode override: {}", e))?;
     }
 
-    // Write model override file if specified (subcommand --model takes priority over top-level --model)
-    let model_override = action.model_override().or(top_level_model);
+    // Write model override file if specified
     if let Some(model) = model_override {
         let override_file = config::Config::runtime_dir().join("model_override");
         std::fs::write(&override_file, model)

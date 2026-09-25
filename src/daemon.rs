@@ -13,6 +13,7 @@ use crate::hotkey::{self, HotkeyEvent};
 #[cfg(target_os = "macos")]
 use crate::hotkey_macos::{self as hotkey, HotkeyEvent};
 use crate::meeting::{self, MeetingDaemon, MeetingEvent, StorageConfig};
+use crate::model_catalog;
 use crate::model_manager::ModelManager;
 use crate::notification::{self, Lifetime};
 use crate::output;
@@ -837,7 +838,7 @@ fn read_model_override() -> Option<String> {
     if model.is_empty() {
         None
     } else {
-        tracing::info!("Using model override: {}", model);
+        tracing::info!("Model override requested: {}", model);
         Some(model)
     }
 }
@@ -848,8 +849,40 @@ fn cleanup_model_override() {
     let _ = std::fs::remove_file(&override_file);
 }
 
+/// Config for a transcriber serving a `--model` override: the user's
+/// settings with `engine` and its model swapped in. Streaming is switched
+/// off because override recordings take the batch path.
+fn override_config(
+    base: &Config,
+    engine: crate::config::TranscriptionEngine,
+    model: &str,
+) -> Config {
+    let mut config = base.clone();
+    config.set_model_for(engine, model);
+    config.whisper.streaming = false;
+    if let Some(parakeet) = config.parakeet.as_mut() {
+        parakeet.streaming = false;
+    }
+    if let Some(openvino) = config.openvino.as_mut() {
+        openvino.streaming = false;
+    }
+    if engine == crate::config::TranscriptionEngine::Whisper
+        && config.whisper.effective_mode() == crate::config::WhisperMode::Remote
+    {
+        // The remote backend sends `remote_model`, not `model`, the same
+        // substitution the Whisper model manager makes for its overrides.
+        config.whisper.remote_model = Some(model.to_string());
+    }
+    config
+}
+
 /// Result type for transcription task
 type TranscriptionResult = std::result::Result<String, crate::error::TranscribeError>;
+
+/// Background construction of a transcriber.
+type TranscriberLoadTask = tokio::task::JoinHandle<
+    std::result::Result<Arc<dyn Transcriber>, crate::error::TranscribeError>,
+>;
 
 /// Main daemon that orchestrates all components
 pub struct Daemon {
@@ -892,6 +925,12 @@ pub struct Daemon {
             std::result::Result<Arc<dyn Transcriber>, crate::error::TranscribeError>,
         >,
     >,
+    // Transcriber for the most recent `--model` override the active engine
+    // can't serve (see `model_catalog::OverrideRoute::Separate`), keyed by
+    // the override name. One slot: the default model stays loaded separately.
+    override_cache: Option<(String, Arc<dyn Transcriber>)>,
+    // Load of an override transcriber started when its recording began.
+    override_load_task: Option<(String, TranscriberLoadTask)>,
     // Background task that spawns and prepares the gpu_isolation subprocess
     // worker. Awaited before transcription so audio capture can start
     // immediately while the worker loads its model in parallel.
@@ -1034,6 +1073,8 @@ impl Daemon {
             osd_supervisor_task: None,
             model_manager: None,
             model_load_task: None,
+            override_cache: None,
+            override_load_task: None,
             whisper_prepare_task: None,
             transcription_task: None,
             active_transcriber: None,
@@ -1310,6 +1351,16 @@ impl Daemon {
         // an is_recording() state, so a leftover cancel file would kill the
         // session moments after it starts. See #606.
         cleanup_cancel_file();
+        // An override model has its own transcriber, which records in batch
+        // mode; streaming would run the default model instead.
+        if let Some(name) = model_override.as_deref() {
+            if matches!(
+                model_catalog::override_route(&self.config, name),
+                Ok(model_catalog::OverrideRoute::Separate { .. })
+            ) {
+                return false;
+            }
+        }
         // Clone out of the field so the borrow doesn't overlap the
         // `&mut self` capture start below.
         let Some(transcriber) = self.transcriber_preloaded.clone() else {
@@ -1928,16 +1979,249 @@ impl Daemon {
         }
     }
 
+    /// Get the model ready while the user speaks: start an on-demand load,
+    /// or warm the preloaded transcriber (spawning the gpu_isolation worker).
+    /// An override the active transcriber can't serve loads its own instead.
+    fn prepare_for_recording(&mut self, model_override: Option<&str>) {
+        if let Some(name) = model_override {
+            if let Ok(model_catalog::OverrideRoute::Separate { engine, model }) =
+                model_catalog::override_route(&self.config, name)
+            {
+                self.start_override_load(name, engine, &model);
+                return;
+            }
+        }
+
+        if self.config.on_demand_loading() {
+            // Start model loading in background
+            match self.config.engine {
+                crate::config::TranscriptionEngine::Whisper => {
+                    let config = self.config.whisper.clone();
+                    let config_path = self.config_path.clone();
+                    let model_to_load = model_override.map(str::to_string);
+                    self.model_load_task = Some(tokio::task::spawn_blocking(move || {
+                        let mut temp_manager = ModelManager::new(&config, config_path);
+                        temp_manager.get_transcriber(model_to_load.as_deref())
+                    }));
+                }
+                crate::config::TranscriptionEngine::Parakeet
+                | crate::config::TranscriptionEngine::Moonshine
+                | crate::config::TranscriptionEngine::SenseVoice
+                | crate::config::TranscriptionEngine::Paraformer
+                | crate::config::TranscriptionEngine::Dolphin
+                | crate::config::TranscriptionEngine::Omnilingual
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::OpenVino
+                | crate::config::TranscriptionEngine::Soniox => {
+                    let config = self.config.clone();
+                    self.model_load_task = Some(tokio::task::spawn_blocking(move || {
+                        crate::transcribe::create_transcriber(&config).map(Arc::from)
+                    }));
+                }
+            }
+            tracing::debug!("Started background model loading");
+        } else {
+            // Prepare model (spawns subprocess for gpu_isolation mode)
+            match self.config.engine {
+                crate::config::TranscriptionEngine::Whisper => {
+                    if let Some(ref mut mm) = self.model_manager {
+                        match mm.prepare_model(model_override) {
+                            Ok(handle) => {
+                                self.whisper_prepare_task = handle;
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to prepare model: {}", e);
+                            }
+                        }
+                    }
+                }
+                crate::config::TranscriptionEngine::Parakeet
+                | crate::config::TranscriptionEngine::Moonshine
+                | crate::config::TranscriptionEngine::SenseVoice
+                | crate::config::TranscriptionEngine::Paraformer
+                | crate::config::TranscriptionEngine::Dolphin
+                | crate::config::TranscriptionEngine::Omnilingual
+                | crate::config::TranscriptionEngine::Cohere
+                | crate::config::TranscriptionEngine::OpenVino
+                | crate::config::TranscriptionEngine::Soniox => {
+                    if let Some(ref t) = self.transcriber_preloaded {
+                        let transcriber = t.clone();
+                        tokio::task::spawn_blocking(move || {
+                            transcriber.prepare();
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reject an unusable `--model` override before recording starts, so the
+    /// user hears the error now rather than after speaking.
+    async fn accept_model_override(&self, model_override: Option<&str>) -> bool {
+        let Some(name) = model_override else {
+            return true;
+        };
+        match model_catalog::override_route(&self.config, name) {
+            Ok(_) => true,
+            Err(problem) => {
+                self.report_override_problem(&problem).await;
+                false
+            }
+        }
+    }
+
+    async fn report_override_problem(&self, problem: &str) {
+        tracing::error!("Model override failed: {}", problem);
+        self.play_feedback(SoundEvent::Error);
+        send_notification(
+            "Voxtype: Model Override Failed",
+            problem,
+            self.config.output.notification.show_engine_icon,
+            self.config.engine,
+            &self.config.output.notification.urgency,
+        )
+        .await;
+    }
+
+    /// Start building the override's transcriber in the background so it's
+    /// ready by the time the recording stops.
+    fn start_override_load(
+        &mut self,
+        name: &str,
+        engine: crate::config::TranscriptionEngine,
+        model: &str,
+    ) {
+        if let Some((cached, transcriber)) = &self.override_cache {
+            if cached == name {
+                let transcriber = transcriber.clone();
+                tokio::task::spawn_blocking(move || transcriber.prepare());
+                return;
+            }
+        }
+        if matches!(&self.override_load_task, Some((pending, _)) if pending == name) {
+            return;
+        }
+        tracing::info!("Loading {:?} model '{}' for this recording", engine, model);
+        let config = override_config(&self.config, engine, model);
+        self.override_load_task = Some((
+            name.to_string(),
+            tokio::task::spawn_blocking(move || {
+                let transcriber: Arc<dyn Transcriber> =
+                    Arc::from(crate::transcribe::create_transcriber(&config)?);
+                transcriber.prepare();
+                Ok(transcriber)
+            }),
+        ));
+    }
+
+    /// The override transcriber once it's loaded, without waiting for it.
+    /// Eager chunking polls this during recording.
+    async fn ready_override(&mut self, name: &str) -> Option<Arc<dyn Transcriber>> {
+        if let Some((cached, transcriber)) = &self.override_cache {
+            if cached == name {
+                return Some(transcriber.clone());
+            }
+        }
+        let finished = matches!(
+            &self.override_load_task,
+            Some((pending, task)) if pending == name && task.is_finished()
+        );
+        if !finished {
+            return None;
+        }
+        let (_, task) = self.override_load_task.take()?;
+        match task.await {
+            Ok(Ok(transcriber)) => {
+                self.override_cache = Some((name.to_string(), transcriber.clone()));
+                Some(transcriber)
+            }
+            // Recording stop retries the load and reports the failure once.
+            Ok(Err(e)) => {
+                tracing::debug!("Override model '{}' failed to load: {}", name, e);
+                None
+            }
+            Err(e) => {
+                tracing::debug!("Override model '{}' load task panicked: {}", name, e);
+                None
+            }
+        }
+    }
+
+    /// The transcriber for an override the active engine can't serve: the
+    /// cached one, the load started at recording start, or a fresh build.
+    async fn override_transcriber(
+        &mut self,
+        name: &str,
+        engine: crate::config::TranscriptionEngine,
+        model: &str,
+    ) -> std::result::Result<Arc<dyn Transcriber>, ()> {
+        let on_demand = self.config.on_demand_loading();
+        if matches!(&self.override_cache, Some((cached, _)) if cached == name) {
+            let (key, transcriber) = self.override_cache.take().expect("matched above");
+            if !on_demand {
+                self.override_cache = Some((key, transcriber.clone()));
+            }
+            return Ok(transcriber);
+        }
+        let task = match self.override_load_task.take() {
+            Some((pending, task)) if pending == name => task,
+            _ => {
+                let config = override_config(&self.config, engine, model);
+                tokio::task::spawn_blocking(move || {
+                    crate::transcribe::create_transcriber(&config).map(Arc::from)
+                })
+            }
+        };
+        match task.await {
+            Ok(Ok(transcriber)) => {
+                // On-demand loading frees models after use; honor that here.
+                if !on_demand {
+                    self.override_cache = Some((name.to_string(), transcriber.clone()));
+                }
+                Ok(transcriber)
+            }
+            Ok(Err(e)) => {
+                self.report_override_problem(&format!("Could not load model '{name}': {e}"))
+                    .await;
+                Err(())
+            }
+            Err(e) => {
+                self.report_override_problem(&format!("Loading model '{name}' panicked: {e}"))
+                    .await;
+                Err(())
+            }
+        }
+    }
+
     /// Get the transcriber for the current recording session
     ///
     /// For on-demand loading: waits for the background model load task to complete
     /// For preloaded models: returns the preloaded transcriber (Parakeet) or gets from model manager (Whisper)
+    /// A `--model` override the active transcriber can't serve gets its own.
     ///
     /// Returns Ok(transcriber) on success, Err(()) if an error occurred and caller should skip to next iteration
     async fn get_transcriber_for_recording(
         &mut self,
         model_override: Option<&str>,
     ) -> std::result::Result<Arc<dyn Transcriber>, ()> {
+        if let Some(name) = model_override {
+            match model_catalog::override_route(&self.config, name) {
+                Ok(model_catalog::OverrideRoute::Separate { engine, model }) => {
+                    let transcriber = self.override_transcriber(name, engine, &model).await?;
+                    tracing::info!(
+                        "Transcribing with override model '{}' ({:?} engine)",
+                        name,
+                        engine
+                    );
+                    return Ok(transcriber);
+                }
+                Ok(_) => {}
+                Err(problem) => {
+                    self.report_override_problem(&problem).await;
+                    return Err(());
+                }
+            }
+        }
         if self.config.on_demand_loading() {
             // Wait for background model load task
             if let Some(task) = self.model_load_task.take() {
@@ -3501,6 +3785,9 @@ impl Daemon {
                             tracing::debug!("Received HotkeyEvent::Pressed (push-to-talk), state.is_idle() = {}, model_override = {:?}, profile_override = {:?}",
                                 state.is_idle(), model_override, profile_override);
                             if state.is_idle() {
+                                if !self.accept_model_override(model_override.as_deref()).await {
+                                    continue;
+                                }
                                 // Write profile override file if a profile modifier was held
                                 if let Some(ref profile_name) = profile_override {
                                     write_profile_override(profile_name);
@@ -3514,67 +3801,7 @@ impl Daemon {
                                 }
 
                                 // Prepare model for transcription
-                                if self.config.on_demand_loading() {
-                                    // Start model loading in background
-                                    match self.config.engine {
-                                        crate::config::TranscriptionEngine::Whisper => {
-                                            let config = self.config.whisper.clone();
-                                            let config_path = self.config_path.clone();
-                                            let model_to_load = model_override.clone();
-                                            self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                                let mut temp_manager = ModelManager::new(&config, config_path);
-                                                temp_manager.get_transcriber(model_to_load.as_deref())
-                                            }));
-                                        }
-                                        crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine
-                                        | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
-                                            let config = self.config.clone();
-                                            self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                                crate::transcribe::create_transcriber(&config).map(Arc::from)
-                                            }));
-                                        }
-                                    }
-                                    tracing::debug!("Started background model loading");
-                                } else {
-                                    // Prepare model (spawns subprocess for gpu_isolation mode)
-                                    match self.config.engine {
-                                        crate::config::TranscriptionEngine::Whisper => {
-                                            if let Some(ref mut mm) = self.model_manager {
-                                                match mm.prepare_model(model_override.as_deref()) {
-                                                    Ok(handle) => {
-                                                        self.whisper_prepare_task = handle;
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::warn!("Failed to prepare model: {}", e);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine
-                                        | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
-                                            if let Some(ref t) = self.transcriber_preloaded {
-                                                let transcriber = t.clone();
-                                                tokio::task::spawn_blocking(move || {
-                                                    transcriber.prepare();
-                                                });
-                                            }
-                                        }
-                                    }
-                                }
+                                self.prepare_for_recording(model_override.as_deref());
 
                                 // Pause or duck playback before either capture path opens
                                 // the microphone.
@@ -3712,6 +3939,9 @@ impl Daemon {
                                 state.is_idle(), state.is_recording(), model_override, profile_override);
 
                             if state.is_idle() {
+                                if !self.accept_model_override(model_override.as_deref()).await {
+                                    continue;
+                                }
                                 // Write profile override file if a profile modifier was held
                                 if let Some(ref profile_name) = profile_override {
                                     write_profile_override(profile_name);
@@ -3725,67 +3955,7 @@ impl Daemon {
                                 }
 
                                 // Prepare model for transcription
-                                if self.config.on_demand_loading() {
-                                    // Start model loading in background
-                                    match self.config.engine {
-                                        crate::config::TranscriptionEngine::Whisper => {
-                                            let config = self.config.whisper.clone();
-                                            let config_path = self.config_path.clone();
-                                            let model_to_load = model_override.clone();
-                                            self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                                let mut temp_manager = ModelManager::new(&config, config_path);
-                                                temp_manager.get_transcriber(model_to_load.as_deref())
-                                            }));
-                                        }
-                                        crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine
-                                        | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
-                                            let config = self.config.clone();
-                                            self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                                crate::transcribe::create_transcriber(&config).map(Arc::from)
-                                            }));
-                                        }
-                                    }
-                                    tracing::debug!("Started background model loading");
-                                } else {
-                                    // Prepare model (spawns subprocess for gpu_isolation mode)
-                                    match self.config.engine {
-                                        crate::config::TranscriptionEngine::Whisper => {
-                                            if let Some(ref mut mm) = self.model_manager {
-                                                match mm.prepare_model(model_override.as_deref()) {
-                                                    Ok(handle) => {
-                                                        self.whisper_prepare_task = handle;
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::warn!("Failed to prepare model: {}", e);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine
-                                        | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
-                                            if let Some(ref t) = self.transcriber_preloaded {
-                                                let transcriber = t.clone();
-                                                tokio::task::spawn_blocking(move || {
-                                                    transcriber.prepare();
-                                                });
-                                            }
-                                        }
-                                    }
-                                }
+                                self.prepare_for_recording(model_override.as_deref());
 
                                 self.suppress_recording_media().await;
 
@@ -4009,11 +4179,27 @@ impl Daemon {
                     // Populate eager transcriber cache on first poll
                     if eager_transcriber.is_none() && state.is_eager_recording() {
                         let model_override = match &state {
-                            State::EagerRecording { model_override, .. } => model_override.as_deref(),
+                            State::EagerRecording { model_override, .. } => model_override.clone(),
                             _ => None,
                         };
-                        eager_transcriber = self.transcriber_preloaded.clone();
-                        if eager_transcriber.is_none()
+                        let separate_override = model_override.as_deref().is_some_and(|name| {
+                            matches!(
+                                model_catalog::override_route(&self.config, name),
+                                Ok(model_catalog::OverrideRoute::Separate { .. })
+                            )
+                        });
+                        let model_override = model_override.as_deref();
+                        if separate_override {
+                            // Chunks wait until the override model has loaded;
+                            // whatever is left over is transcribed at stop.
+                            if let Some(name) = model_override {
+                                eager_transcriber = self.ready_override(name).await;
+                            }
+                        } else {
+                            eager_transcriber = self.transcriber_preloaded.clone();
+                        }
+                        if !separate_override
+                            && eager_transcriber.is_none()
                             && self.config.engine
                                 == crate::config::TranscriptionEngine::Whisper
                         {
@@ -4208,6 +4394,9 @@ impl Daemon {
                     } else {
                         // Read model override from file (set by `voxtype record start --model X`)
                         let model_override = read_model_override();
+                        if !self.accept_model_override(model_override.as_deref()).await {
+                            continue;
+                        }
                         tracing::info!("Recording started (external trigger), model_override = {:?}", model_override);
 
                         if self.config.output.notification.on_recording_start {
@@ -4215,66 +4404,7 @@ impl Daemon {
                         }
 
                         // Prepare model for transcription
-                        if self.config.on_demand_loading() {
-                            // Start model loading in background
-                            match self.config.engine {
-                                crate::config::TranscriptionEngine::Whisper => {
-                                    let config = self.config.whisper.clone();
-                                    let config_path = self.config_path.clone();
-                                    let model_to_load = model_override.clone();
-                                    self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                        let mut temp_manager = ModelManager::new(&config, config_path);
-                                        temp_manager.get_transcriber(model_to_load.as_deref())
-                                    }));
-                                }
-                                crate::config::TranscriptionEngine::Parakeet
-                                | crate::config::TranscriptionEngine::Moonshine
-                                | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
-                                    let config = self.config.clone();
-                                    self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                        crate::transcribe::create_transcriber(&config).map(Arc::from)
-                                    }));
-                                }
-                            }
-                        } else {
-                            // Prepare model (spawns subprocess for gpu_isolation mode)
-                            match self.config.engine {
-                                crate::config::TranscriptionEngine::Whisper => {
-                                    if let Some(ref mut mm) = self.model_manager {
-                                        match mm.prepare_model(model_override.as_deref()) {
-                                            Ok(handle) => {
-                                                self.whisper_prepare_task = handle;
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!("Failed to prepare model: {}", e);
-                                            }
-                                        }
-                                    }
-                                }
-                                crate::config::TranscriptionEngine::Parakeet
-                                | crate::config::TranscriptionEngine::Moonshine
-                                | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
-                                    if let Some(ref t) = self.transcriber_preloaded {
-                                        let transcriber = t.clone();
-                                        tokio::task::spawn_blocking(move || {
-                                            transcriber.prepare();
-                                        });
-                                    }
-                                }
-                            }
-                        }
+                        self.prepare_for_recording(model_override.as_deref());
 
                         self.suppress_recording_media().await;
 
@@ -4775,6 +4905,7 @@ impl Daemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{TranscriptionEngine, WhisperMode};
     use std::fs;
     use tempfile::TempDir;
 
@@ -4817,6 +4948,111 @@ mod tests {
         assert!(!cancel_applies_to(&State::Outputting {
             text: String::new()
         }));
+    }
+
+    struct FixedTranscriber(&'static str);
+
+    impl Transcriber for FixedTranscriber {
+        fn transcribe(&self, _samples: &[f32]) -> TranscriptionResult {
+            Ok(self.0.to_string())
+        }
+    }
+
+    fn parakeet_daemon(on_demand: bool) -> Daemon {
+        let mut config = Config::default();
+        config.audio.feedback.enabled = false;
+        config.set_model_for(TranscriptionEngine::Parakeet, "parakeet-tdt-0.6b-v2");
+        config.parakeet.as_mut().unwrap().on_demand_loading = on_demand;
+        Daemon::new(config, None)
+    }
+
+    #[test]
+    fn override_config_swaps_the_engine_and_turns_off_streaming() {
+        let mut base = Config::default();
+        base.set_model_for(TranscriptionEngine::Parakeet, "parakeet-tdt-0.6b-v2");
+        base.parakeet.as_mut().unwrap().streaming = true;
+        base.whisper.streaming = true;
+
+        let whisper = override_config(&base, TranscriptionEngine::Whisper, "base.en");
+        assert_eq!(whisper.engine, TranscriptionEngine::Whisper);
+        assert_eq!(whisper.whisper.model, "base.en");
+        assert!(!whisper.whisper.streaming);
+        assert_eq!(whisper.whisper.remote_model, None);
+
+        let parakeet =
+            override_config(&base, TranscriptionEngine::Parakeet, "parakeet-tdt-0.6b-v3");
+        let section = parakeet.parakeet.unwrap();
+        assert_eq!(section.model, "parakeet-tdt-0.6b-v3");
+        assert!(!section.streaming);
+
+        // The daemon's own config is untouched.
+        assert_eq!(base.engine, TranscriptionEngine::Parakeet);
+        assert!(base.whisper.streaming);
+    }
+
+    #[test]
+    fn remote_whisper_override_names_the_remote_model() {
+        let mut base = Config::default();
+        base.set_model_for(TranscriptionEngine::Parakeet, "parakeet-tdt-0.6b-v2");
+        base.whisper.mode = Some(WhisperMode::Remote);
+        let config = override_config(&base, TranscriptionEngine::Whisper, "large-v3");
+        assert_eq!(config.whisper.remote_model.as_deref(), Some("large-v3"));
+    }
+
+    #[tokio::test]
+    async fn override_transcriber_reuses_the_cached_instance() {
+        let mut daemon = parakeet_daemon(false);
+        let cached: Arc<dyn Transcriber> = Arc::new(FixedTranscriber("cached"));
+        daemon.override_cache = Some(("base.en".to_string(), cached.clone()));
+
+        let got = daemon
+            .override_transcriber("base.en", TranscriptionEngine::Whisper, "base.en")
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&got, &cached));
+        assert!(
+            daemon.override_cache.is_some(),
+            "kept loaded for the next override"
+        );
+
+        // Starting another recording with the same override doesn't reload.
+        daemon.start_override_load("base.en", TranscriptionEngine::Whisper, "base.en");
+        assert!(daemon.override_load_task.is_none());
+    }
+
+    #[tokio::test]
+    async fn on_demand_override_is_released_after_use() {
+        let mut daemon = parakeet_daemon(true);
+        let cached: Arc<dyn Transcriber> = Arc::new(FixedTranscriber("cached"));
+        daemon.override_cache = Some(("base.en".to_string(), cached.clone()));
+
+        let got = daemon
+            .override_transcriber("base.en", TranscriptionEngine::Whisper, "base.en")
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&got, &cached));
+        assert!(daemon.override_cache.is_none());
+    }
+
+    #[tokio::test]
+    async fn eager_chunks_pick_up_a_finished_override_load() {
+        let mut daemon = parakeet_daemon(false);
+        let task: TranscriberLoadTask = tokio::task::spawn_blocking(|| {
+            Ok(Arc::new(FixedTranscriber("loaded")) as Arc<dyn Transcriber>)
+        });
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        daemon.override_load_task = Some(("base.en".to_string(), task));
+
+        // A different override's load isn't touched.
+        assert!(daemon.ready_override("small.en").await.is_none());
+        assert!(daemon.override_load_task.is_some());
+
+        let ready = daemon.ready_override("base.en").await.unwrap();
+        assert_eq!(ready.transcribe(&[]).unwrap(), "loaded");
+        assert!(daemon.override_load_task.is_none());
+        assert!(matches!(&daemon.override_cache, Some((name, _)) if name == "base.en"));
     }
 
     /// #643: the panic-recovery arm in handle_transcription_result must fire
