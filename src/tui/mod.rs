@@ -27,7 +27,7 @@ mod waybar_section;
 // through the same atomic-save-and-validate path the TUI uses, rather than
 // growing a second config writer.
 #[allow(unused_imports)]
-pub use config_editor::{ConfigEditor, EditorError};
+pub use config_editor::{ConfigEditor, EditorError, OverlayChange};
 
 use crossterm::{
     event::{

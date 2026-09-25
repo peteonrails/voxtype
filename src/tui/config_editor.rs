@@ -226,6 +226,30 @@ impl ConfigEditor {
         }
     }
 
+    /// Merge `overlay` into the table at `dotted`, creating it if missing.
+    ///
+    /// Tables merge key by key; every other item (scalars, arrays, arrays of
+    /// tables) replaces what was there, so applying the same overlay twice
+    /// never duplicates a key or an array entry. Keys the overlay doesn't
+    /// mention are left alone, comments included. Returns the leaves whose
+    /// value actually changed.
+    pub fn overlay_table(
+        &mut self,
+        dotted: &str,
+        overlay: &toml_edit::Table,
+    ) -> Vec<OverlayChange> {
+        let target = self
+            .ensure_table(dotted)
+            .as_table_mut()
+            .expect("ensure_table returns a table");
+        let mut changes = Vec::new();
+        merge_table(target, overlay, dotted, &mut changes);
+        if !changes.is_empty() {
+            self.dirty = true;
+        }
+        changes
+    }
+
     fn table_mut(&mut self, dotted: &str) -> Option<&mut toml_edit::Table> {
         let mut current = self.document.as_table_mut();
         if dotted.is_empty() {
@@ -388,6 +412,108 @@ impl ConfigEditor {
 
         self.dirty = false;
         Ok(())
+    }
+}
+
+/// One leaf [`ConfigEditor::overlay_table`] changed: its full dotted key and
+/// its value before (`None` when it was unset) and after, rendered as TOML.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayChange {
+    pub key: String,
+    pub before: Option<String>,
+    pub after: String,
+}
+
+fn merge_table(
+    target: &mut toml_edit::Table,
+    overlay: &dyn toml_edit::TableLike,
+    prefix: &str,
+    changes: &mut Vec<OverlayChange>,
+) {
+    for (key, item) in overlay.iter() {
+        let path = if prefix.is_empty() {
+            key.to_string()
+        } else {
+            format!("{prefix}.{key}")
+        };
+
+        if let Some(src) = item.as_table_like() {
+            // Normalise the destination to a standard table so its existing
+            // keys survive the merge (an inline `frame = { .. }` included).
+            let existing = target.remove(key);
+            let mut dest = match existing {
+                Some(existing) => existing
+                    .into_table()
+                    .unwrap_or_else(|_| toml_edit::Table::new()),
+                None => toml_edit::Table::new(),
+            };
+            if dest.is_empty() {
+                // Headerless when the overlay only nests deeper tables, so
+                // `[[osd.visual.layers]]` doesn't grow an empty `[osd.visual]`.
+                dest.set_implicit(true);
+            }
+            merge_table(&mut dest, src, &path, changes);
+            target.insert(key, Item::Table(dest));
+            continue;
+        }
+
+        let after = detached(item);
+        let before = target.get(key).filter(|i| !i.is_none());
+        if before.is_some_and(|b| semantic(b) == semantic(&after)) {
+            continue;
+        }
+        changes.push(OverlayChange {
+            key: path,
+            before: before.map(render),
+            after: render(&after),
+        });
+        target.insert(key, after);
+    }
+}
+
+/// Copy of `item` with fresh tables, so tables lifted from another document
+/// don't carry that document's positions into this one's table ordering.
+fn detached(item: &Item) -> Item {
+    fn table(src: &toml_edit::Table) -> toml_edit::Table {
+        let mut t = toml_edit::Table::new();
+        t.set_implicit(src.is_implicit());
+        for (k, v) in src.iter() {
+            t.insert(k, detached(v));
+        }
+        t
+    }
+    match item {
+        Item::Table(t) => Item::Table(table(t)),
+        Item::ArrayOfTables(a) => {
+            let mut out = toml_edit::ArrayOfTables::new();
+            for t in a.iter() {
+                out.push(table(t));
+            }
+            Item::ArrayOfTables(out)
+        }
+        other => other.clone(),
+    }
+}
+
+/// The parsed value of `item`, ignoring formatting and comments, so an
+/// overlay that restates an existing value isn't reported as a change.
+fn semantic(item: &Item) -> Option<toml::Value> {
+    let mut doc = DocumentMut::new();
+    doc.insert("v", item.clone());
+    toml::from_str::<toml::Table>(&doc.to_string())
+        .ok()?
+        .remove("v")
+}
+
+fn render(item: &Item) -> String {
+    match item {
+        Item::ArrayOfTables(a) => format!("{} table(s)", a.len()),
+        Item::Value(v) => {
+            let mut v = v.clone();
+            v.decor_mut().clear();
+            v.to_string()
+        }
+        other => other.to_string().trim().to_string(),
     }
 }
 

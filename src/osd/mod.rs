@@ -17,6 +17,7 @@
 pub mod config;
 pub mod gtk_env;
 pub mod ipc;
+pub mod recipe;
 pub mod style;
 pub mod supervisor;
 pub mod theme;

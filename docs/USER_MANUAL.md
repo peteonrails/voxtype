@@ -333,8 +333,14 @@ name. `voxtype info styles` lists everything the search currently finds.
 Packaged installs ship example styles under `/usr/share/voxtype/osd/` and
 recipe presets under `/usr/share/voxtype/osd-recipes/`; the source tree keeps
 them in `examples/osd-packages/` alongside `examples/osd-recipes/`. Recipes
-are plain `[osd]` config presets you copy keys from rather than installable
-packages. While developing a package, set
+are plain `[osd]` config presets rather than installable packages. Apply one
+with `voxtype setup osd --recipe <name>`, which writes its keys into your
+config without duplicating any that are already there and prints each
+changed key with its previous value; `--dry-run` previews the change and
+`voxtype setup osd --list` shows what's installed. Recipes resolve against
+`~/.config/voxtype/osd-recipes/`, `~/.local/share/voxtype/osd-recipes/`, and
+`/usr/share/voxtype/osd-recipes/`, and `--recipe` also accepts a path to a
+`.toml` file. While developing a package, set
 `plugin_path` to your working directory; it takes priority over the search
 paths so edits apply on the next OSD launch. Package QML is trusted code and
 is not sandboxed.
@@ -344,6 +350,8 @@ TUI's OSD section, and the config file:
 
 ```bash
 voxtype info styles
+voxtype setup osd --recipe showcase-bars --dry-run
+voxtype setup osd --recipe showcase-bars
 voxtype config set osd.style aegis-hud
 voxtype config set osd.plugin_path ~/dev/my-style
 voxtype config unset osd.plugin_path

@@ -3991,9 +3991,26 @@ packages under `/usr/share/voxtype/osd/` and recipe presets under
 [`examples/osd-packages/`](../examples/osd-packages/) (full packages,
 including the `aegis-hud` custom-QML showcase) and
 [`examples/osd-recipes/`](../examples/osd-recipes/) (recipe presets).
-Recipes are plain `[osd]` config snippets, not packages: open one and copy
-the `[osd.frame]` and `[[osd.visual.layers]]` keys you want into your own
-config. Each example package ships a README covering what it looks like, how
+Recipes are plain `[osd]` config snippets, not packages. Apply one with
+`voxtype setup osd --recipe <name>` rather than copying its keys by hand: the
+recipe's keys replace the matching ones in your config (its
+`[[osd.visual.layers]]` replace your layers wholesale), `[osd]` keys the
+recipe doesn't set are kept, comments are preserved, and the result is
+validated before it is written. Hand-copying a recipe into a config that
+already has `[osd]` is an easy way to end up with a duplicate `[osd]` table
+the daemon refuses to load.
+
+```bash
+voxtype setup osd --list                                # installed recipes
+voxtype setup osd --recipe showcase-bars --dry-run      # preview
+voxtype setup osd --recipe showcase-bars                # apply
+voxtype setup osd --recipe ./my-recipe.toml             # apply a file
+```
+
+Recipe names resolve against `~/.config/voxtype/osd-recipes/`,
+`~/.local/share/voxtype/osd-recipes/`, then `/usr/share/voxtype/osd-recipes/`,
+so a user copy shadows a shipped one. Each changed key is printed with its
+previous value, which is what you set back to revert. Each example package ships a README covering what it looks like, how
 to run it standalone, and which manifest fields it uses; the
 [aegis-hud README](../examples/osd-packages/aegis-hud/README.md) is the
 reference for documenting your own package.
