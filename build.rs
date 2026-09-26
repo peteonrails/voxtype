@@ -101,12 +101,20 @@ fn main() -> Result<(), Error> {
 /// back to the bare crate version. Git trouble must never fail the build and
 /// never leak a placeholder like "+gunknown" into the version string.
 fn expose_build_version() {
-    // Re-run when HEAD moves (commit, checkout). Creating a tag without a
-    // new commit does not retrigger by itself; release binaries are always
-    // clean `--no-cache` Docker builds, so best-effort staleness is fine.
-    if let Some(head) = git(&["rev-parse", "--git-path", "HEAD"]) {
-        if std::path::Path::new(&head).exists() {
-            println!("cargo:rerun-if-changed={head}");
+    // Re-run when HEAD moves (commit, checkout). On a branch HEAD only holds
+    // `ref: refs/heads/<name>`, which a commit leaves unchanged, so also watch
+    // the branch ref and packed-refs (where `git gc` moves it). Creating a
+    // tag without a new commit does not retrigger by itself; release binaries
+    // are always clean `--no-cache` Docker builds, so that staleness is fine.
+    let mut watched = vec!["HEAD".to_string(), "packed-refs".to_string()];
+    if let Some(branch_ref) = git(&["symbolic-ref", "-q", "HEAD"]) {
+        watched.push(branch_ref);
+    }
+    for name in &watched {
+        if let Some(path) = git(&["rev-parse", "--git-path", name]) {
+            if std::path::Path::new(&path).exists() {
+                println!("cargo:rerun-if-changed={path}");
+            }
         }
     }
 
