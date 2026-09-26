@@ -12,6 +12,10 @@ fn default_restore_clipboard_delay() -> u32 {
     200 // 200ms - delay for paste to complete before restoring clipboard
 }
 
+fn default_focus_restore_delay_ms() -> u32 {
+    50 // 50ms - settle time after re-focusing the start window
+}
+
 /// Text output configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OutputConfig {
@@ -160,6 +164,31 @@ pub struct OutputConfig {
     #[serde(default = "default_restore_clipboard_delay")]
     pub restore_clipboard_delay_ms: u32,
 
+    /// Return keyboard focus to the window that was focused when recording
+    /// started, right before text output is delivered.
+    ///
+    /// Useful when you start dictating in one window and then look at other
+    /// windows or desktops while speaking: when the transcription is ready,
+    /// the window you started in is focused again and the text lands there
+    /// instead of wherever focus happens to be at that moment.
+    ///
+    /// The focused window is detected automatically per session:
+    /// - Hyprland (via `hyprctl`), sway and i3 (via `swaymsg`/`i3-msg`),
+    ///   X11 (via `xdotool`), and macOS (via System Events) are supported.
+    /// - Other Wayland compositors (GNOME, KDE) have no supported query
+    ///   mechanism; the feature stays inactive there and output follows
+    ///   focus exactly as before (fail-safe by design).
+    #[serde(default)]
+    pub return_to_start_window: bool,
+
+    /// Delay in milliseconds after re-focusing the start window before text
+    /// output begins. Gives the window manager and target application time
+    /// to process the focus change so the text is not delivered to the
+    /// previously focused window. Only applied when a start window was
+    /// actually re-focused.
+    #[serde(default = "default_focus_restore_delay_ms")]
+    pub focus_restore_delay_ms: u32,
+
     /// Wait for modifier keys (Ctrl/Alt/Shift/Super) to be released before
     /// typing transcribed text. Prevents the typed letters from combining
     /// with held modifiers and triggering compositor or application
@@ -207,6 +236,8 @@ impl Default for OutputConfig {
             file_mode: FileMode::default(),
             restore_clipboard: false,
             restore_clipboard_delay_ms: default_restore_clipboard_delay(),
+            return_to_start_window: false,
+            focus_restore_delay_ms: default_focus_restore_delay_ms(),
             wait_for_modifier_release: true,
             modifier_release_timeout_ms: default_modifier_release_timeout_ms(),
         }
@@ -540,6 +571,38 @@ mod tests {
         let config = Config::default();
         assert!(!config.output.restore_clipboard);
         assert_eq!(config.output.restore_clipboard_delay_ms, 200);
+    }
+
+    #[test]
+    fn test_return_to_start_window_defaults() {
+        let config = Config::default();
+        assert!(!config.output.return_to_start_window);
+        assert_eq!(config.output.focus_restore_delay_ms, 50);
+    }
+
+    #[test]
+    fn test_return_to_start_window_deserialization() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 30
+
+            [whisper]
+            model = "base.en"
+
+            [output]
+            mode = "type"
+            return_to_start_window = true
+            focus_restore_delay_ms = 120
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.output.return_to_start_window);
+        assert_eq!(config.output.focus_restore_delay_ms, 120);
     }
 
     #[test]

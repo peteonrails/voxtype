@@ -186,6 +186,20 @@ pre_type_delay_ms = 0
 #   paste_keys = "ctrl+shift+v"  # Some terminal emulators
 # paste_keys = "ctrl+v"
 
+# Return keyboard focus to the window you started dictating in, right before
+# the transcription is delivered. Handy when you walk away to other windows
+# or desktops while talking: the text lands in the window you started in
+# instead of wherever focus happens to be when it finishes.
+# Supported: Hyprland, sway, i3, X11 (xdotool), macOS. Other Wayland
+# compositors (GNOME, KDE) cannot be queried; the feature stays inactive
+# there and output follows focus exactly as before.
+# return_to_start_window = true
+
+# Delay between re-focusing the start window and typing (ms). Gives the
+# window manager and target application time to process the focus change.
+# Only applied when a start window was actually re-focused.
+# focus_restore_delay_ms = 50
+
 # Compositor integration hooks
 # Use `voxtype setup compositor hyprland|sway|river` for automatic setup.
 #
