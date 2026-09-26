@@ -6,8 +6,10 @@
 mod deps;
 #[cfg(test)]
 mod harness;
+mod media;
 
 use deps::Deps;
+use media::MediaSession;
 
 use crate::audio::feedback::{AudioFeedback, SoundEvent};
 use crate::audio::{self, AudioCapture};
@@ -448,13 +450,8 @@ pub struct Daemon {
     #[cfg(feature = "onnx-common")]
     speech_enhancer: Option<std::sync::Arc<audio::enhance::GtcrnEnhancer>>,
     // Media players that were paused when recording started (for resume on stop)
-    paused_media_players: Vec<String>,
-    // Audio streams that were ducked when recording started (for restore on recording stop)
-    ducked_media_streams: Vec<audio::media::DuckedMediaStream>,
-    // In-flight media volume fade, down at recording start or up at stop. Held
-    // so the next duck/restore can serialize against it; see
-    // `duck_media_streams` for why capturing originals mid-fade is unsafe.
-    media_fade_task: Option<tokio::task::JoinHandle<()>>,
+    /// The media this daemon has paused or ducked, with the fade in flight.
+    media: MediaSession,
 }
 
 impl Daemon {
@@ -590,9 +587,7 @@ impl Daemon {
             meeting_event_rx: None,
             #[cfg(feature = "onnx-common")]
             speech_enhancer: None,
-            paused_media_players: Vec::new(),
-            ducked_media_streams: Vec::new(),
-            media_fade_task: None,
+            media: MediaSession::default(),
         }
     }
 
@@ -603,77 +598,15 @@ impl Daemon {
         }
     }
 
-    /// Pause MPRIS media players if configured, storing which ones were paused
-    async fn pause_media_players(&mut self) {
-        if self.config.audio.pause_media {
-            self.paused_media_players =
-                audio::media::pause_playing_players(&self.config.audio.pause_media_ignored_players)
-                    .await;
-        }
-    }
-
-    /// Duck active audio streams if configured, storing original volumes
-    async fn duck_media_streams(&mut self) {
-        if self.config.audio.duck_media {
-            // Wait out any restore still fading up. Its final write is what
-            // puts the streams back at their true original volumes, and
-            // enumerating before that lands would capture intermediate values
-            // as the new originals — every fast toggle cycle would then store
-            // a quieter baseline and media would drift down permanently.
-            // Normally already finished, so this costs nothing.
-            if let Some(task) = self.media_fade_task.take() {
-                let _ = task.await;
-            }
-            let (streams, fade) = audio::media::duck_playing_audio(
-                self.config.audio.duck_media_volume_percent,
-                self.config.audio.duck_media_fade_ms,
-            )
-            .await;
-            self.ducked_media_streams = streams;
-            self.media_fade_task = fade;
-        }
-    }
-
-    /// Restore any audio streams that were ducked at recording start
-    fn restore_ducked_media_streams(&mut self) {
-        if !self.ducked_media_streams.is_empty() {
-            // Abort rather than await a fade still on its way down: this path
-            // is synchronous, and the restore we are about to spawn ends by
-            // writing the stored originals, so an interrupted duck ramp is
-            // corrected either way.
-            if let Some(task) = self.media_fade_task.take() {
-                task.abort();
-            }
-            let streams = std::mem::take(&mut self.ducked_media_streams);
-            self.media_fade_task = Some(tokio::spawn(audio::media::restore_ducked_audio(
-                streams,
-                self.config.audio.duck_media_volume_percent,
-                self.config.audio.duck_media_fade_ms,
-            )));
-        }
-    }
-
-    /// Resume any MPRIS media players that were paused at recording start
-    fn resume_media_players(&mut self) {
-        if !self.paused_media_players.is_empty() {
-            let players = std::mem::take(&mut self.paused_media_players);
-            tokio::spawn(audio::media::resume_players(players));
-        }
-    }
-
     /// Suppress media before opening the microphone so playback cannot leak
     /// into the beginning of a recording.
     async fn suppress_recording_media(&mut self) {
-        self.pause_media_players().await;
-        self.duck_media_streams().await;
+        self.media.suppress(&self.config.audio).await;
     }
 
-    /// Restore media as soon as microphone capture has stopped. Transcription
-    /// and text output may continue after this point without keeping playback
-    /// paused or ducked.
+    /// Restore media as soon as microphone capture has stopped.
     fn restore_recording_media(&mut self) {
-        self.restore_ducked_media_streams();
-        self.resume_media_players();
+        self.media.restore(&self.config.audio);
     }
 
     /// Update the state file if configured
