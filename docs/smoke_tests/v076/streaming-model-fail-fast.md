@@ -50,6 +50,6 @@ grep -c "is_known_parakeet_model\|is_streaming_compatible_parakeet" \
      - Disable streaming in config.toml under [parakeet]:
          streaming = false
      - Or switch to the streaming-compatible model:
-         voxtype setup model parakeet-unified-en-0.6b
-     and set [parakeet] model = "parakeet-unified-en-0.6b" in config.toml.
+         voxtype setup --download --model parakeet-unified-en-0.6b
+         voxtype setup model --set parakeet-unified-en-0.6b
    ```
