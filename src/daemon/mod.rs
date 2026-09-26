@@ -1381,15 +1381,33 @@ impl Daemon {
         } else {
             // Use preloaded transcriber based on engine type
             match self.config.engine {
-                crate::config::TranscriptionEngine::Parakeet
-                | crate::config::TranscriptionEngine::Moonshine
-                | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                crate::config::TranscriptionEngine::Whisper => {
+                    // Wait for the gpu_isolation worker to finish preparing
+                    // (model load) before we hand the transcriber to the
+                    // recording stop path. Otherwise transcribe() would race
+                    // with the in-flight prepare and spawn a second worker.
+                    if let Some(task) = self.whisper_prepare_task.take() {
+                        if let Err(e) = task.await {
+                            tracing::warn!("Whisper prepare task failed: {}", e);
+                        }
+                    }
+                    if let Some(ref mut mm) = self.model_manager {
+                        match mm.get_prepared_transcriber(model_override) {
+                            Ok(t) => Ok(t),
+                            Err(e) => {
+                                tracing::error!("Failed to get transcriber: {}", e);
+                                self.play_feedback(SoundEvent::Error);
+                                Err(())
+                            }
+                        }
+                    } else {
+                        tracing::error!("Model manager not initialized");
+                        self.play_feedback(SoundEvent::Error);
+                        Err(())
+                    }
+                }
+                // Every other engine builds its transcriber through `Deps`.
+                _ => {
                     if let Some(t) = self.transcriber_preloaded.clone() {
                         Ok(t)
                     } else {
@@ -1421,31 +1439,6 @@ impl Daemon {
                                 Err(())
                             }
                         }
-                    }
-                }
-                crate::config::TranscriptionEngine::Whisper => {
-                    // Wait for the gpu_isolation worker to finish preparing
-                    // (model load) before we hand the transcriber to the
-                    // recording stop path. Otherwise transcribe() would race
-                    // with the in-flight prepare and spawn a second worker.
-                    if let Some(task) = self.whisper_prepare_task.take() {
-                        if let Err(e) = task.await {
-                            tracing::warn!("Whisper prepare task failed: {}", e);
-                        }
-                    }
-                    if let Some(ref mut mm) = self.model_manager {
-                        match mm.get_prepared_transcriber(model_override) {
-                            Ok(t) => Ok(t),
-                            Err(e) => {
-                                tracing::error!("Failed to get transcriber: {}", e);
-                                self.play_feedback(SoundEvent::Error);
-                                Err(())
-                            }
-                        }
-                    } else {
-                        tracing::error!("Model manager not initialized");
-                        self.play_feedback(SoundEvent::Error);
-                        Err(())
                     }
                 }
             }
@@ -2875,15 +2868,8 @@ impl Daemon {
                         }
                     }
                 }
-                crate::config::TranscriptionEngine::Parakeet
-                | crate::config::TranscriptionEngine::Moonshine
-                | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                // Every other engine builds its transcriber through `Deps`.
+                _ => {
                     // Non-Whisper engines do their own setup; Soniox just validates
                     // API key + endpoint at construction (no model to download).
                     self.transcriber_preloaded =
@@ -3002,15 +2988,8 @@ impl Daemon {
                                                 temp_manager.get_transcriber(model_to_load.as_deref())
                                             }));
                                         }
-                                        crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine
-                                        | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                                        // Every other engine builds its transcriber through `Deps`.
+                                        _ => {
                                             let config = self.config.clone();
                                             let factories = self.deps.factories.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
@@ -3034,15 +3013,8 @@ impl Daemon {
                                                 }
                                             }
                                         }
-                                        crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine
-                                        | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                                        // Every other engine builds its transcriber through `Deps`.
+                                        _ => {
                                             if let Some(ref t) = self.transcriber_preloaded {
                                                 let transcriber = t.clone();
                                                 tokio::task::spawn_blocking(move || {
@@ -3220,15 +3192,8 @@ impl Daemon {
                                                 temp_manager.get_transcriber(model_to_load.as_deref())
                                             }));
                                         }
-                                        crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine
-                                        | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                                        // Every other engine builds its transcriber through `Deps`.
+                                        _ => {
                                             let config = self.config.clone();
                                             let factories = self.deps.factories.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
@@ -3252,15 +3217,8 @@ impl Daemon {
                                                 }
                                             }
                                         }
-                                        crate::config::TranscriptionEngine::Parakeet
-                                        | crate::config::TranscriptionEngine::Moonshine
-                                        | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                                        // Every other engine builds its transcriber through `Deps`.
+                                        _ => {
                                             if let Some(ref t) = self.transcriber_preloaded {
                                                 let transcriber = t.clone();
                                                 tokio::task::spawn_blocking(move || {
@@ -3753,15 +3711,8 @@ impl Daemon {
                                         temp_manager.get_transcriber(model_to_load.as_deref())
                                     }));
                                 }
-                                crate::config::TranscriptionEngine::Parakeet
-                                | crate::config::TranscriptionEngine::Moonshine
-                                | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                                // Every other engine builds its transcriber through `Deps`.
+                                _ => {
                                     let config = self.config.clone();
                                     let factories = self.deps.factories.clone();
                                     self.model_load_task = Some(tokio::task::spawn_blocking(move || {
@@ -3784,15 +3735,8 @@ impl Daemon {
                                         }
                                     }
                                 }
-                                crate::config::TranscriptionEngine::Parakeet
-                                | crate::config::TranscriptionEngine::Moonshine
-                                | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                                // Every other engine builds its transcriber through `Deps`.
+                                _ => {
                                     if let Some(ref t) = self.transcriber_preloaded {
                                         let transcriber = t.clone();
                                         tokio::task::spawn_blocking(move || {

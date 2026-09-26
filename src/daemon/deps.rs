@@ -54,6 +54,13 @@ impl Factories {
         }
     }
 
+    /// Build a transcriber for any engine except Whisper.
+    ///
+    /// Whisper is the one engine the daemon builds elsewhere, through
+    /// `ModelManager`, because that path needs the streaming wrapper and the
+    /// gpu-isolation worker rather than a plain construction. The daemon's call
+    /// sites therefore ask `match engine { Whisper => ..., _ => ... }` instead
+    /// of listing the engines: adding one is a change they cannot forget.
     pub fn create_transcriber(
         &self,
         config: &Config,
