@@ -2187,6 +2187,30 @@ impl Daemon {
         }
     }
 
+    /// Tell the user a recording was discarded because VAD heard no speech.
+    /// Logged at info and notified (unless `on_no_speech` is off): at debug
+    /// it read as a hang, since nothing else happens after the stop.
+    async fn report_no_speech(&self, result: &crate::vad::VadResult) {
+        tracing::info!(
+            "No speech detected ({:.2}s above threshold, {:.1}% of the recording, avg rms {:.4}); \
+             discarding the recording",
+            result.speech_duration_secs,
+            result.speech_ratio * 100.0,
+            result.rms_energy
+        );
+        self.play_feedback(SoundEvent::Cancelled);
+        if self.config.output.notification.on_no_speech {
+            send_notification(
+                "Voxtype: No speech detected",
+                "Nothing was transcribed. If you were speaking, your microphone level may be too low.",
+                self.config.output.notification.show_engine_icon,
+                self.config.engine,
+                &self.config.output.notification.urgency,
+            )
+            .await;
+        }
+    }
+
     async fn report_override_problem(&self, problem: &str) {
         tracing::error!("Model override failed: {}", problem);
         self.play_feedback(SoundEvent::Error);
@@ -3052,15 +3076,10 @@ impl Daemon {
         if let Some(task) = vad_task {
             match task.await {
                 Ok(Ok(result)) if !result.has_speech => {
-                    tracing::debug!(
-                        "No speech detected (speech={:.1}%, rms={:.4}), discarding eager transcription",
-                        result.speech_ratio * 100.0,
-                        result.rms_energy
-                    );
                     if let Some(task) = tail_task {
                         task.abort();
                     }
-                    self.play_feedback(SoundEvent::Cancelled);
+                    self.report_no_speech(&result).await;
                     self.publish_empty_outcome();
                     return None;
                 }
@@ -3145,12 +3164,7 @@ impl Daemon {
                     if let Some(ref vad) = self.vad {
                         match vad.detect(&samples) {
                             Ok(result) if !result.has_speech => {
-                                tracing::debug!(
-                                    "No speech detected (speech={:.1}%, rms={:.4}), skipping transcription",
-                                    result.speech_ratio * 100.0,
-                                    result.rms_energy
-                                );
-                                self.play_feedback(SoundEvent::Cancelled);
+                                self.report_no_speech(&result).await;
                                 self.publish_empty_outcome();
                                 self.reset_to_idle(state).await;
                                 return false;

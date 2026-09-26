@@ -1077,6 +1077,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Post the transcribed text as a notification when it completes.",
     ),
     spec(
+        "output.notification.on_no_speech",
+        "output.notification",
+        "on_no_speech",
+        KeyType::Bool,
+        "Notifications",
+        "Notify when no speech is heard",
+        "Post a notification when voice activity detection finds no speech and the recording is discarded.",
+    ),
+    spec(
         "output.notification.show_engine_icon",
         "output.notification",
         "show_engine_icon",
@@ -1863,6 +1872,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             json!(cfg.output.notification.on_recording_stop)
         }
         "output.notification.on_transcription" => json!(cfg.output.notification.on_transcription),
+        "output.notification.on_no_speech" => json!(cfg.output.notification.on_no_speech),
         "output.notification.show_engine_icon" => json!(cfg.output.notification.show_engine_icon),
 
         "osd.enabled" => json!(cfg.osd.enabled),

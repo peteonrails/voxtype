@@ -2456,6 +2456,16 @@ on_recording_stop = true    # Notify when transcribing
 on_transcription = true     # Show transcribed text
 ```
 
+### on_no_speech
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+When `true`, shows a notification when voice activity detection finds no speech in a recording and discards it. Without it, a discarded dictation looks the same as a hang: you stop recording and nothing happens. Turn it off if you often tap the hotkey without speaking and don't want the notice.
+
+If you see this notification while you were speaking, your microphone level is probably too low. Raise the input volume, or lower `[vad] threshold`.
+
 ### urgency
 
 **Type:** String (`"low"`, `"normal"`, or `"critical"`)

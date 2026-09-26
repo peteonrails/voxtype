@@ -19,6 +19,12 @@ pub struct NotificationConfig {
     #[serde(default = "default_true")]
     pub on_transcription: bool,
 
+    /// Notify when voice activity detection finds no speech and the
+    /// recording is discarded. On by default: without it a dropped
+    /// dictation looks exactly like a hang.
+    #[serde(default = "default_true")]
+    pub on_no_speech: bool,
+
     /// Show engine icon in notification title (🦜 for Parakeet, 🗣️ for Whisper)
     #[serde(default)]
     pub show_engine_icon: bool,
@@ -39,6 +45,7 @@ impl Default for NotificationConfig {
             on_recording_start: false,
             on_recording_stop: false,
             on_transcription: true,
+            on_no_speech: true,
             show_engine_icon: false,
             urgency: default_notification_urgency(),
         }

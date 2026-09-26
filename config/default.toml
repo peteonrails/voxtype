@@ -214,6 +214,9 @@ on_recording_stop = false
 # Show notification with transcribed text after transcription completes
 on_transcription = true
 
+# Show notification when no speech is detected and the recording is discarded
+on_no_speech = true
+
 # [output.post_process]
 # Pipe transcribed text through an external command for cleanup before output.
 # The command receives text on stdin and outputs processed text on stdout.
