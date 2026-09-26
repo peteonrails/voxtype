@@ -1047,3 +1047,28 @@ async fn a_transcription_cancelled_by_the_cli_file_returns_to_idle_without_outpu
         "a cancelled transcription delivers nothing"
     );
 }
+
+#[tokio::test]
+async fn a_recording_cancelled_by_the_cli_file_returns_to_idle_without_output() {
+    // The poll arm's cancel path, which is the one the compositor binding uses
+    // when it writes the trigger instead of pressing the cancel key.
+    let harness = TestDaemon::speaking("hello");
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            ctl.press();
+            ctl.expect_state("recording").await;
+            tokio::time::sleep(Duration::from_millis(FLOOR_MS)).await;
+
+            std::fs::write(ctl.paths.cancel(), "cancel").expect("write cancel sentinel");
+            ctl.expect_state("idle").await;
+        })
+        .await;
+
+    assert_eq!(
+        ctl.transcription_calls(),
+        Vec::<usize>::new(),
+        "a cancelled recording is never transcribed"
+    );
+}

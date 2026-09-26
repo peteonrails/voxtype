@@ -1244,20 +1244,9 @@ impl Daemon {
         *streaming_session = None;
         *streaming_chain = None;
 
-        self.discard_pending_overrides();
-        // A cancelled streaming session is still an ended session: without this
-        // the external stop hook never runs for it, and `is_external_trigger`
-        // stays set for whatever session comes next.
-        self.end_external_session(state.is_recording()).await;
-        *state = State::Idle;
-        self.update_state("idle");
-        self.play_feedback(SoundEvent::Cancelled);
-
-        if let Some(cmd) = &self.config.output.post_output_command {
-            if let Err(e) = output::run_hook(cmd, "post_output").await {
-                tracing::warn!("{}", e);
-            }
-        }
+        // A cancelled streaming session is still an ended session, so the
+        // external stop hook has to run for it.
+        self.close_cancelled_cycle(state, true).await;
 
         if self.config.output.notification.on_recording_stop {
             send_notification(
@@ -1857,6 +1846,29 @@ impl Daemon {
     /// `--auto-submit` or `--shift-enter` written for the recording the user
     /// just cancelled is applied to whatever unrelated recording is delivered
     /// next, which is the bug this helper exists to prevent.
+    /// The shared end of a cancelled cycle, whichever way it was cancelled.
+    ///
+    /// What differs between cancels — which tasks are aborted, what the
+    /// notification says, whether the session is external — stays at the call
+    /// sites, because those are decisions. This is the part that is always the
+    /// same: drop what the cycle will never consume, end an external session
+    /// when there is one, publish idle, and reset a compositor submap.
+    async fn close_cancelled_cycle(&mut self, state: &mut State, end_external: bool) {
+        self.discard_pending_overrides();
+        if end_external {
+            self.end_external_session(state.is_recording()).await;
+        }
+        *state = State::Idle;
+        self.update_state("idle");
+        self.play_feedback(SoundEvent::Cancelled);
+
+        if let Some(cmd) = &self.config.output.post_output_command {
+            if let Err(e) = output::run_hook(cmd, "post_output").await {
+                tracing::warn!("{}", e);
+            }
+        }
+    }
+
     fn discard_pending_overrides(&self) {
         self.paths.cleanup_output_mode_override();
         self.paths.cleanup_model_override();
@@ -3386,17 +3398,7 @@ impl Daemon {
                                     task.abort();
                                 }
 
-                                self.discard_pending_overrides();
-                                state = State::Idle;
-                                self.update_state("idle");
-                                self.play_feedback(SoundEvent::Cancelled);
-
-                                // Run post_output_command to reset compositor submap
-                                if let Some(cmd) = &self.config.output.post_output_command {
-                                    if let Err(e) = output::run_hook(cmd, "post_output").await {
-                                        tracing::warn!("{}", e);
-                                    }
-                                }
+                                self.close_cancelled_cycle(&mut state, false).await;
 
                                 end_recording_notification("Cancelled", "Recording discarded", &self.config.output.notification, self.config.engine).await;
                             } else if matches!(state, State::Transcribing { .. }) {
@@ -3410,17 +3412,7 @@ impl Daemon {
                                 // held until the next transcription.
                                 self.active_transcriber = None;
 
-                                self.discard_pending_overrides();
-                                state = State::Idle;
-                                self.update_state("idle");
-                                self.play_feedback(SoundEvent::Cancelled);
-
-                                // Run post_output_command to reset compositor submap
-                                if let Some(cmd) = &self.config.output.post_output_command {
-                                    if let Err(e) = output::run_hook(cmd, "post_output").await {
-                                        tracing::warn!("{}", e);
-                                    }
-                                }
+                                self.close_cancelled_cycle(&mut state, false).await;
 
                                 end_recording_notification("Cancelled", "Transcription aborted", &self.config.output.notification, self.config.engine).await;
                             } else {
@@ -3466,21 +3458,10 @@ impl Daemon {
                             *tasks_in_flight = 0;
                         }
 
-                        self.discard_pending_overrides();
                         // A cancelled external-trigger session is still an
-                        // ended session — tell the caller and disarm tracking.
-                        self.end_external_session(state.is_recording()).await;
-                        state = State::Idle;
+                        // ended session: tell the caller and disarm tracking.
+                        self.close_cancelled_cycle(&mut state, true).await;
                         eager_transcriber = None;
-                        self.update_state("idle");
-                        self.play_feedback(SoundEvent::Cancelled);
-
-                        // Run post_output_command to reset compositor submap
-                        if let Some(cmd) = &self.config.output.post_output_command {
-                            if let Err(e) = output::run_hook(cmd, "post_output").await {
-                                tracing::warn!("{}", e);
-                            }
-                        }
 
                         end_recording_notification("Cancelled", "Recording discarded", &self.config.output.notification, self.config.engine).await;
 
@@ -3965,17 +3946,7 @@ impl Daemon {
                         // until the next transcription.
                         self.active_transcriber = None;
 
-                        self.discard_pending_overrides();
-                        state = State::Idle;
-                        self.update_state("idle");
-                        self.play_feedback(SoundEvent::Cancelled);
-
-                        // Run post_output_command to reset compositor submap
-                        if let Some(cmd) = &self.config.output.post_output_command {
-                            if let Err(e) = output::run_hook(cmd, "post_output").await {
-                                tracing::warn!("{}", e);
-                            }
-                        }
+                        self.close_cancelled_cycle(&mut state, false).await;
 
                         end_recording_notification("Cancelled", "Transcription aborted", &self.config.output.notification, self.config.engine).await;
                     }
