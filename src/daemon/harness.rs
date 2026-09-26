@@ -649,3 +649,32 @@ async fn a_profile_override_belongs_to_the_recording_it_was_started_for() {
         "only the recording started with the modifier is post-processed by it"
     );
 }
+
+#[tokio::test]
+async fn a_stale_cancel_sentinel_does_not_swallow_the_next_recording() {
+    // `voxtype record cancel` writes a trigger file. If the daemon is idle when
+    // it arrives the file stays, because the 500 ms idle arm that was meant to
+    // sweep it can never fire: the unconditional 100 ms arm recreates its timer
+    // on every iteration (#644). The sweep that works is the one at capture
+    // start (#606), and this pins it now that the dead arm is gone.
+    let harness = TestDaemon::speaking("hello");
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            std::fs::write(ctl.paths.cancel(), "cancel").expect("write cancel sentinel");
+
+            ctl.press();
+            ctl.expect_state("recording").await;
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            ctl.release();
+            ctl.expect_state("idle").await;
+        })
+        .await;
+
+    assert_eq!(
+        ctl.typed(),
+        vec!["hello".to_string()],
+        "the stale cancel sentinel swallowed the recording"
+    );
+}

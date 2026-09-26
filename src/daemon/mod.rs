@@ -4027,13 +4027,6 @@ impl Daemon {
                     }
                 }
 
-                // Clean up stale cancel file when idle and evict idle models
-                _ = tokio::time::sleep(Duration::from_millis(500)), if matches!(state, State::Idle) => {
-                    // Silently consume any stale cancel request
-                    let _ = self.paths.check_cancel_requested();
-
-                }
-
                 // === MEETING MODE HANDLERS ===
 
                 // Poll for meeting commands (file-based IPC), and carry the
