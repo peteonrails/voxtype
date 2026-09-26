@@ -180,6 +180,20 @@ pub fn detect_cuda_runtime_major() -> Option<i32> {
     Some(version / 1000)
 }
 
+/// Print the binary the running daemon executes, as `setup gpu --status`
+/// does. The package path is only what the next launch would use, and it is
+/// wrong when a wrapper or manual install points somewhere else.
+fn print_binary(next_launch: &Path) {
+    let daemon = crate::daemon_status::read_pid_if_alive();
+    match (daemon.and_then(binary::running_binary_path), daemon) {
+        (Some(path), Some(pid)) => println!("  Binary: {} (daemon pid {})", path.display(), pid),
+        _ => println!(
+            "  Binary: {} (next launch, no daemon running)",
+            next_launch.display()
+        ),
+    }
+}
+
 pub fn show_status() {
     println!("=== Voxtype ONNX Engine Status ===\n");
 
@@ -187,22 +201,12 @@ pub fn show_status() {
         if let Some(backend) = detect_current_parakeet_backend() {
             println!("Active engine: Parakeet");
             println!("  Backend: {}", backend.display_name());
-            println!(
-                "  Binary: {}",
-                Path::new(binary::LIB_DIR)
-                    .join(backend.variant().binary_name())
-                    .display()
-            );
+            print_binary(&Path::new(binary::LIB_DIR).join(backend.variant().binary_name()));
         }
     } else {
         println!("Active engine: Whisper");
         if let Some(variant) = detect_current_whisper_variant() {
-            println!(
-                "  Binary: {}",
-                Path::new(binary::LIB_DIR)
-                    .join(variant.binary_name())
-                    .display()
-            );
+            print_binary(&Path::new(binary::LIB_DIR).join(variant.binary_name()));
         }
     }
 
