@@ -2071,7 +2071,7 @@ restore_clipboard_delay_ms = 300  # Longer delay for slower systems
 **Default:** `true`
 **Required:** No
 
-When `true` and `mode = "type"`, falls back to clipboard if typing fails.
+When `true` and `mode = "type"`, falls back to clipboard if typing fails. With file output (`mode = "file"` or `--file`), a transcription that can't be written to the file goes to the clipboard instead.
 
 **Note:** This setting is ignored when `driver_order` is set, since the driver list explicitly defines what's tried.
 
@@ -2400,6 +2400,8 @@ file_path = "~/transcriptions/output.txt"
 ```
 
 **Note:** Parent directories are created automatically if they don't exist.
+
+If the file can't be written (a read-only directory, say), the transcription goes to the clipboard instead when `fallback_to_clipboard = true` (the default), and a notification names the path that failed. With `fallback_to_clipboard = false`, the notification says the transcription wasn't saved. `pre_output_command` and `post_output_command` run around file output the same as for every other mode, so a compositor submap entered for the recording is always reset.
 
 ### file_mode
 
