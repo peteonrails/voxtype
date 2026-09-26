@@ -107,8 +107,8 @@ pub struct WhisperConfig {
     #[serde(default = "default_eager_chunk_secs")]
     pub eager_chunk_secs: f32,
 
-    /// Overlap between adjacent chunks in seconds for eager processing
-    /// Overlap helps catch words at chunk boundaries
+    /// No longer used: eager chunks are cut at the quietest point near the
+    /// chunk length and never overlap. Kept so existing configs still parse.
     #[serde(default = "default_eager_overlap_secs")]
     pub eager_overlap_secs: f32,
 
