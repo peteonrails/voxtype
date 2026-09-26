@@ -33,6 +33,7 @@ use crate::runtime_files::RuntimePaths;
 use crate::transcribe::{StreamHandle, StreamingEvent, StreamingTranscriber, Transcriber};
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -60,6 +61,13 @@ pub struct Fakes {
     pub transcriber_fails: bool,
     /// Milliseconds the engine takes, so a row can act while it is running.
     pub transcribe_delay_ms: u64,
+    /// Have the streaming backend report a failure instead of a final segment.
+    pub stream_error: bool,
+    /// Load the engine before the first recording instead of on demand, so a
+    /// poisoned instance has somewhere to be cached.
+    pub preload: bool,
+    /// Panic on the first transcription, as a broken engine does (#643).
+    pub panic_once: bool,
 }
 
 /// Audio capture that hands the daemon a scripted buffer.
@@ -153,12 +161,20 @@ struct FakeTranscriber {
     text: String,
     fail: bool,
     delay_ms: u64,
+    /// Set by the first transcription, so `panic_once` happens once.
+    panicked: Arc<AtomicBool>,
+    panic_once: bool,
     calls: Arc<Mutex<Vec<usize>>>,
 }
 
 impl Transcriber for FakeTranscriber {
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         self.calls.lock().expect("calls lock").push(samples.len());
+        if self.panic_once && !self.panicked.swap(true, Ordering::SeqCst) {
+            // Inside `spawn_blocking`, so this surfaces as a JoinError whose
+            // `is_panic` is set, and the daemon drops its cached engine (#643).
+            panic!("fake engine panic");
+        }
         if self.delay_ms > 0 {
             // Real engines take time, and the cancel-during-transcription rows
             // need a window to act in. `transcribe` is synchronous and runs
@@ -178,6 +194,7 @@ impl Transcriber for FakeTranscriber {
 /// input) and `Ended` after it, which is the shape a real backend produces.
 struct FakeStreamingTranscriber {
     text: String,
+    fail: bool,
     calls: Arc<Mutex<Vec<usize>>>,
 }
 
@@ -203,12 +220,25 @@ impl StreamingTranscriber for FakeStreamingTranscriber {
         // the sender to be constructible.
         let (cancel, _abandoned) = oneshot::channel();
         let text = self.text.clone();
+        let fail = self.fail;
 
         let task = tokio::spawn(async move {
-            // One segment is enough: the daemon types finals, and the test is
-            // about the session's lifecycle rather than the text.
-            while samples_rx.recv().await.is_some() {}
-            if !text.is_empty() {
+            // A real backend commits a Final as an utterance completes, while
+            // the session is live. It must not wait for the end: a live session
+            // disowns its typing surface at stop, so anything emitted during the
+            // drain is discarded by design.
+            let first = samples_rx.recv().await;
+            if fail {
+                // The failure is reported when the session ends.
+                while samples_rx.recv().await.is_some() {}
+                let _ = events_tx
+                    .send(StreamingEvent::Error(TranscribeError::ModelNotFound(
+                        "fake stream failure".to_string(),
+                    )))
+                    .await;
+                return Ok(());
+            }
+            if first.is_some() && !text.is_empty() {
                 let _ = events_tx
                     .send(StreamingEvent::Final {
                         text,
@@ -216,6 +246,7 @@ impl StreamingTranscriber for FakeStreamingTranscriber {
                     })
                     .await;
             }
+            while samples_rx.recv().await.is_some() {}
             let _ = events_tx.send(StreamingEvent::Ended).await;
             Ok(())
         });
@@ -259,6 +290,7 @@ pub struct Controls {
     typed: Arc<Mutex<Vec<String>>>,
     transcribed: Arc<Mutex<Vec<usize>>>,
     output_configs: Arc<Mutex<Vec<OutputConfig>>>,
+    transcriber_factory_calls: Arc<AtomicUsize>,
     hotkey_tx: mpsc::Sender<HotkeyEvent>,
     external_start_tx: mpsc::Sender<()>,
     external_stop_tx: mpsc::Sender<()>,
@@ -326,6 +358,12 @@ impl Controls {
 
     pub fn override_exists(&self, name: &str) -> bool {
         self.paths.bool_override(name).exists()
+    }
+
+    /// How many times the daemon asked the factory for a transcriber: once for
+    /// a preloaded engine, twice when a poisoned one is discarded.
+    pub fn transcriber_factory_calls(&self) -> usize {
+        self.transcriber_factory_calls.load(Ordering::SeqCst)
     }
 
     /// The output configuration every chain was built with, in order: the
@@ -423,7 +461,7 @@ impl TestDaemon {
         let dir = TempDir::new().expect("temp dir");
         let state_file = dir.path().join("state");
         let hook_log = dir.path().join("hook-runs");
-        let mut config = base_config(fakes.streaming);
+        let mut config = base_config(fakes.streaming || fakes.preload);
         config.hotkey.enabled = true;
         config.hotkey.mode = ActivationMode::PushToTalk;
         config.state_file = Some(state_file.display().to_string());
@@ -456,6 +494,9 @@ impl TestDaemon {
             typed: typed.clone(),
         };
         let calls = transcribed.clone();
+        let panicked = Arc::new(AtomicBool::new(false));
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let transcriber_factory_calls = factory_calls.clone();
         let configs = output_configs.clone();
         let scripted = text.to_string();
         let factories = Factories {
@@ -466,9 +507,11 @@ impl TestDaemon {
                 )
             })),
             transcriber: Some(Arc::new(move |_config| {
+                transcriber_factory_calls.fetch_add(1, Ordering::SeqCst);
                 if fakes.streaming {
                     Ok(Box::new(FakeStreamingTranscriber {
                         text: scripted.clone(),
+                        fail: fakes.stream_error,
                         calls: calls.clone(),
                     }) as Box<dyn Transcriber>)
                 } else {
@@ -476,6 +519,8 @@ impl TestDaemon {
                         text: scripted.clone(),
                         fail: fakes.transcriber_fails,
                         delay_ms: fakes.transcribe_delay_ms,
+                        panicked: panicked.clone(),
+                        panic_once: fakes.panic_once,
                         calls: calls.clone(),
                     }) as Box<dyn Transcriber>)
                 }
@@ -500,6 +545,7 @@ impl TestDaemon {
             typed,
             transcribed,
             output_configs,
+            transcriber_factory_calls: factory_calls,
             hotkey_tx,
             external_start_tx,
             external_stop_tx,
@@ -561,8 +607,8 @@ model = "sensevoice-small"
 on_demand_loading = false
 "#;
 
-fn base_config(streaming: bool) -> Config {
-    let text = if streaming {
+fn base_config(preload: bool) -> Config {
+    let text = if preload {
         STREAMING_CONFIG
     } else {
         BATCH_CONFIG
@@ -1070,5 +1116,172 @@ async fn a_recording_cancelled_by_the_cli_file_returns_to_idle_without_output() 
         ctl.transcription_calls(),
         Vec::<usize>::new(),
         "a cancelled recording is never transcribed"
+    );
+}
+
+#[tokio::test]
+async fn a_streaming_session_that_ends_delivers_its_final_segment() {
+    let harness = TestDaemon::streaming("hello");
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            ctl.external_start();
+            ctl.expect_state("streaming").await;
+            ctl.external_stop();
+            ctl.expect_state("idle").await;
+
+            assert_eq!(ctl.hook_runs(), 1, "the session ends through its hook");
+        })
+        .await;
+
+    assert_eq!(
+        ctl.typed(),
+        vec!["hello".to_string()],
+        "the committed segment is delivered"
+    );
+}
+
+#[tokio::test]
+async fn a_streaming_session_that_fails_returns_to_idle_without_output() {
+    let harness = TestDaemon::with_fakes(
+        "hello",
+        Fakes {
+            streaming: true,
+            stream_error: true,
+            ..Fakes::default()
+        },
+        |_| {},
+    );
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            ctl.external_start();
+            ctl.expect_state("streaming").await;
+            ctl.external_stop();
+            ctl.expect_state("idle").await;
+        })
+        .await;
+
+    assert_eq!(
+        ctl.typed(),
+        Vec::<String>::new(),
+        "a backend failure types nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_file_session_writes_the_transcript_and_types_nothing() {
+    // `--file=path` takes its own close path, which accumulates instead of
+    // typing and skips the post-output hook: it is a batch dump, not a
+    // live-typing operation the hook is meant to wrap.
+    let harness = TestDaemon::speaking("hello");
+    let ctl = harness.controls();
+    let transcript = ctl.paths.dir().join("dictation.txt");
+
+    harness
+        .run(async {
+            std::fs::write(
+                ctl.paths.output_mode_override(),
+                format!("file:{}", transcript.display()),
+            )
+            .expect("write output mode override");
+
+            ctl.press();
+            ctl.expect_state("recording").await;
+            tokio::time::sleep(Duration::from_millis(FLOOR_MS)).await;
+            ctl.release();
+            ctl.expect_state("idle").await;
+
+            // The writer terminates the line, so appended dictations stay
+            // separate; assert on the text, not on the newline.
+            assert_eq!(
+                std::fs::read_to_string(&transcript)
+                    .unwrap_or_default()
+                    .trim_end(),
+                "hello",
+                "the transcript is written to the requested file"
+            );
+        })
+        .await;
+
+    assert_eq!(
+        ctl.typed(),
+        Vec::<String>::new(),
+        "a file session never types into the focused window"
+    );
+}
+
+#[tokio::test]
+async fn a_streaming_file_session_writes_its_accumulated_text() {
+    let harness = TestDaemon::streaming("hello");
+    let ctl = harness.controls();
+    let transcript = ctl.paths.dir().join("streamed.txt");
+
+    harness
+        .run(async {
+            std::fs::write(
+                ctl.paths.output_mode_override(),
+                format!("file:{}", transcript.display()),
+            )
+            .expect("write output mode override");
+
+            ctl.external_start();
+            ctl.expect_state("streaming").await;
+            ctl.external_stop();
+            ctl.expect_state("idle").await;
+
+            assert_eq!(
+                std::fs::read_to_string(&transcript)
+                    .unwrap_or_default()
+                    .trim_end(),
+                "hello",
+                "the accumulated text is written when the session ends"
+            );
+        })
+        .await;
+
+    assert_eq!(ctl.typed(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn a_panicking_engine_is_dropped_and_the_next_recording_reloads_it() {
+    // #643: a panic inside `spawn_blocking` leaves the engine's internal state
+    // unknown, so the daemon drops the cached instance and the next recording
+    // builds a clean one. The observable is the factory being asked twice: once
+    // for the preloaded engine, once after the poison.
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+
+    let harness = TestDaemon::with_fakes(
+        "hello",
+        Fakes {
+            preload: true,
+            panic_once: true,
+            ..Fakes::default()
+        },
+        |_| {},
+    );
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            record_once(&ctl).await; // panics; the cycle must still end
+            record_once(&ctl).await; // the clean engine has to deliver
+        })
+        .await;
+
+    std::panic::set_hook(previous_hook);
+
+    assert_eq!(
+        ctl.typed(),
+        vec!["hello".to_string()],
+        "only the recording after the panic delivers"
+    );
+    assert_eq!(
+        ctl.transcriber_factory_calls(),
+        2,
+        "the poisoned engine must be rebuilt, not reused"
     );
 }
