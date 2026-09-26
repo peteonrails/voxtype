@@ -1244,6 +1244,10 @@ impl Daemon {
         *streaming_chain = None;
 
         self.discard_pending_overrides();
+        // A cancelled streaming session is still an ended session: without this
+        // the external stop hook never runs for it, and `is_external_trigger`
+        // stays set for whatever session comes next.
+        self.end_external_session(state.is_recording()).await;
         *state = State::Idle;
         self.update_state("idle");
         self.play_feedback(SoundEvent::Cancelled);
@@ -3695,8 +3699,19 @@ impl Daemon {
                     }
                 }
 
-                // Handle SIGUSR1 - start recording (for compositor keybindings)
-                _ = sigusr1.recv() => {
+                // Handle SIGUSR1 - start recording (for compositor keybindings).
+                // A test can inject the same trigger instead of signalling the
+                // process, which would reach every daemon in the test binary.
+                _ = async {
+                    match self.deps.external_start.as_mut() {
+                        Some(rx) => {
+                            let _ = rx.recv().await;
+                        }
+                        None => {
+                            let _ = sigusr1.recv().await;
+                        }
+                    }
+                } => {
                     tracing::debug!("Received SIGUSR1 (start recording)");
                     if state.is_idle() {
                         // Read model override from file (set by `voxtype record start --model X`)

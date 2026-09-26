@@ -30,7 +30,7 @@ use crate::config::{ActivationMode, Config, OutputConfig};
 use crate::error::{AudioError, OutputError, TranscribeError};
 use crate::output::TextOutput;
 use crate::runtime_files::RuntimePaths;
-use crate::transcribe::Transcriber;
+use crate::transcribe::{StreamHandle, StreamingEvent, StreamingTranscriber, Transcriber};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -103,6 +103,62 @@ impl Transcriber for FakeTranscriber {
     }
 }
 
+/// A transcriber that can stream, so the streaming pipeline is reachable.
+///
+/// It emits one `Final` when the daemon drops the samples channel (end of
+/// input) and `Ended` after it, which is the shape a real backend produces.
+struct FakeStreamingTranscriber {
+    text: String,
+    calls: Arc<Mutex<Vec<usize>>>,
+}
+
+impl Transcriber for FakeStreamingTranscriber {
+    fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
+        self.calls.lock().expect("calls lock").push(samples.len());
+        Ok(self.text.clone())
+    }
+
+    fn as_streaming(&self) -> Option<&dyn StreamingTranscriber> {
+        Some(self)
+    }
+}
+
+impl StreamingTranscriber for FakeStreamingTranscriber {
+    fn start_stream(
+        &self,
+        mut samples_rx: mpsc::Receiver<Vec<f32>>,
+    ) -> Result<StreamHandle, TranscribeError> {
+        let (events_tx, events) = mpsc::channel(16);
+        // The daemon sends on this to abort a session. This fake ends when the
+        // samples channel closes instead, so the receiver only has to exist for
+        // the sender to be constructible.
+        let (cancel, _abandoned) = oneshot::channel();
+        let text = self.text.clone();
+
+        let task = tokio::spawn(async move {
+            // One segment is enough: the daemon types finals, and the test is
+            // about the session's lifecycle rather than the text.
+            while samples_rx.recv().await.is_some() {}
+            if !text.is_empty() {
+                let _ = events_tx
+                    .send(StreamingEvent::Final {
+                        text,
+                        segment_id: 1,
+                    })
+                    .await;
+            }
+            let _ = events_tx.send(StreamingEvent::Ended).await;
+            Ok(())
+        });
+
+        Ok(StreamHandle {
+            events,
+            cancel,
+            task,
+        })
+    }
+}
+
 /// Output driver that records what would have been typed.
 #[derive(Clone, Default)]
 struct FakeOutput {
@@ -135,6 +191,8 @@ pub struct Controls {
     transcribed: Arc<Mutex<Vec<usize>>>,
     output_configs: Arc<Mutex<Vec<OutputConfig>>>,
     hotkey_tx: mpsc::Sender<HotkeyEvent>,
+    external_start_tx: mpsc::Sender<()>,
+    hook_log: PathBuf,
     state_file: PathBuf,
     paths: RuntimePaths,
 }
@@ -154,6 +212,19 @@ impl Controls {
     /// The cancel key: discard the cycle in flight without a transcript.
     pub fn cancel(&self) {
         self.send(HotkeyEvent::Cancel);
+    }
+
+    /// An external start, as `voxtype record start` sends with SIGUSR1.
+    pub fn external_start(&self) {
+        let _ = self.external_start_tx.try_send(());
+    }
+
+    /// How many times the external stop hook has run. The configured hook
+    /// appends one byte per run to a file, so its length is the count.
+    pub fn hook_runs(&self) -> usize {
+        std::fs::read_to_string(&self.hook_log)
+            .map(|s| s.len())
+            .unwrap_or(0)
     }
 
     /// Write a sentinel the way `voxtype record start --auto-submit` would.
@@ -231,12 +302,23 @@ impl TestDaemon {
         Self::with_config(text, |_| {})
     }
 
+    /// A daemon whose transcriber can stream, so the streaming pipeline is the
+    /// one under test.
+    pub fn streaming(text: &str) -> Self {
+        Self::build(text, true, |_| {})
+    }
+
     /// As [`TestDaemon::speaking`], with a chance to adjust the configuration
     /// before the daemon is built.
     pub fn with_config(text: &str, tweak: impl FnOnce(&mut Config)) -> Self {
+        Self::build(text, false, tweak)
+    }
+
+    fn build(text: &str, streaming: bool, tweak: impl FnOnce(&mut Config)) -> Self {
         let dir = TempDir::new().expect("temp dir");
         let state_file = dir.path().join("state");
-        let mut config = base_config();
+        let hook_log = dir.path().join("hook-runs");
+        let mut config = base_config(streaming);
         config.hotkey.enabled = true;
         config.hotkey.mode = ActivationMode::PushToTalk;
         config.state_file = Some(state_file.display().to_string());
@@ -251,10 +333,15 @@ impl TestDaemon {
         notification.on_recording_stop = false;
         notification.on_transcription = false;
         config.meeting.storage_path = dir.path().join("meetings").display().to_string();
+        // The external stop hook is a shell command, so a test observes it by
+        // having it append one byte per run.
+        config.audio.external_trigger_stop_command =
+            Some(format!("printf x >> '{}'", hook_log.display()));
         tweak(&mut config);
 
         let (hotkey_tx, hotkey_rx) = mpsc::channel(8);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (external_start_tx, external_start_rx) = mpsc::channel(4);
         let typed = Arc::new(Mutex::new(Vec::new()));
         let transcribed = Arc::new(Mutex::new(Vec::new()));
         let output_configs = Arc::new(Mutex::new(Vec::new()));
@@ -270,10 +357,17 @@ impl TestDaemon {
                 Ok(Box::new(FakeCapture::new(1.5)) as Box<dyn AudioCapture>)
             })),
             transcriber: Some(Arc::new(move |_config| {
-                Ok(Box::new(FakeTranscriber {
-                    text: scripted.clone(),
-                    calls: calls.clone(),
-                }) as Box<dyn Transcriber>)
+                if streaming {
+                    Ok(Box::new(FakeStreamingTranscriber {
+                        text: scripted.clone(),
+                        calls: calls.clone(),
+                    }) as Box<dyn Transcriber>)
+                } else {
+                    Ok(Box::new(FakeTranscriber {
+                        text: scripted.clone(),
+                        calls: calls.clone(),
+                    }) as Box<dyn Transcriber>)
+                }
             })),
             output_chain: Some(Arc::new(move |config| {
                 configs.lock().expect("configs lock").push(config.clone());
@@ -284,6 +378,7 @@ impl TestDaemon {
             factories,
             hotkey_events: Some(hotkey_rx),
             shutdown: Some(shutdown_rx),
+            external_start: Some(external_start_rx),
             exit_process_on_shutdown: false,
         };
 
@@ -294,6 +389,8 @@ impl TestDaemon {
             transcribed,
             output_configs,
             hotkey_tx,
+            external_start_tx,
+            hook_log,
             state_file,
             paths,
         };
@@ -333,7 +430,7 @@ impl TestDaemon {
 /// daemon takes. Every other engine builds it through
 /// `Deps::create_transcriber`, so SenseVoice with on-demand loading is the
 /// engine a harness can stand in for.
-const CONFIG: &str = r#"
+const BATCH_CONFIG: &str = r#"
 engine = "sensevoice"
 
 [sensevoice]
@@ -341,8 +438,23 @@ model = "sensevoice-small"
 on_demand_loading = true
 "#;
 
-fn base_config() -> Config {
-    toml::from_str(CONFIG).expect("the harness configuration deserializes")
+/// Streaming needs the transcriber before recording starts: `try_start_streaming`
+/// reads `transcriber_preloaded`, which only the non-on-demand path fills.
+const STREAMING_CONFIG: &str = r#"
+engine = "sensevoice"
+
+[sensevoice]
+model = "sensevoice-small"
+on_demand_loading = false
+"#;
+
+fn base_config(streaming: bool) -> Config {
+    let text = if streaming {
+        STREAMING_CONFIG
+    } else {
+        BATCH_CONFIG
+    };
+    toml::from_str(text).expect("the harness configuration deserializes")
 }
 
 #[tokio::test]
@@ -422,4 +534,40 @@ async fn a_cancelled_recording_does_not_leak_its_submit_override() {
             .map(|c| c.auto_submit)
             .collect::<Vec<_>>()
     );
+}
+
+#[tokio::test]
+async fn a_cancelled_external_streaming_session_runs_the_stop_hook() {
+    // Compositor users leave a submap in the stop hook, so a session that ends
+    // without running it strands them. Cancelling a *streaming* session used to
+    // skip it: the cancel path tore the session down without telling the
+    // caller, and left `is_external_trigger` set for the next session.
+    let harness = TestDaemon::streaming("hello");
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            ctl.external_start();
+            ctl.expect_state("streaming").await;
+            assert_eq!(
+                ctl.hook_runs(),
+                0,
+                "the hook marks the end of the session, not its start"
+            );
+
+            ctl.cancel();
+            ctl.expect_state("idle").await;
+
+            // Asserted inside the run: the harness owns the temporary runtime
+            // directory and drops it when `run` returns, so a file check after
+            // that would read nothing whatever the daemon did. The state file
+            // flips to idle only after the cancel path has finished, hook
+            // included.
+            assert_eq!(
+                ctl.hook_runs(),
+                1,
+                "cancelling an external streaming session has to run the stop hook once"
+            );
+        })
+        .await;
 }
