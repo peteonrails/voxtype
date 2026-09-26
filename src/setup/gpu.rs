@@ -1141,7 +1141,7 @@ pub fn enable() -> anyhow::Result<()> {
             )
         })?;
 
-        switch_backend_tiered_parakeet(backend_binary)?;
+        switch_backend_tiered_parakeet(backend_binary, "setup gpu --enable")?;
 
         // Regenerate systemd service if it exists
         if super::systemd::regenerate_service_file()? {
@@ -1209,7 +1209,7 @@ pub fn disable() -> anyhow::Result<()> {
         // ONNX mode: switch to best ONNX CPU backend
         let best_backend = detect_best_parakeet_cpu_backend();
         if let Some(backend_name) = best_backend {
-            switch_backend_tiered_parakeet(backend_name)?;
+            switch_backend_tiered_parakeet(backend_name, "setup gpu --disable")?;
             println!(
                 "Switched to ONNX ({}) backend.",
                 backend_name
@@ -1297,8 +1297,10 @@ fn detect_best_parakeet_cpu_backend() -> Option<&'static str> {
     find_binary("voxtype-onnx-avx2", "voxtype-parakeet-avx2")
 }
 
-/// Switch to an ONNX backend binary (tiered mode)
-fn switch_backend_tiered_parakeet(binary_name: &str) -> anyhow::Result<()> {
+/// Switch to an ONNX backend binary (tiered mode). `retry_hint` is the
+/// command suggested if the install needs root, so it must name the command
+/// the user actually ran (#449).
+fn switch_backend_tiered_parakeet(binary_name: &str, retry_hint: &str) -> anyhow::Result<()> {
     let binary_path = Path::new(VOXTYPE_LIB_DIR).join(binary_name);
     let active_bin = get_active_binary_path();
 
@@ -1310,7 +1312,7 @@ fn switch_backend_tiered_parakeet(binary_name: &str) -> anyhow::Result<()> {
         );
     }
 
-    install_active_binary(active_bin, &binary_path, "setup onnx --enable")
+    install_active_binary(active_bin, &binary_path, retry_hint)
 }
 
 #[cfg(test)]
