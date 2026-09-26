@@ -303,29 +303,63 @@ fn ctc_decode_to_ids(logits: &[f32], time_steps: usize, vocab_size: usize) -> Ve
     token_ids
 }
 
+/// Whether `c` belongs to a script written without spaces between words.
+fn is_cjk(c: char) -> bool {
+    matches!(c,
+        '\u{3000}'..='\u{303F}'   // CJK symbols and punctuation
+        | '\u{3040}'..='\u{30FF}' // Hiragana, Katakana
+        | '\u{3400}'..='\u{4DBF}' // CJK Extension A
+        | '\u{4E00}'..='\u{9FFF}' // CJK Unified Ideographs
+        | '\u{AC00}'..='\u{D7AF}' // Hangul syllables
+        | '\u{F900}'..='\u{FAFF}' // CJK compatibility ideographs
+        | '\u{FF00}'..='\u{FFEF}' // Fullwidth forms
+    )
+}
+
 /// Convert token IDs to text, handling BPE continuation markers
 ///
-/// Paraformer uses `@@` suffix for BPE continuation (e.g., "hel@@" + "lo" = "hello").
-/// Chinese characters appear as individual tokens without markers.
+/// Paraformer vocabularies are whole words plus `@@`-suffixed pieces
+/// ("hel@@" + "lo" = "hello"), with no word-boundary marker, so the spaces
+/// have to be put back. This follows FunASR's `sentence_postprocess`: a
+/// finished Latin word is separated from the next Latin word by one space,
+/// and CJK characters join their neighbours with none.
 /// Special tokens (<blank>, <s>, </s>, <OOV>) are filtered out.
 fn tokens_to_text(token_ids: &[u32], tokens: &HashMap<u32, String>) -> String {
     let mut result = String::new();
+    // A finished Latin word is waiting for a separator before the next one.
+    let mut word_ended = false;
 
     for &id in token_ids {
-        if let Some(token_str) = tokens.get(&id) {
-            // Skip special tokens
-            if token_str.starts_with('<') && token_str.ends_with('>') {
-                continue;
-            }
-
-            // Handle BPE continuation marker
-            if let Some(base) = token_str.strip_suffix("@@") {
-                result.push_str(base);
-            } else {
-                // SentencePiece marker cleanup (some models use this instead of @@)
-                result.push_str(&token_str.replace('\u{2581}', " "));
-            }
+        let Some(token_str) = tokens.get(&id) else {
+            continue;
+        };
+        if token_str.starts_with('<') && token_str.ends_with('>') {
+            continue;
         }
+
+        // Some exports use SentencePiece markers, which carry their own spacing.
+        if token_str.contains('\u{2581}') {
+            result.push_str(&token_str.replace('\u{2581}', " "));
+            word_ended = false;
+            continue;
+        }
+
+        let (piece, continues) = match token_str.strip_suffix("@@") {
+            Some(base) => (base, true),
+            None => (token_str.as_str(), false),
+        };
+
+        if piece.chars().next().is_some_and(is_cjk) {
+            result.push_str(piece);
+            word_ended = false;
+            continue;
+        }
+
+        if word_ended {
+            result.push(' ');
+        }
+        result.push_str(piece);
+        word_ended = !continues;
     }
 
     result.trim().to_string()
@@ -638,7 +672,59 @@ mod tests {
 
         let ids = vec![1, 10, 11, 12, 13, 2];
         let result = tokens_to_text(&ids, &tokens);
-        assert_eq!(result, "helloworld");
+        assert_eq!(result, "hello world");
+    }
+
+    /// Token strings from paraformer-en's tokens.txt: whole words, `@@`
+    /// pieces and contractions, with no word-boundary marker at all. Joining
+    /// them bare produced "thisisitsaidthejudge"-style output.
+    #[test]
+    fn test_tokens_to_text_english_words_get_spaces() {
+        let mut tokens = HashMap::new();
+        for (id, t) in [
+            (1, "<s>"),
+            (2, "</s>"),
+            (5, "the"),
+            (14, "is"),
+            (69, "it's"),
+            (142, "don't"),
+            (200, "dict@@"),
+            (201, "ation"),
+            (300, "1@@"),
+            (301, "0"),
+            (302, "works"),
+        ] {
+            tokens.insert(id, t.to_string());
+        }
+
+        let ids = vec![1, 69, 5, 200, 201, 2];
+        assert_eq!(tokens_to_text(&ids, &tokens), "it's the dictation");
+
+        let ids = vec![142, 14, 300, 301, 302];
+        assert_eq!(tokens_to_text(&ids, &tokens), "don't is 10 works");
+    }
+
+    /// paraformer-zh mixes CJK characters with Latin words and pieces.
+    /// FunASR joins CJK with no spaces, including next to an English word.
+    #[test]
+    fn test_tokens_to_text_mixed_chinese_and_english() {
+        let mut tokens = HashMap::new();
+        for (id, t) in [
+            (10, "你"),
+            (11, "好"),
+            (3, "and@@"),
+            (27, "price"),
+            (39, "these"),
+            (12, "世"),
+        ] {
+            tokens.insert(id, t.to_string());
+        }
+
+        let ids = vec![10, 11, 39, 27, 12];
+        assert_eq!(tokens_to_text(&ids, &tokens), "你好these price世");
+
+        let ids = vec![3, 27, 10];
+        assert_eq!(tokens_to_text(&ids, &tokens), "andprice你");
     }
 
     #[test]
