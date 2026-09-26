@@ -4,7 +4,7 @@ Test direct signal control of the daemon:
 
 ```bash
 # Get daemon PID
-DAEMON_PID=$(cat ~/.local/share/voxtype/voxtype.pid)
+DAEMON_PID=$(cat "$XDG_RUNTIME_DIR/voxtype/pid")
 
 # Start recording via SIGUSR1
 kill -USR1 $DAEMON_PID
