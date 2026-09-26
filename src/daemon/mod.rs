@@ -3,6 +3,12 @@
 //! Coordinates the hotkey listener, audio capture, transcription,
 //! and text output components.
 
+mod deps;
+#[cfg(test)]
+mod harness;
+
+use deps::Deps;
+
 use crate::audio::feedback::{AudioFeedback, SoundEvent};
 use crate::audio::{self, AudioCapture};
 use crate::config::{ActivationMode, Config, FileMode, OutputMode};
@@ -366,6 +372,7 @@ pub struct Daemon {
     config_path: Option<PathBuf>,
     state_file_path: Option<PathBuf>,
     paths: RuntimePaths,
+    deps: Deps,
     audio_feedback: Option<AudioFeedback>,
     text_processor: TextProcessor,
     post_processor: Option<PostProcessor>,
@@ -454,17 +461,30 @@ impl Daemon {
     /// Create a new daemon with the given configuration, resolving the runtime
     /// directory from the process environment.
     pub fn new(config: Config, config_path: Option<PathBuf>) -> Self {
-        Self::with_paths(config, config_path, RuntimePaths::from_env())
+        Self::with_deps(
+            config,
+            config_path,
+            RuntimePaths::from_env(),
+            Deps::production(),
+        )
     }
 
-    /// [`Daemon::new`] against a caller-supplied runtime directory.
+    /// [`Daemon::new`] against a caller-supplied outside world.
     ///
     /// Every runtime file the daemon owns (the lock, the level socket, the
     /// published version, the override sentinels and the meeting triggers)
-    /// resolves under `paths`. Production passes the process's own runtime
-    /// directory; a test passes a temporary one, so a harness run never takes
-    /// the running daemon's lock or consumes its sentinels.
-    pub fn with_paths(config: Config, config_path: Option<PathBuf>, paths: RuntimePaths) -> Self {
+    /// resolves under `paths`; the audio device, the engine, the output drivers
+    /// and the hotkey events come from `deps`. Production passes the process's
+    /// own runtime directory and `Deps::production()`. A test passes a
+    /// temporary directory and fakes, so a harness run never takes the running
+    /// daemon's lock, consumes its sentinels, opens the microphone, loads a
+    /// model or writes into the user's session.
+    pub fn with_deps(
+        config: Config,
+        config_path: Option<PathBuf>,
+        paths: RuntimePaths,
+        deps: Deps,
+    ) -> Self {
         let state_file_path = config.resolve_state_file();
 
         // Initialize audio feedback if enabled
@@ -543,6 +563,7 @@ impl Daemon {
             config_path,
             state_file_path,
             paths,
+            deps,
             audio_feedback,
             text_processor,
             post_processor,
@@ -718,7 +739,7 @@ impl Daemon {
         // point every recording path passes through, so a cancel can only
         // ever apply to a recording that was live when it was issued (#606).
         self.paths.cleanup_cancel_file();
-        match audio::create_capture(&self.config.audio) {
+        match self.deps.create_capture(&self.config.audio) {
             Ok(mut capture) => match capture.start().await {
                 Ok(chunk_rx) => {
                     self.is_external_trigger = track_silence;
@@ -869,7 +890,7 @@ impl Daemon {
         *audio_capture = Some(capture);
         *streaming_handle = Some(handle);
         *streaming_session = Some(StreamingSession::new());
-        *streaming_chain = Some(output::create_output_chain(&self.config.output));
+        *streaming_chain = Some(self.deps.create_output_chain(&self.config.output));
         *state = State::Streaming {
             started_at: std::time::Instant::now(),
             model_override,
@@ -1264,7 +1285,7 @@ impl Daemon {
         track_silence: bool,
     ) -> std::result::Result<(Box<dyn AudioCapture>, tokio::sync::mpsc::Receiver<Vec<f32>>), ()>
     {
-        match audio::create_capture(&self.config.audio) {
+        match self.deps.create_capture(&self.config.audio) {
             Ok(mut capture) => match capture.start().await {
                 Ok(chunk_rx) => {
                     // Bounded; backed-up streaming backend drops chunks
@@ -1378,8 +1399,9 @@ impl Daemon {
                         // doesn't disable every one after it.
                         tracing::info!("Transcriber not loaded; creating a fresh instance");
                         let config = self.config.clone();
+                        let factories = self.deps.factories.clone();
                         let created = tokio::task::spawn_blocking(move || {
-                            crate::transcribe::create_transcriber(&config)
+                            factories.create_transcriber(&config)
                         })
                         .await;
                         match created {
@@ -2462,7 +2484,7 @@ impl Daemon {
                         }
                     }
 
-                    let output_chain = output::create_output_chain(&output_config);
+                    let output_chain = self.deps.create_output_chain(&output_config);
 
                     // Output the text
                     *state = State::Outputting {
@@ -2749,7 +2771,11 @@ impl Daemon {
         // Initialize hotkey listener (Linux: evdev, macOS: rdev)
         #[cfg(target_os = "linux")]
         let mut hotkey_listener: Option<Box<dyn hotkey::HotkeyListener>> =
-            if self.config.hotkey.enabled {
+            if self.deps.hotkey_events.is_some() {
+                // An injected event source replaces the listener, so nothing
+                // opens the input device.
+                None
+            } else if self.config.hotkey.enabled {
                 tracing::info!("Hotkey: {}", self.config.hotkey.key);
                 let secondary_model = self.config.whisper.secondary_model.clone();
                 Some(hotkey::create_listener(
@@ -2765,10 +2791,14 @@ impl Daemon {
 
         #[cfg(target_os = "macos")]
         let mut hotkey_listener: Option<Box<dyn hotkey::HotkeyListener>> = if self
-            .config
-            .hotkey
-            .enabled
+            .deps
+            .hotkey_events
+            .is_some()
         {
+            // An injected event source replaces the listener, so nothing
+            // opens the input device.
+            None
+        } else if self.config.hotkey.enabled {
             tracing::info!("Hotkey: {}", self.config.hotkey.key);
             let secondary_model = self.config.whisper.secondary_model.clone();
             match hotkey::create_listener(&self.config.hotkey, secondary_model) {
@@ -2795,7 +2825,7 @@ impl Daemon {
         };
 
         // Log default output chain (chain is created dynamically per-transcription to support overrides)
-        let default_chain = output::create_output_chain(&self.config.output);
+        let default_chain = self.deps.create_output_chain(&self.config.output);
         tracing::debug!(
             "Default output chain: {}",
             default_chain
@@ -2824,9 +2854,8 @@ impl Daemon {
                                  streaming will be unavailable"
                             );
                         }
-                        self.transcriber_preloaded = Some(Arc::from(
-                            crate::transcribe::create_transcriber(&self.config)?,
-                        ));
+                        self.transcriber_preloaded =
+                            Some(Arc::from(self.deps.create_transcriber(&self.config)?));
                     } else {
                         // Use model manager for Whisper
                         if let Err(e) = model_manager.preload_primary() {
@@ -2846,9 +2875,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Soniox => {
                     // Non-Whisper engines do their own setup; Soniox just validates
                     // API key + endpoint at construction (no model to download).
-                    self.transcriber_preloaded = Some(Arc::from(
-                        crate::transcribe::create_transcriber(&self.config)?,
-                    ));
+                    self.transcriber_preloaded =
+                        Some(Arc::from(self.deps.create_transcriber(&self.config)?));
                 }
             }
             tracing::info!("Model loaded, ready for voice input");
@@ -2868,16 +2896,20 @@ impl Daemon {
 
         // Start hotkey listener (if enabled)
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let mut hotkey_rx = if let Some(ref mut listener) = hotkey_listener {
-            match listener.start() {
-                Ok(rx) => Some(rx),
-                Err(e) => {
-                    tracing::warn!("Failed to start hotkey listener: {}. Use 'voxtype record' commands instead.", e);
-                    None
-                }
-            }
-        } else {
-            None
+        let mut hotkey_rx = match self.deps.hotkey_events.take() {
+            // An injected source drives the loop directly: the test keeps the
+            // sender and no input device is opened.
+            Some(rx) => Some(rx),
+            None => match &mut hotkey_listener {
+                Some(listener) => match listener.start() {
+                    Ok(rx) => Some(rx),
+                    Err(e) => {
+                        tracing::warn!("Failed to start hotkey listener: {}. Use 'voxtype record' commands instead.", e);
+                        None
+                    }
+                },
+                None => None,
+            },
         };
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let mut hotkey_rx: Option<tokio::sync::mpsc::Receiver<HotkeyEvent>> = None;
@@ -2966,8 +2998,9 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox => {
                                             let config = self.config.clone();
+                                            let factories = self.deps.factories.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                                crate::transcribe::create_transcriber(&config).map(Arc::from)
+                                                factories.create_transcriber(&config).map(Arc::from)
                                             }));
                                         }
                                     }
@@ -3177,8 +3210,9 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox => {
                                             let config = self.config.clone();
+                                            let factories = self.deps.factories.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                                crate::transcribe::create_transcriber(&config).map(Arc::from)
+                                                factories.create_transcriber(&config).map(Arc::from)
                                             }));
                                         }
                                     }
@@ -3603,6 +3637,12 @@ impl Daemon {
                             max_duration.as_secs_f32()
                         );
 
+                        // A subset on purpose. This cycle still delivers a
+                        // transcript, so the flags the user asked for
+                        // (auto-submit, shift-enter) must survive to be
+                        // applied; only the smart-submit decision is dropped,
+                        // because the recording ran to its limit rather than
+                        // ending where the user meant it to.
                         self.paths.cleanup_output_mode_override();
                         self.paths.cleanup_model_override();
                         self.paths.cleanup_profile_override();
@@ -3693,8 +3733,9 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::OpenVino
                 | crate::config::TranscriptionEngine::Soniox => {
                                     let config = self.config.clone();
+                                    let factories = self.deps.factories.clone();
                                     self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                        crate::transcribe::create_transcriber(&config).map(Arc::from)
+                                        factories.create_transcriber(&config).map(Arc::from)
                                     }));
                                 }
                             }
@@ -4123,6 +4164,20 @@ impl Daemon {
                     }
                 }
 
+                // Injected stop, standing in for SIGINT/SIGTERM. Production
+                // leaves `deps.shutdown` empty, so this arm never fires.
+                _ = async {
+                    match self.deps.shutdown.as_mut() {
+                        Some(rx) => {
+                            let _ = rx.await;
+                        }
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    tracing::info!("Shutdown requested");
+                    break;
+                }
+
                 // Handle graceful shutdown (SIGINT from Ctrl+C)
                 _ = tokio::signal::ctrl_c() => {
                     tracing::info!("Received SIGINT, shutting down...");
@@ -4198,6 +4253,12 @@ impl Daemon {
         }
 
         tracing::info!("Daemon stopped");
+
+        // A test drives `run` to completion in its own process, so it clears
+        // this and takes the ordinary return path instead.
+        if !self.deps.exit_process_on_shutdown {
+            return Ok(());
+        }
 
         // Exit without unwinding. Everything this daemon owns is already
         // released above: profile override, state file, meeting state file,
