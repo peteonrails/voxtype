@@ -89,9 +89,15 @@ impl MeetingSession {
         self.capture.as_mut()
     }
 
-    /// Whether an event stream is attached.
-    pub fn has_events(&self) -> bool {
-        self.events.is_some()
+    /// Take one queued event without waiting. `Some(None)` means the channel
+    /// closed, which is how the daemon learns the meeting daemon is gone.
+    pub fn try_event(&mut self) -> Option<Option<MeetingEvent>> {
+        let rx = self.events.as_mut()?;
+        match rx.try_recv() {
+            Ok(event) => Some(Some(event)),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => None,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => Some(None),
+        }
     }
 
     /// Whether a meeting is running (started and not paused).
@@ -122,11 +128,6 @@ impl MeetingSession {
 
     pub fn set_capture(&mut self, capture: DualCapture) {
         self.capture = Some(capture);
-    }
-
-    /// The event stream to select on, once a meeting has started.
-    pub fn events_mut(&mut self) -> Option<&mut Receiver<MeetingEvent>> {
-        self.events.as_mut()
     }
 
     pub fn push_mic(&mut self, samples: Vec<f32>) {

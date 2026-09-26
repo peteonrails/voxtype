@@ -271,6 +271,39 @@ pub struct Daemon {
     media: MediaSession,
 }
 
+/// One thing the main loop reacts to.
+///
+/// The sources are multiplexed into this, so the daemon's state machine is a
+/// function of `(state, event)` rather than of which future happened to be ready
+/// this iteration. That is also what lets a test drive it: an `Event` can be
+/// handed to `handle` without a signal, a timer or a device.
+enum Event {
+    /// A hotkey press, release or cancel, with the mode it was reported under.
+    Hotkey(HotkeyEvent, ActivationMode),
+    /// The 100 ms tick: recording and transcription housekeeping, the meeting
+    /// trigger files, and idle model eviction.
+    Tick,
+    /// The 50 ms tick that runs while a meeting is active: its queued events,
+    /// its audio pump and its duration limit.
+    MeetingTick,
+    /// An external trigger, from the signal handler or injected by a test.
+    Signal(Signal),
+    /// A transcription task finished.
+    Transcription(std::result::Result<TranscriptionResult, tokio::task::JoinError>),
+    /// One event from the streaming backend's pump.
+    Streaming(Option<StreamingEvent>),
+    /// Stop the loop, with the log line that says why.
+    Stop(&'static str),
+}
+
+/// Which external trigger arrived.
+enum Signal {
+    /// SIGUSR1, or its injected equivalent: start a recording.
+    ExternalStart,
+    /// SIGUSR2, or its injected equivalent: stop the active recording.
+    ExternalStop,
+}
+
 impl Daemon {
     /// Create a new daemon with the given configuration, resolving the runtime
     /// directory from the process environment.
@@ -3135,6 +3168,171 @@ impl Daemon {
         crate::notification::send_sync(&title, &body);
     }
 
+    /// React to one event.
+    ///
+    /// Returns true when the loop must stop. The bodies are the loop's arms,
+    /// moved here so the state machine reads in one place: each event is one of
+    /// them, or the group that shared a period.
+    async fn handle(
+        &mut self,
+        state: &mut State,
+        live: &mut LiveState,
+        max_duration: Duration,
+        event: Event,
+    ) -> bool {
+        match event {
+            Event::Hotkey(hotkey_event, activation_mode) => {
+                match (hotkey_event, activation_mode) {
+                    (
+                        HotkeyEvent::Pressed {
+                            model_override,
+                            profile_override,
+                        },
+                        ActivationMode::PushToTalk,
+                    ) => {
+                        self.on_hotkey_press_push_to_talk(
+                            state,
+                            live,
+                            model_override,
+                            profile_override,
+                        )
+                        .await;
+                    }
+                    (HotkeyEvent::Released, ActivationMode::PushToTalk) => {
+                        self.on_hotkey_release_push_to_talk(state, live).await;
+                    }
+                    (
+                        HotkeyEvent::Pressed {
+                            model_override,
+                            profile_override,
+                        },
+                        ActivationMode::Toggle,
+                    ) => {
+                        self.on_hotkey_press_toggle(state, live, model_override, profile_override)
+                            .await;
+                    }
+                    (HotkeyEvent::Released, ActivationMode::Toggle) => {
+                        // In toggle mode, we ignore key release events
+                        tracing::trace!("Ignoring HotkeyEvent::Released in toggle mode");
+                    }
+                    (HotkeyEvent::Cancel, _) => {
+                        self.on_hotkey_cancel(state, live).await;
+                    }
+                }
+            }
+
+            Event::Tick => {
+                // A live recording's tick. When it ends the cycle, the rest of
+                // this tick belongs to a recording that is already over.
+                if state.is_recording() && self.on_recording_tick(state, live, max_duration).await {
+                    return false;
+                }
+
+                // A cancel that arrives while the engine is working. The state
+                // stays `Transcribing` until the cycle closes, so this keeps
+                // firing until it does.
+                if matches!(state, State::Transcribing { .. })
+                    && self.paths.check_cancel_requested()
+                {
+                    tracing::info!("Transcription cancelled");
+
+                    // Abort the transcription task, and drop the cloned
+                    // transcriber Arc so it isn't held until the next one.
+                    if let Some(task) = self.transcription_task.take() {
+                        task.abort();
+                    }
+                    self.model.clear_active();
+
+                    self.close_cancelled_cycle(state, false).await;
+
+                    end_recording_notification(
+                        "Cancelled",
+                        "Transcription aborted",
+                        &self.config.output.notification,
+                        self.config.engine,
+                    )
+                    .await;
+                }
+
+                self.evict_models_on_tick(state);
+                self.poll_meeting_start().await;
+                self.poll_meeting_state_triggers().await;
+            }
+
+            Event::MeetingTick => {
+                if self.poll_meeting_state_triggers().await {
+                    return false;
+                }
+                self.pump_meeting_audio().await;
+                self.enforce_meeting_duration_limit().await;
+                while let Some(event) = self.meeting.try_event() {
+                    let closed = event.is_none();
+                    self.handle_meeting_event(event);
+                    if closed {
+                        break;
+                    }
+                }
+            }
+
+            Event::Signal(signal) => match signal {
+                Signal::ExternalStart => {
+                    tracing::debug!("Received SIGUSR1 (start recording)");
+                    self.on_external_start(state, live).await;
+                }
+                Signal::ExternalStop => {
+                    tracing::debug!("Received SIGUSR2 (stop recording)");
+                    self.stop_active_recording(state, live).await;
+                }
+            },
+
+            Event::Transcription(result) => {
+                self.transcription_task = None;
+                self.handle_transcription_result(state, result).await;
+            }
+
+            Event::Streaming(event) => self.on_streaming_event(state, live, event).await,
+
+            Event::Stop(why) => {
+                tracing::info!("{why}");
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Evict idle models roughly once a minute, and only while idle: unloading
+    /// a model out from under a recording would be worse than holding it.
+    ///
+    /// This is the eviction the 500 ms idle arm used to do, and never did: the
+    /// 100 ms tick recreated the longer sleep before it could fire (#644).
+    fn evict_models_on_tick(&mut self, state: &State) {
+        static EVICTION_COUNTER: std::sync::atomic::AtomicU32 =
+            std::sync::atomic::AtomicU32::new(0);
+        let count = EVICTION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if count.is_multiple_of(600) && matches!(state, State::Idle) {
+            if let Some(ref mut mm) = self.model_manager {
+                mm.evict_idle_models();
+            }
+        }
+    }
+
+    /// Start a meeting when the file-based IPC asks for one.
+    async fn poll_meeting_start(&mut self) {
+        if let Some(trigger) = self.paths.check_meeting_start() {
+            if self.config.meeting.enabled && !self.meeting.in_progress() {
+                tracing::debug!("Meeting start requested via file trigger");
+                if let Err(e) = self.start_meeting(trigger.title, trigger.diarization).await {
+                    tracing::error!("Failed to start meeting: {}", e);
+                }
+            } else if !self.config.meeting.enabled {
+                tracing::warn!("Meeting mode is disabled in config");
+            } else {
+                tracing::warn!("Meeting already in progress");
+            }
+        }
+    }
+
     /// Run the daemon main loop
     pub async fn run(&mut self) -> Result<()> {
         tracing::info!("Starting voxtype daemon");
@@ -3460,216 +3658,76 @@ impl Daemon {
         // Main event loop
 
         loop {
-            tokio::select! {
-                // Handle hotkey events (only if hotkey listener is enabled)
+            // One event per iteration, whatever produced it.
+            let event = tokio::select! {
+                // Hotkey events, when a listener or an injected source provides them
                 Some(hotkey_event) = async {
                     match &mut hotkey_rx {
                         Some(rx) => rx.recv().await,
                         None => std::future::pending().await,
                     }
-                } => {
-                    match (hotkey_event, activation_mode) {
-                        // === PUSH-TO-TALK MODE ===
-                        (HotkeyEvent::Pressed { model_override, profile_override }, ActivationMode::PushToTalk) => {
-                            self.on_hotkey_press_push_to_talk(&mut state, &mut live, model_override, profile_override).await;
-                        }
+                } => Event::Hotkey(hotkey_event, activation_mode),
 
-                        (HotkeyEvent::Released, ActivationMode::PushToTalk) => {
-                            self.on_hotkey_release_push_to_talk(&mut state, &mut live).await;
-                        }
-
-                        // === TOGGLE MODE ===
-                        (HotkeyEvent::Pressed { model_override, profile_override }, ActivationMode::Toggle) => {
-                            self.on_hotkey_press_toggle(&mut state, &mut live, model_override, profile_override).await;
-                        }
-
-                        (HotkeyEvent::Released, ActivationMode::Toggle) => {
-                            // In toggle mode, we ignore key release events
-                            tracing::trace!("Ignoring HotkeyEvent::Released in toggle mode");
-                        }
-
-                        // === CANCEL KEY (works in both modes) ===
-                        (HotkeyEvent::Cancel, _) => {
-                            self.on_hotkey_cancel(&mut state, &mut live).await;
-                        }
-                    }
-                }
-
-                // Check for recording timeout and cancel requests
-                _ = tokio::time::sleep(Duration::from_millis(100)), if state.is_recording() => {
-                    if self.on_recording_tick(&mut state, &mut live, max_duration).await {
-                        continue;
-                    }
-                }
-
-                // Handle SIGUSR1 - start recording (for compositor keybindings).
-                // A test can inject the same trigger instead of signalling the
-                // process, which would reach every daemon in the test binary.
-                _ = async {
-                    match self.deps.external_start.as_mut() {
-                        Some(rx) => {
-                            let _ = rx.recv().await;
-                        }
-                        None => {
-                            let _ = sigusr1.recv().await;
-                        }
-                    }
-                } => {
-                    self.on_external_start(&mut state, &mut live).await;
-                }
-
-                // Handle SIGUSR2 - stop recording (for compositor keybindings),
-                // or an injected stop when a test supplies one.
-                _ = async {
-                    match self.deps.external_stop.as_mut() {
-                        Some(rx) => {
-                            let _ = rx.recv().await;
-                        }
-                        None => {
-                            let _ = sigusr2.recv().await;
-                        }
-                    }
-                } => {
-                    tracing::debug!("Received SIGUSR2 (stop recording)");
-                    self.stop_active_recording(
-                        &mut state,
-                        &mut live,
-                    ).await;
-                }
-
-                // Handle transcription task completion
                 result = async {
                     match self.transcription_task.as_mut() {
                         Some(task) => task.await,
                         None => std::future::pending().await,
                     }
-                }, if self.transcription_task.is_some() => {
-                    self.transcription_task = None;
-                    self.handle_transcription_result(&mut state, result).await;
-                }
+                }, if self.transcription_task.is_some() => Event::Transcription(result),
 
-                // Streaming event pump (active only while State::Streaming).
                 event = async {
                     match live.streaming_handle.as_mut() {
                         Some(h) => h.events.recv().await,
                         None => std::future::pending().await,
                     }
-                }, if state.is_streaming() && live.streaming_handle.is_some() => {
-                    self.on_streaming_event(&mut state, &mut live, event).await;
-                }
+                }, if state.is_streaming() && live.streaming_handle.is_some() => Event::Streaming(event),
 
-                // Check for cancel during transcription
-                _ = tokio::time::sleep(Duration::from_millis(100)), if matches!(state, State::Transcribing { .. }) => {
-                    if self.paths.check_cancel_requested() {
-                        tracing::info!("Transcription cancelled");
-
-                        // Abort the transcription task
-                        if let Some(task) = self.transcription_task.take() {
-                            task.abort();
-                        }
-                        // Drop the cloned transcriber Arc so it isn't held
-                        // until the next transcription.
-                        self.model.clear_active();
-
-                        self.close_cancelled_cycle(&mut state, false).await;
-
-                        end_recording_notification("Cancelled", "Transcription aborted", &self.config.output.notification, self.config.engine).await;
-                    }
-                }
-
-                // === MEETING MODE HANDLERS ===
-
-                // Poll for meeting commands (file-based IPC), and carry the
-                // idle model eviction that used to live on the 500ms idle arm.
-                //
-                // That arm never ran: select! drops and recreates its
-                // un-completed timer futures each iteration, so this
-                // unconditional 100ms sleep restarted the 500ms sleep before
-                // it could fire. #606 fixed the cancel-trigger half of that
-                // starvation; eviction was the other half, and it meant a
-                // daemon that loaded a model on demand never released it
-                // (#644).
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                    // Evict roughly every 60s, and only while idle — unloading
-                    // a model out from under a recording would be worse than
-                    // holding it.
-                    static EVICTION_COUNTER: std::sync::atomic::AtomicU32 =
-                        std::sync::atomic::AtomicU32::new(0);
-                    let count =
-                        EVICTION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if count.is_multiple_of(600) && matches!(state, State::Idle) {
-                        if let Some(ref mut mm) = self.model_manager {
-                            mm.evict_idle_models();
-                        }
-                    }
-
-                    // Check for meeting start command
-                    if let Some(trigger) = self.paths.check_meeting_start() {
-                        if self.config.meeting.enabled && !self.meeting.in_progress() {
-                            tracing::debug!("Meeting start requested via file trigger");
-                            if let Err(e) = self.start_meeting(trigger.title, trigger.diarization).await {
-                                tracing::error!("Failed to start meeting: {}", e);
+                // External triggers: the injected receiver in tests, the real
+                // signal otherwise. One arm, because the two differ only in
+                // which recording they start or stop.
+                signal = async {
+                    tokio::select! {
+                        _ = async {
+                            match self.deps.external_start.as_mut() {
+                                Some(rx) => { let _ = rx.recv().await; }
+                                None => { let _ = sigusr1.recv().await; }
                             }
-                        } else if !self.config.meeting.enabled {
-                            tracing::warn!("Meeting mode is disabled in config");
-                        } else {
-                            tracing::warn!("Meeting already in progress");
-                        }
+                        } => Signal::ExternalStart,
+                        _ = async {
+                            match self.deps.external_stop.as_mut() {
+                                Some(rx) => { let _ = rx.recv().await; }
+                                None => { let _ = sigusr2.recv().await; }
+                            }
+                        } => Signal::ExternalStop,
                     }
+                } => Event::Signal(signal),
 
-                    // Check for meeting stop, pause or resume commands
-                    self.poll_meeting_state_triggers().await;
-                }
-
-                // Process meeting audio chunks
-                _ = tokio::time::sleep(Duration::from_millis(50)), if self.meeting.is_active() => {
-                    // The 100 ms polling branch is starved by this faster one, so
-                    // the trigger files are checked here as well, and a trigger
-                    // restarts the tick instead of pumping audio for a meeting
-                    // that is pausing or stopping.
-                    if self.poll_meeting_state_triggers().await {
-                        continue;
+                // Stopping: the injected equivalent in tests, the signals in
+                // production. Production leaves `deps.shutdown` empty, so only
+                // the signal legs ever fire there.
+                why = async {
+                    tokio::select! {
+                        _ = async {
+                            match self.deps.shutdown.as_mut() {
+                                Some(rx) => { let _ = rx.await; }
+                                None => std::future::pending().await,
+                            }
+                        } => "Shutdown requested",
+                        _ = tokio::signal::ctrl_c() => "Received SIGINT, shutting down...",
+                        _ = sigterm.recv() => "Received SIGTERM, shutting down...",
                     }
+                } => Event::Stop(why),
 
-                    self.pump_meeting_audio().await;
-                    self.enforce_meeting_duration_limit().await;
-                }
+                // The housekeeping tick, and the meeting pump while one runs.
+                _ = tokio::time::sleep(Duration::from_millis(100)) => Event::Tick,
+                _ = tokio::time::sleep(Duration::from_millis(50)), if self.meeting.is_active() => Event::MeetingTick,
+            };
 
-                // Handle meeting events
-                event = async {
-                    match self.meeting.events_mut() {
-                        Some(rx) => rx.recv().await,
-                        None => std::future::pending().await,
-                    }
-                }, if self.meeting.has_events() => {
-                    self.handle_meeting_event(event);
-                }
-
-                // Injected stop, standing in for SIGINT/SIGTERM. Production
-                // leaves `deps.shutdown` empty, so this arm never fires.
-                _ = async {
-                    match self.deps.shutdown.as_mut() {
-                        Some(rx) => {
-                            let _ = rx.await;
-                        }
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    tracing::info!("Shutdown requested");
-                    break;
-                }
-
-                // Handle graceful shutdown (SIGINT from Ctrl+C)
-                _ = tokio::signal::ctrl_c() => {
-                    tracing::info!("Received SIGINT, shutting down...");
-                    break;
-                }
-
-                // Handle graceful shutdown (SIGTERM from systemctl stop)
-                _ = sigterm.recv() => {
-                    tracing::info!("Received SIGTERM, shutting down...");
-                    break;
-                }
+            if self
+                .handle(&mut state, &mut live, max_duration, event)
+                .await
+            {
+                break;
             }
         }
 
