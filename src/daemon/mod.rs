@@ -1600,6 +1600,118 @@ impl Daemon {
         Ok(())
     }
 
+    /// Act on the meeting stop, pause and resume trigger files.
+    ///
+    /// Shared by the 100 ms tick and the 50 ms tick that runs while a meeting is
+    /// active: the faster tick starves the slower one, so it has to check the
+    /// same files or a stop could wait for the meeting to end on its own.
+    /// Returns true when a trigger was acted on, so a caller that has to restart
+    /// its tick can.
+    async fn poll_meeting_state_triggers(&mut self) -> bool {
+        let mut acted = false;
+
+        if self.paths.check_meeting_stop() && self.meeting.in_progress() {
+            tracing::debug!("Meeting stop requested via file trigger");
+            if let Err(e) = self.stop_meeting().await {
+                tracing::error!("Failed to stop meeting: {}", e);
+            }
+            acted = true;
+        }
+
+        if self.paths.check_meeting_pause() && self.meeting.is_active() {
+            tracing::debug!("Meeting pause requested via file trigger");
+            if let Err(e) = self.pause_meeting().await {
+                tracing::error!("Failed to pause meeting: {}", e);
+            }
+            acted = true;
+        }
+
+        if self.paths.check_meeting_resume() && self.meeting.is_paused() {
+            tracing::debug!("Meeting resume requested via file trigger");
+            if let Err(e) = self.resume_meeting().await {
+                tracing::error!("Failed to resume meeting: {}", e);
+            }
+            acted = true;
+        }
+
+        acted
+    }
+
+    /// Take whatever the meeting capture has, and feed it to the meeting in
+    /// chunks. The capture borrow ends before the buffers are touched, which is
+    /// why the samples are collected first.
+    async fn pump_meeting_audio(&mut self) {
+        let dual_samples = match self.meeting.capture_mut() {
+            Some(capture) => Some(capture.get_samples().await),
+            None => None,
+        };
+        let Some(dual_samples) = dual_samples else {
+            return;
+        };
+
+        self.meeting.push_mic(dual_samples.mic);
+        self.meeting.push_loopback(dual_samples.loopback);
+        let chunk_samples = self
+            .meeting
+            .chunk_samples(self.config.meeting.chunk_duration_secs);
+        self.meeting.process_buffered(false, chunk_samples).await;
+    }
+
+    /// Stop a meeting that has run past `meeting.max_duration_mins`.
+    async fn enforce_meeting_duration_limit(&mut self) {
+        if self.config.meeting.max_duration_mins == 0 {
+            return;
+        }
+        let Some(duration) = self.meeting.elapsed() else {
+            return;
+        };
+        let max_duration = Duration::from_secs(self.config.meeting.max_duration_mins as u64 * 60);
+        if duration > max_duration {
+            tracing::warn!(
+                "Meeting timeout ({} min limit), stopping",
+                self.config.meeting.max_duration_mins
+            );
+            if let Err(e) = self.stop_meeting().await {
+                tracing::error!("Failed to stop meeting after timeout: {}", e);
+            }
+        }
+    }
+
+    /// Log one meeting event, and forget the stream once it closes.
+    fn handle_meeting_event(&mut self, event: Option<MeetingEvent>) {
+        match event {
+            Some(MeetingEvent::Started { meeting_id }) => {
+                tracing::info!("Meeting event: started {}", meeting_id);
+            }
+            Some(MeetingEvent::ChunkProcessed { chunk_id, segments }) => {
+                tracing::debug!(
+                    "Meeting event: chunk {} processed with {} segments",
+                    chunk_id,
+                    segments.len()
+                );
+            }
+            Some(MeetingEvent::Paused) => {
+                tracing::info!("Meeting event: paused");
+            }
+            Some(MeetingEvent::Resumed) => {
+                tracing::info!("Meeting event: resumed");
+            }
+            Some(MeetingEvent::Stopped { meeting_id }) => {
+                tracing::info!("Meeting event: stopped {}", meeting_id);
+            }
+            Some(MeetingEvent::Error(msg)) => {
+                tracing::error!("Meeting error: {}", msg);
+            }
+            None => {
+                // Channel closed. The events go with it, and so may the buffers:
+                // the daemon that would process them is gone, and the next start
+                // clears them regardless.
+                tracing::debug!("Meeting event channel closed");
+                self.meeting.clear();
+            }
+        }
+    }
+
     /// Tell a waiting file-mode client that this recording produced nothing.
     ///
     /// Only fires when the transcript would have gone to a file; interactive
@@ -3395,93 +3507,22 @@ impl Daemon {
                         }
                     }
 
-                    // Check for meeting stop command
-                    if self.paths.check_meeting_stop()
-                        && self.meeting.in_progress() {
-                            tracing::debug!("Meeting stop requested via file trigger");
-                            if let Err(e) = self.stop_meeting().await {
-                                tracing::error!("Failed to stop meeting: {}", e);
-                            }
-                        }
-
-                    // Check for meeting pause command
-                    if self.paths.check_meeting_pause()
-                        && self.meeting.is_active() {
-                            tracing::debug!("Meeting pause requested via file trigger");
-                            if let Err(e) = self.pause_meeting().await {
-                                tracing::error!("Failed to pause meeting: {}", e);
-                            }
-                        }
-
-                    // Check for meeting resume command
-                    if self.paths.check_meeting_resume()
-                        && self.meeting.is_paused() {
-                            tracing::debug!("Meeting resume requested via file trigger");
-                            if let Err(e) = self.resume_meeting().await {
-                                tracing::error!("Failed to resume meeting: {}", e);
-                            }
-                        }
+                    // Check for meeting stop, pause or resume commands
+                    self.poll_meeting_state_triggers().await;
                 }
 
                 // Process meeting audio chunks
                 _ = tokio::time::sleep(Duration::from_millis(50)), if self.meeting.is_active() => {
-                    // Check for meeting stop/pause/resume while active
-                    // (the 100ms polling branch is starved by this faster 50ms branch)
-                    if self.paths.check_meeting_stop() && self.meeting.in_progress() {
-                        tracing::debug!("Meeting stop requested via file trigger");
-                        if let Err(e) = self.stop_meeting().await {
-                            tracing::error!("Failed to stop meeting: {}", e);
-                        }
-                        continue;
-                    }
-                    if self.paths.check_meeting_pause() && self.meeting.is_active() {
-                        tracing::debug!("Meeting pause requested via file trigger");
-                        if let Err(e) = self.pause_meeting().await {
-                            tracing::error!("Failed to pause meeting: {}", e);
-                        }
-                        continue;
-                    }
-                    if self.paths.check_meeting_resume()
-                        && self.meeting.is_paused()
-                    {
-                        tracing::debug!("Meeting resume requested via file trigger");
-                        if let Err(e) = self.resume_meeting().await {
-                            tracing::error!("Failed to resume meeting: {}", e);
-                        }
+                    // The 100 ms polling branch is starved by this faster one, so
+                    // the trigger files are checked here as well, and a trigger
+                    // restarts the tick instead of pumping audio for a meeting
+                    // that is pausing or stopping.
+                    if self.poll_meeting_state_triggers().await {
                         continue;
                     }
 
-                    // Get samples from dual audio capture
-                    // Take what the capture has, then hand it over: the
-                    // capture borrow has to end before the session's own
-                    // methods can touch its buffers.
-                    let dual_samples = match self.meeting.capture_mut() {
-                        Some(capture) => Some(capture.get_samples().await),
-                        None => None,
-                    };
-                    if let Some(dual_samples) = dual_samples {
-                        self.meeting.push_mic(dual_samples.mic);
-                        self.meeting.push_loopback(dual_samples.loopback);
-                        let chunk_samples =
-                            self.meeting.chunk_samples(self.config.meeting.chunk_duration_secs);
-                        self.meeting.process_buffered(false, chunk_samples).await;
-                    }
-
-                    // Check meeting timeout
-                    if self.config.meeting.max_duration_mins > 0 {
-                        if let Some(duration) = self.meeting.elapsed() {
-                            let max_duration = Duration::from_secs(
-                                self.config.meeting.max_duration_mins as u64 * 60
-                            );
-                            if duration > max_duration {
-                                tracing::warn!("Meeting timeout ({} min limit), stopping",
-                                    self.config.meeting.max_duration_mins);
-                                if let Err(e) = self.stop_meeting().await {
-                                    tracing::error!("Failed to stop meeting after timeout: {}", e);
-                                }
-                            }
-                        }
-                    }
+                    self.pump_meeting_audio().await;
+                    self.enforce_meeting_duration_limit().await;
                 }
 
                 // Handle meeting events
@@ -3491,34 +3532,7 @@ impl Daemon {
                         None => std::future::pending().await,
                     }
                 }, if self.meeting.has_events() => {
-                    match event {
-                        Some(MeetingEvent::Started { meeting_id }) => {
-                            tracing::info!("Meeting event: started {}", meeting_id);
-                        }
-                        Some(MeetingEvent::ChunkProcessed { chunk_id, segments }) => {
-                            tracing::debug!("Meeting event: chunk {} processed with {} segments",
-                                chunk_id, segments.len());
-                        }
-                        Some(MeetingEvent::Paused) => {
-                            tracing::info!("Meeting event: paused");
-                        }
-                        Some(MeetingEvent::Resumed) => {
-                            tracing::info!("Meeting event: resumed");
-                        }
-                        Some(MeetingEvent::Stopped { meeting_id }) => {
-                            tracing::info!("Meeting event: stopped {}", meeting_id);
-                        }
-                        Some(MeetingEvent::Error(msg)) => {
-                            tracing::error!("Meeting error: {}", msg);
-                        }
-                        None => {
-                            // Channel closed. The events go with it, and so may
-                            // the buffers: the daemon that would process them is
-                            // gone, and the next start clears them regardless.
-                            tracing::debug!("Meeting event channel closed");
-                            self.meeting.clear();
-                        }
-                    }
+                    self.handle_meeting_event(event);
                 }
 
                 // Injected stop, standing in for SIGINT/SIGTERM. Production
