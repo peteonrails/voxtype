@@ -25,7 +25,7 @@
 
 use super::deps::{Deps, Factories};
 use super::Daemon;
-use crate::audio::AudioCapture;
+use crate::audio::{AudioCapture, DualSamples, MeetingCapture};
 use crate::config::{ActivationMode, Config, OutputConfig, Profile};
 use crate::error::{AudioError, OutputError, TranscribeError};
 use crate::output::TextOutput;
@@ -73,6 +73,9 @@ pub struct Fakes {
     pub panic_once: bool,
     /// Turn on the eager pipeline, which transcribes chunks while recording.
     pub eager: bool,
+    /// Fail to build the capture pair a meeting records from, as a machine with
+    /// no loopback device or a busy one does.
+    pub meeting_capture_unavailable: bool,
     /// Fail the transcriber factory from this call on (1-based), as an engine
     /// that loads once and then stops being able to.
     pub factory_fails_from: Option<usize>,
@@ -295,6 +298,37 @@ impl StreamingTranscriber for FakeStreamingTranscriber {
     }
 }
 
+/// A meeting's capture pair with no devices behind it.
+///
+/// `DualCapture::new` opens real devices, which is why meetings had no rows: a
+/// test could not get past the first line of `start_meeting`. This one starts,
+/// hands out silence (so the chunk pump has nothing to transcribe) and reports
+/// whether it has a loopback leg.
+#[derive(Default)]
+struct FakeDualCapture {
+    /// Whether a loopback leg is part of the pair.
+    loopback: bool,
+}
+
+#[async_trait::async_trait]
+impl MeetingCapture for FakeDualCapture {
+    async fn start(&mut self) -> Result<(), AudioError> {
+        Ok(())
+    }
+
+    async fn stop(&mut self) -> Result<DualSamples, AudioError> {
+        Ok(DualSamples::default())
+    }
+
+    async fn get_samples(&mut self) -> DualSamples {
+        DualSamples::default()
+    }
+
+    fn has_loopback(&self) -> bool {
+        self.loopback
+    }
+}
+
 /// Output driver that records what would have been typed.
 #[derive(Clone, Default)]
 struct FakeOutput {
@@ -400,6 +434,12 @@ impl Controls {
 
     /// How many times the daemon asked the factory for a transcriber: once for
     /// a preloaded engine, twice when a poisoned one is discarded.
+    /// What the meeting state file says, if it has been written. The daemon
+    /// reports meetings through this file, not through its own state.
+    pub fn meeting_state(&self) -> Option<String> {
+        std::fs::read_to_string(self.paths.meeting_state()).ok()
+    }
+
     /// How many times a capture was stopped. The external stop and any stop the
     /// daemon decides on itself both count here.
     pub fn capture_stops(&self) -> usize {
@@ -551,6 +591,7 @@ impl TestDaemon {
         let transcriber_factory_calls = factory_calls.clone();
         let capture_stops = Arc::new(AtomicUsize::new(0));
         let capture_stops_for_factory = capture_stops.clone();
+        let meeting_capture_unavailable = fakes.meeting_capture_unavailable;
         let transcriber_drops = Arc::new(AtomicUsize::new(0));
         let transcriber_drops_for_factory = transcriber_drops.clone();
         let configs = output_configs.clone();
@@ -589,6 +630,14 @@ impl TestDaemon {
                         drops: transcriber_drops_for_factory.clone(),
                     }) as Box<dyn Transcriber>)
                 }
+            })),
+            dual_capture: Some(Arc::new(move |_config, _loopback| {
+                if meeting_capture_unavailable {
+                    return Err(AudioError::Connection(
+                        "fake meeting capture unavailable".to_string(),
+                    ));
+                }
+                Ok(Box::new(FakeDualCapture::default()) as Box<dyn MeetingCapture>)
             })),
             output_chain: Some(Arc::new(move |config| {
                 configs.lock().expect("configs lock").push(config.clone());
@@ -1528,6 +1577,48 @@ async fn an_external_eager_recording_is_transcribed() {
         .await;
 
     assert_eq!(ctl.typed(), vec!["hello".to_string()]);
+}
+
+#[tokio::test]
+async fn a_meeting_whose_audio_cannot_open_starts_nothing() {
+    // `start_meeting` builds the meeting daemon before the capture pair, so a
+    // pair that cannot be built leaves a daemon to stop and an error to return.
+    // What must not survive is a session: no state file entry, and a daemon that
+    // still runs a dictation cycle afterwards.
+    let harness = TestDaemon::with_fakes(
+        "hello",
+        Fakes {
+            meeting_capture_unavailable: true,
+            ..Fakes::default()
+        },
+        |config| config.meeting.enabled = true,
+    );
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            // The file `voxtype meeting start` writes, with the title line it
+            // carries.
+            std::fs::write(ctl.paths.meeting_start(), "Standup\n").expect("write meeting start");
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            assert_eq!(
+                ctl.meeting_state(),
+                None,
+                "a meeting that never started must not report a state"
+            );
+
+            // The daemon is still a working daemon: the failed start left it idle
+            // and ready, which a dictation cycle proves.
+            record_once(&ctl).await;
+        })
+        .await;
+
+    assert_eq!(
+        ctl.typed(),
+        vec!["hello".to_string()],
+        "the dictation cycle after the failed meeting start still delivers"
+    );
 }
 
 #[tokio::test]

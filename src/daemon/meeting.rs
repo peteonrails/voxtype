@@ -10,7 +10,7 @@
 //! daemon: starting a meeting reads the daemon's config, stopping one plays
 //! feedback and sends the notification, and the loop's arm drives the events.
 
-use crate::audio::DualCapture;
+use crate::audio::MeetingCapture;
 use crate::config::Config;
 use crate::meeting::{self, MeetingDaemon, MeetingEvent, StorageConfig};
 use crate::runtime_files::RuntimePaths;
@@ -27,7 +27,7 @@ pub struct MeetingSession {
     /// The meeting daemon, present between start and stop.
     daemon: Option<MeetingDaemon>,
     /// The mic + loopback capture, present between start and stop.
-    capture: Option<DualCapture>,
+    capture: Option<Box<dyn MeetingCapture>>,
     /// Mic samples that do not yet fill a chunk.
     mic_buffer: Vec<f32>,
     /// Loopback samples that do not yet fill a chunk.
@@ -85,7 +85,7 @@ impl MeetingSession {
         self.daemon.as_ref().and_then(|d| d.state().elapsed())
     }
 
-    pub fn capture_mut(&mut self) -> Option<&mut DualCapture> {
+    pub fn capture_mut(&mut self) -> Option<&mut Box<dyn MeetingCapture>> {
         self.capture.as_mut()
     }
 
@@ -122,11 +122,11 @@ impl MeetingSession {
         self.loopback_buffer.clear();
     }
 
-    pub fn take_capture(&mut self) -> Option<DualCapture> {
+    pub fn take_capture(&mut self) -> Option<Box<dyn MeetingCapture>> {
         self.capture.take()
     }
 
-    pub fn set_capture(&mut self, capture: DualCapture) {
+    pub fn set_capture(&mut self, capture: Box<dyn MeetingCapture>) {
         self.capture = Some(capture);
     }
 

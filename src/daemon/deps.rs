@@ -11,7 +11,7 @@
 //! [`Deps::production`] is the honest default and a test replaces exactly what
 //! it needs.
 
-use crate::audio::AudioCapture;
+use crate::audio::{AudioCapture, MeetingCapture};
 use crate::config::{AudioConfig, Config, OutputConfig};
 use crate::error::{AudioError, TranscribeError};
 use crate::output::TextOutput;
@@ -35,10 +35,16 @@ pub type TranscriberFactory =
 /// Builds the output chain one transcription is delivered through.
 pub type OutputChainFactory = Arc<dyn Fn(&OutputConfig) -> Vec<Box<dyn TextOutput>> + Send + Sync>;
 
-/// The four things the daemon asks the outside world to build.
+/// Builds the mic + loopback pair a meeting records from.
+pub type DualCaptureFactory = Arc<
+    dyn Fn(&AudioConfig, Option<&str>) -> Result<Box<dyn MeetingCapture>, AudioError> + Send + Sync,
+>;
+
+/// The five things the daemon asks the outside world to build.
 #[derive(Clone, Default)]
 pub struct Factories {
     pub capture: Option<CaptureFactory>,
+    pub dual_capture: Option<DualCaptureFactory>,
     pub transcriber: Option<TranscriberFactory>,
     pub output_chain: Option<OutputChainFactory>,
 }
@@ -68,6 +74,22 @@ impl Factories {
         match &self.transcriber {
             Some(build) => build(config),
             None => crate::transcribe::create_transcriber(config),
+        }
+    }
+
+    /// Build the capture pair a meeting records from: a microphone and, when
+    /// configured, a loopback device.
+    pub fn create_dual_capture(
+        &self,
+        mic_config: &AudioConfig,
+        loopback_device: Option<&str>,
+    ) -> Result<Box<dyn MeetingCapture>, AudioError> {
+        match &self.dual_capture {
+            Some(build) => build(mic_config, loopback_device),
+            None => Ok(Box::new(crate::audio::DualCapture::new(
+                mic_config,
+                loopback_device,
+            )?)),
         }
     }
 
@@ -135,6 +157,15 @@ impl Deps {
         config: &Config,
     ) -> Result<Box<dyn Transcriber>, TranscribeError> {
         self.factories.create_transcriber(config)
+    }
+
+    pub fn create_dual_capture(
+        &self,
+        mic_config: &AudioConfig,
+        loopback_device: Option<&str>,
+    ) -> Result<Box<dyn MeetingCapture>, AudioError> {
+        self.factories
+            .create_dual_capture(mic_config, loopback_device)
     }
 
     pub fn create_output_chain(&self, config: &OutputConfig) -> Vec<Box<dyn TextOutput>> {

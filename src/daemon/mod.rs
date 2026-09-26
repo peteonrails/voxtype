@@ -1462,7 +1462,10 @@ impl Daemon {
                             meeting_audio_config.device =
                                 self.config.meeting.audio.mic_device.clone();
                         }
-                        match audio::DualCapture::new(&meeting_audio_config, loopback_device) {
+                        match self
+                            .deps
+                            .create_dual_capture(&meeting_audio_config, loopback_device)
+                        {
                             Ok(mut capture) => {
                                 if let Err(e) = capture.start().await {
                                     tracing::error!("Failed to start meeting audio: {}", e);
