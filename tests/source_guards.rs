@@ -167,3 +167,97 @@ fn lock_guard_flags_literals_and_exempts_its_owner() {
          the hardcoded directory and the bare name must be flagged"
     );
 }
+
+/// The runtime files the CLI writes and the daemon reads.
+///
+/// `state` is deliberately absent: its path is configurable, so it is resolved
+/// by `Config::resolve_state_file` rather than by name. (A separate defect,
+/// recorded in the plan: `voxtype record start --wait` polls the default state
+/// name instead of the resolved one.)
+const RUNTIME_FILE_NAMES: &[&str] = &[
+    "cancel",
+    "osd_suppressed",
+    "output_mode_override",
+    "profile_override",
+    "model_override",
+    "auto_submit_override",
+    "shift_enter_override",
+    "smart_auto_submit_override",
+    "no_osd_override",
+    "meeting_start",
+    "meeting_start_diarization",
+    "meeting_stop",
+    "meeting_pause",
+    "meeting_resume",
+    "meeting_state",
+];
+
+#[test]
+fn runtime_file_names_are_written_in_one_place() {
+    // Writer and reader have to agree on these strings, and nothing used to
+    // check that they did: `voxtype record start` and the daemon each spelled
+    // out `join("cancel")` and fourteen more. They now go through
+    // `RuntimePaths`, and this fails if a call site reaches for a name again.
+    const OWNER: &str = "runtime_files.rs";
+    let mut offenders: Vec<String> = Vec::new();
+    for name in RUNTIME_FILE_NAMES {
+        for rel in hits(&src_root(), &format!("join(\"{name}\")")) {
+            if !rel.ends_with(OWNER) && !offenders.contains(&rel) {
+                offenders.push(rel);
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these files spell out a runtime file name instead of going through \
+         RuntimePaths: {offenders:?}"
+    );
+}
+
+#[test]
+fn the_daemon_and_cli_do_not_reach_for_the_environment() {
+    // The daemon takes its runtime directory as a field so a test can point a
+    // whole daemon at a temporary directory. A call to `Config::runtime_dir()`
+    // under `daemon/` or `app/` would bypass that injection silently: the code
+    // would compile and quietly touch the running daemon's files.
+    let offenders: Vec<String> = hits(&src_root(), "Config::runtime_dir()")
+        .into_iter()
+        .filter(|rel| rel.starts_with("daemon/") || rel.starts_with("app/"))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "these files resolve the runtime directory from the environment instead \
+         of using RuntimePaths: {offenders:?}"
+    );
+}
+
+#[test]
+fn the_runtime_dir_is_derived_once() {
+    // `osd/style.rs` carried its own copy of the XDG_RUNTIME_DIR fallback,
+    // which is the same fact as `config/root.rs` written twice.
+    let offenders: Vec<String> = hits(&src_root(), "fn runtime_dir()")
+        .into_iter()
+        .filter(|rel| rel != "config/root.rs")
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "these files define their own runtime directory resolution: {offenders:?}"
+    );
+}
+
+#[test]
+fn runtime_file_guard_flags_planted_names() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("planted_runtime_names");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("temp tree");
+    std::fs::write(
+        root.join("writer.rs"),
+        "let p = Config::runtime_dir().join(\"cancel\");\n",
+    )
+    .expect("planted name");
+    std::fs::write(root.join("clean.rs"), "let p = paths.cancel();\n").expect("clean file");
+
+    let offenders = hits(&root, &format!("join(\"{}\")", "cancel"));
+
+    assert_eq!(offenders, vec!["writer.rs".to_string()]);
+}

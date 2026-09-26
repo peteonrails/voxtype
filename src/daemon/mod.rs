@@ -19,11 +19,12 @@ use crate::output;
 use crate::output::post_process::PostProcessor;
 use crate::output::streaming::StreamingSession;
 use crate::output::TextOutput;
+use crate::runtime_files::{OutputOverride, RuntimePaths};
 use crate::state::{ChunkResult, State};
 use crate::text::TextProcessor;
 use crate::transcribe::{StreamHandle, StreamingEvent, Transcriber};
 use pidlock::Pidlock;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::signal::unix::{signal, SignalKind};
@@ -137,36 +138,6 @@ fn write_state_file(path: &PathBuf, state: &str) {
 }
 
 /// Remove state file on shutdown
-/// Path of the marker that tells OSD frontends to stay hidden for the
-/// recording in flight. Written when a recording starts with `--no-osd`,
-/// removed when the daemon returns to idle.
-///
-/// A marker file rather than a state-file value on purpose: the status JSON
-/// contract went stable in 1.0.0, and Waybar, `status --follow`, and every
-/// other consumer must keep seeing the real state. Only the OSD frontends
-/// read this.
-fn osd_suppressed_path() -> PathBuf {
-    Config::runtime_dir().join("osd_suppressed")
-}
-
-fn set_osd_suppressed(suppressed: bool) {
-    set_osd_suppressed_at(&osd_suppressed_path(), suppressed);
-}
-
-/// Path-taking half of `set_osd_suppressed`, so the marker lifecycle is
-/// testable without mocking `Config::runtime_dir()`.
-fn set_osd_suppressed_at(path: &Path, suppressed: bool) {
-    if suppressed {
-        if let Err(e) = std::fs::write(path, "1") {
-            tracing::warn!("Failed to write OSD suppression marker: {}", e);
-        }
-    } else if path.exists() {
-        if let Err(e) = std::fs::remove_file(path) {
-            tracing::warn!("Failed to clear OSD suppression marker: {}", e);
-        }
-    }
-}
-
 fn cleanup_state_file(path: &PathBuf) {
     if path.exists() {
         if let Err(e) = std::fs::remove_file(path) {
@@ -199,353 +170,9 @@ fn cleanup_stale_lockfile(lock_path: &std::path::Path) -> bool {
     false
 }
 
-/// Check if cancel has been requested (via file trigger)
-fn check_cancel_requested() -> bool {
-    let cancel_file = Config::runtime_dir().join("cancel");
-    if cancel_file.exists() {
-        // Remove the file to acknowledge the cancel
-        let _ = std::fs::remove_file(&cancel_file);
-        true
-    } else {
-        false
-    }
-}
-
-/// Clean up any stale cancel file on startup
-fn cleanup_cancel_file() {
-    let cancel_file = Config::runtime_dir().join("cancel");
-    if cancel_file.exists() {
-        let _ = std::fs::remove_file(&cancel_file);
-    }
-}
-
-/// Read and consume the output mode override file
-/// Returns the override mode if the file exists and is valid, None otherwise
-/// Output mode override result, which may include a file path for file mode
-#[derive(Debug, PartialEq)]
-enum OutputOverride {
-    Mode(OutputMode),
-    FileWithPath(PathBuf),
-}
-
-/// Where this recording's transcript would land, without consuming anything.
-///
-/// The output override is only read once transcription succeeds, so the paths
-/// that bail out earlier (too short, no speech) do not know the transcript
-/// path and cannot report an outcome. This peeks the pending override so those
-/// paths can still publish a completion sidecar, leaving the sentinel for the
-/// normal consuming read.
-fn peek_file_output_path(config: &Config) -> Option<PathBuf> {
-    let override_file = Config::runtime_dir().join("output_mode_override");
-    let pending = std::fs::read_to_string(&override_file).ok();
-    match pending.as_deref().map(str::trim) {
-        Some(value) => {
-            if let Some(path) = value.strip_prefix("file:") {
-                let path = path.trim();
-                if !path.is_empty() {
-                    return Some(PathBuf::from(path));
-                }
-                return config.output.file_path.clone();
-            }
-            // A non-file override wins over the configured mode.
-            None
-        }
-        None => {
-            if config.output.mode == OutputMode::File {
-                config.output.file_path.clone()
-            } else {
-                None
-            }
-        }
-    }
-}
-
-/// Read and consume the output mode override file
-/// Format: "type", "clipboard", "paste", "file", or "file:/path/to/file.txt"
-fn read_output_mode_override() -> Option<OutputOverride> {
-    let override_file = Config::runtime_dir().join("output_mode_override");
-    if !override_file.exists() {
-        return None;
-    }
-
-    let content = match std::fs::read_to_string(&override_file) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("Failed to read output mode override file: {}", e);
-            return None;
-        }
-    };
-
-    // Consume the file (delete it after reading)
-    if let Err(e) = std::fs::remove_file(&override_file) {
-        tracing::warn!("Failed to remove output mode override file: {}", e);
-    }
-
-    let trimmed = content.trim();
-
-    // Check for file mode with path: "file:/path/to/file.txt"
-    if let Some(path) = trimmed.strip_prefix("file:") {
-        let path = path.trim();
-        if path.is_empty() {
-            tracing::warn!("Output mode override 'file:' has empty path");
-            return Some(OutputOverride::Mode(OutputMode::File));
-        }
-        tracing::info!("Using output mode override: file with path {:?}", path);
-        return Some(OutputOverride::FileWithPath(PathBuf::from(path)));
-    }
-
-    match trimmed {
-        "type" => {
-            tracing::info!("Using output mode override: type");
-            Some(OutputOverride::Mode(OutputMode::Type))
-        }
-        "clipboard" => {
-            tracing::info!("Using output mode override: clipboard");
-            Some(OutputOverride::Mode(OutputMode::Clipboard))
-        }
-        "paste" => {
-            tracing::info!("Using output mode override: paste");
-            Some(OutputOverride::Mode(OutputMode::Paste))
-        }
-        "file" => {
-            tracing::info!("Using output mode override: file (using config path)");
-            Some(OutputOverride::Mode(OutputMode::File))
-        }
-        other => {
-            tracing::warn!("Invalid output mode override: {:?}", other);
-            None
-        }
-    }
-}
-
-/// Remove the output mode override file if it exists (for cleanup on cancel/error)
-fn cleanup_output_mode_override() {
-    let override_file = Config::runtime_dir().join("output_mode_override");
-    let _ = std::fs::remove_file(&override_file);
-}
-
-/// Read and consume the profile override file
-/// Returns the profile name if the file exists and is valid, None otherwise
-fn read_profile_override() -> Option<String> {
-    let profile_file = Config::runtime_dir().join("profile_override");
-    if !profile_file.exists() {
-        return None;
-    }
-
-    let content = match std::fs::read_to_string(&profile_file) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("Failed to read profile override file: {}", e);
-            return None;
-        }
-    };
-
-    // Consume the file (delete it after reading)
-    if let Err(e) = std::fs::remove_file(&profile_file) {
-        tracing::warn!("Failed to remove profile override file: {}", e);
-    }
-
-    let profile_name = content.trim().to_string();
-    if profile_name.is_empty() {
-        return None;
-    }
-
-    tracing::info!("Using profile override: {}", profile_name);
-    Some(profile_name)
-}
-
-/// Remove the profile override file if it exists (for cleanup on cancel/error)
-fn cleanup_profile_override() {
-    let profile_file = Config::runtime_dir().join("profile_override");
-    let _ = std::fs::remove_file(&profile_file);
-}
-
-/// Write a profile override file so the daemon uses the named profile for post-processing.
-/// Same mechanism as `voxtype record start --profile <name>`.
-fn write_profile_override(profile_name: &str) {
-    let profile_file = Config::runtime_dir().join("profile_override");
-    if let Err(e) = std::fs::write(&profile_file, profile_name) {
-        tracing::warn!("Failed to write profile override: {}", e);
-    } else {
-        tracing::info!("Profile modifier activated: {}", profile_name);
-    }
-}
-
-/// Read and consume a boolean override file from the runtime directory.
-/// Returns Some(true) or Some(false) if the file exists and is valid, None otherwise.
-fn read_bool_override(name: &str) -> Option<bool> {
-    let override_file = Config::runtime_dir().join(format!("{}_override", name));
-    if !override_file.exists() {
-        return None;
-    }
-
-    let content = match std::fs::read_to_string(&override_file) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("Failed to read {} override file: {}", name, e);
-            return None;
-        }
-    };
-
-    if let Err(e) = std::fs::remove_file(&override_file) {
-        tracing::warn!("Failed to remove {} override file: {}", name, e);
-    }
-
-    match content.trim() {
-        "true" => {
-            tracing::info!("Using {} override: true", name);
-            Some(true)
-        }
-        "false" => {
-            tracing::info!("Using {} override: false", name);
-            Some(false)
-        }
-        other => {
-            tracing::warn!("Invalid {} override value: {:?}", name, other);
-            None
-        }
-    }
-}
-
-/// Remove a boolean override file if it exists (for cleanup on cancel/error)
-fn cleanup_bool_override(name: &str) {
-    let override_file = Config::runtime_dir().join(format!("{}_override", name));
-    let _ = std::fs::remove_file(&override_file);
-}
-
-// === Meeting Mode IPC ===
-
-/// A pending meeting-start trigger with optional title and diarization override.
-struct MeetingStartTrigger {
-    title: Option<String>,
-    diarization: Option<String>,
-}
-
-/// Read a file and return its trimmed contents, or None if missing or empty.
-///
-/// Logs read failures so transient FS / permission errors aren't silent: a
-/// trigger file existing but being unreadable previously looked identical to
-/// "no file" and would then be consumed by the caller's remove_file.
-fn read_trimmed_nonempty(path: &std::path::Path) -> Option<String> {
-    match std::fs::read_to_string(path) {
-        Ok(contents) => {
-            let trimmed = contents.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-        Err(err) => {
-            tracing::warn!(path = %path.display(), error = %err, "Failed to read IPC trigger file");
-            None
-        }
-    }
-}
-
-/// Allowed diarization backend override values from the CLI handler. Kept in
-/// sync with the `value_parser` list on `MeetingAction::Start::diarization`.
-const ALLOWED_DIARIZATION_OVERRIDES: &[&str] = &["simple", "ml"];
-
-/// Validate a diarization backend override against the allowlist.
-///
-/// The CLI's clap `value_parser` already rejects bad values at parse time, but
-/// the daemon reads the trigger from a runtime file written by an arbitrary
-/// process and shouldn't propagate unknown values. Returns `None` and logs a
-/// warning for anything outside the allowlist; defense-in-depth against stale
-/// trigger files, partial writes from older voxtype versions, or a malicious
-/// writer with access to the user's `$XDG_RUNTIME_DIR`.
-fn validate_diarization_override(value: String) -> Option<String> {
-    if ALLOWED_DIARIZATION_OVERRIDES.contains(&value.as_str()) {
-        Some(value)
-    } else {
-        tracing::warn!(
-            value = %value,
-            "Ignoring unknown diarization override; expected one of {:?}",
-            ALLOWED_DIARIZATION_OVERRIDES
-        );
-        None
-    }
-}
-
-/// Check for meeting start command (via file trigger)
-fn check_meeting_start() -> Option<MeetingStartTrigger> {
-    let runtime_dir = Config::runtime_dir();
-    let start_file = runtime_dir.join("meeting_start");
-    if !start_file.exists() {
-        return None;
-    }
-
-    let title = read_trimmed_nonempty(&start_file);
-
-    // Diarization override is written by the CLI handler before the start
-    // trigger. Re-validate against the allowlist (see
-    // `validate_diarization_override` for the rationale).
-    let diarization_file = runtime_dir.join("meeting_start_diarization");
-    let diarization =
-        read_trimmed_nonempty(&diarization_file).and_then(validate_diarization_override);
-    let _ = std::fs::remove_file(&diarization_file);
-
-    // Remove the start trigger last to acknowledge the command.
-    let _ = std::fs::remove_file(&start_file);
-
-    Some(MeetingStartTrigger { title, diarization })
-}
-
-/// Check for meeting stop command (via file trigger)
-fn check_meeting_stop() -> bool {
-    let stop_file = Config::runtime_dir().join("meeting_stop");
-    if stop_file.exists() {
-        let _ = std::fs::remove_file(&stop_file);
-        true
-    } else {
-        false
-    }
-}
-
-/// Check for meeting pause command (via file trigger)
-fn check_meeting_pause() -> bool {
-    let pause_file = Config::runtime_dir().join("meeting_pause");
-    if pause_file.exists() {
-        let _ = std::fs::remove_file(&pause_file);
-        true
-    } else {
-        false
-    }
-}
-
-/// Check for meeting resume command (via file trigger)
-fn check_meeting_resume() -> bool {
-    let resume_file = Config::runtime_dir().join("meeting_resume");
-    if resume_file.exists() {
-        let _ = std::fs::remove_file(&resume_file);
-        true
-    } else {
-        false
-    }
-}
-
-/// Clean up any stale meeting command files on startup
-fn cleanup_meeting_files() {
-    let runtime_dir = Config::runtime_dir();
-    for name in &[
-        "meeting_start",
-        "meeting_start_diarization",
-        "meeting_stop",
-        "meeting_pause",
-        "meeting_resume",
-    ] {
-        let file = runtime_dir.join(name);
-        if file.exists() {
-            let _ = std::fs::remove_file(&file);
-        }
-    }
-}
-
 /// Mark any active/paused meetings as completed on daemon startup.
 /// This handles meetings orphaned by a crash or daemon restart.
-fn cleanup_stale_meetings(config: &Config) {
+fn cleanup_stale_meetings(paths: &RuntimePaths, config: &Config) {
     let storage_path = if config.meeting.storage_path == "auto" {
         Config::data_dir().join("meetings")
     } else {
@@ -563,7 +190,7 @@ fn cleanup_stale_meetings(config: &Config) {
             Ok(count) if count > 0 => {
                 tracing::info!("Marked {} orphaned meeting(s) as completed", count);
                 // Reset meeting state file to idle
-                let state_file = Config::runtime_dir().join("meeting_state");
+                let state_file = paths.meeting_state();
                 let _ = std::fs::write(&state_file, "idle");
             }
             Ok(_) => {}
@@ -730,42 +357,6 @@ async fn write_transcription_to_file(
     Ok(())
 }
 
-/// Read and consume the model override file
-/// Returns the model name if the file exists, None otherwise
-fn read_model_override() -> Option<String> {
-    let override_file = Config::runtime_dir().join("model_override");
-    if !override_file.exists() {
-        return None;
-    }
-
-    let model_str = match std::fs::read_to_string(&override_file) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("Failed to read model override file: {}", e);
-            return None;
-        }
-    };
-
-    // Consume the file (delete it after reading)
-    if let Err(e) = std::fs::remove_file(&override_file) {
-        tracing::warn!("Failed to remove model override file: {}", e);
-    }
-
-    let model = model_str.trim().to_string();
-    if model.is_empty() {
-        None
-    } else {
-        tracing::info!("Using model override: {}", model);
-        Some(model)
-    }
-}
-
-/// Remove the model override file if it exists (for cleanup on cancel/error)
-fn cleanup_model_override() {
-    let override_file = Config::runtime_dir().join("model_override");
-    let _ = std::fs::remove_file(&override_file);
-}
-
 /// Result type for transcription task
 type TranscriptionResult = std::result::Result<String, crate::error::TranscribeError>;
 
@@ -774,6 +365,7 @@ pub struct Daemon {
     config: Config,
     config_path: Option<PathBuf>,
     state_file_path: Option<PathBuf>,
+    paths: RuntimePaths,
     audio_feedback: Option<AudioFeedback>,
     text_processor: TextProcessor,
     post_processor: Option<PostProcessor>,
@@ -859,8 +451,20 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    /// Create a new daemon with the given configuration
+    /// Create a new daemon with the given configuration, resolving the runtime
+    /// directory from the process environment.
     pub fn new(config: Config, config_path: Option<PathBuf>) -> Self {
+        Self::with_paths(config, config_path, RuntimePaths::from_env())
+    }
+
+    /// [`Daemon::new`] against a caller-supplied runtime directory.
+    ///
+    /// Every runtime file the daemon owns (the lock, the level socket, the
+    /// published version, the override sentinels and the meeting triggers)
+    /// resolves under `paths`. Production passes the process's own runtime
+    /// directory; a test passes a temporary one, so a harness run never takes
+    /// the running daemon's lock or consumes its sentinels.
+    pub fn with_paths(config: Config, config_path: Option<PathBuf>, paths: RuntimePaths) -> Self {
         let state_file_path = config.resolve_state_file();
 
         // Initialize audio feedback if enabled
@@ -929,7 +533,7 @@ impl Daemon {
 
         // Meeting state file path (separate from push-to-talk state)
         let meeting_state_file_path = if state_file_path.is_some() {
-            Some(Config::runtime_dir().join("meeting_state"))
+            Some(paths.meeting_state())
         } else {
             None
         };
@@ -938,6 +542,7 @@ impl Daemon {
             config,
             config_path,
             state_file_path,
+            paths,
             audio_feedback,
             text_processor,
             post_processor,
@@ -1063,11 +668,11 @@ impl Daemon {
         // back to idle.
         match state_name {
             "recording" | "streaming" => {
-                if read_bool_override("no_osd").unwrap_or(false) {
-                    set_osd_suppressed(true);
+                if self.paths.read_bool_override("no_osd").unwrap_or(false) {
+                    self.paths.set_osd_suppressed(true);
                 }
             }
-            "idle" | "stopped" => set_osd_suppressed(false),
+            "idle" | "stopped" => self.paths.set_osd_suppressed(false),
             _ => {}
         }
     }
@@ -1112,7 +717,7 @@ impl Daemon {
         // each one after it) ~100-400ms in. Consume it here, at the single
         // point every recording path passes through, so a cancel can only
         // ever apply to a recording that was live when it was issued (#606).
-        cleanup_cancel_file();
+        self.paths.cleanup_cancel_file();
         match audio::create_capture(&self.config.audio) {
             Ok(mut capture) => match capture.start().await {
                 Ok(chunk_rx) => {
@@ -1225,7 +830,7 @@ impl Daemon {
         // Same stale-trigger hazard as start_recording_capture: Streaming is
         // an is_recording() state, so a leftover cancel file would kill the
         // session moments after it starts. See #606.
-        cleanup_cancel_file();
+        self.paths.cleanup_cancel_file();
         // Clone out of the field so the borrow doesn't overlap the
         // `&mut self` capture start below.
         let Some(transcriber) = self.transcriber_preloaded.clone() else {
@@ -1258,7 +863,7 @@ impl Daemon {
         // see the Partial/Final/Replace arms in the event pump, gated on
         // `file_output_path`. The chain is still built normally; it's
         // simply unused for a file-output session.
-        let output_override = read_output_mode_override();
+        let output_override = self.paths.read_output_mode_override();
         let file_output_path = self.resolve_file_output_path(&output_override, None);
 
         *audio_capture = Some(capture);
@@ -1617,12 +1222,12 @@ impl Daemon {
         *streaming_session = None;
         *streaming_chain = None;
 
-        cleanup_output_mode_override();
-        cleanup_model_override();
-        cleanup_profile_override();
-        cleanup_bool_override("auto_submit");
-        cleanup_bool_override("shift_enter");
-        cleanup_bool_override("smart_auto_submit");
+        self.paths.cleanup_output_mode_override();
+        self.paths.cleanup_model_override();
+        self.paths.cleanup_profile_override();
+        self.paths.cleanup_bool_override("auto_submit");
+        self.paths.cleanup_bool_override("shift_enter");
+        self.paths.cleanup_bool_override("smart_auto_submit");
         *state = State::Idle;
         self.update_state("idle");
         self.play_feedback(SoundEvent::Cancelled);
@@ -2223,7 +1828,7 @@ impl Daemon {
     /// Only fires when the transcript would have gone to a file; interactive
     /// output modes have the OSD and sounds to say the same thing.
     fn publish_empty_outcome(&self) {
-        if let Some(path) = peek_file_output_path(&self.config) {
+        if let Some(path) = self.paths.peek_file_output_path(&self.config) {
             write_result_sidecar(&path, &TranscriptOutcome::empty());
         }
     }
@@ -2231,12 +1836,12 @@ impl Daemon {
     /// Reset state to idle and run post_output_command to reset compositor submap
     /// Call this when exiting from recording/transcribing without normal output flow
     async fn reset_to_idle(&mut self, state: &mut State) {
-        cleanup_output_mode_override();
-        cleanup_model_override();
-        cleanup_profile_override();
-        cleanup_bool_override("auto_submit");
-        cleanup_bool_override("shift_enter");
-        cleanup_bool_override("smart_auto_submit");
+        self.paths.cleanup_output_mode_override();
+        self.paths.cleanup_model_override();
+        self.paths.cleanup_profile_override();
+        self.paths.cleanup_bool_override("auto_submit");
+        self.paths.cleanup_bool_override("shift_enter");
+        self.paths.cleanup_bool_override("smart_auto_submit");
 
         // Release any model load this cycle never consumed. With
         // on_demand_loading the load starts when recording starts and is taken
@@ -2597,7 +2202,7 @@ impl Daemon {
 
                     // Smart auto-submit: detect "submit" trigger word at end
                     // CLI override (--smart-auto-submit / --no-smart-auto-submit) takes priority
-                    let smart_auto_submit_cli = read_bool_override("smart_auto_submit");
+                    let smart_auto_submit_cli = self.paths.read_bool_override("smart_auto_submit");
                     let (processed_text, smart_submit) = self
                         .text_processor
                         .detect_submit(&processed_text, smart_auto_submit_cli);
@@ -2609,7 +2214,7 @@ impl Daemon {
                     }
 
                     // Check for profile override from CLI flags
-                    let profile_override = read_profile_override();
+                    let profile_override = self.paths.read_profile_override();
                     let active_profile = profile_override
                         .as_ref()
                         .and_then(|name| self.config.get_profile(name));
@@ -2713,7 +2318,7 @@ impl Daemon {
                     }
 
                     // Check for output mode override from CLI flags
-                    let output_override = read_output_mode_override();
+                    let output_override = self.paths.read_output_mode_override();
 
                     // Check if profile specifies output mode override
                     let profile_output_mode = active_profile.and_then(|p| p.output_mode.clone());
@@ -2728,8 +2333,8 @@ impl Daemon {
                     // the next recording (typically the user's own hotkey, in
                     // type mode) then picked them up. Any client that passes
                     // --no-auto-submit with --file hit this on every dictation.
-                    let auto_submit_override = read_bool_override("auto_submit");
-                    let shift_enter_override = read_bool_override("shift_enter");
+                    let auto_submit_override = self.paths.read_bool_override("auto_submit");
+                    let shift_enter_override = self.paths.read_bool_override("shift_enter");
 
                     if let Some(output_path) = file_output_path {
                         *state = State::Outputting {
@@ -3019,14 +2624,14 @@ impl Daemon {
         }
 
         // Clean up any stale cancel and profile override files from previous runs
-        cleanup_cancel_file();
-        cleanup_profile_override();
+        self.paths.cleanup_cancel_file();
+        self.paths.cleanup_profile_override();
 
         // Clean up any stale meeting command files
-        cleanup_meeting_files();
+        self.paths.cleanup_meeting_files();
 
         // Mark any orphaned active meetings as completed
-        cleanup_stale_meetings(&self.config);
+        cleanup_stale_meetings(&self.paths, &self.config);
 
         // Set up signal handlers for external control
         let mut sigusr1 = signal(SignalKind::user_defined1()).map_err(|e| {
@@ -3047,7 +2652,7 @@ impl Daemon {
         // Start the audio-level broadcaster for the OSD. Failure to bind
         // the socket is not fatal: the daemon still runs without an OSD
         // feed, and downstream code treats `level_hub == None` as "no OSD".
-        let level_socket = audio::levels::default_socket_path();
+        let level_socket = self.paths.level_socket();
         match audio::levels::LevelHub::start(level_socket.clone()).await {
             Ok(hub) => {
                 tracing::info!("OSD audio level socket: {:?}", hub.socket_path());
@@ -3070,7 +2675,7 @@ impl Daemon {
         }
 
         // Check if another instance is already running (single-instance safeguard)
-        let lock_path = crate::daemon_status::pid_file_path();
+        let lock_path = self.paths.lock();
         let lock_path_str = lock_path.to_string_lossy().to_string();
         let mut pidlock = Pidlock::new(&lock_path_str);
 
@@ -3115,7 +2720,7 @@ impl Daemon {
 
         // Only now that the lock is ours: a refused second instance must not
         // overwrite the running daemon's answer with its own version.
-        crate::daemon_status::publish_version();
+        crate::daemon_status::publish_version_in(self.paths.dir());
 
         tracing::info!("Output mode: {:?}", self.config.output.mode);
 
@@ -3328,7 +2933,7 @@ impl Daemon {
                             if state.is_idle() {
                                 // Write profile override file if a profile modifier was held
                                 if let Some(ref profile_name) = profile_override {
-                                    write_profile_override(profile_name);
+                                    self.paths.write_profile_override(profile_name);
                                 }
 
                                 tracing::info!("Recording started");
@@ -3455,7 +3060,7 @@ impl Daemon {
                                         Err(()) => {
                                             // Helper already logged and played the error sound.
                                             self.restore_recording_media();
-                                            cleanup_profile_override();
+                                            self.paths.cleanup_profile_override();
                                         }
                                     }
                                 }
@@ -3539,7 +3144,7 @@ impl Daemon {
                             if state.is_idle() {
                                 // Write profile override file if a profile modifier was held
                                 if let Some(ref profile_name) = profile_override {
-                                    write_profile_override(profile_name);
+                                    self.paths.write_profile_override(profile_name);
                                 }
 
                                 // Start recording
@@ -3659,7 +3264,7 @@ impl Daemon {
                                         Err(()) => {
                                             // Helper already logged and played the error sound.
                                             self.restore_recording_media();
-                                            cleanup_profile_override();
+                                            self.paths.cleanup_profile_override();
                                         }
                                     }
                                 }
@@ -3766,10 +3371,10 @@ impl Daemon {
                                     task.abort();
                                 }
 
-                                cleanup_output_mode_override();
-                                cleanup_model_override();
-                                cleanup_profile_override();
-                                cleanup_bool_override("smart_auto_submit");
+                                self.paths.cleanup_output_mode_override();
+                                self.paths.cleanup_model_override();
+                                self.paths.cleanup_profile_override();
+                                self.paths.cleanup_bool_override("smart_auto_submit");
                                 state = State::Idle;
                                 self.update_state("idle");
                                 self.play_feedback(SoundEvent::Cancelled);
@@ -3793,10 +3398,10 @@ impl Daemon {
                                 // held until the next transcription.
                                 self.active_transcriber = None;
 
-                                cleanup_output_mode_override();
-                                cleanup_model_override();
-                                cleanup_profile_override();
-                                cleanup_bool_override("smart_auto_submit");
+                                self.paths.cleanup_output_mode_override();
+                                self.paths.cleanup_model_override();
+                                self.paths.cleanup_profile_override();
+                                self.paths.cleanup_bool_override("smart_auto_submit");
                                 state = State::Idle;
                                 self.update_state("idle");
                                 self.play_feedback(SoundEvent::Cancelled);
@@ -3819,7 +3424,7 @@ impl Daemon {
                 // Check for recording timeout and cancel requests
                 _ = tokio::time::sleep(Duration::from_millis(100)), if state.is_recording() => {
                     // Check for cancel request first
-                    if check_cancel_requested() {
+                    if self.paths.check_cancel_requested() {
                         tracing::info!("Recording cancelled");
 
                         // Stop recording and discard audio
@@ -3852,10 +3457,10 @@ impl Daemon {
                             *tasks_in_flight = 0;
                         }
 
-                        cleanup_output_mode_override();
-                        cleanup_model_override();
-                        cleanup_profile_override();
-                        cleanup_bool_override("smart_auto_submit");
+                        self.paths.cleanup_output_mode_override();
+                        self.paths.cleanup_model_override();
+                        self.paths.cleanup_profile_override();
+                        self.paths.cleanup_bool_override("smart_auto_submit");
                         // A cancelled external-trigger session is still an
                         // ended session — tell the caller and disarm tracking.
                         self.end_external_session(state.is_recording()).await;
@@ -3998,10 +3603,10 @@ impl Daemon {
                             max_duration.as_secs_f32()
                         );
 
-                        cleanup_output_mode_override();
-                        cleanup_model_override();
-                        cleanup_profile_override();
-                        cleanup_bool_override("smart_auto_submit");
+                        self.paths.cleanup_output_mode_override();
+                        self.paths.cleanup_model_override();
+                        self.paths.cleanup_profile_override();
+                        self.paths.cleanup_bool_override("smart_auto_submit");
 
                         let model_override = match &state {
                             State::Recording { model_override, .. } => model_override.clone(),
@@ -4058,7 +3663,7 @@ impl Daemon {
                     tracing::debug!("Received SIGUSR1 (start recording)");
                     if state.is_idle() {
                         // Read model override from file (set by `voxtype record start --model X`)
-                        let model_override = read_model_override();
+                        let model_override = self.paths.read_model_override();
                         tracing::info!("Recording started (external trigger), model_override = {:?}", model_override);
 
                         if self.config.output.notification.on_recording_start {
@@ -4322,7 +3927,7 @@ impl Daemon {
 
                 // Check for cancel during transcription
                 _ = tokio::time::sleep(Duration::from_millis(100)), if matches!(state, State::Transcribing { .. }) => {
-                    if check_cancel_requested() {
+                    if self.paths.check_cancel_requested() {
                         tracing::info!("Transcription cancelled");
 
                         // Abort the transcription task
@@ -4333,10 +3938,10 @@ impl Daemon {
                         // until the next transcription.
                         self.active_transcriber = None;
 
-                        cleanup_output_mode_override();
-                        cleanup_model_override();
-                        cleanup_profile_override();
-                        cleanup_bool_override("smart_auto_submit");
+                        self.paths.cleanup_output_mode_override();
+                        self.paths.cleanup_model_override();
+                        self.paths.cleanup_profile_override();
+                        self.paths.cleanup_bool_override("smart_auto_submit");
                         state = State::Idle;
                         self.update_state("idle");
                         self.play_feedback(SoundEvent::Cancelled);
@@ -4355,7 +3960,7 @@ impl Daemon {
                 // Clean up stale cancel file when idle and evict idle models
                 _ = tokio::time::sleep(Duration::from_millis(500)), if matches!(state, State::Idle) => {
                     // Silently consume any stale cancel request
-                    let _ = check_cancel_requested();
+                    let _ = self.paths.check_cancel_requested();
 
                 }
 
@@ -4386,7 +3991,7 @@ impl Daemon {
                     }
 
                     // Check for meeting start command
-                    if let Some(trigger) = check_meeting_start() {
+                    if let Some(trigger) = self.paths.check_meeting_start() {
                         if self.config.meeting.enabled && self.meeting_daemon.is_none() {
                             tracing::debug!("Meeting start requested via file trigger");
                             if let Err(e) = self.start_meeting(trigger.title, trigger.diarization).await {
@@ -4400,7 +4005,7 @@ impl Daemon {
                     }
 
                     // Check for meeting stop command
-                    if check_meeting_stop()
+                    if self.paths.check_meeting_stop()
                         && self.meeting_daemon.is_some() {
                             tracing::debug!("Meeting stop requested via file trigger");
                             if let Err(e) = self.stop_meeting().await {
@@ -4409,7 +4014,7 @@ impl Daemon {
                         }
 
                     // Check for meeting pause command
-                    if check_meeting_pause()
+                    if self.paths.check_meeting_pause()
                         && self.meeting_active() {
                             tracing::debug!("Meeting pause requested via file trigger");
                             if let Err(e) = self.pause_meeting().await {
@@ -4418,7 +4023,7 @@ impl Daemon {
                         }
 
                     // Check for meeting resume command
-                    if check_meeting_resume()
+                    if self.paths.check_meeting_resume()
                         && self.meeting_daemon.as_ref().is_some_and(|d| d.state().is_paused()) {
                             tracing::debug!("Meeting resume requested via file trigger");
                             if let Err(e) = self.resume_meeting().await {
@@ -4431,21 +4036,21 @@ impl Daemon {
                 _ = tokio::time::sleep(Duration::from_millis(50)), if self.meeting_active() => {
                     // Check for meeting stop/pause/resume while active
                     // (the 100ms polling branch is starved by this faster 50ms branch)
-                    if check_meeting_stop() && self.meeting_daemon.is_some() {
+                    if self.paths.check_meeting_stop() && self.meeting_daemon.is_some() {
                         tracing::debug!("Meeting stop requested via file trigger");
                         if let Err(e) = self.stop_meeting().await {
                             tracing::error!("Failed to stop meeting: {}", e);
                         }
                         continue;
                     }
-                    if check_meeting_pause() && self.meeting_active() {
+                    if self.paths.check_meeting_pause() && self.meeting_active() {
                         tracing::debug!("Meeting pause requested via file trigger");
                         if let Err(e) = self.pause_meeting().await {
                             tracing::error!("Failed to pause meeting: {}", e);
                         }
                         continue;
                     }
-                    if check_meeting_resume()
+                    if self.paths.check_meeting_resume()
                         && self.meeting_daemon.as_ref().is_some_and(|d| d.state().is_paused())
                     {
                         tracing::debug!("Meeting resume requested via file trigger");
@@ -4574,7 +4179,7 @@ impl Daemon {
         }
 
         // Remove override files on shutdown
-        cleanup_profile_override();
+        self.paths.cleanup_profile_override();
 
         // Remove state file on shutdown
         if let Some(ref path) = self.state_file_path {
@@ -4745,79 +4350,6 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
         assert_eq!(parsed["status"], "error");
         assert_eq!(parsed["message"], "disk went away");
-    }
-
-    #[test]
-    fn test_validate_diarization_override_accepts_allowlist() {
-        assert_eq!(
-            validate_diarization_override("simple".to_string()),
-            Some("simple".to_string())
-        );
-        assert_eq!(
-            validate_diarization_override("ml".to_string()),
-            Some("ml".to_string())
-        );
-    }
-
-    #[test]
-    fn test_validate_diarization_override_rejects_unknown() {
-        // Random unknown value the daemon should never propagate.
-        assert_eq!(validate_diarization_override("bogus".to_string()), None);
-
-        // Path-traversal flavor — `ALLOWED_DIARIZATION_OVERRIDES` is an exact
-        // string match so traversal can't sneak through, but the test pins
-        // the contract.
-        assert_eq!(
-            validate_diarization_override("../../etc/passwd".to_string()),
-            None
-        );
-
-        // Empty string (already filtered by `read_trimmed_nonempty` before
-        // this function is reached, but defense-in-depth).
-        assert_eq!(validate_diarization_override(String::new()), None);
-
-        // Common case variations that look like the right thing but aren't:
-        // case-sensitive match prevents these.
-        assert_eq!(validate_diarization_override("ML".to_string()), None);
-        assert_eq!(validate_diarization_override("Simple".to_string()), None);
-
-        // Whitespace-padded values shouldn't slip through if the trim step
-        // upstream somehow didn't fire.
-        assert_eq!(validate_diarization_override(" ml".to_string()), None);
-        assert_eq!(validate_diarization_override("ml ".to_string()), None);
-    }
-
-    #[test]
-    fn test_validate_diarization_override_const_in_sync() {
-        // Pin the allowlist contents so a future expansion of the CLI's
-        // `value_parser` requires touching this test, keeping the daemon
-        // and CLI surfaces in sync.
-        assert_eq!(ALLOWED_DIARIZATION_OVERRIDES, &["simple", "ml"]);
-    }
-
-    /// #636: the OSD suppression marker is created and removed, never
-    /// rewritten, because both OSD frontends treat "file exists" as the
-    /// signal. Absent is the overwhelmingly common case and must be cheap.
-    #[test]
-    fn test_osd_suppression_marker_lifecycle() {
-        with_test_runtime_dir(|dir| {
-            let marker = dir.join("osd_suppressed");
-            assert!(!marker.exists(), "marker must start absent");
-
-            set_osd_suppressed_at(&marker, true);
-            assert!(marker.exists(), "marker not written");
-
-            // Idempotent: setting it twice is not an error and leaves one file.
-            set_osd_suppressed_at(&marker, true);
-            assert!(marker.exists());
-
-            set_osd_suppressed_at(&marker, false);
-            assert!(!marker.exists(), "marker not cleared");
-
-            // Clearing an already-absent marker must not panic or error.
-            set_osd_suppressed_at(&marker, false);
-            assert!(!marker.exists());
-        });
     }
 
     #[test]
