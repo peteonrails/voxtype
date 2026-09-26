@@ -1019,61 +1019,7 @@ impl Daemon {
             self.start_transcription_task(state, live, model_override)
                 .await;
         } else if state.is_eager_recording() {
-            // Handle eager recording stop via external trigger - extract model_override first
-            let model_override = match &*state {
-                State::EagerRecording { model_override, .. } => model_override.clone(),
-                _ => None,
-            };
-
-            let duration = state.recording_duration().unwrap_or_default();
-            tracing::info!("Eager recording stopped ({:.1}s)", duration.as_secs_f32());
-
-            // Stop audio capture and get remaining samples
-            if let Some(mut capture) = live.audio_capture.take() {
-                if let Ok(final_samples) = capture.stop().await {
-                    if let State::EagerRecording {
-                        accumulated_audio, ..
-                    } = state
-                    {
-                        accumulated_audio.extend(final_samples);
-                    }
-                }
-            }
-            self.restore_recording_media();
-
-            self.play_feedback(SoundEvent::RecordingStop);
-
-            end_recording_notification(
-                "Recording Stopped",
-                "Transcribing...",
-                &self.config.output.notification,
-                self.config.engine,
-            )
-            .await;
-
-            let transcriber = match self
-                .get_transcriber_for_recording(model_override.as_deref())
-                .await
-            {
-                Ok(t) => t,
-                Err(()) => {
-                    *state = State::Idle;
-                    self.update_state("idle");
-                    return;
-                }
-            };
-
-            self.update_state("transcribing");
-
-            if let Some(text) = self.finish_eager_recording(state, transcriber).await {
-                let next = state.into_transcribing(Vec::new());
-                *state = next;
-                self.handle_transcription_result(state, Ok(Ok(text))).await;
-            } else {
-                tracing::debug!("Eager recording produced empty result");
-                self.reset_to_idle(state).await;
-            }
-            live.eager_transcriber = None;
+            self.stop_eager_recording(state, live).await;
         }
     }
 

@@ -1384,3 +1384,32 @@ async fn an_eager_recording_is_transcribed_from_its_chunks() {
     );
     assert_eq!(ctl.typed(), vec!["hello".to_string()]);
 }
+
+#[tokio::test]
+async fn an_external_eager_recording_is_transcribed() {
+    // The external stop takes the same eager path as a hotkey stop; this pins
+    // the shared helper from that side, where the third copy used to live.
+    let harness = TestDaemon::with_fakes(
+        "hello",
+        Fakes {
+            eager: true,
+            ..Fakes::default()
+        },
+        |_| {},
+    );
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            ctl.external_start();
+            ctl.expect_state("recording").await;
+            tokio::time::sleep(Duration::from_millis(FLOOR_MS)).await;
+            ctl.external_stop();
+            ctl.expect_state("idle").await;
+
+            assert_eq!(ctl.hook_runs(), 1, "the session ends through its hook");
+        })
+        .await;
+
+    assert_eq!(ctl.typed(), vec!["hello".to_string()]);
+}
