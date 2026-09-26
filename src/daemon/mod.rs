@@ -688,8 +688,12 @@ impl Daemon {
         {
             Ok(t) => t,
             Err(()) => {
-                *state = State::Idle;
-                self.update_state("idle");
+                // The cycle is over and it did open a capture, so end it the way
+                // any other failed cycle ends: the post-output hook leaves the
+                // compositor submap the pre-recording hook entered, and the
+                // one-shot overrides written for this cycle are discarded
+                // instead of surviving into the next recording.
+                self.reset_to_idle(state).await;
                 return;
             }
         };
@@ -1142,6 +1146,11 @@ impl Daemon {
                 }
             }
 
+            // A streaming session delivers its segments as they finalize, so
+            // nothing ever reads the one-shot boolean overrides; discard them
+            // here, or `--auto-submit` written for this session leaks into the
+            // next batch recording.
+            self.discard_pending_overrides();
             *state = State::Idle;
             self.update_state("idle");
             return;
@@ -1158,6 +1167,9 @@ impl Daemon {
             }
         }
 
+        // Same as the file branch above: the live streaming path types its
+        // segments as they finalize and never reads the boolean overrides.
+        self.discard_pending_overrides();
         *state = State::Idle;
         self.update_state("idle");
     }
@@ -2034,7 +2046,12 @@ impl Daemon {
                         tracing::warn!("Tail transcription failed: {}", e);
                     }
                     Err(e) => {
-                        tracing::warn!("Tail transcription task panicked: {}", e);
+                        if join_error_poisons_engine(&e) {
+                            tracing::error!("Tail transcription task panicked: {}", e);
+                            self.discard_poisoned_engine();
+                        } else {
+                            tracing::debug!("Tail transcription task was cancelled");
+                        }
                     }
                 }
             }
@@ -2499,39 +2516,42 @@ impl Daemon {
                     tracing::debug!("Transcription task was cancelled");
                 } else {
                     tracing::error!("Transcription task panicked: {}", e);
-
-                    // spawn_blocking already kept the panic from reaching the
-                    // daemon, so this is not about survival. It is about not
-                    // reusing an engine whose internal state is whatever the
-                    // panic left behind: drop the cached model so the next
-                    // recording loads a clean one (#643).
-                    //
-                    // Only on a real panic. A cancellation is our own doing
-                    // and leaves the engine perfectly usable.
-                    if let Some(ref mut mm) = self.model_manager {
-                        let dropped = mm.drop_loaded_models();
-                        if dropped > 0 {
-                            tracing::warn!(
-                                "Dropped {} cached model(s) after the panic; \
-                                 the next recording will reload",
-                                dropped
-                            );
-                        }
-                    }
-                    // model_manager only covers Whisper. Every other engine
-                    // clones from transcriber_preloaded, so a poisoned
-                    // instance there has to be discarded the same way;
-                    // get_transcriber_for_recording re-creates it on the
-                    // next recording.
-                    if self.transcriber_preloaded.take().is_some() {
-                        tracing::warn!(
-                            "Dropped the preloaded transcriber after the panic; \
-                             the next recording will re-create it"
-                        );
-                    }
+                    self.discard_poisoned_engine();
                 }
                 self.reset_to_idle(state).await;
             }
+        }
+    }
+
+    /// Discard a cached engine whose task panicked.
+    ///
+    /// A panic inside `spawn_blocking` leaves the engine's internal state
+    /// whatever the panic left behind, and `spawn_blocking` already kept the
+    /// panic out of the daemon, so this is not about survival: it is about not
+    /// reusing that engine. The next recording loads or re-creates a clean one
+    /// (#643).
+    ///
+    /// Only for a real panic: a cancellation is our own doing and leaves the
+    /// engine usable.
+    fn discard_poisoned_engine(&mut self) {
+        if let Some(ref mut mm) = self.model_manager {
+            let dropped = mm.drop_loaded_models();
+            if dropped > 0 {
+                tracing::warn!(
+                    "Dropped {} cached model(s) after the panic; \
+                     the next recording will reload",
+                    dropped
+                );
+            }
+        }
+        // model_manager only covers Whisper. Every other engine clones from
+        // transcriber_preloaded, so a poisoned instance there has to go too;
+        // get_transcriber_for_recording re-creates it on the next recording.
+        if self.transcriber_preloaded.take().is_some() {
+            tracing::warn!(
+                "Dropped the preloaded transcriber after the panic; \
+                 the next recording will re-create it"
+            );
         }
     }
 

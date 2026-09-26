@@ -70,6 +70,9 @@ pub struct Fakes {
     pub panic_once: bool,
     /// Turn on the eager pipeline, which transcribes chunks while recording.
     pub eager: bool,
+    /// Fail the transcriber factory from this call on (1-based), as an engine
+    /// that loads once and then stops being able to.
+    pub factory_fails_from: Option<usize>,
 }
 
 /// Audio capture that hands the daemon a scripted buffer.
@@ -510,7 +513,12 @@ impl TestDaemon {
                 )
             })),
             transcriber: Some(Arc::new(move |_config| {
-                transcriber_factory_calls.fetch_add(1, Ordering::SeqCst);
+                let call = transcriber_factory_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                if fakes.factory_fails_from.is_some_and(|from| call >= from) {
+                    return Err(TranscribeError::ModelNotFound(
+                        "fake factory failure".to_string(),
+                    ));
+                }
                 if fakes.streaming {
                     Ok(Box::new(FakeStreamingTranscriber {
                         text: scripted.clone(),
@@ -1229,6 +1237,9 @@ async fn a_streaming_file_session_writes_its_accumulated_text() {
                 format!("file:{}", transcript.display()),
             )
             .expect("write output mode override");
+            // A file session reads neither of these, so neither may survive it:
+            // the output mode is consumed at the start, the boolean at no point.
+            ctl.write_override("auto_submit", "true");
 
             ctl.external_start();
             ctl.expect_state("streaming").await;
@@ -1241,6 +1252,10 @@ async fn a_streaming_file_session_writes_its_accumulated_text() {
                     .trim_end(),
                 "hello",
                 "the accumulated text is written when the session ends"
+            );
+            assert!(
+                !ctl.override_exists("auto_submit"),
+                "the file session left the sentinel for the next recording"
             );
         })
         .await;
@@ -1412,4 +1427,132 @@ async fn an_external_eager_recording_is_transcribed() {
         .await;
 
     assert_eq!(ctl.typed(), vec!["hello".to_string()]);
+}
+
+#[tokio::test]
+async fn a_panic_during_eager_tail_transcription_drops_the_engine() {
+    // #643's policy — do not reuse an engine whose task panicked — was applied on
+    // the batch path only. The eager tail's panic was logged and the poisoned
+    // engine stayed cached, so the next recording reused it.
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+
+    let harness = TestDaemon::with_fakes(
+        "hello",
+        Fakes {
+            preload: true,
+            eager: true,
+            panic_once: true,
+            ..Fakes::default()
+        },
+        |_| {},
+    );
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            record_once(&ctl).await; // the panic happens inside the tail
+            record_once(&ctl).await; // a clean engine has to be built for this
+        })
+        .await;
+
+    std::panic::set_hook(previous_hook);
+
+    assert_eq!(
+        ctl.transcriber_factory_calls(),
+        2,
+        "the engine whose task panicked must be rebuilt, not reused"
+    );
+    assert_eq!(
+        ctl.typed(),
+        vec!["hello".to_string()],
+        "only the recording after the panic delivers"
+    );
+}
+
+#[tokio::test]
+async fn a_streaming_session_does_not_leave_the_submit_override_behind() {
+    // A streaming session delivers its segments as they finalize, so nothing
+    // ever reads the one-shot boolean overrides. Without discarding them at the
+    // session's close, the `--auto-submit` written for it survives and is
+    // applied to the next batch recording — the leak A2 fixed for cancels,
+    // still open on the streaming success path.
+    let harness = TestDaemon::streaming("hello");
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            ctl.write_override("auto_submit", "true");
+
+            ctl.external_start();
+            ctl.expect_state("streaming").await;
+            ctl.external_stop();
+            ctl.expect_state("idle").await;
+
+            assert!(
+                !ctl.override_exists("auto_submit"),
+                "the streaming session left the sentinel for the next recording"
+            );
+
+            // A second session on the same daemon still works end to end: the
+            // discard must not have taken anything the next close needs. (The
+            // consequence of the leak - a *batch* delivery applying the stale
+            // sentinel - needs a batch-configured daemon, and is pinned by the
+            // cancel row.)
+            ctl.external_start();
+            ctl.expect_state("streaming").await;
+            ctl.external_stop();
+            ctl.expect_state("idle").await;
+        })
+        .await;
+
+    assert_eq!(ctl.typed().last(), Some(&"hello".to_string()));
+}
+
+#[tokio::test]
+async fn a_cycle_that_cannot_get_a_transcriber_still_discards_its_overrides() {
+    // The eager stop's failure branch (no transcriber available) ended in a bare
+    // idle rather than `reset_to_idle`, so it skipped discarding the one-shot
+    // overrides and left a compositor submap entered at pre-recording behind.
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+
+    let harness = TestDaemon::with_fakes(
+        "hello",
+        Fakes {
+            preload: true,
+            eager: true,
+            panic_once: true,
+            // Second call is the re-create after the panic poisoned the cache.
+            factory_fails_from: Some(2),
+            ..Fakes::default()
+        },
+        |_| {},
+    );
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            // The poisoned engine is dropped, so the next cycle asks again.
+            ctl.press();
+            ctl.expect_state("recording").await;
+            tokio::time::sleep(Duration::from_millis(FLOOR_MS)).await;
+            ctl.release();
+            ctl.expect_state("idle").await;
+
+            ctl.write_override("auto_submit", "true");
+            ctl.press();
+            ctl.expect_state("recording").await;
+            tokio::time::sleep(Duration::from_millis(FLOOR_MS)).await;
+            ctl.release();
+            ctl.expect_state("idle").await;
+
+            assert!(
+                !ctl.override_exists("auto_submit"),
+                "the failed cycle left its override behind"
+            );
+        })
+        .await;
+
+    std::panic::set_hook(previous_hook);
 }
