@@ -26,7 +26,7 @@
 use super::deps::{Deps, Factories};
 use super::Daemon;
 use crate::audio::AudioCapture;
-use crate::config::{ActivationMode, Config};
+use crate::config::{ActivationMode, Config, OutputConfig};
 use crate::error::{AudioError, OutputError, TranscribeError};
 use crate::output::TextOutput;
 use crate::runtime_files::RuntimePaths;
@@ -133,8 +133,10 @@ impl TextOutput for FakeOutput {
 pub struct Controls {
     typed: Arc<Mutex<Vec<String>>>,
     transcribed: Arc<Mutex<Vec<usize>>>,
+    output_configs: Arc<Mutex<Vec<OutputConfig>>>,
     hotkey_tx: mpsc::Sender<HotkeyEvent>,
     state_file: PathBuf,
+    paths: RuntimePaths,
 }
 
 impl Controls {
@@ -147,6 +149,27 @@ impl Controls {
 
     pub fn release(&self) {
         self.send(HotkeyEvent::Released);
+    }
+
+    /// The cancel key: discard the cycle in flight without a transcript.
+    pub fn cancel(&self) {
+        self.send(HotkeyEvent::Cancel);
+    }
+
+    /// Write a sentinel the way `voxtype record start --auto-submit` would.
+    pub fn write_override(&self, name: &str, value: &str) {
+        std::fs::write(self.paths.bool_override(name), value).expect("write override");
+    }
+
+    pub fn override_exists(&self, name: &str) -> bool {
+        self.paths.bool_override(name).exists()
+    }
+
+    /// The output configuration every chain was built with, in order: the
+    /// startup log line first, then one per delivered transcription. The flags
+    /// the daemon resolved for a cycle are visible here.
+    pub fn output_configs(&self) -> Vec<OutputConfig> {
+        self.output_configs.lock().expect("configs lock").clone()
     }
 
     fn send(&self, event: HotkeyEvent) {
@@ -234,10 +257,13 @@ impl TestDaemon {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let typed = Arc::new(Mutex::new(Vec::new()));
         let transcribed = Arc::new(Mutex::new(Vec::new()));
+        let output_configs = Arc::new(Mutex::new(Vec::new()));
+
         let output = FakeOutput {
             typed: typed.clone(),
         };
         let calls = transcribed.clone();
+        let configs = output_configs.clone();
         let scripted = text.to_string();
         let factories = Factories {
             capture: Some(Arc::new(|_config| {
@@ -249,7 +275,8 @@ impl TestDaemon {
                     calls: calls.clone(),
                 }) as Box<dyn Transcriber>)
             })),
-            output_chain: Some(Arc::new(move |_config| {
+            output_chain: Some(Arc::new(move |config| {
+                configs.lock().expect("configs lock").push(config.clone());
                 vec![Box::new(output.clone()) as Box<dyn TextOutput>]
             })),
         };
@@ -260,12 +287,15 @@ impl TestDaemon {
             exit_process_on_shutdown: false,
         };
 
-        let daemon = Daemon::with_deps(config, None, RuntimePaths::new(dir.path()), deps);
+        let paths = RuntimePaths::new(dir.path());
+        let daemon = Daemon::with_deps(config, None, paths.clone(), deps);
         let controls = Controls {
             typed,
             transcribed,
+            output_configs,
             hotkey_tx,
             state_file,
+            paths,
         };
         Self {
             daemon: Some(daemon),
@@ -345,5 +375,51 @@ async fn a_push_to_talk_cycle_reaches_idle_with_a_transcript() {
     assert!(
         (samples as f32 / 16_000.0 - 1.5).abs() < 0.05,
         "the transcribe call got {samples} samples, not the scripted recording"
+    );
+}
+
+#[tokio::test]
+async fn a_cancelled_recording_does_not_leak_its_submit_override() {
+    // The boolean overrides are read when a transcript is delivered, so a
+    // cancelled cycle has to clear them: otherwise the `--auto-submit` written
+    // for the recording the user just discarded is applied to whatever
+    // recording is delivered next.
+    let harness = TestDaemon::speaking("hello");
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            ctl.write_override("auto_submit", "true");
+
+            ctl.press();
+            ctl.expect_state("recording").await;
+            ctl.cancel();
+            ctl.expect_state("idle").await;
+            assert!(
+                !ctl.override_exists("auto_submit"),
+                "the cancel left the sentinel for the next cycle to consume"
+            );
+
+            // An unrelated recording, started with no override of its own.
+            ctl.press();
+            ctl.expect_state("recording").await;
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            ctl.release();
+            ctl.expect_state("idle").await;
+        })
+        .await;
+
+    assert_eq!(
+        ctl.typed(),
+        vec!["hello".to_string()],
+        "the second recording still has to be delivered"
+    );
+    assert!(
+        ctl.output_configs().iter().all(|c| !c.auto_submit),
+        "the cancelled recording's --auto-submit was applied to the next one: {:?}",
+        ctl.output_configs()
+            .iter()
+            .map(|c| c.auto_submit)
+            .collect::<Vec<_>>()
     );
 }

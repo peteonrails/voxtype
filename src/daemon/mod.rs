@@ -1243,12 +1243,7 @@ impl Daemon {
         *streaming_session = None;
         *streaming_chain = None;
 
-        self.paths.cleanup_output_mode_override();
-        self.paths.cleanup_model_override();
-        self.paths.cleanup_profile_override();
-        self.paths.cleanup_bool_override("auto_submit");
-        self.paths.cleanup_bool_override("shift_enter");
-        self.paths.cleanup_bool_override("smart_auto_submit");
+        self.discard_pending_overrides();
         *state = State::Idle;
         self.update_state("idle");
         self.play_feedback(SoundEvent::Cancelled);
@@ -1857,13 +1852,24 @@ impl Daemon {
 
     /// Reset state to idle and run post_output_command to reset compositor submap
     /// Call this when exiting from recording/transcribing without normal output flow
-    async fn reset_to_idle(&mut self, state: &mut State) {
+    /// Discard the one-shot overrides a cancelled cycle will never consume.
+    ///
+    /// The boolean overrides are read when a transcript is *delivered*, so a
+    /// cycle that ends without one has to clear them. Otherwise the
+    /// `--auto-submit` or `--shift-enter` written for the recording the user
+    /// just cancelled is applied to whatever unrelated recording is delivered
+    /// next, which is the bug this helper exists to prevent.
+    fn discard_pending_overrides(&self) {
         self.paths.cleanup_output_mode_override();
         self.paths.cleanup_model_override();
         self.paths.cleanup_profile_override();
         self.paths.cleanup_bool_override("auto_submit");
         self.paths.cleanup_bool_override("shift_enter");
         self.paths.cleanup_bool_override("smart_auto_submit");
+    }
+
+    async fn reset_to_idle(&mut self, state: &mut State) {
+        self.discard_pending_overrides();
 
         // Release any model load this cycle never consumed. With
         // on_demand_loading the load starts when recording starts and is taken
@@ -3405,10 +3411,7 @@ impl Daemon {
                                     task.abort();
                                 }
 
-                                self.paths.cleanup_output_mode_override();
-                                self.paths.cleanup_model_override();
-                                self.paths.cleanup_profile_override();
-                                self.paths.cleanup_bool_override("smart_auto_submit");
+                                self.discard_pending_overrides();
                                 state = State::Idle;
                                 self.update_state("idle");
                                 self.play_feedback(SoundEvent::Cancelled);
@@ -3432,10 +3435,7 @@ impl Daemon {
                                 // held until the next transcription.
                                 self.active_transcriber = None;
 
-                                self.paths.cleanup_output_mode_override();
-                                self.paths.cleanup_model_override();
-                                self.paths.cleanup_profile_override();
-                                self.paths.cleanup_bool_override("smart_auto_submit");
+                                self.discard_pending_overrides();
                                 state = State::Idle;
                                 self.update_state("idle");
                                 self.play_feedback(SoundEvent::Cancelled);
@@ -3491,10 +3491,7 @@ impl Daemon {
                             *tasks_in_flight = 0;
                         }
 
-                        self.paths.cleanup_output_mode_override();
-                        self.paths.cleanup_model_override();
-                        self.paths.cleanup_profile_override();
-                        self.paths.cleanup_bool_override("smart_auto_submit");
+                        self.discard_pending_overrides();
                         // A cancelled external-trigger session is still an
                         // ended session — tell the caller and disarm tracking.
                         self.end_external_session(state.is_recording()).await;
@@ -3979,10 +3976,7 @@ impl Daemon {
                         // until the next transcription.
                         self.active_transcriber = None;
 
-                        self.paths.cleanup_output_mode_override();
-                        self.paths.cleanup_model_override();
-                        self.paths.cleanup_profile_override();
-                        self.paths.cleanup_bool_override("smart_auto_submit");
+                        self.discard_pending_overrides();
                         state = State::Idle;
                         self.update_state("idle");
                         self.play_feedback(SoundEvent::Cancelled);
