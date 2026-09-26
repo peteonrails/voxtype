@@ -8,10 +8,12 @@ mod deps;
 mod harness;
 mod media;
 mod meeting;
+mod model_slot;
 pub mod sidecar;
 
 use deps::Deps;
 use media::MediaSession;
+use model_slot::ModelSlot;
 pub use sidecar::result_sidecar_path;
 use sidecar::{write_result_sidecar, write_transcription_to_file, TranscriptOutcome};
 
@@ -245,30 +247,17 @@ pub struct Daemon {
     osd_supervisor_task: Option<tokio::task::JoinHandle<()>>,
     // Model manager for multi-model support
     model_manager: Option<ModelManager>,
-    // Background task for loading model on-demand
-    model_load_task: Option<
-        tokio::task::JoinHandle<
-            std::result::Result<Arc<dyn Transcriber>, crate::error::TranscribeError>,
-        >,
-    >,
     // Background task that spawns and prepares the gpu_isolation subprocess
     // worker. Awaited before transcription so audio capture can start
     // immediately while the worker loads its model in parallel.
     whisper_prepare_task: Option<tokio::task::JoinHandle<()>>,
     // Background task for transcription (allows cancel during transcription)
     transcription_task: Option<tokio::task::JoinHandle<TranscriptionResult>>,
-    // Transcriber Arc used for the in-flight transcription_task. Held so the
-    // result handler can query language metadata (e.g. detected language for
-    // keyboard-layout hints to eitype/dotool, see issue #180) after the task
-    // completes. Cleared when transcription_task is taken.
-    active_transcriber: Option<Arc<dyn Transcriber>>,
-    // Engine instance preloaded at startup when on_demand_loading is off.
-    // Whisper draws its transcriber from model_manager instead; every other
-    // engine clones from here. A field rather than a `run()` local so the
-    // panic recovery in handle_transcription_result can discard a poisoned
-    // instance (#643) — get_transcriber_for_recording re-creates it on the
-    // next recording when it finds this empty.
-    transcriber_preloaded: Option<Arc<dyn Transcriber>>,
+    // The engine for the next recording and the load in flight for it: the
+    // instance the in-flight transcription uses (the result handler reads
+    // language metadata off it, see #180), the one loaded at startup, and the
+    // background load between them, in one owner.
+    model: ModelSlot,
     // Background tasks for eager chunk transcriptions (chunk_index, task)
     eager_chunk_tasks: Vec<(
         usize,
@@ -400,11 +389,9 @@ impl Daemon {
             streaming_drain_pump: None,
             osd_supervisor_task: None,
             model_manager: None,
-            model_load_task: None,
             whisper_prepare_task: None,
             transcription_task: None,
-            active_transcriber: None,
-            transcriber_preloaded: None,
+            model: ModelSlot::default(),
             eager_chunk_tasks: Vec::new(),
             vad,
             meeting: meeting::MeetingSession::new(meeting_state_file_path),
@@ -664,7 +651,7 @@ impl Daemon {
                     let config = self.config.whisper.clone();
                     let config_path = self.config_path.clone();
                     let model_to_load = model_override.map(str::to_string);
-                    self.model_load_task = Some(tokio::task::spawn_blocking(move || {
+                    self.model.begin_load(tokio::task::spawn_blocking(move || {
                         let mut temp_manager = ModelManager::new(&config, config_path);
                         temp_manager.get_transcriber(model_to_load.as_deref())
                     }));
@@ -673,7 +660,7 @@ impl Daemon {
                 _ => {
                     let config = self.config.clone();
                     let factories = self.deps.factories.clone();
-                    self.model_load_task = Some(tokio::task::spawn_blocking(move || {
+                    self.model.begin_load(tokio::task::spawn_blocking(move || {
                         factories.create_transcriber(&config).map(Arc::from)
                     }));
                 }
@@ -695,8 +682,7 @@ impl Daemon {
                 }
                 // Every other engine builds its transcriber through `Deps`.
                 _ => {
-                    if let Some(ref t) = self.transcriber_preloaded {
-                        let transcriber = t.clone();
+                    if let Some(transcriber) = self.model.preloaded() {
                         tokio::task::spawn_blocking(move || {
                             transcriber.prepare();
                         });
@@ -815,7 +801,7 @@ impl Daemon {
         self.paths.cleanup_cancel_file();
         // Clone out of the field so the borrow doesn't overlap the
         // `&mut self` capture start below.
-        let Some(transcriber) = self.transcriber_preloaded.clone() else {
+        let Some(transcriber) = self.model.preloaded() else {
             return false;
         };
         if transcriber.as_streaming().is_none() {
@@ -1248,7 +1234,7 @@ impl Daemon {
     ) -> std::result::Result<Arc<dyn Transcriber>, ()> {
         if self.config.on_demand_loading() {
             // Wait for background model load task
-            if let Some(task) = self.model_load_task.take() {
+            if let Some(task) = self.model.take_load() {
                 match task.await {
                     Ok(Ok(transcriber)) => {
                         tracing::info!("Model loaded successfully");
@@ -1300,7 +1286,7 @@ impl Daemon {
                 }
                 // Every other engine builds its transcriber through `Deps`.
                 _ => {
-                    if let Some(t) = self.transcriber_preloaded.clone() {
+                    if let Some(t) = self.model.preloaded() {
                         Ok(t)
                     } else {
                         // Empty on the non-on-demand path means the panic
@@ -1317,7 +1303,7 @@ impl Daemon {
                         match created {
                             Ok(Ok(t)) => {
                                 let t: Arc<dyn Transcriber> = Arc::from(t);
-                                self.transcriber_preloaded = Some(t.clone());
+                                self.model.set_preloaded(t.clone());
                                 Ok(t)
                             }
                             Ok(Err(e)) => {
@@ -1756,7 +1742,7 @@ impl Daemon {
             self.restore_recording_media();
 
             // Cancel any pending model load task
-            if let Some(task) = self.model_load_task.take() {
+            if let Some(task) = self.model.take_load() {
                 task.abort();
             }
 
@@ -1783,7 +1769,7 @@ impl Daemon {
             }
             // Drop the cloned transcriber Arc so it isn't held until the next
             // transcription.
-            self.active_transcriber = None;
+            self.model.clear_active();
 
             self.close_cancelled_cycle(state, false).await;
 
@@ -2004,7 +1990,7 @@ impl Daemon {
             self.restore_recording_media();
 
             // Cancel any pending model load task
-            if let Some(task) = self.model_load_task.take() {
+            if let Some(task) = self.model.take_load() {
                 task.abort();
             }
 
@@ -2049,7 +2035,7 @@ impl Daemon {
                 State::EagerRecording { model_override, .. } => model_override.as_deref(),
                 _ => None,
             };
-            live.eager_transcriber = self.transcriber_preloaded.clone();
+            live.eager_transcriber = self.model.preloaded();
             if live.eager_transcriber.is_none()
                 && self.config.engine == crate::config::TranscriptionEngine::Whisper
             {
@@ -2393,7 +2379,7 @@ impl Daemon {
         // capture failure) would otherwise leave the finished task parked in
         // this field, holding its Arc<dyn Transcriber> -- and with it the whole
         // model, hundreds of MiB -- until the next recording overwrote it.
-        self.model_load_task = None;
+        self.model.release_unconsumed_load();
 
         self.restore_recording_media();
         *state = State::Idle;
@@ -2703,7 +2689,7 @@ impl Daemon {
                     // post-transcription metadata (e.g. detected language
                     // for layout hints, issue #180) without re-fetching
                     // the transcriber.
-                    self.active_transcriber = Some(transcriber.clone());
+                    self.model.set_active(transcriber.clone());
                     self.transcription_task = Some(tokio::task::spawn_blocking(move || {
                         transcriber.transcribe(&samples)
                     }));
@@ -2732,7 +2718,7 @@ impl Daemon {
         // is dropped on every exit path (success, transcription error, or
         // task error). The Ok(Ok(_)) branch consults it for the language
         // layout hint before letting it drop.
-        let active_transcriber = self.active_transcriber.take();
+        let active = self.model.take_active();
         match result {
             Ok(Ok(text)) => {
                 if text.is_empty() {
@@ -2965,7 +2951,7 @@ impl Daemon {
                     // per field when the user has already set explicit
                     // `eitype_xkb_*` / `dotool_xkb_*` values, so static
                     // configuration wins over auto-detection.
-                    if let Some(ref transcriber) = active_transcriber {
+                    if let Some(transcriber) = &active {
                         if let Some(lang) = transcriber.last_detected_language() {
                             let applied = output_config.apply_language_xkb_hint(&lang);
                             if applied.is_empty() {
@@ -3097,9 +3083,9 @@ impl Daemon {
             }
         }
         // model_manager only covers Whisper. Every other engine clones from
-        // transcriber_preloaded, so a poisoned instance there has to go too;
+        // the slot's preloaded instance, so a poisoned one there has to go too;
         // get_transcriber_for_recording re-creates it on the next recording.
-        if self.transcriber_preloaded.take().is_some() {
+        if self.model.discard_preloaded() {
             tracing::warn!(
                 "Dropped the preloaded transcriber after the panic; \
                  the next recording will re-create it"
@@ -3382,7 +3368,7 @@ impl Daemon {
             match self.config.engine {
                 crate::config::TranscriptionEngine::Whisper => {
                     if self.config.whisper.streaming {
-                        // Streaming needs the transcriber in `transcriber_preloaded`
+                        // Streaming needs the transcriber in the preloaded slot
                         // so try_start_streaming can find it. The factory returns
                         // the sliding-window wrapper when [whisper] streaming = true.
                         if self.config.whisper.on_demand_loading {
@@ -3391,8 +3377,8 @@ impl Daemon {
                                  streaming will be unavailable"
                             );
                         }
-                        self.transcriber_preloaded =
-                            Some(Arc::from(self.deps.create_transcriber(&self.config)?));
+                        self.model
+                            .set_preloaded(Arc::from(self.deps.create_transcriber(&self.config)?));
                     } else {
                         // Use model manager for Whisper
                         if let Err(e) = model_manager.preload_primary() {
@@ -3405,8 +3391,8 @@ impl Daemon {
                 _ => {
                     // Non-Whisper engines do their own setup; Soniox just validates
                     // API key + endpoint at construction (no model to download).
-                    self.transcriber_preloaded =
-                        Some(Arc::from(self.deps.create_transcriber(&self.config)?));
+                    self.model
+                        .set_preloaded(Arc::from(self.deps.create_transcriber(&self.config)?));
                 }
             }
             tracing::info!("Model loaded, ready for voice input");
@@ -3583,7 +3569,7 @@ impl Daemon {
                         }
                         // Drop the cloned transcriber Arc so it isn't held
                         // until the next transcription.
-                        self.active_transcriber = None;
+                        self.model.clear_active();
 
                         self.close_cancelled_cycle(&mut state, false).await;
 
@@ -3715,7 +3701,7 @@ impl Daemon {
         if let Some(task) = self.transcription_task.take() {
             task.abort();
         }
-        self.active_transcriber = None;
+        self.model.clear_active();
 
         // Abort any pending eager chunk tasks
         for (_, task) in self.eager_chunk_tasks.drain(..) {

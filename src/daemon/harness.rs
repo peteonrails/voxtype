@@ -178,6 +178,15 @@ struct FakeTranscriber {
     panicked: Arc<AtomicBool>,
     panic_once: bool,
     calls: Arc<Mutex<Vec<usize>>>,
+    /// Bumped when the last reference goes away, so a row can pin that a cycle
+    /// released the engine it loaded.
+    drops: Arc<AtomicUsize>,
+}
+
+impl Drop for FakeTranscriber {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 impl Transcriber for FakeTranscriber {
@@ -319,6 +328,7 @@ pub struct Controls {
     output_configs: Arc<Mutex<Vec<OutputConfig>>>,
     transcriber_factory_calls: Arc<AtomicUsize>,
     capture_stops: Arc<AtomicUsize>,
+    transcriber_drops: Arc<AtomicUsize>,
     hotkey_tx: mpsc::Sender<HotkeyEvent>,
     external_start_tx: mpsc::Sender<()>,
     external_stop_tx: mpsc::Sender<()>,
@@ -394,6 +404,13 @@ impl Controls {
     /// daemon decides on itself both count here.
     pub fn capture_stops(&self) -> usize {
         self.capture_stops.load(Ordering::SeqCst)
+    }
+
+    /// How many engines have been dropped. The load task holds one when a cycle
+    /// loads a model it never transcribes with, so this is what shows a released
+    /// load against a parked one.
+    pub fn transcriber_drops(&self) -> usize {
+        self.transcriber_drops.load(Ordering::SeqCst)
     }
 
     pub fn transcriber_factory_calls(&self) -> usize {
@@ -534,6 +551,8 @@ impl TestDaemon {
         let transcriber_factory_calls = factory_calls.clone();
         let capture_stops = Arc::new(AtomicUsize::new(0));
         let capture_stops_for_factory = capture_stops.clone();
+        let transcriber_drops = Arc::new(AtomicUsize::new(0));
+        let transcriber_drops_for_factory = transcriber_drops.clone();
         let configs = output_configs.clone();
         let scripted = text.to_string();
         let factories = Factories {
@@ -567,6 +586,7 @@ impl TestDaemon {
                         panicked: panicked.clone(),
                         panic_once: fakes.panic_once,
                         calls: calls.clone(),
+                        drops: transcriber_drops_for_factory.clone(),
                     }) as Box<dyn Transcriber>)
                 }
             })),
@@ -592,6 +612,7 @@ impl TestDaemon {
             output_configs,
             transcriber_factory_calls: factory_calls,
             capture_stops,
+            transcriber_drops,
             hotkey_tx,
             external_start_tx,
             external_stop_tx,
@@ -644,7 +665,7 @@ on_demand_loading = true
 "#;
 
 /// Streaming needs the transcriber before recording starts: `try_start_streaming`
-/// reads `transcriber_preloaded`, which only the non-on-demand path fills.
+/// reads the preloaded slot, which only the non-on-demand path fills.
 const STREAMING_CONFIG: &str = r#"
 engine = "sensevoice"
 
@@ -1507,6 +1528,48 @@ async fn an_external_eager_recording_is_transcribed() {
         .await;
 
     assert_eq!(ctl.typed(), vec!["hello".to_string()]);
+}
+
+#[tokio::test]
+async fn a_cycle_that_ends_before_transcription_releases_its_model_load() {
+    // With on-demand loading the model starts loading when the recording starts,
+    // and `get_transcriber_for_recording` takes its result on the way to
+    // transcription. A cycle that ends before that - here, released inside the
+    // 0.3 s floor - used to leave the finished task parked in its field with the
+    // engine inside it, so the whole model stayed resident for the session
+    // (B4). Nothing pinned the release, which is what this row is for.
+    let harness = TestDaemon::with_fakes("hello", Fakes::default(), |_| {});
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            // No preload, so the load task holds the only reference to the
+            // engine it builds.
+            ctl.press();
+            ctl.expect_state("recording").await;
+            ctl.release();
+            ctl.expect_state("idle").await;
+
+            // The load runs on a blocking thread: give it time to finish, then
+            // for its result to drop.
+            for _ in 0..50 {
+                if ctl.transcriber_drops() > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+
+            assert_eq!(
+                ctl.transcriber_drops(),
+                1,
+                "the load this cycle never consumed has to release its engine"
+            );
+            assert!(
+                ctl.transcription_calls().is_empty(),
+                "the cycle ended before transcription, so nothing was transcribed"
+            );
+        })
+        .await;
 }
 
 #[tokio::test]

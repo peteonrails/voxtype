@@ -261,3 +261,56 @@ fn runtime_file_guard_flags_planted_names() {
 
     assert_eq!(offenders, vec!["writer.rs".to_string()]);
 }
+
+#[test]
+fn the_model_load_handle_lives_in_the_slot() {
+    // The three fields B4 was about: the background load task, the instance it
+    // hands back for the in-flight transcription, and the instance loaded at
+    // startup. `ModelSlot` owns them together, so a cycle cannot release one and
+    // forget another, which is how a finished load stayed parked holding a whole
+    // model. These names must not come back on `Daemon`.
+    let root = src_root();
+    for name in [
+        "model_load_task",
+        "transcriber_preloaded",
+        "active_transcriber",
+    ] {
+        let found: Vec<String> = hits(&root, name)
+            .into_iter()
+            // `harness` is a test-only module compiled under `#[cfg(test)]`,
+            // which the per-file `production` split cannot see from here.
+            .filter(|path| path != "daemon/harness.rs")
+            .collect();
+        assert_eq!(
+            found,
+            Vec::<String>::new(),
+            "{name} belongs to ModelSlot (src/daemon/model_slot.rs)"
+        );
+    }
+
+    // The same fact in its type form: a handle carrying the engine belongs to
+    // the slot, whatever the field is called. Line-based, so the spelling of
+    // the surrounding `Option`/`Vec` does not matter.
+    let mut files = Vec::new();
+    collect_rust_files(&root, &mut files);
+    for path in files {
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel == "daemon/model_slot.rs" || rel == "daemon/harness.rs" {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in production(&text).lines() {
+            let engine_in_handle =
+                line.contains("JoinHandle") && line.contains("Arc<dyn Transcriber>");
+            if engine_in_handle {
+                panic!("{rel} holds a model-load handle outside ModelSlot: {line}");
+            }
+        }
+    }
+}
