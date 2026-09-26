@@ -1600,6 +1600,205 @@ impl Daemon {
         Ok(())
     }
 
+    /// Handle a push-to-talk press: start a recording if the daemon is idle.
+    async fn on_hotkey_press_push_to_talk(
+        &mut self,
+        state: &mut State,
+        live: &mut LiveState,
+        model_override: Option<String>,
+        profile_override: Option<String>,
+    ) {
+        tracing::debug!("Received HotkeyEvent::Pressed (push-to-talk), state.is_idle() = {}, model_override = {:?}, profile_override = {:?}",
+                state.is_idle(), model_override, profile_override);
+        if state.is_idle() {
+            // A profile sentinel is written by `voxtype
+            // record start --profile` for an external
+            // start, which reads it. A hotkey cycle carries
+            // its profile in the state, so a sentinel still
+            // on disk is stale: it must not survive to
+            // post-process a later recording.
+            self.paths.cleanup_profile_override();
+
+            tracing::info!("Recording started");
+
+            // Send notification if enabled
+            if self.config.output.notification.on_recording_start {
+                send_notification_with_lifetime(
+                    "Push to Talk Active",
+                    "Recording...",
+                    self.config.output.notification.show_engine_icon,
+                    self.config.engine,
+                    &self.config.output.notification.urgency,
+                    Lifetime::UntilClosed,
+                )
+                .await;
+            }
+
+            self.begin_recording(
+                state,
+                live,
+                model_override,
+                profile_override,
+                false,
+                "push-to-talk",
+            )
+            .await;
+        }
+    }
+
+    /// Handle a push-to-talk release: stop the recording and hand it to transcription.
+    async fn on_hotkey_release_push_to_talk(&mut self, state: &mut State, live: &mut LiveState) {
+        tracing::debug!(
+            "Received HotkeyEvent::Released (push-to-talk), state.is_recording() = {}",
+            state.is_recording()
+        );
+        if state.is_streaming() {
+            tracing::debug!(
+                "Streaming push-to-talk released; closing audio capture and disowning session"
+            );
+            self.stop_streaming_capture(live).await;
+            // Drop session/chain so the backend's post-stop flush emission is
+            // dropped at the event pump instead of typed. Matches the SIGUSR2
+            // stop path.
+            live.streaming_session = None;
+            live.streaming_chain = None;
+        } else if let State::Recording { model_override, .. } = &state {
+            let model_override = model_override.clone();
+
+            self.start_transcription_task(state, live, model_override)
+                .await;
+        } else if state.is_eager_recording() {
+            self.stop_eager_recording(state, live).await;
+        }
+    }
+
+    /// Handle a toggle press: start a recording, or stop the running one.
+    async fn on_hotkey_press_toggle(
+        &mut self,
+        state: &mut State,
+        live: &mut LiveState,
+        model_override: Option<String>,
+        profile_override: Option<String>,
+    ) {
+        tracing::debug!("Received HotkeyEvent::Pressed (toggle), state.is_idle() = {}, state.is_recording() = {}, model_override = {:?}, profile_override = {:?}",
+                state.is_idle(), state.is_recording(), model_override, profile_override);
+
+        if state.is_idle() {
+            // A profile sentinel is written by `voxtype
+            // record start --profile` for an external
+            // start, which reads it. A hotkey cycle carries
+            // its profile in the state, so a sentinel still
+            // on disk is stale: it must not survive to
+            // post-process a later recording.
+            self.paths.cleanup_profile_override();
+
+            // Start recording
+            tracing::info!("Recording started (toggle mode)");
+
+            if self.config.output.notification.on_recording_start {
+                send_notification_with_lifetime(
+                    "Recording Started",
+                    "Press hotkey again to stop",
+                    self.config.output.notification.show_engine_icon,
+                    self.config.engine,
+                    &self.config.output.notification.urgency,
+                    Lifetime::UntilClosed,
+                )
+                .await;
+            }
+
+            self.begin_recording(
+                state,
+                live,
+                model_override,
+                profile_override,
+                false,
+                "toggle",
+            )
+            .await;
+        } else if state.is_streaming() {
+            tracing::info!("Toggle stop while streaming; closing capture");
+            self.stop_streaming_capture(live).await;
+        } else if let State::Recording {
+            model_override: current_model_override,
+            ..
+        } = &state
+        {
+            let model_override = current_model_override.clone();
+
+            // Stop recording and start transcription
+            self.start_transcription_task(state, live, model_override)
+                .await;
+        } else if state.is_eager_recording() {
+            self.stop_eager_recording(state, live).await;
+        }
+    }
+
+    /// Handle the cancel key: throw away whatever is in flight.
+    async fn on_hotkey_cancel(&mut self, state: &mut State, live: &mut LiveState) {
+        tracing::debug!("Received HotkeyEvent::Cancel");
+
+        if state.is_streaming() {
+            tracing::info!("Streaming cancelled via hotkey");
+            self.cancel_streaming_to_idle(state, live, "Recording discarded")
+                .await;
+        } else if state.is_recording() {
+            tracing::info!("Recording cancelled via hotkey");
+
+            // A cancelled external-trigger session is still an ended session:
+            // tell the caller and disarm tracking.
+            self.end_external_session(state.is_recording()).await;
+
+            // Stop recording and discard audio
+            if let Some(mut capture) = live.audio_capture.take() {
+                let _ = capture.stop().await;
+            }
+            self.restore_recording_media();
+
+            // Cancel any pending model load task
+            if let Some(task) = self.model_load_task.take() {
+                task.abort();
+            }
+
+            // Cancel any pending eager chunk tasks
+            for (_, task) in self.eager_chunk_tasks.drain(..) {
+                task.abort();
+            }
+
+            self.close_cancelled_cycle(state, false).await;
+
+            end_recording_notification(
+                "Cancelled",
+                "Recording discarded",
+                &self.config.output.notification,
+                self.config.engine,
+            )
+            .await;
+        } else if matches!(state, State::Transcribing { .. }) {
+            tracing::info!("Transcription cancelled via hotkey");
+
+            // Abort the transcription task
+            if let Some(task) = self.transcription_task.take() {
+                task.abort();
+            }
+            // Drop the cloned transcriber Arc so it isn't held until the next
+            // transcription.
+            self.active_transcriber = None;
+
+            self.close_cancelled_cycle(state, false).await;
+
+            end_recording_notification(
+                "Cancelled",
+                "Transcription aborted",
+                &self.config.output.notification,
+                self.config.engine,
+            )
+            .await;
+        } else {
+            tracing::trace!("Cancel ignored - not recording or transcribing");
+        }
+    }
+
     /// Act on the meeting stop, pause and resume trigger files.
     ///
     /// Shared by the 100 ms tick and the 50 ms tick that runs while a meeting is
@@ -2865,105 +3064,16 @@ impl Daemon {
                     match (hotkey_event, activation_mode) {
                         // === PUSH-TO-TALK MODE ===
                         (HotkeyEvent::Pressed { model_override, profile_override }, ActivationMode::PushToTalk) => {
-                            tracing::debug!("Received HotkeyEvent::Pressed (push-to-talk), state.is_idle() = {}, model_override = {:?}, profile_override = {:?}",
-                                state.is_idle(), model_override, profile_override);
-                            if state.is_idle() {
-                                // A profile sentinel is written by `voxtype
-                                // record start --profile` for an external
-                                // start, which reads it. A hotkey cycle carries
-                                // its profile in the state, so a sentinel still
-                                // on disk is stale: it must not survive to
-                                // post-process a later recording.
-                                self.paths.cleanup_profile_override();
-
-                                tracing::info!("Recording started");
-
-                                // Send notification if enabled
-                                if self.config.output.notification.on_recording_start {
-                                    send_notification_with_lifetime("Push to Talk Active", "Recording...", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
-                                }
-
-                                self.begin_recording(
-                                    &mut state,
-                                    &mut live,
-                                    model_override,
-                                    profile_override,
-                                    false,
-                                    "push-to-talk",
-                                )
-                                .await;
-                            }
+                            self.on_hotkey_press_push_to_talk(&mut state, &mut live, model_override, profile_override).await;
                         }
 
                         (HotkeyEvent::Released, ActivationMode::PushToTalk) => {
-                            tracing::debug!("Received HotkeyEvent::Released (push-to-talk), state.is_recording() = {}", state.is_recording());
-                            if state.is_streaming() {
-                                tracing::debug!("Streaming push-to-talk released; closing audio capture and disowning session");
-                                self.stop_streaming_capture(&mut live).await;
-                                // Drop session/chain so the backend's
-                                // post-stop flush emission is dropped at
-                                // the event pump instead of typed.
-                                // Matches the SIGUSR2 stop path.
-                                live.streaming_session = None;
-                                live.streaming_chain = None;
-                            } else if let State::Recording { model_override, .. } = &state {
-                                let model_override = model_override.clone();
-
-                                self.start_transcription_task(
-                                    &mut state,
-                                    &mut live,
-                                    model_override,
-                                ).await;
-                            } else if state.is_eager_recording() {
-                                self.stop_eager_recording(&mut state, &mut live).await;
-                            }
+                            self.on_hotkey_release_push_to_talk(&mut state, &mut live).await;
                         }
 
                         // === TOGGLE MODE ===
                         (HotkeyEvent::Pressed { model_override, profile_override }, ActivationMode::Toggle) => {
-                            tracing::debug!("Received HotkeyEvent::Pressed (toggle), state.is_idle() = {}, state.is_recording() = {}, model_override = {:?}, profile_override = {:?}",
-                                state.is_idle(), state.is_recording(), model_override, profile_override);
-
-                            if state.is_idle() {
-                                // A profile sentinel is written by `voxtype
-                                // record start --profile` for an external
-                                // start, which reads it. A hotkey cycle carries
-                                // its profile in the state, so a sentinel still
-                                // on disk is stale: it must not survive to
-                                // post-process a later recording.
-                                self.paths.cleanup_profile_override();
-
-                                // Start recording
-                                tracing::info!("Recording started (toggle mode)");
-
-                                if self.config.output.notification.on_recording_start {
-                                    send_notification_with_lifetime("Recording Started", "Press hotkey again to stop", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
-                                }
-
-                                self.begin_recording(
-                                    &mut state,
-                                    &mut live,
-                                    model_override,
-                                    profile_override,
-                                    false,
-                                    "toggle",
-                                )
-                                .await;
-                            } else if state.is_streaming() {
-                                tracing::info!("Toggle stop while streaming; closing capture");
-                                self.stop_streaming_capture(&mut live).await;
-                            } else if let State::Recording { model_override: current_model_override, .. } = &state {
-                                let model_override = current_model_override.clone();
-
-                                // Stop recording and start transcription
-                                self.start_transcription_task(
-                                    &mut state,
-                                    &mut live,
-                                    model_override,
-                                ).await;
-                            } else if state.is_eager_recording() {
-                                self.stop_eager_recording(&mut state, &mut live).await;
-                            }
+                            self.on_hotkey_press_toggle(&mut state, &mut live, model_override, profile_override).await;
                         }
 
                         (HotkeyEvent::Released, ActivationMode::Toggle) => {
@@ -2973,59 +3083,7 @@ impl Daemon {
 
                         // === CANCEL KEY (works in both modes) ===
                         (HotkeyEvent::Cancel, _) => {
-                            tracing::debug!("Received HotkeyEvent::Cancel");
-
-                            if state.is_streaming() {
-                                tracing::info!("Streaming cancelled via hotkey");
-                                self.cancel_streaming_to_idle(
-                                    &mut state,
-                                    &mut live,
-                                    "Recording discarded",
-                                ).await;
-                            } else if state.is_recording() {
-                                tracing::info!("Recording cancelled via hotkey");
-
-                                // A cancelled external-trigger session is
-                                // still an ended session — tell the caller
-                                // and disarm tracking.
-                                self.end_external_session(state.is_recording()).await;
-
-                                // Stop recording and discard audio
-                                if let Some(mut capture) = live.audio_capture.take() {
-                                    let _ = capture.stop().await;
-                                }
-                                self.restore_recording_media();
-
-                                // Cancel any pending model load task
-                                if let Some(task) = self.model_load_task.take() {
-                                    task.abort();
-                                }
-
-                                // Cancel any pending eager chunk tasks
-                                for (_, task) in self.eager_chunk_tasks.drain(..) {
-                                    task.abort();
-                                }
-
-                                self.close_cancelled_cycle(&mut state, false).await;
-
-                                end_recording_notification("Cancelled", "Recording discarded", &self.config.output.notification, self.config.engine).await;
-                            } else if matches!(state, State::Transcribing { .. }) {
-                                tracing::info!("Transcription cancelled via hotkey");
-
-                                // Abort the transcription task
-                                if let Some(task) = self.transcription_task.take() {
-                                    task.abort();
-                                }
-                                // Drop the cloned transcriber Arc so it isn't
-                                // held until the next transcription.
-                                self.active_transcriber = None;
-
-                                self.close_cancelled_cycle(&mut state, false).await;
-
-                                end_recording_notification("Cancelled", "Transcription aborted", &self.config.output.notification, self.config.engine).await;
-                            } else {
-                                tracing::trace!("Cancel ignored - not recording or transcribing");
-                            }
+                            self.on_hotkey_cancel(&mut state, &mut live).await;
                         }
                     }
                 }
