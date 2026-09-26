@@ -68,6 +68,8 @@ pub struct Fakes {
     pub preload: bool,
     /// Panic on the first transcription, as a broken engine does (#643).
     pub panic_once: bool,
+    /// Turn on the eager pipeline, which transcribes chunks while recording.
+    pub eager: bool,
 }
 
 /// Audio capture that hands the daemon a scripted buffer.
@@ -476,6 +478,7 @@ impl TestDaemon {
         notification.on_recording_stop = false;
         notification.on_transcription = false;
         config.meeting.storage_path = dir.path().join("meetings").display().to_string();
+        config.whisper.eager_processing = fakes.eager;
         // The external stop hook is a shell command, so a test observes it by
         // having it append one byte per run.
         config.audio.external_trigger_stop_command =
@@ -1317,4 +1320,67 @@ async fn a_file_session_that_cannot_write_still_returns_to_idle() {
         .await;
 
     assert_eq!(ctl.typed(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn a_streaming_toggle_session_delivers_its_segment() {
+    // The toggle path into streaming, as opposed to the external trigger the
+    // other streaming rows use.
+    let harness = TestDaemon::with_fakes(
+        "hello",
+        Fakes {
+            streaming: true,
+            ..Fakes::default()
+        },
+        |config| config.hotkey.mode = ActivationMode::Toggle,
+    );
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            ctl.press();
+            ctl.expect_state("streaming").await;
+            tokio::time::sleep(Duration::from_millis(FLOOR_MS)).await;
+            ctl.press(); // the second press ends it
+            ctl.expect_state("idle").await;
+        })
+        .await;
+
+    assert_eq!(
+        ctl.typed(),
+        vec!["hello".to_string()],
+        "the committed segment is delivered"
+    );
+}
+
+#[tokio::test]
+async fn an_eager_recording_is_transcribed_from_its_chunks() {
+    // The eager pipeline takes its own route through the stop: it finishes the
+    // accumulated chunks and the tail rather than calling the batch path, and
+    // it had no row before this one.
+    let harness = TestDaemon::with_fakes(
+        "hello",
+        Fakes {
+            eager: true,
+            ..Fakes::default()
+        },
+        |_| {},
+    );
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            ctl.press();
+            ctl.expect_state("recording").await;
+            tokio::time::sleep(Duration::from_millis(FLOOR_MS)).await;
+            ctl.release();
+            ctl.expect_state("idle").await;
+        })
+        .await;
+
+    assert!(
+        !ctl.transcription_calls().is_empty(),
+        "the eager path still asks the engine for the tail"
+    );
+    assert_eq!(ctl.typed(), vec!["hello".to_string()]);
 }
