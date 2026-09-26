@@ -266,6 +266,24 @@ fn acquire_instance_lock(runtime_dir: &std::path::Path) -> Result<Pidlock> {
     ))
 }
 
+/// Return heap memory freed by a model unload to the kernel.
+///
+/// glibc keeps freed heap memory for reuse rather than giving it back, so an
+/// on-demand model left its full footprint resident after it was dropped.
+/// Measured with on-demand Parakeet on a CPU build: 1976 MB resident after two
+/// transcriptions, 52 MB after trimming. Memory a GPU runtime keeps for the
+/// life of the process (ROCm/MIGraphX libraries and staging buffers) is not
+/// heap and is unaffected; only a separate transcription process frees that,
+/// which today is Whisper's `gpu_isolation`.
+fn release_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim only releases free heap pages; it has no
+    // preconditions and does not touch live allocations.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 /// Remove PID file on shutdown
 fn cleanup_pid_file(path: &PathBuf) {
     if path.exists() {
@@ -3056,6 +3074,19 @@ impl Daemon {
 
     /// Handle transcription completion (called when transcription_task completes)
     async fn handle_transcription_result(
+        &mut self,
+        state: &mut State,
+        result: std::result::Result<TranscriptionResult, tokio::task::JoinError>,
+    ) {
+        self.handle_transcription_result_inner(state, result).await;
+        // The inner handler owns the last reference to an on-demand
+        // transcriber, so by here the model has been dropped.
+        if self.config.on_demand_loading() {
+            release_freed_memory();
+        }
+    }
+
+    async fn handle_transcription_result_inner(
         &mut self,
         state: &mut State,
         result: std::result::Result<TranscriptionResult, tokio::task::JoinError>,
