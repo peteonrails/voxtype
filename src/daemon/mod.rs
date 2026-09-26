@@ -230,6 +230,27 @@ fn write_meeting_state_file(path: &PathBuf, state: &str, meeting_id: Option<&str
 /// Result type for transcription task
 type TranscriptionResult = std::result::Result<String, crate::error::TranscribeError>;
 
+/// The state a live recording owns: what is capturing, what is streaming, and
+/// what is draining.
+///
+/// These five were loop locals threaded through six methods as separate
+/// `&mut Option<…>` parameters, which is why the three recording-start blocks
+/// could not share a helper: each had to pass the whole set. One struct now
+/// holds them, so a helper can take `&mut LiveState` instead.
+#[derive(Default)]
+struct LiveState {
+    /// The capture for this recording, batch or streaming.
+    audio_capture: Option<Box<dyn AudioCapture>>,
+    /// The streaming backend's handle, while one is running.
+    streaming_handle: Option<StreamHandle>,
+    /// The accumulating streaming session, while one is running.
+    streaming_session: Option<StreamingSession>,
+    /// The output chain a streaming session types through.
+    streaming_chain: Option<Vec<Box<dyn TextOutput>>>,
+    /// A transcriber cached for the eager chunk pipeline.
+    eager_transcriber: Option<Arc<dyn Transcriber>>,
+}
+
 /// Main daemon that orchestrates all components
 pub struct Daemon {
     config: Config,
@@ -636,10 +657,7 @@ impl Daemon {
     async fn try_start_streaming(
         &mut self,
         state: &mut State,
-        audio_capture: &mut Option<Box<dyn AudioCapture>>,
-        streaming_handle: &mut Option<StreamHandle>,
-        streaming_session: &mut Option<StreamingSession>,
-        streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
+        live: &mut LiveState,
         model_override: Option<String>,
         track_silence: bool,
     ) -> bool {
@@ -682,10 +700,10 @@ impl Daemon {
         let output_override = self.paths.read_output_mode_override();
         let file_output_path = self.resolve_file_output_path(&output_override, None);
 
-        *audio_capture = Some(capture);
-        *streaming_handle = Some(handle);
-        *streaming_session = Some(StreamingSession::new());
-        *streaming_chain = Some(self.deps.create_output_chain(&self.config.output));
+        live.audio_capture = Some(capture);
+        live.streaming_handle = Some(handle);
+        live.streaming_session = Some(StreamingSession::new());
+        live.streaming_chain = Some(self.deps.create_output_chain(&self.config.output));
         *state = State::Streaming {
             started_at: std::time::Instant::now(),
             model_override,
@@ -748,14 +766,7 @@ impl Daemon {
     /// keybinding) and the silence-timeout auto-stop, which need identical
     /// per-state-variant stop behavior; the only difference between them is
     /// *why* the stop fired, not what happens next.
-    async fn stop_active_recording(
-        &mut self,
-        state: &mut State,
-        audio_capture: &mut Option<Box<dyn AudioCapture>>,
-        streaming_session: &mut Option<StreamingSession>,
-        streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
-        eager_transcriber: &mut Option<Arc<dyn Transcriber>>,
-    ) {
+    async fn stop_active_recording(&mut self, state: &mut State, live: &mut LiveState) {
         // Notify an external-trigger caller that this session is ending,
         // regardless of why (stop, silence timeout, hard timeout) — it may
         // not be the one that decided to stop it — and disarm silence
@@ -785,7 +796,7 @@ impl Daemon {
             } else {
                 tracing::info!("Stopping streaming session; closing capture and disowning session");
             }
-            self.stop_streaming_capture(audio_capture).await;
+            self.stop_streaming_capture(&mut *live).await;
             if !file_output {
                 // Drop the typing surface synchronously so any
                 // Final/Partial events the backend emits while
@@ -793,13 +804,13 @@ impl Daemon {
                 // arm with `streaming_session = None` and get
                 // discarded instead of typed into whatever window
                 // has focus by then.
-                *streaming_session = None;
-                *streaming_chain = None;
+                live.streaming_session = None;
+                live.streaming_chain = None;
             }
         } else if let State::Recording { model_override, .. } = &*state {
             let model_override = model_override.clone();
 
-            self.start_transcription_task(state, audio_capture, model_override)
+            self.start_transcription_task(state, live, model_override)
                 .await;
         } else if state.is_eager_recording() {
             // Handle eager recording stop via external trigger - extract model_override first
@@ -812,7 +823,7 @@ impl Daemon {
             tracing::info!("Eager recording stopped ({:.1}s)", duration.as_secs_f32());
 
             // Stop audio capture and get remaining samples
-            if let Some(mut capture) = audio_capture.take() {
+            if let Some(mut capture) = live.audio_capture.take() {
                 if let Ok(final_samples) = capture.stop().await {
                     if let State::EagerRecording {
                         accumulated_audio, ..
@@ -856,7 +867,7 @@ impl Daemon {
                 tracing::debug!("Eager recording produced empty result");
                 self.reset_to_idle(state).await;
             }
-            *eager_transcriber = None;
+            live.eager_transcriber = None;
         }
     }
 
@@ -901,28 +912,21 @@ impl Daemon {
     /// start the OSD silence pump so the visualizer stays alive during
     /// drain, and stop the mic. Leaves `streaming_session`/`_chain` for
     /// the caller to disown (or keep, to receive trailing finals).
-    async fn stop_streaming_capture(&mut self, audio_capture: &mut Option<Box<dyn AudioCapture>>) {
+    async fn stop_streaming_capture(&mut self, live: &mut LiveState) {
         self.cut_streaming_audio();
         self.start_streaming_drain_pump();
-        if let Some(mut c) = audio_capture.take() {
+        if let Some(mut c) = live.audio_capture.take() {
             let _ = c.stop().await;
         }
         self.restore_recording_media();
     }
 
-    async fn end_streaming(
-        &mut self,
-        state: &mut State,
-        audio_capture: &mut Option<Box<dyn AudioCapture>>,
-        streaming_handle: &mut Option<StreamHandle>,
-        streaming_session: &mut Option<StreamingSession>,
-        streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
-    ) {
-        if let Some(mut c) = audio_capture.take() {
+    async fn end_streaming(&mut self, state: &mut State, live: &mut LiveState) {
+        if let Some(mut c) = live.audio_capture.take() {
             let _ = c.stop().await;
         }
         self.restore_recording_media();
-        if let Some(h) = streaming_handle.take() {
+        if let Some(h) = live.streaming_handle.take() {
             // Don't error on join failure; the task may have already
             // completed. We drop events implicitly here.
             let _ = h.task.await;
@@ -949,15 +953,16 @@ impl Daemon {
             // send as Final, which would otherwise strand that text in
             // `partial` and write an empty file despite a correct
             // transcription. See `finalize_pending_partial`.
-            if let Some(s) = streaming_session.as_mut() {
+            if let Some(s) = live.streaming_session.as_mut() {
                 s.finalize_pending_partial();
             }
-            let final_text = streaming_session
+            let final_text = live
+                .streaming_session
                 .as_ref()
                 .map(|s| s.finalized_text().to_string())
                 .unwrap_or_default();
-            *streaming_session = None;
-            *streaming_chain = None;
+            live.streaming_session = None;
+            live.streaming_chain = None;
 
             // The session accumulated raw engine output (the event pump's
             // file_output branches deliberately skip per-segment
@@ -990,8 +995,8 @@ impl Daemon {
             return;
         }
 
-        *streaming_session = None;
-        *streaming_chain = None;
+        live.streaming_session = None;
+        live.streaming_chain = None;
 
         self.play_feedback(SoundEvent::TranscriptionComplete);
 
@@ -1012,32 +1017,29 @@ impl Daemon {
     async fn cancel_streaming_to_idle(
         &mut self,
         state: &mut State,
-        audio_capture: &mut Option<Box<dyn AudioCapture>>,
-        streaming_handle: &mut Option<StreamHandle>,
-        streaming_session: &mut Option<StreamingSession>,
-        streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
+        live: &mut LiveState,
         notification_body: &str,
     ) {
-        let backend_task = streaming_handle.take().map(|h| {
+        let backend_task = live.streaming_handle.take().map(|h| {
             let _ = h.cancel.send(());
             h.task
         });
         self.cut_streaming_audio();
-        if let Some(mut c) = audio_capture.take() {
+        if let Some(mut c) = live.audio_capture.take() {
             let _ = c.stop().await;
         }
         self.restore_recording_media();
         if let Some(task) = backend_task {
             let _ = task.await;
         }
-        if let Some(s) = streaming_session.as_mut() {
+        if let Some(s) = live.streaming_session.as_mut() {
             if let Err(e) = s.rewind().await {
                 tracing::warn!("Streaming rewind failed: {}", e);
             }
         }
         self.stop_streaming_drain_pump();
-        *streaming_session = None;
-        *streaming_chain = None;
+        live.streaming_session = None;
+        live.streaming_chain = None;
 
         // A cancelled streaming session is still an ended session, so the
         // external stop hook has to run for it.
@@ -1902,7 +1904,7 @@ impl Daemon {
     async fn start_transcription_task(
         &mut self,
         state: &mut State,
-        audio_capture: &mut Option<Box<dyn AudioCapture>>,
+        live: &mut LiveState,
         model_override: Option<String>,
     ) -> bool {
         let duration = state.recording_duration().unwrap_or_default();
@@ -1913,7 +1915,7 @@ impl Daemon {
 
         // Stop recording before waiting on model loading or doing any
         // transcription work, then restore media immediately.
-        if let Some(mut capture) = audio_capture.take() {
+        if let Some(mut capture) = live.audio_capture.take() {
             let stop_result = capture.stop().await;
             self.restore_recording_media();
 
@@ -2721,8 +2723,10 @@ impl Daemon {
         // Current state
         let mut state = State::Idle;
 
-        // Audio capture (created fresh for each recording)
-        let mut audio_capture: Option<Box<dyn AudioCapture>> = None;
+        // The capture, streaming handle and session, and the eager transcriber
+        // for the recording in flight: one bundle, because every recording path
+        // hands the whole set around.
+        let mut live = LiveState::default();
 
         // Recording timeout
         let max_duration = Duration::from_secs(self.config.audio.max_duration_secs as u64);
@@ -2744,13 +2748,6 @@ impl Daemon {
         self.update_state("idle");
 
         // Main event loop
-        // Cached transcriber for eager chunk processing during recording
-        let mut eager_transcriber: Option<Arc<dyn Transcriber>> = None;
-
-        // Streaming session locals (Some only while State::Streaming).
-        let mut streaming_handle: Option<StreamHandle> = None;
-        let mut streaming_session: Option<StreamingSession> = None;
-        let mut streaming_chain: Option<Vec<Box<dyn TextOutput>>> = None;
 
         loop {
             tokio::select! {
@@ -2840,10 +2837,7 @@ impl Daemon {
                                 // doesn't support streaming or setup fails.
                                 if self.try_start_streaming(
                                     &mut state,
-                                    &mut audio_capture,
-                                    &mut streaming_handle,
-                                    &mut streaming_session,
-                                    &mut streaming_chain,
+                                    &mut live,
                                     model_override.clone(),
                                     false,
                                 ).await {
@@ -2854,7 +2848,7 @@ impl Daemon {
                                     match self.start_recording_capture(false).await {
                                         Ok(capture) => {
                                             tracing::debug!("Audio capture started successfully");
-                                            audio_capture = Some(capture);
+                                            live.audio_capture = Some(capture);
 
                                             // Use EagerRecording state if eager_processing is enabled
                                             if self.config.whisper.eager_processing {
@@ -2899,19 +2893,19 @@ impl Daemon {
                             tracing::debug!("Received HotkeyEvent::Released (push-to-talk), state.is_recording() = {}", state.is_recording());
                             if state.is_streaming() {
                                 tracing::debug!("Streaming push-to-talk released; closing audio capture and disowning session");
-                                self.stop_streaming_capture(&mut audio_capture).await;
+                                self.stop_streaming_capture(&mut live).await;
                                 // Drop session/chain so the backend's
                                 // post-stop flush emission is dropped at
                                 // the event pump instead of typed.
                                 // Matches the SIGUSR2 stop path.
-                                streaming_session = None;
-                                streaming_chain = None;
+                                live.streaming_session = None;
+                                live.streaming_chain = None;
                             } else if let State::Recording { model_override, .. } = &state {
                                 let model_override = model_override.clone();
 
                                 self.start_transcription_task(
                                     &mut state,
-                                    &mut audio_capture,
+                                    &mut live,
                                     model_override,
                                 ).await;
                             } else if state.is_eager_recording() {
@@ -2925,7 +2919,7 @@ impl Daemon {
                                 tracing::info!("Eager recording stopped ({:.1}s)", duration.as_secs_f32());
 
                                 // Stop audio capture and get remaining samples
-                                if let Some(mut capture) = audio_capture.take() {
+                                if let Some(mut capture) = live.audio_capture.take() {
                                     if let Ok(final_samples) = capture.stop().await {
                                         // Add final samples to accumulated audio
                                         if let State::EagerRecording { accumulated_audio, .. } = &mut state {
@@ -2961,7 +2955,7 @@ impl Daemon {
                                     tracing::debug!("Eager recording produced empty result");
                                     self.reset_to_idle(&mut state).await;
                                 }
-                                eager_transcriber = None;
+                                live.eager_transcriber = None;
                             }
                         }
 
@@ -3040,10 +3034,7 @@ impl Daemon {
 
                                 if self.try_start_streaming(
                                     &mut state,
-                                    &mut audio_capture,
-                                    &mut streaming_handle,
-                                    &mut streaming_session,
-                                    &mut streaming_chain,
+                                    &mut live,
                                     model_override.clone(),
                                     false,
                                 ).await {
@@ -3051,7 +3042,7 @@ impl Daemon {
                                 } else {
                                     match self.start_recording_capture(false).await {
                                         Ok(capture) => {
-                                            audio_capture = Some(capture);
+                                            live.audio_capture = Some(capture);
 
                                             // Use EagerRecording state if eager_processing is enabled
                                             if self.config.whisper.eager_processing {
@@ -3091,14 +3082,14 @@ impl Daemon {
                                 }
                             } else if state.is_streaming() {
                                 tracing::info!("Toggle stop while streaming; closing capture");
-                                self.stop_streaming_capture(&mut audio_capture).await;
+                                self.stop_streaming_capture(&mut live).await;
                             } else if let State::Recording { model_override: current_model_override, .. } = &state {
                                 let model_override = current_model_override.clone();
 
                                 // Stop recording and start transcription
                                 self.start_transcription_task(
                                     &mut state,
-                                    &mut audio_capture,
+                                    &mut live,
                                     model_override,
                                 ).await;
                             } else if state.is_eager_recording() {
@@ -3112,7 +3103,7 @@ impl Daemon {
                                 tracing::info!("Eager recording stopped ({:.1}s)", duration.as_secs_f32());
 
                                 // Stop audio capture and get remaining samples
-                                if let Some(mut capture) = audio_capture.take() {
+                                if let Some(mut capture) = live.audio_capture.take() {
                                     if let Ok(final_samples) = capture.stop().await {
                                         if let State::EagerRecording { accumulated_audio, .. } = &mut state {
                                             accumulated_audio.extend(final_samples);
@@ -3146,7 +3137,7 @@ impl Daemon {
                                     tracing::debug!("Eager recording produced empty result");
                                     self.reset_to_idle(&mut state).await;
                                 }
-                                eager_transcriber = None;
+                                live.eager_transcriber = None;
                             }
                         }
 
@@ -3163,10 +3154,7 @@ impl Daemon {
                                 tracing::info!("Streaming cancelled via hotkey");
                                 self.cancel_streaming_to_idle(
                                     &mut state,
-                                    &mut audio_capture,
-                                    &mut streaming_handle,
-                                    &mut streaming_session,
-                                    &mut streaming_chain,
+                                    &mut live,
                                     "Recording discarded",
                                 ).await;
                             } else if state.is_recording() {
@@ -3178,7 +3166,7 @@ impl Daemon {
                                 self.end_external_session(state.is_recording()).await;
 
                                 // Stop recording and discard audio
-                                if let Some(mut capture) = audio_capture.take() {
+                                if let Some(mut capture) = live.audio_capture.take() {
                                     let _ = capture.stop().await;
                                 }
                                 self.restore_recording_media();
@@ -3224,7 +3212,7 @@ impl Daemon {
                         tracing::info!("Recording cancelled");
 
                         // Stop recording and discard audio
-                        if let Some(mut capture) = audio_capture.take() {
+                        if let Some(mut capture) = live.audio_capture.take() {
                             let _ = capture.stop().await;
                         }
                         self.restore_recording_media();
@@ -3256,7 +3244,7 @@ impl Daemon {
                         // A cancelled external-trigger session is still an
                         // ended session: tell the caller and disarm tracking.
                         self.close_cancelled_cycle(&mut state, true).await;
-                        eager_transcriber = None;
+                        live.eager_transcriber = None;
 
                         end_recording_notification("Cancelled", "Recording discarded", &self.config.output.notification, self.config.engine).await;
 
@@ -3264,13 +3252,13 @@ impl Daemon {
                     }
 
                     // Populate eager transcriber cache on first poll
-                    if eager_transcriber.is_none() && state.is_eager_recording() {
+                    if live.eager_transcriber.is_none() && state.is_eager_recording() {
                         let model_override = match &state {
                             State::EagerRecording { model_override, .. } => model_override.as_deref(),
                             _ => None,
                         };
-                        eager_transcriber = self.transcriber_preloaded.clone();
-                        if eager_transcriber.is_none()
+                        live.eager_transcriber = self.transcriber_preloaded.clone();
+                        if live.eager_transcriber.is_none()
                             && self.config.engine
                                 == crate::config::TranscriptionEngine::Whisper
                         {
@@ -3279,7 +3267,7 @@ impl Daemon {
                                 match mm.get_prepared_transcriber(model_override) {
                                     Ok(t) => {
                                         tracing::debug!("Created eager transcriber for chunk dispatch");
-                                        eager_transcriber = Some(t);
+                                        live.eager_transcriber = Some(t);
                                     }
                                     Err(e) => {
                                         tracing::warn!("Failed to create eager transcriber: {}", e);
@@ -3297,14 +3285,14 @@ impl Daemon {
                         ..
                     } = &mut state
                     {
-                        if let Some(ref mut capture) = audio_capture {
+                        if let Some(ref mut capture) = live.audio_capture {
                             let new_samples = capture.get_samples().await;
                             if !new_samples.is_empty() {
                                 accumulated_audio.extend(new_samples);
                             }
                         }
 
-                        if let Some(ref transcriber) = eager_transcriber {
+                        if let Some(ref transcriber) = live.eager_transcriber {
                             let transcriber = transcriber.clone();
                             self.process_eager_chunks(
                                 accumulated_audio,
@@ -3342,10 +3330,7 @@ impl Daemon {
                                     );
                                     self.stop_active_recording(
                                         &mut state,
-                                        &mut audio_capture,
-                                        &mut streaming_session,
-                                        &mut streaming_chain,
-                                        &mut eager_transcriber,
+                                        &mut live,
                                     )
                                     .await;
                                     continue;
@@ -3358,7 +3343,7 @@ impl Daemon {
                     // already gone so we don't re-fire cleanup on every 100ms
                     // tick while the streaming session drains server-side
                     // (state stays Streaming until Ended arrives).
-                    let timeout_fired = audio_capture.is_some()
+                    let timeout_fired = live.audio_capture.is_some()
                         && state.recording_duration().is_some_and(|d| d > max_duration);
                     if timeout_fired {
                         // A hard-capped session is ending on voxtype's own
@@ -3376,7 +3361,7 @@ impl Daemon {
                                 "Recording timeout ({:.0}s limit) while streaming; closing capture",
                                 max_duration.as_secs_f32()
                             );
-                            self.stop_streaming_capture(&mut audio_capture).await;
+                            self.stop_streaming_capture(&mut live).await;
                             continue;
                         }
 
@@ -3403,7 +3388,7 @@ impl Daemon {
                         };
 
                         if state.is_eager_recording() {
-                            if let Some(mut capture) = audio_capture.take() {
+                            if let Some(mut capture) = live.audio_capture.take() {
                                 if let Ok(final_samples) = capture.stop().await {
                                     if let State::EagerRecording { accumulated_audio, .. } = &mut state {
                                         accumulated_audio.extend(final_samples);
@@ -3432,7 +3417,7 @@ impl Daemon {
                                 tracing::debug!("Eager recording timeout produced empty result");
                                 self.reset_to_idle(&mut state).await;
                             }
-                            eager_transcriber = None;
+                            live.eager_transcriber = None;
                         } else {
                             for (_, task) in self.eager_chunk_tasks.drain(..) {
                                 task.abort();
@@ -3440,7 +3425,7 @@ impl Daemon {
 
                             self.start_transcription_task(
                                 &mut state,
-                                &mut audio_capture,
+                                &mut live,
                                 model_override,
                             ).await;
                         }
@@ -3527,10 +3512,7 @@ impl Daemon {
 
                         if self.try_start_streaming(
                             &mut state,
-                            &mut audio_capture,
-                            &mut streaming_handle,
-                            &mut streaming_session,
-                            &mut streaming_chain,
+                            &mut live,
                             model_override.clone(),
                             true,
                         ).await {
@@ -3538,7 +3520,7 @@ impl Daemon {
                         } else {
                             match self.start_recording_capture(true).await {
                                 Ok(capture) => {
-                                    audio_capture = Some(capture);
+                                    live.audio_capture = Some(capture);
 
                                     // Use EagerRecording state if eager_processing is enabled
                                     if self.config.whisper.eager_processing {
@@ -3593,10 +3575,7 @@ impl Daemon {
                     tracing::debug!("Received SIGUSR2 (stop recording)");
                     self.stop_active_recording(
                         &mut state,
-                        &mut audio_capture,
-                        &mut streaming_session,
-                        &mut streaming_chain,
-                        &mut eager_transcriber,
+                        &mut live,
                     ).await;
                 }
 
@@ -3613,11 +3592,11 @@ impl Daemon {
 
                 // Streaming event pump (active only while State::Streaming).
                 event = async {
-                    match streaming_handle.as_mut() {
+                    match live.streaming_handle.as_mut() {
                         Some(h) => h.events.recv().await,
                         None => std::future::pending().await,
                     }
-                }, if state.is_streaming() && streaming_handle.is_some() => {
+                }, if state.is_streaming() && live.streaming_handle.is_some() => {
                     // File-output sessions (`--file=path`) accumulate into
                     // finalized_text via the `_silent` session methods
                     // instead of typing through `chain` — there's no
@@ -3630,10 +3609,10 @@ impl Daemon {
                     );
                     match event {
                         Some(StreamingEvent::Partial { text, .. }) => {
-                            if let Some(s) = streaming_session.as_mut() {
+                            if let Some(s) = live.streaming_session.as_mut() {
                                 if file_output {
                                     s.observe_partial_delta(&text);
-                                } else if let Some(chain) = streaming_chain.as_ref() {
+                                } else if let Some(chain) = live.streaming_chain.as_ref() {
                                     if let Err(e) = s.type_partial_delta(
                                         chain,
                                         text,
@@ -3649,14 +3628,14 @@ impl Daemon {
                             }
                         }
                         Some(StreamingEvent::Final { text, .. }) => {
-                            if let Some(s) = streaming_session.as_mut() {
+                            if let Some(s) = live.streaming_session.as_mut() {
                                 if file_output {
                                     // Raw on purpose: file-mode text is
                                     // processed once, whole, at write time
                                     // in end_streaming — that also catches
                                     // matches spanning segment boundaries.
                                     s.commit_segment_silent(&text);
-                                } else if let Some(chain) = streaming_chain.as_ref() {
+                                } else if let Some(chain) = live.streaming_chain.as_ref() {
                                     if let Err(e) = s.commit_segment(
                                         chain,
                                         &text,
@@ -3676,11 +3655,11 @@ impl Daemon {
                             }
                         }
                         Some(StreamingEvent::Replace { backspace, text, .. }) => {
-                            if let Some(s) = streaming_session.as_mut() {
+                            if let Some(s) = live.streaming_session.as_mut() {
                                 if file_output {
                                     // Raw on purpose — see the Final arm.
                                     s.replace_and_commit_silent(backspace, &text);
-                                } else if let Some(chain) = streaming_chain.as_ref() {
+                                } else if let Some(chain) = live.streaming_chain.as_ref() {
                                     if let Err(e) = s.replace_and_commit(
                                         chain,
                                         backspace,
@@ -3710,19 +3689,13 @@ impl Daemon {
                             ).await;
                             self.end_streaming(
                                 &mut state,
-                                &mut audio_capture,
-                                &mut streaming_handle,
-                                &mut streaming_session,
-                                &mut streaming_chain,
+                                &mut live,
                             ).await;
                         }
                         Some(StreamingEvent::Ended) | None => {
                             self.end_streaming(
                                 &mut state,
-                                &mut audio_capture,
-                                &mut streaming_handle,
-                                &mut streaming_session,
-                                &mut streaming_chain,
+                                &mut live,
                             ).await;
                         }
                     }
@@ -3936,12 +3909,12 @@ impl Daemon {
 
         // Stop any active dictation capture before shutting down and always
         // restore media that this daemon suppressed for the session.
-        let streaming_task = streaming_handle.take().map(|handle| {
+        let streaming_task = live.streaming_handle.take().map(|handle| {
             let _ = handle.cancel.send(());
             handle.task
         });
         self.cut_streaming_audio();
-        if let Some(mut capture) = audio_capture.take() {
+        if let Some(mut capture) = live.audio_capture.take() {
             let _ = capture.stop().await;
         }
         self.restore_recording_media();
