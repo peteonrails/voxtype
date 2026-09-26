@@ -7,7 +7,6 @@ Tests parallel transcription of audio chunks during recording:
 #    [whisper]
 #    eager_processing = true
 #    eager_chunk_secs = 3.0  # Use short chunks for visible testing
-#    eager_overlap_secs = 0.5
 
 # 2. Restart daemon
 systemctl --user restart voxtype
@@ -24,8 +23,11 @@ journalctl --user -u voxtype --since "1 minute ago" | grep -iE "eager|chunk"
 #           "Chunk 0 completed"
 #           "Combined eager chunks"
 
-# 5. Verify combined output is coherent (no obvious word duplication)
-# The final transcription should read naturally
+# 5. Verify combined output is coherent: no word duplicated where chunks
+# meet, and a word said twice on purpose ("that that") is kept twice
+
+# 5b. With [vad] enabled, record 5s of silence: expect no output and a
+# "No speech detected ... discarding eager transcription" debug line
 
 # 6. Test cancellation during eager recording
 voxtype record start

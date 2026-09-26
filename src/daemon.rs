@@ -1039,7 +1039,7 @@ pub struct Daemon {
         tokio::task::JoinHandle<std::result::Result<String, crate::error::TranscribeError>>,
     )>,
     // Voice Activity Detection (filters silence-only recordings)
-    vad: Option<Box<dyn crate::vad::VoiceActivityDetector>>,
+    vad: Option<Arc<dyn crate::vad::VoiceActivityDetector>>,
     // Meeting mode daemon (optional, created when meeting starts)
     meeting_daemon: Option<MeetingDaemon>,
     // Meeting state file path
@@ -1124,7 +1124,7 @@ impl Daemon {
                     config.vad.threshold,
                     config.vad.min_speech_duration_ms
                 );
-                Some(vad)
+                Some(Arc::from(vad))
             }
             Ok(None) => None,
             Err(e) => {
@@ -2873,7 +2873,23 @@ impl Daemon {
             chunk_audio.len() as f32 / 16000.0
         );
 
-        let task = tokio::task::spawn_blocking(move || transcriber.transcribe(&chunk_audio));
+        // A chunk with no speech is skipped rather than transcribed: engines
+        // like Whisper invent text for silence, and a silent chunk mid-way
+        // through a recording would otherwise land in the output.
+        let vad = self.vad.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            if let Some(vad) = vad {
+                match vad.detect(&chunk_audio) {
+                    Ok(result) if !result.has_speech => {
+                        tracing::debug!("Chunk {} has no speech, skipping", chunk_index);
+                        return Ok(String::new());
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("VAD failed on chunk {}: {}", chunk_index, e),
+                }
+            }
+            transcriber.transcribe(&chunk_audio)
+        });
 
         self.eager_chunk_tasks.push((chunk_index, task));
     }
@@ -2888,20 +2904,15 @@ impl Daemon {
         transcriber: &Arc<dyn Transcriber>,
     ) -> usize {
         let eager_config = EagerConfig::from_whisper_config(&self.config.whisper);
-        let complete_chunks = eager::count_complete_chunks(accumulated_audio.len(), &eager_config);
+        let boundaries = eager::chunk_boundaries(accumulated_audio, &eager_config);
 
         let mut spawned = 0;
-        while *chunks_sent < complete_chunks {
-            if let Some(chunk_audio) =
-                eager::extract_chunk(accumulated_audio, *chunks_sent, &eager_config)
-            {
-                self.spawn_chunk_transcription(*chunks_sent, chunk_audio, transcriber.clone());
-                *chunks_sent += 1;
-                *tasks_in_flight += 1;
-                spawned += 1;
-            } else {
-                break;
-            }
+        while let Some((start, end)) = eager::chunk_range(&boundaries, *chunks_sent) {
+            let chunk_audio = accumulated_audio[start..end].to_vec();
+            self.spawn_chunk_transcription(*chunks_sent, chunk_audio, transcriber.clone());
+            *chunks_sent += 1;
+            *tasks_in_flight += 1;
+            spawned += 1;
         }
 
         spawned
@@ -3003,48 +3014,76 @@ impl Daemon {
             chunk_results.len()
         );
 
+        // Whole-recording VAD, the same gate the batch path applies. It runs
+        // alongside the in-flight chunks and the tail so it adds no wait.
+        let vad_task = self.vad.clone().map(|vad| {
+            let audio = accumulated_audio.clone();
+            tokio::task::spawn_blocking(move || vad.detect(&audio))
+        });
+
         // Wait for any in-flight chunk tasks
         let mut waited_results = self.wait_for_chunk_tasks().await;
         chunk_results.append(&mut waited_results);
 
-        // Transcribe the tail (audio after last complete chunk)
+        // Transcribe the tail (audio after last complete chunk). Chunk
+        // boundaries depend only on the audio before them, so recomputing
+        // them over the final audio reproduces the bounds of every chunk sent.
         let eager_config = EagerConfig::from_whisper_config(&self.config.whisper);
+        let boundaries = eager::chunk_boundaries(&accumulated_audio, &eager_config);
         let chunks_sent = chunk_results
             .iter()
             .map(|r| r.chunk_index)
             .max()
             .map(|i| i + 1)
             .unwrap_or(0);
-        let tail_start = chunks_sent * eager_config.stride_samples();
+        let tail_start = eager::tail_start(&boundaries, chunks_sent);
 
-        if tail_start < accumulated_audio.len() {
+        let tail_task = (accumulated_audio.len().saturating_sub(tail_start) >= 4800).then(|| {
             let tail_audio = accumulated_audio[tail_start..].to_vec();
-            let tail_duration = tail_audio.len() as f32 / 16000.0;
+            tracing::debug!(
+                "Transcribing tail audio: {:.1}s (from sample {})",
+                tail_audio.len() as f32 / 16000.0,
+                tail_start
+            );
+            let tail_transcriber = transcriber.clone();
+            tokio::task::spawn_blocking(move || tail_transcriber.transcribe(&tail_audio))
+        });
 
-            if tail_duration >= 0.3 {
-                tracing::debug!(
-                    "Transcribing tail audio: {:.1}s (from sample {})",
-                    tail_duration,
-                    tail_start
-                );
+        if let Some(task) = vad_task {
+            match task.await {
+                Ok(Ok(result)) if !result.has_speech => {
+                    tracing::debug!(
+                        "No speech detected (speech={:.1}%, rms={:.4}), discarding eager transcription",
+                        result.speech_ratio * 100.0,
+                        result.rms_energy
+                    );
+                    if let Some(task) = tail_task {
+                        task.abort();
+                    }
+                    self.play_feedback(SoundEvent::Cancelled);
+                    self.publish_empty_outcome();
+                    return None;
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => tracing::warn!("VAD failed, proceeding anyway: {}", e),
+                Err(e) => tracing::warn!("VAD task failed, proceeding anyway: {}", e),
+            }
+        }
 
-                let tail_transcriber = transcriber.clone();
-                match tokio::task::spawn_blocking(move || tail_transcriber.transcribe(&tail_audio))
-                    .await
-                {
-                    Ok(Ok(text)) => {
-                        tracing::debug!("Tail transcription: {:?}", text);
-                        chunk_results.push(ChunkResult {
-                            text,
-                            chunk_index: chunks_sent,
-                        });
-                    }
-                    Ok(Err(e)) => {
-                        tracing::warn!("Tail transcription failed: {}", e);
-                    }
-                    Err(e) => {
-                        tracing::warn!("Tail transcription task panicked: {}", e);
-                    }
+        if let Some(task) = tail_task {
+            match task.await {
+                Ok(Ok(text)) => {
+                    tracing::debug!("Tail transcription: {:?}", text);
+                    chunk_results.push(ChunkResult {
+                        text,
+                        chunk_index: chunks_sent,
+                    });
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("Tail transcription failed: {}", e);
+                }
+                Err(e) => {
+                    tracing::warn!("Tail transcription task panicked: {}", e);
                 }
             }
         }

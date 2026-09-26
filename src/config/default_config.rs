@@ -168,11 +168,10 @@ translate = false
 # Reduces perceived latency on slower machines by processing audio in parallel.
 # eager_processing = false
 #
-# Duration of each audio chunk in seconds (default: 5.0)
+# Nominal duration of each audio chunk in seconds (default: 5.0). Each chunk
+# ends at the quietest point in the last 1.5s before this length, so cuts fall
+# between words and chunks never overlap.
 # eager_chunk_secs = 5.0
-#
-# Overlap between chunks in seconds (helps catch words at boundaries, default: 0.5)
-# eager_overlap_secs = 0.5
 
 # --- Remote backend settings (used when backend = "remote") ---
 #

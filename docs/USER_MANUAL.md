@@ -1493,11 +1493,10 @@ With eager processing enabled:
 
 1. Audio accumulates as you record
 2. Every `eager_chunk_secs` (default: 5 seconds), a chunk is extracted and sent for transcription
-3. Chunks overlap by `eager_overlap_secs` (default: 0.5 seconds) to avoid missing words at boundaries
-4. When you stop recording, all chunk results are combined and deduplicated
-5. The final text is output
-
-The overlap region helps catch words that might be split across chunk boundaries. The deduplication logic matches overlapping text to produce a clean result.
+3. Each chunk ends at the quietest point in the last 1.5 seconds before that length, so the cut lands in a pause between words. Chunks never overlap
+4. A chunk with no speech is skipped, and a recording with no speech produces no output, when voice activity detection is enabled
+5. When you stop recording, the remaining audio is transcribed and all chunk results are joined in order
+6. The final text is output
 
 ### Configuration
 
@@ -1512,9 +1511,6 @@ eager_processing = true
 
 # Chunk duration (default: 5.0 seconds)
 eager_chunk_secs = 5.0
-
-# Overlap between chunks (default: 0.5 seconds)
-eager_overlap_secs = 0.5
 ```
 
 Or via CLI flags:

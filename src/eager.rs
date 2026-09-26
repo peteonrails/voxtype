@@ -4,20 +4,32 @@
 //! with continued recording. This reduces perceived latency on slower machines.
 //!
 //! The basic approach:
-//! 1. During recording, split audio into fixed-size chunks with small overlaps
+//! 1. During recording, cut the audio into consecutive, non-overlapping chunks.
+//!    Each cut lands on the quietest point near the nominal chunk length, so
+//!    it falls between words rather than through one.
 //! 2. As each chunk is ready, spawn a transcription task for it
 //! 3. Continue recording while transcription runs in parallel
-//! 4. At the end, combine all chunk results, deduplicating at boundaries
+//! 4. At the end, transcribe the tail and join the chunk texts in order
+//!
+//! Chunks used to overlap and the joined text was deduplicated at each
+//! boundary by matching words. That both missed duplicates (punctuation made
+//! "dictation." and "dictation" differ) and could not tell a duplicate from a
+//! word the speaker really said twice. Disjoint chunks need no deduplication.
 
 use crate::state::ChunkResult;
+
+/// Length of the energy frames used to find a quiet cut point (20ms at 16kHz).
+const FRAME_SAMPLES: usize = 320;
+
+/// Longest stretch before the nominal boundary searched for a quiet cut.
+const MAX_SEARCH_SECS: f32 = 1.5;
 
 /// Configuration for eager processing
 #[derive(Debug, Clone)]
 pub struct EagerConfig {
-    /// Duration of each chunk in seconds
+    /// Nominal duration of each chunk in seconds. Actual chunks end at the
+    /// quietest point within the search window before this length.
     pub chunk_secs: f32,
-    /// Overlap between adjacent chunks in seconds
-    pub overlap_secs: f32,
     /// Sample rate (assumed 16kHz for whisper)
     pub sample_rate: u32,
 }
@@ -27,401 +39,307 @@ impl EagerConfig {
     pub fn from_whisper_config(config: &crate::config::WhisperConfig) -> Self {
         Self {
             chunk_secs: config.eager_chunk_secs,
-            overlap_secs: config.eager_overlap_secs,
             sample_rate: 16000, // Whisper expects 16kHz
         }
     }
 
-    /// Get chunk size in samples
+    /// Get nominal chunk size in samples
     pub fn chunk_samples(&self) -> usize {
-        (self.chunk_secs * self.sample_rate as f32) as usize
+        ((self.chunk_secs * self.sample_rate as f32) as usize).max(FRAME_SAMPLES)
     }
 
-    /// Get overlap size in samples
-    pub fn overlap_samples(&self) -> usize {
-        (self.overlap_secs * self.sample_rate as f32) as usize
-    }
-
-    /// Get the stride between chunk starts (chunk - overlap)
-    pub fn stride_samples(&self) -> usize {
-        self.chunk_samples().saturating_sub(self.overlap_samples())
+    /// Samples before the nominal boundary searched for the quietest cut:
+    /// up to 1.5s, never more than half a chunk.
+    pub fn search_samples(&self) -> usize {
+        let max = (MAX_SEARCH_SECS * self.sample_rate as f32) as usize;
+        max.min(self.chunk_samples() / 2)
     }
 }
 
-/// Extract a chunk from accumulated audio for transcription.
-/// Returns None if there isn't enough audio for the requested chunk yet.
-///
-/// # Arguments
-/// * `accumulated` - All audio samples collected so far
-/// * `chunk_index` - Which chunk to extract (0-based)
-/// * `config` - Eager processing configuration
-///
-/// # Returns
-/// * `Some(Vec<f32>)` - The audio chunk to transcribe
-/// * `None` - Not enough audio yet for this chunk
-pub fn extract_chunk(
-    accumulated: &[f32],
-    chunk_index: usize,
-    config: &EagerConfig,
-) -> Option<Vec<f32>> {
-    let chunk_size = config.chunk_samples();
-    let stride = config.stride_samples();
-
-    // Calculate chunk boundaries
-    let start = chunk_index * stride;
-    let end = start + chunk_size;
-
-    // Check if we have enough samples
-    if end > accumulated.len() {
-        return None;
-    }
-
-    Some(accumulated[start..end].to_vec())
+/// Mean energy of each `FRAME_SAMPLES` frame in `audio[lo..hi]`, as
+/// `(frame_start, mean_square)`. A trailing partial frame is ignored.
+fn frame_energies(audio: &[f32], lo: usize, hi: usize) -> impl Iterator<Item = (usize, f32)> + '_ {
+    (lo..hi.saturating_sub(FRAME_SAMPLES - 1))
+        .step_by(FRAME_SAMPLES)
+        .map(move |start| {
+            let frame = &audio[start..start + FRAME_SAMPLES];
+            let energy = frame.iter().map(|s| s * s).sum::<f32>() / FRAME_SAMPLES as f32;
+            (start, energy)
+        })
 }
 
-/// Check how many complete chunks are available in the accumulated audio.
-/// A chunk is "complete" when we have enough samples to extract it plus
-/// the overlap for the next chunk (so we don't cut off mid-word).
-///
-/// # Arguments
-/// * `accumulated_len` - Number of samples accumulated so far
-/// * `config` - Eager processing configuration
-///
-/// # Returns
-/// Number of complete chunks available
-pub fn count_complete_chunks(accumulated_len: usize, config: &EagerConfig) -> usize {
-    let stride = config.stride_samples();
-    let chunk_size = config.chunk_samples();
+/// Frames in the quiet stretch a cut must sit in (120ms). A single quiet
+/// frame is not enough: the closure of a stop consonant ("dicta|tion") is
+/// near-silent for 30-80ms, and cutting there splits the word. A pause
+/// between words lasts longer.
+const QUIET_SPAN_FRAMES: usize = 6;
 
-    if accumulated_len < chunk_size {
-        return 0;
+/// The cut point inside `audio[lo..hi]`: the middle of its quietest
+/// `QUIET_SPAN_FRAMES`-frame stretch (fewer if the window is shorter). Ties
+/// go to the latest stretch so chunks stay as close to nominal length as the
+/// audio allows. Falls back to `hi` when the window holds no full frame.
+fn quietest_cut(audio: &[f32], lo: usize, hi: usize) -> usize {
+    let frames: Vec<(usize, f32)> = frame_energies(audio, lo, hi).collect();
+    if frames.is_empty() {
+        return hi;
     }
-
-    // Number of chunks where we have the full chunk + overlap for boundary handling
-    let available_after_first = accumulated_len.saturating_sub(chunk_size);
-    1 + available_after_first / stride
+    let span = QUIET_SPAN_FRAMES.min(frames.len());
+    // At most ~75 frames in a 1.5s window, so summing each stretch directly
+    // is cheap and avoids running-sum drift deciding ties.
+    let mut best = (0, f32::INFINITY);
+    for i in 0..=frames.len() - span {
+        let sum: f32 = frames[i..i + span].iter().map(|(_, e)| e).sum();
+        if sum <= best.1 {
+            best = (i, sum);
+        }
+    }
+    let first = frames[best.0].0;
+    let last = frames[best.0 + span - 1].0 + FRAME_SAMPLES;
+    (first + last) / 2
 }
 
-/// Combine transcription results from multiple chunks, handling duplicates
-/// at chunk boundaries.
+/// End positions of every complete chunk in `audio`. Chunk `k` covers
+/// `boundaries[k-1]..boundaries[k]` (chunk 0 starts at 0), so chunks are
+/// contiguous and never overlap.
+///
+/// A boundary depends only on the audio before it, so the result for a
+/// shorter prefix of the same recording is always a prefix of the result for
+/// the longer one. That lets the daemon recompute boundaries on every poll
+/// and trust that chunks it already sent keep the same bounds.
+pub fn chunk_boundaries(audio: &[f32], config: &EagerConfig) -> Vec<usize> {
+    let chunk = config.chunk_samples();
+    let search = config.search_samples();
+    let mut boundaries = Vec::new();
+    let mut start = 0;
+    while start + chunk <= audio.len() {
+        let nominal = start + chunk;
+        let cut = quietest_cut(audio, nominal - search, nominal);
+        boundaries.push(cut);
+        start = cut;
+    }
+    boundaries
+}
+
+/// Sample range of chunk `index`, or None if that chunk isn't complete yet.
+pub fn chunk_range(boundaries: &[usize], index: usize) -> Option<(usize, usize)> {
+    let end = *boundaries.get(index)?;
+    let start = if index == 0 { 0 } else { boundaries[index - 1] };
+    Some((start, end))
+}
+
+/// Where the tail begins once `chunks_sent` chunks have been transcribed.
+pub fn tail_start(boundaries: &[usize], chunks_sent: usize) -> usize {
+    match chunks_sent {
+        0 => 0,
+        n => boundaries.get(n - 1).copied().unwrap_or(0),
+    }
+}
+
+/// Join transcription results from multiple chunks in chunk order.
+///
+/// Chunks are disjoint, so every word belongs to exactly one chunk and the
+/// texts are simply concatenated. Empty chunks (silence, failures) are
+/// skipped without leaving a double space.
 ///
 /// # Arguments
 /// * `results` - Vector of chunk results (may be in any order)
 ///
 /// # Returns
-/// Combined transcription text with duplicates at boundaries removed
+/// Combined transcription text
 pub fn combine_chunk_results(mut results: Vec<ChunkResult>) -> String {
-    if results.is_empty() {
-        return String::new();
-    }
-
-    // Sort by chunk index to ensure correct order
     results.sort_by_key(|r| r.chunk_index);
-
-    if results.len() == 1 {
-        return results[0].text.clone();
-    }
-
-    let mut combined = String::new();
-
-    for (i, result) in results.iter().enumerate() {
-        if i == 0 {
-            // First chunk: use full text
-            combined = result.text.clone();
-        } else {
-            // Subsequent chunks: deduplicate at boundary
-            let new_text = deduplicate_boundary(&combined, &result.text);
-            if !new_text.is_empty() {
-                if !combined.is_empty() && !combined.ends_with(' ') && !new_text.starts_with(' ') {
-                    combined.push(' ');
-                }
-                combined.push_str(&new_text);
-            }
-        }
-    }
-
-    combined.trim().to_string()
-}
-
-/// Remove duplicate text at the boundary between previous and new transcription.
-///
-/// This uses a simple approach: look for the longest suffix of `previous` that
-/// matches a prefix of `new_text`, and return `new_text` with that prefix removed.
-///
-/// # Arguments
-/// * `previous` - Text transcribed so far (from earlier chunks)
-/// * `new_text` - Text from the new chunk
-///
-/// # Returns
-/// The portion of `new_text` that isn't a duplicate of `previous`
-fn deduplicate_boundary(previous: &str, new_text: &str) -> String {
-    let previous_words: Vec<&str> = previous.split_whitespace().collect();
-    let new_words: Vec<&str> = new_text.split_whitespace().collect();
-
-    if previous_words.is_empty() || new_words.is_empty() {
-        return new_text.to_string();
-    }
-
-    // Look for overlap: find the longest suffix of previous that matches
-    // a prefix of new_text
-    let max_overlap = previous_words.len().min(new_words.len());
-
-    let mut best_overlap = 0;
-    for overlap_len in 1..=max_overlap {
-        let prev_suffix = &previous_words[previous_words.len() - overlap_len..];
-        let new_prefix = &new_words[..overlap_len];
-
-        // Case-insensitive comparison for robustness
-        if prev_suffix
-            .iter()
-            .zip(new_prefix.iter())
-            .all(|(a, b)| a.eq_ignore_ascii_case(b))
-        {
-            best_overlap = overlap_len;
-        }
-    }
-
-    if best_overlap > 0 {
-        // Remove the overlapping prefix from new_text
-        new_words[best_overlap..].join(" ")
-    } else {
-        new_text.to_string()
-    }
+    results
+        .iter()
+        .map(|r| r.text.trim())
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const SR: usize = 16000;
+
     fn test_config() -> EagerConfig {
         EagerConfig {
             chunk_secs: 5.0,
-            overlap_secs: 0.5,
             sample_rate: 16000,
         }
     }
 
+    /// Continuous "speech" (a loud tone) with silent gaps at the given
+    /// second offsets, each gap `gap_ms` long.
+    fn speech_with_gaps(total_secs: f32, gaps_at: &[f32], gap_ms: usize) -> Vec<f32> {
+        let len = (total_secs * SR as f32) as usize;
+        let mut audio: Vec<f32> = (0..len).map(|i| 0.5 * (i as f32 * 0.07).sin()).collect();
+        for &at in gaps_at {
+            let start = (at * SR as f32) as usize;
+            let end = (start + gap_ms * SR / 1000).min(len);
+            audio[start..end].iter_mut().for_each(|s| *s = 0.0);
+        }
+        audio
+    }
+
+    fn result(text: &str, chunk_index: usize) -> ChunkResult {
+        ChunkResult {
+            text: text.to_string(),
+            chunk_index,
+        }
+    }
+
     #[test]
-    fn test_chunk_samples() {
+    fn search_window_is_capped_at_half_a_chunk() {
+        assert_eq!(test_config().search_samples(), 24000); // 1.5s
+        let short = EagerConfig {
+            chunk_secs: 2.0,
+            sample_rate: 16000,
+        };
+        assert_eq!(short.search_samples(), 16000); // half of 2s
+    }
+
+    #[test]
+    fn no_boundaries_before_a_full_chunk() {
         let config = test_config();
-        assert_eq!(config.chunk_samples(), 80000); // 5 seconds * 16000 Hz
-        assert_eq!(config.overlap_samples(), 8000); // 0.5 seconds * 16000 Hz
-        assert_eq!(config.stride_samples(), 72000); // chunk - overlap
+        assert!(chunk_boundaries(&[], &config).is_empty());
+        assert!(chunk_boundaries(&vec![0.1; 4 * SR], &config).is_empty());
     }
 
     #[test]
-    fn test_count_complete_chunks_empty() {
+    fn cut_lands_in_the_silent_gap_before_the_nominal_boundary() {
+        // Gap at 4.2s-4.4s: inside the 3.5s-5.0s search window.
+        let audio = speech_with_gaps(7.0, &[4.2], 200);
+        let boundaries = chunk_boundaries(&audio, &test_config());
+        assert_eq!(boundaries.len(), 1);
+        let cut = boundaries[0] as f32 / SR as f32;
+        assert!(
+            (4.2..4.4).contains(&cut),
+            "cut at {cut}s, expected in the gap"
+        );
+    }
+
+    #[test]
+    fn a_short_stop_closure_loses_to_a_real_pause() {
+        // A 40ms near-silent dip (the closure inside "dicta|tion") later in
+        // the window than a 200ms pause between words: the cut must take the
+        // pause, or it splits the word.
+        let mut audio = speech_with_gaps(7.0, &[3.8], 200);
+        let dip = (4.7 * SR as f32) as usize;
+        audio[dip..dip + 40 * SR / 1000]
+            .iter_mut()
+            .for_each(|s| *s = 0.0);
+        let cut = chunk_boundaries(&audio, &test_config())[0] as f32 / SR as f32;
+        assert!(
+            (3.8..4.0).contains(&cut),
+            "cut at {cut}s, expected in the pause"
+        );
+    }
+
+    #[test]
+    fn a_gap_outside_the_window_is_not_used() {
+        // Gap at 2.0s is before the search window (3.5s-5.0s).
+        let audio = speech_with_gaps(7.0, &[2.0], 200);
+        let cut = chunk_boundaries(&audio, &test_config())[0] as f32 / SR as f32;
+        assert!((3.5..=5.0).contains(&cut), "cut at {cut}s");
+    }
+
+    #[test]
+    fn chunks_are_contiguous_and_cover_the_audio_once() {
+        let audio = speech_with_gaps(23.0, &[4.6, 9.1, 13.7, 18.0], 150);
+        let boundaries = chunk_boundaries(&audio, &test_config());
+        assert!(boundaries.len() >= 3);
+        let mut expected_start = 0;
+        for i in 0..boundaries.len() {
+            let (start, end) = chunk_range(&boundaries, i).unwrap();
+            assert_eq!(
+                start,
+                expected_start,
+                "chunk {i} starts where {} ended",
+                i.saturating_sub(1)
+            );
+            assert!(end > start);
+            expected_start = end;
+        }
+        assert_eq!(tail_start(&boundaries, boundaries.len()), expected_start);
+        assert!(chunk_range(&boundaries, boundaries.len()).is_none());
+    }
+
+    #[test]
+    fn boundaries_are_stable_as_audio_grows() {
+        // The daemon recomputes boundaries every poll; chunks already sent
+        // must keep their bounds when more audio arrives.
+        let audio = speech_with_gaps(30.0, &[4.3, 8.8, 12.1, 17.5, 21.9], 120);
         let config = test_config();
-        assert_eq!(count_complete_chunks(0, &config), 0);
+        let full = chunk_boundaries(&audio, &config);
+        for len in (5 * SR..audio.len()).step_by(SR / 3) {
+            let prefix = chunk_boundaries(&audio[..len], &config);
+            assert_eq!(
+                &full[..prefix.len()],
+                &prefix[..],
+                "prefix of {len} samples"
+            );
+        }
     }
 
     #[test]
-    fn test_count_complete_chunks_less_than_one() {
-        let config = test_config();
-        // Less than one chunk
-        assert_eq!(count_complete_chunks(40000, &config), 0);
+    fn continuous_speech_still_cuts_inside_the_window() {
+        let audio = speech_with_gaps(11.0, &[], 0);
+        let boundaries = chunk_boundaries(&audio, &test_config());
+        assert_eq!(boundaries.len(), 2);
+        assert!((3 * SR + SR / 2..=5 * SR).contains(&boundaries[0]));
     }
 
     #[test]
-    fn test_count_complete_chunks_one() {
-        let config = test_config();
-        // Exactly one chunk
-        assert_eq!(count_complete_chunks(80000, &config), 1);
-    }
-
-    #[test]
-    fn test_count_complete_chunks_multiple() {
-        let config = test_config();
-        // First chunk (80000) + stride for second (72000) = 152000
-        assert_eq!(count_complete_chunks(152000, &config), 2);
-        // First chunk + 2 strides = 224000
-        assert_eq!(count_complete_chunks(224000, &config), 3);
-    }
-
-    #[test]
-    fn test_count_complete_chunks_twelve_seconds() {
-        let config = test_config();
-        let audio_len = 192000;
-        assert_eq!(count_complete_chunks(audio_len, &config), 2);
-    }
-
-    #[test]
-    fn test_extract_chunk_insufficient_data() {
-        let config = test_config();
-        let audio = vec![0.0; 40000]; // Less than one chunk
-        assert!(extract_chunk(&audio, 0, &config).is_none());
-    }
-
-    #[test]
-    fn test_extract_chunk_first() {
-        let config = test_config();
-        let audio: Vec<f32> = (0..100000).map(|i| i as f32).collect();
-        let chunk = extract_chunk(&audio, 0, &config).unwrap();
-        assert_eq!(chunk.len(), 80000);
-        assert_eq!(chunk[0], 0.0);
-    }
-
-    #[test]
-    fn test_extract_chunk_second() {
-        let config = test_config();
-        let audio: Vec<f32> = (0..200000).map(|i| i as f32).collect();
-        let chunk = extract_chunk(&audio, 1, &config).unwrap();
-        assert_eq!(chunk.len(), 80000);
-        // Second chunk starts at stride (72000)
-        assert_eq!(chunk[0], 72000.0);
-    }
-
-    #[test]
-    fn test_extract_chunk_ranges_for_twelve_seconds_audio() {
-        let config = test_config();
-        let audio: Vec<f32> = (0..192000).map(|i| i as f32).collect();
-
-        let chunk0 = extract_chunk(&audio, 0, &config).unwrap();
-        assert_eq!(chunk0.len(), 80000);
-        assert_eq!(chunk0[0], 0.0);
-        assert_eq!(chunk0[79999], 79999.0);
-
-        let chunk1 = extract_chunk(&audio, 1, &config).unwrap();
-        assert_eq!(chunk1.len(), 80000);
-        assert_eq!(chunk1[0], 72000.0);
-        assert_eq!(chunk1[79999], 151999.0);
-    }
-
-    #[test]
-    fn test_deduplicate_boundary_no_overlap() {
-        let result = deduplicate_boundary("hello world", "foo bar");
-        assert_eq!(result, "foo bar");
-    }
-
-    #[test]
-    fn test_deduplicate_boundary_single_word_overlap() {
-        let result = deduplicate_boundary("hello world", "world foo bar");
-        assert_eq!(result, "foo bar");
-    }
-
-    #[test]
-    fn test_deduplicate_boundary_multi_word_overlap() {
-        let result = deduplicate_boundary("hello world foo", "world foo bar baz");
-        assert_eq!(result, "bar baz");
-    }
-
-    #[test]
-    fn test_deduplicate_boundary_case_insensitive() {
-        let result = deduplicate_boundary("Hello World", "world foo");
-        assert_eq!(result, "foo");
-    }
-
-    #[test]
-    fn test_deduplicate_boundary_empty_previous() {
-        let result = deduplicate_boundary("", "hello world");
-        assert_eq!(result, "hello world");
-    }
-
-    #[test]
-    fn test_deduplicate_boundary_empty_new() {
-        let result = deduplicate_boundary("hello world", "");
-        assert_eq!(result, "");
+    fn tail_starts_at_zero_without_chunks() {
+        assert_eq!(tail_start(&[], 0), 0);
+        assert_eq!(tail_start(&[70000, 150000], 1), 70000);
+        assert_eq!(tail_start(&[70000, 150000], 2), 150000);
     }
 
     #[test]
     fn test_combine_chunk_results_empty() {
-        let results: Vec<ChunkResult> = vec![];
-        assert_eq!(combine_chunk_results(results), "");
+        assert_eq!(combine_chunk_results(vec![]), "");
     }
 
     #[test]
     fn test_combine_chunk_results_single() {
-        let results = vec![ChunkResult {
-            text: "hello world".to_string(),
-            chunk_index: 0,
-        }];
-        assert_eq!(combine_chunk_results(results), "hello world");
+        assert_eq!(
+            combine_chunk_results(vec![result("hello world", 0)]),
+            "hello world"
+        );
     }
 
     #[test]
-    fn test_combine_chunk_results_multiple_no_overlap() {
+    fn combine_joins_disjoint_chunks_in_order() {
         let results = vec![
-            ChunkResult {
-                text: "hello world".to_string(),
-                chunk_index: 0,
-            },
-            ChunkResult {
-                text: "foo bar".to_string(),
-                chunk_index: 1,
-            },
-        ];
-        assert_eq!(combine_chunk_results(results), "hello world foo bar");
-    }
-
-    #[test]
-    fn test_combine_chunk_results_with_overlap() {
-        let results = vec![
-            ChunkResult {
-                text: "hello world foo".to_string(),
-                chunk_index: 0,
-            },
-            ChunkResult {
-                text: "foo bar baz".to_string(),
-                chunk_index: 1,
-            },
+            result("foo bar", 1),
+            result("hello world", 0),
+            result("baz", 2),
         ];
         assert_eq!(combine_chunk_results(results), "hello world foo bar baz");
     }
 
     #[test]
-    fn test_combine_chunk_results_deduplicates_overlap_boundary() {
-        let results = vec![
-            ChunkResult {
-                text: "we should deploy this now".to_string(),
-                chunk_index: 0,
-            },
-            ChunkResult {
-                text: "deploy this now please".to_string(),
-                chunk_index: 1,
-            },
-        ];
-
+    fn combine_keeps_words_the_speaker_really_repeated() {
+        // A word said twice across a boundary is two words, not a duplicate.
+        let results = vec![result("I think that", 0), result("that is fine", 1)];
+        assert_eq!(combine_chunk_results(results), "I think that that is fine");
+        let results = vec![result("dictation.", 0), result("Dictation works.", 1)];
         assert_eq!(
             combine_chunk_results(results),
-            "we should deploy this now please"
+            "dictation. Dictation works."
         );
     }
 
     #[test]
-    fn test_combine_chunk_results_out_of_order() {
-        // Results can arrive out of order; they should be sorted by chunk_index
+    fn combine_skips_empty_chunks_without_double_spaces() {
         let results = vec![
-            ChunkResult {
-                text: "bar baz".to_string(),
-                chunk_index: 1,
-            },
-            ChunkResult {
-                text: "hello world bar".to_string(),
-                chunk_index: 0,
-            },
+            result(" one ", 0),
+            result("", 1),
+            result("  ", 2),
+            result("two", 3),
         ];
-        assert_eq!(combine_chunk_results(results), "hello world bar baz");
-    }
-
-    #[test]
-    fn test_combine_chunk_results_three_chunks() {
-        let results = vec![
-            ChunkResult {
-                text: "one two three".to_string(),
-                chunk_index: 0,
-            },
-            ChunkResult {
-                text: "three four five".to_string(),
-                chunk_index: 1,
-            },
-            ChunkResult {
-                text: "five six seven".to_string(),
-                chunk_index: 2,
-            },
-        ];
-        assert_eq!(
-            combine_chunk_results(results),
-            "one two three four five six seven"
-        );
+        assert_eq!(combine_chunk_results(results), "one two");
     }
 }

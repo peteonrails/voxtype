@@ -893,7 +893,6 @@ Enable eager input processing. When enabled, audio is split into chunks and tran
 model = "base.en"
 eager_processing = true
 eager_chunk_secs = 5.0    # 5 second chunks
-eager_overlap_secs = 0.5  # 0.5 second overlap
 ```
 
 **CLI override:**
@@ -901,7 +900,7 @@ eager_overlap_secs = 0.5  # 0.5 second overlap
 voxtype --eager-processing daemon
 ```
 
-**Note:** Eager processing is experimental. There may be occasional word duplications or omissions at chunk boundaries.
+Voice activity detection applies to eager recordings the same way it applies to regular ones: a recording with no speech produces no output, and a chunk with no speech is skipped instead of transcribed.
 
 ### eager_chunk_secs
 
@@ -909,7 +908,7 @@ voxtype --eager-processing daemon
 **Default:** `5.0`
 **Required:** No
 
-Duration of each audio chunk in seconds when eager processing is enabled.
+Nominal duration of each audio chunk in seconds when eager processing is enabled. Each chunk ends at the quietest point in the last 1.5 seconds before this length (at most half a chunk), so cuts fall in the pauses between words. Chunks never overlap.
 
 **Example:**
 ```toml
@@ -933,20 +932,7 @@ voxtype --eager-processing --eager-chunk-secs 3.0 daemon
 **Default:** `0.5`
 **Required:** No
 
-Overlap duration in seconds between adjacent chunks when eager processing is enabled. Overlap helps catch words that span chunk boundaries.
-
-**Example:**
-```toml
-[whisper]
-eager_processing = true
-eager_chunk_secs = 5.0
-eager_overlap_secs = 1.0  # More overlap for better boundary handling
-```
-
-**CLI override:**
-```bash
-voxtype --eager-processing --eager-overlap-secs 1.0 daemon
-```
+No longer used. Earlier versions overlapped adjacent chunks by this much and removed duplicated words where they met, which could drop a word you really said twice and still left duplicates when punctuation differed. Chunks are now cut at a quiet point and never overlap. The setting is still accepted, so existing configs keep working, but it has no effect.
 
 **Trade-offs:**
 - More overlap: Better word boundary handling, slightly more processing
