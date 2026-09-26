@@ -1146,6 +1146,8 @@ impl Daemon {
                 }
             }
 
+            // The streaming file close: a dump to a file, so no post-output hook
+            // and no notification; the cue above reports a successful write.
             // A streaming session delivers its segments as they finalize, so
             // nothing ever reads the one-shot boolean overrides; discard them
             // here, or `--auto-submit` written for this session leaks into the
@@ -1167,8 +1169,10 @@ impl Daemon {
             }
         }
 
-        // Same as the file branch above: the live streaming path types its
-        // segments as they finalize and never reads the boolean overrides.
+        // The streaming typing close: the cue and the post-output hook run here
+        // because no other path runs either for a streaming session. Nothing
+        // here notifies; the only notification a streaming end can produce is
+        // the caller's "Streaming Error", on the error arm.
         self.discard_pending_overrides();
         *state = State::Idle;
         self.update_state("idle");
@@ -2374,6 +2378,11 @@ impl Daemon {
                             }
                         }
 
+                        // The batch file close: the same file dump as the
+                        // streaming file close, so no post-output hook and no
+                        // notification either. The one-shot overrides were
+                        // consumed near the top of this function, before the
+                        // file branch could return early.
                         *state = State::Idle;
                         self.update_state("idle");
                         return;
@@ -2502,6 +2511,9 @@ impl Daemon {
                         }
                     }
 
+                    // The batch typing close: the cue and the notification both
+                    // report a successful output, and the post-output hook ran
+                    // inside the output chain above rather than here.
                     *state = State::Idle;
                     self.update_state("idle");
                 }
