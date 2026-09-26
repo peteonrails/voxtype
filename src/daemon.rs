@@ -813,6 +813,72 @@ async fn write_transcription_to_file(
     Ok(())
 }
 
+/// Where a file-mode transcript ended up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FileDelivery {
+    Written,
+    /// The write failed (error text) and the fallback chain took the text.
+    FellBack(String),
+    /// The write failed (error text) and nothing else could take the text.
+    Lost(String),
+}
+
+/// Deliver a transcript to `path`, wrapped in the pre/post output hooks like
+/// every other output mode, so a compositor submap entered for the recording
+/// is always reset. When the write fails, `fallback` (the clipboard chain,
+/// empty when `fallback_to_clipboard` is off) gets the text instead.
+async fn deliver_to_file(
+    path: &Path,
+    text: &str,
+    cfg: &crate::config::OutputConfig,
+    fallback: &[Box<dyn TextOutput>],
+) -> FileDelivery {
+    if let Some(cmd) = &cfg.pre_output_command {
+        if let Err(e) = output::run_hook(cmd, "pre_output").await {
+            tracing::warn!("{}", e);
+        }
+    }
+
+    let delivery = match write_transcription_to_file(path, text, &cfg.file_mode).await {
+        Ok(()) => FileDelivery::Written,
+        Err(e) => {
+            let err = e.to_string();
+            tracing::error!("Failed to write transcription to {:?}: {}", path, err);
+            let rescued = !fallback.is_empty()
+                && output::output_with_fallback(
+                    fallback,
+                    text,
+                    output::OutputOptions {
+                        pre_output_command: None,
+                        post_output_command: None,
+                        wait_for_modifier_release: false,
+                        modifier_release_timeout: Duration::ZERO,
+                    },
+                )
+                .await
+                .is_ok();
+            if rescued {
+                tracing::warn!(
+                    "Transcription for {:?} copied to the clipboard instead",
+                    path
+                );
+                FileDelivery::FellBack(err)
+            } else {
+                FileDelivery::Lost(err)
+            }
+        }
+    };
+
+    // Always, even when nothing was delivered, matching output_with_fallback.
+    if let Some(cmd) = &cfg.post_output_command {
+        if let Err(e) = output::run_hook(cmd, "post_output").await {
+            tracing::warn!("{}", e);
+        }
+    }
+
+    delivery
+}
+
 /// Read and consume the model override file
 /// Returns the model name if the file exists, None otherwise
 fn read_model_override() -> Option<String> {
@@ -1293,6 +1359,46 @@ impl Daemon {
         }
     }
 
+    /// File-mode delivery with the daemon's clipboard fallback. Tells the
+    /// user when the transcript didn't land at the path they asked for.
+    async fn deliver_file_output(&self, path: &Path, text: &str) -> FileDelivery {
+        let cfg = &self.config.output;
+        let fallback = if cfg.fallback_to_clipboard {
+            let mut clipboard = cfg.clone();
+            clipboard.mode = OutputMode::Clipboard;
+            output::create_output_chain(&clipboard)
+        } else {
+            Vec::new()
+        };
+        let delivery = deliver_to_file(path, text, cfg, &fallback).await;
+        match &delivery {
+            FileDelivery::Written => {}
+            FileDelivery::FellBack(err) => {
+                notification::send(
+                    "Voxtype",
+                    &format!(
+                        "Could not write {}: {}. Transcription copied to the clipboard instead.",
+                        path.display(),
+                        err
+                    ),
+                )
+                .await
+            }
+            FileDelivery::Lost(err) => {
+                notification::send(
+                    "Voxtype",
+                    &format!(
+                        "Could not write {}: {}. The transcription was not saved.",
+                        path.display(),
+                        err
+                    ),
+                )
+                .await
+            }
+        }
+        delivery
+    }
+
     /// Resolve the file-output target path for a recording, if any.
     ///
     /// Priority: 1. CLI `--file=path`, 2. CLI `--file` (config's
@@ -1646,9 +1752,8 @@ impl Daemon {
         // they went — see the event pump's `file_output` branch — so the
         // accumulated text only exists in the session. Write it out now,
         // before the session is dropped below. Mirrors the classic
-        // (non-streaming) path's file handling, including skipping
-        // post_output_command: file mode is a batch dump, not a
-        // live-typing operation the hook is meant to wrap around.
+        // (non-streaming) path's file handling: the output hooks wrap the
+        // write and a failed write falls back to the clipboard.
         let file_output_path = match &state {
             State::Streaming {
                 file_output_path, ..
@@ -1679,23 +1784,17 @@ impl Daemon {
             // text, same as the batch path does before writing (#669).
             let final_text = self.text_processor.process(&final_text);
 
-            let file_mode = &self.config.output.file_mode;
-            match write_transcription_to_file(&output_path, &final_text, file_mode).await {
-                Ok(()) => {
-                    let mode_str = match file_mode {
+            match self.deliver_file_output(&output_path, &final_text).await {
+                FileDelivery::Written => {
+                    let mode_str = match self.config.output.file_mode {
                         FileMode::Overwrite => "wrote",
                         FileMode::Append => "appended",
                     };
                     tracing::info!("{} streamed transcription to {:?}", mode_str, output_path);
                     self.play_feedback(SoundEvent::TranscriptionComplete);
                 }
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to write streamed transcription to {:?}: {}",
-                        output_path,
-                        e
-                    );
-                }
+                FileDelivery::FellBack(_) => self.play_feedback(SoundEvent::TranscriptionComplete),
+                FileDelivery::Lost(_) => self.play_feedback(SoundEvent::Error),
             }
 
             *state = State::Idle;
@@ -3220,12 +3319,9 @@ impl Daemon {
                             text: final_text.clone(),
                         };
 
-                        let file_mode = &self.config.output.file_mode;
-                        match write_transcription_to_file(&output_path, &final_text, file_mode)
-                            .await
-                        {
-                            Ok(()) => {
-                                let mode_str = match file_mode {
+                        match self.deliver_file_output(&output_path, &final_text).await {
+                            FileDelivery::Written => {
+                                let mode_str = match self.config.output.file_mode {
                                     FileMode::Overwrite => "wrote",
                                     FileMode::Append => "appended",
                                 };
@@ -3236,16 +3332,18 @@ impl Daemon {
                                 );
                                 self.play_feedback(SoundEvent::TranscriptionComplete);
                             }
-                            Err(e) => {
-                                tracing::error!(
-                                    "Failed to write transcription to {:?}: {}",
-                                    output_path,
-                                    e
-                                );
+                            FileDelivery::FellBack(err) => {
                                 write_result_sidecar(
                                     &output_path,
-                                    &TranscriptOutcome::error(&e.to_string()),
+                                    &TranscriptOutcome::error(&format!(
+                                        "{err}; copied to the clipboard instead"
+                                    )),
                                 );
+                                self.play_feedback(SoundEvent::TranscriptionComplete);
+                            }
+                            FileDelivery::Lost(err) => {
+                                write_result_sidecar(&output_path, &TranscriptOutcome::error(&err));
+                                self.play_feedback(SoundEvent::Error);
                             }
                         }
 
@@ -4908,6 +5006,129 @@ mod tests {
     use crate::config::{TranscriptionEngine, WhisperMode};
     use std::fs;
     use tempfile::TempDir;
+
+    /// Fallback output that records what it was handed.
+    struct RecordingOutput {
+        got: Arc<std::sync::Mutex<Option<String>>>,
+        succeed: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl TextOutput for RecordingOutput {
+        async fn output(&self, text: &str) -> std::result::Result<(), crate::error::OutputError> {
+            *self.got.lock().unwrap() = Some(text.to_string());
+            if self.succeed {
+                Ok(())
+            } else {
+                Err(crate::error::OutputError::AllMethodsFailed)
+            }
+        }
+        async fn is_available(&self) -> bool {
+            true
+        }
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+    }
+
+    /// Output config whose hooks log to `log`, noting whether `target`
+    /// existed when each ran, so tests can see order relative to the write.
+    fn hooked_output_config(log: &Path, target: &Path) -> crate::config::OutputConfig {
+        let hook = |name: &str| {
+            format!(
+                "if [ -e '{t}' ]; then echo {name}:file >> '{l}'; else echo {name}:nofile >> '{l}'; fi",
+                t = target.display(),
+                l = log.display()
+            )
+        };
+        crate::config::OutputConfig {
+            pre_output_command: Some(hook("pre")),
+            post_output_command: Some(hook("post")),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn file_output_runs_the_hooks_around_the_write() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("out.txt");
+        let log = dir.path().join("hooks.log");
+        let cfg = hooked_output_config(&log, &target);
+
+        let delivery = deliver_to_file(&target, "hello", &cfg, &[]).await;
+
+        assert_eq!(delivery, FileDelivery::Written);
+        assert_eq!(fs::read_to_string(&target).unwrap(), "hello\n");
+        // pre ran before the file existed, post after it was written.
+        assert_eq!(fs::read_to_string(&log).unwrap(), "pre:nofile\npost:file\n");
+    }
+
+    #[tokio::test]
+    async fn failed_file_write_falls_back_and_still_resets_the_submap() {
+        let dir = TempDir::new().unwrap();
+        // A parent that is a regular file fails even for root, unlike a
+        // read-only directory.
+        let blocker = dir.path().join("not-a-dir");
+        fs::write(&blocker, "").unwrap();
+        let target = blocker.join("out.txt");
+        let log = dir.path().join("hooks.log");
+        let cfg = hooked_output_config(&log, &target);
+        let got = Arc::new(std::sync::Mutex::new(None));
+        let fallback: Vec<Box<dyn TextOutput>> = vec![Box::new(RecordingOutput {
+            got: got.clone(),
+            succeed: true,
+        })];
+
+        let delivery = deliver_to_file(&target, "rescue me", &cfg, &fallback).await;
+
+        assert!(
+            matches!(delivery, FileDelivery::FellBack(_)),
+            "{delivery:?}"
+        );
+        assert_eq!(got.lock().unwrap().as_deref(), Some("rescue me"));
+        assert_eq!(
+            fs::read_to_string(&log).unwrap(),
+            "pre:nofile\npost:nofile\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_file_write_without_fallback_reports_the_loss() {
+        let dir = TempDir::new().unwrap();
+        let blocker = dir.path().join("not-a-dir");
+        fs::write(&blocker, "").unwrap();
+        let target = blocker.join("out.txt");
+        let log = dir.path().join("hooks.log");
+        let cfg = hooked_output_config(&log, &target);
+
+        let delivery = deliver_to_file(&target, "gone", &cfg, &[]).await;
+
+        assert!(matches!(delivery, FileDelivery::Lost(_)), "{delivery:?}");
+        // The post hook runs even when nothing was delivered.
+        assert_eq!(
+            fs::read_to_string(&log).unwrap(),
+            "pre:nofile\npost:nofile\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_file_write_with_failing_fallback_reports_the_loss() {
+        let dir = TempDir::new().unwrap();
+        let blocker = dir.path().join("not-a-dir");
+        fs::write(&blocker, "").unwrap();
+        let target = blocker.join("out.txt");
+        let cfg = crate::config::OutputConfig::default();
+        let got = Arc::new(std::sync::Mutex::new(None));
+        let fallback: Vec<Box<dyn TextOutput>> = vec![Box::new(RecordingOutput {
+            got: got.clone(),
+            succeed: false,
+        })];
+
+        let delivery = deliver_to_file(&target, "gone", &cfg, &fallback).await;
+
+        assert!(matches!(delivery, FileDelivery::Lost(_)), "{delivery:?}");
+        assert_eq!(got.lock().unwrap().as_deref(), Some("gone"));
+    }
 
     /// A cancel issued before a start/stop signal is applied first when the
     /// daemon has a live session, so `record cancel; record start` records
