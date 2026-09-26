@@ -171,7 +171,7 @@ voxtype config | grep -A20 "\[meeting\]"
 # Expected: meeting section with audio, storage, diarization settings
 
 # Test with custom chunk duration (edit config.toml):
-#    [meeting.audio]
+#    [meeting]
 #    chunk_duration_secs = 15
 
 # Restart and verify

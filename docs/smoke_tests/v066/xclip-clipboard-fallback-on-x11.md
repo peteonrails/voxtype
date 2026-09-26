@@ -4,7 +4,7 @@ Verifies xclip is in the clipboard mode output chain.
 
 ```bash
 # Structural verification
-grep -A5 "OutputMode::Clipboard =>" src/output/mod.rs | grep -c "XclipOutput"
+grep -A15 "OutputMode::Clipboard =>" src/output/mod.rs | grep -c "XclipOutput"
 # Expected: 1
 
 # Config verification
