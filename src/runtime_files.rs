@@ -276,17 +276,6 @@ impl RuntimePaths {
         let _ = std::fs::remove_file(&profile_file);
     }
 
-    /// Write a profile override file so the daemon uses the named profile for
-    /// post-processing. Same mechanism as `voxtype record start --profile <name>`.
-    pub fn write_profile_override(&self, profile_name: &str) {
-        let profile_file = self.profile_override();
-        if let Err(e) = std::fs::write(&profile_file, profile_name) {
-            tracing::warn!("Failed to write profile override: {}", e);
-        } else {
-            tracing::info!("Profile modifier activated: {}", profile_name);
-        }
-    }
-
     // === Boolean overrides ===
 
     /// Read and consume a boolean override file from the runtime directory.

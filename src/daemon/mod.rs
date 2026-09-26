@@ -1054,7 +1054,8 @@ impl Daemon {
             self.update_state("transcribing");
 
             if let Some(text) = self.finish_eager_recording(state, transcriber).await {
-                *state = State::Transcribing { audio: Vec::new() };
+                let next = state.into_transcribing(Vec::new());
+                *state = next;
                 self.handle_transcription_result(state, Ok(Ok(text))).await;
             } else {
                 tracing::debug!("Eager recording produced empty result");
@@ -2167,9 +2168,8 @@ impl Daemon {
                     }
 
                     tracing::info!("Transcribing {:.1}s of audio...", audio_duration);
-                    *state = State::Transcribing {
-                        audio: samples.clone(),
-                    };
+                    let next = state.into_transcribing(samples.clone());
+                    *state = next;
                     self.update_state("transcribing");
 
                     let transcriber = match self
@@ -2245,8 +2245,9 @@ impl Daemon {
                         );
                     }
 
-                    // Check for profile override from CLI flags
-                    let profile_override = self.paths.read_profile_override();
+                    // The profile this cycle was started with, carried in the
+                    // state rather than laundered through a runtime file.
+                    let profile_override = state.profile_override().map(str::to_string);
                     let active_profile = profile_override
                         .as_ref()
                         .and_then(|name| self.config.get_profile(name));
@@ -2973,10 +2974,13 @@ impl Daemon {
                             tracing::debug!("Received HotkeyEvent::Pressed (push-to-talk), state.is_idle() = {}, model_override = {:?}, profile_override = {:?}",
                                 state.is_idle(), model_override, profile_override);
                             if state.is_idle() {
-                                // Write profile override file if a profile modifier was held
-                                if let Some(ref profile_name) = profile_override {
-                                    self.paths.write_profile_override(profile_name);
-                                }
+                                // A profile sentinel is written by `voxtype
+                                // record start --profile` for an external
+                                // start, which reads it. A hotkey cycle carries
+                                // its profile in the state, so a sentinel still
+                                // on disk is stale: it must not survive to
+                                // post-process a later recording.
+                                self.paths.cleanup_profile_override();
 
                                 tracing::info!("Recording started");
 
@@ -3079,6 +3083,7 @@ impl Daemon {
                                                 state = State::EagerRecording {
                                                     started_at: std::time::Instant::now(),
                                                     model_override: model_override.clone(),
+                                                    profile_override: profile_override.clone(),
                                                     accumulated_audio: Vec::new(),
                                                     chunks_sent: 0,
                                                     chunk_results: Vec::new(),
@@ -3088,6 +3093,7 @@ impl Daemon {
                                                 state = State::Recording {
                                                     started_at: std::time::Instant::now(),
                                                     model_override: model_override.clone(),
+                                                    profile_override: profile_override.clone(),
                                                 };
                                             }
                                             self.update_state("recording");
@@ -3169,7 +3175,8 @@ impl Daemon {
 
                                 if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
                                     // Move to outputting state and handle via transcription result flow
-                                    state = State::Transcribing { audio: Vec::new() };
+                                    let next = state.into_transcribing(Vec::new());
+                                    state = next;
                                     self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
                                 } else {
                                     tracing::debug!("Eager recording produced empty result");
@@ -3185,10 +3192,13 @@ impl Daemon {
                                 state.is_idle(), state.is_recording(), model_override, profile_override);
 
                             if state.is_idle() {
-                                // Write profile override file if a profile modifier was held
-                                if let Some(ref profile_name) = profile_override {
-                                    self.paths.write_profile_override(profile_name);
-                                }
+                                // A profile sentinel is written by `voxtype
+                                // record start --profile` for an external
+                                // start, which reads it. A hotkey cycle carries
+                                // its profile in the state, so a sentinel still
+                                // on disk is stale: it must not survive to
+                                // post-process a later recording.
+                                self.paths.cleanup_profile_override();
 
                                 // Start recording
                                 tracing::info!("Recording started (toggle mode)");
@@ -3284,6 +3294,7 @@ impl Daemon {
                                                 state = State::EagerRecording {
                                                     started_at: std::time::Instant::now(),
                                                     model_override: model_override.clone(),
+                                                    profile_override: profile_override.clone(),
                                                     accumulated_audio: Vec::new(),
                                                     chunks_sent: 0,
                                                     chunk_results: Vec::new(),
@@ -3293,6 +3304,7 @@ impl Daemon {
                                                 state = State::Recording {
                                                     started_at: std::time::Instant::now(),
                                                     model_override: model_override.clone(),
+                                                    profile_override: profile_override.clone(),
                                                 };
                                             }
                                             self.update_state("recording");
@@ -3362,7 +3374,8 @@ impl Daemon {
                                 self.update_state("transcribing");
 
                                 if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
-                                    state = State::Transcribing { audio: Vec::new() };
+                                    let next = state.into_transcribing(Vec::new());
+                                    state = next;
                                     self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
                                 } else {
                                     tracing::debug!("Eager recording produced empty result");
@@ -3678,7 +3691,8 @@ impl Daemon {
                             self.update_state("transcribing");
 
                             if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
-                                state = State::Transcribing { audio: Vec::new() };
+                                let next = state.into_transcribing(Vec::new());
+                                state = next;
                                 self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
                             } else {
                                 tracing::debug!("Eager recording timeout produced empty result");
@@ -3716,6 +3730,10 @@ impl Daemon {
                     if state.is_idle() {
                         // Read model override from file (set by `voxtype record start --model X`)
                         let model_override = self.paths.read_model_override();
+                        // `voxtype record start --profile X` writes this file;
+                        // reading it here hands it to the cycle, which carries
+                        // it in state from this point on.
+                        let profile_override = self.paths.read_profile_override();
                         tracing::info!("Recording started (external trigger), model_override = {:?}", model_override);
 
                         if self.config.output.notification.on_recording_start {
@@ -3808,6 +3826,7 @@ impl Daemon {
                                         state = State::EagerRecording {
                                             started_at: std::time::Instant::now(),
                                             model_override,
+                                            profile_override,
                                             accumulated_audio: Vec::new(),
                                             chunks_sent: 0,
                                             chunk_results: Vec::new(),
@@ -3817,6 +3836,7 @@ impl Daemon {
                                         state = State::Recording {
                                             started_at: std::time::Instant::now(),
                                             model_override,
+                                            profile_override,
                                         };
                                     }
                                     self.update_state("recording");

@@ -26,7 +26,7 @@
 use super::deps::{Deps, Factories};
 use super::Daemon;
 use crate::audio::AudioCapture;
-use crate::config::{ActivationMode, Config, OutputConfig};
+use crate::config::{ActivationMode, Config, OutputConfig, Profile};
 use crate::error::{AudioError, OutputError, TranscribeError};
 use crate::output::TextOutput;
 use crate::runtime_files::RuntimePaths;
@@ -207,6 +207,23 @@ impl Controls {
 
     pub fn release(&self) {
         self.send(HotkeyEvent::Released);
+    }
+
+    /// Press with the profile modifier held, as the hotkey listener reports it.
+    pub fn press_with_profile(&self, profile: &str) {
+        self.send(HotkeyEvent::Pressed {
+            model_override: None,
+            profile_override: Some(profile.to_string()),
+        });
+    }
+
+    /// Write the profile sentinel the way `voxtype record start --profile` does.
+    pub fn write_profile_sentinel(&self, name: &str) {
+        std::fs::write(self.paths.profile_override(), name).expect("write profile sentinel");
+    }
+
+    pub fn profile_sentinel_exists(&self) -> bool {
+        self.paths.profile_override().exists()
     }
 
     /// The cancel key: discard the cycle in flight without a transcript.
@@ -570,4 +587,65 @@ async fn a_cancelled_external_streaming_session_runs_the_stop_hook() {
             );
         })
         .await;
+}
+
+#[tokio::test]
+async fn a_profile_override_belongs_to_the_recording_it_was_started_for() {
+    // The profile modifier used to be laundered through a runtime file: the
+    // press wrote it, delivery read it, and seven cancel paths had to remember
+    // to delete it. A cycle that never reached delivery left it behind, and the
+    // next transcript was post-processed by a profile the user did not ask for.
+    let harness = TestDaemon::with_config("hello", |config| {
+        config.profiles.insert(
+            "shout".to_string(),
+            Profile {
+                post_process_command: Some("tr a-z A-Z".to_string()),
+                post_process_timeout_ms: None,
+                output_mode: None,
+            },
+        );
+    });
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            // Started with the modifier: this one is post-processed by it.
+            ctl.press_with_profile("shout");
+            ctl.expect_state("recording").await;
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            ctl.release();
+            ctl.expect_state("idle").await;
+
+            // The next recording has no modifier, and must not inherit one.
+            ctl.press();
+            ctl.expect_state("recording").await;
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            ctl.release();
+            ctl.expect_state("idle").await;
+
+            // A sentinel the CLI wrote for a start that never happened is
+            // cleared at the end of a cycle rather than waiting for an
+            // unrelated start to consume it.
+            ctl.write_profile_sentinel("shout");
+            ctl.press();
+            ctl.expect_state("recording").await;
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            ctl.release();
+            ctl.expect_state("idle").await;
+            assert!(
+                !ctl.profile_sentinel_exists(),
+                "the stale sentinel outlived the cycle"
+            );
+        })
+        .await;
+
+    assert_eq!(
+        ctl.typed(),
+        vec![
+            "HELLO".to_string(),
+            "hello".to_string(),
+            "hello".to_string()
+        ],
+        "only the recording started with the modifier is post-processed by it"
+    );
 }
