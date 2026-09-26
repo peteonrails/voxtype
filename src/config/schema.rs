@@ -1461,6 +1461,33 @@ pub fn find_key(dotted: &str) -> Option<Found> {
     None
 }
 
+/// Where a top-level `[name]` table belongs when voxtype only reads a section
+/// of that name nested under another, e.g. `[post_process]` is read as
+/// `[output.post_process]`. `None` when `name` is a real top-level section or
+/// matches nothing voxtype knows, so unknown sections stay silently ignored.
+pub fn misplaced_section_home(name: &str) -> Option<String> {
+    let mut homes = std::collections::BTreeSet::new();
+    for spec in CONFIG_KEYS {
+        let parts: Vec<&str> = spec.key.split('.').collect();
+        if parts[0] == name {
+            return None;
+        }
+        // Proper prefixes of two or more segments are the nested tables.
+        for depth in 2..parts.len() {
+            if parts[depth - 1] == name {
+                homes.insert(parts[..depth].join("."));
+            }
+        }
+    }
+    (!homes.is_empty()).then(|| {
+        homes
+            .into_iter()
+            .map(|h| format!("[{h}]"))
+            .collect::<Vec<_>>()
+            .join(" or ")
+    })
+}
+
 /// Scalar keys only — the ones that appear in the schema's `keys` array.
 pub fn scalar_keys() -> impl Iterator<Item = &'static KeySpec> {
     CONFIG_KEYS.iter().filter(|s| s.ty != KeyType::MapString)

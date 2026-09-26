@@ -11,6 +11,22 @@ fn parse_bool_env(val: &str) -> bool {
     val == "1" || val.eq_ignore_ascii_case("true")
 }
 
+/// Top-level tables that voxtype only reads nested elsewhere, as
+/// `(name, where it belongs)`. Serde ignores them silently, which is how a
+/// `[post_process]` meant for `[output.post_process]` never ran.
+fn misplaced_sections(contents: &str) -> Vec<(String, String)> {
+    let Ok(table) = contents.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    table
+        .iter()
+        .filter(|(_, value)| value.is_table())
+        .filter_map(|(name, _)| {
+            super::schema::misplaced_section_home(name).map(|home| (name.clone(), home))
+        })
+        .collect()
+}
+
 pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     // Start with defaults
     let mut config = Config::default();
@@ -56,6 +72,14 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
                     "{} config section(s) were skipped: {}",
                     rejected.len(),
                     rejected.join(", ")
+                );
+            }
+            for (name, home) in misplaced_sections(&contents) {
+                tracing::warn!(
+                    "Config section [{}] is ignored at the top level. \
+                     Voxtype reads it as {}; move it there.",
+                    name,
+                    home
                 );
             }
         } else {
@@ -258,6 +282,38 @@ pub fn save_config(config: &Config, path: &Path) -> Result<(), VoxtypeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn top_level_post_process_is_flagged_with_its_real_home() {
+        let config = "[output]\nmode = \"type\"\n\n[post_process]\ncommand = \"sed 's/uh, //g'\"\n";
+        assert_eq!(
+            misplaced_sections(config),
+            vec![(
+                "post_process".to_string(),
+                "[output.post_process]".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn real_and_unknown_sections_are_not_flagged() {
+        // [audio] is a real top-level section even though [meeting.audio]
+        // also exists; an unknown section stays silently ignored as before.
+        let config = "[audio]\ndevice = \"default\"\n\n[output.post_process]\ncommand = \"cat\"\n\n[meeting.audio]\nloopback_device = \"auto\"\n\n[some_removed_section]\nx = 1\n";
+        assert!(misplaced_sections(config).is_empty());
+    }
+
+    #[test]
+    fn misplaced_nested_sections_name_their_parent() {
+        assert_eq!(
+            super::super::schema::misplaced_section_home("notification").as_deref(),
+            Some("[output.notification]")
+        );
+        assert_eq!(
+            super::super::schema::misplaced_section_home("whisper"),
+            None
+        );
+    }
 
     #[test]
     fn test_load_config_explicit_path() {
