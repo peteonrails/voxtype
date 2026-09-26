@@ -370,6 +370,57 @@ pub async fn detect_output_chain() -> OutputChainStatus {
     }
 }
 
+/// The output method the daemon will actually use for this config.
+///
+/// `detect_output_chain` only knows what is installed, and its
+/// `primary_method` follows the default driver order. A configured `mode`
+/// other than `type`, or a custom `driver_order`, changes what the daemon
+/// really does, and the status report must say that instead.
+pub fn configured_primary_method(
+    status: &OutputChainStatus,
+    output: &crate::config::OutputConfig,
+) -> Option<String> {
+    use crate::config::{OutputDriver, OutputMode};
+
+    let clipboard = status.wl_copy.available || status.xclip.available || status.pbcopy.available;
+    match output.mode {
+        OutputMode::File => return Some("file".to_string()),
+        OutputMode::Clipboard => return clipboard.then(|| "clipboard".to_string()),
+        OutputMode::Paste => {
+            let keystroke =
+                status.wtype.available || status.eitype.available || status.ydotool.available;
+            return (clipboard && keystroke).then(|| "paste".to_string());
+        }
+        OutputMode::Type => {}
+    }
+
+    let Some(order) = output.driver_order.as_deref() else {
+        return status.primary_method.clone();
+    };
+    if status.display_server == DisplayServer::MacOS {
+        // driver_order is not applied on macOS; the native chain is.
+        return status.primary_method.clone();
+    }
+    for driver in order {
+        let available = match driver {
+            OutputDriver::Wtype => status.wtype.available,
+            OutputDriver::Eitype => status.eitype.available,
+            OutputDriver::Dotool => status.dotool.available,
+            OutputDriver::Ydotool => status.ydotool.available,
+            OutputDriver::Clipboard => status.wl_copy.available,
+            OutputDriver::Xclip => status.xclip.available,
+        };
+        if available {
+            return Some(match driver {
+                OutputDriver::Clipboard | OutputDriver::Xclip => "clipboard".to_string(),
+                other => other.to_string(),
+            });
+        }
+    }
+    // The daemon appends clipboard to a custom order when this is on.
+    (output.fallback_to_clipboard && clipboard).then(|| "clipboard".to_string())
+}
+
 /// Print output chain status
 pub fn print_output_chain_status(status: &OutputChainStatus) {
     println!("\nOutput Chain:");
@@ -460,7 +511,13 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
             "clipboard" => "clipboard (requires manual paste)",
             _ => method.as_str(),
         };
-        println!("  \x1b[32m→\x1b[0m Text will be typed via {}", method_desc);
+        match method.as_str() {
+            "file" => println!("  \x1b[32m→\x1b[0m Text will be written to a file (mode = \"file\")"),
+            "paste" => println!(
+                "  \x1b[32m→\x1b[0m Text will be pasted: clipboard, then a paste keystroke (mode = \"paste\")"
+            ),
+            _ => println!("  \x1b[32m→\x1b[0m Text will be typed via {}", method_desc),
+        }
     } else {
         println!("  \x1b[31m→\x1b[0m No text output method available!");
         if status.display_server == DisplayServer::MacOS {
@@ -1185,7 +1242,8 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
     }
 
     // Check output chain
-    let output_status = detect_output_chain().await;
+    let mut output_status = detect_output_chain().await;
+    output_status.primary_method = configured_primary_method(&output_status, &config.output);
     print_output_chain_status(&output_status);
 
     if output_status.primary_method.is_none() {
@@ -1197,7 +1255,9 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
             println!("       Install ydotool: sudo pacman -S ydotool");
         }
         all_ok = false;
-    } else if output_status.primary_method.as_deref() == Some("clipboard") {
+    } else if output_status.primary_method.as_deref() == Some("clipboard")
+        && config.output.mode == crate::config::OutputMode::Type
+    {
         print_warning("Only clipboard mode available - typing won't work");
         if output_status.display_server == DisplayServer::Wayland {
             println!("       Install wtype: sudo pacman -S wtype");
@@ -1388,6 +1448,89 @@ pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{OutputConfig, OutputDriver, OutputMode};
+
+    fn tool(name: &'static str, available: bool) -> OutputToolStatus {
+        OutputToolStatus {
+            name,
+            installed: available,
+            available,
+            path: None,
+            note: None,
+        }
+    }
+
+    /// A Wayland box without eitype: what `detect_output_chain` reports here.
+    fn wayland_status(wtype: bool) -> OutputChainStatus {
+        OutputChainStatus {
+            display_server: DisplayServer::Wayland,
+            wtype: tool("wtype", wtype),
+            eitype: tool("eitype", false),
+            dotool: tool("dotool", true),
+            ydotool: tool("ydotool", false),
+            ydotool_daemon: false,
+            wl_copy: tool("wl-copy", true),
+            xclip: tool("xclip", false),
+            osascript: tool("osascript", false),
+            pbcopy: tool("pbcopy", false),
+            primary_method: Some(if wtype { "wtype" } else { "dotool" }.to_string()),
+        }
+    }
+
+    fn output(mode: OutputMode, order: Option<Vec<OutputDriver>>) -> OutputConfig {
+        OutputConfig {
+            mode,
+            driver_order: order,
+            ..OutputConfig::default()
+        }
+    }
+
+    #[test]
+    fn primary_method_follows_a_custom_driver_order() {
+        // driver_order = ["wtype", "clipboard"] never uses dotool, even when
+        // wtype is unavailable and dotool is installed.
+        let cfg = output(
+            OutputMode::Type,
+            Some(vec![OutputDriver::Wtype, OutputDriver::Clipboard]),
+        );
+        assert_eq!(
+            configured_primary_method(&wayland_status(true), &cfg).as_deref(),
+            Some("wtype")
+        );
+        assert_eq!(
+            configured_primary_method(&wayland_status(false), &cfg).as_deref(),
+            Some("clipboard")
+        );
+    }
+
+    #[test]
+    fn primary_method_without_a_custom_order_keeps_detection() {
+        let cfg = output(OutputMode::Type, None);
+        assert_eq!(
+            configured_primary_method(&wayland_status(false), &cfg).as_deref(),
+            Some("dotool")
+        );
+    }
+
+    #[test]
+    fn primary_method_reports_the_configured_mode() {
+        let status = wayland_status(true);
+        let method = |mode| configured_primary_method(&status, &output(mode, None));
+        assert_eq!(method(OutputMode::File).as_deref(), Some("file"));
+        assert_eq!(method(OutputMode::Clipboard).as_deref(), Some("clipboard"));
+        assert_eq!(method(OutputMode::Paste).as_deref(), Some("paste"));
+    }
+
+    #[test]
+    fn exhausted_driver_order_uses_clipboard_only_when_fallback_is_on() {
+        let mut cfg = output(OutputMode::Type, Some(vec![OutputDriver::Ydotool]));
+        assert_eq!(
+            configured_primary_method(&wayland_status(true), &cfg).as_deref(),
+            Some("clipboard")
+        );
+        cfg.fallback_to_clipboard = false;
+        assert_eq!(configured_primary_method(&wayland_status(true), &cfg), None);
+    }
 
     /// `small` is in both the Whisper and SenseVoice tables. Whisper has to
     /// win, or `setup --download --model small` can never fetch Whisper small.

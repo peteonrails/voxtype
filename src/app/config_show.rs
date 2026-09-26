@@ -233,7 +233,8 @@ pub(crate) async fn show_config(config: &config::Config) -> anyhow::Result<()> {
     }
 
     // Show output chain status
-    let output_status = setup::detect_output_chain().await;
+    let mut output_status = setup::detect_output_chain().await;
+    output_status.primary_method = setup::configured_primary_method(&output_status, &config.output);
     setup::print_output_chain_status(&output_status);
 
     println!("\n---");
