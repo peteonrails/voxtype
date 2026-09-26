@@ -219,10 +219,10 @@ impl MeetingSession {
                 }
             }
 
-            // Reconcile per-source offsets so any source that received a short
-            // or skipped chunk this iteration catches up to wall-clock before
-            // the next one. Added in PR #330 to fix dual-source timestamp
-            // inflation in meeting mode.
+            // Reconcile per-source offsets so any source that received a short or
+            // skipped chunk this iteration catches up to wall-clock before the
+            // next one. Added in PR #330 to fix dual-source timestamp inflation
+            // in meeting mode.
             daemon.sync_source_offsets();
 
             // Dedup bleed-through: strip echoed phrases from mic segments
