@@ -210,10 +210,13 @@ pub struct PasteOutput {
     restore_clipboard: bool,
     /// Delay after paste before restoring clipboard (milliseconds)
     restore_clipboard_delay_ms: u32,
+    /// Delay after paste before sending Enter (milliseconds)
+    submit_delay_ms: u32,
 }
 
 impl PasteOutput {
     /// Create a new paste output
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         auto_submit: bool,
         append_text: Option<String>,
@@ -222,6 +225,7 @@ impl PasteOutput {
         pre_type_delay_ms: u32,
         restore_clipboard: bool,
         restore_clipboard_delay_ms: u32,
+        submit_delay_ms: u32,
     ) -> Self {
         let keystroke_str = paste_keys.as_deref().unwrap_or("ctrl+v");
         let keystroke = ParsedKeystroke::parse(keystroke_str).unwrap_or_else(|e| {
@@ -243,6 +247,7 @@ impl PasteOutput {
             pre_type_delay_ms,
             restore_clipboard,
             restore_clipboard_delay_ms,
+            submit_delay_ms,
         }
     }
 
@@ -863,6 +868,10 @@ impl TextOutput for PasteOutput {
 
         // Send Enter key if configured
         if self.auto_submit {
+            tokio::time::sleep(std::time::Duration::from_millis(
+                self.submit_delay_ms as u64,
+            ))
+            .await;
             self.send_enter().await?;
         }
 
@@ -973,14 +982,14 @@ mod tests {
 
     #[test]
     fn test_new_stores_restore_clipboard_fields() {
-        let output = PasteOutput::new(false, None, None, 10, 100, true, 300);
+        let output = PasteOutput::new(false, None, None, 10, 100, true, 300, 0);
         assert!(output.restore_clipboard);
         assert_eq!(output.restore_clipboard_delay_ms, 300);
     }
 
     #[test]
     fn test_new_defaults_restore_clipboard_disabled() {
-        let output = PasteOutput::new(false, None, None, 10, 100, false, 200);
+        let output = PasteOutput::new(false, None, None, 10, 100, false, 200, 0);
         assert!(!output.restore_clipboard);
         assert_eq!(output.restore_clipboard_delay_ms, 200);
     }
