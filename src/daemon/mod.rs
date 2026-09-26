@@ -1799,6 +1799,188 @@ impl Daemon {
         }
     }
 
+    /// Handle one event from the streaming backend's pump.
+    async fn on_streaming_event(
+        &mut self,
+        state: &mut State,
+        live: &mut LiveState,
+        event: Option<StreamingEvent>,
+    ) {
+        // File-output sessions (`--file=path`) accumulate into
+        // finalized_text via the `_silent` session methods
+        // instead of typing through `chain` — there's no
+        // cursor/focused window to type into, and doing so
+        // anyway is exactly the leak this branch exists to
+        // avoid (see the SIGUSR2 handler below).
+        let file_output = matches!(
+            &state,
+            State::Streaming {
+                file_output_path: Some(_),
+                ..
+            }
+        );
+        match event {
+            Some(StreamingEvent::Partial { text, .. }) => {
+                if let Some(s) = live.streaming_session.as_mut() {
+                    if file_output {
+                        s.observe_partial_delta(&text);
+                    } else if let Some(chain) = live.streaming_chain.as_ref() {
+                        if let Err(e) = s
+                            .type_partial_delta(
+                                chain,
+                                text,
+                                self.config.output.pre_output_command.as_deref(),
+                                self.config.output.post_output_command.as_deref(),
+                            )
+                            .await
+                        {
+                            tracing::warn!("Streaming partial delta type failed: {}", e);
+                        }
+                    }
+                    if let State::Streaming { typed_chars, .. } = state {
+                        *typed_chars = s.typed_chars();
+                    }
+                }
+            }
+            Some(StreamingEvent::Final { text, .. }) => {
+                if let Some(s) = live.streaming_session.as_mut() {
+                    if file_output {
+                        // Raw on purpose: file-mode text is
+                        // processed once, whole, at write time
+                        // in end_streaming — that also catches
+                        // matches spanning segment boundaries.
+                        s.commit_segment_silent(&text);
+                    } else if let Some(chain) = live.streaming_chain.as_ref() {
+                        if let Err(e) = s
+                            .commit_segment(
+                                chain,
+                                &text,
+                                Some(&self.text_processor),
+                                self.config.output.pre_output_command.as_deref(),
+                                self.config.output.post_output_command.as_deref(),
+                            )
+                            .await
+                        {
+                            tracing::error!("Streaming commit_segment failed: {}", e);
+                        }
+                    }
+                    // Mirror typed_chars onto the state for cancel-rewind.
+                    if let State::Streaming {
+                        typed_chars,
+                        finalized_text,
+                        ..
+                    } = state
+                    {
+                        *typed_chars = s.typed_chars();
+                        finalized_text.clear();
+                        finalized_text.push_str(s.finalized_text());
+                    }
+                }
+            }
+            Some(StreamingEvent::Replace {
+                backspace, text, ..
+            }) => {
+                if let Some(s) = live.streaming_session.as_mut() {
+                    if file_output {
+                        // Raw on purpose — see the Final arm.
+                        s.replace_and_commit_silent(backspace, &text);
+                    } else if let Some(chain) = live.streaming_chain.as_ref() {
+                        if let Err(e) = s
+                            .replace_and_commit(
+                                chain,
+                                backspace,
+                                &text,
+                                Some(&self.text_processor),
+                                self.config.output.pre_output_command.as_deref(),
+                                self.config.output.post_output_command.as_deref(),
+                            )
+                            .await
+                        {
+                            tracing::error!("Streaming replace_and_commit failed: {}", e);
+                        }
+                    }
+                    if let State::Streaming {
+                        typed_chars,
+                        finalized_text,
+                        ..
+                    } = state
+                    {
+                        *typed_chars = s.typed_chars();
+                        finalized_text.clear();
+                        finalized_text.push_str(s.finalized_text());
+                    }
+                }
+            }
+            Some(StreamingEvent::Error(err)) => {
+                tracing::error!("Streaming backend error: {}", err);
+                send_notification(
+                    "Streaming Error",
+                    &err.to_string(),
+                    self.config.output.notification.show_engine_icon,
+                    self.config.engine,
+                    "critical",
+                )
+                .await;
+                // The backend ended its own session, so no stop ran
+                // for it: the caller that started the session still
+                // has to be told, or a compositor that entered a
+                // submap stays in it, and the silence tracker is
+                // disarmed for a session that is already over.
+                self.end_external_session(state.is_recording()).await;
+                self.end_streaming(state, live).await;
+            }
+            Some(StreamingEvent::Ended) | None => {
+                // Same as the error arm: `Ended` and a closed events
+                // channel both mean the backend ended the session
+                // itself. No-ops when a stop already ended it, since
+                // `end_external_session` clears its own flag.
+                self.end_external_session(state.is_recording()).await;
+                self.end_streaming(state, live).await;
+            }
+        }
+    }
+
+    /// Start a recording that an external trigger asked for: a compositor
+    /// keybinding, `voxtype record start`, or the injected equivalent.
+    /// The model and profile overrides come from the files those commands write.
+    async fn on_external_start(&mut self, state: &mut State, live: &mut LiveState) {
+        tracing::debug!("Received SIGUSR1 (start recording)");
+        if state.is_idle() {
+            // Read model override from file (set by `voxtype record start --model X`)
+            let model_override = self.paths.read_model_override();
+            // `voxtype record start --profile X` writes this file;
+            // reading it here hands it to the cycle, which carries
+            // it in state from this point on.
+            let profile_override = self.paths.read_profile_override();
+            tracing::info!(
+                "Recording started (external trigger), model_override = {:?}",
+                model_override
+            );
+
+            if self.config.output.notification.on_recording_start {
+                send_notification_with_lifetime(
+                    "Recording Started",
+                    "External trigger",
+                    self.config.output.notification.show_engine_icon,
+                    self.config.engine,
+                    &self.config.output.notification.urgency,
+                    Lifetime::UntilClosed,
+                )
+                .await;
+            }
+
+            self.begin_recording(
+                state,
+                live,
+                model_override,
+                profile_override,
+                true,
+                "SIGUSR1",
+            )
+            .await;
+        }
+    }
+
     /// Act on the meeting stop, pause and resume trigger files.
     ///
     /// Shared by the 100 ms tick and the 50 ms tick that runs while a meeting is
@@ -3328,30 +3510,7 @@ impl Daemon {
                         }
                     }
                 } => {
-                    tracing::debug!("Received SIGUSR1 (start recording)");
-                    if state.is_idle() {
-                        // Read model override from file (set by `voxtype record start --model X`)
-                        let model_override = self.paths.read_model_override();
-                        // `voxtype record start --profile X` writes this file;
-                        // reading it here hands it to the cycle, which carries
-                        // it in state from this point on.
-                        let profile_override = self.paths.read_profile_override();
-                        tracing::info!("Recording started (external trigger), model_override = {:?}", model_override);
-
-                        if self.config.output.notification.on_recording_start {
-                            send_notification_with_lifetime("Recording Started", "External trigger", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
-                        }
-
-                        self.begin_recording(
-                            &mut state,
-                            &mut live,
-                            model_override,
-                            profile_override,
-                            true,
-                            "SIGUSR1",
-                        )
-                        .await;
-                    }
+                    self.on_external_start(&mut state, &mut live).await;
                 }
 
                 // Handle SIGUSR2 - stop recording (for compositor keybindings),
@@ -3391,119 +3550,7 @@ impl Daemon {
                         None => std::future::pending().await,
                     }
                 }, if state.is_streaming() && live.streaming_handle.is_some() => {
-                    // File-output sessions (`--file=path`) accumulate into
-                    // finalized_text via the `_silent` session methods
-                    // instead of typing through `chain` — there's no
-                    // cursor/focused window to type into, and doing so
-                    // anyway is exactly the leak this branch exists to
-                    // avoid (see the SIGUSR2 handler below).
-                    let file_output = matches!(
-                        &state,
-                        State::Streaming { file_output_path: Some(_), .. }
-                    );
-                    match event {
-                        Some(StreamingEvent::Partial { text, .. }) => {
-                            if let Some(s) = live.streaming_session.as_mut() {
-                                if file_output {
-                                    s.observe_partial_delta(&text);
-                                } else if let Some(chain) = live.streaming_chain.as_ref() {
-                                    if let Err(e) = s.type_partial_delta(
-                                        chain,
-                                        text,
-                                        self.config.output.pre_output_command.as_deref(),
-                                        self.config.output.post_output_command.as_deref(),
-                                    ).await {
-                                        tracing::warn!("Streaming partial delta type failed: {}", e);
-                                    }
-                                }
-                                if let State::Streaming { typed_chars, .. } = &mut state {
-                                    *typed_chars = s.typed_chars();
-                                }
-                            }
-                        }
-                        Some(StreamingEvent::Final { text, .. }) => {
-                            if let Some(s) = live.streaming_session.as_mut() {
-                                if file_output {
-                                    // Raw on purpose: file-mode text is
-                                    // processed once, whole, at write time
-                                    // in end_streaming — that also catches
-                                    // matches spanning segment boundaries.
-                                    s.commit_segment_silent(&text);
-                                } else if let Some(chain) = live.streaming_chain.as_ref() {
-                                    if let Err(e) = s.commit_segment(
-                                        chain,
-                                        &text,
-                                        Some(&self.text_processor),
-                                        self.config.output.pre_output_command.as_deref(),
-                                        self.config.output.post_output_command.as_deref(),
-                                    ).await {
-                                        tracing::error!("Streaming commit_segment failed: {}", e);
-                                    }
-                                }
-                                // Mirror typed_chars onto the state for cancel-rewind.
-                                if let State::Streaming { typed_chars, finalized_text, .. } = &mut state {
-                                    *typed_chars = s.typed_chars();
-                                    finalized_text.clear();
-                                    finalized_text.push_str(s.finalized_text());
-                                }
-                            }
-                        }
-                        Some(StreamingEvent::Replace { backspace, text, .. }) => {
-                            if let Some(s) = live.streaming_session.as_mut() {
-                                if file_output {
-                                    // Raw on purpose — see the Final arm.
-                                    s.replace_and_commit_silent(backspace, &text);
-                                } else if let Some(chain) = live.streaming_chain.as_ref() {
-                                    if let Err(e) = s.replace_and_commit(
-                                        chain,
-                                        backspace,
-                                        &text,
-                                        Some(&self.text_processor),
-                                        self.config.output.pre_output_command.as_deref(),
-                                        self.config.output.post_output_command.as_deref(),
-                                    ).await {
-                                        tracing::error!("Streaming replace_and_commit failed: {}", e);
-                                    }
-                                }
-                                if let State::Streaming { typed_chars, finalized_text, .. } = &mut state {
-                                    *typed_chars = s.typed_chars();
-                                    finalized_text.clear();
-                                    finalized_text.push_str(s.finalized_text());
-                                }
-                            }
-                        }
-                        Some(StreamingEvent::Error(err)) => {
-                            tracing::error!("Streaming backend error: {}", err);
-                            send_notification(
-                                "Streaming Error",
-                                &err.to_string(),
-                                self.config.output.notification.show_engine_icon,
-                                self.config.engine,
-                                "critical",
-                            ).await;
-                            // The backend ended its own session, so no stop ran
-                            // for it: the caller that started the session still
-                            // has to be told, or a compositor that entered a
-                            // submap stays in it, and the silence tracker is
-                            // disarmed for a session that is already over.
-                            self.end_external_session(state.is_recording()).await;
-                            self.end_streaming(
-                                &mut state,
-                                &mut live,
-                            ).await;
-                        }
-                        Some(StreamingEvent::Ended) | None => {
-                            // Same as the error arm: `Ended` and a closed events
-                            // channel both mean the backend ended the session
-                            // itself. No-ops when a stop already ended it, since
-                            // `end_external_session` clears its own flag.
-                            self.end_external_session(state.is_recording()).await;
-                            self.end_streaming(
-                                &mut state,
-                                &mut live,
-                            ).await;
-                        }
-                    }
+                    self.on_streaming_event(&mut state, &mut live, event).await;
                 }
 
                 // Check for cancel during transcription
