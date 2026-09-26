@@ -75,8 +75,8 @@ impl ParakeetStreamingTranscriber {
                  - Disable streaming in config.toml under [parakeet]:\n\n      \
                  streaming = false\n\n  \
                  - Or switch to the streaming-compatible model:\n\n      \
-                 voxtype setup model {streaming_model}\n\n    \
-                 and set [parakeet] model = \"{streaming_model}\" in config.toml.",
+                 voxtype setup --download --model {streaming_model}\n      \
+                 voxtype setup model --set {streaming_model}",
                 config.model,
                 streaming_model = crate::setup::model::DEFAULT_PARAKEET_STREAMING_MODEL,
             )));
