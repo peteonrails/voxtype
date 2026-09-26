@@ -1285,3 +1285,36 @@ async fn a_panicking_engine_is_dropped_and_the_next_recording_reloads_it() {
         "the poisoned engine must be rebuilt, not reused"
     );
 }
+
+#[tokio::test]
+async fn a_file_session_that_cannot_write_still_returns_to_idle() {
+    // The delivery path's write-failure close: it publishes an error sidecar
+    // and returns to idle rather than leaving the daemon in Outputting.
+    let harness = TestDaemon::speaking("hello");
+    let ctl = harness.controls();
+    let unwritable = ctl.paths.dir().join("no-such-dir").join("dictation.txt");
+
+    harness
+        .run(async {
+            std::fs::write(
+                ctl.paths.output_mode_override(),
+                format!("file:{}", unwritable.display()),
+            )
+            .expect("write output mode override");
+
+            ctl.press();
+            ctl.expect_state("recording").await;
+            tokio::time::sleep(Duration::from_millis(FLOOR_MS)).await;
+            ctl.release();
+            ctl.expect_state("idle").await;
+
+            assert_eq!(
+                ctl.transcription_calls().len(),
+                1,
+                "the recording was transcribed; only the write failed"
+            );
+        })
+        .await;
+
+    assert_eq!(ctl.typed(), Vec::<String>::new());
+}
