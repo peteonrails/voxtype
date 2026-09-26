@@ -27,6 +27,14 @@ pub fn pid_file_path() -> std::path::PathBuf {
     Config::runtime_dir().join("voxtype.lock")
 }
 
+/// Path to the menu bar's lockfile, which marks a running menu bar process the
+/// way the daemon's lockfile marks the daemon. Derived here for the same
+/// reason: the macOS launch path clears a stale lock before starting one, and
+/// it has to agree with the process that created it.
+pub fn menubar_lock_path() -> std::path::PathBuf {
+    Config::runtime_dir().join("menubar.lock")
+}
+
 /// Read the daemon's PID from the lockfile, returning `None` if the file
 /// is missing, unreadable, doesn't contain a valid integer, or contains a
 /// PID that cannot legally identify another process to signal.

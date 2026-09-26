@@ -3070,7 +3070,7 @@ impl Daemon {
         }
 
         // Check if another instance is already running (single-instance safeguard)
-        let lock_path = Config::runtime_dir().join("voxtype.lock");
+        let lock_path = crate::daemon_status::pid_file_path();
         let lock_path_str = lock_path.to_string_lossy().to_string();
         let mut pidlock = Pidlock::new(&lock_path_str);
 
