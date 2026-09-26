@@ -3802,8 +3802,18 @@ impl Daemon {
                     }
                 }
 
-                // Handle SIGUSR2 - stop recording (for compositor keybindings)
-                _ = sigusr2.recv() => {
+                // Handle SIGUSR2 - stop recording (for compositor keybindings),
+                // or an injected stop when a test supplies one.
+                _ = async {
+                    match self.deps.external_stop.as_mut() {
+                        Some(rx) => {
+                            let _ = rx.recv().await;
+                        }
+                        None => {
+                            let _ = sigusr2.recv().await;
+                        }
+                    }
+                } => {
                     tracing::debug!("Received SIGUSR2 (stop recording)");
                     self.stop_active_recording(
                         &mut state,

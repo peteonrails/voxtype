@@ -95,11 +95,13 @@ pub struct Deps {
     /// `None`: being signalled is how a daemon is asked to stop.
     pub shutdown: Option<oneshot::Receiver<()>>,
 
-    /// External start, in place of the SIGUSR1 that `voxtype record start`
-    /// sends. Production leaves it `None` and hears the signal. A test pushes
-    /// the trigger instead, because signalling the process is process-global:
-    /// it would reach every other daemon running in the same test binary.
+    /// External start and stop, in place of the SIGUSR1 and SIGUSR2 that
+    /// `voxtype record start` and `stop` send. Production leaves both `None`
+    /// and hears the signals. A test pushes the triggers instead, because
+    /// signalling the process is process-global: it would reach every other
+    /// daemon running in the same test binary.
     pub external_start: Option<tokio::sync::mpsc::Receiver<()>>,
+    pub external_stop: Option<tokio::sync::mpsc::Receiver<()>>,
 
     /// Whether to end the process after the shutdown tail. Production sets it:
     /// the daemon owns its process and `_exit` skips destructors that can
@@ -116,6 +118,7 @@ impl Deps {
             hotkey_events: None,
             shutdown: None,
             external_start: None,
+            external_stop: None,
             exit_process_on_shutdown: true,
         }
     }

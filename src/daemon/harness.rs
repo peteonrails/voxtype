@@ -46,59 +46,128 @@ use crate::hotkey_macos::HotkeyEvent;
 /// How long a scenario waits for a state before calling it a failure.
 const STATE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Audio capture that hands the daemon a fixed buffer.
+/// What the fakes should do, for the rows that need something other than a
+/// clean recording.
+#[derive(Clone, Copy, Default)]
+pub struct Fakes {
+    /// A transcriber that can stream, so the streaming pipeline is exercised.
+    pub streaming: bool,
+    /// Record silence, so the speech gate has nothing to find.
+    pub silence: bool,
+    /// Fail to open a capture, as a missing or busy device does.
+    pub capture_fails: bool,
+    /// Fail to transcribe, as a model that cannot decode does.
+    pub transcriber_fails: bool,
+    /// Milliseconds the engine takes, so a row can act while it is running.
+    pub transcribe_delay_ms: u64,
+}
+
+/// Audio capture that hands the daemon a scripted buffer.
+///
+/// It records for as long as the daemon holds it open and returns only that
+/// much audio, because the daemon's accidental-press floor is a count of
+/// samples: a fake that always returned the whole buffer would make every
+/// duration-dependent row meaningless.
 struct FakeCapture {
     samples: Vec<f32>,
+    /// Fail `start`, as an unavailable device does.
+    fail: bool,
+    /// When the daemon opened the device, so `stop` can say how much it got.
+    started_at: Option<Instant>,
+    /// Samples handed out by `get_samples` so far.
+    drained: usize,
     /// Kept alive so the frame tap's channel does not close while recording.
     feed: Option<mpsc::Sender<Vec<f32>>>,
 }
 
 impl FakeCapture {
-    fn new(seconds: f32) -> Self {
+    fn new(seconds: f32, silence: bool, fail: bool) -> Self {
         let count = (seconds * 16_000.0) as usize;
-        // A tone rather than silence: the level tap and any speech gate see
-        // something shaped like audio, and the daemon's silence paths stay off.
+        // A tone rather than silence by default: the level tap and the speech
+        // gate see something shaped like audio, so the daemon's silence paths
+        // stay out of the way. A row that is about silence asks for zeros.
         let samples = (0..count)
             .map(|i| {
-                let t = i as f32 / 16_000.0;
-                0.3 * (2.0 * std::f32::consts::PI * 440.0 * t).sin()
+                if silence {
+                    0.0
+                } else {
+                    let t = i as f32 / 16_000.0;
+                    0.3 * (2.0 * std::f32::consts::PI * 440.0 * t).sin()
+                }
             })
             .collect();
         Self {
             samples,
+            fail,
+            started_at: None,
+            drained: 0,
             feed: None,
         }
+    }
+
+    /// How many samples a recording of `elapsed` would have collected.
+    fn recorded(&self, elapsed: Duration) -> usize {
+        let recorded = (elapsed.as_secs_f32() * 16_000.0) as usize;
+        recorded.min(self.samples.len())
     }
 }
 
 #[async_trait::async_trait]
 impl AudioCapture for FakeCapture {
     async fn start(&mut self) -> Result<mpsc::Receiver<Vec<f32>>, AudioError> {
+        if self.fail {
+            return Err(AudioError::Connection(
+                "fake capture unavailable".to_string(),
+            ));
+        }
         let (tx, rx) = mpsc::channel(8);
         let _ = tx.send(self.samples.clone()).await;
         self.feed = Some(tx);
+        self.started_at = Some(Instant::now());
+        self.drained = 0;
         Ok(rx)
     }
 
     async fn stop(&mut self) -> Result<Vec<f32>, AudioError> {
         self.feed = None;
-        Ok(self.samples.clone())
+        let recorded = match self.started_at.take() {
+            Some(at) => self.recorded(at.elapsed()),
+            None => 0,
+        };
+        Ok(self.samples[..recorded].to_vec())
     }
 
     async fn get_samples(&mut self) -> Vec<f32> {
-        self.samples.clone()
+        let recorded = match self.started_at {
+            Some(at) => self.recorded(at.elapsed()),
+            None => 0,
+        };
+        let fresh = self.samples[self.drained..recorded].to_vec();
+        self.drained = recorded;
+        fresh
     }
 }
 
 /// Transcriber that returns scripted text and records the audio it was handed.
 struct FakeTranscriber {
     text: String,
+    fail: bool,
+    delay_ms: u64,
     calls: Arc<Mutex<Vec<usize>>>,
 }
 
 impl Transcriber for FakeTranscriber {
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         self.calls.lock().expect("calls lock").push(samples.len());
+        if self.delay_ms > 0 {
+            // Real engines take time, and the cancel-during-transcription rows
+            // need a window to act in. `transcribe` is synchronous and runs
+            // inside `spawn_blocking`, so sleeping here is honest.
+            std::thread::sleep(Duration::from_millis(self.delay_ms));
+        }
+        if self.fail {
+            return Err(TranscribeError::ModelNotFound("fake failure".to_string()));
+        }
         Ok(self.text.clone())
     }
 }
@@ -192,6 +261,7 @@ pub struct Controls {
     output_configs: Arc<Mutex<Vec<OutputConfig>>>,
     hotkey_tx: mpsc::Sender<HotkeyEvent>,
     external_start_tx: mpsc::Sender<()>,
+    external_stop_tx: mpsc::Sender<()>,
     hook_log: PathBuf,
     state_file: PathBuf,
     paths: RuntimePaths,
@@ -234,6 +304,11 @@ impl Controls {
     /// An external start, as `voxtype record start` sends with SIGUSR1.
     pub fn external_start(&self) {
         let _ = self.external_start_tx.try_send(());
+    }
+
+    /// An external stop, as `voxtype record stop` sends with SIGUSR2.
+    pub fn external_stop(&self) {
+        let _ = self.external_stop_tx.try_send(());
     }
 
     /// How many times the external stop hook has run. The configured hook
@@ -322,20 +397,33 @@ impl TestDaemon {
     /// A daemon whose transcriber can stream, so the streaming pipeline is the
     /// one under test.
     pub fn streaming(text: &str) -> Self {
-        Self::build(text, true, |_| {})
+        Self::build(
+            text,
+            Fakes {
+                streaming: true,
+                ..Fakes::default()
+            },
+            |_| {},
+        )
+    }
+
+    /// As [`TestDaemon::speaking`], with fakes configured for the row under
+    /// test (silence, a failing device, a failing engine).
+    pub fn with_fakes(text: &str, fakes: Fakes, tweak: impl FnOnce(&mut Config)) -> Self {
+        Self::build(text, fakes, tweak)
     }
 
     /// As [`TestDaemon::speaking`], with a chance to adjust the configuration
     /// before the daemon is built.
     pub fn with_config(text: &str, tweak: impl FnOnce(&mut Config)) -> Self {
-        Self::build(text, false, tweak)
+        Self::build(text, Fakes::default(), tweak)
     }
 
-    fn build(text: &str, streaming: bool, tweak: impl FnOnce(&mut Config)) -> Self {
+    fn build(text: &str, fakes: Fakes, tweak: impl FnOnce(&mut Config)) -> Self {
         let dir = TempDir::new().expect("temp dir");
         let state_file = dir.path().join("state");
         let hook_log = dir.path().join("hook-runs");
-        let mut config = base_config(streaming);
+        let mut config = base_config(fakes.streaming);
         config.hotkey.enabled = true;
         config.hotkey.mode = ActivationMode::PushToTalk;
         config.state_file = Some(state_file.display().to_string());
@@ -359,6 +447,7 @@ impl TestDaemon {
         let (hotkey_tx, hotkey_rx) = mpsc::channel(8);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (external_start_tx, external_start_rx) = mpsc::channel(4);
+        let (external_stop_tx, external_stop_rx) = mpsc::channel(4);
         let typed = Arc::new(Mutex::new(Vec::new()));
         let transcribed = Arc::new(Mutex::new(Vec::new()));
         let output_configs = Arc::new(Mutex::new(Vec::new()));
@@ -370,11 +459,14 @@ impl TestDaemon {
         let configs = output_configs.clone();
         let scripted = text.to_string();
         let factories = Factories {
-            capture: Some(Arc::new(|_config| {
-                Ok(Box::new(FakeCapture::new(1.5)) as Box<dyn AudioCapture>)
+            capture: Some(Arc::new(move |_config| {
+                Ok(
+                    Box::new(FakeCapture::new(1.5, fakes.silence, fakes.capture_fails))
+                        as Box<dyn AudioCapture>,
+                )
             })),
             transcriber: Some(Arc::new(move |_config| {
-                if streaming {
+                if fakes.streaming {
                     Ok(Box::new(FakeStreamingTranscriber {
                         text: scripted.clone(),
                         calls: calls.clone(),
@@ -382,6 +474,8 @@ impl TestDaemon {
                 } else {
                     Ok(Box::new(FakeTranscriber {
                         text: scripted.clone(),
+                        fail: fakes.transcriber_fails,
+                        delay_ms: fakes.transcribe_delay_ms,
                         calls: calls.clone(),
                     }) as Box<dyn Transcriber>)
                 }
@@ -396,6 +490,7 @@ impl TestDaemon {
             hotkey_events: Some(hotkey_rx),
             shutdown: Some(shutdown_rx),
             external_start: Some(external_start_rx),
+            external_stop: Some(external_stop_rx),
             exit_process_on_shutdown: false,
         };
 
@@ -407,6 +502,7 @@ impl TestDaemon {
             output_configs,
             hotkey_tx,
             external_start_tx,
+            external_stop_tx,
             hook_log,
             state_file,
             paths,
@@ -501,9 +597,11 @@ async fn a_push_to_talk_cycle_reaches_idle_with_a_transcript() {
         "one recording, one call"
     );
     let samples = ctl.transcription_calls()[0];
+    let seconds = samples as f32 / 16_000.0;
     assert!(
-        (samples as f32 / 16_000.0 - 1.5).abs() < 0.05,
-        "the transcribe call got {samples} samples, not the scripted recording"
+        (0.3..=1.6).contains(&seconds),
+        "the engine got {seconds:.2}s of audio: the recording was delivered, above \
+         the accidental-press floor and within what was recorded"
     );
 }
 
@@ -676,5 +774,276 @@ async fn a_stale_cancel_sentinel_does_not_swallow_the_next_recording() {
         ctl.typed(),
         vec!["hello".to_string()],
         "the stale cancel sentinel swallowed the recording"
+    );
+}
+
+/// Comfortably over the daemon's 0.3 s accidental-press floor.
+const FLOOR_MS: u64 = 500;
+
+/// A press and release that records something worth transcribing.
+async fn record_once(ctl: &Controls) {
+    ctl.press();
+    ctl.expect_state("recording").await;
+    tokio::time::sleep(Duration::from_millis(FLOOR_MS)).await;
+    ctl.release();
+    ctl.expect_state("idle").await;
+}
+
+#[tokio::test]
+async fn a_recording_below_the_floor_is_discarded() {
+    // Released inside the floor: an accidental press, so nothing is built and
+    // nothing is delivered.
+    let harness = TestDaemon::speaking("hello");
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            ctl.press();
+            ctl.release();
+            ctl.expect_state("idle").await;
+        })
+        .await;
+
+    assert_eq!(ctl.typed(), Vec::<String>::new());
+    assert_eq!(ctl.transcription_calls(), Vec::<usize>::new());
+}
+
+#[tokio::test]
+async fn a_silent_recording_is_skipped_by_the_speech_gate() {
+    let harness = TestDaemon::with_fakes(
+        "hello",
+        Fakes {
+            silence: true,
+            ..Fakes::default()
+        },
+        |config| config.vad.enabled = true,
+    );
+    let ctl = harness.controls();
+
+    harness.run(async { record_once(&ctl).await }).await;
+
+    assert_eq!(
+        ctl.transcription_calls(),
+        Vec::<usize>::new(),
+        "a silent recording never reaches the engine"
+    );
+}
+
+#[tokio::test]
+async fn a_toggle_press_starts_and_a_second_stops() {
+    let harness = TestDaemon::with_config("hello", |config| {
+        config.hotkey.mode = ActivationMode::Toggle
+    });
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            ctl.press();
+            ctl.expect_state("recording").await;
+            tokio::time::sleep(Duration::from_millis(FLOOR_MS)).await;
+            ctl.press();
+            ctl.expect_state("idle").await;
+        })
+        .await;
+
+    assert_eq!(ctl.typed(), vec!["hello".to_string()]);
+}
+
+#[tokio::test]
+async fn an_external_stop_delivers_the_recording_and_runs_the_hook() {
+    let harness = TestDaemon::speaking("hello");
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            ctl.external_start();
+            ctl.expect_state("recording").await;
+            tokio::time::sleep(Duration::from_millis(FLOOR_MS)).await;
+            ctl.external_stop();
+            ctl.expect_state("idle").await;
+
+            assert_eq!(
+                ctl.hook_runs(),
+                1,
+                "an external session ends through its hook"
+            );
+        })
+        .await;
+
+    assert_eq!(ctl.typed(), vec!["hello".to_string()]);
+}
+
+#[tokio::test]
+async fn an_external_recording_below_the_floor_still_ends_the_session() {
+    let harness = TestDaemon::speaking("hello");
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            ctl.external_start();
+            ctl.expect_state("recording").await;
+            ctl.external_stop();
+            ctl.expect_state("idle").await;
+
+            assert_eq!(
+                ctl.hook_runs(),
+                1,
+                "the session has to end even with nothing to deliver"
+            );
+        })
+        .await;
+
+    assert_eq!(ctl.transcription_calls(), Vec::<usize>::new());
+}
+
+#[tokio::test]
+async fn a_failed_capture_returns_to_idle_without_delivering() {
+    let harness = TestDaemon::with_fakes(
+        "hello",
+        Fakes {
+            capture_fails: true,
+            ..Fakes::default()
+        },
+        |_| {},
+    );
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            ctl.press();
+            ctl.expect_state("idle").await;
+        })
+        .await;
+
+    assert_eq!(ctl.transcription_calls(), Vec::<usize>::new());
+    assert_eq!(ctl.typed(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn a_failed_transcription_returns_to_idle_without_output() {
+    let harness = TestDaemon::with_fakes(
+        "hello",
+        Fakes {
+            transcriber_fails: true,
+            ..Fakes::default()
+        },
+        |_| {},
+    );
+    let ctl = harness.controls();
+
+    harness.run(async { record_once(&ctl).await }).await;
+
+    assert_eq!(
+        ctl.transcription_calls().len(),
+        1,
+        "the engine was asked exactly once"
+    );
+    assert_eq!(ctl.typed(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn a_recording_that_reaches_its_limit_is_still_transcribed() {
+    let harness = TestDaemon::with_config("hello", |config| config.audio.max_duration_secs = 1);
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            ctl.press();
+            ctl.expect_state("recording").await;
+            // The limit fires on its own; no release is sent.
+            ctl.expect_state("idle").await;
+        })
+        .await;
+
+    assert_eq!(
+        ctl.typed(),
+        vec!["hello".to_string()],
+        "audio captured up to the limit is transcribed, not dropped"
+    );
+}
+
+#[tokio::test]
+async fn a_streaming_session_cancelled_by_the_cli_file_ends_cleanly() {
+    let harness = TestDaemon::streaming("hello");
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            ctl.external_start();
+            ctl.expect_state("streaming").await;
+            std::fs::write(ctl.paths.cancel(), "cancel").expect("write cancel sentinel");
+            ctl.expect_state("idle").await;
+
+            assert_eq!(
+                ctl.hook_runs(),
+                1,
+                "a cancelled streaming session still ends through its hook"
+            );
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_transcription_cancelled_by_the_hotkey_returns_to_idle_without_output() {
+    // The engine is slow enough to act inside the transcribing window.
+    let harness = TestDaemon::with_fakes(
+        "hello",
+        Fakes {
+            transcribe_delay_ms: 1_500,
+            ..Fakes::default()
+        },
+        |_| {},
+    );
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            ctl.press();
+            ctl.expect_state("recording").await;
+            tokio::time::sleep(Duration::from_millis(FLOOR_MS)).await;
+            ctl.release();
+            ctl.expect_state("transcribing").await;
+
+            ctl.cancel();
+            ctl.expect_state("idle").await;
+        })
+        .await;
+
+    assert_eq!(
+        ctl.typed(),
+        Vec::<String>::new(),
+        "a cancelled transcription delivers nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_transcription_cancelled_by_the_cli_file_returns_to_idle_without_output() {
+    let harness = TestDaemon::with_fakes(
+        "hello",
+        Fakes {
+            transcribe_delay_ms: 1_500,
+            ..Fakes::default()
+        },
+        |_| {},
+    );
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            ctl.press();
+            ctl.expect_state("recording").await;
+            tokio::time::sleep(Duration::from_millis(FLOOR_MS)).await;
+            ctl.release();
+            ctl.expect_state("transcribing").await;
+
+            std::fs::write(ctl.paths.cancel(), "cancel").expect("write cancel sentinel");
+            ctl.expect_state("idle").await;
+        })
+        .await;
+
+    assert_eq!(
+        ctl.typed(),
+        Vec::<String>::new(),
+        "a cancelled transcription delivers nothing"
     );
 }
