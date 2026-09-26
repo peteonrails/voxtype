@@ -2044,6 +2044,54 @@ restore_clipboard = true
 restore_clipboard_delay_ms = 300  # Longer delay for slower systems
 ```
 
+### return_to_start_window
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+When `true`, voxtype remembers which window had keyboard focus when recording started and hands focus back to that window right before the transcription is delivered. Dictation then lands in the window you started in, even if you browsed to other windows or desktops while speaking.
+
+This is useful with the default "type into the focused window" behavior: without it, whatever window you happened to be looking at when transcription finished receives the text.
+
+**Platform support (detected automatically per session):**
+
+| Session | Mechanism |
+|---------|-----------|
+| Hyprland | `hyprctl` (window focus + cursor warp) |
+| sway | `swaymsg` IPC |
+| i3 | `i3-msg` IPC |
+| X11 | `xdotool` |
+| macOS | System Events (frontmost application) |
+| GNOME / KDE / other Wayland | not supported — feature stays inactive |
+
+The feature is fail-safe: when no supported mechanism is detected (or the compositor helper is missing, or no window has focus), voxtype logs this at debug level and output follows focus exactly as before.
+
+**Note on streaming mode:** streaming engines type finalized segments live while the hotkey is still held, so those segments follow whatever window has focus at the time. When the session ends, focus returns to the start window. Batch and eager modes (the default) type only at the end, so they land entirely in the start window.
+
+**Example:**
+```toml
+[output]
+mode = "type"
+return_to_start_window = true
+```
+
+### focus_restore_delay_ms
+
+**Type:** Integer
+**Default:** `50`
+**Required:** No
+**Applies to:** Only when `return_to_start_window = true` and a start window was re-focused
+
+Delay in milliseconds between re-focusing the start window and delivering the transcription. Gives the window manager and the target application time to process the focus change, so the text is not delivered to the previously focused window. Raise this on slow setups if you see the first characters land in the wrong window.
+
+**Example:**
+```toml
+[output]
+return_to_start_window = true
+focus_restore_delay_ms = 120  # Extra settle time for slower systems
+```
+
 ### fallback_to_clipboard
 
 **Type:** Boolean

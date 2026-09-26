@@ -826,6 +826,11 @@ pub struct Daemon {
     /// cleared) by `stop_active_recording` to decide whether to run
     /// `external_trigger_stop_command`.
     is_external_trigger: bool,
+    /// Window that had keyboard focus when the current recording started,
+    /// captured when `output.return_to_start_window` is enabled. Re-focused
+    /// right before text output and consumed in the process, so cancel/
+    /// error paths never re-focus a stale window.
+    pinned_start_window: Option<output::focus::PinnedWindow>,
     /// Synthetic zero-level publisher that keeps the OSD visible while a
     /// streaming session is draining server-side after the mic stopped.
     /// Aborted in `end_streaming`.
@@ -979,6 +984,7 @@ impl Daemon {
             level_emitter_task: None,
             silence_tracker: None,
             is_external_trigger: false,
+            pinned_start_window: None,
             streaming_drain_pump: None,
             osd_supervisor_task: None,
             model_manager: None,
@@ -1315,6 +1321,10 @@ impl Daemon {
             }
         }
 
+        // Remember which window the user started in, so text output can
+        // return focus to it (output.return_to_start_window).
+        self.pin_start_window().await;
+
         if self.config.output.notification.on_recording_start {
             send_notification(
                 "Streaming Active",
@@ -1533,6 +1543,24 @@ impl Daemon {
             let _ = c.stop().await;
         }
         self.restore_recording_media();
+
+        let file_output_path = match &state {
+            State::Streaming {
+                file_output_path, ..
+            } => file_output_path.clone(),
+            _ => None,
+        };
+
+        // Return focus to the window the recording started in. Streaming
+        // types finalized segments live while the hotkey is held, so those
+        // segments followed whatever window had focus at the time (a known
+        // limitation — see docs/CONFIGURATION.md); restoring focus here at
+        // least returns the user home for everything that follows. File-
+        // output sessions never typed anything, so they keep focus alone.
+        if file_output_path.is_none() {
+            self.restore_start_window().await;
+        }
+
         if let Some(h) = streaming_handle.take() {
             // Don't error on join failure; the task may have already
             // completed. We drop events implicitly here.
@@ -1547,12 +1575,6 @@ impl Daemon {
         // (non-streaming) path's file handling, including skipping
         // post_output_command: file mode is a batch dump, not a
         // live-typing operation the hook is meant to wrap around.
-        let file_output_path = match &state {
-            State::Streaming {
-                file_output_path, ..
-            } => file_output_path.clone(),
-            _ => None,
-        };
         if let Some(output_path) = file_output_path {
             // Fold any leftover `partial` in first: the sliding-window
             // engine can confirm a whole short utterance as a single
@@ -1649,6 +1671,9 @@ impl Daemon {
         self.stop_streaming_drain_pump();
         *streaming_session = None;
         *streaming_chain = None;
+
+        // Cancelled: drop the pinned start window without re-focusing it.
+        self.pinned_start_window = None;
 
         cleanup_output_mode_override();
         cleanup_model_override();
@@ -2263,6 +2288,54 @@ impl Daemon {
 
     /// Reset state to idle and run post_output_command to reset compositor submap
     /// Call this when exiting from recording/transcribing without normal output flow
+    /// Snapshot the currently focused window when recording starts, so text
+    /// output can hand focus back to it (output.return_to_start_window).
+    ///
+    /// Inactive (and cheap) when the config flag is off. When the session
+    /// has no supported focused-window mechanism — GNOME/KDE Wayland, a TTY
+    /// — this logs at debug level and leaves the pin empty; output then
+    /// follows focus exactly as before.
+    async fn pin_start_window(&mut self) {
+        self.pinned_start_window = None;
+        if !self.config.output.return_to_start_window {
+            return;
+        }
+        match output::focus::PinnedWindow::capture().await {
+            Some(window) => {
+                tracing::info!("Pinned start window: {}", window.describe());
+                self.pinned_start_window = Some(window);
+            }
+            None => {
+                tracing::debug!(
+                    "return_to_start_window: no focused-window mechanism for this \
+                     session; output will follow focus as before"
+                );
+            }
+        }
+    }
+
+    /// Re-focus the window pinned at recording start, if any, and wait for
+    /// the configured settle delay so the window manager and target
+    /// application process the focus change before text is delivered.
+    ///
+    /// Consumes the pin: once called (or once a cancel path clears it), a
+    /// later failure can never re-focus a stale window.
+    async fn restore_start_window(&mut self) {
+        let Some(window) = self.pinned_start_window.take() else {
+            return;
+        };
+        let describe = window.describe();
+        if window.refocus().await {
+            tracing::info!("Restored focus to start window: {describe}");
+        } else {
+            tracing::debug!("Could not restore focus to start window: {describe}");
+        }
+        let delay = self.config.output.focus_restore_delay_ms;
+        if delay > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(u64::from(delay))).await;
+        }
+    }
+
     async fn reset_to_idle(&mut self, state: &mut State) {
         cleanup_output_mode_override();
         cleanup_model_override();
@@ -2270,6 +2343,9 @@ impl Daemon {
         cleanup_bool_override("auto_submit");
         cleanup_bool_override("shift_enter");
         cleanup_bool_override("smart_auto_submit");
+        // The recording is over and no output will be delivered; drop the
+        // pinned start window without re-focusing it.
+        self.pinned_start_window = None;
         self.restore_recording_media();
         *state = State::Idle;
         self.update_state("idle");
@@ -2880,6 +2956,12 @@ impl Daemon {
                         }
                     }
 
+                    // Return focus to the window the recording started in,
+                    // so the transcription is typed there rather than into
+                    // whatever window happens to have focus by now
+                    // (output.return_to_start_window).
+                    self.restore_start_window().await;
+
                     let output_chain = output::create_output_chain(&output_config);
 
                     // Output the text
@@ -3477,6 +3559,11 @@ impl Daemon {
                                                     tracing::warn!("{}", e);
                                                 }
                                             }
+
+                                            // Remember which window the user started in, so
+                                            // text output can return focus to it
+                                            // (output.return_to_start_window).
+                                            self.pin_start_window().await;
                                         }
                                         Err(()) => {
                                             // Helper already logged and played the error sound.
@@ -3681,6 +3768,11 @@ impl Daemon {
                                                     tracing::warn!("{}", e);
                                                 }
                                             }
+
+                                            // Remember which window the user started in, so
+                                            // text output can return focus to it
+                                            // (output.return_to_start_window).
+                                            self.pin_start_window().await;
                                         }
                                         Err(()) => {
                                             // Helper already logged and played the error sound.
@@ -4196,6 +4288,11 @@ impl Daemon {
                                             tracing::warn!("{}", e);
                                         }
                                     }
+
+                                    // Remember which window the user started in, so
+                                    // text output can return focus to it
+                                    // (output.return_to_start_window).
+                                    self.pin_start_window().await;
                                 }
                                 Err(()) => {
                                     // Helper already logged and played the error sound.
@@ -4358,6 +4455,10 @@ impl Daemon {
                         // Drop the cloned transcriber Arc so it isn't held
                         // until the next transcription.
                         self.active_transcriber = None;
+
+                        // Cancelled: drop the pinned start window without
+                        // re-focusing it.
+                        self.pinned_start_window = None;
 
                         cleanup_output_mode_override();
                         cleanup_model_override();
