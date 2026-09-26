@@ -3503,12 +3503,23 @@ impl Daemon {
                                 self.config.engine,
                                 "critical",
                             ).await;
+                            // The backend ended its own session, so no stop ran
+                            // for it: the caller that started the session still
+                            // has to be told, or a compositor that entered a
+                            // submap stays in it, and the silence tracker is
+                            // disarmed for a session that is already over.
+                            self.end_external_session(state.is_recording()).await;
                             self.end_streaming(
                                 &mut state,
                                 &mut live,
                             ).await;
                         }
                         Some(StreamingEvent::Ended) | None => {
+                            // Same as the error arm: `Ended` and a closed events
+                            // channel both mean the backend ended the session
+                            // itself. No-ops when a stop already ended it, since
+                            // `end_external_session` clears its own flag.
+                            self.end_external_session(state.is_recording()).await;
                             self.end_streaming(
                                 &mut state,
                                 &mut live,

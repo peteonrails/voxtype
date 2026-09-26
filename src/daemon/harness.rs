@@ -63,6 +63,9 @@ pub struct Fakes {
     pub transcribe_delay_ms: u64,
     /// Have the streaming backend report a failure instead of a final segment.
     pub stream_error: bool,
+    /// Have the streaming backend end the session on its own, the way a remote
+    /// stream does when the socket closes or the server finishes.
+    pub stream_self_ends: bool,
     /// Load the engine before the first recording instead of on demand, so a
     /// poisoned instance has somewhere to be cached.
     pub preload: bool,
@@ -83,6 +86,9 @@ pub struct Fakes {
 /// duration-dependent row meaningless.
 struct FakeCapture {
     samples: Vec<f32>,
+    /// How many times the daemon stopped this capture, so a row can pin that a
+    /// session closed the microphone even though it was not asked to stop.
+    stops: Arc<AtomicUsize>,
     /// Fail `start`, as an unavailable device does.
     fail: bool,
     /// When the daemon opened the device, so `stop` can say how much it got.
@@ -94,7 +100,7 @@ struct FakeCapture {
 }
 
 impl FakeCapture {
-    fn new(seconds: f32, silence: bool, fail: bool) -> Self {
+    fn new(seconds: f32, silence: bool, fail: bool, stops: Arc<AtomicUsize>) -> Self {
         let count = (seconds * 16_000.0) as usize;
         // A tone rather than silence by default: the level tap and the speech
         // gate see something shaped like audio, so the daemon's silence paths
@@ -111,6 +117,7 @@ impl FakeCapture {
             .collect();
         Self {
             samples,
+            stops,
             fail,
             started_at: None,
             drained: 0,
@@ -142,6 +149,7 @@ impl AudioCapture for FakeCapture {
     }
 
     async fn stop(&mut self) -> Result<Vec<f32>, AudioError> {
+        self.stops.fetch_add(1, Ordering::SeqCst);
         self.feed = None;
         let recorded = match self.started_at.take() {
             Some(at) => self.recorded(at.elapsed()),
@@ -200,6 +208,9 @@ impl Transcriber for FakeTranscriber {
 struct FakeStreamingTranscriber {
     text: String,
     fail: bool,
+    /// End the session after the first segment instead of waiting for the
+    /// daemon to stop the capture.
+    self_ends: bool,
     calls: Arc<Mutex<Vec<usize>>>,
 }
 
@@ -226,6 +237,7 @@ impl StreamingTranscriber for FakeStreamingTranscriber {
         let (cancel, _abandoned) = oneshot::channel();
         let text = self.text.clone();
         let fail = self.fail;
+        let self_ends = self.self_ends;
 
         let task = tokio::spawn(async move {
             // A real backend commits a Final as an utterance completes, while
@@ -250,6 +262,16 @@ impl StreamingTranscriber for FakeStreamingTranscriber {
                         segment_id: 1,
                     })
                     .await;
+            }
+            if self_ends {
+                // A remote backend ends the session on its own terms: the socket
+                // closes, the server finishes, the task dies. It stops reading
+                // here, which leaves the daemon's pump with nowhere to send.
+                // The delay is what makes the live phase observable: a backend
+                // that ended in the same tick as the start would race the test.
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                let _ = events_tx.send(StreamingEvent::Ended).await;
+                return Ok(());
             }
             while samples_rx.recv().await.is_some() {}
             let _ = events_tx.send(StreamingEvent::Ended).await;
@@ -296,6 +318,7 @@ pub struct Controls {
     transcribed: Arc<Mutex<Vec<usize>>>,
     output_configs: Arc<Mutex<Vec<OutputConfig>>>,
     transcriber_factory_calls: Arc<AtomicUsize>,
+    capture_stops: Arc<AtomicUsize>,
     hotkey_tx: mpsc::Sender<HotkeyEvent>,
     external_start_tx: mpsc::Sender<()>,
     external_stop_tx: mpsc::Sender<()>,
@@ -367,6 +390,12 @@ impl Controls {
 
     /// How many times the daemon asked the factory for a transcriber: once for
     /// a preloaded engine, twice when a poisoned one is discarded.
+    /// How many times a capture was stopped. The external stop and any stop the
+    /// daemon decides on itself both count here.
+    pub fn capture_stops(&self) -> usize {
+        self.capture_stops.load(Ordering::SeqCst)
+    }
+
     pub fn transcriber_factory_calls(&self) -> usize {
         self.transcriber_factory_calls.load(Ordering::SeqCst)
     }
@@ -503,14 +532,18 @@ impl TestDaemon {
         let panicked = Arc::new(AtomicBool::new(false));
         let factory_calls = Arc::new(AtomicUsize::new(0));
         let transcriber_factory_calls = factory_calls.clone();
+        let capture_stops = Arc::new(AtomicUsize::new(0));
+        let capture_stops_for_factory = capture_stops.clone();
         let configs = output_configs.clone();
         let scripted = text.to_string();
         let factories = Factories {
             capture: Some(Arc::new(move |_config| {
-                Ok(
-                    Box::new(FakeCapture::new(1.5, fakes.silence, fakes.capture_fails))
-                        as Box<dyn AudioCapture>,
-                )
+                Ok(Box::new(FakeCapture::new(
+                    1.5,
+                    fakes.silence,
+                    fakes.capture_fails,
+                    capture_stops_for_factory.clone(),
+                )) as Box<dyn AudioCapture>)
             })),
             transcriber: Some(Arc::new(move |_config| {
                 let call = transcriber_factory_calls.fetch_add(1, Ordering::SeqCst) + 1;
@@ -523,6 +556,7 @@ impl TestDaemon {
                     Ok(Box::new(FakeStreamingTranscriber {
                         text: scripted.clone(),
                         fail: fakes.stream_error,
+                        self_ends: fakes.stream_self_ends,
                         calls: calls.clone(),
                     }) as Box<dyn Transcriber>)
                 } else {
@@ -557,6 +591,7 @@ impl TestDaemon {
             transcribed,
             output_configs,
             transcriber_factory_calls: factory_calls,
+            capture_stops,
             hotkey_tx,
             external_start_tx,
             external_stop_tx,
@@ -1150,6 +1185,51 @@ async fn a_streaming_session_that_ends_delivers_its_final_segment() {
         ctl.typed(),
         vec!["hello".to_string()],
         "the committed segment is delivered"
+    );
+}
+
+#[tokio::test]
+async fn a_streaming_backend_that_ends_the_session_itself_tells_the_caller() {
+    // The backend can end the session without the daemon stopping it: the
+    // remote stream closes, the server finishes, the task dies. The daemon then
+    // walks into `end_streaming` with the capture still open and
+    // `is_external_trigger` still set, so the caller that started the session
+    // is never told it may leave its compositor submap, and the microphone
+    // stays open until the next recording overwrites it.
+    let harness = TestDaemon::with_fakes(
+        "hello",
+        Fakes {
+            streaming: true,
+            stream_self_ends: true,
+            ..Fakes::default()
+        },
+        |_| {},
+    );
+    let ctl = harness.controls();
+
+    harness
+        .run(async {
+            ctl.external_start();
+            ctl.expect_state("streaming").await;
+            ctl.expect_state("idle").await;
+
+            assert_eq!(
+                ctl.hook_runs(),
+                1,
+                "the caller that started the session has to be told it ended"
+            );
+            assert_eq!(
+                ctl.capture_stops(),
+                1,
+                "the capture the backend left behind has to be closed"
+            );
+        })
+        .await;
+
+    assert_eq!(
+        ctl.typed(),
+        vec!["hello".to_string()],
+        "the segment the backend committed is still delivered"
     );
 }
 
