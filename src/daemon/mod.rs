@@ -642,6 +642,145 @@ impl Daemon {
         }
     }
 
+    /// Load or prepare the model for a recording that is about to start.
+    ///
+    /// With on-demand loading the load runs in the background, hidden behind
+    /// the recording. Without it the engine is prepared up front, which for
+    /// gpu isolation means spawning its worker so the first transcription does
+    /// not pay for it.
+    fn prepare_model_for_recording(&mut self, model_override: Option<&str>) {
+        if self.config.on_demand_loading() {
+            match self.config.engine {
+                crate::config::TranscriptionEngine::Whisper => {
+                    let config = self.config.whisper.clone();
+                    let config_path = self.config_path.clone();
+                    let model_to_load = model_override.map(str::to_string);
+                    self.model_load_task = Some(tokio::task::spawn_blocking(move || {
+                        let mut temp_manager = ModelManager::new(&config, config_path);
+                        temp_manager.get_transcriber(model_to_load.as_deref())
+                    }));
+                }
+                // Every other engine builds its transcriber through `Deps`.
+                _ => {
+                    let config = self.config.clone();
+                    let factories = self.deps.factories.clone();
+                    self.model_load_task = Some(tokio::task::spawn_blocking(move || {
+                        factories.create_transcriber(&config).map(Arc::from)
+                    }));
+                }
+            }
+            tracing::debug!("Started background model loading");
+        } else {
+            match self.config.engine {
+                crate::config::TranscriptionEngine::Whisper => {
+                    if let Some(ref mut mm) = self.model_manager {
+                        match mm.prepare_model(model_override) {
+                            Ok(handle) => {
+                                self.whisper_prepare_task = handle;
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to prepare model: {}", e);
+                            }
+                        }
+                    }
+                }
+                // Every other engine builds its transcriber through `Deps`.
+                _ => {
+                    if let Some(ref t) = self.transcriber_preloaded {
+                        let transcriber = t.clone();
+                        tokio::task::spawn_blocking(move || {
+                            transcriber.prepare();
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Begin a recording: prepare the model, open the capture or the stream, and
+    /// put the state machine into the matching recording state.
+    ///
+    /// The three ways a recording starts — push-to-talk, toggle and the external
+    /// trigger — differ only in `external`, which marks a session that tracks
+    /// silence and ends through the stop hook, and in `started_by`, which is a
+    /// log label. Everything else is this one sequence, so it is written once.
+    async fn begin_recording(
+        &mut self,
+        state: &mut State,
+        live: &mut LiveState,
+        model_override: Option<String>,
+        profile_override: Option<String>,
+        external: bool,
+        started_by: &str,
+    ) {
+        self.prepare_model_for_recording(model_override.as_deref());
+
+        // Pause or duck playback before either capture path opens the
+        // microphone.
+        self.suppress_recording_media().await;
+
+        // Try streaming first; fall through to batch if the engine doesn't
+        // support streaming or setup fails.
+        if self
+            .try_start_streaming(state, live, model_override.clone(), external)
+            .await
+        {
+            tracing::info!("Streaming session started ({})", started_by);
+            return;
+        }
+
+        // Create and start audio capture
+        tracing::debug!(
+            "Creating audio capture with device: {}",
+            self.config.audio.device
+        );
+        match self.start_recording_capture(external).await {
+            Ok(capture) => {
+                tracing::debug!("Audio capture started successfully");
+                live.audio_capture = Some(capture);
+
+                // Use EagerRecording state if eager_processing is enabled
+                if self.config.whisper.eager_processing {
+                    tracing::info!("Using eager input processing");
+                    *state = State::EagerRecording {
+                        started_at: std::time::Instant::now(),
+                        model_override,
+                        profile_override,
+                        accumulated_audio: Vec::new(),
+                        chunks_sent: 0,
+                        chunk_results: Vec::new(),
+                        tasks_in_flight: 0,
+                    };
+                } else {
+                    *state = State::Recording {
+                        started_at: std::time::Instant::now(),
+                        model_override,
+                        profile_override,
+                    };
+                }
+                self.update_state("recording");
+                self.play_feedback(SoundEvent::RecordingStart);
+
+                // Run pre-recording hook (e.g., enter compositor submap for cancel)
+                if let Some(cmd) = &self.config.output.pre_recording_command {
+                    if let Err(e) = output::run_hook(cmd, "pre_recording").await {
+                        tracing::warn!("{}", e);
+                    }
+                }
+            }
+            Err(()) => {
+                // Helper already logged and played the error sound.
+                self.restore_recording_media();
+                // The sentinel belongs to a session that never started. The
+                // external path has consumed it by the time it gets here, so this
+                // only ever removes a stale one; the two hotkey paths cleaned up
+                // and the external one did not, a difference with no reason left
+                // behind it since the CLI became the sentinel's only writer.
+                self.paths.cleanup_profile_override();
+            }
+        }
+    }
+
     /// Attempt to start a streaming transcription session.
     ///
     /// Returns `true` and populates the streaming locals on success. Returns
@@ -2779,113 +2918,15 @@ impl Daemon {
                                     send_notification_with_lifetime("Push to Talk Active", "Recording...", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
                                 }
 
-                                // Prepare model for transcription
-                                if self.config.on_demand_loading() {
-                                    // Start model loading in background
-                                    match self.config.engine {
-                                        crate::config::TranscriptionEngine::Whisper => {
-                                            let config = self.config.whisper.clone();
-                                            let config_path = self.config_path.clone();
-                                            let model_to_load = model_override.clone();
-                                            self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                                let mut temp_manager = ModelManager::new(&config, config_path);
-                                                temp_manager.get_transcriber(model_to_load.as_deref())
-                                            }));
-                                        }
-                                        // Every other engine builds its transcriber through `Deps`.
-                                        _ => {
-                                            let config = self.config.clone();
-                                            let factories = self.deps.factories.clone();
-                                            self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                                factories.create_transcriber(&config).map(Arc::from)
-                                            }));
-                                        }
-                                    }
-                                    tracing::debug!("Started background model loading");
-                                } else {
-                                    // Prepare model (spawns subprocess for gpu_isolation mode)
-                                    match self.config.engine {
-                                        crate::config::TranscriptionEngine::Whisper => {
-                                            if let Some(ref mut mm) = self.model_manager {
-                                                match mm.prepare_model(model_override.as_deref()) {
-                                                    Ok(handle) => {
-                                                        self.whisper_prepare_task = handle;
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::warn!("Failed to prepare model: {}", e);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        // Every other engine builds its transcriber through `Deps`.
-                                        _ => {
-                                            if let Some(ref t) = self.transcriber_preloaded {
-                                                let transcriber = t.clone();
-                                                tokio::task::spawn_blocking(move || {
-                                                    transcriber.prepare();
-                                                });
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // Pause or duck playback before either capture path opens
-                                // the microphone.
-                                self.suppress_recording_media().await;
-
-                                // Try streaming first; fall through to batch if the engine
-                                // doesn't support streaming or setup fails.
-                                if self.try_start_streaming(
+                                self.begin_recording(
                                     &mut state,
                                     &mut live,
-                                    model_override.clone(),
+                                    model_override,
+                                    profile_override,
                                     false,
-                                ).await {
-                                    tracing::info!("Streaming session started (push-to-talk)");
-                                } else {
-                                    // Create and start audio capture
-                                    tracing::debug!("Creating audio capture with device: {}", self.config.audio.device);
-                                    match self.start_recording_capture(false).await {
-                                        Ok(capture) => {
-                                            tracing::debug!("Audio capture started successfully");
-                                            live.audio_capture = Some(capture);
-
-                                            // Use EagerRecording state if eager_processing is enabled
-                                            if self.config.whisper.eager_processing {
-                                                tracing::info!("Using eager input processing");
-                                                state = State::EagerRecording {
-                                                    started_at: std::time::Instant::now(),
-                                                    model_override: model_override.clone(),
-                                                    profile_override: profile_override.clone(),
-                                                    accumulated_audio: Vec::new(),
-                                                    chunks_sent: 0,
-                                                    chunk_results: Vec::new(),
-                                                    tasks_in_flight: 0,
-                                                };
-                                            } else {
-                                                state = State::Recording {
-                                                    started_at: std::time::Instant::now(),
-                                                    model_override: model_override.clone(),
-                                                    profile_override: profile_override.clone(),
-                                                };
-                                            }
-                                            self.update_state("recording");
-                                            self.play_feedback(SoundEvent::RecordingStart);
-
-                                            // Run pre-recording hook (e.g., enter compositor submap for cancel)
-                                            if let Some(cmd) = &self.config.output.pre_recording_command {
-                                                if let Err(e) = output::run_hook(cmd, "pre_recording").await {
-                                                    tracing::warn!("{}", e);
-                                                }
-                                            }
-                                        }
-                                        Err(()) => {
-                                            // Helper already logged and played the error sound.
-                                            self.restore_recording_media();
-                                            self.paths.cleanup_profile_override();
-                                        }
-                                    }
-                                }
+                                    "push-to-talk",
+                                )
+                                .await;
                             }
                         }
 
@@ -2980,106 +3021,15 @@ impl Daemon {
                                     send_notification_with_lifetime("Recording Started", "Press hotkey again to stop", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
                                 }
 
-                                // Prepare model for transcription
-                                if self.config.on_demand_loading() {
-                                    // Start model loading in background
-                                    match self.config.engine {
-                                        crate::config::TranscriptionEngine::Whisper => {
-                                            let config = self.config.whisper.clone();
-                                            let config_path = self.config_path.clone();
-                                            let model_to_load = model_override.clone();
-                                            self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                                let mut temp_manager = ModelManager::new(&config, config_path);
-                                                temp_manager.get_transcriber(model_to_load.as_deref())
-                                            }));
-                                        }
-                                        // Every other engine builds its transcriber through `Deps`.
-                                        _ => {
-                                            let config = self.config.clone();
-                                            let factories = self.deps.factories.clone();
-                                            self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                                factories.create_transcriber(&config).map(Arc::from)
-                                            }));
-                                        }
-                                    }
-                                    tracing::debug!("Started background model loading");
-                                } else {
-                                    // Prepare model (spawns subprocess for gpu_isolation mode)
-                                    match self.config.engine {
-                                        crate::config::TranscriptionEngine::Whisper => {
-                                            if let Some(ref mut mm) = self.model_manager {
-                                                match mm.prepare_model(model_override.as_deref()) {
-                                                    Ok(handle) => {
-                                                        self.whisper_prepare_task = handle;
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::warn!("Failed to prepare model: {}", e);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        // Every other engine builds its transcriber through `Deps`.
-                                        _ => {
-                                            if let Some(ref t) = self.transcriber_preloaded {
-                                                let transcriber = t.clone();
-                                                tokio::task::spawn_blocking(move || {
-                                                    transcriber.prepare();
-                                                });
-                                            }
-                                        }
-                                    }
-                                }
-
-                                self.suppress_recording_media().await;
-
-                                if self.try_start_streaming(
+                                self.begin_recording(
                                     &mut state,
                                     &mut live,
-                                    model_override.clone(),
+                                    model_override,
+                                    profile_override,
                                     false,
-                                ).await {
-                                    tracing::info!("Streaming session started (toggle)");
-                                } else {
-                                    match self.start_recording_capture(false).await {
-                                        Ok(capture) => {
-                                            live.audio_capture = Some(capture);
-
-                                            // Use EagerRecording state if eager_processing is enabled
-                                            if self.config.whisper.eager_processing {
-                                                tracing::info!("Using eager input processing");
-                                                state = State::EagerRecording {
-                                                    started_at: std::time::Instant::now(),
-                                                    model_override: model_override.clone(),
-                                                    profile_override: profile_override.clone(),
-                                                    accumulated_audio: Vec::new(),
-                                                    chunks_sent: 0,
-                                                    chunk_results: Vec::new(),
-                                                    tasks_in_flight: 0,
-                                                };
-                                            } else {
-                                                state = State::Recording {
-                                                    started_at: std::time::Instant::now(),
-                                                    model_override: model_override.clone(),
-                                                    profile_override: profile_override.clone(),
-                                                };
-                                            }
-                                            self.update_state("recording");
-                                            self.play_feedback(SoundEvent::RecordingStart);
-
-                                            // Run pre-recording hook (e.g., enter compositor submap for cancel)
-                                            if let Some(cmd) = &self.config.output.pre_recording_command {
-                                                if let Err(e) = output::run_hook(cmd, "pre_recording").await {
-                                                    tracing::warn!("{}", e);
-                                                }
-                                            }
-                                        }
-                                        Err(()) => {
-                                            // Helper already logged and played the error sound.
-                                            self.restore_recording_media();
-                                            self.paths.cleanup_profile_override();
-                                        }
-                                    }
-                                }
+                                    "toggle",
+                                )
+                                .await;
                             } else if state.is_streaming() {
                                 tracing::info!("Toggle stop while streaming; closing capture");
                                 self.stop_streaming_capture(&mut live).await;
@@ -3459,104 +3409,15 @@ impl Daemon {
                             send_notification_with_lifetime("Recording Started", "External trigger", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
                         }
 
-                        // Prepare model for transcription
-                        if self.config.on_demand_loading() {
-                            // Start model loading in background
-                            match self.config.engine {
-                                crate::config::TranscriptionEngine::Whisper => {
-                                    let config = self.config.whisper.clone();
-                                    let config_path = self.config_path.clone();
-                                    let model_to_load = model_override.clone();
-                                    self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                        let mut temp_manager = ModelManager::new(&config, config_path);
-                                        temp_manager.get_transcriber(model_to_load.as_deref())
-                                    }));
-                                }
-                                // Every other engine builds its transcriber through `Deps`.
-                                _ => {
-                                    let config = self.config.clone();
-                                    let factories = self.deps.factories.clone();
-                                    self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                                        factories.create_transcriber(&config).map(Arc::from)
-                                    }));
-                                }
-                            }
-                        } else {
-                            // Prepare model (spawns subprocess for gpu_isolation mode)
-                            match self.config.engine {
-                                crate::config::TranscriptionEngine::Whisper => {
-                                    if let Some(ref mut mm) = self.model_manager {
-                                        match mm.prepare_model(model_override.as_deref()) {
-                                            Ok(handle) => {
-                                                self.whisper_prepare_task = handle;
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!("Failed to prepare model: {}", e);
-                                            }
-                                        }
-                                    }
-                                }
-                                // Every other engine builds its transcriber through `Deps`.
-                                _ => {
-                                    if let Some(ref t) = self.transcriber_preloaded {
-                                        let transcriber = t.clone();
-                                        tokio::task::spawn_blocking(move || {
-                                            transcriber.prepare();
-                                        });
-                                    }
-                                }
-                            }
-                        }
-
-                        self.suppress_recording_media().await;
-
-                        if self.try_start_streaming(
+                        self.begin_recording(
                             &mut state,
                             &mut live,
-                            model_override.clone(),
+                            model_override,
+                            profile_override,
                             true,
-                        ).await {
-                            tracing::info!("Streaming session started (SIGUSR1)");
-                        } else {
-                            match self.start_recording_capture(true).await {
-                                Ok(capture) => {
-                                    live.audio_capture = Some(capture);
-
-                                    // Use EagerRecording state if eager_processing is enabled
-                                    if self.config.whisper.eager_processing {
-                                        tracing::info!("Using eager input processing");
-                                        state = State::EagerRecording {
-                                            started_at: std::time::Instant::now(),
-                                            model_override,
-                                            profile_override,
-                                            accumulated_audio: Vec::new(),
-                                            chunks_sent: 0,
-                                            chunk_results: Vec::new(),
-                                            tasks_in_flight: 0,
-                                        };
-                                    } else {
-                                        state = State::Recording {
-                                            started_at: std::time::Instant::now(),
-                                            model_override,
-                                            profile_override,
-                                        };
-                                    }
-                                    self.update_state("recording");
-                                    self.play_feedback(SoundEvent::RecordingStart);
-
-                                    // Run pre-recording hook (e.g., enter compositor submap for cancel)
-                                    if let Some(cmd) = &self.config.output.pre_recording_command {
-                                        if let Err(e) = output::run_hook(cmd, "pre_recording").await {
-                                            tracing::warn!("{}", e);
-                                        }
-                                    }
-                                }
-                                Err(()) => {
-                                    // Helper already logged and played the error sound.
-                                    self.restore_recording_media();
-                                }
-                            }
-                        }
+                            "SIGUSR1",
+                        )
+                        .await;
                     }
                 }
 
