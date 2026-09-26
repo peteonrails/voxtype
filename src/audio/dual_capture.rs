@@ -300,6 +300,43 @@ impl DualCapture {
     }
 }
 
+/// What the daemon needs from a meeting's pair of captures.
+///
+/// `DualCapture` is the real one: a microphone, plus a loopback device when the
+/// configuration names one. The daemon talks to this trait so a test can drive a
+/// meeting without an audio device, which is the only way a meeting row can
+/// exist at all - `DualCapture::new` opens devices.
+#[async_trait::async_trait]
+pub trait MeetingCapture: Send {
+    /// Open both devices.
+    async fn start(&mut self) -> Result<(), AudioError>;
+    /// Close them, returning whatever arrived since the last poll.
+    async fn stop(&mut self) -> Result<DualSamples, AudioError>;
+    /// Take what has arrived since the last call.
+    async fn get_samples(&mut self) -> DualSamples;
+    /// Whether a loopback device is part of this pair.
+    fn has_loopback(&self) -> bool;
+}
+
+#[async_trait::async_trait]
+impl MeetingCapture for DualCapture {
+    async fn start(&mut self) -> Result<(), AudioError> {
+        DualCapture::start(self).await
+    }
+
+    async fn stop(&mut self) -> Result<DualSamples, AudioError> {
+        DualCapture::stop(self).await
+    }
+
+    async fn get_samples(&mut self) -> DualSamples {
+        DualCapture::get_samples(self).await
+    }
+
+    fn has_loopback(&self) -> bool {
+        DualCapture::has_loopback(self)
+    }
+}
+
 /// Samples from both sources
 #[derive(Debug, Clone, Default)]
 pub struct DualSamples {

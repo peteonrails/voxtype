@@ -124,7 +124,12 @@ impl AudioFrame {
 
 /// Default path for the audio-frames socket.
 pub fn default_socket_path() -> PathBuf {
-    Config::runtime_dir().join("audio.sock")
+    default_socket_path_in(&Config::runtime_dir())
+}
+
+/// [`default_socket_path`] against a caller-supplied runtime directory.
+pub fn default_socket_path_in(runtime_dir: &std::path::Path) -> PathBuf {
+    runtime_dir.join("audio.sock")
 }
 
 /// Per-subscriber bounded queue. 30 frames = 300 ms at 100 Hz; if a client

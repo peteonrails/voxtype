@@ -97,7 +97,7 @@ impl HotkeyListener for RdevHotkeyListener {
                             "Accessibility permission granted, restarting daemon to activate hotkey..."
                         );
                         // Remove lock file so the new process can acquire it
-                        let lock_path = crate::config::Config::runtime_dir().join("voxtype.lock");
+                        let lock_path = crate::daemon_status::pid_file_path();
                         let _ = std::fs::remove_file(&lock_path);
                         // Spawn a new daemon and exit. The dead CGEvent tap in this
                         // process can't be revived; a fresh process is needed.

@@ -99,8 +99,12 @@ pub(crate) async fn dispatch(
             let _ = std::process::Command::new("pkill")
                 .args(["-9", "-f", "voxtype-bin menubar"])
                 .status();
-            let _ = std::fs::remove_file("/tmp/voxtype/voxtype.lock");
-            let _ = std::fs::remove_file("/tmp/voxtype/menubar.lock");
+            // Derived, not spelled out: these used to be literals under
+            // /tmp/voxtype, which is not the directory the daemon uses when
+            // XDG_RUNTIME_DIR is set, so the stale lock they were aiming at
+            // was never the one this process would create.
+            let _ = std::fs::remove_file(crate::daemon_status::pid_file_path());
+            let _ = std::fs::remove_file(crate::daemon_status::menubar_lock_path());
 
             // Start daemon as a child process with logging
             let exe = std::env::current_exe()?;

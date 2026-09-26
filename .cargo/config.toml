@@ -1,2 +1,6 @@
 [alias]
 xtask = "run --package xtask --"
+# Everything under `cargo t` runs with the desktop session out of reach
+# (private X, throwaway XDG_RUNTIME_DIR, disabled dbus). Plain `cargo test`
+# has the real session bus, so a daemon test can pop a notification.
+t = "!./scripts/test-isolated.sh test"
