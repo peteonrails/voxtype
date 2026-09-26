@@ -73,6 +73,7 @@ pub struct OutputChainStatus {
     pub display_server: DisplayServer,
     pub wtype: OutputToolStatus,
     pub eitype: OutputToolStatus,
+    pub dotool: OutputToolStatus,
     pub ydotool: OutputToolStatus,
     pub ydotool_daemon: bool,
     pub wl_copy: OutputToolStatus,
@@ -225,6 +226,11 @@ pub async fn detect_output_chain() -> OutputChainStatus {
         None
     };
 
+    // Check dotool. Same test the dotool driver applies at output time: on
+    // PATH is enough, since it writes to uinput on Wayland, X11 and TTY alike.
+    let dotool_path = get_command_path("dotool").await;
+    let dotool_installed = dotool_path.is_some();
+
     // Check ydotool
     let ydotool_path = get_command_path("ydotool").await;
     let ydotool_installed = ydotool_path.is_some();
@@ -289,6 +295,8 @@ pub async fn detect_output_chain() -> OutputChainStatus {
         Some("wtype".to_string())
     } else if eitype_available {
         Some("eitype".to_string())
+    } else if dotool_installed {
+        Some("dotool".to_string())
     } else if ydotool_available {
         Some("ydotool".to_string())
     } else if pbcopy_available {
@@ -314,6 +322,13 @@ pub async fn detect_output_chain() -> OutputChainStatus {
             available: eitype_available,
             path: eitype_path,
             note: eitype_note,
+        },
+        dotool: OutputToolStatus {
+            name: "dotool",
+            installed: dotool_installed,
+            available: dotool_installed,
+            path: dotool_path,
+            note: None,
         },
         ydotool: OutputToolStatus {
             name: "ydotool",
@@ -393,6 +408,9 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
             status.display_server == DisplayServer::Wayland,
         );
 
+        // dotool
+        print_tool_status(&status.dotool, true);
+
         // ydotool
         if status.ydotool.installed {
             let daemon_status = if status.ydotool_daemon {
@@ -437,6 +455,7 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
             "pbcopy" => "pbcopy (clipboard, requires manual paste)",
             "wtype" => "wtype (CJK supported)",
             "eitype" => "eitype (libei, GNOME/KDE native)",
+            "dotool" => "dotool (keyboard layouts via dotool_xkb_layout)",
             "ydotool" => "ydotool (CJK not supported)",
             "clipboard" => "clipboard (requires manual paste)",
             _ => method.as_str(),
@@ -447,7 +466,7 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
         if status.display_server == DisplayServer::MacOS {
             println!("    osascript should be available on macOS");
         } else {
-            println!("    Install wtype (Wayland), eitype (GNOME/KDE), or ydotool (X11) for typing support");
+            println!("    Install wtype (Wayland), eitype (GNOME/KDE), dotool, or ydotool for typing support");
         }
     }
 }
