@@ -175,28 +175,6 @@ fn cleanup_state_file(path: &PathBuf) {
     }
 }
 
-/// Write PID file for external control via signals
-fn write_pid_file() -> Option<PathBuf> {
-    let pid_path = Config::runtime_dir().join("pid");
-
-    // Ensure parent directory exists
-    if let Some(parent) = pid_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            tracing::warn!("Failed to create PID file directory: {}", e);
-            return None;
-        }
-    }
-
-    let pid = std::process::id();
-    if let Err(e) = std::fs::write(&pid_path, pid.to_string()) {
-        tracing::warn!("Failed to write PID file: {}", e);
-        return None;
-    }
-
-    tracing::debug!("PID file written: {:?} (pid={})", pid_path, pid);
-    Some(pid_path)
-}
-
 /// Check if lockfile is stale (PID no longer running) and remove it if so.
 ///
 /// Liveness goes through `crate::daemon_status::is_running` so the daemon
@@ -219,15 +197,6 @@ fn cleanup_stale_lockfile(lock_path: &std::path::Path) -> bool {
         }
     }
     false
-}
-
-/// Remove PID file on shutdown
-fn cleanup_pid_file(path: &PathBuf) {
-    if path.exists() {
-        if let Err(e) = std::fs::remove_file(path) {
-            tracing::warn!("Failed to remove PID file: {}", e);
-        }
-    }
 }
 
 /// Check if cancel has been requested (via file trigger)
@@ -805,7 +774,6 @@ pub struct Daemon {
     config: Config,
     config_path: Option<PathBuf>,
     state_file_path: Option<PathBuf>,
-    pid_file_path: Option<PathBuf>,
     audio_feedback: Option<AudioFeedback>,
     text_processor: TextProcessor,
     post_processor: Option<PostProcessor>,
@@ -970,7 +938,6 @@ impl Daemon {
             config,
             config_path,
             state_file_path,
-            pid_file_path: None,
             audio_feedback,
             text_processor,
             post_processor,
@@ -3061,9 +3028,6 @@ impl Daemon {
         // Mark any orphaned active meetings as completed
         cleanup_stale_meetings(&self.config);
 
-        // Write PID file for external control via signals
-        self.pid_file_path = write_pid_file();
-
         // Set up signal handlers for external control
         let mut sigusr1 = signal(SignalKind::user_defined1()).map_err(|e| {
             crate::error::VoxtypeError::Config(format!("Failed to set up SIGUSR1 handler: {}", e))
@@ -4620,11 +4584,6 @@ impl Daemon {
         // Remove meeting state file on shutdown
         if let Some(ref path) = self.meeting_state_file_path {
             cleanup_state_file(path);
-        }
-
-        // Remove PID file on shutdown
-        if let Some(ref path) = self.pid_file_path {
-            cleanup_pid_file(path);
         }
 
         // Remove the OSD audio level socket so a stale path doesn't
