@@ -1981,6 +1981,245 @@ impl Daemon {
         }
     }
 
+    /// One 100 ms tick of a live recording: the cancel file, the streaming
+    /// silence timeout, the eager pipeline's chunk pumping and the hard
+    /// `max_duration_secs` cap.
+    ///
+    /// Returns true when the tick ended the cycle, so the caller restarts its
+    /// select instead of doing more work for a recording that is over.
+    async fn on_recording_tick(
+        &mut self,
+        state: &mut State,
+        live: &mut LiveState,
+        max_duration: Duration,
+    ) -> bool {
+        // Check for cancel request first
+        if self.paths.check_cancel_requested() {
+            tracing::info!("Recording cancelled");
+
+            // Stop recording and discard audio
+            if let Some(mut capture) = live.audio_capture.take() {
+                let _ = capture.stop().await;
+            }
+            self.restore_recording_media();
+
+            // Cancel any pending model load task
+            if let Some(task) = self.model_load_task.take() {
+                task.abort();
+            }
+
+            // Cancel any pending eager chunk tasks
+            for (_, task) in self.eager_chunk_tasks.drain(..) {
+                task.abort();
+            }
+
+            if let State::EagerRecording {
+                accumulated_audio,
+                chunk_results,
+                chunks_sent,
+                tasks_in_flight,
+                ..
+            } = state
+            {
+                accumulated_audio.clear();
+                chunk_results.clear();
+                *chunks_sent = 0;
+                *tasks_in_flight = 0;
+            }
+
+            // A cancelled external-trigger session is still an
+            // ended session: tell the caller and disarm tracking.
+            self.close_cancelled_cycle(state, true).await;
+            live.eager_transcriber = None;
+
+            end_recording_notification(
+                "Cancelled",
+                "Recording discarded",
+                &self.config.output.notification,
+                self.config.engine,
+            )
+            .await;
+
+            return true;
+        }
+
+        // Populate eager transcriber cache on first poll
+        if live.eager_transcriber.is_none() && state.is_eager_recording() {
+            let model_override = match &state {
+                State::EagerRecording { model_override, .. } => model_override.as_deref(),
+                _ => None,
+            };
+            live.eager_transcriber = self.transcriber_preloaded.clone();
+            if live.eager_transcriber.is_none()
+                && self.config.engine == crate::config::TranscriptionEngine::Whisper
+            {
+                // Whisper engine: get from model manager
+                if let Some(ref mut mm) = self.model_manager {
+                    match mm.get_prepared_transcriber(model_override) {
+                        Ok(t) => {
+                            tracing::debug!("Created eager transcriber for chunk dispatch");
+                            live.eager_transcriber = Some(t);
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to create eager transcriber: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let State::EagerRecording {
+            accumulated_audio,
+            chunks_sent,
+            chunk_results,
+            tasks_in_flight,
+            ..
+        } = state
+        {
+            if let Some(ref mut capture) = live.audio_capture {
+                let new_samples = capture.get_samples().await;
+                if !new_samples.is_empty() {
+                    accumulated_audio.extend(new_samples);
+                }
+            }
+
+            if let Some(ref transcriber) = live.eager_transcriber {
+                let transcriber = transcriber.clone();
+                self.process_eager_chunks(
+                    accumulated_audio,
+                    chunks_sent,
+                    tasks_in_flight,
+                    &transcriber,
+                );
+            }
+
+            let completed = self.poll_chunk_tasks().await;
+            if !completed.is_empty() {
+                *tasks_in_flight = tasks_in_flight.saturating_sub(completed.len());
+                chunk_results.extend(completed);
+            }
+        }
+
+        // Silence-based auto-stop for external-trigger
+        // (wake-word) sessions. Checked from this tick rather
+        // than a standalone sleep arm: `loop { select! }` rebuilds
+        // every arm future each iteration, so a 300 ms sleep arm
+        // here was permanently starved by this same 100 ms tick
+        // and never fired. 100 ms granularity is plenty for a
+        // multi-second threshold.
+        if self.is_external_trigger && state.is_recording() {
+            if let Some(tracker) = &self.silence_tracker {
+                if let Some(timeout_secs) = self.config.audio.external_trigger_silence_timeout_secs
+                {
+                    let elapsed = tracker.silence_elapsed().await;
+                    if elapsed.as_secs_f32() >= timeout_secs {
+                        tracing::info!(
+                            "Silence timeout ({:.1}s >= {:.1}s), auto-stopping",
+                            elapsed.as_secs_f32(),
+                            timeout_secs
+                        );
+                        self.stop_active_recording(state, live).await;
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Check for recording timeout. Skip when audio_capture is
+        // already gone so we don't re-fire cleanup on every 100ms
+        // tick while the streaming session drains server-side
+        // (state stays Streaming until Ended arrives).
+        let timeout_fired = live.audio_capture.is_some()
+            && state.recording_duration().is_some_and(|d| d > max_duration);
+        if timeout_fired {
+            // A hard-capped session is ending on voxtype's own
+            // initiative (not the caller's `record stop`) — end
+            // it as an external-trigger session so the caller is
+            // told, and the silence tracker is disarmed.
+            self.end_external_session(state.is_recording()).await;
+
+            // Streaming has its own clean stop path: skip the
+            // batch_transcribe branch below to avoid opening a
+            // second WS session for audio already being processed
+            // by the active streaming one.
+            if state.is_streaming() {
+                tracing::warn!(
+                    "Recording timeout ({:.0}s limit) while streaming; closing capture",
+                    max_duration.as_secs_f32()
+                );
+                self.stop_streaming_capture(live).await;
+                return true;
+            }
+
+            tracing::warn!(
+                "Recording timeout ({:.0}s limit), transcribing captured audio",
+                max_duration.as_secs_f32()
+            );
+
+            // A subset on purpose. This cycle still delivers a
+            // transcript, so the flags the user asked for
+            // (auto-submit, shift-enter) must survive to be
+            // applied; only the smart-submit decision is dropped,
+            // because the recording ran to its limit rather than
+            // ending where the user meant it to.
+            self.paths.cleanup_output_mode_override();
+            self.paths.cleanup_model_override();
+            self.paths.cleanup_profile_override();
+            self.paths.cleanup_bool_override("smart_auto_submit");
+
+            let model_override = match &state {
+                State::Recording { model_override, .. } => model_override.clone(),
+                State::EagerRecording { model_override, .. } => model_override.clone(),
+                _ => None,
+            };
+
+            if state.is_eager_recording() {
+                if let Some(mut capture) = live.audio_capture.take() {
+                    if let Ok(final_samples) = capture.stop().await {
+                        if let State::EagerRecording {
+                            accumulated_audio, ..
+                        } = state
+                        {
+                            accumulated_audio.extend(final_samples);
+                        }
+                    }
+                }
+                self.restore_recording_media();
+
+                let transcriber = match self
+                    .get_transcriber_for_recording(model_override.as_deref())
+                    .await
+                {
+                    Ok(transcriber) => transcriber,
+                    Err(()) => {
+                        self.reset_to_idle(state).await;
+                        return true;
+                    }
+                };
+
+                self.update_state("transcribing");
+
+                if let Some(text) = self.finish_eager_recording(state, transcriber).await {
+                    let next = state.into_transcribing(Vec::new());
+                    *state = next;
+                    self.handle_transcription_result(state, Ok(Ok(text))).await;
+                } else {
+                    tracing::debug!("Eager recording timeout produced empty result");
+                    self.reset_to_idle(state).await;
+                }
+                live.eager_transcriber = None;
+            } else {
+                for (_, task) in self.eager_chunk_tasks.drain(..) {
+                    task.abort();
+                }
+
+                self.start_transcription_task(state, live, model_override)
+                    .await;
+            }
+        }
+        false
+    }
+
     /// Act on the meeting stop, pause and resume trigger files.
     ///
     /// Shared by the 100 ms tick and the 50 ms tick that runs while a meeting is
@@ -3272,228 +3511,8 @@ impl Daemon {
 
                 // Check for recording timeout and cancel requests
                 _ = tokio::time::sleep(Duration::from_millis(100)), if state.is_recording() => {
-                    // Check for cancel request first
-                    if self.paths.check_cancel_requested() {
-                        tracing::info!("Recording cancelled");
-
-                        // Stop recording and discard audio
-                        if let Some(mut capture) = live.audio_capture.take() {
-                            let _ = capture.stop().await;
-                        }
-                        self.restore_recording_media();
-
-                        // Cancel any pending model load task
-                        if let Some(task) = self.model_load_task.take() {
-                            task.abort();
-                        }
-
-                        // Cancel any pending eager chunk tasks
-                        for (_, task) in self.eager_chunk_tasks.drain(..) {
-                            task.abort();
-                        }
-
-                        if let State::EagerRecording {
-                            accumulated_audio,
-                            chunk_results,
-                            chunks_sent,
-                            tasks_in_flight,
-                            ..
-                        } = &mut state
-                        {
-                            accumulated_audio.clear();
-                            chunk_results.clear();
-                            *chunks_sent = 0;
-                            *tasks_in_flight = 0;
-                        }
-
-                        // A cancelled external-trigger session is still an
-                        // ended session: tell the caller and disarm tracking.
-                        self.close_cancelled_cycle(&mut state, true).await;
-                        live.eager_transcriber = None;
-
-                        end_recording_notification("Cancelled", "Recording discarded", &self.config.output.notification, self.config.engine).await;
-
+                    if self.on_recording_tick(&mut state, &mut live, max_duration).await {
                         continue;
-                    }
-
-                    // Populate eager transcriber cache on first poll
-                    if live.eager_transcriber.is_none() && state.is_eager_recording() {
-                        let model_override = match &state {
-                            State::EagerRecording { model_override, .. } => model_override.as_deref(),
-                            _ => None,
-                        };
-                        live.eager_transcriber = self.transcriber_preloaded.clone();
-                        if live.eager_transcriber.is_none()
-                            && self.config.engine
-                                == crate::config::TranscriptionEngine::Whisper
-                        {
-                            // Whisper engine: get from model manager
-                            if let Some(ref mut mm) = self.model_manager {
-                                match mm.get_prepared_transcriber(model_override) {
-                                    Ok(t) => {
-                                        tracing::debug!("Created eager transcriber for chunk dispatch");
-                                        live.eager_transcriber = Some(t);
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("Failed to create eager transcriber: {}", e);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if let State::EagerRecording {
-                        accumulated_audio,
-                        chunks_sent,
-                        chunk_results,
-                        tasks_in_flight,
-                        ..
-                    } = &mut state
-                    {
-                        if let Some(ref mut capture) = live.audio_capture {
-                            let new_samples = capture.get_samples().await;
-                            if !new_samples.is_empty() {
-                                accumulated_audio.extend(new_samples);
-                            }
-                        }
-
-                        if let Some(ref transcriber) = live.eager_transcriber {
-                            let transcriber = transcriber.clone();
-                            self.process_eager_chunks(
-                                accumulated_audio,
-                                chunks_sent,
-                                tasks_in_flight,
-                                &transcriber,
-                            );
-                        }
-
-                        let completed = self.poll_chunk_tasks().await;
-                        if !completed.is_empty() {
-                            *tasks_in_flight = tasks_in_flight.saturating_sub(completed.len());
-                            chunk_results.extend(completed);
-                        }
-                    }
-
-                    // Silence-based auto-stop for external-trigger
-                    // (wake-word) sessions. Checked from this tick rather
-                    // than a standalone sleep arm: `loop { select! }` rebuilds
-                    // every arm future each iteration, so a 300 ms sleep arm
-                    // here was permanently starved by this same 100 ms tick
-                    // and never fired. 100 ms granularity is plenty for a
-                    // multi-second threshold.
-                    if self.is_external_trigger && state.is_recording() {
-                        if let Some(tracker) = &self.silence_tracker {
-                            if let Some(timeout_secs) =
-                                self.config.audio.external_trigger_silence_timeout_secs
-                            {
-                                let elapsed = tracker.silence_elapsed().await;
-                                if elapsed.as_secs_f32() >= timeout_secs {
-                                    tracing::info!(
-                                        "Silence timeout ({:.1}s >= {:.1}s), auto-stopping",
-                                        elapsed.as_secs_f32(),
-                                        timeout_secs
-                                    );
-                                    self.stop_active_recording(
-                                        &mut state,
-                                        &mut live,
-                                    )
-                                    .await;
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-
-                    // Check for recording timeout. Skip when audio_capture is
-                    // already gone so we don't re-fire cleanup on every 100ms
-                    // tick while the streaming session drains server-side
-                    // (state stays Streaming until Ended arrives).
-                    let timeout_fired = live.audio_capture.is_some()
-                        && state.recording_duration().is_some_and(|d| d > max_duration);
-                    if timeout_fired {
-                        // A hard-capped session is ending on voxtype's own
-                        // initiative (not the caller's `record stop`) — end
-                        // it as an external-trigger session so the caller is
-                        // told, and the silence tracker is disarmed.
-                        self.end_external_session(state.is_recording()).await;
-
-                        // Streaming has its own clean stop path: skip the
-                        // batch_transcribe branch below to avoid opening a
-                        // second WS session for audio already being processed
-                        // by the active streaming one.
-                        if state.is_streaming() {
-                            tracing::warn!(
-                                "Recording timeout ({:.0}s limit) while streaming; closing capture",
-                                max_duration.as_secs_f32()
-                            );
-                            self.stop_streaming_capture(&mut live).await;
-                            continue;
-                        }
-
-                        tracing::warn!(
-                            "Recording timeout ({:.0}s limit), transcribing captured audio",
-                            max_duration.as_secs_f32()
-                        );
-
-                        // A subset on purpose. This cycle still delivers a
-                        // transcript, so the flags the user asked for
-                        // (auto-submit, shift-enter) must survive to be
-                        // applied; only the smart-submit decision is dropped,
-                        // because the recording ran to its limit rather than
-                        // ending where the user meant it to.
-                        self.paths.cleanup_output_mode_override();
-                        self.paths.cleanup_model_override();
-                        self.paths.cleanup_profile_override();
-                        self.paths.cleanup_bool_override("smart_auto_submit");
-
-                        let model_override = match &state {
-                            State::Recording { model_override, .. } => model_override.clone(),
-                            State::EagerRecording { model_override, .. } => model_override.clone(),
-                            _ => None,
-                        };
-
-                        if state.is_eager_recording() {
-                            if let Some(mut capture) = live.audio_capture.take() {
-                                if let Ok(final_samples) = capture.stop().await {
-                                    if let State::EagerRecording { accumulated_audio, .. } = &mut state {
-                                        accumulated_audio.extend(final_samples);
-                                    }
-                                }
-                            }
-                            self.restore_recording_media();
-
-                            let transcriber = match self.get_transcriber_for_recording(
-                                model_override.as_deref(),
-                            ).await {
-                                Ok(transcriber) => transcriber,
-                                Err(()) => {
-                                    self.reset_to_idle(&mut state).await;
-                                    continue;
-                                }
-                            };
-
-                            self.update_state("transcribing");
-
-                            if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
-                                let next = state.into_transcribing(Vec::new());
-                                state = next;
-                                self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
-                            } else {
-                                tracing::debug!("Eager recording timeout produced empty result");
-                                self.reset_to_idle(&mut state).await;
-                            }
-                            live.eager_transcriber = None;
-                        } else {
-                            for (_, task) in self.eager_chunk_tasks.drain(..) {
-                                task.abort();
-                            }
-
-                            self.start_transcription_task(
-                                &mut state,
-                                &mut live,
-                                model_override,
-                            ).await;
-                        }
                     }
                 }
 
