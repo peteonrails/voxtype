@@ -240,6 +240,16 @@ impl GpuVendor {
             GpuVendor::Other => "Other",
         }
     }
+
+    /// The `VOXTYPE_VULKAN_DEVICE` value that selects this vendor.
+    fn env_value(&self) -> Option<&'static str> {
+        match self {
+            GpuVendor::Nvidia => Some("nvidia"),
+            GpuVendor::Amd => Some("amd"),
+            GpuVendor::Intel => Some("intel"),
+            GpuVendor::Other => None,
+        }
+    }
 }
 
 /// Information about a detected GPU
@@ -409,6 +419,83 @@ pub fn detect_gpu() -> Option<String> {
 }
 
 /// Parse VOXTYPE_VULKAN_DEVICE environment variable and return the appropriate vendor
+/// Status and hints for choosing among several GPUs, naming only vendors that
+/// are actually installed. A vendor that `VOXTYPE_VULKAN_DEVICE` asks for but
+/// no detected GPU matches is reported as auto, because that is what the
+/// Whisper device resolution falls back to.
+fn gpu_selection_advice(vendors: &[GpuVendor], selected: Option<GpuVendor>) -> Vec<String> {
+    let mut present: Vec<GpuVendor> = Vec::new();
+    for v in vendors {
+        if v.env_value().is_some() && !present.contains(v) {
+            present.push(*v);
+        }
+    }
+
+    match selected {
+        Some(v) if present.contains(&v) => {
+            return vec![format!(
+                "GPU selection: {} (via VOXTYPE_VULKAN_DEVICE)",
+                v.display_name()
+            )];
+        }
+        Some(v) => {
+            return vec![
+                "GPU selection: auto (first available)".to_string(),
+                format!(
+                    "  VOXTYPE_VULKAN_DEVICE asks for {0}, but no {0} GPU was detected",
+                    v.display_name()
+                ),
+            ];
+        }
+        None => {}
+    }
+
+    let mut lines = vec![
+        "GPU selection: auto (first available)".to_string(),
+        String::new(),
+    ];
+    if present.len() > 1 {
+        lines.push("Multiple GPUs detected. To select one by vendor, set:".to_string());
+        for v in &present {
+            let env = v.env_value().unwrap_or_default();
+            lines.push(format!(
+                "  VOXTYPE_VULKAN_DEVICE={:<8} # Use {} GPU",
+                env,
+                v.display_name()
+            ));
+        }
+        // Prefer a discrete vendor for the example; Intel is usually the iGPU.
+        let example = present
+            .iter()
+            .find(|v| **v != GpuVendor::Intel)
+            .unwrap_or(&present[0])
+            .env_value()
+            .unwrap_or_default();
+        lines.push(String::new());
+        lines.push(
+            "For systemd, create ~/.config/systemd/user/voxtype.service.d/gpu.conf:".to_string(),
+        );
+        lines.push("  [Service]".to_string());
+        lines.push(format!(
+            "  Environment=\"VOXTYPE_VULKAN_DEVICE={}\"",
+            example
+        ));
+    } else {
+        let name = present
+            .first()
+            .map(|v| v.display_name())
+            .unwrap_or("the same vendor");
+        lines.push(format!(
+            "All detected GPUs are {}, so a vendor name can't tell them apart. Pick one by",
+            name
+        ));
+        lines.push("Vulkan device index instead (see `vulkaninfo --summary`):".to_string());
+        lines.push("  [whisper]".to_string());
+        lines.push("  gpu_device = 1".to_string());
+    }
+    lines
+}
+
 pub fn get_selected_gpu_vendor() -> Option<GpuVendor> {
     std::env::var("VOXTYPE_VULKAN_DEVICE")
         .ok()
@@ -974,22 +1061,9 @@ pub fn show_status() {
         // Show GPU selection status if multiple GPUs
         if gpus.len() > 1 {
             println!();
-            if let Some(selected) = get_selected_gpu_vendor() {
-                println!(
-                    "GPU selection: {} (via VOXTYPE_VULKAN_DEVICE)",
-                    selected.display_name()
-                );
-            } else {
-                println!("GPU selection: auto (first available)");
-                println!();
-                println!("Multiple GPUs detected. To select a specific GPU, set:");
-                println!("  VOXTYPE_VULKAN_DEVICE=nvidia   # Use NVIDIA GPU");
-                println!("  VOXTYPE_VULKAN_DEVICE=amd      # Use AMD GPU");
-                println!("  VOXTYPE_VULKAN_DEVICE=intel    # Use Intel GPU");
-                println!();
-                println!("For systemd, create ~/.config/systemd/user/voxtype.service.d/gpu.conf:");
-                println!("  [Service]");
-                println!("  Environment=\"VOXTYPE_VULKAN_DEVICE=nvidia\"");
+            let vendors: Vec<GpuVendor> = gpus.iter().map(|g| g.vendor).collect();
+            for line in gpu_selection_advice(&vendors, get_selected_gpu_vendor()) {
+                println!("{}", line);
             }
         }
     }
@@ -1317,6 +1391,45 @@ fn switch_backend_tiered_parakeet(binary_name: &str, retry_hint: &str) -> anyhow
 
 #[cfg(test)]
 mod tests {
+
+    fn advice(vendors: &[super::GpuVendor], selected: Option<super::GpuVendor>) -> String {
+        super::gpu_selection_advice(vendors, selected).join("\n")
+    }
+
+    /// An AMD dGPU + AMD iGPU box was told to set VOXTYPE_VULKAN_DEVICE=nvidia.
+    #[test]
+    fn single_vendor_box_is_steered_to_gpu_device_not_absent_vendors() {
+        use super::GpuVendor::Amd;
+        let text = advice(&[Amd, Amd], None);
+        assert!(!text.to_lowercase().contains("nvidia"), "{text}");
+        assert!(!text.to_lowercase().contains("intel"), "{text}");
+        assert!(text.contains("gpu_device"), "{text}");
+    }
+
+    #[test]
+    fn hybrid_laptop_lists_its_two_vendors_and_prefers_the_discrete_one() {
+        use super::GpuVendor::{Intel, Nvidia};
+        let text = advice(&[Intel, Nvidia], None);
+        assert!(text.contains("VOXTYPE_VULKAN_DEVICE=intel"), "{text}");
+        assert!(text.contains("VOXTYPE_VULKAN_DEVICE=nvidia"), "{text}");
+        assert!(!text.contains("=amd"), "{text}");
+        assert!(
+            text.contains("Environment=\"VOXTYPE_VULKAN_DEVICE=nvidia\""),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_selection_is_only_claimed_when_that_vendor_exists() {
+        use super::GpuVendor::{Amd, Nvidia};
+        assert_eq!(
+            advice(&[Amd, Nvidia], Some(Nvidia)),
+            "GPU selection: NVIDIA (via VOXTYPE_VULKAN_DEVICE)"
+        );
+        let absent = advice(&[Amd, Amd], Some(Nvidia));
+        assert!(absent.starts_with("GPU selection: auto"), "{absent}");
+        assert!(absent.contains("no NVIDIA GPU was detected"), "{absent}");
+    }
 
     /// #611: the wait exists to cover a driver that binds a second or two
     /// after the daemon starts. It must not turn into a startup stall on a
