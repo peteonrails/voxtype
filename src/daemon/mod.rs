@@ -304,6 +304,26 @@ enum Signal {
     ExternalStop,
 }
 
+/// What `run` needs from its setup: the event sources, the cycle's state, and
+/// the guards that have to stay alive for the loop (the hotkey listener and the
+/// single-instance lock both stop doing their job when dropped).
+struct RunParts {
+    /// Kept alive for the loop's lifetime: dropping the listener stops the
+    /// events.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    hotkey_listener: Option<Box<dyn hotkey::HotkeyListener>>,
+    hotkey_rx: Option<tokio::sync::mpsc::Receiver<HotkeyEvent>>,
+    sigusr1: tokio::signal::unix::Signal,
+    sigusr2: tokio::signal::unix::Signal,
+    sigterm: tokio::signal::unix::Signal,
+    state: State,
+    live: LiveState,
+    max_duration: Duration,
+    activation_mode: ActivationMode,
+    /// Held, not read: the lock is released when this drops.
+    _pidlock: Pidlock,
+}
+
 impl Daemon {
     /// Create a new daemon with the given configuration, resolving the runtime
     /// directory from the process environment.
@@ -3168,173 +3188,10 @@ impl Daemon {
         crate::notification::send_sync(&title, &body);
     }
 
-    /// React to one event.
-    ///
-    /// Returns true when the loop must stop. The bodies are the loop's arms,
-    /// moved here so the state machine reads in one place: each event is one of
-    /// them, or the group that shared a period.
-    async fn handle(
-        &mut self,
-        state: &mut State,
-        live: &mut LiveState,
-        max_duration: Duration,
-        event: Event,
-    ) -> bool {
-        match event {
-            Event::Hotkey(hotkey_event, activation_mode) => {
-                match (hotkey_event, activation_mode) {
-                    (
-                        HotkeyEvent::Pressed {
-                            model_override,
-                            profile_override,
-                        },
-                        ActivationMode::PushToTalk,
-                    ) => {
-                        self.on_hotkey_press_push_to_talk(
-                            state,
-                            live,
-                            model_override,
-                            profile_override,
-                        )
-                        .await;
-                    }
-                    (HotkeyEvent::Released, ActivationMode::PushToTalk) => {
-                        self.on_hotkey_release_push_to_talk(state, live).await;
-                    }
-                    (
-                        HotkeyEvent::Pressed {
-                            model_override,
-                            profile_override,
-                        },
-                        ActivationMode::Toggle,
-                    ) => {
-                        self.on_hotkey_press_toggle(state, live, model_override, profile_override)
-                            .await;
-                    }
-                    (HotkeyEvent::Released, ActivationMode::Toggle) => {
-                        // In toggle mode, we ignore key release events
-                        tracing::trace!("Ignoring HotkeyEvent::Released in toggle mode");
-                    }
-                    (HotkeyEvent::Cancel, _) => {
-                        self.on_hotkey_cancel(state, live).await;
-                    }
-                }
-            }
-
-            Event::Tick => {
-                // A live recording's tick. When it ends the cycle, the rest of
-                // this tick belongs to a recording that is already over.
-                if state.is_recording() && self.on_recording_tick(state, live, max_duration).await {
-                    return false;
-                }
-
-                // A cancel that arrives while the engine is working. The state
-                // stays `Transcribing` until the cycle closes, so this keeps
-                // firing until it does.
-                if matches!(state, State::Transcribing { .. })
-                    && self.paths.check_cancel_requested()
-                {
-                    tracing::info!("Transcription cancelled");
-
-                    // Abort the transcription task, and drop the cloned
-                    // transcriber Arc so it isn't held until the next one.
-                    if let Some(task) = self.transcription_task.take() {
-                        task.abort();
-                    }
-                    self.model.clear_active();
-
-                    self.close_cancelled_cycle(state, false).await;
-
-                    end_recording_notification(
-                        "Cancelled",
-                        "Transcription aborted",
-                        &self.config.output.notification,
-                        self.config.engine,
-                    )
-                    .await;
-                }
-
-                self.evict_models_on_tick(state);
-                self.poll_meeting_start().await;
-                self.poll_meeting_state_triggers().await;
-            }
-
-            Event::MeetingTick => {
-                if self.poll_meeting_state_triggers().await {
-                    return false;
-                }
-                self.pump_meeting_audio().await;
-                self.enforce_meeting_duration_limit().await;
-                while let Some(event) = self.meeting.try_event() {
-                    let closed = event.is_none();
-                    self.handle_meeting_event(event);
-                    if closed {
-                        break;
-                    }
-                }
-            }
-
-            Event::Signal(signal) => match signal {
-                Signal::ExternalStart => {
-                    tracing::debug!("Received SIGUSR1 (start recording)");
-                    self.on_external_start(state, live).await;
-                }
-                Signal::ExternalStop => {
-                    tracing::debug!("Received SIGUSR2 (stop recording)");
-                    self.stop_active_recording(state, live).await;
-                }
-            },
-
-            Event::Transcription(result) => {
-                self.transcription_task = None;
-                self.handle_transcription_result(state, result).await;
-            }
-
-            Event::Streaming(event) => self.on_streaming_event(state, live, event).await,
-
-            Event::Stop(why) => {
-                tracing::info!("{why}");
-                return true;
-            }
-        }
-
-        false
-    }
-
-    /// Evict idle models roughly once a minute, and only while idle: unloading
-    /// a model out from under a recording would be worse than holding it.
-    ///
-    /// This is the eviction the 500 ms idle arm used to do, and never did: the
-    /// 100 ms tick recreated the longer sleep before it could fire (#644).
-    fn evict_models_on_tick(&mut self, state: &State) {
-        static EVICTION_COUNTER: std::sync::atomic::AtomicU32 =
-            std::sync::atomic::AtomicU32::new(0);
-        let count = EVICTION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if count.is_multiple_of(600) && matches!(state, State::Idle) {
-            if let Some(ref mut mm) = self.model_manager {
-                mm.evict_idle_models();
-            }
-        }
-    }
-
-    /// Start a meeting when the file-based IPC asks for one.
-    async fn poll_meeting_start(&mut self) {
-        if let Some(trigger) = self.paths.check_meeting_start() {
-            if self.config.meeting.enabled && !self.meeting.in_progress() {
-                tracing::debug!("Meeting start requested via file trigger");
-                if let Err(e) = self.start_meeting(trigger.title, trigger.diarization).await {
-                    tracing::error!("Failed to start meeting: {}", e);
-                }
-            } else if !self.config.meeting.enabled {
-                tracing::warn!("Meeting mode is disabled in config");
-            } else {
-                tracing::warn!("Meeting already in progress");
-            }
-        }
-    }
-
-    /// Run the daemon main loop
-    pub async fn run(&mut self) -> Result<()> {
+    /// Everything `run` does before its loop: the runtime checks that report
+    /// instead of failing, the event sources, the single-instance lock, the OSD
+    /// and its level socket, and the state the loop starts from.
+    async fn setup_runtime(&mut self) -> crate::error::Result<RunParts> {
         tracing::info!("Starting voxtype daemon");
 
         // Engine-vs-binary mismatch check at startup so users see a desktop
@@ -3377,13 +3234,13 @@ impl Daemon {
         meeting::cleanup_stale(&self.paths, &self.config);
 
         // Set up signal handlers for external control
-        let mut sigusr1 = signal(SignalKind::user_defined1()).map_err(|e| {
+        let sigusr1 = signal(SignalKind::user_defined1()).map_err(|e| {
             crate::error::VoxtypeError::Config(format!("Failed to set up SIGUSR1 handler: {}", e))
         })?;
-        let mut sigusr2 = signal(SignalKind::user_defined2()).map_err(|e| {
+        let sigusr2 = signal(SignalKind::user_defined2()).map_err(|e| {
             crate::error::VoxtypeError::Config(format!("Failed to set up SIGUSR2 handler: {}", e))
         })?;
-        let mut sigterm = signal(SignalKind::terminate()).map_err(|e| {
+        let sigterm = signal(SignalKind::terminate()).map_err(|e| {
             crate::error::VoxtypeError::Config(format!("Failed to set up SIGTERM handler: {}", e))
         })?;
 
@@ -3610,7 +3467,7 @@ impl Daemon {
 
         // Start hotkey listener (if enabled)
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let mut hotkey_rx = match self.deps.hotkey_events.take() {
+        let hotkey_rx = match self.deps.hotkey_events.take() {
             // An injected source drives the loop directly: the test keeps the
             // sender and no input device is opened.
             Some(rx) => Some(rx),
@@ -3629,12 +3486,12 @@ impl Daemon {
         let mut hotkey_rx: Option<tokio::sync::mpsc::Receiver<HotkeyEvent>> = None;
 
         // Current state
-        let mut state = State::Idle;
+        let state = State::Idle;
 
         // The capture, streaming handle and session, and the eager transcriber
         // for the recording in flight: one bundle, because every recording path
         // hands the whole set around.
-        let mut live = LiveState::default();
+        let live = LiveState::default();
 
         // Recording timeout
         let max_duration = Duration::from_secs(self.config.audio.max_duration_secs as u64);
@@ -3656,6 +3513,201 @@ impl Daemon {
         self.update_state("idle");
 
         // Main event loop
+        Ok(RunParts {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            hotkey_listener,
+            hotkey_rx,
+            sigusr1,
+            sigusr2,
+            sigterm,
+            state,
+            live,
+            max_duration,
+            activation_mode,
+            _pidlock: pidlock,
+        })
+    }
+
+    /// React to one event.
+    ///
+    /// Returns true when the loop must stop. The bodies are the loop's arms,
+    /// moved here so the state machine reads in one place: each event is one of
+    /// them, or the group that shared a period.
+    async fn handle(
+        &mut self,
+        state: &mut State,
+        live: &mut LiveState,
+        max_duration: Duration,
+        event: Event,
+    ) -> bool {
+        match event {
+            Event::Hotkey(hotkey_event, activation_mode) => {
+                match (hotkey_event, activation_mode) {
+                    (
+                        HotkeyEvent::Pressed {
+                            model_override,
+                            profile_override,
+                        },
+                        ActivationMode::PushToTalk,
+                    ) => {
+                        self.on_hotkey_press_push_to_talk(
+                            state,
+                            live,
+                            model_override,
+                            profile_override,
+                        )
+                        .await;
+                    }
+                    (HotkeyEvent::Released, ActivationMode::PushToTalk) => {
+                        self.on_hotkey_release_push_to_talk(state, live).await;
+                    }
+                    (
+                        HotkeyEvent::Pressed {
+                            model_override,
+                            profile_override,
+                        },
+                        ActivationMode::Toggle,
+                    ) => {
+                        self.on_hotkey_press_toggle(state, live, model_override, profile_override)
+                            .await;
+                    }
+                    (HotkeyEvent::Released, ActivationMode::Toggle) => {
+                        // In toggle mode, we ignore key release events
+                        tracing::trace!("Ignoring HotkeyEvent::Released in toggle mode");
+                    }
+                    (HotkeyEvent::Cancel, _) => {
+                        self.on_hotkey_cancel(state, live).await;
+                    }
+                }
+            }
+
+            Event::Tick => {
+                // A live recording's tick. When it ends the cycle, the rest of
+                // this tick belongs to a recording that is already over.
+                if state.is_recording() && self.on_recording_tick(state, live, max_duration).await {
+                    return false;
+                }
+
+                // A cancel that arrives while the engine is working. The state
+                // stays `Transcribing` until the cycle closes, so this keeps
+                // firing until it does.
+                if matches!(state, State::Transcribing { .. })
+                    && self.paths.check_cancel_requested()
+                {
+                    tracing::info!("Transcription cancelled");
+
+                    // Abort the transcription task, and drop the cloned
+                    // transcriber Arc so it isn't held until the next one.
+                    if let Some(task) = self.transcription_task.take() {
+                        task.abort();
+                    }
+                    self.model.clear_active();
+
+                    self.close_cancelled_cycle(state, false).await;
+
+                    end_recording_notification(
+                        "Cancelled",
+                        "Transcription aborted",
+                        &self.config.output.notification,
+                        self.config.engine,
+                    )
+                    .await;
+                }
+
+                self.evict_models_on_tick(state);
+                self.poll_meeting_start().await;
+                self.poll_meeting_state_triggers().await;
+            }
+
+            Event::MeetingTick => {
+                if self.poll_meeting_state_triggers().await {
+                    return false;
+                }
+                self.pump_meeting_audio().await;
+                self.enforce_meeting_duration_limit().await;
+                while let Some(event) = self.meeting.try_event() {
+                    let closed = event.is_none();
+                    self.handle_meeting_event(event);
+                    if closed {
+                        break;
+                    }
+                }
+            }
+
+            Event::Signal(signal) => match signal {
+                Signal::ExternalStart => {
+                    tracing::debug!("Received SIGUSR1 (start recording)");
+                    self.on_external_start(state, live).await;
+                }
+                Signal::ExternalStop => {
+                    tracing::debug!("Received SIGUSR2 (stop recording)");
+                    self.stop_active_recording(state, live).await;
+                }
+            },
+
+            Event::Transcription(result) => {
+                self.transcription_task = None;
+                self.handle_transcription_result(state, result).await;
+            }
+
+            Event::Streaming(event) => self.on_streaming_event(state, live, event).await,
+
+            Event::Stop(why) => {
+                tracing::info!("{why}");
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Evict idle models roughly once a minute, and only while idle: unloading
+    /// a model out from under a recording would be worse than holding it.
+    ///
+    /// This is the eviction the 500 ms idle arm used to do, and never did: the
+    /// 100 ms tick recreated the longer sleep before it could fire (#644).
+    fn evict_models_on_tick(&mut self, state: &State) {
+        static EVICTION_COUNTER: std::sync::atomic::AtomicU32 =
+            std::sync::atomic::AtomicU32::new(0);
+        let count = EVICTION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if count.is_multiple_of(600) && matches!(state, State::Idle) {
+            if let Some(ref mut mm) = self.model_manager {
+                mm.evict_idle_models();
+            }
+        }
+    }
+
+    /// Start a meeting when the file-based IPC asks for one.
+    async fn poll_meeting_start(&mut self) {
+        if let Some(trigger) = self.paths.check_meeting_start() {
+            if self.config.meeting.enabled && !self.meeting.in_progress() {
+                tracing::debug!("Meeting start requested via file trigger");
+                if let Err(e) = self.start_meeting(trigger.title, trigger.diarization).await {
+                    tracing::error!("Failed to start meeting: {}", e);
+                }
+            } else if !self.config.meeting.enabled {
+                tracing::warn!("Meeting mode is disabled in config");
+            } else {
+                tracing::warn!("Meeting already in progress");
+            }
+        }
+    }
+
+    /// Run the daemon main loop
+    pub async fn run(&mut self) -> Result<()> {
+        let RunParts {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            hotkey_listener,
+            mut hotkey_rx,
+            mut sigusr1,
+            mut sigusr2,
+            mut sigterm,
+            mut state,
+            mut live,
+            max_duration,
+            activation_mode,
+            _pidlock,
+        } = self.setup_runtime().await?;
 
         loop {
             // One event per iteration, whatever produced it.
