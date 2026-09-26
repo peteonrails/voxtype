@@ -68,17 +68,34 @@ fn frame_energies(audio: &[f32], lo: usize, hi: usize) -> impl Iterator<Item = (
         })
 }
 
-/// The cut point inside `audio[lo..hi]`: the middle of its quietest frame.
-/// Ties go to the latest frame so chunks stay as close to nominal length as
-/// the audio allows. Falls back to `hi` when the window holds no full frame.
+/// Frames in the quiet stretch a cut must sit in (120ms). A single quiet
+/// frame is not enough: the closure of a stop consonant ("dicta|tion") is
+/// near-silent for 30-80ms, and cutting there splits the word. A pause
+/// between words lasts longer.
+const QUIET_SPAN_FRAMES: usize = 6;
+
+/// The cut point inside `audio[lo..hi]`: the middle of its quietest
+/// `QUIET_SPAN_FRAMES`-frame stretch (fewer if the window is shorter). Ties
+/// go to the latest stretch so chunks stay as close to nominal length as the
+/// audio allows. Falls back to `hi` when the window holds no full frame.
 fn quietest_cut(audio: &[f32], lo: usize, hi: usize) -> usize {
-    frame_energies(audio, lo, hi)
-        .fold(None::<(usize, f32)>, |best, (start, energy)| match best {
-            Some((_, e)) if energy > e => best,
-            _ => Some((start, energy)),
-        })
-        .map(|(start, _)| start + FRAME_SAMPLES / 2)
-        .unwrap_or(hi)
+    let frames: Vec<(usize, f32)> = frame_energies(audio, lo, hi).collect();
+    if frames.is_empty() {
+        return hi;
+    }
+    let span = QUIET_SPAN_FRAMES.min(frames.len());
+    // At most ~75 frames in a 1.5s window, so summing each stretch directly
+    // is cheap and avoids running-sum drift deciding ties.
+    let mut best = (0, f32::INFINITY);
+    for i in 0..=frames.len() - span {
+        let sum: f32 = frames[i..i + span].iter().map(|(_, e)| e).sum();
+        if sum <= best.1 {
+            best = (i, sum);
+        }
+    }
+    let first = frames[best.0].0;
+    let last = frames[best.0 + span - 1].0 + FRAME_SAMPLES;
+    (first + last) / 2
 }
 
 /// End positions of every complete chunk in `audio`. Chunk `k` covers
@@ -199,6 +216,23 @@ mod tests {
         assert!(
             (4.2..4.4).contains(&cut),
             "cut at {cut}s, expected in the gap"
+        );
+    }
+
+    #[test]
+    fn a_short_stop_closure_loses_to_a_real_pause() {
+        // A 40ms near-silent dip (the closure inside "dicta|tion") later in
+        // the window than a 200ms pause between words: the cut must take the
+        // pause, or it splits the word.
+        let mut audio = speech_with_gaps(7.0, &[3.8], 200);
+        let dip = (4.7 * SR as f32) as usize;
+        audio[dip..dip + 40 * SR / 1000]
+            .iter_mut()
+            .for_each(|s| *s = 0.0);
+        let cut = chunk_boundaries(&audio, &test_config())[0] as f32 / SR as f32;
+        assert!(
+            (3.8..4.0).contains(&cut),
+            "cut at {cut}s, expected in the pause"
         );
     }
 
