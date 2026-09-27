@@ -116,6 +116,7 @@ The main key to hold for recording. Must be a valid Linux evdev key name.
 - `MEDIA` - Media key (often a dedicated button on multimedia keyboards)
 - `RECORD` - Record key
 - `INSERT` - Insert key
+- `PRINTSCREEN` - Print Screen key (alias `SYSRQ`). Pair it with a modifier, since screenshot tools also see it
 - `HOME` - Home key
 - `END` - End key
 - `PAGEUP` - Page Up key
