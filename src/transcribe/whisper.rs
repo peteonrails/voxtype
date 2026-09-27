@@ -249,12 +249,6 @@ impl Transcriber for WhisperTranscriber {
 
         let start = std::time::Instant::now();
 
-        // Create state for this transcription
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
-
         // Determine language based on configuration mode
         let selected_language: Option<String> = if self.language.is_auto() {
             // Unconstrained auto-detection: let Whisper detect from all languages
@@ -264,6 +258,12 @@ impl Transcriber for WhisperTranscriber {
             // Constrained auto-detection: detect from allowed set only
             let allowed = self.language.as_vec();
             tracing::debug!("Using constrained language detection from: {:?}", allowed);
+            // State needed only for pcm_to_mel/lang_detect below; run_full()
+            // creates its own separate state for the actual decode.
+            let mut state = self
+                .ctx
+                .create_state()
+                .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
             Some(self.select_language_from_allowed(&mut state, samples, &allowed)?)
         } else {
             // Single language: use it directly
