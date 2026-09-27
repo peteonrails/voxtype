@@ -3,8 +3,8 @@
 //! Replaces the cstr-shaped implementation that was the proof-of-concept in
 //! 0.7.0-rc1. The HF Optimum export is the upstream-canonical shape (used
 //! by `onnx-community/cohere-transcribe-03-2026-ONNX`) and ships in four
-//! precisions (FP16, int8, q4, q4f16). q4 is the one that compiles cleanly
-//! through MIGraphX 7.2 and unblocks AMD GPU acceleration for Cohere.
+//! precisions (FP16, int8, q4, q4f16). The experimental `cohere-openvino`
+//! feature can run the encoder on Intel GPUs while keeping the decoder on CPU.
 //!
 //! ## Architecture
 //!
@@ -50,7 +50,7 @@
 //!  <|notimestamp|>=11, <|nodiarize|>=13]
 //! ```
 
-use crate::config::CohereConfig;
+use crate::config::{CohereConfig, CohereEncoderBackend};
 use crate::error::TranscribeError;
 use crate::transcribe::cohere_fbank::CohereFbank;
 use crate::transcribe::Transcriber;
@@ -119,19 +119,39 @@ struct StepOutputs {
     present_enc: Vec<DynValue>,
 }
 
+enum Encoder {
+    Onnx(Session),
+    #[cfg(feature = "cohere-openvino")]
+    OpenVino(super::cohere_openvino::OpenVinoEncoder),
+}
+
+impl Encoder {
+    fn run(&mut self, frames: usize, features: Vec<f32>) -> Result<DynValue, TranscribeError> {
+        match self {
+            Self::Onnx(session) => {
+                let input = Tensor::<f32>::from_array(([1usize, frames, N_MELS], features))
+                    .map_err(|e| TranscribeError::InferenceFailed(format!("encoder input: {e}")))?;
+                let mut outputs = session
+                    .run(ort::inputs!["input_features" => input])
+                    .map_err(|e| TranscribeError::InferenceFailed(format!("encoder run: {e}")))?;
+                outputs.remove("last_hidden_state").ok_or_else(|| {
+                    TranscribeError::InferenceFailed("encoder missing last_hidden_state".into())
+                })
+            }
+            #[cfg(feature = "cohere-openvino")]
+            Self::OpenVino(encoder) => encoder.run(frames, &features),
+        }
+    }
+}
+
 pub struct CohereTranscriber {
-    encoder: Mutex<Session>,
+    encoder: Mutex<Encoder>,
     decoder: Mutex<Session>,
     tokenizer: Tokenizer,
     fbank: CohereFbank,
     prefix: Vec<i64>,
-    /// Float dtype the encoder emits and the decoder expects on
-    /// `encoder_hidden_states` and the `past_key_values.*` cache tensors.
-    /// Float32 for the q4 / int8 / FP32 variants, Float16 for fp16 / q4f16.
-    /// We discover this once at load time from the encoder's
-    /// `last_hidden_state` output type so the decoder loop can build
-    /// matching empty caches and we can extract the encoder output
-    /// against the right primitive.
+    /// Decoder KV-cache and logits dtype, discovered from the decoder inputs.
+    /// Encoder hidden states remain Float32 even for fp16 / q4f16 exports.
     float_dtype: TensorElementType,
 }
 
@@ -139,7 +159,12 @@ impl CohereTranscriber {
     pub fn new(config: &CohereConfig) -> Result<Self, TranscribeError> {
         let model_dir = resolve_model_path(&config.model)?;
         let threads = config.threads.unwrap_or_else(|| num_cpus::get().min(4));
-        Self::with_threads_and_lang(&model_dir, threads, &config.language)
+        Self::load(
+            &model_dir,
+            threads,
+            &config.language,
+            config.encoder_backend,
+        )
     }
 
     pub fn from_dir(model_dir: &Path) -> Result<Self, TranscribeError> {
@@ -154,6 +179,15 @@ impl CohereTranscriber {
         model_dir: &Path,
         threads: usize,
         language: &str,
+    ) -> Result<Self, TranscribeError> {
+        Self::load(model_dir, threads, language, CohereEncoderBackend::Onnx)
+    }
+
+    fn load(
+        model_dir: &Path,
+        threads: usize,
+        language: &str,
+        encoder_backend: CohereEncoderBackend,
     ) -> Result<Self, TranscribeError> {
         tracing::info!("Loading Cohere Transcribe model from {:?}", model_dir);
         let start = std::time::Instant::now();
@@ -184,7 +218,23 @@ impl CohereTranscriber {
             ))
         })?;
 
-        let encoder = build_session(&encoder_file, threads, "encoder", true)?;
+        let encoder = match encoder_backend {
+            CohereEncoderBackend::Onnx => {
+                Encoder::Onnx(build_session(&encoder_file, threads, "encoder", true)?)
+            }
+            CohereEncoderBackend::OpenvinoGpu => {
+                #[cfg(feature = "cohere-openvino")]
+                {
+                    Encoder::OpenVino(super::cohere_openvino::OpenVinoEncoder::new(&encoder_file)?)
+                }
+                #[cfg(not(feature = "cohere-openvino"))]
+                {
+                    return Err(TranscribeError::InitFailed(
+                    "Cohere OpenVINO GPU support is not compiled in. Build with --features cohere-openvino, or set cohere.encoder_backend = \"onnx\".".into()
+                ));
+                }
+            }
+        };
         // Decoder pinned to CPU: ORT's CUDA GroupQueryAttention kernel rejects
         // the `attention_bias` input that the HF Optimum decoder export uses
         // (validated on GTX 1660 Ti, ORT 1.20 via pyke ort 2.0.0-rc.12). The
@@ -260,8 +310,7 @@ impl CohereTranscriber {
             return Ok(String::new());
         }
         let features_flat: Vec<f32> = features_2d.iter().copied().collect();
-        let enc_input = Tensor::<f32>::from_array(([1usize, n_frames, N_MELS], features_flat))
-            .map_err(|e| TranscribeError::InferenceFailed(format!("encoder input: {e}")))?;
+        let encoder_start = std::time::Instant::now();
 
         // 2. Encoder forward. We hold on to the encoder output as a
         // DynValue (rather than extracting it into a Vec<f32>) so the same
@@ -273,13 +322,13 @@ impl CohereTranscriber {
                 .encoder
                 .lock()
                 .map_err(|e| TranscribeError::InferenceFailed(format!("encoder lock: {e}")))?;
-            let mut enc_outputs = enc
-                .run(ort::inputs!["input_features" => enc_input])
-                .map_err(|e| TranscribeError::InferenceFailed(format!("encoder run: {e}")))?;
-            enc_outputs.remove("last_hidden_state").ok_or_else(|| {
-                TranscribeError::InferenceFailed("encoder missing last_hidden_state".to_string())
-            })?
+            enc.run(n_frames, features_flat)?
         };
+        tracing::debug!(
+            encoder_secs = encoder_start.elapsed().as_secs_f64(),
+            "Cohere encoder completed"
+        );
+        let decoder_start = std::time::Instant::now();
 
         // 3. Decoder generation loop.
         let audio_secs = samples.len() as f32 / SAMPLE_RATE as f32;
@@ -340,15 +389,16 @@ impl CohereTranscriber {
             let num_logits = Tensor::<i64>::from_array(([] as [usize; 0], vec![1_i64]))
                 .map_err(|e| TranscribeError::InferenceFailed(format!("num_logits tensor: {e}")))?;
 
-            let mut inputs: Vec<(Cow<str>, ort::session::SessionInputValue)> = Vec::new();
-            inputs.push((Cow::Borrowed("input_ids"), input_ids.into()));
-            inputs.push((Cow::Borrowed("attention_mask"), attention_mask.into()));
-            inputs.push((Cow::Borrowed("position_ids"), position_ids.into()));
-            inputs.push((Cow::Borrowed("num_logits_to_keep"), num_logits.into()));
-            inputs.push((
-                Cow::Borrowed("encoder_hidden_states"),
-                ort::session::SessionInputValue::from(&encoder_hidden),
-            ));
+            let mut inputs: Vec<(Cow<str>, ort::session::SessionInputValue)> = vec![
+                (Cow::Borrowed("input_ids"), input_ids.into()),
+                (Cow::Borrowed("attention_mask"), attention_mask.into()),
+                (Cow::Borrowed("position_ids"), position_ids.into()),
+                (Cow::Borrowed("num_logits_to_keep"), num_logits.into()),
+                (
+                    Cow::Borrowed("encoder_hidden_states"),
+                    ort::session::SessionInputValue::from(&encoder_hidden),
+                ),
+            ];
 
             for layer in 0..N_LAYERS {
                 let dk_name = format!("past_key_values.{layer}.decoder.key");
@@ -394,28 +444,28 @@ impl CohereTranscriber {
                 let mut present_enc: Vec<DynValue> = Vec::with_capacity(N_LAYERS * 2);
                 for layer in 0..N_LAYERS {
                     let dk = outputs
-                        .remove(&format!("present.{layer}.decoder.key"))
+                        .remove(format!("present.{layer}.decoder.key"))
                         .ok_or_else(|| {
                             TranscribeError::InferenceFailed(format!(
                                 "missing present.{layer}.decoder.key"
                             ))
                         })?;
                     let dv = outputs
-                        .remove(&format!("present.{layer}.decoder.value"))
+                        .remove(format!("present.{layer}.decoder.value"))
                         .ok_or_else(|| {
                             TranscribeError::InferenceFailed(format!(
                                 "missing present.{layer}.decoder.value"
                             ))
                         })?;
                     let ek = outputs
-                        .remove(&format!("present.{layer}.encoder.key"))
+                        .remove(format!("present.{layer}.encoder.key"))
                         .ok_or_else(|| {
                             TranscribeError::InferenceFailed(format!(
                                 "missing present.{layer}.encoder.key"
                             ))
                         })?;
                     let ev = outputs
-                        .remove(&format!("present.{layer}.encoder.value"))
+                        .remove(format!("present.{layer}.encoder.value"))
                         .ok_or_else(|| {
                             TranscribeError::InferenceFailed(format!(
                                 "missing present.{layer}.encoder.value"
@@ -443,6 +493,11 @@ impl CohereTranscriber {
             past_enc = present_enc;
         }
 
+        tracing::debug!(
+            decoder_secs = decoder_start.elapsed().as_secs_f64(),
+            tokens = generated.len(),
+            "Cohere decoder completed"
+        );
         let ids_u32: Vec<u32> = generated.iter().map(|&t| t as u32).collect();
         let text = self
             .tokenizer

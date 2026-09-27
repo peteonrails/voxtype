@@ -65,6 +65,18 @@ pub enum ConfigSetError {
         feature: &'static str,
     },
 
+    #[error(
+        "'{key} = {value}' requires Cargo feature '{feature}', which is not compiled \
+         into this binary.\n  Rebuild voxtype with --features {feature} and install \
+         the native OpenVINO runtime and Intel compute drivers.\n  \
+         Or select the default: voxtype config set {key} onnx"
+    )]
+    ChoiceFeatureNotCompiled {
+        key: &'static str,
+        value: String,
+        feature: &'static str,
+    },
+
     #[error("config editor: {0}")]
     Editor(#[from] EditorError),
 }
@@ -79,7 +91,8 @@ impl ConfigSetError {
             | ConfigSetError::FeatureNotCompiled(_)
             | ConfigSetError::UnknownKey(_)
             | ConfigSetError::BadValue(_)
-            | ConfigSetError::KeyFeatureNotCompiled { .. } => 2,
+            | ConfigSetError::KeyFeatureNotCompiled { .. }
+            | ConfigSetError::ChoiceFeatureNotCompiled { .. } => 2,
             ConfigSetError::Editor(_) => 1,
         }
     }
@@ -210,6 +223,15 @@ pub fn set_key(path: PathBuf, key: &str, raw: &str) -> Result<SetOutcome, Config
     let found = lookup(key)?;
     let spec = found.spec();
     let value = schema::validate_value(spec, raw)?;
+    if let Some(feature) = spec.choice_requires_feature(raw) {
+        if !schema::feature_compiled(feature) {
+            return Err(ConfigSetError::ChoiceFeatureNotCompiled {
+                key: spec.key,
+                value: raw.to_string(),
+                feature,
+            });
+        }
+    }
 
     let mut editor = ConfigEditor::load_from_path(path)?;
     schema::apply(&mut editor, &found, &value);
@@ -572,6 +594,66 @@ mod tests {
             other => panic!("expected KeyFeatureNotCompiled, got {:?}", other),
         }
         assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    #[cfg(not(feature = "cohere-openvino"))]
+    fn unavailable_cohere_backend_leaves_file_unchanged() {
+        let (_dir, path) = full_config();
+        let before = fs::read(&path).unwrap();
+        let err = set_key(path.clone(), "cohere.encoder_backend", "openvino_gpu").unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        if cfg!(feature = "cohere") {
+            assert!(matches!(
+                err,
+                ConfigSetError::ChoiceFeatureNotCompiled { .. }
+            ));
+            assert!(err.to_string().contains("--features cohere-openvino"));
+            assert!(err
+                .to_string()
+                .contains("voxtype config set cohere.encoder_backend onnx"));
+        } else {
+            assert!(matches!(err, ConfigSetError::KeyFeatureNotCompiled { .. }));
+        }
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let absent = path.with_file_name("absent.toml");
+        assert!(set_key(absent.clone(), "cohere.encoder_backend", "openvino_gpu").is_err());
+        assert!(!absent.exists());
+    }
+
+    #[test]
+    #[cfg(feature = "cohere")]
+    fn cohere_onnx_backend_is_settable_and_unsettable() {
+        let (_dir, path) = temp_config(
+            "# keep this comment\n[cohere]\nmodel = \"cohere-transcribe-q4f16\"\n\
+             language = \"es\"\nencoder_backend = \"openvino_gpu\"\n",
+        );
+        set_key(path.clone(), "cohere.encoder_backend", "onnx").unwrap();
+        assert_eq!(
+            reload(&path).cohere.unwrap().encoder_backend,
+            crate::config::CohereEncoderBackend::Onnx
+        );
+        unset_key(path.clone(), "cohere.encoder_backend").unwrap();
+        let cohere = reload(&path).cohere.unwrap();
+        assert_eq!(
+            cohere.encoder_backend,
+            crate::config::CohereEncoderBackend::Onnx
+        );
+        assert_eq!(cohere.language, "es");
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("# keep this comment"));
+        assert!(!contents.contains("encoder_backend"));
+    }
+
+    #[test]
+    #[cfg(feature = "cohere-openvino")]
+    fn compiled_cohere_gpu_backend_is_settable() {
+        let (_dir, path) = full_config();
+        set_key(path.clone(), "cohere.encoder_backend", "openvino_gpu").unwrap();
+        assert_eq!(
+            reload(&path).cohere.unwrap().encoder_backend,
+            crate::config::CohereEncoderBackend::OpenvinoGpu
+        );
     }
 
     #[test]

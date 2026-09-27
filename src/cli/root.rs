@@ -178,6 +178,22 @@ pub struct Cli {
     )]
     pub remote_api_key: Option<String>,
 
+    // -- Cohere --
+    /// Cohere encoder backend (or use VOXTYPE_COHERE_ENCODER_BACKEND)
+    #[arg(
+        long,
+        value_name = "BACKEND",
+        value_parser = ["onnx", "openvino_gpu"],
+        help_heading = "Cohere",
+        long_help = "Cohere encoder backend (or use VOXTYPE_COHERE_ENCODER_BACKEND).\n\
+        onnx preserves the existing ONNX Runtime path (default).\n\
+        openvino_gpu is experimental: native OpenVINO on Intel GPU, encoder only; \
+        the decoder stays on ONNX Runtime CPU. Requires the cohere-openvino feature, \
+        a native OpenVINO runtime (validated with 2026.4), and Intel compute drivers. \
+        No silent CPU fallback. Uses the existing q4f16 weights unchanged."
+    )]
+    pub cohere_encoder_backend: Option<String>,
+
     // -- Soniox --
     /// API key for Soniox (or use SONIOX_API_KEY env var)
     #[arg(
@@ -608,6 +624,31 @@ mod tests {
         // The CLI should preserve case as-is; main.rs handles case-insensitive matching
         let cli = Cli::parse_from(["voxtype", "--engine", "PARAKEET"]);
         assert_eq!(cli.engine, Some("PARAKEET".to_string()));
+    }
+
+    #[test]
+    fn test_cohere_encoder_backend_flag() {
+        for backend in ["onnx", "openvino_gpu"] {
+            let cli =
+                Cli::try_parse_from(["voxtype", "--cohere-encoder-backend", backend, "daemon"])
+                    .unwrap();
+            assert_eq!(cli.cohere_encoder_backend.as_deref(), Some(backend));
+        }
+        assert!(Cli::try_parse_from(["voxtype"])
+            .unwrap()
+            .cohere_encoder_backend
+            .is_none());
+    }
+
+    #[test]
+    fn test_cohere_encoder_backend_flag_rejects_unknown() {
+        for backend in ["gpu", "openvino", "openvino-gpu", "auto", "ONNX"] {
+            let error = Cli::try_parse_from(["voxtype", "--cohere-encoder-backend", backend])
+                .err()
+                .expect("unknown backend must fail");
+            assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+            assert!(error.to_string().contains("openvino_gpu"));
+        }
     }
 
     // =========================================================================

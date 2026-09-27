@@ -9,6 +9,7 @@ Solutions to common issues when using Voxtype.
 - [Permission Issues](#permission-issues)
 - [Audio Problems](#audio-problems)
 - [Transcription Issues](#transcription-issues)
+  - [Cohere Intel GPU Encoder (Experimental)](#cohere-intel-gpu-encoder-experimental)
 - [Voice Activity Detection (VAD)](#voice-activity-detection-vad)
 - [Output Problems](#output-problems)
   - [wtype not working on KDE Plasma or GNOME Wayland](#wtype-not-working-on-kde-plasma-or-gnome-wayland)
@@ -305,6 +306,45 @@ max_duration_secs = 120  # 2 minutes
 ---
 
 ## Transcription Issues
+
+### Cohere Intel GPU Encoder (Experimental)
+
+`[cohere] encoder_backend = "openvino_gpu"` is an opt-in, strict Intel GPU backend.
+It moves only the encoder to native OpenVINO; the original ONNX Runtime CPU
+decoder and installed q4f16 weights remain unchanged. CPU decoder activity is
+expected and is not an encoder fallback.
+
+If initialization or transcription fails:
+
+1. Verify your binary was built with `cohere-openvino`. An ordinary ONNX-enabled
+   binary is not enough. Missing feature support is an error.
+2. Install the system Intel compute drivers and ensure your user can access the
+   GPU render device. A working display driver alone does not establish compute
+   support.
+3. Ensure the native OpenVINO dynamic library and GPU plugin can be loaded by the
+   actual voxtype process. A systemd user service does not automatically inherit
+   runtime paths exported in an interactive shell. Native OpenVINO **2026.4** was
+   validated on Intel Arc B390; other versions/devices are not yet validated.
+4. Do not substitute ONNX Runtime's OpenVINO execution provider. Its bundled
+   OpenVINO 2025.4 crashed with the tested encoder; this backend deliberately uses
+   the native OpenVINO runtime instead.
+5. Use `voxtype -vv --engine cohere --cohere-encoder-backend openvino_gpu daemon`
+   to inspect runtime loading and encoder compilation errors. The ready message
+   includes the runtime version. Check conflicting `OPENVINO_INSTALL_DIR`,
+   `INTEL_OPENVINO_DIR`, or `OPENVINO_BUILD_DIR` settings if the wrong runtime loads;
+   they can take precedence over `LD_LIBRARY_PATH`.
+6. After a successful transcription, `voxtype info accel` recognizes the
+   `Cohere OpenVINO GPU encoder inference succeeded` journal marker. A ready
+   message alone is not proof of inference and may still report unknown.
+
+Cohere runs in-process. Whisper's `gpu_isolation` does not protect it from native
+runtime or driver crashes. This backend is experimental and has only been
+hardware-validated on the runtime/device combination above.
+
+GPU setup/compilation failures do **not** silently fall back to CPU. To opt out,
+set `encoder_backend = "onnx"` or pass `--cohere-encoder-backend onnx`. Also check
+`VOXTYPE_COHERE_ENCODER_BACKEND`, which overrides the file. Only `onnx` and
+`openvino_gpu` are valid values; `gpu`, `auto`, and `openvino` are rejected.
 
 ### "Model not found"
 
