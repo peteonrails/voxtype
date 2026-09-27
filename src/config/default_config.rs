@@ -250,6 +250,11 @@ type_delay_ms = 0
 # Allows time for the paste operation to complete (default: 200)
 # restore_clipboard_delay_ms = 200
 
+# Delay after paste before sending Enter with auto_submit (milliseconds)
+# Only applies to mode = "paste". Raise it if an app that pastes
+# asynchronously sometimes misses the Enter (default: 0)
+# submit_delay_ms = 0
+
 # Wait for modifier keys to be released before typing (default: true)
 # Prevents transcribed letters from combining with held modifiers (Ctrl/Alt/
 # Shift/Super) and triggering compositor or application keybindings. Reads

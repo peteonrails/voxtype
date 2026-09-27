@@ -160,6 +160,11 @@ pub struct OutputConfig {
     #[serde(default = "default_restore_clipboard_delay")]
     pub restore_clipboard_delay_ms: u32,
 
+    /// Delay after the paste keystroke before sending Enter (milliseconds)
+    /// Gives apps that paste asynchronously time to insert the text first
+    #[serde(default)]
+    pub submit_delay_ms: u32,
+
     /// Wait for modifier keys (Ctrl/Alt/Shift/Super) to be released before
     /// typing transcribed text. Prevents the typed letters from combining
     /// with held modifiers and triggering compositor or application
@@ -207,6 +212,7 @@ impl Default for OutputConfig {
             file_mode: FileMode::default(),
             restore_clipboard: false,
             restore_clipboard_delay_ms: default_restore_clipboard_delay(),
+            submit_delay_ms: 0,
             wait_for_modifier_release: true,
             modifier_release_timeout_ms: default_modifier_release_timeout_ms(),
         }
@@ -565,6 +571,36 @@ mod tests {
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.output.restore_clipboard);
         assert_eq!(config.output.restore_clipboard_delay_ms, 500);
+    }
+
+    #[test]
+    fn test_submit_delay_defaults_to_zero() {
+        let config = Config::default();
+        assert_eq!(config.output.submit_delay_ms, 0);
+    }
+
+    #[test]
+    fn test_submit_delay_deserialization() {
+        let toml_str = r#"
+            [hotkey]
+            key = "SCROLLLOCK"
+
+            [audio]
+            device = "default"
+            sample_rate = 16000
+            max_duration_secs = 30
+
+            [whisper]
+            model = "base.en"
+
+            [output]
+            mode = "paste"
+            auto_submit = true
+            submit_delay_ms = 25
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.output.submit_delay_ms, 25);
     }
 
     #[test]

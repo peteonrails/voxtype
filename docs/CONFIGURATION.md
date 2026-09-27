@@ -2044,6 +2044,23 @@ restore_clipboard = true
 restore_clipboard_delay_ms = 300  # Longer delay for slower systems
 ```
 
+### submit_delay_ms
+
+**Type:** Integer
+**Default:** `0`
+**Required:** No
+**Applies to:** Paste mode only (when `auto_submit = true`)
+
+Delay in milliseconds after the paste keystroke before sending Enter. Some applications insert pasted text asynchronously and can receive the Enter before the text arrives. Increase this if the Enter is sometimes missed.
+
+**Example:**
+```toml
+[output]
+mode = "paste"
+auto_submit = true
+submit_delay_ms = 25
+```
+
 ### fallback_to_clipboard
 
 **Type:** Boolean
