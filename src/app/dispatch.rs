@@ -14,6 +14,7 @@ use super::config_show::show_config;
 use super::info::run_info_command;
 use super::meeting::run_meeting_command;
 use super::record::send_record_command;
+use super::stats::run_stats;
 use super::status::run_status;
 use super::transcribe_file::transcribe_file;
 use super::updates::check_for_updates;
@@ -439,6 +440,10 @@ pub(crate) async fn dispatch(
             icon_theme,
         } => {
             run_status(&config, follow, &format, extended, icon_theme).await?;
+        }
+
+        Commands::Stats { lines, format } => {
+            run_stats(&config, lines, &format).await?;
         }
 
         Commands::Record { action } => {
