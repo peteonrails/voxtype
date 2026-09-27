@@ -27,6 +27,7 @@ Hold a hotkey (default: ScrollLock) while speaking, release to transcribe and ou
 - **Floating waveform OSD.** Matches your swayosd band by default — same vertical position as volume and brightness — so the level meter sits where you already look for system feedback.
 - **Interactive TUI configure.** `voxtype configure` (also surfaces in Walker / fuzzel / rofi) edits every option in `~/.config/voxtype/config.toml` for you — no hand-editing TOML. Auto-downloads missing models, swaps GPU binaries via pkexec, restarts the daemon when needed.
 - **Push-to-talk or toggle.** Hold to record, or press once to start/stop. Optional audio cues when recording starts/stops.
+- **Dictation lands where you started.** Optional `return_to_start_window` hands focus back to the window you pressed record in before the text is typed — wander off to other windows or desktops mid-sentence without losing your place. Hyprland, sway, i3, X11 and macOS; inactive (harmlessly) elsewhere.
 
 ### Trust
 
@@ -192,6 +193,8 @@ translate = false   # Translate non-English speech to English
 mode = "type"       # "type", "clipboard", or "paste"
 fallback_to_clipboard = true
 type_delay_ms = 0   # Increase if characters are dropped
+# return_to_start_window = true  # Focus back the window you recorded in
+# focus_restore_delay_ms = 50    # Settle time after re-focusing (ms)
 # auto_submit = true  # Send Enter after transcription (for chat apps, terminals)
 # Note: "paste" mode copies to clipboard then simulates Ctrl+V
 #       Useful for non-US keyboard layouts where ydotool typing fails

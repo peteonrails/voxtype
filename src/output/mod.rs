@@ -18,12 +18,18 @@
 //! 3. pbcopy - Native macOS clipboard
 //!
 //! Paste mode (clipboard + Ctrl+V) helps with system with non US keyboard layouts.
+//!
+//! The `focus` submodule implements `output.return_to_start_window`: it
+//! remembers the window that had keyboard focus when recording started and
+//! re-focuses it right before text output (fail-safe; inactive on compositors
+//! with no supported focused-window query).
 
 #[cfg(target_os = "macos")]
 pub mod cgevent;
 pub mod clipboard;
 pub mod dotool;
 pub mod eitype;
+pub mod focus;
 // modifier_guard is evdev-based; macOS has its own osascript modifier handling.
 #[cfg(target_os = "linux")]
 pub mod modifier_guard;
