@@ -175,7 +175,21 @@ PanelWindow {
         return frame.halo === undefined ? true : !!frame.halo;
     }
 
+    // [osd] card_scale, already clamped by the Rust side.
+    function _cardScale() {
+        const scale = style && style.config ? Number(style.config.card_scale) : 0;
+        return scale > 0 ? scale : 1.0;
+    }
+
     function _cardWidth() {
+        return Math.round(_layoutCardWidth() * _cardScale());
+    }
+
+    function _cardHeight() {
+        return Math.round(_layoutCardHeight() * _cardScale());
+    }
+
+    function _layoutCardWidth() {
         const layout = _styleLayout();
         if (layout === "wide") return Math.max(VT.Theme.defaultWidthPx, 560);
         if (layout === "minimal") return Math.min(VT.Theme.defaultWidthPx, 260);
@@ -184,7 +198,7 @@ PanelWindow {
         return VT.Theme.defaultWidthPx;
     }
 
-    function _cardHeight() {
+    function _layoutCardHeight() {
         const layout = _styleLayout();
         if (layout === "minimal") return 48;
         if (layout === "tile") return 176;
@@ -385,10 +399,11 @@ PanelWindow {
     Canvas {
         id: orbBackdropShadow
         visible: !panel.customActive && panel._isOrbLayout()
-        width: card.width + 190
-        height: card.height + 190
+        // Room for the gradient, which reaches 0.96 × card width.
+        width: card.width * 2
+        height: card.height * 2
         anchors.centerIn: card
-        anchors.verticalCenterOffset: 8
+        anchors.verticalCenterOffset: 8 * panel._cardScale()
         opacity: panel.daemonState === "recording" ? 1.0 : 0.0
         Component.onCompleted: requestPaint()
         onVisibleChanged: requestPaint()
@@ -428,13 +443,13 @@ PanelWindow {
             required property int index
             readonly property int haloIndex: index
             visible: !panel.customActive && panel._isOrbLayout() && panel._frameHaloEnabled()
-            width: card.width + modelData + panel.orbHaloEnergy * [34, 24, 14][haloIndex]
-            height: card.height + modelData + panel.orbHaloEnergy * [34, 24, 14][haloIndex]
+            width: card.width + (modelData + panel.orbHaloEnergy * [34, 24, 14][haloIndex]) * panel._cardScale()
+            height: card.height + (modelData + panel.orbHaloEnergy * [34, 24, 14][haloIndex]) * panel._cardScale()
             anchors.centerIn: card
             radius: width / 2
             color: "transparent"
             border.color: panel._styleColor("accent", panel.stateColor)
-            border.width: [1.2, 1.8, 2.6][haloIndex] + panel.orbHaloEnergy * [1.6, 2.4, 3.2][haloIndex]
+            border.width: Math.max(1, ([1.2, 1.8, 2.6][haloIndex] + panel.orbHaloEnergy * [1.6, 2.4, 3.2][haloIndex]) * panel._cardScale())
             opacity: panel.daemonState === "recording"
                 ? [0.055, 0.11, 0.22][haloIndex] + panel.orbHaloEnergy * [0.18, 0.30, 0.48][haloIndex]
                 : 0.0

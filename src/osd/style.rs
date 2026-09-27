@@ -29,6 +29,8 @@ pub struct RuntimeOsdStyle {
     pub style: String,
     pub palette: OsdPaletteSource,
     pub layout: OsdLayout,
+    /// Size multiplier for the host card; see `OsdConfig::card_scale`.
+    pub card_scale: f32,
     pub position: OsdPosition,
     pub margin_px: u32,
     pub top_margin: f32,
@@ -68,6 +70,12 @@ pub fn resolve_runtime_style(
         .as_ref()
         .and_then(|m| m.layout)
         .unwrap_or(osd.layout);
+    // Below 0.5 the strip layouts' fixed-size icon and padding no longer fit.
+    let card_scale = if osd.card_scale.is_finite() {
+        osd.card_scale.clamp(0.5, 4.0)
+    } else {
+        1.0
+    };
     let frame = manifest
         .as_ref()
         .and_then(|m| m.frame.clone())
@@ -104,6 +112,7 @@ pub fn resolve_runtime_style(
         style: style_name,
         palette: palette_source,
         layout,
+        card_scale,
         position: osd.position,
         margin_px: osd.margin_px,
         top_margin: osd.top_margin,
@@ -576,6 +585,28 @@ mod tests {
         );
         assert_eq!(style.frame.background, "none");
         assert_eq!(style.frame.border, "none");
+    }
+
+    #[test]
+    fn card_scale_is_clamped_and_non_finite_falls_back() {
+        for (input, expected) in [
+            (0.5, 0.5),
+            (f32::NAN, 1.0),
+            (f32::INFINITY, 1.0),
+            (10.0, 4.0),
+            (0.25, 0.5),
+        ] {
+            let cfg = OsdConfig {
+                card_scale: input,
+                ..OsdConfig::default()
+            };
+            let style = resolve_runtime_style(&cfg, None).unwrap();
+            assert!(
+                (style.card_scale - expected).abs() < 1e-6,
+                "{input} -> {}",
+                style.card_scale
+            );
+        }
     }
 
     #[test]
