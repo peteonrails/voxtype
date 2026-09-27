@@ -67,7 +67,8 @@ pub struct Cli {
         help_heading = "Transcription",
         long_help = "Override model for transcription.\n\
         Whisper: tiny, base, small, medium, large-v3, large-v3-turbo (and .en variants).\n\
-        Parakeet: parakeet-tdt-0.6b-v3, parakeet-tdt-0.6b-v3-int8"
+        Parakeet: parakeet-tdt-0.6b-v3, parakeet-tdt-0.6b-v3-int8, \
+        nemotron-3.5-asr-streaming-0.6b-int8, or an absolute model directory"
     )]
     pub model: Option<String>,
 
@@ -80,8 +81,14 @@ pub struct Cli {
     )]
     pub engine: Option<String>,
 
-    /// Language for transcription (e.g., en, fr, auto, or comma-separated: en,fr,de)
-    #[arg(long, value_name = "LANG", help_heading = "Transcription")]
+    #[arg(
+        long,
+        value_name = "LANG",
+        help_heading = "Transcription",
+        long_help = "Language for transcription.\n\
+        Whisper accepts a language code, auto, or a comma-separated detection set.\n\
+        Nemotron accepts auto or a locale such as en-US, de-DE, or pt-BR."
+    )]
     pub language: Option<String>,
 
     /// Translate non-English speech to English
