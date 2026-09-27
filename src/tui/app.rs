@@ -297,6 +297,7 @@ impl App {
             Section::Output => self.output.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Hotkey => self.hotkey.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Audio => self.audio.as_ref().is_some_and(|s| s.editing.is_some()),
+            Section::Text => self.text.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Waybar => self.waybar.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Osd => self.osd.as_ref().is_some_and(|s| s.editing.is_some()),
             _ => false,

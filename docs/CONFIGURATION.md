@@ -2514,6 +2514,30 @@ auto_submit = true  # Press Enter after transcription
 
 **Note:** This works with all output modes (`type`, `paste`) but has no effect in `clipboard` mode since clipboard-only output doesn't simulate keypresses.
 
+### auto_submit_apps
+
+**Type:** Table of String to Boolean
+**Default:** Empty (no per-app rules)
+**Required:** No
+
+Per-application overrides for `auto_submit`. Each key is a window pattern and each value says whether to press Enter after dictating into a matching window. Patterns are case-insensitive substrings matched against the focused window's class (for example `Slack`, `kitty`) or title. When several patterns match, the longest one wins, so `neovim` beats `kitty`. When nothing matches, the global `auto_submit` setting applies. An empty pattern `""` matches every window and can serve as a catch-all.
+
+**Example:**
+```toml
+[output]
+auto_submit = false
+
+[output.auto_submit_apps]
+Slack = true       # chat: submit after every dictation
+discord = true
+"config.toml" = false   # title match: never submit while editing this file
+kitty = false      # terminals: never submit
+```
+
+The focused window is queried at output time from the compositor: `hyprctl` on Hyprland, `swaymsg` on Sway, `niri msg` on Niri, or the frontmost application name on macOS. The query is skipped entirely when no rules are configured, and a 750ms timeout guards against a hung compositor socket. If the compositor is unsupported or the query fails, the global `auto_submit` applies.
+
+**Note:** Rules sit between the config default and the per-dictation controls: the `--auto-submit` / `--no-auto-submit` record flags and the `smart_auto_submit` keyword still win for a single dictation. Class patterns are safer than title patterns, since a title such as "Slack outage postmortem" in a browser tab would also match `Slack`. This table is only configurable through the config file (or the `voxtype configure` TUI), not through `voxtype config set`. If the daemon runs as a systemd user service and the rules never apply, see [Troubleshooting](TROUBLESHOOTING.md#per-app-auto-submit-rules-never-apply).
+
 ### append_text
 
 **Type:** String
