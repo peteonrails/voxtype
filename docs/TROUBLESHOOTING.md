@@ -964,6 +964,16 @@ restore_clipboard_delay_ms = 500  # Try 300-500ms for slow applications
 notify-send "Test" "This is a test"
 ```
 
+### The word "quote" is typed as a quotation mark
+
+**Cause:** With `spoken_punctuation` enabled, the bare words "quote" and
+"unquote" open and close a quotation, in the same way that "period" and
+"comma" become symbols.
+
+**Solution:** Say "double quote" for a lone `"` character. If you dictate the
+noun "quote" often, disable `spoken_punctuation` and let the engine's own
+punctuation stand.
+
 ---
 
 ## Performance Issues
