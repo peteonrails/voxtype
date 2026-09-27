@@ -1486,10 +1486,10 @@ Cohere Transcribe is an encoder-decoder ASR model from Cohere Labs. It currently
 ### model
 
 **Type:** String
-**Default:** `"cohere-transcribe-int8"`
+**Default:** `"cohere-transcribe-q4f16"`
 **Required:** No
 
-The Cohere model to use. Can be a model name (looked up in `~/.local/share/voxtype/models/<name>/`) or an absolute path to a model directory.
+The Cohere model to use. ONNX models use a model name (looked up in `~/.local/share/voxtype/models/<name>/`) or a directory path. GGUF models use a `.gguf` file path, including `cohere-transcribe-03-2026-Q4_K_M.gguf`.
 
 **Available models:**
 
@@ -1498,9 +1498,11 @@ The Cohere model to use. Can be a model name (looked up in `~/.local/share/voxty
 | `cohere-transcribe-q4f16` | int4 weights, FP16 KV | ~1.5 GB | Recommended; smallest download, fastest CPU |
 | `cohere-transcribe-q4` | int4 weights, FP32 KV | ~2.0 GB | Same accuracy as q4f16, larger memory |
 | `cohere-transcribe-int8` | int8 | ~2.9 GB | Quality reference for quantized models |
-| `cohere-transcribe-fp16` | FP16 | ~3.9 GB | Highest accuracy, largest download |
+| `cohere-transcribe-fp16` | FP16 | ~3.9 GB | Highest accuracy, largest ONNX download |
+| `cohere-transcribe-03-2026-Q4_K_M.gguf` | Q4_K_M GGUF | 1.56 GB | transcribe.cpp, tested on Intel Vulkan |
+| `cohere-transcribe-03-2026-Q8_0.gguf` | Q8_0 GGUF | 2.41 GB | transcribe.cpp reference quantization |
 
-All variants are HuggingFace Optimum exports of Cohere Transcribe (16384 vocab, 14 languages). Download via `voxtype setup model` (interactive) — pick the Cohere section and confirm the size warning.
+The first four variants are HuggingFace Optimum ONNX exports. The GGUF variants are published for transcribe.cpp by handy-computer. Download either format via `voxtype setup model` (interactive), or pass its exact name to `voxtype setup --download --model <name>`. Setup verifies GGUF downloads against the publisher's SHA-256 before installing them.
 
 **Performance (warm CPU, voxtype 0.7.0, dictation-length audio):**
 
@@ -1546,6 +1548,20 @@ language = "fr"
 
 The daemon resolves the language to its decoder prefix at startup. Unsupported codes are rejected with a clear error.
 
+### max_chunk_secs and boundary_search_secs
+
+**Defaults:** `35` seconds and `2.5` seconds, respectively.
+
+Cohere recordings longer than `max_chunk_secs` are divided into balanced segments before inference. Voxtype searches up to `boundary_search_secs` on either side of each target split for the quietest 100 ms of audio. Every sample is included once; adjacent segments do not overlap. This applies to both ONNX and GGUF Cohere models, including meeting audio passed to the engine. The model's official processor also chunks long recordings; keeping each inference at 35 seconds or less helps avoid long-form quality loss. Quiet-boundary splitting can still cut through speech when no silence is present.
+
+`max_chunk_secs` accepts 5–35; `boundary_search_secs` accepts 0–5. Set the search to `0` for exact balanced splits. Shorter chunks can improve long-form accuracy but increase processing time, especially with GGUF's current per-chunk CLI startup.
+
+```toml
+[cohere]
+max_chunk_secs = 30
+boundary_search_secs = 2.5
+```
+
 ### threads
 
 **Type:** Integer (optional)
@@ -1581,6 +1597,9 @@ on_demand_loading = true
 | `model` | `--model` | `VOXTYPE_MODEL` | `"cohere-transcribe-q4f16"` | Cohere model name or path |
 | `language` | `--language` | `VOXTYPE_LANGUAGE` | `"en"` | One of the 14 supported language codes |
 | `threads` | - | - | auto | ONNX intra-op thread count |
+| `gguf_backend` | - | - | `"auto"` | transcribe.cpp backend for GGUF models |
+| `max_chunk_secs` | - | - | `35` | Maximum seconds per Cohere inference |
+| `boundary_search_secs` | - | - | `2.5` | Quiet-boundary search radius in seconds |
 | `on_demand_loading` | - | - | `false` | Load model only when recording starts |
 
 ### Complete Example
@@ -1605,6 +1624,29 @@ cargo build --release --features cohere-tensorrt  # NVIDIA + TensorRT EP
 ```
 
 The prebuilt `voxtype-*-onnx-*` release binaries already include `cohere`, so users installing via AUR/.deb/.rpm don't need to rebuild.
+
+### GGUF with Vulkan
+
+GGUF models use [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) in the Voxtype daemon through its Rust binding. The model and session remain loaded across recordings when `on_demand_loading = false`. This is the same `cohere` engine in Voxtype, with a different inference runtime selected by the `.gguf` extension. The ONNX model directory and GGUF file are distinct formats.
+
+Build Voxtype with `--features gpu-vulkan`, then run `voxtype setup model` and choose a Cohere GGUF variant. To download without activating it:
+
+```sh
+voxtype setup --download --model cohere-transcribe-03-2026-Q4_K_M.gguf
+```
+
+To activate it explicitly, set:
+
+```toml
+engine = "cohere"
+
+[cohere]
+model = "cohere-transcribe-03-2026-Q4_K_M.gguf"
+gguf_backend = "vulkan"
+language = "en"
+```
+
+`gguf_backend = "vulkan"` requires a hardware Vulkan device and reports an error if none is selected; `"auto"` lets transcribe.cpp select the backend. `--features cohere-gguf` alone builds the CPU runtime; `--features cohere` also includes GGUF support. The Rust dependency builds transcribe.cpp from source and needs CMake and a C++ compiler; Vulkan builds also need Vulkan and SPIR-V headers plus `glslc`. Setup downloads Q4_K_M and Q8_0 from a pinned revision of the [official transcribe.cpp Cohere GGUF repository](https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf); the other published quantizations remain usable by absolute path.
 
 ---
 

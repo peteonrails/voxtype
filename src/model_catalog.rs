@@ -36,12 +36,16 @@ pub fn model_catalog(engine: &str) -> Vec<&'static str> {
         "paraformer" => vec!["paraformer-zh", "paraformer-en"],
         "dolphin" => vec!["dolphin-base"],
         "omnilingual" => vec!["omnilingual-300m"],
-        "cohere" => vec![
-            "cohere-transcribe-q4f16",
-            "cohere-transcribe-q4",
-            "cohere-transcribe-int8",
-            "cohere-transcribe-fp16",
-        ],
+        "cohere" => {
+            let mut models = vec![
+                "cohere-transcribe-q4f16",
+                "cohere-transcribe-q4",
+                "cohere-transcribe-int8",
+                "cohere-transcribe-fp16",
+            ];
+            models.extend(model::cohere_gguf_models().iter().map(|entry| entry.name));
+            models
+        }
         "openvino" => model::valid_openvino_model_names(),
         _ => Vec::new(),
     }
@@ -103,7 +107,7 @@ pub fn download_arg(engine: &str, model: &str) -> Option<String> {
     }
 }
 
-/// On-disk location of a model: a single `ggml-<name>.bin` file for whisper,
+/// On-disk location of a model: a single file for Whisper and Cohere GGUF,
 /// a directory for every ONNX engine.
 fn model_path(models_dir: &Path, engine: &str, model: &str) -> std::path::PathBuf {
     if engine == "whisper" {
@@ -172,6 +176,15 @@ pub(crate) fn model_health_in(models_dir: &Path, engine: &str, model: &str) -> M
         };
     }
 
+    if engine == "cohere" {
+        if let Some(gguf) = model::find_cohere_gguf_model(model) {
+            return match model::validate_cohere_gguf_model(&path, gguf) {
+                Ok(()) => ModelHealth::Present,
+                Err(e) => ModelHealth::Corrupt(vec![format!("{}: {}", display_name(&path), e)]),
+            };
+        }
+    }
+
     if engine == "openvino" {
         return match model::validate_openvino_model(&path) {
             Ok(()) => ModelHealth::Present,
@@ -236,6 +249,17 @@ pub(crate) fn verify_model_in(models_dir: &Path, engine: &str, model: &str) -> M
             "whisper models are published without checksums, so only their \
              ggml header could be checked",
         );
+    }
+
+    if engine == "cohere" {
+        if let Some(gguf) = model::find_cohere_gguf_model(model) {
+            return match model::verify_cohere_gguf_model(&path, gguf) {
+                Ok(()) => ModelVerification::Ok,
+                Err(e) => {
+                    ModelVerification::Corrupt(vec![format!("{}: {}", display_name(&path), e)])
+                }
+            };
+        }
     }
 
     let Some(manifest) = read_cached_manifest(&path) else {

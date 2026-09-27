@@ -61,9 +61,8 @@ pub enum TranscriptionEngine {
     /// Use Omnilingual (FunASR 50+ language CTC encoder via ONNX Runtime)
     /// Requires: cargo build --features omnilingual
     Omnilingual,
-    /// Use Cohere Transcribe (encoder-decoder via ONNX Runtime, Whisper-style
-    /// task tokens). Top of the Open ASR Leaderboard.
-    /// Requires: cargo build --features cohere
+    /// Use Cohere Transcribe through ONNX Runtime or transcribe.cpp GGUF.
+    /// Requires `cohere` for ONNX or `cohere-gguf` for GGUF.
     Cohere,
     /// Use OpenVINO Whisper (Intel NPU/CPU/GPU via OpenVINO Runtime).
     /// Requires: cargo build --features openvino-whisper
