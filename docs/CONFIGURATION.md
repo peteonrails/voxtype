@@ -2563,7 +2563,7 @@ shift_enter_newlines = true  # Use Shift+Enter for newlines
 - Web forms where Enter submits
 - Any application where Enter has special meaning
 
-**Note:** This only affects the wtype output driver. When combined with `auto_submit = true`, the final Enter (to submit) is still sent as a regular Enter after all Shift+Enter line breaks.
+**Note:** This applies when text is typed by the wtype, eitype, dotool, or ydotool output drivers. It does not apply in `clipboard` or `paste` modes, where newlines are copied as-is. When combined with `auto_submit = true`, the final Enter (to submit) is still sent as a regular Enter after all Shift+Enter line breaks.
 
 ### wtype_shift_prefix
 
