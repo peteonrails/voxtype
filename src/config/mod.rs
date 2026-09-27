@@ -32,7 +32,7 @@ pub use engines::{
     ParaformerConfig, ParakeetConfig, ParakeetModelType, SenseVoiceConfig, SonioxConfig,
     TranscriptionEngine,
 };
-pub use hotkey::{ActivationMode, HotkeyConfig};
+pub use hotkey::{ActivationMode, HotkeyBackend, HotkeyConfig};
 pub use language::LanguageConfig;
 pub use load::{load_config, save_config};
 pub use meeting::{

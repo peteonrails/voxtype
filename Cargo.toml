@@ -167,6 +167,9 @@ nix = { version = "0.29", features = ["signal", "process"] }  # Unix signals for
 # that playerctl silently filters out, and surfaces real errors on resume.
 zbus = { version = "4", default-features = false, features = ["tokio"] }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+zbus = { version = "4", default-features = false, features = ["tokio", "p2p"] }
+
 [features]
 default = []
 # OSD frontends. Each binary is gated on its own feature so users can

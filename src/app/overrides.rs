@@ -84,6 +84,13 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if let Some(ref hotkey) = cli.hotkey {
         config.hotkey.key = hotkey.clone();
     }
+    if let Some(ref backend) = cli.hotkey_backend {
+        // clap validates the flag against HOTKEY_BACKENDS, which a test pins
+        // to the enum's variants, so the parse cannot fail.
+        config.hotkey.backend = backend
+            .parse()
+            .expect("clap accepts only the values HOTKEY_BACKENDS lists");
+    }
     if cli.toggle {
         config.hotkey.mode = config::ActivationMode::Toggle;
     }

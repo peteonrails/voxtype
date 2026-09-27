@@ -5,10 +5,12 @@
 //! `src/cli/`. The clap derive on `Cli` references `Commands`,
 //! which is imported from `super`.
 
+use clap::builder::PossibleValuesParser;
 use clap::Parser;
 
 use super::Commands;
 use super::ENGINE_NAMES_CSV;
+use super::HOTKEY_BACKENDS;
 
 #[derive(Parser)]
 #[command(name = "voxtype")]
@@ -192,6 +194,19 @@ pub struct Cli {
     /// Override hotkey (e.g., SCROLLLOCK, PAUSE, F13, MEDIA, WEV_234, EVTEST_226)
     #[arg(long, value_name = "KEY", help_heading = "Hotkey")]
     pub hotkey: Option<String>,
+
+    /// Override the Linux hotkey backend (evdev, portal, auto)
+    // VOXTYPE_HOTKEY_BACKEND is read in load_config with the other hotkey
+    // variables rather than through clap's `env`, so an unusable value warns
+    // and leaves the configured backend in place instead of failing every
+    // command.
+    #[arg(
+        long,
+        value_parser = PossibleValuesParser::new(HOTKEY_BACKENDS),
+        value_name = "BACKEND",
+        help_heading = "Hotkey"
+    )]
+    pub hotkey_backend: Option<String>,
 
     /// Use toggle mode (press to start/stop) instead of push-to-talk (hold to record)
     #[arg(long, help_heading = "Hotkey")]
