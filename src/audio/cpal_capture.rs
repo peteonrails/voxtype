@@ -187,6 +187,7 @@ impl AudioCapture for CpalCapture {
         // Create channels
         let (chunk_tx, chunk_rx) = mpsc::channel(64);
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<CaptureCommand>();
+        let (startup_tx, startup_rx) = oneshot::channel();
 
         // Shared state
         let samples = Arc::new(Mutex::new(Vec::<f32>::new()));
@@ -254,7 +255,9 @@ impl AudioCapture for CpalCapture {
                     build_stream::<u16>(&device, &stream_config, make_params(), err_fn)
                 }
                 format => {
-                    tracing::error!("Unsupported sample format: {:?}", format);
+                    let _ = startup_tx.send(Err(AudioError::StreamError(format!(
+                        "Unsupported sample format: {format:?}"
+                    ))));
                     return;
                 }
             };
@@ -262,13 +265,18 @@ impl AudioCapture for CpalCapture {
             let stream = match stream_result {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::error!("Failed to build audio stream: {}", e);
+                    let _ = startup_tx.send(Err(e));
                     return;
                 }
             };
 
             if let Err(e) = stream.play() {
-                tracing::error!("Failed to start audio stream: {}", e);
+                let _ = startup_tx.send(Err(AudioError::StreamError(e.to_string())));
+                return;
+            }
+
+            // Do not report recording success until the device is actually running.
+            if startup_tx.send(Ok(())).is_err() {
                 return;
             }
 
@@ -337,6 +345,12 @@ impl AudioCapture for CpalCapture {
 
             tracing::debug!("Audio capture thread stopped");
         });
+
+        if let Err(error) = await_startup(startup_rx).await {
+            drop(cmd_tx);
+            let _ = thread_handle.join();
+            return Err(error);
+        }
 
         self.cmd_tx = Some(cmd_tx);
         self.thread_handle = Some(thread_handle);
@@ -472,6 +486,15 @@ where
     Ok(stream)
 }
 
+/// Propagate worker startup failures instead of returning a dead audio receiver.
+async fn await_startup(
+    receiver: oneshot::Receiver<Result<(), AudioError>>,
+) -> Result<(), AudioError> {
+    receiver.await.map_err(|_| {
+        AudioError::StreamError("Audio capture thread exited before starting".to_string())
+    })?
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::resampler::resample_buffer;
@@ -511,5 +534,39 @@ mod tests {
     fn test_resample_empty() {
         let samples: Vec<f32> = vec![];
         assert!(resample_buffer(&samples, 48000, 16000).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn waits_until_stream_is_running() {
+        let (tx, rx) = oneshot::channel();
+        let task = tokio::spawn(await_startup(rx));
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        tx.send(Ok(())).unwrap();
+        assert!(task.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn propagates_stream_startup_failure() {
+        let (tx, rx) = oneshot::channel();
+        tx.send(Err(AudioError::StreamError("device disconnected".into())))
+            .unwrap();
+        assert!(matches!(await_startup(rx).await,
+            Err(AudioError::StreamError(message)) if message == "device disconnected"));
+    }
+
+    #[tokio::test]
+    async fn worker_exit_is_not_recording_success() {
+        let (tx, rx) = oneshot::channel();
+        drop(tx);
+        assert!(matches!(
+            await_startup(rx).await,
+            Err(AudioError::StreamError(_))
+        ));
     }
 }
