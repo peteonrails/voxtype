@@ -89,6 +89,7 @@ pub mod model_manager;
 pub mod notification;
 pub mod osd;
 pub mod output;
+pub mod runtime_files;
 pub mod setup;
 pub mod state;
 pub mod status_json;

@@ -60,6 +60,23 @@ cargo fmt && cargo clippy --all-targets --no-deps -- -D warnings && cargo test
 If any step fails, fix it before pushing. CI runs the same checks and will
 block the merge otherwise.
 
+### Running the tests without touching your session
+
+Some tests start the daemon, and a daemon started on your own desktop talks to
+it: it can type or paste into the focused window, raise desktop notifications,
+or poke MPRIS. Use the wrapper so the suite runs against a private
+environment instead:
+
+```bash
+./scripts/test-isolated.sh test
+```
+
+It runs cargo under `xvfb-run` with a throwaway `XDG_RUNTIME_DIR`, and with
+`DBUS_SESSION_BUS_ADDRESS=disabled:` so there is no session bus to deliver a
+notification, no Wayland display for `wl-copy` to reach the clipboard, and no
+`ydotoold` socket for `ydotool` to type through. Verified by probe: session bus,
+notification port, `wl-copy` and `ydotool` are all unreachable inside it.
+
 ## Branching
 
 Voxtype uses a three-branch flow:

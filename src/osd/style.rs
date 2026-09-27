@@ -125,7 +125,7 @@ pub fn write_runtime_style(style: &RuntimeOsdStyle) -> Result<PathBuf, VoxtypeEr
 
 /// Path of the runtime JSON consumed by Quickshell.
 pub fn runtime_style_path() -> PathBuf {
-    runtime_dir().join("quickshell-style.json")
+    crate::config::Config::runtime_dir().join("quickshell-style.json")
 }
 
 /// Serialize a resolved style to the JSON written for Quickshell.
@@ -195,13 +195,6 @@ fn write_style_file(path: &Path, json: &str) -> Result<(), VoxtypeError> {
     };
     fs::write(&tmp, json).map_err(write_err)?;
     fs::rename(&tmp, path).map_err(write_err)
-}
-
-fn runtime_dir() -> PathBuf {
-    std::env::var("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp"))
-        .join("voxtype")
 }
 
 fn resolve_package_dir(

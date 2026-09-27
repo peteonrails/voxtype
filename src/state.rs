@@ -30,6 +30,11 @@ pub enum State {
         started_at: Instant,
         /// Optional model override for this recording
         model_override: Option<String>,
+        /// Optional post-processing profile for this recording. Carried here
+        /// rather than in a runtime file: the cycle that owns it is the only
+        /// thing that can consume it, so a cancelled cycle cannot leave it
+        /// behind for the next one.
+        profile_override: Option<String>,
     },
 
     /// Hotkey held, recording audio with eager chunk processing
@@ -38,6 +43,8 @@ pub enum State {
         started_at: Instant,
         /// Optional model override for this recording
         model_override: Option<String>,
+        /// Optional post-processing profile for this recording
+        profile_override: Option<String>,
         /// Accumulated audio samples during recording
         accumulated_audio: AudioBuffer,
         /// Number of chunks already sent for transcription
@@ -52,6 +59,9 @@ pub enum State {
     Transcribing {
         /// Recorded audio samples
         audio: AudioBuffer,
+        /// The profile the finished recording was started with, so the
+        /// delivered transcript can be post-processed by it.
+        profile_override: Option<String>,
     },
 
     /// Transcription complete, outputting text
@@ -106,6 +116,32 @@ impl State {
             self,
             State::Recording { .. } | State::EagerRecording { .. } | State::Streaming { .. }
         )
+    }
+
+    /// The post-processing profile this cycle was started with, if any.
+    pub fn profile_override(&self) -> Option<&str> {
+        match self {
+            State::Recording {
+                profile_override, ..
+            }
+            | State::EagerRecording {
+                profile_override, ..
+            }
+            | State::Transcribing {
+                profile_override, ..
+            } => profile_override.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Carry this cycle's overrides into `Transcribing`, which no longer holds
+    /// the recording but is still the same cycle.
+    pub fn into_transcribing(&self, audio: AudioBuffer) -> State {
+        let profile_override = self.profile_override().map(str::to_string);
+        State::Transcribing {
+            audio,
+            profile_override,
+        }
     }
 
     /// Check if in eager recording state specifically
@@ -174,7 +210,7 @@ impl std::fmt::Display for State {
                     tasks_in_flight
                 )
             }
-            State::Transcribing { audio } => {
+            State::Transcribing { audio, .. } => {
                 let duration = audio.len() as f32 / 16000.0;
                 write!(f, "Transcribing ({:.1}s of audio)", duration)
             }
@@ -220,6 +256,7 @@ mod tests {
         let state = State::Recording {
             started_at: Instant::now(),
             model_override: None,
+            profile_override: None,
         };
         assert!(state.is_recording());
         assert!(!state.is_idle());
@@ -240,6 +277,7 @@ mod tests {
         let state = State::Recording {
             started_at: Instant::now(),
             model_override: None,
+            profile_override: None,
         };
         assert!(format!("{}", state).starts_with("Recording"));
     }
@@ -249,6 +287,7 @@ mod tests {
         let state = State::EagerRecording {
             started_at: Instant::now(),
             model_override: None,
+            profile_override: None,
             accumulated_audio: vec![],
             chunks_sent: 2,
             chunk_results: vec![],
@@ -267,6 +306,7 @@ mod tests {
         let state = State::Recording {
             started_at: Instant::now(),
             model_override: None,
+            profile_override: None,
         };
         assert!(state.is_recording());
         assert!(!state.is_eager_recording());
@@ -311,11 +351,13 @@ mod tests {
         let r = State::Recording {
             started_at: Instant::now(),
             model_override: None,
+            profile_override: None,
         };
         assert!(!r.is_streaming());
         let e = State::EagerRecording {
             started_at: Instant::now(),
             model_override: None,
+            profile_override: None,
             accumulated_audio: vec![],
             chunks_sent: 0,
             chunk_results: vec![],
@@ -329,6 +371,7 @@ mod tests {
         let state = State::EagerRecording {
             started_at: Instant::now(),
             model_override: None,
+            profile_override: None,
             accumulated_audio: vec![],
             chunks_sent: 3,
             chunk_results: vec![],

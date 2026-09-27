@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use voxtype::daemon::result_sidecar_path;
+use voxtype::runtime_files::RuntimePaths;
 use voxtype::{config, daemon_status, RecordAction};
 
 /// Send a record command to the running daemon via Unix signals or file triggers
@@ -25,9 +26,12 @@ pub(crate) fn send_record_command(
     // checks in `voxtype meeting` and `voxtype status`.
     let pid = daemon_status::check_daemon_running()?;
 
+    // One derivation for the sentinel names this writes and the daemon reads.
+    let paths = RuntimePaths::from_env();
+
     // Handle cancel separately (uses file trigger instead of signal)
     if matches!(action, RecordAction::Cancel) {
-        let cancel_file = config::Config::runtime_dir().join("cancel");
+        let cancel_file = paths.cancel();
         std::fs::write(&cancel_file, "cancel")
             .map_err(|e| anyhow::anyhow!("Failed to write cancel file: {}", e))?;
         return Ok(());
@@ -36,7 +40,7 @@ pub(crate) fn send_record_command(
     // Write output mode override file if specified
     // For file mode, format is "file" or "file:/path/to/file"
     if let Some(mode_override) = action.output_mode_override() {
-        let override_file = config::Config::runtime_dir().join("output_mode_override");
+        let override_file = paths.output_mode_override();
         let mode_str = match mode_override {
             OutputModeOverride::Type => "type".to_string(),
             OutputModeOverride::Clipboard => "clipboard".to_string(),
@@ -56,14 +60,14 @@ pub(crate) fn send_record_command(
     // Write model override file if specified (subcommand --model takes priority over top-level --model)
     let model_override = action.model_override().or(top_level_model);
     if let Some(model) = model_override {
-        let override_file = config::Config::runtime_dir().join("model_override");
+        let override_file = paths.model_override();
         std::fs::write(&override_file, model)
             .map_err(|e| anyhow::anyhow!("Failed to write model override: {}", e))?;
     }
 
     // Write smart auto-submit override file if specified
     if let Some(enabled) = action.smart_auto_submit_override() {
-        let override_file = config::Config::runtime_dir().join("smart_auto_submit_override");
+        let override_file = paths.bool_override("smart_auto_submit");
         std::fs::write(&override_file, if enabled { "true" } else { "false" })
             .map_err(|e| anyhow::anyhow!("Failed to write smart auto-submit override: {}", e))?;
     }
@@ -95,21 +99,21 @@ pub(crate) fn send_record_command(
             std::process::exit(1);
         }
 
-        let profile_file = config::Config::runtime_dir().join("profile_override");
+        let profile_file = paths.profile_override();
         std::fs::write(&profile_file, profile_name)
             .map_err(|e| anyhow::anyhow!("Failed to write profile override: {}", e))?;
     }
 
     // Write auto_submit override file if specified
     if let Some(value) = action.auto_submit_override() {
-        let override_file = config::Config::runtime_dir().join("auto_submit_override");
+        let override_file = paths.bool_override("auto_submit");
         std::fs::write(&override_file, if value { "true" } else { "false" })
             .map_err(|e| anyhow::anyhow!("Failed to write auto_submit override: {}", e))?;
     }
 
     // Write shift_enter_newlines override file if specified
     if let Some(value) = action.shift_enter_newlines_override() {
-        let override_file = config::Config::runtime_dir().join("shift_enter_override");
+        let override_file = paths.bool_override("shift_enter");
         std::fs::write(&override_file, if value { "true" } else { "false" })
             .map_err(|e| anyhow::anyhow!("Failed to write shift_enter override: {}", e))?;
     }
@@ -118,7 +122,7 @@ pub(crate) fn send_record_command(
     // never cleared here: like the other overrides the daemon consumes and
     // removes it, so a stale file cannot silence a later recording.
     if action.suppress_osd() {
-        let override_file = config::Config::runtime_dir().join("no_osd_override");
+        let override_file = paths.bool_override("no_osd");
         std::fs::write(&override_file, "true")
             .map_err(|e| anyhow::anyhow!("Failed to write no_osd override: {}", e))?;
     }
@@ -198,7 +202,14 @@ pub(crate) fn send_record_command(
             RecordAction::Stop { json, timeout, .. } => (*json, *timeout),
             _ => (false, 120),
         };
-        let outcome = await_transcription(&transcript, Duration::from_secs(timeout));
+        // The state file is the backstop when no sidecar appears, so `--wait`
+        // has to poll the path the daemon actually writes: a custom
+        // `state_file` (or `disabled`) is not the default runtime-dir name.
+        let outcome = await_transcription(
+            &transcript,
+            config.resolve_state_file().as_deref(),
+            Duration::from_secs(timeout),
+        );
         report_outcome(&outcome, as_json);
         std::process::exit(outcome.exit_code());
     }
@@ -218,8 +229,7 @@ fn resolve_wait_target(config: &config::Config, explicit: Option<&str>) -> Optio
         }
     }
 
-    let pending =
-        std::fs::read_to_string(config::Config::runtime_dir().join("output_mode_override")).ok();
+    let pending = std::fs::read_to_string(RuntimePaths::from_env().output_mode_override()).ok();
     if let Some(value) = pending.as_deref().map(str::trim) {
         if let Some(path) = value.strip_prefix("file:") {
             let path = path.trim();
@@ -253,16 +263,19 @@ impl WaitOutcome {
 /// Block until the daemon publishes this recording's outcome.
 ///
 /// The daemon writes the completion sidecar after the transcript itself, so
-/// seeing the sidecar means the transcript is complete. A state file that
-/// returns to idle without one is the backstop: that means the recording ended
-/// down a path that produced no transcript.
-fn await_transcription(transcript: &Path, timeout: Duration) -> WaitOutcome {
+/// seeing the sidecar means the transcript is complete. The resolved state
+/// file returning to idle without one is the backstop: that means the recording
+/// ended down a path that produced no transcript.
+fn await_transcription(
+    transcript: &Path,
+    state_file: Option<&Path>,
+    timeout: Duration,
+) -> WaitOutcome {
     const POLL: Duration = Duration::from_millis(50);
     // How long to keep looking for a sidecar after the daemon reports idle.
     const SETTLE: Duration = Duration::from_millis(750);
 
     let sidecar = result_sidecar_path(transcript);
-    let state_file = config::Config::runtime_dir().join("state");
     let deadline = Instant::now() + timeout;
     let mut idle_since: Option<Instant> = None;
 
@@ -272,7 +285,10 @@ fn await_transcription(transcript: &Path, timeout: Duration) -> WaitOutcome {
             return finish(transcript, &body);
         }
 
-        let state = std::fs::read_to_string(&state_file)
+        // No state file configured means no backstop: the sidecar or the
+        // deadline decides, and the message reports the state as unknown.
+        let state = state_file
+            .and_then(|path| std::fs::read_to_string(path).ok())
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
         if state == "idle" {
@@ -367,5 +383,41 @@ fn report_outcome(outcome: &WaitOutcome, as_json: bool) {
         eprintln!("{}: {}", outcome.status, message);
     } else {
         eprintln!("{}", outcome.status);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A custom `state_file` is the backstop `--wait` polls, so it has to poll
+    /// the resolved path, not the default name under the runtime directory.
+    #[test]
+    fn await_transcription_polls_the_resolved_state_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let transcript = dir.path().join("dictation.txt");
+        let state = dir.path().join("custom-state");
+        std::fs::write(&state, "idle").unwrap();
+
+        let started = Instant::now();
+        let outcome = await_transcription(&transcript, Some(&state), Duration::from_secs(30));
+
+        assert_eq!(outcome.status, "empty");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "returned only at the deadline, so the state file was not polled"
+        );
+    }
+
+    /// With no state file configured there is nothing to poll: the deadline is
+    /// what ends the wait, and the outcome says so.
+    #[test]
+    fn await_transcription_without_a_state_file_times_out() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let transcript = dir.path().join("dictation.txt");
+
+        let outcome = await_transcription(&transcript, None, Duration::from_millis(300));
+
+        assert_eq!(outcome.status, "timeout");
     }
 }

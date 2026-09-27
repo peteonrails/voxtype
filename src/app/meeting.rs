@@ -1,6 +1,7 @@
 //! `voxtype meeting <action>` — start/stop/pause/resume/status/list/export/show/delete/label/summarize.
 
 use std::path::PathBuf;
+use voxtype::runtime_files::RuntimePaths;
 use voxtype::{config, daemon_status::check_daemon_running, meeting, setup, MeetingAction};
 
 /// Run a meeting command
@@ -47,7 +48,7 @@ pub(crate) async fn run_meeting_command(
             check_daemon_running()?;
 
             // Check if meeting already in progress
-            let meeting_state_file = config::Config::runtime_dir().join("meeting_state");
+            let meeting_state_file = RuntimePaths::from_env().meeting_state();
             if meeting_state_file.exists() {
                 let state = std::fs::read_to_string(&meeting_state_file).unwrap_or_default();
                 if state.starts_with("recording") || state.starts_with("paused") {
@@ -96,8 +97,8 @@ pub(crate) async fn run_meeting_command(
 
             // Write the diarization override first so it's visible by the time
             // the daemon picks up the start trigger.
-            let runtime_dir = config::Config::runtime_dir();
-            let diarization_file = runtime_dir.join("meeting_start_diarization");
+            let paths = RuntimePaths::from_env();
+            let diarization_file = paths.meeting_start_diarization();
             if let Some(ref backend) = diarization {
                 std::fs::write(&diarization_file, backend)?;
             } else {
@@ -106,7 +107,7 @@ pub(crate) async fn run_meeting_command(
             }
 
             // Write start trigger file (with optional title)
-            let start_file = runtime_dir.join("meeting_start");
+            let start_file = paths.meeting_start();
             let content = title.unwrap_or_default();
             std::fs::write(&start_file, content)?;
 
@@ -125,7 +126,7 @@ pub(crate) async fn run_meeting_command(
             check_daemon_running()?;
 
             // Check if meeting is in progress
-            let meeting_state_file = config::Config::runtime_dir().join("meeting_state");
+            let meeting_state_file = RuntimePaths::from_env().meeting_state();
             if !meeting_state_file.exists() {
                 eprintln!("Error: No meeting in progress.");
                 std::process::exit(1);
@@ -138,7 +139,7 @@ pub(crate) async fn run_meeting_command(
             }
 
             // Write stop trigger file
-            let stop_file = config::Config::runtime_dir().join("meeting_stop");
+            let stop_file = RuntimePaths::from_env().meeting_stop();
             std::fs::write(&stop_file, "")?;
 
             println!("Meeting stop requested.");
@@ -148,7 +149,7 @@ pub(crate) async fn run_meeting_command(
             check_daemon_running()?;
 
             // Check if meeting is active (not paused)
-            let meeting_state_file = config::Config::runtime_dir().join("meeting_state");
+            let meeting_state_file = RuntimePaths::from_env().meeting_state();
             if !meeting_state_file.exists() {
                 eprintln!("Error: No meeting in progress.");
                 std::process::exit(1);
@@ -161,7 +162,7 @@ pub(crate) async fn run_meeting_command(
             }
 
             // Write pause trigger file
-            let pause_file = config::Config::runtime_dir().join("meeting_pause");
+            let pause_file = RuntimePaths::from_env().meeting_pause();
             std::fs::write(&pause_file, "")?;
 
             println!("Meeting pause requested.");
@@ -171,7 +172,7 @@ pub(crate) async fn run_meeting_command(
             check_daemon_running()?;
 
             // Check if meeting is paused
-            let meeting_state_file = config::Config::runtime_dir().join("meeting_state");
+            let meeting_state_file = RuntimePaths::from_env().meeting_state();
             if !meeting_state_file.exists() {
                 eprintln!("Error: No paused meeting to resume.");
                 std::process::exit(1);
@@ -184,7 +185,7 @@ pub(crate) async fn run_meeting_command(
             }
 
             // Write resume trigger file
-            let resume_file = config::Config::runtime_dir().join("meeting_resume");
+            let resume_file = RuntimePaths::from_env().meeting_resume();
             std::fs::write(&resume_file, "")?;
 
             println!("Meeting resume requested.");
@@ -192,7 +193,7 @@ pub(crate) async fn run_meeting_command(
 
         MeetingAction::Status => {
             // Read meeting state file
-            let meeting_state_file = config::Config::runtime_dir().join("meeting_state");
+            let meeting_state_file = RuntimePaths::from_env().meeting_state();
             if !meeting_state_file.exists() {
                 println!("No meeting currently in progress.");
                 println!();

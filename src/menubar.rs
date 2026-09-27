@@ -483,7 +483,7 @@ pub fn run(state_file: PathBuf) -> ! {
     println!("State file: {}", state_file.display());
 
     // Single instance check
-    let lock_path = Config::runtime_dir().join("menubar.lock");
+    let lock_path = crate::daemon_status::menubar_lock_path();
     let lock_path_str = lock_path.to_string_lossy().to_string();
     let mut pidlock = Pidlock::new(&lock_path_str);
 

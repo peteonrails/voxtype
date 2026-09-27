@@ -13,7 +13,7 @@ pub mod levels;
 pub mod media;
 pub mod resampler;
 
-pub use dual_capture::{AudioSourceType, DualCapture, DualSamples, SourcedSample};
+pub use dual_capture::{AudioSourceType, DualCapture, DualSamples, MeetingCapture, SourcedSample};
 
 use crate::config::AudioConfig;
 use crate::error::AudioError;

@@ -24,7 +24,29 @@ use crate::config::Config;
 /// Pidlock). Every external liveness check resolves through here so a
 /// future rename of the lockfile updates every consumer in one place.
 pub fn pid_file_path() -> std::path::PathBuf {
-    Config::runtime_dir().join("voxtype.lock")
+    pid_file_path_in(&Config::runtime_dir())
+}
+
+/// [`pid_file_path`] against a caller-supplied runtime directory.
+///
+/// The name stays here either way: the daemon resolves its runtime directory
+/// once and passes it down, which is what lets a test point a whole daemon at
+/// a temporary directory without changing which file marks a live instance.
+pub fn pid_file_path_in(runtime_dir: &std::path::Path) -> std::path::PathBuf {
+    runtime_dir.join("voxtype.lock")
+}
+
+/// Path to the menu bar's lockfile, which marks a running menu bar process the
+/// way the daemon's lockfile marks the daemon. Derived here for the same
+/// reason: the macOS launch path clears a stale lock before starting one, and
+/// it has to agree with the process that created it.
+pub fn menubar_lock_path() -> std::path::PathBuf {
+    menubar_lock_path_in(&Config::runtime_dir())
+}
+
+/// [`menubar_lock_path`] against a caller-supplied runtime directory.
+pub fn menubar_lock_path_in(runtime_dir: &std::path::Path) -> std::path::PathBuf {
+    runtime_dir.join("menubar.lock")
 }
 
 /// Read the daemon's PID from the lockfile, returning `None` if the file
@@ -68,14 +90,24 @@ pub fn read_pid_if_alive() -> Option<i32> {
 /// Sits beside the lockfile in the runtime dir, so it is cleared by the same
 /// reboot that clears the lock and can never outlive the machine's uptime.
 pub fn version_file_path() -> std::path::PathBuf {
-    Config::runtime_dir().join("version")
+    version_file_path_in(&Config::runtime_dir())
+}
+
+/// [`version_file_path`] against a caller-supplied runtime directory.
+pub fn version_file_path_in(runtime_dir: &std::path::Path) -> std::path::PathBuf {
+    runtime_dir.join("version")
 }
 
 /// Publish this process's version. Called by the daemon at startup, after
 /// the lock is acquired, so a refused second instance never overwrites the
 /// running daemon's answer.
 pub fn publish_version() {
-    let path = version_file_path();
+    publish_version_in(&Config::runtime_dir())
+}
+
+/// [`publish_version`] against a caller-supplied runtime directory.
+pub fn publish_version_in(runtime_dir: &std::path::Path) {
+    let path = version_file_path_in(runtime_dir);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
