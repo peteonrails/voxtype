@@ -5,7 +5,7 @@ on:
     branches: [main, dev]
   pull_request:
 
-# Three parallel jobs (fmt, clippy, test) instead of a single sequential `check`.
+# Parallel Rust checks and model-free CPU importer tests.
 # Each runs on its own runner so a 4 min clippy run doesn't block a 30 s fmt
 # check, and PR failures attribute to the specific gate that broke. Required
 # status checks on dev (PR-time) and main (release-time) reference all three
@@ -64,12 +64,29 @@ jobs:
       - name: cargo test
         run: cargo test
 
+  importer:
+    name: Orukeet importer (CPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      # Keep these versions aligned with the importer's inline script metadata.
+      - name: Install importer dependencies
+        run: python -m pip install onnx==1.22.0 onnxruntime==1.30.0 numpy==2.5.3
+
+      - name: Test importer without downloaded models or audio
+        run: python -m unittest discover -s scripts/tests -p 'test_import_orukeet_onnx.py' -v
+
   # Aggregator job — branch protection only needs to require `ci-success`.
   # Adding/removing parallel checks above just updates the `needs:` list;
   # the protection rule never needs to be touched.
   ci-success:
     name: ci-success
-    needs: [fmt, clippy, test]
+    needs: [fmt, clippy, test, importer]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -79,10 +96,12 @@ jobs:
           fmt='${{ needs.fmt.result }}'
           clippy='${{ needs.clippy.result }}'
           test='${{ needs.test.result }}'
+          importer='${{ needs.importer.result }}'
           echo "fmt:    $fmt"
           echo "clippy: $clippy"
           echo "test:   $test"
-          if [[ "$fmt" != success || "$clippy" != success || "$test" != success ]]; then
+          echo "importer: $importer"
+          if [[ "$fmt" != success || "$clippy" != success || "$test" != success || "$importer" != success ]]; then
             echo "::error::One or more required jobs failed"
             exit 1
           fi
