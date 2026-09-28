@@ -24,6 +24,10 @@ pub enum HotkeyEvent {
     },
     /// The hotkey was released
     Released,
+    /// The hotkey was released before min_hold_ms elapsed: discard the
+    /// recording (if any), but do NOT abort an in-flight transcription the
+    /// way the cancel key does.
+    TooShort,
     /// The cancel key was pressed (abort recording/transcription)
     Cancel,
 }
