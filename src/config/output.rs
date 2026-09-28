@@ -350,6 +350,8 @@ pub enum OutputMode {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputDriver {
+    /// kwtype - KDE Plasma Wayland via KWin's Fake Input protocol
+    Kwtype,
     /// wtype - Wayland-native via virtual-keyboard protocol, best Unicode/CJK support
     Wtype,
     /// eitype - Wayland via libei/EI protocol, works on GNOME/KDE
@@ -367,6 +369,7 @@ pub enum OutputDriver {
 impl std::fmt::Display for OutputDriver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            OutputDriver::Kwtype => write!(f, "kwtype"),
             OutputDriver::Wtype => write!(f, "wtype"),
             OutputDriver::Eitype => write!(f, "eitype"),
             OutputDriver::Dotool => write!(f, "dotool"),
@@ -382,6 +385,7 @@ impl std::str::FromStr for OutputDriver {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
+            "kwtype" => Ok(OutputDriver::Kwtype),
             "wtype" => Ok(OutputDriver::Wtype),
             "eitype" => Ok(OutputDriver::Eitype),
             "dotool" => Ok(OutputDriver::Dotool),
@@ -389,7 +393,7 @@ impl std::str::FromStr for OutputDriver {
             "clipboard" => Ok(OutputDriver::Clipboard),
             "xclip" => Ok(OutputDriver::Xclip),
             _ => Err(format!(
-                "Unknown driver '{}'. Valid options: wtype, eitype, dotool, ydotool, clipboard, xclip",
+                "Unknown driver '{}'. Valid options: kwtype, wtype, eitype, dotool, ydotool, clipboard, xclip",
                 s
             )),
         }
@@ -462,6 +466,10 @@ mod tests {
     #[test]
     fn test_output_driver_from_str() {
         assert_eq!(
+            "kwtype".parse::<OutputDriver>().unwrap(),
+            OutputDriver::Kwtype
+        );
+        assert_eq!(
             "wtype".parse::<OutputDriver>().unwrap(),
             OutputDriver::Wtype
         );
@@ -500,6 +508,7 @@ mod tests {
 
     #[test]
     fn test_output_driver_display() {
+        assert_eq!(OutputDriver::Kwtype.to_string(), "kwtype");
         assert_eq!(OutputDriver::Wtype.to_string(), "wtype");
         assert_eq!(OutputDriver::Dotool.to_string(), "dotool");
         assert_eq!(OutputDriver::Ydotool.to_string(), "ydotool");
