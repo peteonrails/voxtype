@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
+use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
 use tray_icon::{
     menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu},
     TrayIconBuilder,
@@ -556,8 +557,16 @@ pub fn run(state_file: PathBuf) -> ! {
     // Set up menu event receiver
     let menu_channel = MenuEvent::receiver();
 
-    // Create event loop
-    let event_loop = EventLoopBuilder::new().build();
+    // Create event loop.
+    //
+    // Accessory activation policy keeps voxtype out of the Dock and the
+    // Cmd-Tab switcher: it owns a status bar item, not a window. tao defaults
+    // to `Regular`, which applies `setActivationPolicy(.regular)` when the
+    // event loop starts and overrides `LSUIElement` in the bundle's
+    // Info.plist, so setting it here is what actually takes effect. Must be
+    // called before `run()`.
+    let mut event_loop = EventLoopBuilder::new().build();
+    event_loop.set_activation_policy(ActivationPolicy::Accessory);
 
     event_loop.run(move |_event, _, control_flow| {
         // Wake every 100ms to check menu events; state updates arrive via kqueue flag
