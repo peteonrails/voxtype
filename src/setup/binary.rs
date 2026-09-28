@@ -553,6 +553,15 @@ pub enum InstallKind {
 pub struct Cpu {
     pub avx2: bool,
     pub avx512: bool,
+    /// Architecture of the running binary (`std::env::consts::ARCH`).
+    pub arch: &'static str,
+}
+
+impl Cpu {
+    /// The AVX tiers and the CUDA/MIGraphX bundles only exist as x86-64 builds.
+    pub fn is_x86_64(&self) -> bool {
+        self.arch == "x86_64"
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -609,8 +618,10 @@ pub struct Recommendation {
     pub primary: Variant,
 }
 
-pub fn recommend(cpu: &Cpu, gpus: &Gpus) -> Recommendation {
-    let whisper = recommend_whisper(cpu, gpus);
+/// `installed` only matters off x86-64, where the release pipeline builds no
+/// Vulkan binary: Vulkan is recommended there only when one is present.
+pub fn recommend(cpu: &Cpu, gpus: &Gpus, installed: &[Variant]) -> Recommendation {
+    let whisper = recommend_whisper(cpu, gpus, installed);
     let onnx = recommend_onnx(cpu, gpus);
     Recommendation {
         whisper: whisper.0,
@@ -621,7 +632,23 @@ pub fn recommend(cpu: &Cpu, gpus: &Gpus) -> Recommendation {
     }
 }
 
-fn recommend_whisper(cpu: &Cpu, gpus: &Gpus) -> (Variant, &'static str) {
+fn recommend_whisper(cpu: &Cpu, gpus: &Gpus, installed: &[Variant]) -> (Variant, &'static str) {
+    if !cpu.is_x86_64() {
+        if installed.contains(&Variant::WhisperVulkan) {
+            return (
+                Variant::WhisperVulkan,
+                "Non-x86 CPU with the Vulkan build installed; Vulkan uses the GPU where the \
+                 driver supports compute (e.g. Asahi on Apple Silicon) and falls back to CPU \
+                 otherwise.",
+            );
+        }
+        return (
+            Variant::WhisperNative,
+            "Non-x86 CPU; release builds for this architecture are CPU-only. Source builds \
+             with Vulkan (e.g. the AUR voxtype package) can use the GPU where the driver \
+             supports compute.",
+        );
+    }
     if gpus.nvidia || gpus.amd {
         // Vulkan covers all GPU vendors and is the most reliable Whisper GPU path.
         return (
@@ -642,6 +669,13 @@ fn recommend_whisper(cpu: &Cpu, gpus: &Gpus) -> (Variant, &'static str) {
 }
 
 fn recommend_onnx(cpu: &Cpu, gpus: &Gpus) -> (Variant, &'static str) {
+    if !cpu.is_x86_64() {
+        return (
+            Variant::OnnxNative,
+            "Non-x86 CPU; the AVX, CUDA and MIGraphX ONNX builds are x86-64 only, \
+             so ONNX runs on the native CPU build.",
+        );
+    }
     // CUDA/MIGraphX bundles ship with AVX-512 ONNX Runtime, so the CPU has to
     // support it before we can recommend a GPU variant.
     if gpus.nvidia && cpu.avx512 {
@@ -680,6 +714,7 @@ pub fn detect_cpu() -> Cpu {
         avx2: false,
         #[cfg(not(target_arch = "x86_64"))]
         avx512: false,
+        arch: std::env::consts::ARCH,
     }
 }
 
@@ -793,7 +828,15 @@ pub fn enumerate_installed() -> Vec<Variant> {
         .collect()
 }
 
-fn variant_runs_on_cpu(v: Variant, cpu: &Cpu) -> bool {
+pub(crate) fn variant_runs_on_cpu(v: Variant, cpu: &Cpu) -> bool {
+    if !cpu.is_x86_64() {
+        // Off x86-64 the AVX flags are always false and say nothing about
+        // what runs: the Vulkan and native binaries are built for the host.
+        return matches!(
+            v.acceleration(),
+            Acceleration::Vulkan | Acceleration::Native
+        );
+    }
     match v.acceleration() {
         // The floor variant: it exists precisely so there is something to run
         // when nothing else will, so it never disqualifies itself.
@@ -808,7 +851,7 @@ fn variant_runs_on_cpu(v: Variant, cpu: &Cpu) -> bool {
     }
 }
 
-fn variant_gpu_available(v: Variant, g: &Gpus) -> bool {
+pub(crate) fn variant_gpu_available(v: Variant, g: &Gpus) -> bool {
     match v.acceleration() {
         Acceleration::Cuda => g.nvidia,
         Acceleration::Migraphx => g.amd,
@@ -918,7 +961,16 @@ pub fn inventory() -> Inventory {
         None
     };
 
-    let recommendation = recommend(&cpu, &gpus);
+    // `variants` is empty for source installs, so read the lib dir directly,
+    // and count a source build that has Vulkan compiled in.
+    let mut installed = enumerate_installed();
+    if install_kind == InstallKind::Source
+        && cfg!(feature = "gpu-vulkan")
+        && !installed.contains(&Variant::WhisperVulkan)
+    {
+        installed.push(Variant::WhisperVulkan);
+    }
+    let recommendation = recommend(&cpu, &gpus, &installed);
 
     Inventory {
         install_kind,
@@ -1024,6 +1076,7 @@ mod tests {
         let no_avx512 = Cpu {
             avx2: true,
             avx512: false,
+            arch: "x86_64",
         };
         assert!(variant_runs_on_cpu(Variant::WhisperAvx2, &no_avx512));
         // The floor variant exists to run when nothing else will, so it must
@@ -1041,6 +1094,7 @@ mod tests {
         let full = Cpu {
             avx2: true,
             avx512: true,
+            arch: "x86_64",
         };
         assert!(variant_runs_on_cpu(Variant::WhisperAvx512, &full));
         assert!(variant_runs_on_cpu(Variant::OnnxCuda, &full));
@@ -1048,6 +1102,7 @@ mod tests {
         let nothing = Cpu {
             avx2: false,
             avx512: false,
+            arch: "x86_64",
         };
         assert!(!variant_runs_on_cpu(Variant::WhisperAvx2, &nothing));
         assert!(!variant_runs_on_cpu(Variant::WhisperNative, &nothing));
@@ -1095,26 +1150,45 @@ mod tests {
             &Cpu {
                 avx2: true,
                 avx512: false,
+                arch: "x86_64",
             },
             &Gpus {
                 nvidia: false,
                 amd: false,
             },
+            &[],
         );
         assert_eq!(r.whisper, Variant::WhisperAvx2);
         assert_eq!(r.onnx, Variant::OnnxAvx2);
         assert_eq!(r.primary, Variant::WhisperAvx2);
+
+        // On x86-64 the installed list does not change the pick.
+        let r = recommend(
+            &Cpu {
+                avx2: true,
+                avx512: false,
+                arch: "x86_64",
+            },
+            &Gpus {
+                nvidia: false,
+                amd: false,
+            },
+            &[Variant::WhisperVulkan, Variant::WhisperNative],
+        );
+        assert_eq!(r.whisper, Variant::WhisperAvx2);
 
         // No GPU, AVX-512 → Whisper AVX-512 + ONNX AVX-512.
         let r = recommend(
             &Cpu {
                 avx2: true,
                 avx512: true,
+                arch: "x86_64",
             },
             &Gpus {
                 nvidia: false,
                 amd: false,
             },
+            &[],
         );
         assert_eq!(r.whisper, Variant::WhisperAvx512);
         assert_eq!(r.onnx, Variant::OnnxAvx512);
@@ -1124,11 +1198,13 @@ mod tests {
             &Cpu {
                 avx2: true,
                 avx512: true,
+                arch: "x86_64",
             },
             &Gpus {
                 nvidia: true,
                 amd: false,
             },
+            &[],
         );
         assert_eq!(r.whisper, Variant::WhisperVulkan);
         assert_eq!(r.onnx, Variant::OnnxCuda);
@@ -1138,11 +1214,13 @@ mod tests {
             &Cpu {
                 avx2: true,
                 avx512: false,
+                arch: "x86_64",
             },
             &Gpus {
                 nvidia: true,
                 amd: false,
             },
+            &[],
         );
         assert_eq!(r.whisper, Variant::WhisperVulkan);
         assert_eq!(r.onnx, Variant::OnnxAvx2);
@@ -1152,14 +1230,84 @@ mod tests {
             &Cpu {
                 avx2: true,
                 avx512: true,
+                arch: "x86_64",
             },
             &Gpus {
                 nvidia: false,
                 amd: true,
             },
+            &[],
         );
         assert_eq!(r.whisper, Variant::WhisperVulkan);
         assert_eq!(r.onnx, Variant::OnnxAvx512);
+    }
+
+    /// aarch64 reports no AVX, which used to flag the Vulkan and native
+    /// binaries as "won't run" and recommend AVX2 builds that don't exist
+    /// for the architecture.
+    #[test]
+    fn cpu_gating_off_x86() {
+        let arm = Cpu {
+            avx2: false,
+            avx512: false,
+            arch: "aarch64",
+        };
+        assert!(variant_runs_on_cpu(Variant::WhisperVulkan, &arm));
+        assert!(variant_runs_on_cpu(Variant::WhisperNative, &arm));
+        assert!(variant_runs_on_cpu(Variant::OnnxNative, &arm));
+        assert!(!variant_runs_on_cpu(Variant::WhisperAvx2, &arm));
+        assert!(!variant_runs_on_cpu(Variant::WhisperAvx512, &arm));
+        assert!(!variant_runs_on_cpu(Variant::OnnxAvx2, &arm));
+        assert!(!variant_runs_on_cpu(Variant::OnnxAvx512, &arm));
+        assert!(!variant_runs_on_cpu(Variant::OnnxCuda, &arm));
+        assert!(!variant_runs_on_cpu(Variant::OnnxCuda12, &arm));
+        assert!(!variant_runs_on_cpu(Variant::OnnxCuda13, &arm));
+        assert!(!variant_runs_on_cpu(Variant::OnnxMigraphx, &arm));
+    }
+
+    #[test]
+    fn recommendations_off_x86() {
+        let arm = Cpu {
+            avx2: false,
+            avx512: false,
+            arch: "aarch64",
+        };
+        let no_gpu = Gpus {
+            nvidia: false,
+            amd: false,
+        };
+
+        // Release aarch64 builds are CPU-only, so without a Vulkan binary
+        // installed the native build is the recommendation.
+        let r = recommend(&arm, &no_gpu, &[Variant::WhisperNative]);
+        assert_eq!(r.whisper, Variant::WhisperNative);
+        assert_eq!(r.onnx, Variant::OnnxNative);
+        assert_eq!(r.primary, Variant::WhisperNative);
+
+        let r = recommend(&arm, &no_gpu, &[]);
+        assert_eq!(r.whisper, Variant::WhisperNative);
+
+        // A source build that ships voxtype-vulkan (e.g. the AUR package).
+        let r = recommend(
+            &arm,
+            &no_gpu,
+            &[Variant::WhisperNative, Variant::WhisperVulkan],
+        );
+        assert_eq!(r.whisper, Variant::WhisperVulkan);
+        assert_eq!(r.primary, Variant::WhisperVulkan);
+
+        // An NVIDIA GPU on aarch64 (e.g. Jetson) must not pull ONNX toward the
+        // x86-64-only CUDA builds.
+        let r = recommend(
+            &arm,
+            &Gpus {
+                nvidia: true,
+                amd: false,
+            },
+            &[Variant::WhisperVulkan, Variant::OnnxNative],
+        );
+        assert_eq!(r.whisper, Variant::WhisperVulkan);
+        assert_eq!(r.onnx, Variant::OnnxNative);
     }
 
     #[test]

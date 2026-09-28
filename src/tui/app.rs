@@ -148,29 +148,14 @@ fn build_inventory(force_package_mode: bool) -> Inventory {
                     variant: v,
                     binary_name: v.binary_name().to_string(),
                     installed: Path::new(binary::LIB_DIR).join(v.binary_name()).exists(),
-                    runs_on_this_cpu: variant_runs_on_cpu(v, &inv.cpu),
-                    gpu_available: variant_gpu_available(v, &inv.gpus),
+                    runs_on_this_cpu: binary::variant_runs_on_cpu(v, &inv.cpu),
+                    gpu_available: binary::variant_gpu_available(v, &inv.gpus),
                     active: inv.active_variant == Some(v),
                 })
                 .collect();
         }
     }
     inv
-}
-
-fn variant_runs_on_cpu(v: Variant, cpu: &binary::Cpu) -> bool {
-    match v.acceleration() {
-        Acceleration::Avx512 | Acceleration::Cuda | Acceleration::Migraphx => cpu.avx512,
-        _ => cpu.avx2,
-    }
-}
-
-fn variant_gpu_available(v: Variant, g: &binary::Gpus) -> bool {
-    match v.acceleration() {
-        Acceleration::Cuda => g.nvidia,
-        Acceleration::Migraphx => g.amd,
-        _ => true,
-    }
 }
 
 impl App {

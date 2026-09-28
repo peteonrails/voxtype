@@ -968,7 +968,12 @@ pub fn enable() -> anyhow::Result<()> {
                 .map(|info| info.contains("avx512f"))
                 .unwrap_or(false);
 
-            let hint = if (has_amd || has_nvidia) && !has_avx512 {
+            let hint = if (has_amd || has_nvidia) && !super::binary::detect_cpu().is_x86_64() {
+                "You have a GPU, but the ONNX GPU binaries (CUDA/MIGraphX) are only built for \
+                 x86-64.\n\n\
+                 Use the Whisper engine with Vulkan GPU acceleration instead:\n  \
+                 voxtype setup onnx --disable && sudo voxtype setup gpu --enable"
+            } else if (has_amd || has_nvidia) && !has_avx512 {
                 "You have a GPU, but the ONNX GPU binaries (CUDA/MIGraphX) require a CPU with \
                  AVX-512 support. Your CPU only supports AVX2.\n\n\
                  Use ONNX on CPU instead:\n  \
