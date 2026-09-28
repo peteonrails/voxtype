@@ -798,105 +798,123 @@ impl SonioxTranscriber {
         let job_id = job.id;
         tracing::debug!("Soniox async: created job_id={}", job_id);
 
-        // 3. Poll until completed or error.
-        let poll_interval = ASYNC_POLL_INTERVAL;
-        let max_wait = Duration::from_secs(self.config.async_max_wait_secs.max(5));
-        let poll_start = std::time::Instant::now();
-        loop {
-            if poll_start.elapsed() > max_wait {
-                self.async_cleanup(client, &auth, &job_id).await;
-                return Err(TranscribeError::InferenceFailed(format!(
-                    "Soniox async: job {} did not complete within {}s",
-                    job_id,
-                    max_wait.as_secs()
-                )));
+        // 3-4. Poll until completed, then fetch + parse the transcript. Wrapped
+        // in an async block so EVERY exit (including `?` on transport/parse
+        // errors) falls through to the single cleanup below; otherwise a
+        // transient poll/fetch error returns early and leaks both the
+        // transcription and its uploaded file.
+        let result: Result<TranscriptResponse, TranscribeError> = async {
+            let poll_interval = ASYNC_POLL_INTERVAL;
+            let max_wait = Duration::from_secs(self.config.async_max_wait_secs.max(5));
+            let poll_start = std::time::Instant::now();
+            loop {
+                if poll_start.elapsed() > max_wait {
+                    return Err(TranscribeError::InferenceFailed(format!(
+                        "Soniox async: job {} did not complete within {}s",
+                        job_id,
+                        max_wait.as_secs()
+                    )));
+                }
+                tokio::time::sleep(poll_interval).await;
+                let resp = client
+                    .get(format!("{}/transcriptions/{}", SONIOX_ASYNC_BASE, job_id))
+                    .header("Authorization", &auth)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        TranscribeError::InferenceFailed(format!(
+                            "Soniox async: poll failed: {}",
+                            e
+                        ))
+                    })?;
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    return Err(TranscribeError::InferenceFailed(format!(
+                        "Soniox async: poll returned {}: {}",
+                        status, text
+                    )));
+                }
+                let status_resp: TranscriptionStatusResponse = resp.json().await.map_err(|e| {
+                    TranscribeError::InferenceFailed(format!(
+                        "Soniox async: parse status response: {}",
+                        e
+                    ))
+                })?;
+                match status_resp.status.as_str() {
+                    "completed" => break,
+                    "error" => {
+                        let err = status_resp
+                            .error_message
+                            .unwrap_or_else(|| "unspecified error".to_string());
+                        return Err(TranscribeError::InferenceFailed(format!(
+                            "Soniox async: server error: {}",
+                            err
+                        )));
+                    }
+                    "processing" | "queued" | "running" => {
+                        tracing::trace!(
+                            "Soniox async: job {} status={}",
+                            job_id,
+                            status_resp.status
+                        );
+                    }
+                    other => {
+                        tracing::warn!(
+                            "Soniox async: unknown status '{}', continuing to poll",
+                            other
+                        );
+                    }
+                }
             }
-            tokio::time::sleep(poll_interval).await;
+            tracing::info!(
+                "Soniox async: transcription completed in {:.2}s",
+                poll_start.elapsed().as_secs_f32()
+            );
+
             let resp = client
-                .get(format!("{}/transcriptions/{}", SONIOX_ASYNC_BASE, job_id))
+                .get(format!(
+                    "{}/transcriptions/{}/transcript",
+                    SONIOX_ASYNC_BASE, job_id
+                ))
                 .header("Authorization", &auth)
                 .send()
                 .await
                 .map_err(|e| {
-                    TranscribeError::InferenceFailed(format!("Soniox async: poll failed: {}", e))
+                    TranscribeError::InferenceFailed(format!(
+                        "Soniox async: fetch transcript: {}",
+                        e
+                    ))
                 })?;
             if !resp.status().is_success() {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();
-                self.async_cleanup(client, &auth, &job_id).await;
                 return Err(TranscribeError::InferenceFailed(format!(
-                    "Soniox async: poll returned {}: {}",
+                    "Soniox async: fetch transcript returned {}: {}",
                     status, text
                 )));
             }
-            let status_resp: TranscriptionStatusResponse = resp.json().await.map_err(|e| {
+            let body = resp.text().await.map_err(|e| {
                 TranscribeError::InferenceFailed(format!(
-                    "Soniox async: parse status response: {}",
+                    "Soniox async: read transcript body: {}",
                     e
                 ))
             })?;
-            match status_resp.status.as_str() {
-                "completed" => break,
-                "error" => {
-                    let err = status_resp
-                        .error_message
-                        .unwrap_or_else(|| "unspecified error".to_string());
-                    self.async_cleanup(client, &auth, &job_id).await;
-                    return Err(TranscribeError::InferenceFailed(format!(
-                        "Soniox async: server error: {}",
-                        err
-                    )));
-                }
-                "processing" | "queued" | "running" => {
-                    tracing::trace!("Soniox async: job {} status={}", job_id, status_resp.status);
-                }
-                other => {
-                    tracing::warn!(
-                        "Soniox async: unknown status '{}', continuing to poll",
-                        other
-                    );
-                }
-            }
+            tracing::debug!(target: "voxtype::soniox::wire", "<- transcript: {}", body);
+            serde_json::from_str::<TranscriptResponse>(&body).map_err(|e| {
+                TranscribeError::InferenceFailed(format!(
+                    "Soniox async: parse transcript: {} (body: {})",
+                    e, body
+                ))
+            })
         }
-        tracing::info!(
-            "Soniox async: transcription completed in {:.2}s",
-            poll_start.elapsed().as_secs_f32()
-        );
+        .await;
 
-        // 4. Fetch transcript.
-        let resp = client
-            .get(format!(
-                "{}/transcriptions/{}/transcript",
-                SONIOX_ASYNC_BASE, job_id
-            ))
-            .header("Authorization", &auth)
-            .send()
-            .await
-            .map_err(|e| {
-                TranscribeError::InferenceFailed(format!("Soniox async: fetch transcript: {}", e))
-            })?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            self.async_cleanup(client, &auth, &job_id).await;
-            return Err(TranscribeError::InferenceFailed(format!(
-                "Soniox async: fetch transcript returned {}: {}",
-                status, text
-            )));
-        }
-        let body = resp.text().await.map_err(|e| {
-            TranscribeError::InferenceFailed(format!("Soniox async: read transcript body: {}", e))
-        })?;
-        tracing::debug!(target: "voxtype::soniox::wire", "<- transcript: {}", body);
-        let transcript: TranscriptResponse = serde_json::from_str(&body).map_err(|e| {
-            TranscribeError::InferenceFailed(format!(
-                "Soniox async: parse transcript: {} (body: {})",
-                e, body
-            ))
-        })?;
+        // 5. Cleanup ALWAYS runs (best effort, never fails the user-visible
+        // result), regardless of how the poll/fetch above exited.
+        self.async_cleanup(client, &auth, &job_id, &file_id).await;
 
-        // 5. Cleanup server-side state (best effort, don't fail user-visible).
-        self.async_cleanup(client, &auth, &job_id).await;
+        let transcript = result?;
 
         // 6. Concatenate tokens (skip special markers).
         let mut out = String::new();
@@ -910,21 +928,82 @@ impl SonioxTranscriber {
     }
 
     async fn async_delete_file(&self, client: &reqwest::Client, auth: &str, file_id: &str) {
-        let _ = client
-            .delete(format!("{}/files/{}", SONIOX_ASYNC_BASE, file_id))
-            .header("Authorization", auth)
-            .send()
-            .await;
+        self.async_delete_with_retry(
+            client,
+            auth,
+            format!("{}/files/{}", SONIOX_ASYNC_BASE, file_id),
+        )
+        .await;
     }
 
-    async fn async_cleanup(&self, client: &reqwest::Client, auth: &str, job_id: &str) {
-        // DELETE /v1/transcriptions/{id} cascades to its associated file
-        // per Soniox docs, so we don't issue a separate /files/{id} DELETE.
-        let _ = client
-            .delete(format!("{}/transcriptions/{}", SONIOX_ASYNC_BASE, job_id))
-            .header("Authorization", auth)
-            .send()
-            .await;
+    async fn async_cleanup(
+        &self,
+        client: &reqwest::Client,
+        auth: &str,
+        job_id: &str,
+        file_id: &str,
+    ) {
+        // Delete the transcription first, then its uploaded file. DELETE
+        // /v1/transcriptions/{id} does NOT cascade to the file (confirmed
+        // empirically and by Soniox's own async example, which deletes both):
+        // leaving the file behind leaks it against the org-wide 1000-file cap,
+        // after which every /v1/files upload 429s and transcription silently
+        // stops. Both deletes are capped at 500 req/min, so retry on 429.
+        self.async_delete_with_retry(
+            client,
+            auth,
+            format!("{}/transcriptions/{}", SONIOX_ASYNC_BASE, job_id),
+        )
+        .await;
+        self.async_delete_file(client, auth, file_id).await;
+    }
+
+    /// Best-effort DELETE that retries transient failures (429 rate limits,
+    /// 5xx, and network errors). Never fails the user-visible result; logs at
+    /// error level if it gives up so a persistent leak is visible, not silent.
+    async fn async_delete_with_retry(&self, client: &reqwest::Client, auth: &str, url: String) {
+        const MAX_ATTEMPTS: u32 = 4;
+        for attempt in 0..MAX_ATTEMPTS {
+            let retryable = match client
+                .delete(&url)
+                .header("Authorization", auth)
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    let status = resp.status();
+                    // Drain the body before branching: reqwest won't return a
+                    // connection to the pool while its response body is unread,
+                    // so dropping it here would force a fresh connection on every
+                    // retry and amplify churn during a 429/5xx storm.
+                    let _ = resp.bytes().await;
+                    if status.is_success() {
+                        return;
+                    }
+                    // 429/5xx are transient; other 4xx (e.g. 404 already-gone)
+                    // won't change on retry, so stop.
+                    if status.as_u16() == 429 || status.is_server_error() {
+                        tracing::debug!("Soniox cleanup DELETE {} got {}, retrying", url, status);
+                        true
+                    } else {
+                        tracing::warn!("Soniox cleanup DELETE {} returned {}", url, status);
+                        return;
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("Soniox cleanup DELETE {} failed: {}, retrying", url, e);
+                    true
+                }
+            };
+            // No point sleeping after the final attempt.
+            if retryable && attempt + 1 < MAX_ATTEMPTS {
+                tokio::time::sleep(Duration::from_millis(500 * u64::from(attempt + 1))).await;
+            }
+        }
+        tracing::error!(
+            "Soniox cleanup DELETE {} still failing after retries; resource may leak against org quota",
+            url
+        );
     }
 }
 
