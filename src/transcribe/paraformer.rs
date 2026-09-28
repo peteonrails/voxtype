@@ -303,32 +303,110 @@ fn ctc_decode_to_ids(logits: &[f32], time_steps: usize, vocab_size: usize) -> Ve
     token_ids
 }
 
-/// Convert token IDs to text, handling BPE continuation markers
+/// Convert token IDs to text, matching FunASR `sentence_postprocess`.
 ///
-/// Paraformer uses `@@` suffix for BPE continuation (e.g., "hel@@" + "lo" = "hello").
-/// Chinese characters appear as individual tokens without markers.
-/// Special tokens (<blank>, <s>, </s>, <OOV>) are filtered out.
+/// Paraformer-zh uses `@@` as a BPE continuation marker (`hel@@` + `lo` = `hello`).
+/// A token *without* `@@` that is all ASCII letters ends an English word and
+/// must be followed by a space. Chinese characters concatenate with no space.
+/// Mixed output drops the English trailing space before a Chinese character
+/// (`hello` + `你` → `hello你`).
 fn tokens_to_text(token_ids: &[u32], tokens: &HashMap<u32, String>) -> String {
-    let mut result = String::new();
-
+    let mut pieces: Vec<String> = Vec::new();
     for &id in token_ids {
         if let Some(token_str) = tokens.get(&id) {
-            // Skip special tokens
-            if token_str.starts_with('<') && token_str.ends_with('>') {
-                continue;
-            }
+            pieces.push(token_str.clone());
+        }
+    }
+    sentence_postprocess(&pieces)
+}
 
-            // Handle BPE continuation marker
-            if let Some(base) = token_str.strip_suffix("@@") {
-                result.push_str(base);
+fn is_special_token(token: &str) -> bool {
+    matches!(token, "<blank>" | "<s>" | "</s>" | "<unk>" | "<OOV>")
+        || (token.starts_with('<') && token.ends_with('>'))
+}
+
+fn is_cjk_char(ch: char) -> bool {
+    matches!(ch, '\u{4e00}'..='\u{9fff}' | '0'..='9') || ch == '@'
+}
+
+fn is_all_chinese(token: &str) -> bool {
+    let stripped = token.replace([' ', '\t'], "");
+    !stripped.is_empty() && stripped.chars().all(is_cjk_char)
+}
+
+fn is_all_alpha(token: &str) -> bool {
+    let stripped: String = token.chars().filter(|c| !c.is_whitespace()).collect();
+    if stripped.is_empty() {
+        return false;
+    }
+    stripped
+        .chars()
+        .all(|ch| ch.is_ascii_alphabetic() || ch == '\'')
+}
+
+/// FunASR `sentence_postprocess` (no timestamps).
+fn sentence_postprocess(words: &[String]) -> String {
+    let middle: Vec<&str> = words
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|w| !is_special_token(w))
+        .collect();
+
+    if middle.is_empty() {
+        return String::new();
+    }
+
+    let all_chinese = middle.iter().all(|w| is_all_chinese(w));
+    let all_alpha = middle.iter().all(|w| is_all_alpha(w));
+
+    let mut word_lists: Vec<String> = Vec::new();
+    let mut word_item = String::new();
+
+    if all_chinese {
+        for ch in &middle {
+            word_lists.push(ch.replace(' ', ""));
+        }
+    } else if all_alpha {
+        for ch in &middle {
+            if ch.contains("@@") {
+                word_item.push_str(&ch.replace("@@", ""));
             } else {
-                // SentencePiece marker cleanup (some models use this instead of @@)
-                result.push_str(&token_str.replace('\u{2581}', " "));
+                word_item.push_str(ch);
+                word_lists.push(std::mem::take(&mut word_item));
+                word_lists.push(" ".to_string());
             }
+        }
+        if !word_item.is_empty() {
+            word_lists.push(word_item);
+        }
+    } else {
+        let mut alpha_blank = false;
+        for ch in &middle {
+            if is_all_chinese(ch) {
+                if alpha_blank {
+                    word_lists.pop();
+                }
+                word_lists.push((*ch).to_string());
+                alpha_blank = false;
+            } else if ch.contains("@@") {
+                word_item.push_str(&ch.replace("@@", ""));
+                alpha_blank = false;
+            } else if is_all_alpha(ch) {
+                word_item.push_str(ch);
+                word_lists.push(std::mem::take(&mut word_item));
+                word_lists.push(" ".to_string());
+                alpha_blank = true;
+            } else {
+                let cleaned = ch.replace('\u{2581}', " ");
+                word_lists.push(cleaned);
+            }
+        }
+        if !word_item.is_empty() {
+            word_lists.push(word_item);
         }
     }
 
-    result.trim().to_string()
+    word_lists.concat().trim().to_string()
 }
 
 /// Read CMVN stats from Kaldi am.mvn binary matrix file
@@ -638,7 +716,25 @@ mod tests {
 
         let ids = vec![1, 10, 11, 12, 13, 2];
         let result = tokens_to_text(&ids, &tokens);
-        assert_eq!(result, "helloworld");
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_tokens_to_text_mixed_zh_en() {
+        let mut tokens = HashMap::new();
+        tokens.insert(1, "<s>".to_string());
+        tokens.insert(2, "</s>".to_string());
+        tokens.insert(10, "你".to_string());
+        tokens.insert(11, "好".to_string());
+        tokens.insert(12, "for".to_string());
+        tokens.insert(13, "ex@@".to_string());
+        tokens.insert(14, "ample".to_string());
+        tokens.insert(15, "世".to_string());
+        tokens.insert(16, "界".to_string());
+
+        let ids = vec![1, 10, 11, 12, 13, 14, 15, 16, 2];
+        let result = tokens_to_text(&ids, &tokens);
+        assert_eq!(result, "你好for example世界");
     }
 
     #[test]
