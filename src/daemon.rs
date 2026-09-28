@@ -2270,6 +2270,16 @@ impl Daemon {
         cleanup_bool_override("auto_submit");
         cleanup_bool_override("shift_enter");
         cleanup_bool_override("smart_auto_submit");
+
+        // Release any model load this cycle never consumed. With
+        // on_demand_loading the load starts when recording starts and is taken
+        // by get_transcriber_for_recording on the way to transcription. A cycle
+        // that ends before that point (recording too short, no speech detected,
+        // capture failure) would otherwise leave the finished task parked in
+        // this field, holding its Arc<dyn Transcriber> -- and with it the whole
+        // model, hundreds of MiB -- until the next recording overwrote it.
+        self.model_load_task = None;
+
         self.restore_recording_media();
         *state = State::Idle;
         self.update_state("idle");
