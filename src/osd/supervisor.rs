@@ -55,11 +55,16 @@ fn resolve_osd_binary() -> PathBuf {
 /// Spawn a tokio task that supervises `voxtype-osd`. The returned handle's
 /// drop kills the child via `kill_on_drop`. Holding the handle keeps the
 /// supervisor alive for the daemon's lifetime.
-pub fn spawn() -> JoinHandle<()> {
-    tokio::spawn(supervise())
+///
+/// `max_duration_secs` is the daemon's effective recording auto-stop
+/// limit (config file < env < CLI). It is forwarded as
+/// `VOXTYPE_OSD_MAX_DURATION_SECS` so the Quickshell countdown matches
+/// the actual auto-stop even when CLI/env overrides are in play.
+pub fn spawn(max_duration_secs: u32) -> JoinHandle<()> {
+    tokio::spawn(supervise(max_duration_secs))
 }
 
-async fn supervise() {
+async fn supervise(max_duration_secs: u32) {
     let mut backoff = RESTART_MIN;
     let mut rapid_fails: u32 = 0;
     let mut rapid_window_start = Instant::now();
@@ -74,6 +79,12 @@ async fn supervise() {
         // the Quickshell launcher (otherwise kill_on_drop has nothing
         // to kill — see #395).
         cmd.env("VOXTYPE_OSD_SUPERVISED", "1");
+        // Forward the effective auto-stop limit so the OSD countdown
+        // matches the daemon even with CLI/env overrides.
+        cmd.env(
+            "VOXTYPE_OSD_MAX_DURATION_SECS",
+            max_duration_secs.to_string(),
+        );
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,

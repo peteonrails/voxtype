@@ -28,6 +28,7 @@ QtObject {
             "position": "bottom-center",
             "margin_px": 24,
             "top_margin": 0.85,
+            "max_duration_secs": 60,
             "package_dir": null,
             "asset_root": null,
             "custom_qml": null,

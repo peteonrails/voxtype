@@ -44,6 +44,20 @@ PanelWindow {
     /// visual recipe layers, and optional custom QML package entry.
     property var style: null
 
+    /// Countdown to the recording auto-stop limit. The daemon publishes
+    /// its effective audio.max_duration_secs (file < env < CLI) in the
+    /// runtime style JSON; QML never parses user config files directly.
+    /// Declarative binding so late style loads and live updates propagate.
+    property int maxDurationSecs: {
+        const v = style && style.config ? style.config.max_duration_secs : undefined;
+        return v !== undefined && v !== null && Number(v) > 0
+            ? Math.max(5, Math.round(Number(v)))
+            : 60;
+    }
+    property real recordingElapsed: 0
+    readonly property real recordingRemaining: Math.max(0, maxDurationSecs - recordingElapsed)
+    readonly property real recordingFraction: maxDurationSecs > 0 ? recordingRemaining / maxDurationSecs : 1.0
+
     visible: !osdSuppressed && daemonState !== "idle" && daemonState !== ""
     anchors {
         top: true
@@ -101,6 +115,16 @@ PanelWindow {
     readonly property real orbHaloEnergy: Math.min(1.0, Math.max(0.0, currentRms * 10.0 + currentPeak * 1.8))
 
     onCustomQmlUrlChanged: customQmlFailed = false
+
+    // Ticks elapsed recording time; reset on state transitions below.
+    Timer {
+        id: countdownTimer
+        interval: 250
+        repeat: true
+        running: panel.daemonState === "recording"
+        triggeredOnStart: true
+        onTriggered: panel.recordingElapsed += 0.25
+    }
 
     function _styleColor(role, fallback) {
         if (style && style.color) {
@@ -247,6 +271,7 @@ PanelWindow {
 
     function _resetMeters() {
         ring = [];
+        recordingElapsed = 0;
         currentPeakDbfs = -120;
         heldDbfs = -120;
         currentPeak = 0;
@@ -302,8 +327,12 @@ PanelWindow {
     // waveform doesn't show stale audio from the previous recording on
     // the next one.
     onDaemonStateChanged: {
+        if (daemonState === "recording") {
+            recordingElapsed = 0;
+        }
         if (daemonState === "idle" || daemonState === "") {
             _resetMeters();
+            recordingElapsed = 0;
         }
         _syncCustomItem();
     }
@@ -511,6 +540,46 @@ PanelWindow {
                         meterFloorDbfs: VT.Theme.meterFloorDbfs
                     }
                 }
+            }
+        }
+
+        // Seconds-left readout (top-right) + depleting time bar (bottom).
+        // Counts down to audio.max_duration_secs auto-stop while recording.
+        Text {
+            id: countdownLabel
+            visible: !panel._isBlockLayout() && panel.daemonState === "recording"
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.right: parent.right
+            anchors.rightMargin: 12
+            text: Math.ceil(panel.recordingRemaining) + "s"
+            font.pixelSize: 33
+            font.bold: true
+            font.family: "JetBrainsMono Nerd Font"
+            color: panel.recordingRemaining <= 5 ? panel._styleColor("error", "#f2594d")
+                 : panel.recordingRemaining <= 10 ? panel._styleColor("warning", "#f2cc4d")
+                 : panel._styleColor("foreground", VT.Theme.textColor)
+        }
+        Rectangle {
+            id: countdownBar
+            visible: !panel._isBlockLayout() && panel.daemonState === "recording"
+            anchors.bottom: parent.bottom
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.leftMargin: 10
+            anchors.rightMargin: 10
+            anchors.bottomMargin: 5
+            height: 2
+            radius: 1
+            color: panel._styleColor("muted", "#3a3a42")
+            Rectangle {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                width: parent.width * panel.recordingFraction
+                height: parent.height
+                radius: 1
+                color: panel.recordingRemaining <= 5 ? panel._styleColor("error", "#f2594d")
+                     : panel.recordingRemaining <= 10 ? panel._styleColor("warning", "#f2cc4d")
+                     : panel.stateColor
             }
         }
     }
