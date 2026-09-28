@@ -5,12 +5,13 @@
 //! Fallback chain for `mode = "type"`:
 //!
 //! Linux:
-//! 1. wtype - Wayland-native via virtual-keyboard protocol, best Unicode/CJK support, no daemon needed
-//! 2. eitype - Wayland via libei/EI protocol, works on GNOME/KDE (no virtual-keyboard support)
-//! 3. dotool - Works on X11/Wayland/TTY, supports keyboard layouts, no daemon needed
-//! 4. ydotool - Works on X11/Wayland/TTY, requires daemon
-//! 5. clipboard (wl-copy) - Wayland clipboard fallback
-//! 6. xclip - X11 clipboard fallback
+//! 1. portal - persistent XDG RemoteDesktop session, works on KDE/GNOME/wlroots, no uinput
+//! 2. wtype - Wayland-native via virtual-keyboard protocol, best Unicode/CJK support, no daemon needed
+//! 3. eitype - Wayland via libei/EI protocol, works on GNOME/KDE (no virtual-keyboard support)
+//! 4. dotool - Works on X11/Wayland/TTY, supports keyboard layouts, no daemon needed
+//! 5. ydotool - Works on X11/Wayland/TTY, requires daemon
+//! 6. clipboard (wl-copy) - Wayland clipboard fallback
+//! 7. xclip - X11 clipboard fallback
 //!
 //! macOS:
 //! 1. cgevent - Native CGEvent API for keyboard simulation (best performance)
@@ -24,6 +25,8 @@ pub mod cgevent;
 pub mod clipboard;
 pub mod dotool;
 pub mod eitype;
+#[cfg(all(feature = "portal", not(target_os = "macos")))]
+pub mod portal;
 // modifier_guard is evdev-based; macOS has its own osascript modifier handling.
 #[cfg(target_os = "linux")]
 pub mod modifier_guard;
@@ -239,8 +242,23 @@ pub trait TextOutput: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
-/// Default driver order for type mode
-#[cfg(not(target_os = "macos"))]
+/// Default driver order for type mode. With the `portal` feature (enabled by
+/// default), the persistent RemoteDesktop portal driver is tried first: it
+/// works on KDE/GNOME/wlroots without uinput and supersedes wtype where the
+/// portal is available.
+#[cfg(all(feature = "portal", not(target_os = "macos")))]
+const DEFAULT_DRIVER_ORDER: &[OutputDriver] = &[
+    OutputDriver::Portal,
+    OutputDriver::Wtype,
+    OutputDriver::Eitype,
+    OutputDriver::Dotool,
+    OutputDriver::Ydotool,
+    OutputDriver::Clipboard,
+    OutputDriver::Xclip,
+];
+
+/// Default driver order for type mode (built without the `portal` feature).
+#[cfg(all(not(feature = "portal"), not(target_os = "macos")))]
 const DEFAULT_DRIVER_ORDER: &[OutputDriver] = &[
     OutputDriver::Wtype,
     OutputDriver::Eitype,
@@ -274,6 +292,14 @@ fn create_driver_output(
             config.shift_enter_newlines,
             config.eitype_xkb_layout.clone(),
             config.eitype_xkb_variant.clone(),
+        )),
+        #[cfg(feature = "portal")]
+        OutputDriver::Portal => Box::new(portal::PortalOutput::new(
+            config.auto_submit,
+            config.append_text.clone(),
+            config.type_delay_ms,
+            pre_type_delay_ms,
+            config.shift_enter_newlines,
         )),
         OutputDriver::Dotool => Box::new(dotool::DotoolOutput::new(
             config.type_delay_ms,
@@ -455,7 +481,8 @@ pub struct OutputOptions<'a> {
 /// keybindings when modifiers are held. Used to filter the chain when the
 /// modifier-release wait times out.
 fn is_keystroke_method(name: &str) -> bool {
-    matches!(name, "wtype" | "eitype" | "dotool" | "ydotool") || name.starts_with("paste")
+    matches!(name, "wtype" | "eitype" | "dotool" | "ydotool" | "portal")
+        || name.starts_with("paste")
 }
 
 /// Try each output method in the chain until one succeeds

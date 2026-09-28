@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Voxtype
+GenericName=Voice-to-Text
+Comment=Push-to-talk voice-to-text daemon
+Exec=voxtype daemon
+Icon=audio-input-microphone
+Categories=Utility;
+Keywords=voxtype;voice;dictation;transcription;whisper;parakeet;
+Terminal=false
+NoDisplay=true
+StartupWMClass=voxtype

@@ -71,6 +71,7 @@ pub struct OutputToolStatus {
 #[derive(Debug)]
 pub struct OutputChainStatus {
     pub display_server: DisplayServer,
+    pub portal: OutputToolStatus,
     pub wtype: OutputToolStatus,
     pub eitype: OutputToolStatus,
     pub ydotool: OutputToolStatus,
@@ -282,9 +283,26 @@ pub async fn detect_output_chain() -> OutputChainStatus {
         None
     };
 
+    // Portal (compiled-in feature, no external binary). Probe availability
+    // without creating a session so this never pops a consent dialog.
+    #[cfg(all(feature = "portal", not(target_os = "macos")))]
+    let portal_available = crate::output::portal::probe_available().await;
+    #[cfg(not(all(feature = "portal", not(target_os = "macos"))))]
+    let portal_available = false;
+    let portal_installed = cfg!(all(feature = "portal", not(target_os = "macos")));
+    let portal_note = if !portal_installed {
+        Some("enable the `portal` cargo feature".to_string())
+    } else if !portal_available {
+        Some("no RemoteDesktop portal with keyboard support".to_string())
+    } else {
+        None
+    };
+
     // Determine primary method
     let primary_method = if osascript_available {
         Some("osascript".to_string())
+    } else if portal_available {
+        Some("portal".to_string())
     } else if wtype_available {
         Some("wtype".to_string())
     } else if eitype_available {
@@ -301,6 +319,13 @@ pub async fn detect_output_chain() -> OutputChainStatus {
 
     OutputChainStatus {
         display_server,
+        portal: OutputToolStatus {
+            name: "portal",
+            installed: portal_installed,
+            available: portal_available,
+            path: None,
+            note: portal_note,
+        },
         wtype: OutputToolStatus {
             name: "wtype",
             installed: wtype_installed,
@@ -381,6 +406,30 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
         print_tool_status(&status.pbcopy, true);
     } else {
         // Linux tools
+        // portal (compiled-in feature, no external binary)
+        {
+            let pad = " ".repeat(14 - "portal".len());
+            if !status.portal.installed {
+                println!("  portal:{}  \x1b[90m- not built in\x1b[0m", pad);
+            } else if status.portal.available {
+                println!(
+                    "  portal:{}  \x1b[32m✓\x1b[0m built in, RemoteDesktop portal available",
+                    pad
+                );
+            } else {
+                let note = status
+                    .portal
+                    .note
+                    .as_deref()
+                    .map(|n| format!(" ({})", n))
+                    .unwrap_or_default();
+                println!(
+                    "  portal:{}  \x1b[33m⚠\x1b[0m built in, portal unavailable{}",
+                    pad, note
+                );
+            }
+        }
+
         // wtype
         print_tool_status(
             &status.wtype,
@@ -435,6 +484,7 @@ pub fn print_output_chain_status(status: &OutputChainStatus) {
         let method_desc = match method.as_str() {
             "osascript" => "osascript (AppleScript/System Events)",
             "pbcopy" => "pbcopy (clipboard, requires manual paste)",
+            "portal" => "portal (RemoteDesktop, persistent session)",
             "wtype" => "wtype (CJK supported)",
             "eitype" => "eitype (libei, GNOME/KDE native)",
             "ydotool" => "ydotool (CJK not supported)",

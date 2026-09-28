@@ -36,6 +36,10 @@ override_dh_auto_install:
 	# Install configuration TUI launcher (.desktop entry + terminal-picker script)
 	install -D -m 644 packaging/voxtype-configure.desktop \
 		debian/voxtype/usr/share/applications/voxtype-configure.desktop
+	# Daemon desktop entry: gives the XDG portal an app-id ("voxtype") to name,
+	# so consent dialogs show "Voxtype" instead of "some application".
+	install -D -m 644 packaging/voxtype.desktop \
+		debian/voxtype/usr/share/applications/voxtype.desktop
 	install -D -m 755 packaging/scripts/voxtype-configure-launcher \
 		debian/voxtype/usr/bin/voxtype-configure-launcher
 
