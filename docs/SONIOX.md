@@ -10,8 +10,15 @@ Soniox is a paid cloud STT provider offering:
 - **Per-token finality** — server marks each token as `is_final: true` or `false`, with stable-final guarantees
 - **Sub-second latency** for partial tokens
 - **Server-side endpoint detection** — automatic finalization at utterance boundaries
-- **Two API modes** — realtime WebSocket (`stt-rt-v4`) and async REST (`stt-async-v4`)
+- **Two API modes** — realtime WebSocket (`stt-rt-v5`) and async REST (`stt-async-v5`)
 - **Domain context** — bias the model toward your vocabulary
+
+> **On version numbers.** Soniox keeps `stt-rt-v4` and `stt-async-v4` as stable
+> aliases pointing at v5, so a config still naming a v4 model is already running
+> v5 and does not need changing. Voxtype defaults to the explicit `v5` names so
+> the model you are running is recorded in your config and in the daemon log,
+> rather than moving under you when Soniox promotes a new generation. Pin a
+> different version by setting `model` yourself.
 
 ## Privacy
 
@@ -59,7 +66,7 @@ Soniox exposes two distinct backends. Voxtype supports both via `[soniox] async_
 WebSocket-based. Tokens stream back as you speak.
 
 - **Latency:** partials appear within ~100ms of speech, finals at utterance boundaries.
-- **Model:** `stt-rt-v4`.
+- **Model:** `stt-rt-v5`.
 - **Activation:** **toggle only.** Push-to-talk is auto-promoted to toggle for the running session, because typing characters at the cursor while the PTT key is still held breaks libinput's held-key state on Hyprland/Sway/River.
 - **Live typing:** non-final tokens are typed at the cursor as they arrive (`type_partials = true`). Soniox occasionally revises the tail when finalizing; voxtype emits a backspace+retype primitive (`StreamingEvent::Replace`) to patch up the cursor.
 
@@ -95,7 +102,7 @@ streaming = false           # buffer locally, single WS round trip on release
 REST-based file upload + poll. Higher accuracy claim, but slower roundtrip.
 
 - **Latency:** for a 15s recording, ~1s upload + 2-5s server processing = 3-6s wait after release.
-- **Model:** `stt-async-v4`.
+- **Model:** `stt-async-v5`.
 - **Activation:** push-to-talk compatible. No live typing, no compositor-state clobbering.
 - **Quality:** marketed as more accurate than realtime. In practice quality varies by language and content — benchmark both before committing.
 
@@ -106,7 +113,7 @@ mode = "push_to_talk"
 [soniox]
 async_api = true
 language_hints = ["en"]
-# model defaults to stt-async-v4 when async_api = true
+# model defaults to stt-async-v5 when async_api = true
 ```
 
 ### Dictation vs Meeting Mode (automatic)
@@ -118,11 +125,11 @@ The two Soniox APIs target different use cases and voxtype routes them automatic
 | Dictation (hotkey) | follows your `async_api` setting (default `false` → realtime WS) | Live partials, sub-second latency |
 | Meeting (`voxtype meeting start`) | **always** async REST, regardless of `async_api` | Fixed-chunk batch is what async is designed for; diarization-friendly; audio-second billing instead of WS-duration; survives network hiccups |
 
-Concretely: if your config has the default `async_api = false`, dictation keeps live-partial WebSocket typing while meetings transparently switch to `stt-async-v4` for each 30-second chunk. No knob to turn off — meetings on the realtime WS would open one fresh socket per chunk, pay connect latency, and bill by session-duration not audio-duration.
+Concretely: if your config has the default `async_api = false`, dictation keeps live-partial WebSocket typing while meetings transparently switch to `stt-async-v5` for each 30-second chunk. No knob to turn off — meetings on the realtime WS would open one fresh socket per chunk, pay connect latency, and bill by session-duration not audio-duration.
 
 If your config has `async_api = true` (explicit), both paths use async — your call.
 
-You can see the meeting-mode switch in the daemon log: `Soniox meeting mode: routing to async API (stt-async-v4); dictation path unchanged`.
+You can see the meeting-mode switch in the daemon log: `Soniox meeting mode: routing to async API; dictation path unchanged`.
 
 ## Language Hints
 
@@ -143,7 +150,7 @@ See [CONFIGURATION.md → [soniox]](CONFIGURATION.md#soniox) for the full field-
 | Field | Default | Notes |
 |---|---|---|
 | `api_key` | env: `SONIOX_API_KEY` | Required |
-| `model` | `stt-rt-v4` (or `stt-async-v4` if `async_api`) | Advanced override |
+| `model` | realtime: `stt-rt-v5`; async: `stt-async-v5` | Advanced override |
 | `language_hints` | `["hu", "en"]` | Empty = auto-detect |
 | `language_hints_strict` | `true` | Restrict output to hinted languages (no-op if hints empty) |
 | `streaming` | `true` | Realtime live; ignored if `async_api` |

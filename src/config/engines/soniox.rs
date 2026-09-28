@@ -14,7 +14,7 @@ pub struct SonioxConfig {
     #[serde(default)]
     pub api_key: Option<String>,
 
-    /// Soniox model name. Default: "stt-rt-v4".
+    /// Soniox model name. Default: "stt-rt-v5".
     #[serde(default = "default_soniox_model")]
     pub model: String,
 
@@ -66,7 +66,7 @@ pub struct SonioxConfig {
     /// Use the Soniox async transcription API (file upload + poll) instead
     /// of the realtime WebSocket. Higher accuracy, PTT-compatible, batch
     /// only (no live partials). When true, overrides `streaming` and
-    /// `type_partials`. Default model becomes `stt-async-v4`.
+    /// `type_partials`. Default model becomes `stt-async-v5`.
     /// Default: false.
     #[serde(default)]
     pub async_api: bool,
@@ -78,7 +78,7 @@ pub struct SonioxConfig {
 }
 
 fn default_soniox_model() -> String {
-    "stt-rt-v4".to_string()
+    "stt-rt-v5".to_string()
 }
 
 fn default_soniox_language_hints() -> Vec<String> {
