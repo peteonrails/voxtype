@@ -302,6 +302,88 @@ aplay test.wav
 max_duration_secs = 120  # 2 minutes
 ```
 
+### "Failed to start audio" on a binary built with a conda toolchain
+
+**Symptoms:** The hotkey is detected and recording starts, but the daemon immediately
+fails to open the capture device:
+
+```
+ALSA lib conf.c:4041:(snd_config_hooks_call) [error.core] Cannot open shared library libasound_module_conf_pulse.so (/home/you/miniconda3/lib/alsa-lib/libasound_module_conf_pulse.so: cannot open shared object file: No such file or directory)
+ALSA lib pcm.c:2722:(snd_pcm_open_noupdate) [error.pcm] Unknown PCM default
+ERROR Failed to start audio: Audio connection failed: The requested device is no longer available. For example, it has been unplugged.
+```
+
+Meanwhile `pactl info` and `arecord -D default ...` both work, so the audio server
+and the microphone are fine.
+
+**Cause:** The binary was linked with a conda / Conda-Forge compiler in `PATH` — for
+example an activated `base` environment whose `gcc`/`cc` shadows the system one.
+Conda's compiler driver appends `-Wl,-rpath,$CONDA_PREFIX/lib` at link time, so the
+binary carries a `DT_RPATH` pointing into the conda prefix:
+
+```bash
+$ readelf -d "$(command -v voxtype)" | grep -i rpath
+ 0x000000000000000f (RPATH)              Library rpath: [/home/you/miniconda3/lib]
+```
+
+`DT_RPATH` is searched *before* the system library paths, so the process loads the
+conda copies of `libasound.so.2`, `libstdc++.so.6` and `libgcc_s.so.1` instead of the
+system ones. Conda's `alsa-lib` package ships `libasound.so.2` but **not** the ALSA
+plugin modules (`libasound_module_conf_pulse.so`, `libasound_module_pcm_pulse.so`),
+so ALSA cannot resolve the `default` PCM, which routes through PulseAudio/PipeWire.
+Voxtype then reports the device as unavailable.
+
+This can look like it "broke overnight": the dynamic loader binds libraries when the
+process starts, so a long-running daemon keeps using whatever it resolved at launch.
+The failure only shows up after the daemon is restarted (reboot, upgrade,
+`systemctl --user restart`), once the conda prefix actually contains
+`libasound.so.2`.
+
+**Diagnose:**
+
+```bash
+# Does the installed binary carry a conda RPATH?
+readelf -d "$(command -v voxtype)" | grep -iE 'rpath|runpath'
+
+# Which libasound is it actually loading?
+ldd "$(command -v voxtype)" | grep asound
+# broken: libasound.so.2 => /home/you/miniconda3/lib/libasound.so.2
+#   fine: libasound.so.2 => /lib/x86_64-linux-gnu/libasound.so.2
+
+# Reproduce the mechanism with a known-good tool
+LD_LIBRARY_PATH="$CONDA_PREFIX/lib" arecord -D default -f S16_LE -r 16000 -c 1 -d 1 /tmp/t.wav
+# prints the same "Unknown PCM default" error
+```
+
+**Solution:** Rebuild with the conda toolchain out of the way:
+
+```bash
+env -i HOME="$HOME" \
+    PATH="$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin" \
+    CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rustup" \
+    CC=/usr/bin/gcc CXX=/usr/bin/g++ \
+    cargo build --release --features <your features>
+```
+
+Confirm the RPATH is gone before installing:
+
+```bash
+readelf -d target/release/voxtype | grep -iE 'rpath|runpath'   # should print nothing
+ldd target/release/voxtype | grep asound                       # should point at /lib/x86_64-linux-gnu
+```
+
+**If you must keep a conda-linked binary:**
+
+- `LD_PRELOAD=/lib/x86_64-linux-gnu/libasound.so.2` — note that `LD_LIBRARY_PATH`
+  will *not* help, because `DT_RPATH` is searched before it.
+- Rename the conda prefix's `lib/libasound.so.2*` so the loader falls back to the
+  system copy.
+- Pin the linker for future builds in `.cargo/config.toml`:
+  ```toml
+  [target.x86_64-unknown-linux-gnu]
+  linker = "/usr/bin/gcc"
+  ```
+
 ---
 
 ## Transcription Issues
