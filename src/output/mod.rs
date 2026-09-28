@@ -396,6 +396,7 @@ pub fn create_output_chain_with_override(
                 config.auto_submit,
                 config.append_text.clone(),
                 config.paste_keys.clone(),
+                config.driver_order.clone(),
                 config.type_delay_ms,
                 pre_type_delay_ms,
                 config.restore_clipboard,
