@@ -40,6 +40,17 @@ pub struct HotkeyConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
+    /// Take every keyboard device exclusively and re-emit its events through a
+    /// virtual keyboard, dropping the hotkey chord on the way.
+    ///
+    /// Without this, a chord like Meta+V reaches the listener *and* the focused
+    /// application, where Chromium and other clients insert "v". Requires write
+    /// access to /dev/uinput (same requirement as the dotool/ydotool output
+    /// drivers). Off by default: while it is on, every keystroke is routed
+    /// through voxtype before the compositor sees it.
+    #[serde(default)]
+    pub grab: bool,
+
     /// Optional cancel key (evdev KEY_* constant name, without KEY_ prefix)
     /// When pressed, cancels the current recording or transcription
     /// Examples: "ESC", "BACKSPACE", "F12"
@@ -66,6 +77,7 @@ impl Default for HotkeyConfig {
             modifiers: Vec::new(),
             mode: ActivationMode::default(),
             enabled: true,
+            grab: false,
             cancel_key: None,
             model_modifier: None,
             profile_modifiers: HashMap::new(),

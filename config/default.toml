@@ -51,6 +51,12 @@ modifiers = []
 # LEFTSHIFT = "translate"   # Shift+hotkey activates [profiles.translate]
 # RIGHTALT = "formal"       # RightAlt+hotkey activates [profiles.formal]
 
+# Exclusive keyboard capture (evdev only). Grabs each keyboard and re-emits its
+# events through a virtual keyboard, withholding the hotkey chord. Use it when
+# the chord also reaches applications: Chromium inserts "v" on Meta+V. Needs
+# /dev/uinput access, the same 'input' group membership dotool/ydotool use.
+# grab = false
+
 [audio]
 # Audio input device ("default" uses system default)
 # List devices with: voxtype info devices

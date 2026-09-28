@@ -11,13 +11,34 @@
 use super::{HotkeyEvent, HotkeyListener};
 use crate::config::HotkeyConfig;
 use crate::error::HotkeyError;
-use evdev::{Device, EventType, KeyCode as Key};
+use evdev::uinput::VirtualDevice;
+use evdev::{Device, EventType, InputEvent, KeyCode as Key};
 use inotify::{Inotify, WatchMask};
 use std::collections::{HashMap, HashSet};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
+
+/// Name of the virtual keyboard that carries a grabbed device's events back to
+/// the compositor. [`is_injection_keyboard`] matches it, so voxtype never opens
+/// (or grabs) its own mirror: that would loop every keystroke back through the
+/// listener forever.
+const MIRROR_DEVICE_NAME: &str = "voxtype key mirror";
+
+/// The keys the listener watches for, parsed once from [`HotkeyConfig`].
+struct HotkeyKeys {
+    /// The push-to-talk key
+    target: Key,
+    /// Modifier keys that must be held for the hotkey to engage
+    modifiers: HashSet<Key>,
+    /// Optional cancel key
+    cancel: Option<Key>,
+    /// Optional model modifier key (when held, use secondary model)
+    model_modifier: Option<Key>,
+    /// Modifier keys that activate named profiles for post-processing
+    profile_modifiers: HashMap<Key, String>,
+}
 
 /// evdev-based hotkey listener
 pub struct EvdevListener {
@@ -33,6 +54,8 @@ pub struct EvdevListener {
     secondary_model: Option<String>,
     /// Modifier keys that activate named profiles for post-processing
     profile_modifiers: HashMap<Key, String>,
+    /// Take every keyboard exclusively and re-emit its events
+    grab: bool,
     /// Signal to stop the listener task
     stop_signal: Option<oneshot::Sender<()>>,
 }
@@ -89,6 +112,18 @@ impl EvdevListener {
             }
         }
 
+        // Exclusive capture with no modifiers withholds every press of the
+        // hotkey key, not just a chord. That is a legitimate choice for a
+        // dedicated key (the point of hiding it from applications), but it is
+        // surprising enough to say out loud.
+        if config.grab && modifier_keys.is_empty() {
+            tracing::warn!(
+                "hotkey.grab is on with no modifiers configured: every {:?} press \
+                 will be withheld from applications, not only a chord",
+                target_key
+            );
+        }
+
         // Verify we can access /dev/input (permission check)
         std::fs::read_dir("/dev/input")
             .map_err(|e| HotkeyError::DeviceAccess(format!("/dev/input: {}", e)))?;
@@ -100,6 +135,7 @@ impl EvdevListener {
             model_modifier,
             secondary_model: None, // Set later via set_secondary_model
             profile_modifiers,
+            grab: config.grab,
             stop_signal: None,
         })
     }
@@ -116,25 +152,19 @@ impl HotkeyListener for EvdevListener {
         let (stop_tx, stop_rx) = oneshot::channel();
         self.stop_signal = Some(stop_tx);
 
-        let target_key = self.target_key;
-        let modifier_keys = self.modifier_keys.clone();
-        let cancel_key = self.cancel_key;
-        let model_modifier = self.model_modifier;
+        let keys = HotkeyKeys {
+            target: self.target_key,
+            modifiers: self.modifier_keys.clone(),
+            cancel: self.cancel_key,
+            model_modifier: self.model_modifier,
+            profile_modifiers: self.profile_modifiers.clone(),
+        };
+        let grab = self.grab;
         let secondary_model = self.secondary_model.clone();
-        let profile_modifiers = self.profile_modifiers.clone();
 
         // Spawn the listener task
         tokio::task::spawn_blocking(move || {
-            if let Err(e) = evdev_listener_loop(
-                target_key,
-                modifier_keys,
-                cancel_key,
-                model_modifier,
-                secondary_model,
-                profile_modifiers,
-                tx,
-                stop_rx,
-            ) {
+            if let Err(e) = evdev_listener_loop(grab, keys, secondary_model, tx, stop_rx) {
                 tracing::error!("Hotkey listener error: {}", e);
             }
         });
@@ -150,12 +180,29 @@ impl HotkeyListener for EvdevListener {
     }
 }
 
+/// One open keyboard device.
+struct DeviceSlot {
+    /// Path the device was opened from, as it appears in /dev/input
+    path: PathBuf,
+    /// The real device, opened non-blocking
+    device: Device,
+    /// Virtual keyboard re-emitting this device's events, present only while
+    /// `[hotkey] grab` is on and the grab succeeded
+    mirror: Option<VirtualDevice>,
+}
+
 /// Manages input devices with hotplug detection via inotify
 struct DeviceManager {
-    /// Map of device path to opened device
-    devices: HashMap<PathBuf, Device>,
-    /// inotify instance watching /dev/input
-    inotify: Inotify,
+    /// Open keyboards, one per slot. A slot is emptied (`None`) rather than
+    /// removed when its device goes away, because `poll_events` hands slot ids
+    /// back to the caller for the batch it is about to process; renumbering
+    /// would point those ids at other devices. New devices refill the holes.
+    devices: Vec<Option<DeviceSlot>>,
+    /// Take every keyboard exclusively (`[hotkey] grab`)
+    grab: bool,
+    /// inotify instance watching /dev/input. `None` in tests, which inject
+    /// their own keyboards and must not touch the real ones.
+    inotify: Option<Inotify>,
     /// Buffer for inotify events
     inotify_buffer: [u8; 1024],
     /// Last time we did a full validation
@@ -164,7 +211,21 @@ struct DeviceManager {
 
 impl DeviceManager {
     /// Create a new device manager with inotify watcher
-    fn new() -> Result<Self, HotkeyError> {
+    fn new(grab: bool) -> Result<Self, HotkeyError> {
+        let mut manager = Self::watching(grab)?;
+
+        // Initial device enumeration
+        manager.enumerate_devices()?;
+
+        if !manager.has_devices() {
+            return Err(HotkeyError::NoKeyboard);
+        }
+
+        Ok(manager)
+    }
+
+    /// A manager with the hotplug watcher armed and no devices opened yet
+    fn watching(grab: bool) -> Result<Self, HotkeyError> {
         let inotify = Inotify::init().map_err(|e| {
             HotkeyError::DeviceAccess(format!("Failed to initialize inotify: {}", e))
         })?;
@@ -175,21 +236,29 @@ impl DeviceManager {
             .add("/dev/input", WatchMask::CREATE | WatchMask::DELETE)
             .map_err(|e| HotkeyError::DeviceAccess(format!("Failed to watch /dev/input: {}", e)))?;
 
-        let mut manager = Self {
-            devices: HashMap::new(),
-            inotify,
+        Ok(Self {
+            devices: Vec::new(),
+            grab,
+            inotify: Some(inotify),
             inotify_buffer: [0u8; 1024],
             last_validation: Instant::now(),
-        };
+        })
+    }
 
-        // Initial device enumeration
-        manager.enumerate_devices()?;
-
-        if manager.devices.is_empty() {
-            return Err(HotkeyError::NoKeyboard);
+    /// A manager that opens no devices and watches nothing, for tests that
+    /// inject their own keyboards through [`Self::try_open_device`].
+    ///
+    /// Enumerating /dev/input in a test would open the keyboards of whoever
+    /// runs the suite and, with capture on, grab them out from under them.
+    #[cfg(test)]
+    fn detached(grab: bool) -> Self {
+        Self {
+            devices: Vec::new(),
+            grab,
+            inotify: None,
+            inotify_buffer: [0u8; 1024],
+            last_validation: Instant::now(),
         }
-
-        Ok(manager)
     }
 
     /// Enumerate all keyboard devices and open them
@@ -212,26 +281,32 @@ impl DeviceManager {
             }
 
             // Skip if already open
-            if self.devices.contains_key(&path) {
+            if self.has_path(&path) {
                 continue;
             }
 
             // Try to open and check if it's a keyboard
-            self.try_open_device(&path);
+            self.try_open_device(path);
         }
 
         Ok(())
     }
 
+    /// Whether the keyboard at `path` is already open
+    fn has_path(&self, path: &PathBuf) -> bool {
+        self.devices.iter().flatten().any(|slot| &slot.path == path)
+    }
+
     /// Try to open a device and add it if it's a keyboard
-    fn try_open_device(&mut self, path: &PathBuf) {
-        match Device::open(path) {
-            Ok(device) => {
+    fn try_open_device(&mut self, path: PathBuf) {
+        match Device::open(&path) {
+            Ok(mut device) => {
                 // Skip virtual keyboards created by text-injection tools
-                // (dotool, ydotool, xdotool). voxtype types its transcription out
-                // through one of these; grabbing it back is pointless and, when the
-                // tool tears down its short-lived uinput device, leaves a stale fd
-                // that spins fetch_events() at 100% CPU. See issue #445.
+                // (dotool, ydotool, xdotool) and voxtype's own capture mirror.
+                // voxtype types its transcription out through one of these;
+                // grabbing it back is pointless and, when the tool tears down
+                // its short-lived uinput device, leaves a stale fd that spins
+                // fetch_events() at 100% CPU. See issue #445.
                 let is_injection_device = device.name().map(is_injection_keyboard).unwrap_or(false);
                 if is_injection_device {
                     tracing::debug!("Skipping virtual injection keyboard: {:?}", device.name());
@@ -250,21 +325,24 @@ impl DeviceManager {
                     .unwrap_or(false);
 
                 if has_keys {
-                    // Set device to non-blocking mode
-                    let fd = device.as_raw_fd();
-                    unsafe {
-                        let flags = libc::fcntl(fd, libc::F_GETFL);
-                        if flags != -1 {
-                            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-                        }
-                    }
+                    set_nonblocking(device.as_raw_fd());
+
+                    let mirror = if self.grab {
+                        start_capture(&mut device, &path)
+                    } else {
+                        None
+                    };
 
                     tracing::info!(
                         "Opened keyboard: {:?} ({:?})",
                         path,
                         device.name().unwrap_or("unknown")
                     );
-                    self.devices.insert(path.clone(), device);
+                    self.place(DeviceSlot {
+                        path,
+                        device,
+                        mirror,
+                    });
                 }
             }
             Err(e) => {
@@ -275,25 +353,31 @@ impl DeviceManager {
         }
     }
 
+    /// Add a slot, refilling a hole an unplugged keyboard left behind
+    fn place(&mut self, slot: DeviceSlot) {
+        match self.devices.iter_mut().find(|entry| entry.is_none()) {
+            Some(hole) => *hole = Some(slot),
+            None => self.devices.push(Some(slot)),
+        }
+    }
+
     /// Check inotify for device changes (non-blocking)
     /// Returns true if devices changed
     fn check_for_device_changes(&mut self) -> bool {
-        // Set inotify to non-blocking for this check
-        let fd = self.inotify.as_raw_fd();
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFL);
-            if flags != -1 {
-                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-            }
-        }
+        let Some(inotify) = self.inotify.as_mut() else {
+            return false;
+        };
 
-        let events = match self.inotify.read_events(&mut self.inotify_buffer) {
+        // Set inotify to non-blocking for this check
+        set_nonblocking(inotify.as_raw_fd());
+
+        let events = match inotify.read_events(&mut self.inotify_buffer) {
             Ok(events) => events,
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                return false;
-            }
             Err(e) => {
-                tracing::warn!("inotify read error: {}", e);
+                // WouldBlock is the common case: no device changes queued.
+                if e.kind() != std::io::ErrorKind::WouldBlock {
+                    tracing::warn!("inotify read error: {}", e);
+                }
                 return false;
             }
         };
@@ -310,7 +394,7 @@ impl DeviceManager {
                         changed = true;
                     } else if event.mask.contains(inotify::EventMask::DELETE) {
                         tracing::debug!("Device removed: {:?}", path);
-                        self.devices.remove(&path);
+                        clear_slot(&mut self.devices, &path);
                         changed = true;
                     }
                 }
@@ -330,17 +414,22 @@ impl DeviceManager {
             tracing::warn!("Device enumeration failed: {}", e);
         }
 
-        tracing::info!("Devices updated: {} keyboard(s) active", self.devices.len());
+        tracing::info!(
+            "Devices updated: {} keyboard(s) active",
+            self.device_count()
+        );
     }
 
     /// Validate that all devices are still accessible
     /// Returns true if any device was removed
     fn validate_devices(&mut self) -> bool {
-        let mut stale_paths = Vec::new();
+        let mut stale = Vec::new();
 
-        for (path, device) in &self.devices {
-            let fd = device.as_raw_fd();
-            let link_path = format!("/proc/self/fd/{}", fd);
+        for (slot, entry) in self.devices.iter().enumerate() {
+            let Some(entry) = entry else {
+                continue;
+            };
+            let link_path = format!("/proc/self/fd/{}", entry.device.as_raw_fd());
 
             // Check if the symlink still points to a valid device
             let is_valid = std::fs::read_link(&link_path)
@@ -348,66 +437,198 @@ impl DeviceManager {
                 .unwrap_or(false);
 
             if !is_valid {
-                tracing::debug!("Device no longer valid: {:?}", path);
-                stale_paths.push(path.clone());
+                tracing::debug!("Device no longer valid: {:?}", entry.path);
+                stale.push(slot);
             }
         }
 
-        for path in &stale_paths {
-            self.devices.remove(path);
+        for slot in &stale {
+            self.devices[*slot] = None;
         }
 
-        !stale_paths.is_empty()
+        !stale.is_empty()
     }
 
     /// Poll all devices for events, handling errors gracefully
-    fn poll_events(&mut self) -> Vec<(Key, i32)> {
+    ///
+    /// Every event type comes back, not just keys: when capture is on this
+    /// batch is the only copy of the input the compositor will ever see, and
+    /// the caller re-emits it through the device's mirror.
+    fn poll_events(&mut self) -> Vec<(usize, InputEvent)> {
         let mut events = Vec::new();
-        let mut error_paths = Vec::new();
+        let mut error_slots = Vec::new();
 
-        for (path, device) in &mut self.devices {
+        for (slot, entry) in self.devices.iter_mut().enumerate() {
+            let Some(entry) = entry else {
+                continue;
+            };
+
             // Detect a hung-up / disconnected fd before reading. When a uinput
             // device (e.g. dotool's virtual keyboard) is destroyed, its fd can be
             // left in a state where fetch_events() never returns ENODEV and instead
             // spins at 100% CPU. poll() reliably reports POLLHUP/POLLERR/POLLNVAL for
             // such a dead fd, so we drop it before ever calling fetch_events().
-            if fd_is_hung_up(device.as_raw_fd()) {
-                tracing::debug!("Device hung up (POLLHUP/POLLERR): {:?}", path);
-                error_paths.push(path.clone());
+            if fd_is_hung_up(entry.device.as_raw_fd()) {
+                tracing::debug!("Device hung up (POLLHUP/POLLERR): {:?}", entry.path);
+                error_slots.push(slot);
                 continue;
             }
 
-            match device.fetch_events() {
+            match entry.device.fetch_events() {
                 Ok(device_events) => {
                     for event in device_events {
-                        if event.event_type() == EventType::KEY {
-                            events.push((Key::new(event.code()), event.value()));
-                        }
+                        events.push((slot, event));
                     }
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     // No events available, this is normal for non-blocking
                 }
                 Err(e) => {
                     // Any other error (ENODEV, EIO, ...) means the device is gone or
                     // unusable - drop it rather than retrying forever.
-                    tracing::debug!("Device read error on {:?}: {} - removing", path, e);
-                    error_paths.push(path.clone());
+                    tracing::debug!("Device read error on {:?}: {} - removing", entry.path, e);
+                    error_slots.push(slot);
                 }
             }
         }
 
-        // Remove devices that returned errors
-        for path in error_paths {
-            self.devices.remove(&path);
+        // Empty the slots of devices that returned errors. Slot ids handed out
+        // above stay valid because emptying never renumbers.
+        for slot in error_slots {
+            self.devices[slot] = None;
         }
 
         events
     }
 
+    /// Re-emit one event through the mirror of the device in `slot`.
+    ///
+    /// Re-emission is what keeps a grabbed keyboard usable: with the device
+    /// held exclusively, the compositor only knows the mirror. Devices that are
+    /// not captured have no mirror, so this is a no-op for them.
+    fn mirror_event(&mut self, slot: usize, event: &InputEvent) {
+        // Synchronization events are structural: `emit` terminates every batch
+        // with its own SYN_REPORT, and SYN_DROPPED describes our read buffer,
+        // not the application's input.
+        if event.event_type() == EventType::SYNCHRONIZATION {
+            return;
+        }
+
+        let Some(Some(entry)) = self.devices.get_mut(slot) else {
+            return;
+        };
+        let Some(mirror) = entry.mirror.as_mut() else {
+            return;
+        };
+
+        if let Err(e) = mirror.emit(std::slice::from_ref(event)) {
+            tracing::debug!("Mirror write failed on {:?}: {}", entry.path, e);
+        }
+    }
+
     /// Check if we have any devices
     fn has_devices(&self) -> bool {
-        !self.devices.is_empty()
+        self.devices.iter().any(|entry| entry.is_some())
+    }
+
+    /// Number of open keyboards
+    fn device_count(&self) -> usize {
+        self.devices.iter().flatten().count()
+    }
+
+    /// Number of keyboards captured exclusively
+    fn captured_count(&self) -> usize {
+        self.devices
+            .iter()
+            .flatten()
+            .filter(|slot| slot.mirror.is_some())
+            .count()
+    }
+
+    /// The /dev/input node of the mirror in `slot`, for tests that assert on
+    /// what an application would have received.
+    #[cfg(test)]
+    fn mirror_node(&mut self, slot: usize) -> Option<PathBuf> {
+        let entry = self.devices.get_mut(slot)?.as_mut()?;
+        let mirror = entry.mirror.as_mut()?;
+        let mut nodes = mirror.enumerate_dev_nodes_blocking().ok()?;
+        nodes.next()?.ok()
+    }
+}
+
+/// Empty the slot holding `path`, if any
+fn clear_slot(devices: &mut [Option<DeviceSlot>], path: &PathBuf) -> bool {
+    let mut cleared = false;
+    for entry in devices.iter_mut() {
+        if matches!(entry.as_ref(), Some(slot) if &slot.path == path) {
+            *entry = None;
+            cleared = true;
+        }
+    }
+    cleared
+}
+
+/// Put an open evdev fd in non-blocking mode
+fn set_nonblocking(fd: RawFd) {
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags != -1 {
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+}
+
+/// Take a keyboard exclusively and build the virtual keyboard that carries its
+/// events back to the compositor.
+///
+/// Returns `None`, leaving the device ungrabbed, when the mirror cannot be
+/// built or the grab fails. Both failures are survivable: the hotkey still
+/// works, the chord just also reaches the application. A grab without a working
+/// mirror is not survivable, which is why the mirror is built first.
+fn start_capture(device: &mut Device, path: &PathBuf) -> Option<VirtualDevice> {
+    let mirror = (|| -> std::io::Result<VirtualDevice> {
+        let keys = device.supported_keys().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "device reports no key capabilities",
+            )
+        })?;
+        VirtualDevice::builder()?
+            .name(MIRROR_DEVICE_NAME)
+            .with_keys(keys)?
+            .build()
+    })();
+
+    match mirror {
+        Ok(mirror) => match device.grab() {
+            Ok(()) => {
+                tracing::info!(
+                    "Capturing {:?} exclusively; its events are re-emitted through '{}'",
+                    path,
+                    MIRROR_DEVICE_NAME
+                );
+                Some(mirror)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "hotkey.grab: cannot grab {:?} ({}). Another program may hold it. \
+                     The hotkey chord will also reach applications on this keyboard.",
+                    path,
+                    e
+                );
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                "hotkey.grab: cannot create the mirror device for {:?} ({}). Is \
+                 /dev/uinput available, and is this user in the 'input' group? \
+                 The hotkey chord will also reach applications on this keyboard.",
+                path,
+                e
+            );
+            None
+        }
     }
 }
 
@@ -428,6 +649,7 @@ fn reset_for_device_change(
     model_modifier_held: &mut bool,
     held_profile_modifiers: &mut HashSet<Key>,
     last_pressed_profile: &mut Option<String>,
+    chord_withheld: &mut bool,
 ) -> Option<HotkeyEvent> {
     let was_pressed = *is_pressed;
 
@@ -436,23 +658,110 @@ fn reset_for_device_change(
     held_profile_modifiers.clear();
     *last_pressed_profile = None;
     *is_pressed = false;
+    // A withheld press leaves with the keyboard that carried it: its mirror is
+    // gone, and the next press decides for itself.
+    *chord_withheld = false;
 
     was_pressed.then_some(HotkeyEvent::Released)
 }
 
+/// Hotkey state transition for a target-key event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HotkeyTransition {
+    /// The hotkey key was pressed with the required modifiers held.
+    Pressed,
+    /// The hotkey key was released while the hotkey was engaged.
+    Released,
+}
+
+/// Classify a target-key event as a hotkey press, release, or neither.
+///
+/// Presses engage only when the required modifiers are currently held.
+/// Releases always disengage an engaged hotkey — even when a modifier was
+/// already released. Lifting a chord (e.g. Meta+V) commonly delivers the
+/// modifier's release event before the hotkey key's; gating the release on
+/// the modifier state would leave the recording stuck until the next
+/// engaged press or the recording-length cap.
+fn hotkey_event(
+    value: i32,
+    is_pressed: bool,
+    modifiers_satisfied: bool,
+) -> Option<HotkeyTransition> {
+    match value {
+        1 if !is_pressed && modifiers_satisfied => Some(HotkeyTransition::Pressed),
+        0 if is_pressed => Some(HotkeyTransition::Released),
+        _ => None,
+    }
+}
+
+/// Whether a target-key event must be withheld from the capture mirror.
+///
+/// This is what `[hotkey] grab` is for: without it a chord like Meta+V reaches
+/// the listener *and* the focused application, where Chromium and other clients
+/// insert "v".
+///
+/// A press is withheld only when the chord is complete. Auto-repeats and
+/// releases follow the press they belong to, so a plain "v" typed into an
+/// application still arrives, and a withheld press never leaves a stray key-up
+/// behind.
+fn suppress_target_event(value: i32, withheld: bool, modifiers_satisfied: bool) -> bool {
+    match value {
+        1 => modifiers_satisfied,
+        _ => withheld,
+    }
+}
+
 /// Main listener loop running in a blocking task
-#[allow(clippy::too_many_arguments)]
 fn evdev_listener_loop(
-    target_key: Key,
-    modifier_keys: HashSet<Key>,
-    cancel_key: Option<Key>,
-    model_modifier: Option<Key>,
+    grab: bool,
+    keys: HotkeyKeys,
     secondary_model: Option<String>,
-    profile_modifiers: HashMap<Key, String>,
+    tx: mpsc::Sender<HotkeyEvent>,
+    stop_rx: oneshot::Receiver<()>,
+) -> Result<(), HotkeyError> {
+    let manager = DeviceManager::new(grab)?;
+    if grab {
+        report_capture(&manager);
+    }
+    run_listener(manager, keys, secondary_model, tx, stop_rx)
+}
+
+/// Report what capture actually achieved, which is not always what was asked
+/// for: /dev/uinput may be missing, or another program may already hold a
+/// keyboard.
+fn report_capture(manager: &DeviceManager) {
+    let captured = manager.captured_count();
+    if captured == 0 {
+        tracing::warn!(
+            "hotkey.grab: no keyboard could be captured ({} open). The hotkey chord \
+             will also reach applications.",
+            manager.device_count()
+        );
+    } else {
+        tracing::info!(
+            "Exclusive capture active: {} of {} keyboard(s) grabbed; the hotkey chord \
+             is withheld from applications",
+            captured,
+            manager.device_count()
+        );
+    }
+}
+
+/// Watch `manager` for hotkey events until `stop_rx` fires.
+fn run_listener(
+    mut manager: DeviceManager,
+    keys: HotkeyKeys,
+    secondary_model: Option<String>,
     tx: mpsc::Sender<HotkeyEvent>,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<(), HotkeyError> {
-    let mut manager = DeviceManager::new()?;
+    let HotkeyKeys {
+        target: target_key,
+        modifiers: modifier_keys,
+        cancel: cancel_key,
+        model_modifier,
+        profile_modifiers,
+    } = keys;
 
     // Track currently held modifier keys
     let mut active_modifiers: HashSet<Key> = HashSet::new();
@@ -467,25 +776,30 @@ fn evdev_listener_loop(
     // Track if we're currently "pressed" (to handle repeat events)
     let mut is_pressed = false;
 
+    // Track whether the hotkey key's own press was withheld from the mirror, so
+    // its auto-repeat and release are withheld with it: an application that
+    // never saw the key go down must not see it come up either.
+    let mut chord_withheld = false;
+
     if let Some(cancel) = cancel_key {
         tracing::info!(
             "Listening for {:?} (with modifiers: {:?}) and cancel key {:?} on {} device(s)",
             target_key,
             modifier_keys,
             cancel,
-            manager.devices.len()
+            manager.device_count()
         );
     } else {
         tracing::info!(
             "Listening for {:?} (with modifiers: {:?}) on {} device(s)",
             target_key,
             modifier_keys,
-            manager.devices.len()
+            manager.device_count()
         );
     }
 
     if let Some(mm) = model_modifier {
-        if let Some(ref model) = secondary_model {
+        if let Some(model) = &secondary_model {
             tracing::info!(
                 "Model modifier {:?} configured for secondary model '{}'",
                 mm,
@@ -512,6 +826,7 @@ fn evdev_listener_loop(
                 &mut model_modifier_held,
                 &mut held_profile_modifiers,
                 &mut last_pressed_profile,
+                &mut chord_withheld,
             ) {
                 tracing::warn!(
                     "Input devices changed while the hotkey was held; releasing \
@@ -533,6 +848,7 @@ fn evdev_listener_loop(
                 held_profile_modifiers.clear();
                 last_pressed_profile = None;
                 is_pressed = false;
+                chord_withheld = false;
                 tracing::debug!("Stale devices removed during validation");
             }
             manager.last_validation = Instant::now();
@@ -548,8 +864,20 @@ fn evdev_listener_loop(
             continue;
         }
 
-        // Poll all devices for events
-        for (key, value) in manager.poll_events() {
+        // Poll all devices for events. When capture is on this batch is the
+        // only copy the compositor will see: every event is re-emitted through
+        // the device's mirror, except the hotkey chord.
+        for (slot, event) in manager.poll_events() {
+            // Non-key events (reports, scancodes, switch state) carry no hotkey
+            // meaning, but the mirror still needs them.
+            if event.event_type() != EventType::KEY {
+                manager.mirror_event(slot, &event);
+                continue;
+            }
+
+            let key = Key::new(event.code());
+            let value = event.value();
+
             // Track modifier state
             if modifier_keys.contains(&key) {
                 match value {
@@ -596,6 +924,9 @@ fn evdev_listener_loop(
                 if key == cancel && value == 1 {
                     // Cancel key pressed (ignore repeats and releases)
                     tracing::debug!("Cancel key pressed");
+                    // Not part of the hotkey chord, so it is not withheld: ESC
+                    // stays ESC for the application.
+                    manager.mirror_event(slot, &event);
                     if tx.blocking_send(HotkeyEvent::Cancel).is_err() {
                         return Ok(()); // Channel closed
                     }
@@ -603,62 +934,72 @@ fn evdev_listener_loop(
                 }
             }
 
+            // Everything past here is withheld from the mirror only when it is
+            // the hotkey chord itself.
+            let mut withheld = false;
+
             // Check target key
             if key == target_key {
                 let modifiers_satisfied =
                     modifier_keys.iter().all(|m| active_modifiers.contains(m));
 
-                if modifiers_satisfied {
-                    match value {
-                        1 if !is_pressed => {
-                            // Key press (not repeat)
-                            is_pressed = true;
+                match hotkey_event(value, is_pressed, modifiers_satisfied) {
+                    Some(HotkeyTransition::Pressed) => {
+                        // Key press (not repeat)
+                        is_pressed = true;
 
-                            // Determine model override based on model_modifier state
-                            let model_override = if model_modifier_held {
-                                secondary_model.clone()
-                            } else {
-                                None
-                            };
+                        // Determine model override based on model_modifier state
+                        let model_override = if model_modifier_held {
+                            secondary_model.clone()
+                        } else {
+                            None
+                        };
 
-                            // Determine profile override from held profile modifier keys
-                            // If multiple are held, the most recently pressed wins
-                            let profile_override = last_pressed_profile.clone();
+                        // Determine profile override from held profile modifier keys
+                        // If multiple are held, the most recently pressed wins
+                        let profile_override = last_pressed_profile.clone();
 
-                            if model_override.is_some() || profile_override.is_some() {
-                                tracing::debug!(
-                                    "Hotkey pressed with model_override: {:?}, profile_override: {:?}",
-                                    model_override,
-                                    profile_override
-                                );
-                            } else {
-                                tracing::debug!("Hotkey pressed");
-                            }
-
-                            if tx
-                                .blocking_send(HotkeyEvent::Pressed {
-                                    model_override,
-                                    profile_override,
-                                })
-                                .is_err()
-                            {
-                                return Ok(()); // Channel closed
-                            }
+                        if model_override.is_some() || profile_override.is_some() {
+                            tracing::debug!(
+                                "Hotkey pressed with model_override: {:?}, profile_override: {:?}",
+                                model_override,
+                                profile_override
+                            );
+                        } else {
+                            tracing::debug!("Hotkey pressed");
                         }
-                        0 if is_pressed => {
-                            // Key release
-                            is_pressed = false;
-                            tracing::debug!("Hotkey released");
-                            if tx.blocking_send(HotkeyEvent::Released).is_err() {
-                                return Ok(()); // Channel closed
-                            }
+
+                        if tx
+                            .blocking_send(HotkeyEvent::Pressed {
+                                model_override,
+                                profile_override,
+                            })
+                            .is_err()
+                        {
+                            return Ok(()); // Channel closed
                         }
-                        2 => {
-                            // Key repeat - ignore
-                        }
-                        _ => {}
                     }
+                    Some(HotkeyTransition::Released) => {
+                        // Key release — honored regardless of the current
+                        // modifier state (see `hotkey_event`).
+                        is_pressed = false;
+                        tracing::debug!("Hotkey released");
+                        if tx.blocking_send(HotkeyEvent::Released).is_err() {
+                            return Ok(()); // Channel closed
+                        }
+                    }
+                    None => {}
                 }
+
+                // The chord is the one event class the application must not
+                // see. Decided after the state machine so the withholding
+                // carries into the repeats and the release that follow.
+                withheld = suppress_target_event(value, chord_withheld, modifiers_satisfied);
+                chord_withheld = withheld;
+            }
+
+            if !withheld {
+                manager.mirror_event(slot, &event);
             }
         }
 
@@ -845,13 +1186,18 @@ fn parse_prefixed_keycode(s: &str) -> Result<Option<Key>, HotkeyError> {
 }
 
 /// Returns true if a device name belongs to a text-injection virtual keyboard
-/// (dotool, ydotool, wtype, xdotool). voxtype types its transcription out through
-/// one of these; grabbing it back is pointless and, when the tool tears down its
-/// short-lived uinput device, leaves a stale fd that spins fetch_events() at 100%
-/// CPU. See issue #445.
+/// (dotool, ydotool, wtype, xdotool) or to voxtype's own capture mirror.
+///
+/// voxtype types its transcription out through one of these; grabbing it back is
+/// pointless and, when the tool tears down its short-lived uinput device, leaves
+/// a stale fd that spins fetch_events() at 100% CPU. See issue #445.
+///
+/// The mirror is the same kind of trap: opening it back up would feed every
+/// keystroke through the listener a second time, and grabbing it would leave
+/// the compositor with no keyboard at all.
 fn is_injection_keyboard(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    n.contains("dotool") || n.contains("wtype") || n.contains("xdotool")
+    n.contains("dotool") || n.contains("wtype") || n.contains("xdotool") || n.contains("voxtype")
 }
 
 /// Return true if `fd` is hung up, errored, or invalid according to poll().
@@ -875,6 +1221,255 @@ fn fd_is_hung_up(fd: RawFd) -> bool {
 mod tests {
     use super::*;
 
+    /// Wait for a virtual device's /dev/input node to appear.
+    fn wait_for_node(vdev: &mut VirtualDevice) -> Option<PathBuf> {
+        for _ in 0..50 {
+            if let Ok(mut nodes) = vdev.enumerate_dev_nodes_blocking() {
+                if let Some(Ok(path)) = nodes.next() {
+                    return Some(path);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        None
+    }
+
+    /// Wait for the capture mirror the manager built for `slot` to appear.
+    fn wait_for_mirror(manager: &mut DeviceManager, slot: usize) -> Option<PathBuf> {
+        for _ in 0..50 {
+            if let Some(path) = manager.mirror_node(slot) {
+                return Some(path);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        None
+    }
+
+    /// Open a device node, waiting for udev to grant access.
+    fn open_readable(path: &PathBuf) -> Option<Device> {
+        for _ in 0..50 {
+            match Device::open(path) {
+                Ok(device) => return Some(device),
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => {
+                    eprintln!("cannot open {}: {}", path.display(), e);
+                    return None;
+                }
+            }
+        }
+        None
+    }
+
+    /// Key events a device produced, in order, until `want` arrive or `budget`
+    /// runs out. Filters out the SYN reports `emit` adds.
+    fn key_events(device: &mut Device, want: usize, budget: Duration) -> Vec<(Key, i32)> {
+        let mut seen = Vec::new();
+        let deadline = Instant::now() + budget;
+
+        while seen.len() < want && Instant::now() < deadline {
+            match device.fetch_events() {
+                Ok(batch) => seen.extend(
+                    batch
+                        .filter(|event| event.event_type() == EventType::KEY)
+                        .map(|event| (Key::new(event.code()), event.value())),
+                ),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => break,
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        seen
+    }
+
+    /// Hotkey events the listener emitted, until `want` arrive or time runs out.
+    fn listener_events(rx: &mut mpsc::Receiver<HotkeyEvent>, want: usize) -> Vec<HotkeyEvent> {
+        let mut seen = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        while seen.len() < want && Instant::now() < deadline {
+            while let Ok(event) = rx.try_recv() {
+                seen.push(event);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        seen
+    }
+
+    #[test]
+    fn test_suppress_target_event_withholds_only_the_chord() {
+        // Chord complete: the press, its auto-repeat and its release are all
+        // withheld, so the application never receives a stray key-up.
+        assert!(suppress_target_event(1, false, true));
+        assert!(suppress_target_event(2, true, true));
+        assert!(suppress_target_event(0, true, true));
+
+        // The same key on its own is ordinary text, before and after a chord.
+        assert!(!suppress_target_event(1, false, false));
+        assert!(!suppress_target_event(2, false, false));
+        assert!(!suppress_target_event(0, false, false));
+
+        // A release still belongs to the press that was withheld even when the
+        // modifier came up first (lifting a chord).
+        assert!(suppress_target_event(0, true, false));
+
+        // A fresh press after a withheld one is judged on its own modifiers.
+        assert!(!suppress_target_event(1, true, false));
+    }
+
+    /// Meta+V, the shape reported against Chromium ("v" typed into the page).
+    /// A fake keyboard carries the chord through the real listener, so the
+    /// grab, the mirror and the withholding are exercised at kernel level.
+    #[test]
+    fn exclusive_capture_withholds_the_chord_and_mirrors_the_rest() {
+        use evdev::AttributeSet;
+        use std::thread::sleep;
+
+        // A fake "physical" keyboard. Its name must not look like an injection
+        // device: try_open_device() skips those, voxtype's own mirror included.
+        // The kernel drops events for keys a device does not declare, so the
+        // chord's modifier has to be in the set.
+        let mut keys = AttributeSet::<Key>::new();
+        for code in 1..59 {
+            keys.insert(Key::new(code));
+        }
+        keys.insert(Key::KEY_LEFTMETA);
+        let Ok(builder) = VirtualDevice::builder() else {
+            eprintln!("skipping: uinput unavailable");
+            return;
+        };
+        let Ok(builder) = builder.name("capture-test-source").with_keys(&keys) else {
+            eprintln!("skipping: with_keys failed");
+            return;
+        };
+        let Ok(mut source) = builder.build() else {
+            eprintln!("skipping: uinput build failed");
+            return;
+        };
+
+        let Some(source_node) = wait_for_node(&mut source) else {
+            eprintln!("skipping: no event node for the source keyboard");
+            return;
+        };
+        // udev relabels the node to group `input` shortly after the kernel
+        // creates it; try_open_device() does not retry, so wait it out here.
+        if open_readable(&source_node).is_none() {
+            eprintln!("skipping: {source_node:?} never became readable");
+            return;
+        }
+
+        // Open it the way the daemon does with capture on: this grabs the fake
+        // keyboard exclusively and builds the mirror for it.
+        let mut manager = DeviceManager::detached(true);
+        manager.try_open_device(source_node.clone());
+        assert_eq!(manager.device_count(), 1, "the keyboard was not opened");
+        assert_eq!(manager.captured_count(), 1, "the keyboard was not captured");
+
+        let mirror_node = wait_for_mirror(&mut manager, 0);
+        let Some(mirror_node) = mirror_node else {
+            eprintln!("skipping: the mirror keyboard never appeared");
+            return;
+        };
+        let Some(mut mirrored) = open_readable(&mirror_node) else {
+            eprintln!("skipping: cannot read the mirror keyboard");
+            return;
+        };
+        // Non-blocking, like the fds the daemon holds: a read that finds no
+        // events has to report that instead of waiting for the next one.
+        set_nonblocking(mirrored.as_raw_fd());
+        // Capturing takes the real device away from every other reader, this
+        // one included: that is what keeps the compositor from seeing the chord.
+        let Some(mut bypass) = open_readable(&source_node) else {
+            eprintln!("skipping: cannot open the source keyboard");
+            return;
+        };
+        set_nonblocking(bypass.as_raw_fd());
+
+        let (tx, mut rx) = mpsc::channel(32);
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let listener = std::thread::spawn(move || {
+            run_listener(
+                manager,
+                HotkeyKeys {
+                    target: Key::KEY_V,
+                    modifiers: [Key::KEY_LEFTMETA].into_iter().collect(),
+                    cancel: None,
+                    model_modifier: None,
+                    profile_modifiers: HashMap::new(),
+                },
+                None,
+                tx,
+                stop_rx,
+            )
+        });
+
+        let key_event = |key: Key, value| InputEvent::new(EventType::KEY.0, key.code(), value);
+        // Meta held, V pressed, held (auto-repeat) and released, Meta released.
+        source
+            .emit(&[
+                key_event(Key::KEY_LEFTMETA, 1),
+                key_event(Key::KEY_V, 1),
+                key_event(Key::KEY_V, 2),
+                key_event(Key::KEY_V, 0),
+                key_event(Key::KEY_LEFTMETA, 0),
+            ])
+            .unwrap();
+        // Plain v and a letter: ordinary typing, untouched by capture.
+        source
+            .emit(&[
+                key_event(Key::KEY_V, 1),
+                key_event(Key::KEY_V, 0),
+                key_event(Key::KEY_A, 1),
+                key_event(Key::KEY_A, 0),
+            ])
+            .unwrap();
+
+        let chord: Vec<_> = listener_events(&mut rx, 2);
+        assert_eq!(
+            chord,
+            vec![
+                HotkeyEvent::Pressed {
+                    model_override: None,
+                    profile_override: None,
+                },
+                HotkeyEvent::Released,
+            ],
+            "the listener must still see the chord it is withholding"
+        );
+
+        // What an application would receive: the modifier and its release, no
+        // trace of the withheld chord, then the same keys typed normally.
+        let seen = key_events(&mut mirrored, 6, Duration::from_secs(5));
+        assert_eq!(
+            seen,
+            vec![
+                (Key::KEY_LEFTMETA, 1),
+                (Key::KEY_LEFTMETA, 0),
+                (Key::KEY_V, 1),
+                (Key::KEY_V, 0),
+                (Key::KEY_A, 1),
+                (Key::KEY_A, 0),
+            ],
+            "the chord leaked into the mirror, or unmuted keys went missing"
+        );
+
+        sleep(Duration::from_millis(50));
+        let leaked = key_events(&mut bypass, 1, Duration::from_millis(200));
+        assert!(
+            leaked.is_empty(),
+            "capture did not hold the keyboard exclusively: {leaked:?}"
+        );
+
+        drop(stop_tx);
+        listener
+            .join()
+            .expect("listener thread panicked")
+            .expect("listener returned an error");
+    }
+
     /// #556: a device change while the hotkey is held must synthesize a
     /// release. Without it the real key-up is dropped by the `0 if is_pressed`
     /// guard and the recording runs to max_duration_secs — the reporter
@@ -886,6 +1481,7 @@ mod tests {
         let mut model_held = true;
         let mut profile_mods: HashSet<Key> = HashSet::from([Key::KEY_LEFTSHIFT]);
         let mut last_profile = Some("slack".to_string());
+        let mut chord_withheld = true;
 
         let event = reset_for_device_change(
             &mut is_pressed,
@@ -893,6 +1489,7 @@ mod tests {
             &mut model_held,
             &mut profile_mods,
             &mut last_profile,
+            &mut chord_withheld,
         );
 
         assert!(
@@ -905,6 +1502,7 @@ mod tests {
         assert!(!model_held);
         assert!(profile_mods.is_empty());
         assert!(last_profile.is_none());
+        assert!(!chord_withheld);
     }
 
     /// The common case: devices change while nothing is held. Emitting a
@@ -916,6 +1514,7 @@ mod tests {
         let mut model_held = false;
         let mut profile_mods: HashSet<Key> = HashSet::new();
         let mut last_profile: Option<String> = None;
+        let mut chord_withheld = false;
 
         let event = reset_for_device_change(
             &mut is_pressed,
@@ -923,6 +1522,7 @@ mod tests {
             &mut model_held,
             &mut profile_mods,
             &mut last_profile,
+            &mut chord_withheld,
         );
 
         assert!(
@@ -942,6 +1542,8 @@ mod tests {
         assert!(is_injection_keyboard("xdotool"));
         // case-insensitive
         assert!(is_injection_keyboard("YDOTOOL Virtual Device"));
+        // voxtype's own capture mirror, and anything else it creates
+        assert!(is_injection_keyboard(MIRROR_DEVICE_NAME));
     }
 
     #[test]
@@ -973,9 +1575,7 @@ mod tests {
 
     #[test]
     fn poll_guard_drops_real_torn_down_evdev_device() {
-        use evdev::{uinput::VirtualDevice, AttributeSet};
-        use std::thread::sleep;
-        use std::time::Duration;
+        use evdev::AttributeSet;
 
         // Build a NON-keyboard virtual device (one media key, no A/Z/Enter) so a
         // real voxtype instance's keyboard filter ignores it and is unaffected by
@@ -1006,41 +1606,17 @@ mod tests {
             }
         };
 
-        // Resolve the /dev/input/eventN node the kernel created for it.
-        let node = match vdev.enumerate_dev_nodes_blocking() {
-            Ok(mut it) => match it.next() {
-                Some(Ok(p)) => p,
-                _ => {
-                    eprintln!("skipping: no dev node for virtual device");
-                    return;
-                }
-            },
-            Err(e) => {
-                eprintln!("skipping: enumerate_dev_nodes failed ({e})");
+        let node = match wait_for_node(&mut vdev) {
+            Some(node) => node,
+            None => {
+                eprintln!("skipping: no dev node for virtual device");
                 return;
             }
         };
-
         // The kernel creates the event node before udev relabels it to group
-        // `input`; retry briefly to beat that race before giving up.
-        let mut opened = None;
-        for _ in 0..50 {
-            match Device::open(&node) {
-                Ok(d) => {
-                    opened = Some(d);
-                    break;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                    sleep(Duration::from_millis(20));
-                }
-                Err(e) => {
-                    eprintln!("skipping: cannot open {node:?} ({e})");
-                    return;
-                }
-            }
-        }
-        let dev = match opened {
-            Some(d) => d,
+        // `input`; open_readable waits out that race.
+        let dev = match open_readable(&node) {
+            Some(dev) => dev,
             None => {
                 eprintln!("skipping: {node:?} never became readable (udev perms)");
                 return;
@@ -1064,7 +1640,7 @@ mod tests {
                 flagged = true;
                 break;
             }
-            sleep(Duration::from_millis(20));
+            std::thread::sleep(Duration::from_millis(20));
         }
         assert!(
             flagged,
@@ -1074,9 +1650,7 @@ mod tests {
 
     #[test]
     fn synced_fetch_recovers_multiple_held_keys_after_overflow() {
-        use evdev::{uinput::VirtualDevice, AttributeSet, InputEvent};
-        use std::thread::sleep;
-        use std::time::Duration;
+        use evdev::AttributeSet;
 
         // evdev 0.12 loses the absolute key-code offset while compensating after
         // SYN_DROPPED. Multiple held keys can then make fetch_events() loop forever.
@@ -1110,37 +1684,15 @@ mod tests {
             }
         };
 
-        let node = match output.enumerate_dev_nodes_blocking() {
-            Ok(mut nodes) => match nodes.next() {
-                Some(Ok(path)) => path,
-                _ => {
-                    eprintln!("skipping: no event node for virtual device");
-                    return;
-                }
-            },
-            Err(e) => {
-                eprintln!("skipping: enumerate_dev_nodes failed ({e})");
+        let node = match wait_for_node(&mut output) {
+            Some(node) => node,
+            None => {
+                eprintln!("skipping: no event node for virtual device");
                 return;
             }
         };
 
-        let mut input = None;
-        for _ in 0..50 {
-            match Device::open(&node) {
-                Ok(device) => {
-                    input = Some(device);
-                    break;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                    sleep(Duration::from_millis(20));
-                }
-                Err(e) => {
-                    eprintln!("skipping: cannot open {node:?} ({e})");
-                    return;
-                }
-            }
-        }
-        let Some(mut input) = input else {
+        let Some(mut input) = open_readable(&node) else {
             eprintln!("skipping: {node:?} never became readable");
             return;
         };
@@ -1169,6 +1721,47 @@ mod tests {
                 "missing recovered press for {key:?}: {recovered:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_hotkey_event_press_requires_modifiers() {
+        assert_eq!(
+            hotkey_event(1, false, true),
+            Some(HotkeyTransition::Pressed)
+        );
+        // Pressing the hotkey key without the required modifiers does nothing.
+        assert_eq!(hotkey_event(1, false, false), None);
+        // A press while already engaged (repeat key-down) does nothing.
+        assert_eq!(hotkey_event(1, true, true), None);
+    }
+
+    #[test]
+    fn test_hotkey_event_repeat_ignored() {
+        assert_eq!(hotkey_event(2, false, true), None);
+        assert_eq!(hotkey_event(2, true, true), None);
+    }
+
+    #[test]
+    fn test_hotkey_event_release_does_not_require_modifiers() {
+        // Normal chord release: modifiers still held.
+        assert_eq!(
+            hotkey_event(0, true, true),
+            Some(HotkeyTransition::Released)
+        );
+        // The fix: release is honored even when the modifier was released
+        // first (common when lifting a chord). Previously this event was
+        // dropped, leaving `is_pressed` true and the recording stuck.
+        assert_eq!(
+            hotkey_event(0, true, false),
+            Some(HotkeyTransition::Released)
+        );
+    }
+
+    #[test]
+    fn test_hotkey_event_stray_release_ignored() {
+        // A release with no engaged hotkey does nothing.
+        assert_eq!(hotkey_event(0, false, true), None);
+        assert_eq!(hotkey_event(0, false, false), None);
     }
 
     #[test]

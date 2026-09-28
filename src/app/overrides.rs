@@ -90,6 +90,9 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if cli.no_hotkey {
         config.hotkey.enabled = false;
     }
+    if cli.hotkey_grab {
+        config.hotkey.grab = true;
+    }
     if let Some(ref cancel_key) = cli.cancel_key {
         config.hotkey.cancel_key = Some(cancel_key.clone());
     }

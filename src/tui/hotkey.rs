@@ -23,6 +23,7 @@ pub struct HotkeyState {
     pub key: String,
     pub mode: Mode,
     pub enabled: bool,
+    pub grab: bool,
     pub cancel_key: Option<String>,
     pub modifier: Option<String>,
     /// Status banner shown after Save / Reset, cleared on the next edit.
@@ -63,6 +64,7 @@ pub enum Field {
     Mode,
     CancelKey,
     Modifier,
+    Grab,
 }
 
 impl Field {
@@ -72,6 +74,7 @@ impl Field {
         Field::Mode,
         Field::CancelKey,
         Field::Modifier,
+        Field::Grab,
     ];
 }
 
@@ -123,6 +126,7 @@ impl HotkeyState {
                 _ => Mode::PushToTalk,
             },
             enabled: ed.get_bool("hotkey", "enabled").unwrap_or(true),
+            grab: ed.get_bool("hotkey", "grab").unwrap_or(false),
             cancel_key: ed.get_string("hotkey", "cancel_key"),
             modifier: ed.get_string("hotkey", "model_modifier"),
             feedback: None,
@@ -153,6 +157,7 @@ impl HotkeyState {
             },
         );
         ed.set_bool("hotkey", "enabled", self.enabled);
+        ed.set_bool("hotkey", "grab", self.grab);
         match &self.cancel_key {
             Some(k) => ed.set_string("hotkey", "cancel_key", k),
             None => ed.unset("hotkey", "cancel_key"),
@@ -287,6 +292,9 @@ impl HotkeyState {
             Field::Enabled => {
                 self.enabled = !self.enabled;
             }
+            Field::Grab => {
+                self.grab = !self.grab;
+            }
         }
         self.dirty_since_load = true;
         self.feedback = None;
@@ -385,6 +393,16 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             },
         )
         .dimmed(greyout),
+        FormRowSpec::new(
+            state.field == Field::Grab,
+            "Exclusive keyboard capture",
+            if state.grab {
+                "on (chord withheld)"
+            } else {
+                "off"
+            },
+        )
+        .dimmed(greyout),
     ];
 
     let feedback_pair = state
@@ -420,6 +438,7 @@ fn guidance_for_field(state: &HotkeyState) -> Vec<Line<'_>> {
         Field::Mode => guidance_mode(state),
         Field::CancelKey => guidance_cancel(state),
         Field::Modifier => guidance_modifier(state),
+        Field::Grab => guidance_grab(state),
     }
 }
 
@@ -653,6 +672,38 @@ fn guidance_modifier<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
         Line::from(Span::styled(
             "(none) disables the modifier behavior; the PTT key always uses \
              the primary model.",
+            Style::default().fg(Color::Gray),
+        )),
+    ];
+    if !state.enabled {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "(Ignored: evdev listener is disabled.)",
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    lines
+}
+
+fn guidance_grab<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
+    let mut lines = vec![
+        heading("Exclusive keyboard capture"),
+        Line::from(""),
+        Line::from(
+            "Takes every keyboard device exclusively and re-emits its events \
+             through a virtual keyboard held by voxtype, so the push-to-talk \
+             chord is delivered to voxtype only.",
+        ),
+        Line::from(""),
+        Line::from(
+            "Turn this on when the chord also reaches applications: with the \
+             capture off, Chromium inserts \"v\" when you press Meta+V.",
+        ),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Requires write access to /dev/uinput — the same 'input' group \
+             membership dotool and ydotool need. Keys other than the chord \
+             (cancel key, modifier keys) are still delivered normally.",
             Style::default().fg(Color::Gray),
         )),
     ];

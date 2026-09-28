@@ -38,6 +38,14 @@ modifiers = []
 # Example: model_modifier = "LEFTSHIFT"  # Shift+hotkey uses secondary model
 # model_modifier = "LEFTSHIFT"
 
+# Exclusive keyboard capture. Take each keyboard device exclusively and re-emit
+# its events through a virtual keyboard, withholding the hotkey chord itself.
+# Without it a chord like Meta+V also reaches the focused application, where
+# Chromium and other clients insert "v". Requires /dev/uinput access (same
+# 'input' group membership as dotool/ydotool). While it is on, every keystroke
+# passes through voxtype on its way to the compositor.
+# grab = false
+
 [audio]
 # Audio input device ("default" uses system default)
 # List devices with: voxtype info devices
