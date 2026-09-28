@@ -1,5 +1,7 @@
 # Voxtype
 
+**[English](README.md)** | **[简体中文](README.zh-CN.md)**
+
 [![Voxtype - Voice to Text for Linux](website/images/og-preview.png)](https://voxtype.io)
 
 **[voxtype.io](https://voxtype.io)**
@@ -756,6 +758,7 @@ We want to hear from you! Voxtype is a young project and your feedback helps mak
 - [graysky](https://github.com/graysky2) - Flash attention config fix
 - [OldJobobo](https://github.com/OldJobobo) - Quickshell OSD theming, Omarchy theme state path support, configurable media ducking, degenerate Whisper transcript retry; co-owns `quickshell/`
 - [Matthias Breddin](https://github.com/lunetics) - IBus non-ASCII reordering troubleshooting, Rust 1.98 clippy fix, media ducking fade, cubic-scale ducking volume correction
+- [Franklinyung](https://github.com/Franklinyung) - Simplified Chinese README, troubleshooting docs for conda-linked binaries that fail to start audio
 
 ## License
 
