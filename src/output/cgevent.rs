@@ -151,11 +151,18 @@ impl CGEventOutput {
             .map_err(|_| OutputError::InjectionFailed("Failed to create keyboard event".into()))?;
 
         event.set_string_from_utf16_unchecked(&utf16_buf);
+        // Pin empty modifier flags: Fn-range hotkeys (F13-F20, which is what
+        // PrintScreen/ScrollLock/Pause arrive as on macOS) latch the fn flag
+        // in the session input state past key release. Without explicit flags
+        // the event inherits it and apps treat the keystroke as a function
+        // chord instead of text insertion, silently dropping the output.
+        event.set_flags(CGEventFlags::empty());
         event.post(CGEventTapLocation::HID);
 
         // Key up event
         let event_up = CGEvent::new_keyboard_event(source.clone(), 0, false)
             .map_err(|_| OutputError::InjectionFailed("Failed to create key up event".into()))?;
+        event_up.set_flags(CGEventFlags::empty());
         event_up.post(CGEventTapLocation::HID);
 
         Ok(())
