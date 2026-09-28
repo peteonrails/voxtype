@@ -1,0 +1,6 @@
+/src/
+/pkg/
+/voxtype/
+/*.pkg.tar.*
+/*.src.tar.*
+/*.log
