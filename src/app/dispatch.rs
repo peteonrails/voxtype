@@ -343,6 +343,25 @@ pub(crate) async fn dispatch(
                         setup::parakeet::show_status();
                     }
                 }
+                Some(SetupAction::Benchmark {
+                    audio,
+                    runs,
+                    save_audio,
+                    json,
+                    record_to,
+                }) => {
+                    warn_if_root("benchmark");
+                    setup::benchmark::run(
+                        &config,
+                        config_path.as_deref(),
+                        audio,
+                        runs,
+                        save_audio,
+                        json,
+                        record_to,
+                    )
+                    .await?;
+                }
                 Some(SetupAction::Compositor { compositor_type }) => {
                     warn_if_root("compositor");
                     setup::compositor::run(&compositor_type).await?;

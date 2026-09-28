@@ -18,7 +18,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(banner_height(app)),
-            Constraint::Length(8), // install/daemon info
+            Constraint::Length(9), // install/daemon info
             Constraint::Min(8),    // variant matrix
             Constraint::Length(2), // legend
             Constraint::Length(1), // section help
@@ -122,7 +122,12 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
         .unwrap_or_else(|| "unknown (symlink missing or unrecognized)".to_string());
 
     let rec = &inv.recommendation;
-    let recommended = format!("{}  /  {}", rec.whisper.display(), rec.onnx.display());
+    let recommended = if cfg!(target_os = "macos") {
+        // The variants are Linux release binaries; macOS ships one build.
+        "not applicable on macOS".to_string()
+    } else {
+        format!("{}  /  {}", rec.whisper.display(), rec.onnx.display())
+    };
 
     let lines = vec![
         Line::from(vec![
@@ -142,10 +147,15 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(recommended, Style::default().fg(Color::Cyan)),
             Span::styled("   (Whisper / ONNX)", Style::default().fg(Color::Gray)),
         ]),
-        Line::from(format!(
-            "CPU:           AVX2={}  AVX-512={}",
-            inv.cpu.avx2, inv.cpu.avx512
-        )),
+        measured_line(app),
+        Line::from(if inv.cpu.is_x86_64() {
+            format!(
+                "CPU:           AVX2={}  AVX-512={}",
+                inv.cpu.avx2, inv.cpu.avx512
+            )
+        } else {
+            format!("CPU:           {}", inv.cpu.arch)
+        }),
         Line::from(format!(
             "GPU:           NVIDIA={}  AMD={}",
             inv.gpus.nvidia, inv.gpus.amd
@@ -154,6 +164,38 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
 
     let block = Block::default().borders(Borders::ALL).title("Install");
     f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn measured_line(app: &App) -> Line<'static> {
+    use crate::setup::benchmark;
+    let label = Span::raw("Measured:      ");
+    let gray = Style::default().fg(Color::Gray);
+    let cyan = Style::default().fg(Color::Cyan);
+    let Some(report) = &app.measured else {
+        return Line::from(vec![
+            label,
+            Span::styled("not yet, press b to benchmark this machine", gray),
+        ]);
+    };
+    match benchmark::summary(report, benchmark::now_secs()) {
+        Some(summary) if app.measured_stale => Line::from(vec![
+            label,
+            Span::styled(summary, gray),
+            Span::styled(
+                "   (builds changed, press b to rerun)",
+                Style::default().fg(Color::Yellow),
+            ),
+        ]),
+        Some(summary) => Line::from(vec![
+            label,
+            Span::styled("★ ", cyan),
+            Span::styled(summary, cyan),
+        ]),
+        None => Line::from(vec![
+            label,
+            Span::styled("no usable result, press b to rerun", gray),
+        ]),
+    }
 }
 
 fn render_matrix(f: &mut Frame, area: Rect, app: &App) {
@@ -236,15 +278,24 @@ fn render_cell(app: &App, row: usize, col: usize) -> String {
         None => "·",
     };
 
-    if is_recommended(variant, &app.inventory.recommendation) {
+    if is_recommended(variant, &app.inventory.recommendation, app.measured_pick()) {
         format!("★ {}", glyph)
     } else {
         glyph.to_string()
     }
 }
 
-fn is_recommended(v: Variant, r: &crate::setup::binary::Recommendation) -> bool {
-    v == r.whisper || v == r.onnx
+/// ★ follows the benchmark's pick for its engine family when there is a
+/// current one, and the hardware recommendation otherwise.
+fn is_recommended(
+    v: Variant,
+    r: &crate::setup::binary::Recommendation,
+    measured: Option<Variant>,
+) -> bool {
+    match measured {
+        Some(m) if m.family() == v.family() => v == m,
+        _ => v == r.whisper || v == r.onnx,
+    }
 }
 
 fn render_hint(f: &mut Frame, area: Rect, app: &App) {
@@ -294,10 +345,46 @@ fn variant_hint_lines<'a>(variant: Variant, app: &App) -> Vec<Line<'a>> {
     };
 
     let rec = &app.inventory.recommendation;
+    let measured_pick = app.measured_pick();
     let mut lines: Vec<Line> = Vec::new();
+    if let Some(report) = app.measured.as_ref().filter(|_| !app.measured_stale) {
+        if let Some(result) = report.result(variant) {
+            if measured_pick == Some(variant) {
+                lines.push(Line::from(Span::styled(
+                    "★ Fastest accurate build measured on this machine",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )));
+            }
+            let detail = if let Some(why) = &result.stopped {
+                format!("Measured: {}", why)
+            } else if let Some(err) = &result.error {
+                format!("Measured: failed ({})", err)
+            } else {
+                let secs = result
+                    .median_secs
+                    .map_or("n/a".to_string(), |s| format!("{:.2}s", s));
+                let wer = result.word_error_rate.map_or(String::new(), |w| {
+                    format!(", {:.0}% word errors", w * 100.0)
+                });
+                format!("Measured: {} transcription{}", secs, wer)
+            };
+            lines.push(Line::from(Span::styled(
+                detail,
+                Style::default().fg(Color::Cyan),
+            )));
+            lines.push(Line::from(""));
+        }
+    }
+    let overridden = |family: EngineFamily| measured_pick.is_some_and(|m| m.family() == family);
     if variant == rec.whisper {
         lines.push(Line::from(Span::styled(
-            "★ Recommended for Whisper on this hardware",
+            if overridden(EngineFamily::Whisper) {
+                "Hardware guess for Whisper (the benchmark result above takes precedence)"
+            } else {
+                "★ Recommended for Whisper on this hardware"
+            },
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -310,7 +397,11 @@ fn variant_hint_lines<'a>(variant: Variant, app: &App) -> Vec<Line<'a>> {
     }
     if variant == rec.onnx {
         lines.push(Line::from(Span::styled(
-            "★ Recommended for ONNX engines on this hardware",
+            if overridden(EngineFamily::Onnx) {
+                "Hardware guess for ONNX engines (the benchmark result takes precedence)"
+            } else {
+                "★ Recommended for ONNX engines on this hardware"
+            },
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -644,7 +735,10 @@ fn variant_hint(v: Variant) -> VariantHint {
 
 fn render_legend(f: &mut Frame, area: Rect) {
     let line = Line::from(vec![
-        Span::styled("★ recommended   ", Style::default().fg(Color::Cyan)),
+        Span::styled(
+            "★ recommended (measured if benchmarked)   ",
+            Style::default().fg(Color::Cyan),
+        ),
         Span::raw("● active   "),
         Span::raw("✓ ready   "),
         Span::raw("⚠ CPU/GPU mismatch   "),
@@ -656,7 +750,7 @@ fn render_legend(f: &mut Frame, area: Rect) {
 
 fn render_help(f: &mut Frame, area: Rect) {
     let line = Line::from(Span::styled(
-        " ↑↓←→ navigate matrix · Enter switch · D start/restart daemon · r refresh ",
+        " ↑↓←→ navigate matrix · Enter switch · b benchmark · D start/restart daemon · r refresh ",
         Style::default().fg(Color::Gray),
     ));
     f.render_widget(Paragraph::new(line), area);
@@ -774,4 +868,37 @@ fn selected_actionable_variant(app: &App) -> Option<Variant> {
         return None;
     }
     Some(v)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::setup::binary::Recommendation;
+
+    fn hardware() -> Recommendation {
+        Recommendation {
+            whisper: Variant::WhisperNative,
+            whisper_reason: "",
+            onnx: Variant::OnnxNative,
+            onnx_reason: "",
+            primary: Variant::WhisperNative,
+        }
+    }
+
+    #[test]
+    fn star_follows_the_measured_pick_within_its_family() {
+        let rec = hardware();
+        let measured = Some(Variant::WhisperVulkan);
+        assert!(is_recommended(Variant::WhisperVulkan, &rec, measured));
+        assert!(!is_recommended(Variant::WhisperNative, &rec, measured));
+        // ONNX was not benchmarked, so its hardware pick keeps the star.
+        assert!(is_recommended(Variant::OnnxNative, &rec, measured));
+    }
+
+    #[test]
+    fn star_uses_the_hardware_pick_without_a_benchmark() {
+        let rec = hardware();
+        assert!(is_recommended(Variant::WhisperNative, &rec, None));
+        assert!(!is_recommended(Variant::WhisperVulkan, &rec, None));
+    }
 }

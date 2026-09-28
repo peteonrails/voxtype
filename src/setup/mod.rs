@@ -13,6 +13,7 @@
 pub mod accel;
 #[cfg(target_os = "macos")]
 pub mod app_bundle;
+pub mod benchmark;
 pub mod binary;
 pub mod compositor;
 pub mod dms;

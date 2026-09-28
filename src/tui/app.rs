@@ -4,8 +4,11 @@ use crate::setup::binary::{self, Acceleration, EngineFamily, InstallKind, Invent
 use crate::setup::variant_check::{self, VariantMismatch};
 use std::path::Path;
 
+use crate::setup::benchmark::{self, Report};
+
 use super::advanced_section::AdvancedState;
 use super::audio::AudioState;
+use super::benchmark_screen::BenchmarkScreen;
 use super::engine::EngineState;
 use super::hotkey::HotkeyState;
 use super::meeting_section::MeetingState;
@@ -107,6 +110,13 @@ pub struct App {
     /// quit cleanly but never took effect, while variant switches and
     /// model downloads restarted immediately.
     pub config_synced_mtime: Option<std::time::SystemTime>,
+    /// Last saved benchmark (`voxtype setup benchmark` or `b` on General).
+    pub measured: Option<Report>,
+    /// True when the installed builds changed since `measured` was taken, so
+    /// its pick no longer overrides the hardware recommendation.
+    pub measured_stale: bool,
+    /// The benchmark screen, while it is open.
+    pub benchmark: Option<BenchmarkScreen>,
     /// Lazily loaded Hotkey section state. None until the user opens Hotkey
     /// for the first time (or load fails).
     pub hotkey: Option<HotkeyState>,
@@ -148,8 +158,8 @@ fn build_inventory(force_package_mode: bool) -> Inventory {
                     variant: v,
                     binary_name: v.binary_name().to_string(),
                     installed: Path::new(binary::LIB_DIR).join(v.binary_name()).exists(),
-                    runs_on_this_cpu: variant_runs_on_cpu(v, &inv.cpu),
-                    gpu_available: variant_gpu_available(v, &inv.gpus),
+                    runs_on_this_cpu: binary::variant_runs_on_cpu(v, &inv.cpu),
+                    gpu_available: binary::variant_gpu_available(v, &inv.gpus),
                     active: inv.active_variant == Some(v),
                 })
                 .collect();
@@ -158,27 +168,16 @@ fn build_inventory(force_package_mode: bool) -> Inventory {
     inv
 }
 
-fn variant_runs_on_cpu(v: Variant, cpu: &binary::Cpu) -> bool {
-    match v.acceleration() {
-        Acceleration::Avx512 | Acceleration::Cuda | Acceleration::Migraphx => cpu.avx512,
-        _ => cpu.avx2,
-    }
-}
-
-fn variant_gpu_available(v: Variant, g: &binary::Gpus) -> bool {
-    match v.acceleration() {
-        Acceleration::Cuda => g.nvidia,
-        Acceleration::Migraphx => g.amd,
-        _ => true,
-    }
-}
-
 impl App {
     pub fn new(force_package_mode: bool) -> Self {
         let inventory = build_inventory(force_package_mode);
         let cursor = initial_cursor(&inventory);
         let variant_mismatch = detect_variant_mismatch(&inventory);
+        let (measured, measured_stale) = load_measured(&inventory);
         Self {
+            measured,
+            measured_stale,
+            benchmark: None,
             inventory,
             cursor,
             restart_needed: false,
@@ -309,6 +308,10 @@ impl App {
         if let Some(audio) = self.audio.as_mut() {
             audio.poll_device_scan();
         }
+        if let Some(report) = self.benchmark.as_mut().and_then(|screen| screen.poll()) {
+            self.measured = Some(report);
+            self.measured_stale = false;
+        }
     }
 
     pub fn refresh_inventory(&mut self) {
@@ -316,6 +319,19 @@ impl App {
         self.daemon_running = is_daemon_running();
         self.missing_model = detect_missing_model();
         self.variant_mismatch = detect_variant_mismatch(&self.inventory);
+        (self.measured, self.measured_stale) = load_measured(&self.inventory);
+    }
+
+    pub fn open_benchmark(&mut self) {
+        self.benchmark = Some(BenchmarkScreen::open());
+    }
+
+    /// The benchmark's pick, when a current benchmark has one.
+    pub fn measured_pick(&self) -> Option<Variant> {
+        if self.measured_stale {
+            return None;
+        }
+        self.measured.as_ref()?.recommended
     }
 
     /// True when at least one section state has been loaded — the user has
@@ -438,6 +454,20 @@ impl App {
         self.last_switch = Some(SwitchOutcome { success, message });
         self.refresh_inventory();
     }
+}
+
+/// The saved benchmark and whether the installed builds changed since.
+fn load_measured(inv: &Inventory) -> (Option<Report>, bool) {
+    let report = benchmark::load_report();
+    let stale = report.as_ref().is_some_and(|r| {
+        r.is_stale(&benchmark::eligible(
+            &binary::enumerate_installed(),
+            &inv.cpu,
+            &inv.gpus,
+            &r.engine,
+        ))
+    });
+    (report, stale)
 }
 
 fn clamp_signed(v: i32, len: usize) -> usize {
