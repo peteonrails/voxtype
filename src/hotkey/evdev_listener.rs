@@ -440,6 +440,29 @@ fn reset_for_device_change(
     was_pressed.then_some(HotkeyEvent::Released)
 }
 
+/// What an event on the target key means for the recording.
+#[derive(Debug, PartialEq, Eq)]
+enum TargetKeyAction {
+    Press,
+    Release,
+    Ignore,
+}
+
+/// Classify an event on the target key.
+///
+/// Modifiers gate only the press. The release must end the recording no
+/// matter which modifiers are still held: with `key = "RIGHTALT"` and
+/// `modifiers = ["RIGHTCTRL"]`, letting go of Ctrl before Alt would otherwise
+/// drop the Alt release and leave the recording running to
+/// `max_duration_secs`.
+fn target_key_action(value: i32, is_pressed: bool, modifiers_satisfied: bool) -> TargetKeyAction {
+    match value {
+        1 if !is_pressed && modifiers_satisfied => TargetKeyAction::Press,
+        0 if is_pressed => TargetKeyAction::Release,
+        _ => TargetKeyAction::Ignore,
+    }
+}
+
 /// Main listener loop running in a blocking task
 #[allow(clippy::too_many_arguments)]
 fn evdev_listener_loop(
@@ -608,56 +631,49 @@ fn evdev_listener_loop(
                 let modifiers_satisfied =
                     modifier_keys.iter().all(|m| active_modifiers.contains(m));
 
-                if modifiers_satisfied {
-                    match value {
-                        1 if !is_pressed => {
-                            // Key press (not repeat)
-                            is_pressed = true;
+                match target_key_action(value, is_pressed, modifiers_satisfied) {
+                    TargetKeyAction::Press => {
+                        is_pressed = true;
 
-                            // Determine model override based on model_modifier state
-                            let model_override = if model_modifier_held {
-                                secondary_model.clone()
-                            } else {
-                                None
-                            };
+                        // Determine model override based on model_modifier state
+                        let model_override = if model_modifier_held {
+                            secondary_model.clone()
+                        } else {
+                            None
+                        };
 
-                            // Determine profile override from held profile modifier keys
-                            // If multiple are held, the most recently pressed wins
-                            let profile_override = last_pressed_profile.clone();
+                        // Determine profile override from held profile modifier keys
+                        // If multiple are held, the most recently pressed wins
+                        let profile_override = last_pressed_profile.clone();
 
-                            if model_override.is_some() || profile_override.is_some() {
-                                tracing::debug!(
-                                    "Hotkey pressed with model_override: {:?}, profile_override: {:?}",
-                                    model_override,
-                                    profile_override
-                                );
-                            } else {
-                                tracing::debug!("Hotkey pressed");
-                            }
-
-                            if tx
-                                .blocking_send(HotkeyEvent::Pressed {
-                                    model_override,
-                                    profile_override,
-                                })
-                                .is_err()
-                            {
-                                return Ok(()); // Channel closed
-                            }
+                        if model_override.is_some() || profile_override.is_some() {
+                            tracing::debug!(
+                                "Hotkey pressed with model_override: {:?}, profile_override: {:?}",
+                                model_override,
+                                profile_override
+                            );
+                        } else {
+                            tracing::debug!("Hotkey pressed");
                         }
-                        0 if is_pressed => {
-                            // Key release
-                            is_pressed = false;
-                            tracing::debug!("Hotkey released");
-                            if tx.blocking_send(HotkeyEvent::Released).is_err() {
-                                return Ok(()); // Channel closed
-                            }
+
+                        if tx
+                            .blocking_send(HotkeyEvent::Pressed {
+                                model_override,
+                                profile_override,
+                            })
+                            .is_err()
+                        {
+                            return Ok(()); // Channel closed
                         }
-                        2 => {
-                            // Key repeat - ignore
-                        }
-                        _ => {}
                     }
+                    TargetKeyAction::Release => {
+                        is_pressed = false;
+                        tracing::debug!("Hotkey released");
+                        if tx.blocking_send(HotkeyEvent::Released).is_err() {
+                            return Ok(()); // Channel closed
+                        }
+                    }
+                    TargetKeyAction::Ignore => {}
                 }
             }
         }
@@ -905,6 +921,28 @@ mod tests {
         assert!(!model_held);
         assert!(profile_mods.is_empty());
         assert!(last_profile.is_none());
+    }
+
+    /// Releasing a required modifier before the hotkey must still end the
+    /// recording. Gating the release on modifiers left it running to
+    /// max_duration_secs.
+    #[test]
+    fn release_ends_recording_after_modifier_released_first() {
+        assert_eq!(target_key_action(0, true, false), TargetKeyAction::Release);
+        assert_eq!(target_key_action(0, true, true), TargetKeyAction::Release);
+    }
+
+    #[test]
+    fn press_requires_modifiers() {
+        assert_eq!(target_key_action(1, false, true), TargetKeyAction::Press);
+        assert_eq!(target_key_action(1, false, false), TargetKeyAction::Ignore);
+    }
+
+    #[test]
+    fn repeats_and_stray_releases_are_ignored() {
+        assert_eq!(target_key_action(2, true, true), TargetKeyAction::Ignore);
+        assert_eq!(target_key_action(1, true, true), TargetKeyAction::Ignore);
+        assert_eq!(target_key_action(0, false, false), TargetKeyAction::Ignore);
     }
 
     /// The common case: devices change while nothing is held. Emitting a
