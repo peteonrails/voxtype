@@ -65,7 +65,10 @@ pub enum Commands {
 
         /// Specify which model to download (use with --download).
         /// Whisper: tiny, base, small, medium, large-v3, large-v3-turbo (and .en variants).
-        /// Parakeet: parakeet-tdt-0.6b-v3, parakeet-tdt-0.6b-v3-int8
+        /// Parakeet: parakeet-tdt-0.6b-v3, parakeet-tdt-0.6b-v3-int8.
+        /// Other engines (Moonshine, SenseVoice, Paraformer, Dolphin,
+        /// Omnilingual, Cohere, OpenVINO) take the directory-form names shown
+        /// by `voxtype info models`, e.g. cohere-transcribe-q4f16.
         #[arg(long, value_name = "NAME")]
         model: Option<String>,
 

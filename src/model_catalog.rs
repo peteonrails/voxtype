@@ -87,19 +87,18 @@ pub fn model_dir_name(engine: &str, model: &str) -> String {
 
 /// The `--model` value that downloads this catalog entry.
 ///
-/// `None` means `voxtype setup --download` can't fetch it: `run_setup` only
-/// routes Whisper, Parakeet, SenseVoice, and OpenVINO names, so the other
-/// ONNX engines
-/// are reachable only through the interactive picker (`voxtype setup model`).
-/// A UI should not offer a Download button for those.
+/// Every catalog engine resolves to one (#687); `None` only for engines that
+/// have no catalog at all.
 ///
-/// SenseVoice returns its directory name rather than its config value,
-/// because `small` is also a Whisper model name and Whisper wins that
-/// collision in `setup --model`.
+/// SenseVoice and Moonshine return their directory names rather than their
+/// config values, because the short forms (`small`, `base`, `tiny`) are also
+/// Whisper model names and Whisper wins those collisions in `setup --model`.
+/// The remaining engines' catalog names are already directory names.
 pub fn download_arg(engine: &str, model: &str) -> Option<String> {
     match engine {
         "whisper" | "parakeet" | "openvino" => Some(model.to_string()),
-        "sensevoice" => Some(model_dir_name(engine, model)),
+        "sensevoice" | "moonshine" => Some(model_dir_name(engine, model)),
+        "paraformer" | "dolphin" | "omnilingual" | "cohere" => Some(model.to_string()),
         _ => None,
     }
 }

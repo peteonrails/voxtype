@@ -38,16 +38,25 @@ Key test modules:
 
 ## CLI Command Tests
 
-### Setup Commands
+### Info and Setup Commands
 
 ```bash
-# List available models
-./target/release/voxtype setup --list-models
+# List models per engine and which are installed (replaces the removed
+# `setup --list-models`)
+./target/release/voxtype info models
 
-# Show current configuration
-./target/release/voxtype setup --show-config
+# Engines, variants, styles, acceleration
+./target/release/voxtype info engines
+./target/release/voxtype info variants
+./target/release/voxtype info styles
+./target/release/voxtype info accel
 
-# Check GPU detection (if available)
+# Resolved configuration (replaces the removed `setup --show-config`)
+./target/release/voxtype config get
+./target/release/voxtype config schema --json | python3 -c "import json,sys; print(len(json.load(sys.stdin)['keys']), 'keys')"
+
+# System check and GPU detection
+./target/release/voxtype setup check
 ./target/release/voxtype setup gpu --status
 ```
 
@@ -72,16 +81,22 @@ timeout 2 ./target/release/voxtype status --format json || echo "Daemon not runn
 
 ### Default Config Loading
 
-```bash
-# Should not error with missing config
-rm -f ~/.config/voxtype/config.toml
-./target/release/voxtype --help
+Never touch `~/.config/voxtype/config.toml` on a dev machine - the old
+version of this test deleted the real config. Isolate with XDG variables
+or `--config` instead:
 
-# Should load config without errors
-mkdir -p ~/.config/voxtype
-cp config/default.toml ~/.config/voxtype/config.toml
-./target/release/voxtype setup --show-config
+```bash
+# Should run on built-in defaults with no config at all
+XDG_CONFIG_HOME=$(mktemp -d) ./target/release/voxtype info engines
+
+# Should load the shipped default config without errors
+./target/release/voxtype --config config/default.toml config get
 ```
+
+### Config Salvage (#646, since 1.1.0)
+
+One bad value must not stop the daemon; syntax errors and duplicate keys
+must. Full matrix: docs/smoke_tests/config-validation.md.
 
 ### Config Backwards Compatibility
 
@@ -103,23 +118,24 @@ EOF
 
 ## Binary Variant Tests
 
-For each binary variant, verify:
+For each binary variant, verify version and help, and always download the
+release assets and check them against the CI-signed sums first:
 
 ```bash
-VERSION=0.4.14
+VERSION=1.1.0
+gh release download v${VERSION} -p 'SHA256SUMS.txt' -p 'voxtype-*-linux-x86_64-*'
+grep -E "x86_64-(baseline|avx2|avx512|vulkan)$" SHA256SUMS.txt | sha256sum -c -
 
-# AVX2
-releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx2 --version
-releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx2 --help
-
-# AVX-512
-releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx512 --version
-releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-avx512 --help
-
-# Vulkan
-releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-vulkan --version
-releases/${VERSION}/voxtype-${VERSION}-linux-x86_64-vulkan --help
+for v in baseline avx2 avx512 vulkan; do
+  B=voxtype-${VERSION}-linux-x86_64-$v
+  chmod +x "$B" && ./$B --version && ./$B --help > /dev/null
+done
 ```
+
+Then run `/validate-binaries` for the instruction-set and glibc gates. For
+the baseline variant, --version is NOT sufficient: the #740 class of bug
+passes every startup path and crashes at first inference. Run the
+behavioral floor test in docs/smoke_tests/baseline-v2-floor.md.
 
 ## Integration Tests
 

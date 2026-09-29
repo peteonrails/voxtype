@@ -64,7 +64,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if raw_args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("voxtype-osd {}", env!("CARGO_PKG_VERSION"));
+        println!("voxtype-osd {}", voxtype::cli::VERSION);
         return ExitCode::SUCCESS;
     }
 
@@ -154,7 +154,7 @@ fn print_help() {
          ENV:\n    \
              VOXTYPE_OSD_FRONTEND   Same as --frontend.\n    \
              VOXTYPE_CONFIG         Path to the voxtype config file.\n",
-        env!("CARGO_PKG_VERSION"),
+        voxtype::cli::VERSION,
     );
 }
 

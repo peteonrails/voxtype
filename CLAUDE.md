@@ -333,19 +333,31 @@ Known gaps as of 1.0.0: the Omarchy `edge` repo still ships `voxtype-bin` 0.7.5-
 
 ### Feature Roadmap
 
-Milestone-aligned with GitHub so the two don't drift. Based on the 29 Aug 2026 backlog triage.
+Milestone-aligned with GitHub so the two don't drift. Based on the 29 Aug 2026 backlog triage,
+updated 25 Sep 2026 for the ggml/GGUF direction below.
+
+**Strategic shift (25 Sep 2026): native ggml/GGUF engines are now a near-term priority, not an
+exploratory item.** Omarchy's Ryan Hughes proved out Cohere Transcribe as a GGUF model on
+Vulkan via `transcribe.cpp` (running as an external loopback helper in
+[omarchy#13098](https://github.com/omacom/omarchy/pull/13098) /
+[omarchy-pkgs#617](https://github.com/omacom/omarchy-pkgs/pull/617)); voxtype is absorbing that
+natively instead of leaving it as an Omarchy-side workaround. **Voxtype 2.0 will remove ONNX
+Runtime support entirely.** Phase 3 risk (does every ONNX engine have a ggml/GGUF port) is
+resolved for the important ones; the rest (exact list TBD) get evaluated for porting or
+retirement closer to 2.0, not before.
 
 **1.0.1 (fast follow-up):** Defects that shipped in 1.0.0 - SIGILL guidance on pre-AVX2 CPUs ([#612](https://github.com/peteonrails/voxtype/issues/612)), `configure --config` overwriting the real config ([#595](https://github.com/peteonrails/voxtype/issues/595)), impossible install instructions ([#604](https://github.com/peteonrails/voxtype/issues/604), [#622](https://github.com/peteonrails/voxtype/issues/622)), stuck push-to-talk ([#556](https://github.com/peteonrails/voxtype/issues/556)), and `voxtype info accel` reading a state file nothing writes. Plus docs corrections (#526, #528, #564).
 
 **1.1.x (incremental):**
+- 1.1.0 Daemon core, model plumbing and OSD: #581, #612, #646, #656, #669, #687, #692, #694, #705
 - 1.1.1 GPU selection and display: #577, #611, #430, #578, #580
 - 1.1.2 Output drivers: #530, #538, #543, #507, #552
 - 1.1.3 macOS: #522, #576, #452, #632
-- 1.1.5 Compatibility: #612, #603
+- 1.1.5 Compatibility: #603
 
-**1.2.0 (architecture):** Model registry out of Rust structs into versioned data ([#648](https://github.com/peteonrails/voxtype/issues/648)), owning the model download transfer layer ([#647](https://github.com/peteonrails/voxtype/issues/647)), long-audio windowing for Cohere and Parakeet (#551, #288), Nemotron ([#47](https://github.com/peteonrails/voxtype/issues/47)). Dictation cleanup pipeline ([#696](https://github.com/peteonrails/voxtype/issues/696)): staged labelers and rules instead of LLM rewriting - vocabulary, disfluency tagging (LARD-trained, CC-BY), punctuation/casing for the CTC engines that emit neither, ITN via text-processing-rs, user rules last; the LLM keeps only tone/restructuring behind an edit-list contract. Absorbs #535 and the filler-word half of #566; profile vocabularies feed #519.
+**1.2.0 (architecture):** Model registry out of Rust structs into versioned data ([#648](https://github.com/peteonrails/voxtype/issues/648)), owning the model download transfer layer ([#647](https://github.com/peteonrails/voxtype/issues/647)), Nemotron ([#47](https://github.com/peteonrails/voxtype/issues/47)). **Resident Vulkan Cohere GGUF transcription** ([#792](https://github.com/peteonrails/voxtype/pull/792), Jacob Mink) - runs Cohere `.gguf` through the official `transcribe.cpp` Rust binding, model/session resident in-process (no subprocess worker) when `on_demand_loading = false`; also closes the Cohere half of the long-audio windowing gap (#551) via quiet-boundary chunk splitting, shared with the ONNX path. Parakeet's long-audio windowing (#288) is unrelated and still open. Before merge: reconcile the model source (currently a pinned HuggingFace revision from handy-computer's repo) against the R2-only model CDN policy - every other model is R2-mirrored, none are HF-direct - and note the PR explicitly does not implement an end-to-end GPU-probe/fallback policy, which overlaps #611/#577. Dictation cleanup pipeline ([#696](https://github.com/peteonrails/voxtype/issues/696)): staged labelers and rules instead of LLM rewriting - vocabulary, disfluency tagging (LARD-trained, CC-BY), punctuation/casing for the CTC engines that emit neither, ITN via text-processing-rs, user rules last; the LLM keeps only tone/restructuring behind an edit-list contract. Absorbs #535 and the filler-word half of #566; profile vocabularies feed #519.
 
-**1.3.0:** parakeet.cpp as a ggml/Vulkan Parakeet backend ([#483](https://github.com/peteonrails/voxtype/issues/483)) - 5-6x faster steady-state than ONNX/MIGraphX on AMD, and the only GPU path for AMD and Intel Arc since ORT has no Vulkan EP. Subprocess-isolated so whisper-rs's ggml and parakeet.cpp's ggml never share an address space. Unified profiles ([#519](https://github.com/peteonrails/voxtype/issues/519)) absorbing Dictation Intents and per-record language (#484).
+**1.3.0:** parakeet.cpp as a ggml/Vulkan Parakeet backend ([#483](https://github.com/peteonrails/voxtype/issues/483)) - 5-6x faster steady-state than ONNX/MIGraphX on AMD, and the only GPU path for AMD and Intel Arc since ORT has no Vulkan EP. Subprocess-isolated so whisper-rs's ggml and parakeet.cpp's ggml never share an address space (contrast #792's resident, non-subprocess Cohere design - the two GGUF engines take different memory-lifecycle approaches; worth reconciling once both have shipped). Unified profiles ([#519](https://github.com/peteonrails/voxtype/issues/519)) absorbing Dictation Intents and per-record language (#484).
 
 **1.3.1:** Internal cleanup (#477, #478, #470, #471) and xdotool as an opt-in driver (#559).
 
@@ -355,12 +367,14 @@ Milestone-aligned with GitHub so the two don't drift. Based on the 29 Aug 2026 b
 
 **1.5.0:** Audio and output retention as one feature - caching (#28), history (#209), meeting file import (#489), and fixing `retain_audio`'s dead wiring (#529). Off by default.
 
+**2.0 (major):** Remove ONNX Runtime support entirely, once every ONNX-backed engine that's staying either has a native ggml/GGUF port (Cohere via #792 lands first, in 1.2.0; parakeet.cpp via #483 in 1.3.0) or is dropped. Moonshine/SenseVoice/Paraformer/Dolphin/Omnilingual still need an explicit per-engine port-or-retire call - not yet made. This also retires the ONNX-specific build/packaging burden: the onnx-avx2/onnx-avx512/onnx-cuda-12/onnx-cuda-13/onnx-migraphx binary targets, the AVX-512-instruction-leakage checks that exist only because of bundled ONNX Runtime prebuilts, and both open items under Blocked/Waiting below become moot rather than needing to be solved.
+
 **Near Term (unscheduled):**
 - **Deterministic integration tests** - Automated smoke tests using pre-recorded audio files that can run in CI without LLM/human interaction
 - **Meeting echo cancellation edge trimming** - Remove residual bleed-through words at segment boundaries when loopback audio is active. GTCRN handles the bulk of echo removal, but 1-2 stray words can appear at the start/end of mic segments where the STFT window crosses a chunk boundary.
 
 **Exploratory:**
-- **Consolidated release binaries** - Reduce from 8 binaries today (avx2, avx512, vulkan, onnx-avx2, onnx-avx512, onnx-cuda-12, onnx-cuda-13, onnx-migraphx) to 3 (cpu, cuda, migraphx) by combining Whisper + Vulkan + ONNX engines into each binary. Vulkan and CUDA/MIGraphX fall back to CPU when no GPU is present, and ONNX Runtime does runtime CPU dispatch. Trade-off is losing AVX-512 Whisper performance (~10-30%) and larger binaries. Blocked on whisper.cpp/ggml adding runtime SIMD dispatch if AVX-512 performance must be preserved; otherwise, AVX2-only Whisper is safe on all x86-64 CPUs. This now interacts with #483: a shared-ggml refactor would serve both.
+- **Consolidated release binaries** - Superseded by the 2.0 ONNX removal above: once no engine depends on ONNX Runtime, the 5 onnx-* build targets disappear outright rather than needing a combined-binary redesign. What's left to decide is only the ggml-side split (cpu/vulkan/cuda/rocm vs today's avx2/avx512/vulkan), with the same AVX-512-vs-binary-count trade-off as today.
 - **Vibe Voice backend** ([#285](https://github.com/peteonrails/voxtype/issues/285)) - Microsoft's speech model
 - **Parakeet sortformer for meeting diarization** - Evaluate parakeet-rs's sortformer feature as alternative to the current ml-diarization ECAPA-TDNN pipeline
 - **Native StatusNotifierItem tray** ([#267](https://github.com/peteonrails/voxtype/issues/267)) - Awaiting a contributor rebase; two PRs (#291, #438) predate the `src/cli` and `src/main` refactors and no longer apply
@@ -370,8 +384,8 @@ Milestone-aligned with GitHub so the two don't drift. Based on the 29 Aug 2026 b
 **Output driver policy:** The default chain (wtype -> dotool -> ydotool -> clipboard) is onboarding, not a requirement - `driver_order` already pins a single driver, though `fallback_to_clipboard = false` is needed alongside it to suppress the clipboard append. New drivers are opt-in and never auto-inserted into the default chain, so an upgrade never silently changes which driver types a user's text.
 
 **Blocked/Waiting:**
-- **Nixpkgs onnxruntime MIGraphX support** - Verify the nixpkgs `onnxruntime` build (with `rocmSupport = true`) actually exposes the MIGraphX EP. The Nix flake's `parakeet-migraphx` output uses `onnxruntimeRocm` and sets `ORT_MIGRAPHX_MODEL_CACHE_PATH`; if MIGraphX isn't exposed in nixpkgs, ORT will fail to register the EP at runtime.
-- **Cohere decoder on CUDA** - Encoder runs on GPU; decoder pinned to CPU pending ORT's CUDA `GroupQueryAttention` kernel adding `attention_bias` support. Flip the second arg of `build_session(&decoder_file, threads, "decoder", false)` in `src/transcribe/cohere.rs` once ORT lands the kernel.
+- **Nixpkgs onnxruntime MIGraphX support** - Verify the nixpkgs `onnxruntime` build (with `rocmSupport = true`) actually exposes the MIGraphX EP. The Nix flake's `parakeet-migraphx` output uses `onnxruntimeRocm` and sets `ORT_MIGRAPHX_MODEL_CACHE_PATH`; if MIGraphX isn't exposed in nixpkgs, ORT will fail to register the EP at runtime. Moot once ONNX Runtime is removed at 2.0 - AMD GPU users move to ggml's Vulkan/ROCm-HIP path instead, which doesn't route through an ONNX execution provider at all.
+- **Cohere decoder on CUDA** - Encoder runs on GPU; decoder pinned to CPU pending ORT's CUDA `GroupQueryAttention` kernel adding `attention_bias` support. Flip the second arg of `build_session(&decoder_file, threads, "decoder", false)` in `src/transcribe/cohere.rs` once ORT lands the kernel. Unblocked outright by #792's native GGUF path once that ships in 1.2.0 - a ggml-native decoder doesn't inherit ORT's kernel gap.
 
 ### Non-Goals
 
@@ -446,14 +460,15 @@ Building on hosts with newer glibc (e.g. 2.43 on CachyOS/Arch) can produce binar
 
 ### Build Strategy
 
-A full release requires **8 Linux binaries** (3 Whisper variants and 5 ONNX variants) plus a macOS arm64 DMG.
+A full release requires **9 Linux binaries** (4 Whisper variants and 5 ONNX variants) plus a macOS arm64 DMG.
 
 **CRITICAL: Every binary must be built in Docker.** Never build release binaries directly on the host, even for AVX-512 or MIGraphX builds that require specific hardware. Run Docker locally on the machine with the required hardware instead.
 
-**Whisper Binaries (3):**
+**Whisper Binaries (4):**
 
 | Binary | Dockerfile | Docker Context | Base Image | Max glibc |
 |--------|-----------|----------------|------------|-----------|
+| baseline | `Dockerfile.baseline` | CI (runner CPU irrelevant: GGML_NATIVE=OFF) | Ubuntu 22.04 | 2.35 |
 | AVX2 | `Dockerfile.build` | Remote (pre-AVX-512) | Ubuntu 22.04 | 2.35 |
 | Vulkan | `Dockerfile.vulkan` | Remote (pre-AVX-512) | Ubuntu 24.04 | 2.39 |
 | AVX-512 | `Dockerfile.avx512` | Local (AVX-512 host) | Ubuntu 22.04 | 2.35 |
@@ -622,6 +637,32 @@ journalctl --user -u voxtype --since "10 seconds ago" | grep -iE "(rocm|executio
 ```
 
 If GPU detection fails but the binary otherwise works, the build used stale artifacts. Run `cargo clean` and rebuild.
+
+### Validating the Baseline Binary (x86-64-v2 Floor)
+
+The baseline variant promises x86-64-v2 and has its own contamination class:
+BMI2/FMA/AVX2 leaking in through ggml when the CMake toolchain constraints
+don't take (#740 - env vars like `GGML_NATIVE=OFF` and `CMAKE_C_FLAGS` are
+read by nothing; the only reliable channel into whisper-rs-sys's CMake is
+`CMAKE_TOOLCHAIN_FILE`, see `cmake/x86-64-v2-toolchain.cmake`).
+
+No static count can gate the v2 floor: a correct build legitimately carries
+~370 BMI2 instructions (ring's CPUID-dispatched assembly) and ~1800 FMA
+(rustfft's runtime-dispatched AVX kernels), and #740's ggml contamination
+added only ~60 BMI2 on top - inside the noise. The decisive gate is
+behavioral:
+
+```bash
+# REAL INFERENCE under a v2-modeled CPU. Model load succeeds on a
+# contaminated build; only the first ggml matmul executes the bad code, so
+# --version and `setup check` prove nothing. TCG cannot decode out-of-floor
+# instructions, so this reproduces the Ivy Bridge SIGILL exactly.
+qemu-x86_64-static -cpu Nehalem voxtype-*-baseline transcribe tests/fixtures/vad/speech_hello.wav
+```
+
+CI runs both (build-linux.yml). For hardware-path verification, use the
+Ivy Bridge VM described in CLAUDE.local.md, and run `transcribe`, not just
+startup commands.
 
 ### Validating Binaries (AVX-512 Detection)
 
@@ -871,6 +912,44 @@ option = "value"</code></pre>
 4. Update `packaging/arch-bin/voxtype-bin.install` post_upgrade() message with current version highlights
 5. Commit and push website changes
 6. Push AUR package updates
+
+### Shipping a Release: Sequencing
+
+The order matters as much as the content. Two incidents in the 1.1.0 cycle
+came from sequencing, not from anything on the checklist above.
+
+**Create the GitHub release by hand, immediately after pushing the tag.**
+The build workflows each carry a softprops/action-gh-release step, and
+whichever runs first creates the release with default flags. That is how
+v1.1.0-rc2 briefly shipped marked "latest" with a stub body. Pushing the
+signed tag and then running `gh release create <tag> --verify-tag
+--notes-file <notes>` (with `--prerelease` for rc tags) before any workflow
+finishes means the workflows only ever attach assets. Verify both flags
+afterward: `isPrerelease` on the release, and that `releases/latest` points
+where it should.
+
+**Full ship order:**
+1. Push the signed tag
+2. Create the release by hand with notes and flags (above)
+3. Wait for all tag builds to go green and the full asset set to upload
+4. Only then merge the release branch to `main` - the website deploys from
+   main, and merging earlier publishes download links that 404 until the
+   assets exist
+5. Back-merge to `dev` (the default branch; this is what auto-closes issues)
+6. Cascade the downstream rc/ stack in version order and push it (this is
+   the milestone push - see the branch-push policy)
+7. Close any milestone issues the back-merge did not auto-close, then close
+   the milestone
+8. AUR pushes (sums cross-checked against the CI-signed SHA256SUMS.txt from
+   the release, never against local downloads alone)
+9. Draft announcements for review - never post without approval
+
+**Branch-push policy during development:** every push to an `rc/*` branch
+triggers three workflows, one of which is a ten-variant Docker matrix.
+During active work, push only the release branch under development; keep
+downstream cascade merges local and push the whole stack at milestones.
+Repeated full-stack pushes once queued ~90 runs and starved a tag build for
+hours while a release sat partially uploaded.
 
 ## Website
 

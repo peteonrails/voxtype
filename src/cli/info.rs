@@ -60,4 +60,16 @@ pub enum InfoAction {
         #[arg(long)]
         json: bool,
     },
+
+    /// List installed OSD styles (Quickshell frontend)
+    ///
+    /// The values `voxtype config set osd.style` accepts: the built-in
+    /// default plus every style package found in ~/.config/voxtype/osd,
+    /// ~/.local/share/voxtype/osd, and /usr/share/voxtype/osd. A user copy
+    /// shadows a system package with the same name.
+    Styles {
+        /// Emit machine-readable JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
 }

@@ -19,6 +19,9 @@ use crate::osd::theme;
 use crate::osd::visual::{Color, Palette};
 
 const PACKAGE_MANIFEST: &str = "voxtype-osd.toml";
+/// System-wide package directory populated by distro packages; user paths
+/// are searched first so a user copy always shadows a shipped package.
+const SYSTEM_PACKAGE_DIR: &str = "/usr/share/voxtype/osd";
 
 /// Fully resolved style data consumed by Quickshell QML.
 #[derive(Debug, Clone, Serialize)]
@@ -115,26 +118,83 @@ pub fn resolve_runtime_style(
 
 /// Write the runtime JSON consumed by Quickshell and return its path.
 pub fn write_runtime_style(style: &RuntimeOsdStyle) -> Result<PathBuf, VoxtypeError> {
-    let dir = runtime_dir();
-    fs::create_dir_all(&dir).map_err(|e| {
-        VoxtypeError::Config(format!(
-            "Failed to create OSD runtime directory {}: {}",
-            dir.display(),
-            e
-        ))
-    })?;
-    let path = dir.join("quickshell-style.json");
-    let json = serde_json::to_string_pretty(style).map_err(|e| {
+    let path = runtime_style_path();
+    write_style_file(&path, &style_json(style)?)?;
+    Ok(path)
+}
+
+/// Path of the runtime JSON consumed by Quickshell.
+pub fn runtime_style_path() -> PathBuf {
+    runtime_dir().join("quickshell-style.json")
+}
+
+/// Serialize a resolved style to the JSON written for Quickshell.
+pub fn style_json(style: &RuntimeOsdStyle) -> Result<String, VoxtypeError> {
+    serde_json::to_string_pretty(style).map_err(|e| {
         VoxtypeError::Config(format!("Failed to serialize Quickshell OSD style: {}", e))
-    })?;
-    fs::write(&path, json).map_err(|e| {
+    })
+}
+
+/// Rewrite the runtime JSON only when `style` serializes differently from
+/// `last_json`; updates `last_json` and reports whether a write happened.
+pub fn rewrite_runtime_style_if_changed(
+    path: &Path,
+    style: &RuntimeOsdStyle,
+    last_json: &mut String,
+) -> Result<bool, VoxtypeError> {
+    let json = style_json(style)?;
+    if json == *last_json {
+        return Ok(false);
+    }
+    write_style_file(path, &json)?;
+    *last_json = json;
+    Ok(true)
+}
+
+/// Start live Omarchy theme following for a resolved style.
+///
+/// Returns `None` when the palette source is not Omarchy (a pinned package
+/// or custom palette never gets a watcher) or when no Omarchy install is
+/// present.
+pub fn follow_omarchy_theme<F>(
+    style: &RuntimeOsdStyle,
+    on_change: F,
+) -> Option<theme::ThemeWatchHandle>
+where
+    F: FnMut() + Send + 'static,
+{
+    if style.palette != OsdPaletteSource::Omarchy {
+        return None;
+    }
+    theme::watch_current_theme(on_change)
+}
+
+/// Atomic write: the Quickshell FileView reloads this file on change, so a
+/// reader must never observe a partially written JSON. Write to a sibling
+/// temp file and rename it into place. Creates the parent directory when
+/// missing (XDG_RUNTIME_DIR contents can be cleaned under a live follower).
+fn write_style_file(path: &Path, json: &str) -> Result<(), VoxtypeError> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| {
+            VoxtypeError::Config(format!(
+                "Failed to create OSD runtime directory {}: {}",
+                dir.display(),
+                e
+            ))
+        })?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".tmp.{}", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    let write_err = |e: std::io::Error| {
         VoxtypeError::Config(format!(
             "Failed to write Quickshell OSD style {}: {}",
             path.display(),
             e
         ))
-    })?;
-    Ok(path)
+    };
+    fs::write(&tmp, json).map_err(write_err)?;
+    fs::rename(&tmp, path).map_err(write_err)
 }
 
 fn runtime_dir() -> PathBuf {
@@ -168,8 +228,8 @@ fn resolve_package_dir(
         return Ok(Some(direct));
     }
     let candidates = candidate_package_dirs(style);
-    if let Some(found) = candidates.iter().find(|p| is_package_dir(p)) {
-        return Ok(Some(found.clone()));
+    if let Some(found) = find_package_dir(&candidates) {
+        return Ok(Some(found));
     }
     let mut searched: Vec<String> = vec![direct.display().to_string()];
     searched.extend(candidates.iter().map(|p| p.display().to_string()));
@@ -196,24 +256,109 @@ fn is_package_dir(path: &Path) -> bool {
 }
 
 fn candidate_package_dirs(name: &str) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
+    candidate_package_dirs_with_system(name, Path::new(SYSTEM_PACKAGE_DIR))
+}
+
+fn candidate_package_dirs_with_system(name: &str, system_dir: &Path) -> Vec<PathBuf> {
+    package_roots_with_system(system_dir)
+        .into_iter()
+        .map(|root| root.join(name))
+        .collect()
+}
+
+/// Package search roots in priority order: user config, user data, then the
+/// system directory, so a user copy always shadows a shipped package. Shared
+/// by per-name resolution and [`list_installed_styles`] so the two can't
+/// disagree about where packages live.
+fn package_roots_with_system(system_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         if !xdg.is_empty() {
-            dirs.push(PathBuf::from(xdg).join("voxtype/osd").join(name));
+            roots.push(PathBuf::from(xdg).join("voxtype/osd"));
         }
     }
     if let Some(home) = dirs::home_dir() {
-        dirs.push(home.join(".config/voxtype/osd").join(name));
+        roots.push(home.join(".config/voxtype/osd"));
     }
     if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
         if !xdg.is_empty() {
-            dirs.push(PathBuf::from(xdg).join("voxtype/osd").join(name));
+            roots.push(PathBuf::from(xdg).join("voxtype/osd"));
         }
     }
     if let Some(home) = dirs::home_dir() {
-        dirs.push(home.join(".local/share/voxtype/osd").join(name));
+        roots.push(home.join(".local/share/voxtype/osd"));
     }
-    dirs
+    roots.push(system_dir.to_path_buf());
+    roots
+}
+
+/// An OSD style `[osd] style` can select, discovered on disk or built in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InstalledStyle {
+    /// The value to set `[osd] style` to.
+    pub name: String,
+    /// Package directory; `None` for the built-in default renderer.
+    pub dir: Option<PathBuf>,
+    /// The package manifest's `description`, when it sets one.
+    pub description: Option<String>,
+}
+
+/// Every style installed right now: the built-in `default`, then each valid
+/// package directory across the search roots in name order. A name present
+/// in several roots is listed once with the highest-priority copy, matching
+/// how [`resolve_runtime_style`] resolves it.
+pub fn list_installed_styles() -> Vec<InstalledStyle> {
+    list_installed_styles_in(&package_roots_with_system(Path::new(SYSTEM_PACKAGE_DIR)))
+}
+
+fn list_installed_styles_in(roots: &[PathBuf]) -> Vec<InstalledStyle> {
+    // "default" never resolves to a package (resolve_package_dir returns the
+    // built-in renderer before searching), so a package dir named "default"
+    // is unreachable and deliberately not listed.
+    let mut seen: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::from(["default".to_string()]);
+    let mut packages: Vec<InstalledStyle> = Vec::new();
+    for root in roots {
+        let Ok(entries) = fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if !is_package_dir(&dir) {
+                continue;
+            }
+            let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !seen.insert(name.to_string()) {
+                continue;
+            }
+            // A manifest that fails to parse would error at selection time,
+            // but the package is still installed; list it without a
+            // description rather than hiding it.
+            let description = load_manifest(&dir)
+                .ok()
+                .flatten()
+                .and_then(|m| m.description);
+            packages.push(InstalledStyle {
+                name: name.to_string(),
+                dir: Some(dir),
+                description,
+            });
+        }
+    }
+    packages.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut styles = vec![InstalledStyle {
+        name: "default".to_string(),
+        dir: None,
+        description: Some("Built-in recipe renderer".to_string()),
+    }];
+    styles.extend(packages);
+    styles
+}
+
+fn find_package_dir(candidates: &[PathBuf]) -> Option<PathBuf> {
+    candidates.iter().find(|p| is_package_dir(p)).cloned()
 }
 
 fn load_manifest(dir: &Path) -> Result<Option<OsdPackageManifest>, VoxtypeError> {
@@ -476,6 +621,106 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("definitely-not-installed"), "got: {msg}");
         assert!(msg.contains("Searched"), "got: {msg}");
+        assert!(
+            msg.contains("/usr/share/voxtype/osd/definitely-not-installed"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn system_package_dir_is_last_candidate_after_user_paths() {
+        let system = Path::new("/fake/system/osd");
+        let dirs = candidate_package_dirs_with_system("neon", system);
+        assert_eq!(dirs.last(), Some(&system.join("neon")));
+        let home_config = dirs::home_dir().unwrap().join(".config/voxtype/osd/neon");
+        let user_idx = dirs.iter().position(|p| *p == home_config).unwrap();
+        assert!(user_idx < dirs.len() - 1, "user path must precede system");
+
+        assert_eq!(
+            candidate_package_dirs("neon").last(),
+            Some(&PathBuf::from("/usr/share/voxtype/osd/neon"))
+        );
+    }
+
+    #[test]
+    fn package_only_in_system_dir_resolves() {
+        let tmp = tempdir().unwrap();
+        let user = tmp.path().join("user/osd/neon");
+        let system = tmp.path().join("system/osd/neon");
+        fs::create_dir_all(&system).unwrap();
+        fs::write(
+            system.join(PACKAGE_MANIFEST),
+            "name = \"neon\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(find_package_dir(&[user, system.clone()]), Some(system));
+    }
+
+    #[test]
+    fn list_installed_styles_dedupes_shadowed_packages() {
+        let tmp = tempdir().unwrap();
+        let user_root = tmp.path().join("user/osd");
+        let system_root = tmp.path().join("system/osd");
+        for (root, desc) in [(&user_root, "User copy"), (&system_root, "Shipped copy")] {
+            let dir = root.join("neon");
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join(PACKAGE_MANIFEST),
+                format!("name = \"neon\"\nversion = \"1.0.0\"\ndescription = \"{desc}\"\n"),
+            )
+            .unwrap();
+        }
+        let aurora = system_root.join("aurora");
+        fs::create_dir_all(&aurora).unwrap();
+        fs::write(
+            aurora.join(PACKAGE_MANIFEST),
+            "name = \"aurora\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        // A plain directory without a manifest is not a package.
+        fs::create_dir_all(system_root.join("not-a-package")).unwrap();
+
+        let styles = list_installed_styles_in(&[user_root.clone(), system_root]);
+        let names: Vec<&str> = styles.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["default", "aurora", "neon"]);
+
+        let neon = styles.iter().find(|s| s.name == "neon").unwrap();
+        assert_eq!(
+            neon.dir.as_deref(),
+            Some(user_root.join("neon").as_path()),
+            "the user copy must shadow the system copy"
+        );
+        assert_eq!(neon.description.as_deref(), Some("User copy"));
+
+        let aurora = styles.iter().find(|s| s.name == "aurora").unwrap();
+        assert_eq!(aurora.description, None);
+    }
+
+    #[test]
+    fn list_installed_styles_with_no_packages_is_just_default() {
+        let tmp = tempdir().unwrap();
+        let styles = list_installed_styles_in(&[tmp.path().join("missing/osd")]);
+        assert_eq!(styles.len(), 1);
+        assert_eq!(styles[0].name, "default");
+        assert_eq!(styles[0].dir, None);
+    }
+
+    #[test]
+    fn user_package_shadows_system_package() {
+        let tmp = tempdir().unwrap();
+        let user = tmp.path().join("user/osd/neon");
+        let system = tmp.path().join("system/osd/neon");
+        for dir in [&user, &system] {
+            fs::create_dir_all(dir).unwrap();
+            fs::write(
+                dir.join(PACKAGE_MANIFEST),
+                "name = \"neon\"\nversion = \"1.0.0\"\n",
+            )
+            .unwrap();
+        }
+
+        assert_eq!(find_package_dir(&[user.clone(), system]), Some(user));
     }
 
     #[test]
@@ -515,6 +760,61 @@ mod tests {
         let home = dirs::home_dir().unwrap();
         assert_eq!(expand_tilde(Path::new("~/x/y")), home.join("x/y"));
         assert_eq!(expand_tilde(Path::new("/abs/x")), PathBuf::from("/abs/x"));
+    }
+
+    #[test]
+    fn rewrite_skips_write_when_style_is_unchanged() {
+        let style = resolve_runtime_style(&OsdConfig::default(), None).unwrap();
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("quickshell-style.json");
+
+        let mut last = String::new();
+        assert!(rewrite_runtime_style_if_changed(&path, &style, &mut last).unwrap());
+        assert!(path.is_file());
+
+        // Deleting the file proves the no-op: an unchanged style must not
+        // recreate it.
+        fs::remove_file(&path).unwrap();
+        assert!(!rewrite_runtime_style_if_changed(&path, &style, &mut last).unwrap());
+        assert!(!path.exists());
+
+        let mut changed = style.clone();
+        changed.margin_px += 1;
+        assert!(rewrite_runtime_style_if_changed(&path, &changed, &mut last).unwrap());
+        assert!(path.is_file());
+        assert_eq!(fs::read_to_string(&path).unwrap(), last);
+    }
+
+    #[test]
+    fn atomic_write_leaves_no_temp_file_behind() {
+        let style = resolve_runtime_style(&OsdConfig::default(), None).unwrap();
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("quickshell-style.json");
+        write_style_file(&path, &style_json(&style).unwrap()).unwrap();
+        let entries: Vec<_> = fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![std::ffi::OsString::from("quickshell-style.json")]
+        );
+    }
+
+    #[test]
+    fn non_omarchy_palette_gets_no_theme_watcher() {
+        let mut style = resolve_runtime_style(&OsdConfig::default(), None).unwrap();
+        for source in [
+            OsdPaletteSource::Fallback,
+            OsdPaletteSource::Custom,
+            OsdPaletteSource::Package,
+        ] {
+            style.palette = source;
+            assert!(
+                follow_omarchy_theme(&style, || {}).is_none(),
+                "palette {source:?} must not start a theme watcher"
+            );
+        }
     }
 
     #[test]

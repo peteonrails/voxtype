@@ -2,8 +2,9 @@
 //! binary variants, audio devices, model catalogs, and compiled engines.
 //!
 //! The `--json` forms exist so a settings UI can populate its pickers without
-//! scraping human-readable output. `info devices` and `info models` back the
-//! `dynamic_enum` key types in `voxtype config schema --json`.
+//! scraping human-readable output. `info devices`, `info models`, and
+//! `info styles` back the `dynamic_enum` key types in
+//! `voxtype config schema --json`.
 
 use voxtype::audio::devices;
 use voxtype::config::Config;
@@ -33,6 +34,7 @@ pub(crate) fn run_info_command(action: InfoAction, config: &Config) -> anyhow::R
         } => run_models(json, engine.as_deref(), verify)?,
         InfoAction::Accel { json } => run_accel(json)?,
         InfoAction::Engines { json } => run_engines(json, config)?,
+        InfoAction::Styles { json } => run_styles(json, config)?,
     }
     Ok(())
 }
@@ -333,6 +335,50 @@ fn run_engines(json: bool, config: &Config) -> anyhow::Result<()> {
     }
     println!();
     println!("Switch with: voxtype config set engine <NAME>");
+    Ok(())
+}
+
+fn run_styles(json: bool, config: &Config) -> anyhow::Result<()> {
+    let styles = voxtype::osd::style::list_installed_styles();
+    let active = config.osd.style.as_str();
+
+    if json {
+        let list: Vec<serde_json::Value> = styles
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "name": s.name,
+                    "dir": s.dir,
+                    "description": s.description,
+                    "active": s.name == active,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&list)?);
+        return Ok(());
+    }
+
+    println!("OSD styles (Quickshell frontend)");
+    for s in &styles {
+        let mark = if s.name == active { " ● active" } else { "" };
+        println!("  {}{}", s.name, mark);
+        if let Some(dir) = &s.dir {
+            println!("      {}", dir.display());
+        }
+        if let Some(desc) = &s.description {
+            println!("      {}", desc);
+        }
+    }
+    if let Some(path) = &config.osd.plugin_path {
+        println!();
+        println!(
+            "Note: [osd] plugin_path = {} overrides the style selection.",
+            path.display()
+        );
+    }
+    println!();
+    println!("Switch with: voxtype config set osd.style <NAME>");
+    println!("Recipe presets to copy from: /usr/share/voxtype/osd-recipes (or examples/osd-recipes in the source tree)");
     Ok(())
 }
 

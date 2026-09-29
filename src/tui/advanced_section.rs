@@ -551,12 +551,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
 /// is detached, and `download_parakeet_model` writes to the on-disk models
 /// dir which the daemon picks up on next start).
 ///
-/// All three notifications share the sync hint
-/// `x-canonical-private-synchronous:voxtype-model-download`, which tells
-/// notification daemons (mako, dunst, GNOME Shell, KDE) to overwrite the
-/// previous notification in that slot rather than stack them. Same pattern
-/// as `src/notification.rs::send_linux` uses for recording/transcribing
-/// transitions, just with a different sync key so the two don't collide.
+/// All three notifications go through `notification::send_status_sync`, which
+/// owns the `--replace-id` bookkeeping keeping every voxtype notification in
+/// one slot that replaces in place (#679). Shelling out to `notify-send`
+/// directly here got a fresh server ID each time, so these stacked on KDE
+/// while real dictation notifications replaced each other — the one place a
+/// user watches notifications to judge their setup behaved unlike actual use.
 ///
 /// Urgency levels:
 /// - `low` for the "starting" notification (informational, just letting the
@@ -566,21 +566,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
 ///   succeed; they need to know to retry)
 fn spawn_background_model_download(model_name: String) {
     std::thread::spawn(move || {
-        const SYNC_HINT: &str = "string:x-canonical-private-synchronous:voxtype-model-download";
-
         // Starting notification — low urgency, just informational.
-        let _ = std::process::Command::new("notify-send")
-            .args([
-                "--app-name=Voxtype",
-                "--urgency=low",
-                "-h",
-                SYNC_HINT,
-                "Voxtype",
-                &format!("Downloading model {} in the background…", model_name),
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+        crate::notification::send_status_sync(
+            "Voxtype",
+            &format!("Downloading model {} in the background…", model_name),
+            "low",
+        );
 
         // Synchronous download in this worker thread. `download_parakeet_model`
         // is `fn` (not `async fn`), so no tokio runtime is required here.
@@ -588,38 +579,24 @@ fn spawn_background_model_download(model_name: String) {
 
         match result {
             Ok(()) => {
-                let _ = std::process::Command::new("notify-send")
-                    .args([
-                        "--app-name=Voxtype",
-                        "--urgency=normal",
-                        "-h",
-                        SYNC_HINT,
-                        "Voxtype",
-                        &format!(
-                            "Model download complete: {}. Restart voxtype to use it.",
-                            model_name
-                        ),
-                    ])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
+                crate::notification::send_status_sync(
+                    "Voxtype",
+                    &format!(
+                        "Model download complete: {}. Restart voxtype to use it.",
+                        model_name
+                    ),
+                    "normal",
+                );
             }
             Err(e) => {
-                let _ = std::process::Command::new("notify-send")
-                    .args([
-                        "--app-name=Voxtype",
-                        "--urgency=critical",
-                        "-h",
-                        SYNC_HINT,
-                        "Voxtype",
-                        &format!(
-                            "Model download failed: {}. Run `voxtype setup --download --model {}` to retry.",
-                            e, model_name
-                        ),
-                    ])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
+                crate::notification::send_status_sync(
+                    "Voxtype",
+                    &format!(
+                        "Model download failed: {}. Run `voxtype setup --download --model {}` to retry.",
+                        e, model_name
+                    ),
+                    "critical",
+                );
             }
         }
     });

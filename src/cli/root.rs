@@ -12,7 +12,7 @@ use super::ENGINE_NAMES_CSV;
 
 #[derive(Parser)]
 #[command(name = "voxtype")]
-#[command(author, version, about = "Push-to-talk voice-to-text for Linux")]
+#[command(author, version = super::VERSION, about = "Push-to-talk voice-to-text for Linux")]
 #[command(long_about = "\
 Voxtype is a push-to-talk voice-to-text tool for Linux.\n\
 Optimized for Wayland, works on X11 too.")]

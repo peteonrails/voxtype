@@ -44,7 +44,7 @@ What language(s) do you speak?
 │   └─ Chinese dialects?                 → Dolphin
 │
 ├─ Japanese or Korean
-│   ├─ Want a small, fast model?         → Moonshine (tiny-ja/tiny-ko) or SenseVoice
+│   ├─ Want a small, fast model?         → Moonshine (base-ja/tiny-ko) or SenseVoice
 │   └─ Want best quality?                → Whisper large-v3-turbo or SenseVoice
 │
 ├─ European languages (German, French, Spanish, etc.)
@@ -229,8 +229,6 @@ Encoder-decoder transformer optimized for edge devices. Processes variable-lengt
 | tiny | 100 MB | English | MIT |
 | base-ja | 237 MB | Japanese | Community (non-commercial) |
 | base-zh | 237 MB | Chinese | Community (non-commercial) |
-| tiny-ja | 100 MB | Japanese | Community (non-commercial) |
-| tiny-zh | 100 MB | Chinese | Community (non-commercial) |
 | tiny-ko | 100 MB | Korean | Community (non-commercial) |
 | tiny-ar | 100 MB | Arabic | Community (non-commercial) |
 

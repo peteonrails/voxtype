@@ -459,6 +459,21 @@ mod tests {
         }
     }
 
+    /// #669/#581 regression gate: routing the streaming and transcribe-file
+    /// paths through TextProcessor must not change what the batch path
+    /// produces. Pins the exact output for a representative input that
+    /// exercises replacements and spoken punctuation together.
+    #[test]
+    fn batch_pipeline_output_is_pinned() {
+        let config = make_config(true, &[("vox type", "voxtype")]);
+        let processor = TextProcessor::new(&config);
+
+        assert_eq!(
+            processor.process("hello comma I use vox type for dictation period"),
+            "hello, I use voxtype for dictation."
+        );
+    }
+
     #[test]
     fn test_spoken_punctuation_basic() {
         let config = make_config(true, &[]);

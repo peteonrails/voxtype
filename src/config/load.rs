@@ -1,4 +1,4 @@
-use super::parse::parse_config_with_defaults;
+use super::parse::parse_config_salvaging;
 use super::{
     Config, LanguageConfig, OpenVinoConfig, OutputMode, SonioxConfig, TranscriptionEngine,
 };
@@ -34,8 +34,30 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             let contents = std::fs::read_to_string(path)
                 .map_err(|e| VoxtypeError::Config(format!("Failed to read config: {}", e)))?;
 
-            config = parse_config_with_defaults(&contents)
+            // Salvage per section rather than refusing to start: one bad
+            // value used to cost the user every other setting they had
+            // (#646). A TOML syntax error is still fatal, because there is
+            // nothing to salvage from a file we cannot parse at all.
+            let (parsed, rejected) = parse_config_salvaging(&contents)
                 .map_err(|e| VoxtypeError::Config(format!("Invalid config: {}", e)))?;
+            config = parsed;
+
+            for key in &rejected {
+                // Names only. These sections hold API keys for the remote and
+                // Soniox backends, so the values must never reach the log.
+                tracing::warn!(
+                    "Config section '{}' could not be read and is using defaults. \
+                     Check it against `voxtype config schema`.",
+                    key
+                );
+            }
+            if !rejected.is_empty() {
+                tracing::warn!(
+                    "{} config section(s) were skipped: {}",
+                    rejected.len(),
+                    rejected.join(", ")
+                );
+            }
         } else {
             tracing::debug!("Config file not found at {:?}, using defaults", path);
         }
@@ -267,5 +289,35 @@ mod tests {
         assert_eq!(config.hotkey.key, "F12");
         assert_eq!(config.whisper.model, "tiny.en");
         assert_eq!(config.output.mode, OutputMode::Clipboard);
+    }
+
+    /// #646's user-facing contract: a config file with one broken section
+    /// still loads. Before the salvage path, `load_config` returned Err here
+    /// and the daemon refused to start, costing the user every setting they
+    /// had over one bad value.
+    #[test]
+    fn load_config_warns_but_succeeds_on_a_partially_bad_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+                [hotkey]
+                key = "F13"
+
+                [audio]
+                max_duration_secs = "not a number"
+            "#,
+        )
+        .unwrap();
+
+        let config = load_config(Some(&config_path))
+            .expect("a partially bad config must load, not refuse to start (#646)");
+        assert_eq!(config.hotkey.key, "F13", "the good section must survive");
+        assert_eq!(
+            config.audio.max_duration_secs,
+            Config::default().audio.max_duration_secs,
+            "the bad section falls back to its default"
+        );
     }
 }

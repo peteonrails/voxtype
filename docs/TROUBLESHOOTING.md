@@ -1247,6 +1247,19 @@ in the foreground to see the QML error:
 voxtype-osd-quickshell --no-daemonize
 ```
 
+### OSD looks or behaves like an older version after a binary upgrade
+
+The Quickshell frontend is two parts: the launcher binary and the QML tree it
+runs (installed to `~/.local/share/voxtype/quickshell/`). Package upgrades
+keep them in sync through `/usr/share/voxtype/quickshell`, but a manual
+binary swap upgrades only the launcher, and the stale QML keeps rendering old
+behavior. The launcher's manifest check catches missing files, not outdated
+ones. After any manual binary upgrade, re-sync the tree:
+
+```bash
+voxtype setup quickshell --force
+```
+
 ### Style or recipe changes don't show up
 
 The launcher resolves `[osd]` config once at startup and writes the result to

@@ -103,7 +103,12 @@ RUN cargo build --release --features parakeet,moonshine,sensevoice,paraformer,do
 # bridges the daemon's audio.sock to NDJSON for the Quickshell QML modules.
 # All four build with no extra GUI deps beyond what osd-gtk4 already pulls
 # in, so they ride alongside the existing gtk4 build with no overhead.
-RUN cargo build --release --features osd-gtk4 \
+# Built at x86-64-v2, unlike the daemon: these are UI and IPC binaries with
+# no inference hot path, and pinning them to haswell left pre-AVX2 machines
+# with a working baseline daemon but no OSD at all (#740). One artifact at
+# the lower floor serves every x86_64 machine.
+RUN RUSTFLAGS="-C target-cpu=x86-64-v2 -C target-feature=-avx2,-fma,-bmi2,-avx512f,-avx512bw,-avx512cd,-avx512dq,-avx512vl,-gfni" \
+    cargo build --release --features osd-gtk4 \
     --bin voxtype-osd --bin voxtype-osd-gtk4 \
     --bin voxtype-osd-quickshell --bin voxtype-audio-bridge \
     --config 'profile.release.lto=false' \
