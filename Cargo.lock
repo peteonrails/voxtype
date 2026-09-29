@@ -6116,6 +6116,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "evdev",
+ "flate2",
  "futures-util",
  "glib 0.22.7",
  "gtk4",

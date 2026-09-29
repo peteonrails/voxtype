@@ -369,3 +369,24 @@ fn report_outcome(outcome: &WaitOutcome, as_json: bool) {
         eprintln!("{}", outcome.status);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use voxtype::daemon::TranscriptOutcome;
+
+    #[test]
+    fn backend_error_sidecar_returns_failure_despite_saved_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("dictation.txt");
+        std::fs::write(&transcript, "incomplete transcript\n").unwrap();
+        let sidecar =
+            serde_json::to_string(&TranscriptOutcome::error("stream interrupted")).unwrap();
+
+        let outcome = finish(&transcript, &sidecar);
+        assert_eq!(outcome.status, "error");
+        assert_eq!(outcome.exit_code(), 1);
+        assert_eq!(outcome.message.as_deref(), Some("stream interrupted"));
+        assert!(outcome.text.is_empty());
+    }
+}

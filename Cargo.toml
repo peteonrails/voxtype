@@ -55,9 +55,10 @@ hound = "3"  # WAV file reading/writing
 # HTTP client for remote transcription
 ureq = { version = "2", features = ["json"] }
 
-# WebSocket client for Soniox streaming backend
+# WebSocket client for cloud streaming backends
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
+flate2 = "1"
 # Async HTTP client for Soniox async transcription API (multipart upload + poll)
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 

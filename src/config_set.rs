@@ -85,10 +85,10 @@ impl ConfigSetError {
     }
 }
 
-/// Engines `config set engine` and the settings UIs offer, in
-/// [`TranscriptionEngine`] declaration order. Deliberately narrower than the
-/// enum: `soniox` is configured through its own `[soniox]` table and is not
-/// offered by the TUI picker or `config set engine`, so it is excluded here.
+/// Engines offered by the model/settings UIs, in [`TranscriptionEngine`]
+/// declaration order. Deliberately narrower than the enum: cloud engines are
+/// configured through their own tables and have no downloadable model, so they
+/// are excluded here.
 /// The `engine_names_track_the_enum` test pins this list against the enum so
 /// a new variant can't be silently forgotten.
 pub const ENGINE_NAMES: &[&str] = &[
@@ -116,8 +116,8 @@ pub fn parse_engine(name: &str) -> Option<TranscriptionEngine> {
 
 /// Was this binary compiled with the feature needed to run the given engine?
 ///
-/// Whisper and Soniox are unconditional (Soniox was un-feature-gated in
-/// #441); every other engine is gated on the corresponding Cargo feature.
+/// Whisper, Soniox, and Seed-ASR are unconditional cloud/core engines; every
+/// other engine is gated on the corresponding Cargo feature.
 /// This is the source-of-truth check that matches what the TUI shows on
 /// source builds (see `EngineState::refresh_binary_match` in
 /// `src/tui/engine.rs`). The TUI's `compiled_features()` list in
@@ -133,7 +133,7 @@ pub fn engine_feature_compiled(name: &str) -> bool {
     };
     match engine {
         TranscriptionEngine::Whisper => true,
-        TranscriptionEngine::Soniox => true,
+        TranscriptionEngine::Soniox | TranscriptionEngine::SeedAsr => true,
         TranscriptionEngine::Parakeet => cfg!(feature = "parakeet"),
         TranscriptionEngine::Moonshine => cfg!(feature = "moonshine"),
         TranscriptionEngine::SenseVoice => cfg!(feature = "sensevoice"),
@@ -266,7 +266,7 @@ mod tests {
             .collect();
         assert_eq!(
             excluded,
-            [&"soniox"],
+            [&"soniox", &"seedasr"],
             "new engine variants must be added to ENGINE_NAMES or documented as excluded"
         );
     }
