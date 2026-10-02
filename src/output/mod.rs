@@ -391,7 +391,6 @@ pub fn create_output_chain_with_override(
             }
         }
         crate::config::OutputMode::Paste => {
-            // Only paste mode (no fallback as requested)
             chain.push(Box::new(paste::PasteOutput::new(
                 config.auto_submit,
                 config.append_text.clone(),
@@ -400,6 +399,11 @@ pub fn create_output_chain_with_override(
                 pre_type_delay_ms,
                 config.restore_clipboard,
                 config.restore_clipboard_delay_ms,
+            )));
+            // When the modifier guard times out it skips the paste; leave
+            // the text on the clipboard instead of dropping it.
+            chain.push(Box::new(clipboard::ClipboardOutput::new(
+                config.append_text.clone(),
             )));
         }
         crate::config::OutputMode::File => {
@@ -604,6 +608,19 @@ mod tests {
         let text = "Café \u{2019} emoji 😀";
         let result = normalize_quotes(text);
         assert_eq!(result, "Café ' emoji 😀");
+    }
+
+    #[test]
+    fn test_paste_mode_falls_back_to_clipboard() {
+        let config = OutputConfig {
+            mode: crate::config::OutputMode::Paste,
+            ..Default::default()
+        };
+        let chain = create_output_chain(&config);
+        let names: Vec<&str> = chain.iter().map(|o| o.name()).collect();
+        assert!(names[0].starts_with("paste"));
+        // The fallback must survive the guard's keystroke filter.
+        assert!(names[1..].iter().any(|n| !is_keystroke_method(n)));
     }
 
     #[test]
