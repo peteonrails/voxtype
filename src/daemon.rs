@@ -1192,6 +1192,16 @@ enum StreamingEndReason {
     Failed(Option<String>),
 }
 
+/// A finished dictation held back while the hotkey is down for the next one.
+struct DeferredOutput {
+    config: crate::config::OutputConfig,
+    text: String,
+    /// The transcription before text processing, for `show_edits`
+    original: String,
+    /// Its history entry, committed once the text is delivered
+    history: Option<crate::history::recorder::Pending>,
+}
+
 /// Main daemon that orchestrates all components
 #[cfg(test)]
 type HistoryTestEagerLoop = (
@@ -1295,6 +1305,14 @@ pub struct Daemon {
     whisper_prepare_task: Option<tokio::task::JoinHandle<()>>,
     // Background task for transcription (allows cancel during transcription)
     transcription_task: Option<tokio::task::JoinHandle<TranscriptionResult>>,
+    // Push-to-talk pipelining. The microphone keeps running from the end of
+    // a recording until its transcription finishes, so a press in that
+    // window records from where it left off instead of being dropped. Text
+    // that finishes while the hotkey is held for the next dictation waits in
+    // `deferred_output` until the release, so it doesn't land mid-sentence.
+    standby_capture: Option<Box<dyn AudioCapture>>,
+    deferred_output: Option<DeferredOutput>,
+    hotkey_down: bool,
     // Transcriber Arc used for the in-flight transcription_task. Held so the
     // result handler can query language metadata (e.g. detected language for
     // keyboard-layout hints to eitype/dotool, see issue #180) after the task
@@ -1609,6 +1627,9 @@ impl Daemon {
             override_load_task: None,
             whisper_prepare_task: None,
             transcription_task: None,
+            standby_capture: None,
+            deferred_output: None,
+            hotkey_down: false,
             active_transcriber: None,
             #[cfg(test)]
             history_test_capture: None,
@@ -1751,17 +1772,36 @@ impl Daemon {
 
     /// The dictation is over: write it in the background.
     fn history_commit(&self) {
-        let pending = self
+        if let Some(pending) = self.history_take() {
+            self.history_commit_pending(pending);
+        }
+    }
+
+    /// Take the dictation's history entry out of the recorder, for a
+    /// dictation whose text is delivered after the next one starts.
+    fn history_take(&self) -> Option<crate::history::recorder::Pending> {
+        let mut pending = self
             .dictation
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .take();
-        let Some(mut pending) = pending else {
-            return;
-        };
+            .take()?;
         if self.osd_limit_reached && pending.entry.ended_by == crate::history::EndedBy::Released {
             pending.entry.ended_by = crate::history::EndedBy::Timeout;
         }
+        Some(pending)
+    }
+
+    fn history_swap(
+        &self,
+        pending: Option<crate::history::recorder::Pending>,
+    ) -> Option<crate::history::recorder::Pending> {
+        std::mem::replace(
+            &mut *self.dictation.lock().unwrap_or_else(|e| e.into_inner()),
+            pending,
+        )
+    }
+
+    fn history_commit_pending(&self, pending: crate::history::recorder::Pending) {
         let _ = self
             .history
             .lock()
@@ -5662,6 +5702,130 @@ impl Daemon {
         }
     }
 
+    /// Whether to keep the microphone open while a push-to-talk dictation
+    /// transcribes, ready for the next press.
+    fn pipelines_dictation(&self) -> bool {
+        self.config.hotkey.enabled && self.config.hotkey.mode == ActivationMode::PushToTalk
+    }
+
+    async fn stop_standby_capture(&mut self) {
+        if let Some(mut capture) = self.standby_capture.take() {
+            tracing::debug!("Closing the standby capture");
+            let _ = capture.stop().await;
+            self.stop_level_emitter();
+        }
+    }
+
+    /// Output a dictation that was held back while the hotkey was down.
+    async fn flush_deferred_output(&mut self) {
+        let Some(deferred) = self.deferred_output.take() else {
+            return;
+        };
+        tracing::info!("Hotkey released; outputting the held-back dictation");
+        // Its history entry stands in for the recording's in progress while
+        // it is delivered.
+        let current = self.history_swap(deferred.history);
+        self.deliver_dictation(&deferred.config, &deferred.text, &deferred.original, false)
+            .await;
+        if let Some(finished) = self.history_swap(current) {
+            self.history_commit_pending(finished);
+        }
+    }
+
+    /// Type or paste a finished dictation and record how it went. `osd` is
+    /// false for a dictation held back while the next one records, whose
+    /// outcome would land on the new recording's OSD.
+    async fn deliver_dictation(
+        &mut self,
+        output_config: &crate::config::OutputConfig,
+        final_text: &str,
+        original: &str,
+        osd: bool,
+    ) {
+        #[cfg(test)]
+        let output_chain = match self.history_test_output_chain.take() {
+            Some(chain) => chain,
+            None => output::create_output_chain(output_config),
+        };
+        #[cfg(not(test))]
+        let output_chain = output::create_output_chain(output_config);
+
+        let history_context = self.history_context();
+        let output_options = output::OutputOptions {
+            history_context: history_context.as_ref(),
+            pre_output_command: output_config.pre_output_command.as_deref(),
+            post_output_command: output_config.post_output_command.as_deref(),
+            wait_for_modifier_release: output_config.wait_for_modifier_release,
+            modifier_release_timeout: std::time::Duration::from_millis(
+                output_config.modifier_release_timeout_ms,
+            ),
+        };
+
+        let (report, delivery) =
+            output::output_with_fallback_report(&output_chain, final_text, output_options).await;
+        {
+            use crate::history::{Outcome, OutputInfo};
+            let mode = format!("{:?}", output_config.mode).to_lowercase();
+            let auto_submit = output_config.auto_submit;
+            let (driver, fell_back, error) = match &delivery {
+                Ok(d) => (Some(d.driver.clone()), d.fell_back, None),
+                Err(e) => (None, false, Some(e.to_string())),
+            };
+            let delivered_text = delivery.as_ref().ok().map(|d| d.text.clone());
+            self.history_note(|p| {
+                if let Some(text) = &delivered_text {
+                    p.delivered_text(text);
+                }
+                p.entry.output = Some(OutputInfo {
+                    mode,
+                    driver,
+                    fell_back,
+                });
+                p.entry.auto_submit = auto_submit;
+                if let Some(err) = error {
+                    p.outcome(Outcome::OutputFailed, Some(err));
+                }
+            });
+        }
+        if let Err(e) = delivery {
+            tracing::error!("Output failed: {}", e);
+            if osd {
+                self.publish_osd_outcome(osd::session::OutcomeKind::OutputFailed, 0);
+            }
+            // Nothing typed or copied: keep the text recoverable,
+            // unless [output] keep_undelivered_text is off.
+            output::fallback::notify_failed(
+                &report,
+                &e,
+                final_text,
+                self.config.output.keep_undelivered_text,
+            )
+            .await;
+        } else {
+            if osd {
+                self.publish_osd_text_outcome(final_text);
+            }
+            self.play_feedback(SoundEvent::TranscriptionComplete);
+            // Says "copied to clipboard" (and why, once) when
+            // typing fell back to the clipboard.
+            output::fallback::notify_delivered(
+                &report,
+                final_text,
+                self.config
+                    .output
+                    .notification
+                    .show_edits
+                    .then_some(original),
+                &self.config.output.notification,
+                self.config.engine,
+            )
+            .await;
+        }
+        // After the "Transcribed" notification, which would
+        // otherwise replace a post-process or hook failure notice.
+        output::deferred_notice::flush().await;
+    }
+
     /// Start transcription task (non-blocking, stores JoinHandle for later completion)
     /// Returns true if transcription was started, false if skipped (too short)
     async fn start_transcription_task(
@@ -5761,6 +5925,12 @@ impl Daemon {
                     self.transcription_task = Some(tokio::task::spawn_blocking(move || {
                         transcriber.transcribe(&samples)
                     }));
+                    if self.pipelines_dictation() && self.standby_capture.is_none() {
+                        match self.start_recording_capture(false).await {
+                            Ok(capture) => self.standby_capture = Some(capture),
+                            Err(()) => tracing::debug!("Standby capture didn't start"),
+                        }
+                    }
                     true
                 }
                 Err(e) => {
@@ -6220,93 +6390,27 @@ impl Daemon {
                         }
                     }
 
-                    #[cfg(test)]
-                    let output_chain = match self.history_test_output_chain.take() {
-                        Some(chain) => chain,
-                        None => output::create_output_chain(&output_config),
-                    };
-                    #[cfg(not(test))]
-                    let output_chain = output::create_output_chain(&output_config);
+                    if self.pipelines_dictation() && self.hotkey_down {
+                        tracing::info!(
+                            "Hotkey held for the next dictation; output waits for the release"
+                        );
+                        let history = self.history_take();
+                        self.deferred_output = Some(DeferredOutput {
+                            config: output_config,
+                            text: final_text,
+                            original: text.clone(),
+                            history,
+                        });
+                        *state = State::Idle;
+                        self.update_state("idle");
+                        return;
+                    }
 
-                    // Output the text
                     *state = State::Outputting {
                         text: final_text.clone(),
                     };
-
-                    let history_context = self.history_context();
-                    let output_options = output::OutputOptions {
-                        history_context: history_context.as_ref(),
-                        pre_output_command: output_config.pre_output_command.as_deref(),
-                        post_output_command: output_config.post_output_command.as_deref(),
-                        wait_for_modifier_release: output_config.wait_for_modifier_release,
-                        modifier_release_timeout: std::time::Duration::from_millis(
-                            output_config.modifier_release_timeout_ms,
-                        ),
-                    };
-
-                    let (report, delivery) = output::output_with_fallback_report(
-                        &output_chain,
-                        &final_text,
-                        output_options,
-                    )
-                    .await;
-                    {
-                        use crate::history::{Outcome, OutputInfo};
-                        let mode = format!("{:?}", output_config.mode).to_lowercase();
-                        let auto_submit = output_config.auto_submit;
-                        let (driver, fell_back, error) = match &delivery {
-                            Ok(d) => (Some(d.driver.clone()), d.fell_back, None),
-                            Err(e) => (None, false, Some(e.to_string())),
-                        };
-                        let delivered_text = delivery.as_ref().ok().map(|d| d.text.clone());
-                        self.history_note(|p| {
-                            if let Some(text) = &delivered_text {
-                                p.delivered_text(text);
-                            }
-                            p.entry.output = Some(OutputInfo {
-                                mode,
-                                driver,
-                                fell_back,
-                            });
-                            p.entry.auto_submit = auto_submit;
-                            if let Some(err) = error {
-                                p.outcome(Outcome::OutputFailed, Some(err));
-                            }
-                        });
-                    }
-                    if let Err(e) = delivery {
-                        tracing::error!("Output failed: {}", e);
-                        self.publish_osd_outcome(osd::session::OutcomeKind::OutputFailed, 0);
-                        // Nothing typed or copied: keep the text recoverable,
-                        // unless [output] keep_undelivered_text is off.
-                        output::fallback::notify_failed(
-                            &report,
-                            &e,
-                            &final_text,
-                            self.config.output.keep_undelivered_text,
-                        )
+                    self.deliver_dictation(&output_config, &final_text, &text, true)
                         .await;
-                    } else {
-                        self.publish_osd_text_outcome(&final_text);
-                        self.play_feedback(SoundEvent::TranscriptionComplete);
-                        // Says "copied to clipboard" (and why, once) when
-                        // typing fell back to the clipboard.
-                        output::fallback::notify_delivered(
-                            &report,
-                            &final_text,
-                            self.config
-                                .output
-                                .notification
-                                .show_edits
-                                .then_some(text.as_str()),
-                            &self.config.output.notification,
-                            self.config.engine,
-                        )
-                        .await;
-                    }
-                    // After the "Transcribed" notification, which would
-                    // otherwise replace a post-process or hook failure notice.
-                    output::deferred_notice::flush().await;
 
                     *state = State::Idle;
                     self.update_state("idle");
@@ -6937,6 +7041,11 @@ impl Daemon {
         let mut transcribing_poll = tokio::time::interval(Duration::from_millis(100));
         transcribing_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+        // Push-to-talk events that arrived while a dictation was
+        // transcribing, and the same events queued to run once it's done.
+        let mut held_events: Vec<HotkeyEvent> = Vec::new();
+        let mut replay_queue: std::collections::VecDeque<HotkeyEvent> = Default::default();
+
         loop {
             self.apply_pending_language(state.is_idle());
             tokio::select! {
@@ -6971,6 +7080,9 @@ impl Daemon {
                 }
                 // Handle hotkey events (only if hotkey listener is enabled)
                 Some(hotkey_event) = async {
+                    if let Some(event) = replay_queue.pop_front() {
+                        return Some(event);
+                    }
                     match &mut hotkey_rx {
                         Some(rx) => rx.recv().await,
                         None => std::future::pending().await,
@@ -6981,6 +7093,12 @@ impl Daemon {
                         (HotkeyEvent::Pressed { model_override, profile_override }, ActivationMode::PushToTalk) => {
                             tracing::debug!("Received HotkeyEvent::Pressed (push-to-talk), state.is_idle() = {}, model_override = {:?}, profile_override = {:?}",
                                 state.is_idle(), model_override, profile_override);
+                            self.hotkey_down = true;
+                            if matches!(state, State::Transcribing { .. }) && self.standby_capture.is_some() {
+                                tracing::debug!("Busy transcribing; recording continues on the standby capture");
+                                held_events.push(HotkeyEvent::Pressed { model_override, profile_override });
+                                continue;
+                            }
                             if state.is_idle() {
                                 if !self.accept_model_override(model_override.as_deref()).await {
                                     continue;
@@ -7016,10 +7134,18 @@ impl Daemon {
                                     false,
                                 ).await {
                                     tracing::info!("Streaming session started (push-to-talk)");
+                                    self.stop_standby_capture().await;
                                 } else {
                                     // Create and start audio capture
                                     tracing::debug!("Creating audio capture with device: {}", self.config.audio.device);
-                                    match self.start_recording_capture(false).await {
+                                    let capture = match self.standby_capture.take() {
+                                        Some(capture) => {
+                                            tracing::debug!("Recording on the standby capture");
+                                            Ok(capture)
+                                        }
+                                        None => self.start_recording_capture(false).await,
+                                    };
+                                    match capture {
                                         Ok(capture) => {
                                             tracing::debug!("Audio capture started successfully");
                                             audio_capture = Some(capture);
@@ -7064,6 +7190,14 @@ impl Daemon {
 
                         (HotkeyEvent::Released, ActivationMode::PushToTalk) => {
                             tracing::debug!("Received HotkeyEvent::Released (push-to-talk), state.is_recording() = {}", state.is_recording());
+                            self.hotkey_down = false;
+                            if matches!(state, State::Transcribing { .. })
+                                && held_events.iter().any(|e| matches!(e, HotkeyEvent::Pressed { .. }))
+                            {
+                                held_events.push(HotkeyEvent::Released);
+                                continue;
+                            }
+                            self.flush_deferred_output().await;
                             if state.is_streaming() {
                                 self.request_streaming_stop(
                                     &mut audio_capture,
@@ -7292,6 +7426,16 @@ impl Daemon {
                         // === CANCEL KEY (works in both modes) ===
                         (HotkeyEvent::Cancel, _) => {
                             tracing::debug!("Received HotkeyEvent::Cancel");
+                            self.hotkey_down = false;
+                            // Cancelling a recording queued behind a
+                            // transcription drops that recording, not the
+                            // dictation being transcribed.
+                            if !held_events.is_empty() {
+                                held_events.clear();
+                                continue;
+                            }
+                            self.flush_deferred_output().await;
+                            self.stop_standby_capture().await;
                             self.cancel_requested_session(
                                 &mut state,
                                 &mut audio_capture,
@@ -7664,6 +7808,10 @@ impl Daemon {
                 }, if self.transcription_task.is_some() => {
                     self.transcription_task = None;
                     self.handle_transcription_result(&mut state, result).await;
+                    if held_events.is_empty() {
+                        self.stop_standby_capture().await;
+                    }
+                    replay_queue.extend(held_events.drain(..));
                 }
 
                 Some(report) = async {
@@ -7832,6 +7980,8 @@ impl Daemon {
                 // Check for cancel during transcription
                 _ = transcribing_poll.tick(), if matches!(state, State::Transcribing { .. }) => {
                     if check_cancel_requested() {
+                        held_events.clear();
+                        self.stop_standby_capture().await;
                         self.cancel_requested_session(
                             &mut state,
                             &mut audio_capture,
