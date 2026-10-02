@@ -1028,6 +1028,12 @@ type TranscriberLoadTask = tokio::task::JoinHandle<
     std::result::Result<Arc<dyn Transcriber>, crate::error::TranscribeError>,
 >;
 
+/// A finished dictation held back while the hotkey is down for the next one.
+struct DeferredOutput {
+    config: crate::config::OutputConfig,
+    text: String,
+}
+
 /// Main daemon that orchestrates all components
 pub struct Daemon {
     config: Config,
@@ -1085,6 +1091,14 @@ pub struct Daemon {
     whisper_prepare_task: Option<tokio::task::JoinHandle<()>>,
     // Background task for transcription (allows cancel during transcription)
     transcription_task: Option<tokio::task::JoinHandle<TranscriptionResult>>,
+    // Push-to-talk pipelining. The microphone keeps running from the end of
+    // a recording until its transcription finishes, so a press in that
+    // window records from where it left off instead of being dropped. Text
+    // that finishes while the hotkey is held for the next dictation waits in
+    // `deferred_output` until the release, so it doesn't land mid-sentence.
+    standby_capture: Option<Box<dyn AudioCapture>>,
+    deferred_output: Option<DeferredOutput>,
+    hotkey_down: bool,
     // Transcriber Arc used for the in-flight transcription_task. Held so the
     // result handler can query language metadata (e.g. detected language for
     // keyboard-layout hints to eitype/dotool, see issue #180) after the task
@@ -1226,6 +1240,9 @@ impl Daemon {
             override_load_task: None,
             whisper_prepare_task: None,
             transcription_task: None,
+            standby_capture: None,
+            deferred_output: None,
+            hotkey_down: false,
             active_transcriber: None,
             transcriber_preloaded: None,
             eager_chunk_tasks: Vec::new(),
@@ -3225,6 +3242,51 @@ impl Daemon {
 
     /// Start transcription task (non-blocking, stores JoinHandle for later completion)
     /// Returns true if transcription was started, false if skipped (too short)
+    /// Whether to keep the microphone open while a push-to-talk dictation
+    /// transcribes, ready for the next press.
+    fn pipelines_dictation(&self) -> bool {
+        self.config.hotkey.enabled && self.config.hotkey.mode == ActivationMode::PushToTalk
+    }
+
+    async fn stop_standby_capture(&mut self) {
+        if let Some(mut capture) = self.standby_capture.take() {
+            tracing::debug!("Closing the standby capture");
+            let _ = capture.stop().await;
+            self.stop_level_emitter();
+        }
+    }
+
+    /// Output a dictation that was held back while the hotkey was down.
+    async fn flush_deferred_output(&mut self) {
+        let Some(deferred) = self.deferred_output.take() else {
+            return;
+        };
+        tracing::info!("Hotkey released; outputting the held-back dictation");
+        let chain = output::create_output_chain(&deferred.config);
+        let options = output::OutputOptions {
+            pre_output_command: deferred.config.pre_output_command.as_deref(),
+            post_output_command: deferred.config.post_output_command.as_deref(),
+            wait_for_modifier_release: deferred.config.wait_for_modifier_release,
+            modifier_release_timeout: std::time::Duration::from_millis(
+                deferred.config.modifier_release_timeout_ms,
+            ),
+        };
+        if let Err(e) = output::output_with_fallback(&chain, &deferred.text, options).await {
+            tracing::error!("Output failed: {}", e);
+            return;
+        }
+        self.play_feedback(SoundEvent::TranscriptionComplete);
+        if self.config.output.notification.on_transcription {
+            output::send_transcription_notification(
+                &deferred.text,
+                self.config.output.notification.show_engine_icon,
+                self.config.engine,
+                &self.config.output.notification.urgency,
+            )
+            .await;
+        }
+    }
+
     async fn start_transcription_task(
         &mut self,
         state: &mut State,
@@ -3314,6 +3376,12 @@ impl Daemon {
                     self.transcription_task = Some(tokio::task::spawn_blocking(move || {
                         transcriber.transcribe(&samples)
                     }));
+                    if self.pipelines_dictation() && self.standby_capture.is_none() {
+                        match self.start_recording_capture(false).await {
+                            Ok(capture) => self.standby_capture = Some(capture),
+                            Err(()) => tracing::debug!("Standby capture didn't start"),
+                        }
+                    }
                     true
                 }
                 Err(e) => {
@@ -3628,6 +3696,19 @@ impl Daemon {
                                 }
                             }
                         }
+                    }
+
+                    if self.pipelines_dictation() && self.hotkey_down {
+                        tracing::info!(
+                            "Hotkey held for the next dictation; output waits for the release"
+                        );
+                        self.deferred_output = Some(DeferredOutput {
+                            config: output_config,
+                            text: final_text,
+                        });
+                        *state = State::Idle;
+                        self.update_state("idle");
+                        return;
                     }
 
                     let output_chain = output::create_output_chain(&output_config);
@@ -4060,10 +4141,18 @@ impl Daemon {
         let mut transcribing_poll = tokio::time::interval(Duration::from_millis(100));
         transcribing_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+        // Push-to-talk events that arrived while a dictation was
+        // transcribing, and the same events queued to run once it's done.
+        let mut held_events: Vec<HotkeyEvent> = Vec::new();
+        let mut replay_queue: std::collections::VecDeque<HotkeyEvent> = Default::default();
+
         loop {
             tokio::select! {
                 // Handle hotkey events (only if hotkey listener is enabled)
                 Some(hotkey_event) = async {
+                    if let Some(event) = replay_queue.pop_front() {
+                        return Some(event);
+                    }
                     match &mut hotkey_rx {
                         Some(rx) => rx.recv().await,
                         None => std::future::pending().await,
@@ -4074,6 +4163,12 @@ impl Daemon {
                         (HotkeyEvent::Pressed { model_override, profile_override }, ActivationMode::PushToTalk) => {
                             tracing::debug!("Received HotkeyEvent::Pressed (push-to-talk), state.is_idle() = {}, model_override = {:?}, profile_override = {:?}",
                                 state.is_idle(), model_override, profile_override);
+                            self.hotkey_down = true;
+                            if matches!(state, State::Transcribing { .. }) && self.standby_capture.is_some() {
+                                tracing::debug!("Busy transcribing; recording continues on the standby capture");
+                                held_events.push(HotkeyEvent::Pressed { model_override, profile_override });
+                                continue;
+                            }
                             if state.is_idle() {
                                 if !self.accept_model_override(model_override.as_deref()).await {
                                     continue;
@@ -4109,10 +4204,18 @@ impl Daemon {
                                     false,
                                 ).await {
                                     tracing::info!("Streaming session started (push-to-talk)");
+                                    self.stop_standby_capture().await;
                                 } else {
                                     // Create and start audio capture
                                     tracing::debug!("Creating audio capture with device: {}", self.config.audio.device);
-                                    match self.start_recording_capture(false).await {
+                                    let capture = match self.standby_capture.take() {
+                                        Some(capture) => {
+                                            tracing::debug!("Recording on the standby capture");
+                                            Ok(capture)
+                                        }
+                                        None => self.start_recording_capture(false).await,
+                                    };
+                                    match capture {
                                         Ok(capture) => {
                                             tracing::debug!("Audio capture started successfully");
                                             audio_capture = Some(capture);
@@ -4156,6 +4259,14 @@ impl Daemon {
 
                         (HotkeyEvent::Released, ActivationMode::PushToTalk) => {
                             tracing::debug!("Received HotkeyEvent::Released (push-to-talk), state.is_recording() = {}", state.is_recording());
+                            self.hotkey_down = false;
+                            if matches!(state, State::Transcribing { .. })
+                                && held_events.iter().any(|e| matches!(e, HotkeyEvent::Pressed { .. }))
+                            {
+                                held_events.push(HotkeyEvent::Released);
+                                continue;
+                            }
+                            self.flush_deferred_output().await;
                             if state.is_streaming() {
                                 tracing::debug!("Streaming push-to-talk released; closing audio capture and disowning session");
                                 self.stop_streaming_capture(&mut audio_capture).await;
@@ -4366,6 +4477,16 @@ impl Daemon {
                         // === CANCEL KEY (works in both modes) ===
                         (HotkeyEvent::Cancel, _) => {
                             tracing::debug!("Received HotkeyEvent::Cancel");
+                            self.hotkey_down = false;
+                            // Cancelling a recording queued behind a
+                            // transcription drops that recording, not the
+                            // dictation being transcribed.
+                            if !held_events.is_empty() {
+                                held_events.clear();
+                                continue;
+                            }
+                            self.flush_deferred_output().await;
+                            self.stop_standby_capture().await;
 
                             if state.is_streaming() {
                                 tracing::info!("Streaming cancelled via hotkey");
@@ -4778,6 +4899,10 @@ impl Daemon {
                 }, if self.transcription_task.is_some() => {
                     self.transcription_task = None;
                     self.handle_transcription_result(&mut state, result).await;
+                    if held_events.is_empty() {
+                        self.stop_standby_capture().await;
+                    }
+                    replay_queue.extend(held_events.drain(..));
                 }
 
                 // Streaming event pump (active only while State::Streaming).
@@ -4900,6 +5025,8 @@ impl Daemon {
                 // Check for cancel during transcription
                 _ = transcribing_poll.tick(), if matches!(state, State::Transcribing { .. }) => {
                     if check_cancel_requested() {
+                        held_events.clear();
+                        self.stop_standby_capture().await;
                         self.cancel_requested_session(
                             &mut state,
                             &mut audio_capture,
