@@ -294,6 +294,22 @@ cancel_key = "ESC"  # Press Escape to cancel
 
 **Note:** This only applies when using evdev hotkey detection (`enabled = true`). When using compositor keybindings, use `voxtype record cancel` instead. See [User Manual - Canceling Transcription](USER_MANUAL.md#canceling-transcription).
 
+### cancel_on_other_key
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Cancels the recording when any other key goes down while the hotkey is held. Useful when the hotkey is a key you also use in shortcuts: with `key = "RIGHTCTRL"`, pressing Right Ctrl+C copies without leaving a recording of whatever you were saying behind.
+
+Modifier keys (Ctrl, Shift, Alt, Super), `model_modifier` and the `profile_modifiers` keys don't cancel, so they keep working with the hotkey held.
+
+```toml
+[hotkey]
+key = "RIGHTCTRL"
+cancel_on_other_key = true
+```
+
 ### [hotkey.profile_modifiers]
 
 **Type:** Table (key = modifier name, value = profile name)

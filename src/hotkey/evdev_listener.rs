@@ -33,6 +33,8 @@ pub struct EvdevListener {
     secondary_model: Option<String>,
     /// Modifier keys that activate named profiles for post-processing
     profile_modifiers: HashMap<Key, String>,
+    /// Cancel when another key is pressed with the hotkey held
+    cancel_on_other_key: bool,
     /// Signal to stop the listener task
     stop_signal: Option<oneshot::Sender<()>>,
 }
@@ -100,6 +102,7 @@ impl EvdevListener {
             model_modifier,
             secondary_model: None, // Set later via set_secondary_model
             profile_modifiers,
+            cancel_on_other_key: config.cancel_on_other_key,
             stop_signal: None,
         })
     }
@@ -122,6 +125,7 @@ impl HotkeyListener for EvdevListener {
         let model_modifier = self.model_modifier;
         let secondary_model = self.secondary_model.clone();
         let profile_modifiers = self.profile_modifiers.clone();
+        let cancel_on_other_key = self.cancel_on_other_key;
 
         // Spawn the listener task
         tokio::task::spawn_blocking(move || {
@@ -132,6 +136,7 @@ impl HotkeyListener for EvdevListener {
                 model_modifier,
                 secondary_model,
                 profile_modifiers,
+                cancel_on_other_key,
                 tx,
                 stop_rx,
             ) {
@@ -440,6 +445,31 @@ fn reset_for_device_change(
     was_pressed.then_some(HotkeyEvent::Released)
 }
 
+/// Whether pressing `key` while the hotkey is held turns the hotkey into
+/// part of a shortcut. Modifiers and the keys voxtype itself reads with the
+/// hotkey don't.
+fn is_shortcut_key(
+    key: Key,
+    target_key: Key,
+    model_modifier: Option<Key>,
+    profile_modifiers: &HashMap<Key, String>,
+) -> bool {
+    !(key == target_key
+        || model_modifier == Some(key)
+        || profile_modifiers.contains_key(&key)
+        || matches!(
+            key,
+            Key::KEY_LEFTCTRL
+                | Key::KEY_RIGHTCTRL
+                | Key::KEY_LEFTSHIFT
+                | Key::KEY_RIGHTSHIFT
+                | Key::KEY_LEFTALT
+                | Key::KEY_RIGHTALT
+                | Key::KEY_LEFTMETA
+                | Key::KEY_RIGHTMETA
+        ))
+}
+
 /// Main listener loop running in a blocking task
 #[allow(clippy::too_many_arguments)]
 fn evdev_listener_loop(
@@ -449,6 +479,7 @@ fn evdev_listener_loop(
     model_modifier: Option<Key>,
     secondary_model: Option<String>,
     profile_modifiers: HashMap<Key, String>,
+    cancel_on_other_key: bool,
     tx: mpsc::Sender<HotkeyEvent>,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<(), HotkeyError> {
@@ -589,6 +620,22 @@ fn evdev_listener_loop(
                     }
                     _ => {}
                 }
+            }
+
+            if cancel_on_other_key
+                && is_pressed
+                && value == 1
+                && is_shortcut_key(key, target_key, model_modifier, &profile_modifiers)
+            {
+                tracing::debug!(
+                    "{:?} pressed with the hotkey; cancelling the recording",
+                    key
+                );
+                is_pressed = false;
+                if tx.blocking_send(HotkeyEvent::Cancel).is_err() {
+                    return Ok(()); // Channel closed
+                }
+                continue;
             }
 
             // Check cancel key first (if configured)
@@ -874,6 +921,18 @@ fn fd_is_hung_up(fd: RawFd) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_shortcut_key() {
+        let profiles = HashMap::from([(Key::KEY_RIGHTALT, "formal".to_string())]);
+        let shortcut = |k| is_shortcut_key(k, Key::KEY_RIGHTCTRL, Some(Key::KEY_F13), &profiles);
+        assert!(shortcut(Key::KEY_C));
+        assert!(shortcut(Key::KEY_ENTER));
+        assert!(!shortcut(Key::KEY_RIGHTCTRL));
+        assert!(!shortcut(Key::KEY_LEFTSHIFT));
+        assert!(!shortcut(Key::KEY_RIGHTALT));
+        assert!(!shortcut(Key::KEY_F13));
+    }
 
     /// #556: a device change while the hotkey is held must synthesize a
     /// release. Without it the real key-up is dropped by the `0 if is_pressed`
