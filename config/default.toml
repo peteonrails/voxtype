@@ -51,6 +51,13 @@ modifiers = []
 # LEFTSHIFT = "translate"   # Shift+hotkey activates [profiles.translate]
 # RIGHTALT = "formal"       # RightAlt+hotkey activates [profiles.formal]
 
+# Language modifiers (evdev only, Whisper engine)
+# Maps modifier keys to Whisper language codes. Hold one when the hotkey goes
+# down, or press it any time during the recording, to transcribe that
+# recording in that language instead of the configured one.
+# [hotkey.language_modifiers]
+# RIGHTSHIFT = "pt"
+
 [audio]
 # Audio input device ("default" uses system default)
 # List devices with: voxtype info devices
