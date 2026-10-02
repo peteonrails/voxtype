@@ -284,7 +284,18 @@ impl Transcriber for WhisperTranscriber {
         let mut result =
             self.run_full(samples, selected_language.as_deref(), duration_secs, false)?;
 
-        if duration_secs >= 1.0 && is_degenerate_transcript(&result) {
+        if duration_secs >= 1.0 && has_repetition_loop(&result) {
+            tracing::warn!(
+                "Whisper looped on a phrase for {:.2}s audio; retrying with beam search",
+                duration_secs
+            );
+            let retry_result =
+                self.run_full(samples, selected_language.as_deref(), duration_secs, true)?;
+            if !is_degenerate_transcript(&retry_result) {
+                result = retry_result;
+            }
+            result = collapse_repetition_loops(&result);
+        } else if duration_secs >= 1.0 && is_degenerate_transcript(&result) {
             tracing::warn!(
                 "Whisper returned degenerate transcript {:?} for {:.2}s audio; retrying with beam search",
                 result,
@@ -320,6 +331,52 @@ impl Transcriber for WhisperTranscriber {
     fn last_detected_language(&self) -> Option<String> {
         self.last_language.lock().ok().and_then(|g| g.clone())
     }
+}
+
+/// Shortest phrase, in words, whose back-to-back repeats count as a decoder loop.
+/// Shorter repeats ("no no no") are often what was said.
+const LOOP_MIN_WORDS: usize = 3;
+
+fn loop_key(word: &str) -> String {
+    word.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Finds a phrase of at least LOOP_MIN_WORDS words repeated three or more
+/// times in a row. Returns (start, phrase length, copies) in words.
+fn find_repetition_loop(words: &[&str]) -> Option<(usize, usize, usize)> {
+    let keys: Vec<String> = words.iter().map(|w| loop_key(w)).collect();
+    for len in LOOP_MIN_WORDS..=keys.len() / 3 {
+        for start in 0..=keys.len() - 3 * len {
+            let mut copies = 1;
+            while start + (copies + 1) * len <= keys.len()
+                && keys[start..start + len]
+                    == keys[start + copies * len..start + (copies + 1) * len]
+            {
+                copies += 1;
+            }
+            if copies >= 3 {
+                return Some((start, len, copies));
+            }
+        }
+    }
+    None
+}
+
+fn has_repetition_loop(text: &str) -> bool {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    find_repetition_loop(&words).is_some()
+}
+
+/// Keeps one copy of each phrase Whisper looped on.
+fn collapse_repetition_loops(text: &str) -> String {
+    let mut words: Vec<&str> = text.split_whitespace().collect();
+    while let Some((start, len, copies)) = find_repetition_loop(&words) {
+        words.drain(start + len..start + copies * len);
+    }
+    words.join(" ")
 }
 
 fn is_degenerate_transcript(text: &str) -> bool {
@@ -449,6 +506,27 @@ pub fn get_model_url(model: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_repetition_loops() {
+        let looped = "I mean, what's the status of the project? ".repeat(15);
+        assert!(has_repetition_loop(&looped));
+        assert_eq!(
+            collapse_repetition_loops(&looped),
+            "I mean, what's the status of the project?"
+        );
+        assert_eq!(
+            collapse_repetition_loops("So, go on. Go on. Go on. Go on. Then stop."),
+            "So, go on. Go on. Go on. Go on. Then stop."
+        );
+        assert_eq!(
+            collapse_repetition_loops("Fine. It works now. It works now. It works now. Done."),
+            "Fine. It works now. Done."
+        );
+        assert!(!has_repetition_loop("no no no, not that one"));
+        assert!(!has_repetition_loop("one two three one two three"));
+        assert!(!has_repetition_loop(""));
+    }
 
     #[test]
     fn test_model_url() {
