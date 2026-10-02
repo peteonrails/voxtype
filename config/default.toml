@@ -45,6 +45,11 @@ modifiers = []
 # Hold this key while pressing the hotkey to use secondary_model
 # model_modifier = "LEFTSHIFT"
 
+# Cancel the recording when another key is pressed while the hotkey is held,
+# so a shortcut that uses the hotkey (Right Ctrl+C with key = "RIGHTCTRL")
+# doesn't also dictate. Modifier keys don't trigger it.
+# cancel_on_other_key = false
+
 # Profile modifiers for context-aware post-processing (evdev only)
 # Maps modifier keys to named profiles defined in [profiles.*] sections
 # [hotkey.profile_modifiers]
