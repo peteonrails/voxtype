@@ -33,6 +33,8 @@ pub struct EvdevListener {
     secondary_model: Option<String>,
     /// Modifier keys that activate named profiles for post-processing
     profile_modifiers: HashMap<Key, String>,
+    /// Modifier keys that pick the Whisper language for one recording
+    language_modifiers: HashMap<Key, String>,
     /// Signal to stop the listener task
     stop_signal: Option<oneshot::Sender<()>>,
 }
@@ -69,6 +71,12 @@ impl EvdevListener {
             .map(|(k, v)| Ok((parse_key_name(k)?, v.clone())))
             .collect::<Result<HashMap<Key, String>, HotkeyError>>()?;
 
+        let language_modifiers = config
+            .language_modifiers
+            .iter()
+            .map(|(k, v)| Ok((parse_key_name(k)?, v.clone())))
+            .collect::<Result<HashMap<Key, String>, HotkeyError>>()?;
+
         // Warn if profile modifier keys overlap with required modifiers or model modifier
         for (key, profile_name) in &profile_modifiers {
             if modifier_keys.contains(key) {
@@ -100,6 +108,7 @@ impl EvdevListener {
             model_modifier,
             secondary_model: None, // Set later via set_secondary_model
             profile_modifiers,
+            language_modifiers,
             stop_signal: None,
         })
     }
@@ -122,6 +131,7 @@ impl HotkeyListener for EvdevListener {
         let model_modifier = self.model_modifier;
         let secondary_model = self.secondary_model.clone();
         let profile_modifiers = self.profile_modifiers.clone();
+        let language_modifiers = self.language_modifiers.clone();
 
         // Spawn the listener task
         tokio::task::spawn_blocking(move || {
@@ -132,6 +142,7 @@ impl HotkeyListener for EvdevListener {
                 model_modifier,
                 secondary_model,
                 profile_modifiers,
+                language_modifiers,
                 tx,
                 stop_rx,
             ) {
@@ -449,6 +460,7 @@ fn evdev_listener_loop(
     model_modifier: Option<Key>,
     secondary_model: Option<String>,
     profile_modifiers: HashMap<Key, String>,
+    language_modifiers: HashMap<Key, String>,
     tx: mpsc::Sender<HotkeyEvent>,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<(), HotkeyError> {
@@ -466,6 +478,15 @@ fn evdev_listener_loop(
 
     // Track if we're currently "pressed" (to handle repeat events)
     let mut is_pressed = false;
+
+    // Language picked by a held language modifier; applied when the hotkey
+    // goes down, or straight away if it goes down during a recording.
+    let mut held_language: Option<String> = None;
+    let set_language = |lang: Option<String>| {
+        if let Ok(mut guard) = crate::transcribe::whisper::LANGUAGE_OVERRIDE.lock() {
+            *guard = lang;
+        }
+    };
 
     if let Some(cancel) = cancel_key {
         tracing::info!(
@@ -591,6 +612,20 @@ fn evdev_listener_loop(
                 }
             }
 
+            if let Some(lang) = language_modifiers.get(&key) {
+                match value {
+                    1 => {
+                        held_language = Some(lang.clone());
+                        if is_pressed {
+                            tracing::debug!("Language {} picked during recording", lang);
+                            set_language(Some(lang.clone()));
+                        }
+                    }
+                    0 => held_language = None,
+                    _ => {}
+                }
+            }
+
             // Check cancel key first (if configured)
             if let Some(cancel) = cancel_key {
                 if key == cancel && value == 1 {
@@ -613,6 +648,7 @@ fn evdev_listener_loop(
                         1 if !is_pressed => {
                             // Key press (not repeat)
                             is_pressed = true;
+                            set_language(held_language.clone());
 
                             // Determine model override based on model_modifier state
                             let model_override = if model_modifier_held {

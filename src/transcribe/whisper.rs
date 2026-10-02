@@ -14,6 +14,10 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+/// Language for the next transcription, set by the hotkey listener from
+/// `hotkey.language_modifiers`. Takes precedence over the configured language.
+pub static LANGUAGE_OVERRIDE: Mutex<Option<String>> = Mutex::new(None);
+
 /// Whisper-based transcriber
 pub struct WhisperTranscriber {
     /// Whisper context (holds the model)
@@ -256,7 +260,11 @@ impl Transcriber for WhisperTranscriber {
             .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
 
         // Determine language based on configuration mode
-        let selected_language: Option<String> = if self.language.is_auto() {
+        let override_language = LANGUAGE_OVERRIDE.lock().ok().and_then(|g| g.clone());
+        let selected_language: Option<String> = if let Some(lang) = override_language {
+            tracing::info!("Using language from hotkey modifier: {}", lang);
+            Some(lang)
+        } else if self.language.is_auto() {
             // Unconstrained auto-detection: let Whisper detect from all languages
             tracing::debug!("Using unconstrained language auto-detection");
             None

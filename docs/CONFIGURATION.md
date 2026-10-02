@@ -327,6 +327,31 @@ post_process_command = "my-script.sh --formal"
 
 **Note:** This only applies when using evdev hotkey detection (`enabled = true`). When using compositor keybindings, use `voxtype record start --profile <name>` instead. Avoid using the same key in both `modifiers` and `profile_modifiers` -- every hotkey press would always activate that profile.
 
+### [hotkey.language_modifiers]
+
+**Type:** Table (key = modifier name, value = Whisper language code)
+**Default:** Empty (disabled)
+**Required:** No
+
+Maps modifier keys to languages. Hold a language modifier when the hotkey goes down, or press it at any point before the recording stops, and Whisper transcribes that recording in that language, skipping `[whisper] language` and auto-detection. The next recording goes back to the configured language unless the modifier is held again.
+
+Pressing it during the recording is the useful part for bilingual users: start talking with the hotkey alone, realise it's going to be Portuguese, tap Right Shift.
+
+**Example:**
+```toml
+[whisper]
+language = "en"
+
+[hotkey]
+key = "RIGHTCTRL"
+
+[hotkey.language_modifiers]
+RIGHTSHIFT = "pt"
+RIGHTALT = "de"
+```
+
+**Note:** evdev hotkey detection only, and only the Whisper engine reads it. Other engines ignore it.
+
 ---
 
 ## [audio]
