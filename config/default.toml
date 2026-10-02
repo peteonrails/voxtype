@@ -41,6 +41,10 @@ modifiers = []
 # - toggle: Press hotkey once to start recording, press again to stop
 # mode = "push_to_talk"
 
+# Double-tap the hotkey to keep recording hands-free until the next press
+# (push_to_talk only). A single short tap is then discarded.
+# double_tap_latch = false
+
 # Modifier key for secondary model selection (evdev only)
 # Hold this key while pressing the hotkey to use secondary_model
 # model_modifier = "LEFTSHIFT"

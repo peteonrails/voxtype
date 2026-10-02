@@ -9,7 +9,7 @@
 //! The user must be in the 'input' group to access /dev/input/* devices.
 
 use super::{HotkeyEvent, HotkeyListener};
-use crate::config::HotkeyConfig;
+use crate::config::{ActivationMode, HotkeyConfig};
 use crate::error::HotkeyError;
 use evdev::{Device, EventType, KeyCode as Key};
 use inotify::{Inotify, WatchMask};
@@ -33,6 +33,8 @@ pub struct EvdevListener {
     secondary_model: Option<String>,
     /// Modifier keys that activate named profiles for post-processing
     profile_modifiers: HashMap<Key, String>,
+    /// Double-tap latch enabled (push_to_talk only)
+    double_tap_latch: bool,
     /// Signal to stop the listener task
     stop_signal: Option<oneshot::Sender<()>>,
 }
@@ -100,6 +102,7 @@ impl EvdevListener {
             model_modifier,
             secondary_model: None, // Set later via set_secondary_model
             profile_modifiers,
+            double_tap_latch: config.double_tap_latch && config.mode == ActivationMode::PushToTalk,
             stop_signal: None,
         })
     }
@@ -122,6 +125,7 @@ impl HotkeyListener for EvdevListener {
         let model_modifier = self.model_modifier;
         let secondary_model = self.secondary_model.clone();
         let profile_modifiers = self.profile_modifiers.clone();
+        let tap_latch = self.double_tap_latch.then(TapLatch::default);
 
         // Spawn the listener task
         tokio::task::spawn_blocking(move || {
@@ -132,6 +136,7 @@ impl HotkeyListener for EvdevListener {
                 model_modifier,
                 secondary_model,
                 profile_modifiers,
+                tap_latch,
                 tx,
                 stop_rx,
             ) {
@@ -440,6 +445,77 @@ fn reset_for_device_change(
     was_pressed.then_some(HotkeyEvent::Released)
 }
 
+/// What the double-tap latch does with a hotkey press or release.
+#[derive(Debug, PartialEq, Eq)]
+enum TapAction {
+    /// Handle the event as usual.
+    Pass,
+    /// Drop the event; the recording keeps running.
+    Swallow,
+    /// Drop the event and stop the latched recording.
+    Stop,
+}
+
+/// Double-tap latch for push-to-talk (`hotkey.double_tap_latch`).
+///
+/// A short tap doesn't stop the recording straight away: it leaves it running
+/// for `WINDOW`. A second press within the window latches the recording on
+/// until the next press. No second press means it was a single tap, and the
+/// recording is cancelled.
+#[derive(Debug, Default)]
+struct TapLatch {
+    pressed_at: Option<Instant>,
+    tap_deadline: Option<Instant>,
+    latched: bool,
+    swallow_release: bool,
+}
+
+impl TapLatch {
+    /// Longest press that still counts as a tap.
+    const TAP_MAX: Duration = Duration::from_millis(250);
+    /// How long after a tap a second press latches.
+    const WINDOW: Duration = Duration::from_millis(300);
+
+    fn press(&mut self, now: Instant) -> TapAction {
+        if self.tap_deadline.take().is_some() {
+            self.latched = true;
+            self.swallow_release = true;
+            return TapAction::Swallow;
+        }
+        if self.latched {
+            self.latched = false;
+            self.swallow_release = true;
+            return TapAction::Stop;
+        }
+        self.pressed_at = Some(now);
+        TapAction::Pass
+    }
+
+    fn release(&mut self, now: Instant) -> TapAction {
+        if std::mem::take(&mut self.swallow_release) {
+            return TapAction::Swallow;
+        }
+        if self
+            .pressed_at
+            .take()
+            .is_some_and(|t| now.duration_since(t) < Self::TAP_MAX)
+        {
+            self.tap_deadline = Some(now + Self::WINDOW);
+            return TapAction::Swallow;
+        }
+        TapAction::Pass
+    }
+
+    /// True once, when a tap's window passes without a second press.
+    fn single_tap_expired(&mut self, now: Instant) -> bool {
+        if self.tap_deadline.is_some_and(|d| now >= d) {
+            self.tap_deadline = None;
+            return true;
+        }
+        false
+    }
+}
+
 /// Main listener loop running in a blocking task
 #[allow(clippy::too_many_arguments)]
 fn evdev_listener_loop(
@@ -449,6 +525,7 @@ fn evdev_listener_loop(
     model_modifier: Option<Key>,
     secondary_model: Option<String>,
     profile_modifiers: HashMap<Key, String>,
+    mut tap_latch: Option<TapLatch>,
     tx: mpsc::Sender<HotkeyEvent>,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<(), HotkeyError> {
@@ -548,6 +625,15 @@ fn evdev_listener_loop(
             continue;
         }
 
+        if let Some(latch) = tap_latch.as_mut() {
+            if latch.single_tap_expired(Instant::now()) {
+                tracing::debug!("Single tap, discarding the recording");
+                if tx.blocking_send(HotkeyEvent::Cancel).is_err() {
+                    return Ok(()); // Channel closed
+                }
+            }
+        }
+
         // Poll all devices for events
         for (key, value) in manager.poll_events() {
             // Track modifier state
@@ -614,6 +700,21 @@ fn evdev_listener_loop(
                             // Key press (not repeat)
                             is_pressed = true;
 
+                            match tap_latch.as_mut().map(|l| l.press(Instant::now())) {
+                                Some(TapAction::Swallow) => {
+                                    tracing::debug!("Double tap, recording latched");
+                                    continue;
+                                }
+                                Some(TapAction::Stop) => {
+                                    tracing::debug!("Hotkey pressed while latched, stopping");
+                                    if tx.blocking_send(HotkeyEvent::Released).is_err() {
+                                        return Ok(()); // Channel closed
+                                    }
+                                    continue;
+                                }
+                                Some(TapAction::Pass) | None => {}
+                            }
+
                             // Determine model override based on model_modifier state
                             let model_override = if model_modifier_held {
                                 secondary_model.clone()
@@ -648,6 +749,11 @@ fn evdev_listener_loop(
                         0 if is_pressed => {
                             // Key release
                             is_pressed = false;
+                            if tap_latch.as_mut().map(|l| l.release(Instant::now()))
+                                == Some(TapAction::Swallow)
+                            {
+                                continue;
+                            }
                             tracing::debug!("Hotkey released");
                             if tx.blocking_send(HotkeyEvent::Released).is_err() {
                                 return Ok(()); // Channel closed
@@ -874,6 +980,50 @@ fn fd_is_hung_up(fd: RawFd) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_tap_latch_double_tap_latches_until_next_press() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let mut latch = TapLatch::default();
+        assert_eq!(latch.press(t0), TapAction::Pass);
+        assert_eq!(latch.release(ms(100)), TapAction::Swallow);
+        assert_eq!(latch.press(ms(250)), TapAction::Swallow);
+        assert_eq!(latch.release(ms(300)), TapAction::Swallow);
+        assert!(!latch.single_tap_expired(ms(10_000)));
+        assert_eq!(latch.press(ms(10_000)), TapAction::Stop);
+        assert_eq!(latch.release(ms(10_100)), TapAction::Swallow);
+        // Back to plain push-to-talk.
+        assert_eq!(latch.press(ms(20_000)), TapAction::Pass);
+        assert_eq!(latch.release(ms(25_000)), TapAction::Pass);
+    }
+
+    #[test]
+    fn test_tap_latch_single_tap_expires() {
+        let t0 = Instant::now();
+        let mut latch = TapLatch::default();
+        latch.press(t0);
+        assert_eq!(
+            latch.release(t0 + Duration::from_millis(100)),
+            TapAction::Swallow
+        );
+        assert!(!latch.single_tap_expired(t0 + Duration::from_millis(200)));
+        assert!(latch.single_tap_expired(t0 + Duration::from_millis(400)));
+        assert!(!latch.single_tap_expired(t0 + Duration::from_millis(500)));
+        assert_eq!(
+            latch.press(t0 + Duration::from_millis(600)),
+            TapAction::Pass
+        );
+    }
+
+    #[test]
+    fn test_tap_latch_long_press_is_plain_push_to_talk() {
+        let t0 = Instant::now();
+        let mut latch = TapLatch::default();
+        assert_eq!(latch.press(t0), TapAction::Pass);
+        assert_eq!(latch.release(t0 + Duration::from_secs(3)), TapAction::Pass);
+        assert!(!latch.single_tap_expired(t0 + Duration::from_secs(10)));
+    }
 
     /// #556: a device change while the hotkey is held must synthesize a
     /// release. Without it the real key-up is dropped by the `0 if is_pressed`
