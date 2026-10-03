@@ -60,6 +60,11 @@ pub mod moonshine;
 #[cfg(feature = "sensevoice")]
 pub mod sensevoice;
 
+/// SenseVoice via the FunASR llama.cpp / ggml runtime (external process, can
+/// keep the weights in VRAM).
+#[cfg(feature = "sensevoice")]
+pub mod sensevoice_ggml;
+
 #[cfg(feature = "paraformer")]
 pub mod paraformer;
 
@@ -226,9 +231,14 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
                         .to_string(),
                 )
             })?;
-            Ok(Box::new(sensevoice::SenseVoiceTranscriber::new(
-                sensevoice_config,
-            )?))
+            match sensevoice_config.runtime {
+                crate::config::SenseVoiceRuntime::Onnx => Ok(Box::new(
+                    sensevoice::SenseVoiceTranscriber::new(sensevoice_config)?,
+                )),
+                crate::config::SenseVoiceRuntime::Ggml => Ok(Box::new(
+                    sensevoice_ggml::SenseVoiceGgmlTranscriber::new(sensevoice_config)?,
+                )),
+            }
         }
         #[cfg(not(feature = "sensevoice"))]
         TranscriptionEngine::SenseVoice => Err(TranscribeError::InitFailed(

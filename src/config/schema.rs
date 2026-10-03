@@ -206,6 +206,9 @@ const WHISPER_LANG_CHOICES: &[&str] = &[
     "auto", "en", "fr", "de", "it", "es", "pt", "nl", "pl", "zh", "ja", "ko", "ru", "ar",
 ];
 const SENSEVOICE_LANG_CHOICES: &[&str] = &["auto", "zh", "en", "ja", "ko", "yue"];
+const SENSEVOICE_RUNTIME_CHOICES: &[&str] = &["onnx", "ggml"];
+/// Mirrors the ggml runtime's own `--backend` values.
+const GGML_BACKEND_CHOICES: &[&str] = &["vulkan", "cpu", "cuda"];
 const COHERE_LANG_CHOICES: &[&str] = &[
     "ar", "de", "en", "es", "fr", "hi", "it", "ja", "ko", "nl", "pt", "ru", "tr", "zh",
 ];
@@ -527,6 +530,56 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Engine",
         "Load on demand",
         "Load the model when recording starts and unload at idle.",
+    )
+    .for_onnx_engine("sensevoice"),
+    spec(
+        "sensevoice.runtime",
+        "sensevoice",
+        "runtime",
+        closed(SENSEVOICE_RUNTIME_CHOICES),
+        "Engine",
+        "Runtime",
+        "Which runtime executes the encoder: onnx (in-process, weights in RAM) or ggml (child process, weights can live in VRAM).",
+    )
+    .for_onnx_engine("sensevoice"),
+    spec(
+        "sensevoice.ggml_binary",
+        "sensevoice",
+        "ggml_binary",
+        KeyType::String,
+        "Engine",
+        "ggml runtime binary",
+        "Path to llama-funasr-sensevoice. Required when runtime = ggml.",
+    )
+    .for_onnx_engine("sensevoice"),
+    spec(
+        "sensevoice.ggml_model",
+        "sensevoice",
+        "ggml_model",
+        KeyType::String,
+        "Engine",
+        "ggml model",
+        "Path to the SenseVoice GGUF (sensevoice-small-q8.gguf or -f16.gguf). Required when runtime = ggml.",
+    )
+    .for_onnx_engine("sensevoice"),
+    spec(
+        "sensevoice.ggml_vad",
+        "sensevoice",
+        "ggml_vad",
+        KeyType::String,
+        "Engine",
+        "ggml VAD model",
+        "Optional FSMN-VAD GGUF; the runtime then segments long audio itself.",
+    )
+    .for_onnx_engine("sensevoice"),
+    spec(
+        "sensevoice.ggml_backend",
+        "sensevoice",
+        "ggml_backend",
+        closed(GGML_BACKEND_CHOICES),
+        "Engine",
+        "ggml backend",
+        "Compute backend for the ggml runtime: vulkan (weights in VRAM), cpu, or cuda.",
     )
     .for_onnx_engine("sensevoice"),
     // paraformer
@@ -1721,6 +1774,20 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             None => Json::Null,
         },
         "sensevoice.on_demand_loading" => json!(sv().on_demand_loading),
+        "sensevoice.runtime" => json!(sv().runtime.as_str()),
+        "sensevoice.ggml_binary" => match &sv().ggml_binary {
+            Some(p) => json!(p.display().to_string()),
+            None => Json::Null,
+        },
+        "sensevoice.ggml_model" => match &sv().ggml_model {
+            Some(p) => json!(p.display().to_string()),
+            None => Json::Null,
+        },
+        "sensevoice.ggml_vad" => match &sv().ggml_vad {
+            Some(p) => json!(p.display().to_string()),
+            None => Json::Null,
+        },
+        "sensevoice.ggml_backend" => json!(sv().ggml_backend.as_str()),
 
         "paraformer.model" => json!(pf().model),
         "paraformer.threads" => match pf().threads {

@@ -53,7 +53,7 @@ Selects which speech-to-text engine to use for transcription.
 - `whisper` - OpenAI Whisper via whisper.cpp (default, recommended)
 - `parakeet` - NVIDIA Parakeet via ONNX Runtime (requires ONNX binary)
 - `moonshine` - Moonshine encoder-decoder transformer via ONNX Runtime (experimental, requires special binary)
-- `sensevoice` - Alibaba SenseVoice CTC via ONNX Runtime (CJK + English)
+- `sensevoice` - Alibaba SenseVoice CTC, via ONNX Runtime in-process or the FunASR ggml runtime as a child process (CJK + English)
 - `paraformer` - FunASR Paraformer CTC via ONNX Runtime (Chinese + English)
 - `dolphin` - Dictation-optimized CTC via ONNX Runtime (Chinese + English)
 - `omnilingual` - FunASR Omnilingual CTC via ONNX Runtime (50+ languages)
@@ -1605,6 +1605,133 @@ cargo build --release --features cohere-tensorrt  # NVIDIA + TensorRT EP
 ```
 
 The prebuilt `voxtype-*-onnx-*` release binaries already include `cohere`, so users installing via AUR/.deb/.rpm don't need to rebuild.
+
+---
+
+## [sensevoice]
+
+Configuration for the SenseVoice CTC engine (CJK + English). This section is only used when `engine = "sensevoice"`.
+
+SenseVoice is an encoder-only CTC model: a single forward pass, so there is no decoder loop to hallucinate text. The characters it emits come from the model's own character prior, which is trained on conversational and web text — rare or classical vocabulary is what it gets wrong.
+
+### model
+
+**Type:** String
+**Default:** `"sensevoice-small"`
+
+Directory name under the voxtype models directory, or an absolute path to a directory containing the model. The directory must hold `model.int8.onnx` (or `model.onnx`) and `tokens.txt`. Used when `runtime = "onnx"`.
+
+### language
+
+**Type:** Enum (`auto`, `zh`, `en`, `ja`, `ko`, `yue`)
+**Default:** `"auto"`
+
+Language hint. Ignored when `runtime = "ggml"`, which always auto-detects (voxtype logs a warning at startup if you set both).
+
+### use_itn
+
+**Type:** Boolean
+**Default:** `true`
+
+Inverse text normalization: numerals and punctuation rather than spelled-out words. The ggml runtime always applies ITN, so `false` is only honoured by `runtime = "onnx"`.
+
+### threads
+
+**Type:** Integer (1-256)
+**Default:** unset
+
+ONNX Runtime intra-op threads. Unset lets voxtype pick. Only used when `runtime = "onnx"`.
+
+### on_demand_loading
+
+**Type:** Boolean
+**Default:** `true`
+
+Load the model when recording starts and unload it at idle. With `runtime = "ggml"` no weights are held in the daemon either way, so this only decides when the configured paths are validated.
+
+### runtime
+
+**Type:** Enum (`onnx`, `ggml`)
+**Default:** `"onnx"`
+
+Which runtime executes the encoder.
+
+- `onnx` runs in-process through ONNX Runtime. Straightforward, but the weights occupy the daemon's RAM for as long as the model is loaded.
+- `ggml` runs the FunASR llama.cpp runtime as a child process, one process per transcription. With `ggml_backend = "vulkan"` the weights are uploaded to the GPU, so they sit in VRAM rather than in the daemon's heap; the child exits after each transcription, which also releases the VRAM. Nothing of the model is retained in the daemon between dictations.
+
+`ggml` needs two files that voxtype does not ship: the runtime binary and the GGUF weights. Both are fetched per-user, so no packaging change is required.
+
+### ggml_binary
+
+**Type:** String (path)
+**Default:** unset
+
+Path to `llama-funasr-sensevoice` from the FunASR llama.cpp runtime. Required when `runtime = "ggml"`. Take the package that matches your backend: the `linux-x64-vulkan` tarball for Vulkan, the plain `linux-x64` tarball for CPU.
+
+### ggml_model
+
+**Type:** String (path)
+**Default:** unset
+
+Path to the SenseVoice GGUF weights: `sensevoice-small-q8.gguf` (about 242 MB) or `sensevoice-small-f16.gguf`. Required when `runtime = "ggml"`. These are ggml ports of the same SenseVoiceSmall weights; the runtime's CTC token stream is validated against the PyTorch model.
+
+### ggml_vad
+
+**Type:** String (path)
+**Default:** unset
+
+Optional FSMN-VAD GGUF. When set, the runtime segments long audio itself (`--vad`) and decodes each segment, instead of relying on voxtype's own VAD.
+
+### ggml_backend
+
+**Type:** Enum (`vulkan`, `cpu`, `cuda`)
+**Default:** `"vulkan"`
+
+Compute backend, passed to the runtime as `--backend`.
+
+- `vulkan` uploads the weights to GPU memory. It needs a working Vulkan driver and the Vulkan build of the runtime. A runtime binary built without Vulkan support fails loudly, and voxtype reports the runtime's own stage diagnostics in the error.
+- `cpu` keeps the weights in the child process and leaves the daemon's heap untouched.
+- `cuda` requires a runtime binary built with `GGML_CUDA=ON`.
+
+### Complete Example
+
+```toml
+engine = "sensevoice"
+
+[sensevoice]
+model = "sensevoice-small"          # used by runtime = "onnx"
+runtime = "ggml"
+ggml_binary = "/usr/local/bin/llama-funasr-sensevoice"
+ggml_model = "/usr/local/share/voxtype/sensevoice-small-q8.gguf"
+ggml_vad = "/usr/local/share/voxtype/fsmn-vad.gguf"
+ggml_backend = "vulkan"
+```
+
+### Getting the runtime and the weights
+
+Fetch the runtime release `runtime-llamacpp-v0.2.6` from the FunASR releases page (assets `funasr-llamacpp-linux-x64-vulkan.tar.gz` or `funasr-llamacpp-linux-x64.tar.gz`, SHA-256 published alongside them), then the GGUF weights from `FunAudioLLM/SenseVoiceSmall-GGUF` and `FunAudioLLM/fsmn-vad-GGUF` on Hugging Face. The release tarball also carries `download-funasr-model.sh`, which pulls both GGUFs if you have the Hugging Face CLI installed.
+
+Check the backend by hand before wiring it into voxtype, so a driver problem is not mistaken for a voxtype problem:
+
+```bash
+llama-funasr-sensevoice \
+  -m sensevoice-small-q8.gguf \
+  --vad fsmn-vad.gguf \
+  -a sample.wav --backend vulkan
+```
+
+Transcription text goes to stdout; progress and diagnostics go to stderr. The runtime reports each stage (vulkan backend ready, model ready, graph allocated, compute complete), so the last completed stage names what failed.
+
+### Building from Source
+
+Source builds need the `sensevoice` Cargo feature. Optional GPU execution providers for the in-process path via `sensevoice-cuda` or `sensevoice-tensorrt`:
+
+```bash
+cargo build --release --features sensevoice           # ONNX Runtime, CPU
+cargo build --release --features sensevoice-cuda      # ONNX Runtime, NVIDIA GPU
+```
+
+The `ggml` runtime is an external binary, so it needs nothing extra at build time beyond the `sensevoice` feature.
 
 ---
 
