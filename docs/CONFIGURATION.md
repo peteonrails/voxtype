@@ -2073,6 +2073,7 @@ Custom order of output drivers to try when `mode = "type"`. Each driver is tried
 - `wtype` - Wayland virtual keyboard protocol (best CJK/Unicode support, wlroots compositors only)
 - `eitype` - Wayland via libei/EI protocol (works on GNOME, KDE, and compositors with libei support). On KDE Plasma 6, each invocation briefly registers via the XDG RemoteDesktop portal, which can cause a system-tray icon to flicker during streaming dictation (many fast typing calls). Prefer `dotool` for streaming if you're on KDE.
 - `dotool` - uinput-based typing (supports keyboard layouts, works on X11/Wayland/TTY). For streaming backends (Parakeet, Soniox), run `dotoold` to make this **much** faster when no per-call layout or variant hint is needed — see [Streaming performance: dotoold fast path](#streaming-performance-dotoold-fast-path) below.
+- `x11` - native X11 typing through XTEST with a generated Unicode keymap. Types CJK and any other character the active layout cannot produce, with no clipboard, no daemon, and no external typing tool. **Opt-in:** not part of the default chain, so an upgrade never changes which driver types your text. Requires an X server with XTEST (Xorg or XWayland).
 - `ydotool` - uinput-based typing (requires `ydotoold` daemon, X11/Wayland/TTY). Fast spawn, but **does not support keyboard layouts** — sends raw US keycodes. Wrong output on non-US layouts (e.g. Hungarian Z/Y swap).
 - `clipboard` - Wayland clipboard via wl-copy
 - `xclip` - X11 clipboard via xclip
@@ -2090,7 +2091,10 @@ mode = "type"
 driver_order = ["ydotool", "dotool", "clipboard"]
 
 # X11-only setup
-driver_order = ["dotool", "ydotool", "xclip"]
+driver_order = ["x11", "dotool", "ydotool", "xclip"]
+
+# Type CJK into X11 windows without the clipboard (native XTEST typing)
+driver_order = ["x11", "xclip"]
 
 # Force single driver (no fallback)
 driver_order = ["ydotool"]
@@ -2496,6 +2500,36 @@ Delay in milliseconds before typing starts. This allows the virtual keyboard to 
 ```toml
 [output]
 pre_type_delay_ms = 100  # 100ms delay before typing starts
+```
+
+### x11_keymap_settle_ms
+
+**Type:** Integer
+**Default:** `20`
+**Required:** No
+**Applies to:** The `x11` driver only
+
+How long to wait after changing the X11 keyboard mapping before pressing the
+keys that depend on it, and again before restoring the mapping.
+
+The `x11` driver types a character the active layout cannot produce (CJK, for
+example) by binding it to a spare keycode first. Clients resolve keycodes
+through their own copy of the keyboard mapping, which they refresh when the
+server tells them it changed, so pressing a remapped keycode too early loses or
+swaps the character. One wait covers a whole batch of characters, and a
+transcription normally needs a single mapping change: only text with more
+distinct characters than the mapping has unused keycodes takes more.
+
+The default of 20 ms is roughly four times the shortest wait that kept a GTK4
+entry intact on the slowest machine this was measured on (5 ms). Raise it if
+characters are still dropped in a slow client, or lower it if you want the
+transcription to appear sooner.
+
+**Example:**
+```toml
+[output]
+driver_order = ["x11", "xclip"]
+x11_keymap_settle_ms = 50  # Very slow client
 ```
 
 ### auto_submit
@@ -3570,6 +3604,7 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_SHIFT_ENTER_NEWLINES` | bool | `output.shift_enter_newlines` |
 | `VOXTYPE_PRE_TYPE_DELAY` | integer | `output.pre_type_delay_ms` |
 | `VOXTYPE_TYPE_DELAY` | integer | `output.type_delay_ms` |
+| `VOXTYPE_X11_KEYMAP_SETTLE_MS` | integer | `output.x11_keymap_settle_ms` |
 | `VOXTYPE_FALLBACK_TO_CLIPBOARD` | bool | `output.fallback_to_clipboard` |
 | `VOXTYPE_PASTE_KEYS` | string | `output.paste_keys` |
 | `VOXTYPE_DOTOOL_XKB_LAYOUT` | string | `output.dotool_xkb_layout` |

@@ -231,6 +231,9 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if let Some(delay) = cli.type_delay {
         config.output.type_delay_ms = delay;
     }
+    if let Some(settle_ms) = cli.x11_keymap_settle_ms {
+        config.output.x11_keymap_settle_ms = settle_ms;
+    }
     apply_bool_override(
         &mut config.output.fallback_to_clipboard,
         cli.fallback_to_clipboard,

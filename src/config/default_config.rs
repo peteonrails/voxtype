@@ -207,13 +207,16 @@ mode = "type"
 fallback_to_clipboard = true
 
 # Custom driver order for type mode (optional)
-# Default order: wtype -> dotool -> ydotool -> clipboard
+# Default order: wtype -> eitype -> dotool -> ydotool -> clipboard -> xclip
 # Customize to prefer a specific driver or change the fallback order.
-# Available drivers: wtype, dotool, ydotool, clipboard
+# Available drivers: wtype, eitype, dotool, x11, ydotool, clipboard, xclip
 # Example: prefer ydotool over dotool:
 #   driver_order = ["wtype", "ydotool", "dotool", "clipboard"]
 # Example: use only ydotool, no fallback:
 #   driver_order = ["ydotool"]
+# Example: type CJK into X11 windows without the clipboard and without any
+# extra tool (native XTEST typing; opt-in, not part of the default chain):
+#   driver_order = ["x11", "xclip"]
 # driver_order = ["wtype", "dotool", "ydotool", "clipboard"]
 
 # Per-language XKB layout variants for multilingual dictation.
@@ -226,6 +229,13 @@ fallback_to_clipboard = true
 # Delay between typed characters in milliseconds
 # 0 = fastest possible, increase if characters are dropped
 type_delay_ms = 0
+
+# Wait after changing the X11 keyboard mapping before pressing the keys that
+# depend on it (ms), and again before restoring it. Only used by the `x11`
+# driver, which binds each distinct character to a spare keycode: clients that
+# resolve key events through their own copy of the mapping need a moment to
+# catch up, or the character is lost.
+# x11_keymap_settle_ms = 20
 
 # Automatically submit (send Enter key) after outputting transcribed text
 # Useful for chat applications, command lines, or forms where you want

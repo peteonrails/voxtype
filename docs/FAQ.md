@@ -48,6 +48,10 @@ For text output, Voxtype uses:
 - **dotool** as fallback (supports keyboard layouts, no daemon needed)
 - **ydotool** on X11 or as fallback (requires daemon)
 
+There is also an opt-in native X11 driver, `x11`, which types CJK and other
+text the active layout cannot produce with no external tool at all
+(`driver_order = ["x11"]`).
+
 ### Which audio systems are supported?
 
 - PipeWire (recommended)
@@ -190,6 +194,7 @@ The `input` group is only required if you use voxtype's built-in evdev hotkey (e
 Neither Wayland nor X11 provide a universal way for applications to simulate keyboard input. Voxtype uses a fallback chain:
 - **wtype** on Wayland - uses the virtual-keyboard protocol, supports CJK characters, no daemon needed
 - **dotool** as fallback - uses the kernel's uinput interface, supports keyboard layouts, no daemon needed
+- **x11** (opt-in, `driver_order = ["x11"]`) - native X11 typing through XTEST with a generated Unicode keymap; types CJK without the clipboard and without an external tool
 - **ydotool** on X11 (or Wayland fallback) - uses the kernel's uinput interface, requires a daemon
 
 ### How much RAM does it use?

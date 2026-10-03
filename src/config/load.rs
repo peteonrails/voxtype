@@ -182,6 +182,11 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             config.output.type_delay_ms = n;
         }
     }
+    if let Ok(val) = std::env::var("VOXTYPE_X11_KEYMAP_SETTLE_MS") {
+        if let Ok(n) = val.parse::<u32>() {
+            config.output.x11_keymap_settle_ms = n;
+        }
+    }
     if let Ok(val) = std::env::var("VOXTYPE_FALLBACK_TO_CLIPBOARD") {
         config.output.fallback_to_clipboard = parse_bool_env(&val);
     }

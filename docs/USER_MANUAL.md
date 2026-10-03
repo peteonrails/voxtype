@@ -1712,13 +1712,17 @@ mode = "type"
 driver_order = ["ydotool", "wtype", "clipboard"]
 ```
 
-**Available drivers:** `wtype`, `eitype`, `dotool`, `ydotool`, `clipboard` (wl-copy), `xclip` (X11)
+**Available drivers:** `wtype`, `eitype`, `dotool`, `x11` (native X11 typing), `ydotool`, `clipboard` (wl-copy), `xclip` (X11)
 
 **Examples:**
 
 ```toml
 # X11-only setup (no Wayland)
-driver_order = ["ydotool", "xclip"]
+driver_order = ["x11", "ydotool", "xclip"]
+
+# Type CJK into X11 windows without the clipboard: the x11 driver binds each
+# distinct character to a keycode of its own instead of pasting
+driver_order = ["x11", "xclip"]
 
 # Force ydotool only (no fallback)
 driver_order = ["ydotool"]

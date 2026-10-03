@@ -882,6 +882,45 @@ You can also enable it via CLI flag (`--wtype-shift-prefix`) or environment vari
 type_delay_ms = 10  # Try 10-50ms
 ```
 
+### CJK or accented text dropped or reordered on X11 (type mode)
+
+**Symptom:** On an X11 session with `mode = "type"`, a transcription containing
+Chinese, Japanese, Korean, or accented characters arrives with most of those
+characters missing, or in the wrong order. ASCII-only dictation is unaffected,
+and every dictation arrives intact in `mode = "paste"`. The daemon log shows
+the correct transcription, so the text is being lost on the way to the
+application.
+
+**Cause:** A character the active keyboard layout cannot produce has to be
+bound to a keycode before it can be pressed. X11 clients that resolve key
+events themselves (GTK4, Qt6, Chromium, terminals - through xkbcommon) read
+each keycode against their own copy of the keyboard mapping and only refresh it
+when the server notifies them of a change. Pressing a freshly bound keycode
+immediately therefore resolves against the old mapping, and the character is
+dropped or swapped for the previous one. Measured on a GTK4 entry typing twelve
+Han characters with a driver that rebinds a keycode per character: 11 were
+lost at zero inter-key delay; at 2 ms, 3; intact from 5 ms on.
+
+**Solution:** Use the native `x11` driver, which binds every distinct character
+of a transcription in a single mapping change and then waits once for clients
+to catch up, instead of rebinding a keycode per character:
+
+```toml
+[output]
+mode = "type"
+driver_order = ["x11", "xclip"]
+```
+
+It needs no external tool, only an X server with XTEST (Xorg or XWayland). If
+characters still go missing in a slow client, raise the wait:
+
+```toml
+[output]
+x11_keymap_settle_ms = 50
+```
+
+Paste mode works around it too, at the cost of the clipboard.
+
 ### Non-ASCII characters move to the front of the text (GNOME, type mode)
 
 **Symptom:** Dictating text with non-ASCII characters (umlauts, accents, ß)

@@ -79,6 +79,7 @@ verification.
 | [X11 Session Clipboard](smoke_tests/x11-session-clipboard-xclip-xsel.md) | xclip/xsel clipboard output on X11 |
 | [Output Chain Verification](smoke_tests/output-chain-verification.md) | Full fallback chain wtype, dotool, ydotool, clipboard |
 | [Delay Options](smoke_tests/delay-options.md) | `--delay` and per-driver inter-keystroke delays |
+| [Native X11 Typing](smoke_tests/x11-native-typing.md) | The opt-in `x11` driver types CJK without clipboard or external tools; the keymap settle is what makes it work |
 | [Post-Processing Command](smoke_tests/post-processing-command.md) | LLM cleanup command runs on the transcript before output |
 
 ## Integrations
