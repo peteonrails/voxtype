@@ -8,7 +8,8 @@
 //! `config_get.rs`, `config_schema.rs`,
 //! `updates.rs`, `macos.rs`). Shared binary-side plumbing lives in
 //! `dispatch.rs` (the top-level subcommand router), `overrides.rs` (CLI →
-//! Config layering), and `sigpipe.rs`. Cross-binary helpers like daemon
+//! Config layering), `sigpipe.rs` (signal handling) and `exit.rs` (process
+//! exit without static destructors). Cross-binary helpers like daemon
 //! liveness sit in the library at `voxtype::daemon_status`, so the TUI and
 //! any future external caller resolve to the same lockfile path and
 //! liveness check.
@@ -21,6 +22,7 @@ mod config_schema;
 mod config_set;
 mod config_show;
 mod dispatch;
+pub(crate) mod exit;
 mod info;
 #[cfg(target_os = "macos")]
 mod macos;

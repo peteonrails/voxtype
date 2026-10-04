@@ -29,6 +29,7 @@ verification.
 | [CLI Overrides](smoke_tests/cli-overrides.md) | `--model`, `--engine`, `--device`, and other per-invocation flags |
 | [File Output](smoke_tests/file-output.md) | `--file`, append vs overwrite, config-based paths, directory creation |
 | [Transcribe Command](smoke_tests/transcribe-command-file-input.md) | `voxtype transcribe <wav>` for offline file transcription |
+| [One-shot Exit Status](smoke_tests/one-shot-exit-status.md) | One-shot commands exit with a code, not a signal (ONNX/CUDA teardown abort, #772) |
 
 ## Recording behaviour
 

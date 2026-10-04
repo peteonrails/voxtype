@@ -11,7 +11,7 @@
 
 mod app;
 
-use app::sigpipe;
+use app::{exit, sigpipe};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 use voxtype::{config, cpu, Cli, Commands};
@@ -71,5 +71,16 @@ async fn main() -> anyhow::Result<()> {
         .or_else(config::Config::default_path);
     let config = config::load_config(cli.config.as_deref())?;
 
-    app::run(cli, config_path, config).await
+    // One-shot commands return here. Leave the process the way the daemon does
+    // (commit 525a0a6d): without running static destructors, because the ONNX
+    // Runtime exit hook aborts on glibc's heap check after a successful run
+    // (#772). `app::exit` flushes stdio first. Errors keep their exit code and
+    // their `Error: ...` line, which is what `Termination` would have printed.
+    match app::run(cli, config_path, config).await {
+        Ok(()) => exit::without_destructors(0),
+        Err(err) => {
+            eprintln!("Error: {err:?}");
+            exit::without_destructors(1)
+        }
+    }
 }
