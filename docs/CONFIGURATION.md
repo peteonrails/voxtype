@@ -294,6 +294,22 @@ cancel_key = "ESC"  # Press Escape to cancel
 
 **Note:** This only applies when using evdev hotkey detection (`enabled = true`). When using compositor keybindings, use `voxtype record cancel` instead. See [User Manual - Canceling Transcription](USER_MANUAL.md#canceling-transcription).
 
+### double_tap_latch
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Push-to-talk only. Double-tap the hotkey and the recording keeps running after you let go, until the next press of the hotkey. Holding the hotkey still works as before.
+
+With this on, a single tap shorter than 250 ms no longer stops the recording at once. Voxtype waits 300 ms for a second tap and, if none comes, discards the recording.
+
+```toml
+[hotkey]
+key = "RIGHTCTRL"
+double_tap_latch = true
+```
+
 ### [hotkey.profile_modifiers]
 
 **Type:** Table (key = modifier name, value = profile name)
