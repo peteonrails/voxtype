@@ -197,6 +197,15 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     if let Ok(variant) = std::env::var("VOXTYPE_DOTOOL_XKB_VARIANT") {
         config.output.dotool_xkb_variant = Some(variant);
     }
+    if let Ok(layout) = std::env::var("VOXTYPE_UINPUT_XKB_LAYOUT") {
+        config.output.uinput_xkb_layout = Some(layout);
+    }
+    if let Ok(variant) = std::env::var("VOXTYPE_UINPUT_XKB_VARIANT") {
+        config.output.uinput_xkb_variant = Some(variant);
+    }
+    if let Ok(command) = std::env::var("VOXTYPE_UINPUT_READY_COMMAND") {
+        config.output.uinput_ready_command = Some(command);
+    }
     if let Ok(layout) = std::env::var("VOXTYPE_EITYPE_XKB_LAYOUT") {
         config.output.eitype_xkb_layout = Some(layout);
     }

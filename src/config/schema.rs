@@ -946,6 +946,21 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Post-process command",
         "Shell command that receives the transcription on stdin and returns the cleaned text on stdout.",
     ),
+    spec(
+        "output.uinput_xkb_layout", "output", "uinput_xkb_layout", KeyType::String,
+        "Output", "Native keyboard layout",
+        "Required for native output: the single XKB layout assigned to the Voxtype virtual keyboard.",
+    ),
+    spec(
+        "output.uinput_xkb_variant", "output", "uinput_xkb_variant", KeyType::String,
+        "Output", "Native keyboard variant",
+        "XKB variant assigned to the Voxtype virtual keyboard; defaults to the base variant.",
+    ),
+    spec(
+        "output.uinput_ready_command", "output", "uinput_ready_command", KeyType::String,
+        "Output", "Native keyboard readiness hook",
+        "Optional command to prepare only the virtual keyboard before each burst; compiled XKB map on stdin, three-second timeout, failure stops output.",
+    ),
     // -- Text ---------------------------------------------------------------
     spec(
         "text.spoken_punctuation",
@@ -1784,6 +1799,9 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "audio.feedback.volume" => f32_json(cfg.audio.feedback.volume),
 
         "output.mode" => serde_json::to_value(cfg.output.mode.clone()).ok()?,
+        "output.uinput_xkb_layout" => opt_str(cfg.output.uinput_xkb_layout.as_ref()),
+        "output.uinput_xkb_variant" => opt_str(cfg.output.uinput_xkb_variant.as_ref()),
+        "output.uinput_ready_command" => opt_str(cfg.output.uinput_ready_command.as_ref()),
         "output.fallback_to_clipboard" => json!(cfg.output.fallback_to_clipboard),
         "output.auto_submit" => json!(cfg.output.auto_submit),
         "output.shift_enter_newlines" => json!(cfg.output.shift_enter_newlines),

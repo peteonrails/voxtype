@@ -1560,6 +1560,10 @@ Then record for 10+ seconds. You should see log messages like:
 ---
 ## Output Modes
 
+For experimental clipboard-free Linux keyboard delivery, see
+[Native keyboard output](NATIVE_KEYBOARD_OUTPUT.md). It requires an explicit
+matching device keymap and an exclusive `driver_order = ["uinput"]`.
+
 ### Type Mode (Default)
 
 Simulates keyboard input, typing text directly at your cursor position.
