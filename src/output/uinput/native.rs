@@ -331,7 +331,7 @@ fn create_device() -> Result<VirtualDevice, OutputError> {
     Ok(device)
 }
 
-fn plan_text(config: &OutputConfig, text: &str) -> Result<Plan, OutputError> {
+fn planner_for(config: &OutputConfig) -> Result<Planner, OutputError> {
     let layout = config.uinput_xkb_layout.as_deref().ok_or_else(|| {
         stopped(
             "set output.uinput_xkb_layout to the layout assigned to the Voxtype virtual keyboard",
@@ -342,7 +342,11 @@ fn plan_text(config: &OutputConfig, text: &str) -> Result<Plan, OutputError> {
         .iter()
         .find_map(|name| std::env::var(name).ok().filter(|s| !s.is_empty()))
         .unwrap_or_else(|| "en_US.UTF-8".into());
-    let planner = Planner::new(layout, variant, &locale)?;
+    Planner::new(layout, variant, &locale)
+}
+
+fn plan_text(config: &OutputConfig, text: &str) -> Result<Plan, OutputError> {
+    let planner = planner_for(config)?;
     let text = format!("{}{}", text, config.append_text.as_deref().unwrap_or(""));
     let mut plan = planner.plan(&text)?;
     if config.auto_submit {
@@ -352,6 +356,52 @@ fn plan_text(config: &OutputConfig, text: &str) -> Result<Plan, OutputError> {
         }]);
     }
     Ok(plan)
+}
+
+// Runs after hotplug but before any key events. No transcription is passed.
+fn prepare_keyboard(command: &str, keymap: String, timeout: Duration) -> Result<(), OutputError> {
+    use std::io::Write;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("sh")
+        .args(["-c", command])
+        .env("VOXTYPE_UINPUT_DEVICE_NAME", DEVICE_NAME)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .process_group(0)
+        .spawn()
+        .map_err(|e| stopped(format!("keyboard readiness hook could not start: {e}")))?;
+    let mut stdin = child.stdin.take().unwrap();
+    let writer = std::thread::spawn(move || stdin.write_all(keymap.as_bytes()));
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            other => {
+                // Kill the entire hook group, including a blocked compiler.
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+                }
+                let _ = child.wait();
+                break Err(stopped(format!(
+                    "keyboard readiness hook timed out or failed: {other:?}"
+                )));
+            }
+        }
+    };
+    // Also terminate any descendants retaining the pipe after the shell exits.
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    let write_result = writer
+        .join()
+        .map_err(|_| stopped("keyboard readiness writer failed"))?;
+    if !status?.success() {
+        return Err(stopped("keyboard readiness hook exited unsuccessfully"));
+    }
+    write_result.map_err(|e| stopped(format!("keyboard readiness map delivery failed: {e}")))
 }
 
 pub(super) async fn output(
@@ -375,6 +425,14 @@ pub(super) async fn output(
         if plan.is_empty() {
             return Ok(());
         }
+        let readiness_map = config
+            .uinput_ready_command
+            .as_ref()
+            .map(|_| {
+                planner_for(&config)
+                    .map(|planner| planner.keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1))
+            })
+            .transpose()?;
         let mut guard = Guard::new()?;
         guard.wait(Duration::from_millis(config.modifier_release_timeout_ms))?;
         std::thread::sleep(Duration::from_millis(u64::from(config.pre_type_delay_ms)));
@@ -383,6 +441,12 @@ pub(super) async fn output(
             .map_err(|_| stopped("keyboard state lock was poisoned"))?;
         if slot.is_none() {
             *slot = Some(create_device()?);
+        }
+        if let (Some(command), Some(keymap)) = (&config.uinput_ready_command, readiness_map) {
+            if let Err(error) = prepare_keyboard(command, keymap, Duration::from_secs(3)) {
+                *slot = None;
+                return Err(error);
+            }
         }
         let delay = Duration::from_millis(u64::from(config.type_delay_ms.max(5)));
         let result = dispatch(
@@ -475,6 +539,17 @@ mod tests {
             .iter()
             .any(|(key, _)| [29, 97, 56, 125, 126, 28, 15].contains(key)));
         capture
+    }
+
+    #[test]
+    fn readiness_hook_receives_the_map_and_failure_is_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("map");
+        let command = format!("cat > '{}'", file.display());
+        prepare_keyboard(&command, "test XKB map".into(), Duration::from_secs(1)).unwrap();
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "test XKB map");
+        assert!(prepare_keyboard("exit 42", "map".into(), Duration::from_secs(1)).is_err());
+        assert!(prepare_keyboard("sleep 10", "map".into(), Duration::from_millis(50)).is_err());
     }
 
     #[test]

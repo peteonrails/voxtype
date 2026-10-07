@@ -119,6 +119,10 @@ pub struct OutputConfig {
     #[serde(default)]
     pub uinput_xkb_variant: Option<String>,
 
+    /// Optional device readiness hook; receives the compiled XKB map on stdin.
+    #[serde(default)]
+    pub uinput_ready_command: Option<String>,
+
     /// Keyboard layout for eitype (e.g., "de" for German, "ru" for Russian).
     /// Passed to eitype as `-l <layout>`. Overrides the system XKB layout
     /// while eitype is typing, then restores it when eitype exits.
@@ -218,6 +222,7 @@ impl Default for OutputConfig {
             dotool_xkb_variant: None,
             uinput_xkb_layout: None,
             uinput_xkb_variant: None,
+            uinput_ready_command: None,
             eitype_xkb_layout: None,
             eitype_xkb_variant: None,
             language_to_layout: default_language_to_layout(),

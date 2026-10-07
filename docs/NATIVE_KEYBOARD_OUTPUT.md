@@ -39,6 +39,30 @@ CLI overrides are `--driver uinput`, `--uinput-xkb-layout`, and
 `--uinput-xkb-variant`. Environment overrides are `VOXTYPE_UINPUT_XKB_LAYOUT`
 and `VOXTYPE_UINPUT_XKB_VARIANT`.
 
+## Device readiness hook
+
+`uinput_ready_command` optionally prepares the virtual device after creation
+and before every text or Backspace burst. It receives the driver's compiled
+XKB map on stdin and `VOXTYPE_UINPUT_DEVICE_NAME` in the environment. Failure
+or a three-second timeout stops output before events are emitted and destroys
+the device. The hook must consume stdin and exit successfully; it receives no
+transcription text. CLI/environment overrides are `--uinput-ready-command`
+and `VOXTYPE_UINPUT_READY_COMMAND`.
+
+For an existing Xorg session, install `scripts/uinput-xorg-ready` into your
+user executable directory, then configure its absolute path:
+
+```toml
+[output]
+uinput_ready_command = "/home/your-user/.local/bin/voxtype-uinput-xorg-ready"
+```
+
+This helper requires `xinput` and `xkbcomp`. It targets only the named slave
+keyboard by device ID and loads the exact compiled map without changing the
+core keyboard or physical device maps. This also handles the first delivery
+before a newly written Xorg InputClass has been loaded. The helper is for
+Xorg; Wayland uses the compositor's device configuration instead.
+
 ## Desktop and remapper setup
 
 The virtual keyboard has vendor ID `5658` and product ID `5459` (hexadecimal).
