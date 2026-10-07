@@ -295,7 +295,8 @@ pub struct Cli {
         value_name = "DRIVERS",
         help_heading = "Output",
         long_help = "Output driver order for type mode (comma-separated).\n\
-        Available: wtype, dotool, ydotool, clipboard.\n\
+        Available: uinput, wtype, eitype, dotool, ydotool, clipboard, xclip.\n\
+        uinput is an exclusive Linux driver (requires the uinput build feature); it never uses the clipboard.\n\
         Example: --driver=ydotool,wtype,clipboard"
     )]
     pub driver: Option<String>,
@@ -397,6 +398,14 @@ pub struct Cli {
         hide_short_help = true
     )]
     pub dotool_xkb_variant: Option<String>,
+
+    /// Layout assigned to the Voxtype virtual keyboard (native uinput driver)
+    #[arg(long, value_name = "LAYOUT", help_heading = "Output")]
+    pub uinput_xkb_layout: Option<String>,
+
+    /// Variant assigned to the Voxtype virtual keyboard (native uinput driver)
+    #[arg(long, value_name = "VARIANT", help_heading = "Output")]
+    pub uinput_xkb_variant: Option<String>,
 
     /// Keyboard layout for eitype (e.g., de, ru, us). Passed as `-l <LAYOUT>`.
     /// Overrides any layout derived from the transcribed language.

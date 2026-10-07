@@ -2063,6 +2063,10 @@ fallback_to_clipboard = true  # Use clipboard if typing drivers fail
 
 ### driver_order
 
+For experimental clipboard-free Linux keyboard delivery, see
+[Native keyboard output](NATIVE_KEYBOARD_OUTPUT.md). It requires an explicit
+matching device keymap and an exclusive `driver_order = ["uinput"]`.
+
 **Type:** Array of strings
 **Default:** `["wtype", "eitype", "dotool", "ydotool", "clipboard", "xclip"]`
 **Required:** No

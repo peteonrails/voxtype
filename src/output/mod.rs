@@ -35,6 +35,8 @@ pub mod pbcopy;
 pub mod post_process;
 pub mod session;
 pub mod streaming;
+#[cfg(target_os = "linux")]
+pub mod uinput;
 pub mod wtype;
 pub mod xclip;
 pub mod ydotool;
@@ -237,6 +239,16 @@ pub trait TextOutput: Send + Sync {
 
     /// Human-readable name for logging
     fn name(&self) -> &'static str;
+
+    /// Legacy command-line typing tools need ASCII quote normalization.
+    fn normalize_quotes(&self) -> bool {
+        true
+    }
+
+    /// A native backend can keep streaming corrections on its own device.
+    async fn backspace(&self, _count: usize) -> Option<Result<usize, OutputError>> {
+        None
+    }
 }
 
 /// Default driver order for type mode
@@ -258,6 +270,14 @@ fn create_driver_output(
     pre_type_delay_ms: u32,
 ) -> Box<dyn TextOutput> {
     match driver {
+        OutputDriver::Uinput => {
+            #[cfg(target_os = "linux")]
+            {
+                Box::new(uinput::UinputOutput::new(config, None))
+            }
+            #[cfg(not(target_os = "linux"))]
+            unreachable!("uinput requires Linux");
+        }
         OutputDriver::Wtype => Box::new(wtype::WtypeOutput::new(
             config.auto_submit,
             config.append_text.clone(),
@@ -346,6 +366,20 @@ pub fn create_output_chain_with_override(
                 let driver_order: &[OutputDriver] = driver_override
                     .or(config.driver_order.as_deref())
                     .unwrap_or(DEFAULT_DRIVER_ORDER);
+
+                // Native output is deliberately exclusive: a failed or partial
+                // delivery must never retry through a clipboard or another keyboard.
+                if driver_order.contains(&OutputDriver::Uinput) {
+                    #[cfg(target_os = "linux")]
+                    {
+                        let reason = (driver_order != [OutputDriver::Uinput]).then(|| {
+                            "uinput must be the only entry in output.driver_order".to_string()
+                        });
+                        return vec![Box::new(uinput::UinputOutput::new(config, reason))];
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    return Vec::new();
+                }
 
                 if let Some(custom_order) = driver_override.or(config.driver_order.as_deref()) {
                     tracing::info!(
@@ -455,7 +489,8 @@ pub struct OutputOptions<'a> {
 /// keybindings when modifiers are held. Used to filter the chain when the
 /// modifier-release wait times out.
 fn is_keystroke_method(name: &str) -> bool {
-    matches!(name, "wtype" | "eitype" | "dotool" | "ydotool") || name.starts_with("paste")
+    matches!(name, "uinput" | "wtype" | "eitype" | "dotool" | "ydotool")
+        || name.starts_with("paste")
 }
 
 /// Try each output method in the chain until one succeeds
@@ -478,7 +513,7 @@ pub async fn output_with_fallback(
     // wait_for_modifiers_release in osascript.rs and gets called separately
     // from the osascript output path.
     #[cfg(target_os = "linux")]
-    if options.wait_for_modifier_release {
+    if options.wait_for_modifier_release && !chain.iter().any(|output| output.name() == "uinput") {
         let mut guard = modifier_guard::ModifierGuard::new();
         if guard
             .wait_for_release(options.modifier_release_timeout)
@@ -527,10 +562,19 @@ pub async fn output_with_fallback(
             continue;
         }
 
-        match output.output(&normalized_text).await {
+        let text = if output.normalize_quotes() {
+            &normalized_text
+        } else {
+            text
+        };
+        match output.output(text).await {
             Ok(()) => {
                 tracing::debug!("Text output via {}", output.name());
                 result = Ok(());
+                break;
+            }
+            Err(e @ OutputError::KeyboardStopped(_)) => {
+                result = Err(e);
                 break;
             }
             Err(e) => {
@@ -658,5 +702,104 @@ mod tests {
         assert_eq!(sanitize_urgency("LOW"), "normal");
         assert_eq!(sanitize_urgency("urgent"), "normal");
         assert_eq!(sanitize_urgency("--rm -rf /"), "normal");
+    }
+}
+
+#[cfg(test)]
+mod native_output_tests {
+    use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_selection_has_no_implicit_clipboard_even_with_legacy_default() {
+        let config = OutputConfig {
+            driver_order: Some(vec![OutputDriver::Uinput]),
+            ..Default::default()
+        };
+        let chain = create_output_chain(&config);
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].name(), "uinput");
+        assert!(is_keystroke_method(chain[0].name()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn mixed_native_chain_rejects_before_device_access() {
+        let config = OutputConfig {
+            driver_order: Some(vec![OutputDriver::Uinput, OutputDriver::Clipboard]),
+            ..Default::default()
+        };
+        let chain = create_output_chain(&config);
+        let error = chain[0].output("hello").await.unwrap_err();
+        assert!(error.to_string().contains("only entry"));
+    }
+
+    struct SpyOutput {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        stop: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl TextOutput for SpyOutput {
+        async fn output(&self, text: &str) -> Result<(), OutputError> {
+            self.seen.lock().unwrap().push(text.into());
+            if self.stop {
+                Err(OutputError::KeyboardStopped("device failed".into()))
+            } else {
+                Ok(())
+            }
+        }
+        async fn is_available(&self) -> bool {
+            true
+        }
+        fn name(&self) -> &'static str {
+            "uinput"
+        }
+        fn normalize_quotes(&self) -> bool {
+            false
+        }
+    }
+
+    fn options() -> OutputOptions<'static> {
+        OutputOptions {
+            pre_output_command: None,
+            post_output_command: None,
+            wait_for_modifier_release: false,
+            modifier_release_timeout: std::time::Duration::ZERO,
+        }
+    }
+
+    #[tokio::test]
+    async fn native_delivery_preserves_quotes_primes_and_backslashes() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let chain: Vec<Box<dyn TextOutput>> = vec![Box::new(SpyOutput {
+            seen: seen.clone(),
+            stop: false,
+        })];
+        let text = "‘literal’ \"text\" x′ x″ \\n \\t";
+        output_with_fallback(&chain, text, options()).await.unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![text.to_string()]);
+    }
+
+    #[tokio::test]
+    async fn keyboard_abort_never_retries_or_copies() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let fallback = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let chain: Vec<Box<dyn TextOutput>> = vec![
+            Box::new(SpyOutput {
+                seen: seen.clone(),
+                stop: true,
+            }),
+            Box::new(SpyOutput {
+                seen: fallback.clone(),
+                stop: false,
+            }),
+        ];
+        let error = output_with_fallback(&chain, "hello", options())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, OutputError::KeyboardStopped(_)));
+        assert_eq!(*seen.lock().unwrap(), vec!["hello".to_string()]);
+        assert!(fallback.lock().unwrap().is_empty());
     }
 }

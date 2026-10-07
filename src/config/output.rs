@@ -102,6 +102,14 @@ pub struct OutputConfig {
     #[serde(default)]
     pub dotool_xkb_variant: Option<String>,
 
+    /// Layout assigned to the dedicated Voxtype uinput keyboard (required).
+    #[serde(default)]
+    pub uinput_xkb_layout: Option<String>,
+
+    /// Variant assigned to the dedicated Voxtype uinput keyboard.
+    #[serde(default)]
+    pub uinput_xkb_variant: Option<String>,
+
     /// Keyboard layout for eitype (e.g., "de" for German, "ru" for Russian).
     /// Passed to eitype as `-l <layout>`. Overrides the system XKB layout
     /// while eitype is typing, then restores it when eitype exits.
@@ -199,6 +207,8 @@ impl Default for OutputConfig {
             paste_keys: None,
             dotool_xkb_layout: None,
             dotool_xkb_variant: None,
+            uinput_xkb_layout: None,
+            uinput_xkb_variant: None,
             eitype_xkb_layout: None,
             eitype_xkb_variant: None,
             language_to_layout: default_language_to_layout(),
@@ -350,6 +360,8 @@ pub enum OutputMode {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputDriver {
+    /// Native Linux virtual keyboard; exclusive and never uses the clipboard.
+    Uinput,
     /// wtype - Wayland-native via virtual-keyboard protocol, best Unicode/CJK support
     Wtype,
     /// eitype - Wayland via libei/EI protocol, works on GNOME/KDE
@@ -367,6 +379,7 @@ pub enum OutputDriver {
 impl std::fmt::Display for OutputDriver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            OutputDriver::Uinput => write!(f, "uinput"),
             OutputDriver::Wtype => write!(f, "wtype"),
             OutputDriver::Eitype => write!(f, "eitype"),
             OutputDriver::Dotool => write!(f, "dotool"),
@@ -382,6 +395,7 @@ impl std::str::FromStr for OutputDriver {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
+            "uinput" => Ok(OutputDriver::Uinput),
             "wtype" => Ok(OutputDriver::Wtype),
             "eitype" => Ok(OutputDriver::Eitype),
             "dotool" => Ok(OutputDriver::Dotool),
@@ -389,7 +403,7 @@ impl std::str::FromStr for OutputDriver {
             "clipboard" => Ok(OutputDriver::Clipboard),
             "xclip" => Ok(OutputDriver::Xclip),
             _ => Err(format!(
-                "Unknown driver '{}'. Valid options: wtype, eitype, dotool, ydotool, clipboard, xclip",
+                "Unknown driver '{}'. Valid options: uinput, wtype, eitype, dotool, ydotool, clipboard, xclip",
                 s
             )),
         }

@@ -1642,7 +1642,7 @@ impl Daemon {
             let _ = task.await;
         }
         if let Some(s) = streaming_session.as_mut() {
-            if let Err(e) = s.rewind().await {
+            if let Err(e) = s.rewind(streaming_chain.as_deref().unwrap_or(&[])).await {
                 tracing::warn!("Streaming rewind failed: {}", e);
             }
         }

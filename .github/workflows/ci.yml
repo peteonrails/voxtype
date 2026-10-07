@@ -64,12 +64,29 @@ jobs:
       - name: cargo test
         run: cargo test
 
+  uinput:
+    name: native uinput (no device access)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install build dependencies and keymaps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libclang-dev cmake libxkbcommon-dev xkb-data
+      - name: Check native keyboard output
+        run: |
+          cargo clippy --features uinput --all-targets --no-deps -- -D warnings
+          cargo test --features uinput
+
   # Aggregator job — branch protection only needs to require `ci-success`.
   # Adding/removing parallel checks above just updates the `needs:` list;
   # the protection rule never needs to be touched.
   ci-success:
     name: ci-success
-    needs: [fmt, clippy, test]
+    needs: [fmt, clippy, test, uinput]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -79,10 +96,12 @@ jobs:
           fmt='${{ needs.fmt.result }}'
           clippy='${{ needs.clippy.result }}'
           test='${{ needs.test.result }}'
+          uinput='${{ needs.uinput.result }}'
           echo "fmt:    $fmt"
           echo "clippy: $clippy"
           echo "test:   $test"
-          if [[ "$fmt" != success || "$clippy" != success || "$test" != success ]]; then
+          echo "uinput: $uinput"
+          if [[ "$fmt" != success || "$clippy" != success || "$test" != success || "$uinput" != success ]]; then
             echo "::error::One or more required jobs failed"
             exit 1
           fi
