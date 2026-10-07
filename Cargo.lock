@@ -6169,6 +6169,7 @@ dependencies = [
  "wgpu",
  "which",
  "whisper-rs",
+ "xkbcommon",
  "zbus",
 ]
 
