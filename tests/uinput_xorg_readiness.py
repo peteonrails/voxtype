@@ -41,8 +41,10 @@ def printable_symbols(text):
                 for key in range(8, 256):
                     symbol = lib.xkb_state_key_get_one_sym(state, key)
                     character = lib.xkb_keysym_to_utf32(symbol)
-                    if character and chr(character).isprintable():
-                        symbols[modifiers, key] = character
+                    if (character and chr(character).isprintable()) or 0xFE50 <= symbol <= 0xFE6F:
+                        # Dead-key identity matters to compose processing even
+                        # though the key itself has no Unicode character.
+                        symbols[modifiers, key] = (character, symbol if not character else 0)
             finally:
                 lib.xkb_state_unref(state)
     finally:
@@ -82,7 +84,7 @@ def main():
             expected = printable_symbols(native)
             receiver = printable_symbols(actual)
             assert expected == receiver, "Xorg receiver changes printable key meanings"
-            print(f"{layout}/{variant or 'base'}: helper accepted; {len(expected)} printable strokes match; native upload exit {original.returncode}")
+            print(f"{layout}/{variant or 'base'}: helper accepted; {len(expected)} printable/dead-key strokes match; native upload exit {original.returncode}")
         core_after = run(["xkbcomp", "-w", "0", "-xkb", "-i", "3", display, "-"], env).stdout
         assert core_before == core_after, "Helper changed the core keyboard map"
         bad = run([str(ROOT / "scripts/uinput-xorg-ready"), "us", "intl"],
