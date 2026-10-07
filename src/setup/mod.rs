@@ -513,6 +513,7 @@ pub(crate) enum ModelKind {
     Omnilingual,
     Cohere,
     OpenVino,
+    Whistle,
 }
 
 /// Resolve a `--model` name to the engine that owns it.
@@ -545,11 +546,13 @@ pub(crate) fn classify_model_override(name: &str) -> anyhow::Result<ModelKind> {
         Ok(ModelKind::Cohere)
     } else if model::is_openvino_model(name) {
         Ok(ModelKind::OpenVino)
+    } else if model::is_valid_whistle_model(name) {
+        Ok(ModelKind::Whistle)
     } else {
         anyhow::bail!(
             "Unknown model '{}'.\n  Whisper: {}\n  Parakeet: {}\n  SenseVoice: {}\n  \
              Moonshine: {}\n  Paraformer: {}\n  Dolphin: {}\n  Omnilingual: {}\n  \
-             Cohere: {}\n  OpenVINO: {}",
+             Cohere: {}\n  OpenVINO: {}\n  Whistle: {}",
             name,
             model::valid_model_names().join(", "),
             model::valid_parakeet_model_names().join(", "),
@@ -560,6 +563,7 @@ pub(crate) fn classify_model_override(name: &str) -> anyhow::Result<ModelKind> {
             model::omnilingual_setup_model_names().join(", "),
             model::cohere_setup_model_names().join(", "),
             model::valid_openvino_model_names().join(", "),
+            model::valid_whistle_model_names().join(", "),
         )
     }
 }
@@ -640,6 +644,16 @@ fn onnx_setup_route(kind: ModelKind) -> Option<OnnxSetupRoute> {
             config_value: model::cohere_dir_name,
             validate: model::validate_cohere_model,
             download: model::download_cohere_model,
+        }),
+        ModelKind::Whistle => Some(OnnxSetupRoute {
+            display: "Whistle",
+            engine: "whistle",
+            feature: "whistle",
+            enabled: cfg!(feature = "whistle"),
+            dir_name: model::whistle_dir_name,
+            config_value: model::whistle_config_name,
+            validate: model::validate_whistle_model,
+            download: model::download_whistle_model,
         }),
         _ => None,
     }
@@ -1402,6 +1416,7 @@ mod tests {
             ("omnilingual-300m", ModelKind::Omnilingual),
             ("cohere-transcribe-q4f16", ModelKind::Cohere),
             ("cohere-transcribe-fp16", ModelKind::Cohere),
+            ("whistle.cact", ModelKind::Whistle),
         ] {
             assert_eq!(classify_model_override(name).unwrap(), expected, "{}", name);
         }
@@ -1418,6 +1433,7 @@ mod tests {
             "dolphin",
             "omnilingual",
             "cohere",
+            "whistle",
         ] {
             for model in crate::model_catalog::model_catalog(engine) {
                 let arg = crate::model_catalog::download_arg(engine, model).unwrap();
@@ -1497,6 +1513,7 @@ mod tests {
                     "omnilingual" => ModelKind::Omnilingual,
                     "cohere" => ModelKind::Cohere,
                     "openvino" => ModelKind::OpenVino,
+                    "whistle" => ModelKind::Whistle,
                     other => panic!(
                         "'{}' advertises a download argument but run_setup has no branch for it",
                         other

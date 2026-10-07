@@ -833,7 +833,7 @@ Any valid evdev key name works. Common choices:
 
 ## Transcription Engines
 
-Voxtype supports seven speech-to-text engines. Whisper uses whisper.cpp and works with any binary variant. The other six engines run via ONNX Runtime and require an ONNX binary variant (`voxtype-*-onnx-*`).
+Voxtype supports multiple speech-to-text engines. Whisper uses whisper.cpp and works with any binary variant. ONNX engines require an ONNX binary variant (`voxtype-*-onnx-*`). Optional native engines require their corresponding Cargo feature and runtime.
 
 | Engine | Best For | GPU Required | Languages |
 |--------|----------|--------------|-----------|
@@ -845,6 +845,7 @@ Voxtype supports seven speech-to-text engines. Whisper uses whisper.cpp and work
 | **Dolphin** | Dictation-optimized, fast CTC | No | Chinese + English |
 | **Omnilingual** | Broadest language coverage in ONNX engines | No | 50+ languages |
 | **Cohere** | #1 Open ASR Leaderboard accuracy | Optional (CUDA via `cohere-cuda`) | Arabic, German, English, Spanish, French, Hindi, Italian, Japanese, Korean, Dutch, Portuguese, Russian, Turkish, Chinese (14) |
+| **Whistle** | Small CPU-oriented model and technical vocabulary biasing | No | English, German, French, Spanish, Italian, Dutch, Polish |
 
 ### Selecting an Engine
 
@@ -862,7 +863,30 @@ engine = "paraformer"
 engine = "dolphin"
 engine = "omnilingual"
 engine = "cohere"
+
+# Optional native Cactus Whistle backend (requires the `whistle` build feature
+# and the Cactus Needle shared runtime)
+engine = "whistle"
+
+[whistle]
+model = "whistle.cact"
+# language omitted = automatic detection
+keywords = ["Voxtype", "NixOS", "Hyprland"]
 ```
+
+Install the model with `voxtype setup --download --model whistle.cact` once
+the `whistle/whistle` artifact is mirrored to the Voxtype model CDN. Whistle
+requires a build with `--features whistle` and the Cactus Needle native shared
+runtime. It accepts complete clips up to 30 seconds and is not a streaming
+engine. The Nix flake's Linux ONNX packages include the runtime and configure
+its path without `LD_LIBRARY_PATH`; standard GitHub/AUR binaries do not yet
+enable Whistle.
+
+The Needle C API exposes process-global model state and no model-unload
+function. Voxtype serializes calls and keeps the model loaded until the process
+exits. Voxtype disables Needle telemetry before loading the library. See the
+[initial Whistle/Whisper comparison](WHISTLE_BENCHMARK.md) for the local privacy
+check and its synthetic-speech limitations.
 
 **Via CLI flag** (overrides config):
 
@@ -875,9 +899,10 @@ voxtype --engine paraformer daemon
 voxtype --engine dolphin daemon
 voxtype --engine omnilingual daemon
 voxtype --engine cohere daemon
+voxtype --engine whistle daemon
 ```
 
-Valid `--engine` values: `whisper`, `parakeet`, `moonshine`, `sensevoice`, `paraformer`, `dolphin`, `omnilingual`, `cohere`.
+Valid `--engine` values: `whisper`, `parakeet`, `moonshine`, `sensevoice`, `paraformer`, `dolphin`, `omnilingual`, `cohere`, `whistle`.
 
 ### Switching to an ONNX Engine
 

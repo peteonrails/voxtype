@@ -303,7 +303,8 @@ fn send_macos_native(title: &str, body: &str, engine: Option<TranscriptionEngine
         | TranscriptionEngine::Omnilingual
         | TranscriptionEngine::Cohere
         | TranscriptionEngine::Soniox
-        | TranscriptionEngine::OpenVino => None,
+        | TranscriptionEngine::OpenVino
+        | TranscriptionEngine::Whistle => None,
     });
 
     for notifier in notifier_paths {

@@ -883,6 +883,29 @@ pub struct RegistryFile {
     pub local_path: String,
 }
 
+struct WhistleModelArtifact;
+
+impl ModelArtifact for WhistleModelArtifact {
+    fn name(&self) -> &str {
+        "whistle"
+    }
+
+    fn engine_prefix(&self) -> &'static str {
+        "whistle"
+    }
+
+    fn upstream_repo(&self) -> &str {
+        "Cactus-Compute/whistle"
+    }
+
+    fn expected_files(&self) -> Vec<ExpectedFile> {
+        vec![ExpectedFile {
+            path: "whistle.cact".to_string(),
+            size: 16_919_407,
+        }]
+    }
+}
+
 /// Files an ONNX model is expected to have on disk, by engine and model name.
 ///
 /// Only the file *names* come from here. The compiled-in sizes in the model
@@ -1015,6 +1038,15 @@ pub fn registry_snapshot() -> Vec<RegistryEntry> {
                 .collect(),
         });
     }
+    out.push(RegistryEntry {
+        engine_prefix: "whistle",
+        name: "whistle".to_string(),
+        upstream_repo: "Cactus-Compute/whistle".to_string(),
+        files: vec![RegistryFile {
+            upstream_path: "whistle.cact".to_string(),
+            local_path: "whistle.cact".to_string(),
+        }],
+    });
     // OpenVINO Whisper conversions (Intel's official HF org). Keyed by
     // dir_name like moonshine/sensevoice, since that is the on-disk layout
     // download_artifact writes and the R2 tree must mirror byte-for-byte.
@@ -2898,12 +2930,44 @@ pub fn validate_cohere_model(path: &Path) -> anyhow::Result<()> {
     }
 }
 
-/// Download a Cohere model by name (public API for run_setup).
-///
-/// Cohere is the largest artifact voxtype ships (up to ~4 GB across a
-/// handful of files). We print a size + disk headroom estimate before
-/// the unified downloader takes over so users don't wonder why their
-/// disk is filling.
+/// Model names accepted by the Whistle model downloader.
+pub fn valid_whistle_model_names() -> Vec<&'static str> {
+    vec!["whistle.cact"]
+}
+
+pub fn is_valid_whistle_model(name: &str) -> bool {
+    name == "whistle.cact"
+}
+
+pub fn whistle_dir_name(name: &str) -> Option<&'static str> {
+    is_valid_whistle_model(name).then_some("whistle")
+}
+
+pub fn whistle_config_name(name: &str) -> Option<&'static str> {
+    is_valid_whistle_model(name).then_some("whistle.cact")
+}
+
+pub fn validate_whistle_model(path: &Path) -> anyhow::Result<()> {
+    let model = path.join("whistle.cact");
+    let metadata = std::fs::metadata(&model)
+        .map_err(|e| anyhow::anyhow!("Whistle model is missing at {}: {e}", model.display()))?;
+    if metadata.len() != 16_919_407 {
+        anyhow::bail!(
+            "Whistle model has an unexpected size ({} bytes); re-download it with `voxtype setup --download --model whistle.cact`",
+            metadata.len()
+        );
+    }
+    Ok(())
+}
+
+pub fn download_whistle_model(model_name: &str) -> anyhow::Result<()> {
+    if !is_valid_whistle_model(model_name) {
+        anyhow::bail!("Unknown Whistle model: {model_name}");
+    }
+    download_artifact(&WhistleModelArtifact, &Config::models_dir())?;
+    validate_whistle_model(&Config::models_dir().join("whistle"))
+}
+
 pub fn download_cohere_model(model_name: &str) -> anyhow::Result<()> {
     let model = find_cohere_model(model_name)
         .ok_or_else(|| anyhow::anyhow!("Unknown Cohere model: {}", model_name))?;

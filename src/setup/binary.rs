@@ -854,6 +854,9 @@ pub fn compiled_features() -> Vec<&'static str> {
     if cfg!(feature = "cohere") {
         f.push("cohere");
     }
+    if cfg!(feature = "whistle") {
+        f.push("whistle");
+    }
     if cfg!(feature = "openvino-whisper") {
         f.push("openvino");
     }
@@ -1177,6 +1180,10 @@ mod tests {
         assert!(Variant::OnnxAvx2.supports_engine("openvino"));
         assert!(Variant::OnnxAvx512.supports_engine("openvino"));
         assert!(!Variant::WhisperAvx2.supports_engine("openvino"));
+        // Whistle is included by some Nix builds but not every packaged ONNX
+        // binary, so engine availability comes from the running binary's
+        // compiled_features rather than the broad binary family.
+        assert!(!Variant::OnnxAvx2.supports_engine("whistle"));
     }
 
     /// Regression test for #383: `compiled_features()` previously omitted
@@ -1212,6 +1219,7 @@ mod tests {
         require_feature_listed!("dolphin");
         require_feature_listed!("omnilingual");
         require_feature_listed!("cohere");
+        require_feature_listed!("whistle");
         if cfg!(feature = "openvino-whisper") {
             assert!(f.contains(&"openvino"));
         }

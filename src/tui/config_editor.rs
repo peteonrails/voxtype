@@ -158,6 +158,20 @@ impl ConfigEditor {
         self.dirty = true;
     }
 
+    pub fn set_string_array(&mut self, table: &str, key: &str, values: &[String]) {
+        let mut array = toml_edit::Array::new();
+        for value in values {
+            array.push(value.as_str());
+        }
+        if table.is_empty() {
+            self.document.as_table_mut()[key] = toml_edit::value(array);
+        } else {
+            let item = self.ensure_table(table);
+            item[key] = toml_edit::value(array);
+        }
+        self.dirty = true;
+    }
+
     pub fn set_bool(&mut self, table: &str, key: &str, value: bool) {
         if table.is_empty() {
             self.document.as_table_mut()[key] = toml_edit::value(value);
@@ -257,6 +271,14 @@ impl ConfigEditor {
 
     pub fn get_string(&self, table: &str, key: &str) -> Option<String> {
         self.value(table, key)?.as_str().map(|s| s.to_string())
+    }
+
+    pub fn get_string_array(&self, table: &str, key: &str) -> Option<Vec<String>> {
+        self.value(table, key)?
+            .as_array()?
+            .iter()
+            .map(|value| value.as_str().map(str::to_string))
+            .collect()
     }
 
     pub fn get_bool(&self, table: &str, key: &str) -> Option<bool> {

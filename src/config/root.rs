@@ -2,7 +2,7 @@ use super::{
     AudioConfig, CohereConfig, DolphinConfig, HotkeyConfig, MeetingConfig, MoonshineConfig,
     OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig, ParakeetConfig, Profile,
     SenseVoiceConfig, SonioxConfig, StatusConfig, StreamingConfig, TextConfig, TranscriptionEngine,
-    VadConfig, WhisperConfig,
+    VadConfig, WhisperConfig, WhistleConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -66,6 +66,10 @@ pub struct Config {
     #[serde(default)]
     pub soniox: Option<SonioxConfig>,
 
+    /// Whistle local speech-to-text configuration.
+    #[serde(default)]
+    pub whistle: Option<WhistleConfig>,
+
     /// Shared sliding-window streaming engine tuning, used by every batch
     /// backend wrapped in `transcribe::sliding_window` (currently `whisper`
     /// and `openvino`). `None` when config.toml has no `[streaming]`
@@ -127,6 +131,7 @@ impl Default for Config {
             cohere: None,
             openvino: None,
             soniox: None,
+            whistle: None,
             streaming: None,
             text: TextConfig::default(),
             vad: VadConfig::default(),
@@ -375,7 +380,7 @@ impl Config {
                 .map(|o| o.on_demand_loading)
                 .unwrap_or(false),
             // Soniox is a cloud backend; nothing to load on demand.
-            TranscriptionEngine::Soniox => false,
+            TranscriptionEngine::Soniox | TranscriptionEngine::Whistle => false,
         }
     }
 
@@ -397,6 +402,7 @@ impl Config {
                 super::language::LanguageConfig::Multiple(_) => return None,
             },
             TranscriptionEngine::Cohere => self.cohere.as_ref().map(|c| c.language.as_str())?,
+            TranscriptionEngine::Whistle => self.whistle.as_ref()?.language.as_deref()?,
             TranscriptionEngine::SenseVoice => {
                 self.sensevoice.as_ref().map(|s| s.language.as_str())?
             }
@@ -450,6 +456,11 @@ impl Config {
                 .as_ref()
                 .map(|c| c.model.as_str())
                 .unwrap_or("cohere (not configured)"),
+            TranscriptionEngine::Whistle => self
+                .whistle
+                .as_ref()
+                .map(|w| w.model.as_str())
+                .unwrap_or("whistle (not configured)"),
             TranscriptionEngine::OpenVino => self
                 .openvino
                 .as_ref()
