@@ -75,11 +75,12 @@ jobs:
       - name: Install build dependencies and keymaps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libclang-dev cmake libxkbcommon-dev xkb-data
+          sudo apt-get install -y libasound2-dev libclang-dev cmake libxkbcommon-dev libxkbcommon-tools xkb-data xvfb xinput x11-xkb-utils
       - name: Check native keyboard output
         run: |
           cargo clippy --features uinput --all-targets --no-deps -- -D warnings
           cargo test --features uinput
+          python3 tests/uinput_xorg_readiness.py
 
   # Aggregator job — branch protection only needs to require `ci-success`.
   # Adding/removing parallel checks above just updates the `needs:` list;

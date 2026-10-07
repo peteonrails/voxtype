@@ -1,12 +1,17 @@
 #!/usr/bin/bash
 # Prepare only Voxtype's slave keyboard; do not alter the core keyboard map.
-# The native driver supplies its compiled keymap on stdin before every burst.
+# The driver supplies a libxkbcommon map on stdin. Xorg needs its own compiler.
 set -euo pipefail
 : "${DISPLAY:?An Xorg DISPLAY is required}"
 : "${VOXTYPE_UINPUT_DEVICE_NAME:?Run this through the native readiness hook}"
+layout=${1:?Pass the same layout as output.uinput_xkb_layout}
+variant=${2:-}
+# Consume the native map, but do not upload its newer XKB representation to Xorg.
+cat > /dev/null
 device_id=$(xinput list --id-only "$VOXTYPE_UINPUT_DEVICE_NAME")
 if [[ ! "$device_id" =~ ^[0-9]+$ ]] || (( device_id <= 5 )); then
     echo "Cannot identify a unique Voxtype slave keyboard" >&2
     exit 1
 fi
-exec xkbcomp -w 0 -i "$device_id" - "$DISPLAY"
+setxkbmap -rules evdev -model pc105 -layout "$layout" -variant "$variant" -option '' -print |
+    xkbcomp -w 0 -i "$device_id" - "$DISPLAY"

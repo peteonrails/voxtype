@@ -54,12 +54,15 @@ user executable directory, then configure its absolute path:
 
 ```toml
 [output]
-uinput_ready_command = "/home/your-user/.local/bin/voxtype-uinput-xorg-ready"
+uinput_ready_command = "/home/your-user/.local/bin/voxtype-uinput-xorg-ready us intl"
 ```
 
-This helper requires `xinput` and `xkbcomp`. It targets only the named slave
-keyboard by device ID and loads the exact compiled map without changing the
-core keyboard or physical device maps. This also handles the first delivery
+This helper requires `xinput`, `setxkbmap`, and `xkbcomp`. Its layout and
+variant arguments must match the driver configuration. It consumes the native
+map, then compiles an equivalent map through Xorg's own tools: newer
+libxkbcommon exports can be rejected by Xorg's older protocol. It targets only
+the named slave keyboard by device ID without changing the core keyboard or
+physical device maps. This also handles the first delivery
 before a newly written Xorg InputClass has been loaded. The helper is for
 Xorg; Wayland uses the compositor's device configuration instead.
 
