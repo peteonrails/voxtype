@@ -407,6 +407,10 @@ pub struct Cli {
     #[arg(long, value_name = "VARIANT", help_heading = "Output")]
     pub uinput_xkb_variant: Option<String>,
 
+    /// Device readiness hook; receives the compiled native XKB keymap on stdin
+    #[arg(long, value_name = "COMMAND", help_heading = "Output")]
+    pub uinput_ready_command: Option<String>,
+
     /// Keyboard layout for eitype (e.g., de, ru, us). Passed as `-l <LAYOUT>`.
     /// Overrides any layout derived from the transcribed language.
     #[arg(

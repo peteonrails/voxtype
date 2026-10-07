@@ -259,6 +259,10 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if let Some(ref variant) = cli.uinput_xkb_variant {
         config.output.uinput_xkb_variant = Some(variant.clone());
     }
+    if let Some(ref command) = cli.uinput_ready_command {
+        config.output.uinput_ready_command = Some(command.clone());
+    }
+
     if let Some(ref layout) = cli.eitype_xkb_layout {
         config.output.eitype_xkb_layout = Some(layout.clone());
     }
