@@ -1640,6 +1640,7 @@ impl Daemon {
                 if let Err(e) = s
                     .flush(
                         chain,
+                        Some(&self.text_processor),
                         self.post_processor.as_ref(),
                         self.config.output.pre_output_command.as_deref(),
                         self.config.output.post_output_command.as_deref(),

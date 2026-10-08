@@ -126,12 +126,16 @@ impl StreamingSession {
         pre_output_command: Option<&str>,
         post_output_command: Option<&str>,
     ) -> Result<(), OutputError> {
-        // Buffered mode never types partials; the whole transcript is
-        // emitted once at end of session via `flush`.
-        if self.buffer_only {
+        if new_partial.is_empty() {
             return Ok(());
         }
-        if new_partial.is_empty() {
+        // Buffered mode types nothing during the session, but the delta is
+        // still transcript: backends that type partials send only the rest
+        // of the segment as its Final (Soniox) or never confirm it at all
+        // (Parakeet, the sliding-window engines), so dropping it here lost
+        // that text. Hold it like file output does; `flush` emits it.
+        if self.buffer_only {
+            self.observe_partial_delta(&new_partial);
             return Ok(());
         }
 
@@ -208,18 +212,19 @@ impl StreamingSession {
         pre_output_command: Option<&str>,
         post_output_command: Option<&str>,
     ) -> Result<(), OutputError> {
+        if self.buffer_only {
+            // Accumulate the raw text, partial tail included, and type
+            // nothing; `flush` processes and emits the whole transcript at
+            // graceful end of session. No typed_chars bump: nothing is on
+            // the cursor to rewind if the user cancels.
+            self.commit_segment_silent(text);
+            return Ok(());
+        }
+
         let processed = process_segment(text, text_processor);
         let text = processed.as_str();
         if text.is_empty() {
             self.clear_partial();
-            return Ok(());
-        }
-
-        if self.buffer_only {
-            // Accumulate only; flushed once at graceful end of session.
-            // No typing and no typed_chars bump (nothing is on the cursor
-            // to rewind if the user cancels).
-            self.finalized_text.push_str(text);
             return Ok(());
         }
 
@@ -305,11 +310,11 @@ impl StreamingSession {
         post_output_command: Option<&str>,
     ) -> Result<(), OutputError> {
         if self.buffer_only {
-            // Nothing was typed, so there is nothing to backspace; just
-            // accumulate the final text for the end-of-session flush,
-            // processed like any other final.
-            self.finalized_text
-                .push_str(&process_segment(text, text_processor));
+            // Nothing was typed, so there is nothing to backspace on
+            // screen, but `backspace` still trims the raw partial the
+            // backend is revising. Same bookkeeping as file output;
+            // processing happens once at `flush`.
+            self.replace_and_commit_silent(backspace, text);
             return Ok(());
         }
 
@@ -385,12 +390,18 @@ impl StreamingSession {
 
     /// Emit the entire buffered transcript once. Used in buffered mode
     /// (`[output] streaming_buffer_output`) at graceful end of session.
-    /// Runs post-processing on the full transcript when configured —
-    /// unlike the incremental path, which skips it to avoid operating on
-    /// fragments. No-op when nothing was buffered.
+    ///
+    /// The buffer holds the raw transcript, partial deltas included (see
+    /// `type_partial_delta`). Here it is processed once, whole, like the
+    /// batch path and file output: any partial the backend never confirmed
+    /// is folded in, the [`TextProcessor`] runs over the complete text (so
+    /// replacements spanning a segment boundary still match), then
+    /// post-processing, which the incremental path skips to avoid
+    /// operating on fragments. No-op when nothing was buffered.
     pub async fn flush(
         &mut self,
         chain: &[Box<dyn TextOutput>],
+        text_processor: Option<&TextProcessor>,
         post_process: Option<&PostProcessor>,
         pre_output_command: Option<&str>,
         post_output_command: Option<&str>,
@@ -401,13 +412,18 @@ impl StreamingSession {
         if !self.buffer_only {
             return Ok(());
         }
-        if self.finalized_text.is_empty() {
+        self.finalize_pending_partial();
+        let processed = match text_processor {
+            Some(tp) => tp.process(&self.finalized_text),
+            None => self.finalized_text.clone(),
+        };
+        if processed.is_empty() {
             return Ok(());
         }
         let pp_started = std::time::Instant::now();
         let text = match post_process {
-            Some(pp) => pp.process_with_context(&self.finalized_text, None).await,
-            None => self.finalized_text.clone(),
+            Some(pp) => pp.process_with_context(&processed, None).await,
+            None => processed,
         };
         let post_process_ms = pp_started.elapsed().as_millis() as u64;
         let opts = OutputOptions {
@@ -471,8 +487,8 @@ impl Default for StreamingSession {
 /// spacing). `TextProcessor::process` trims the text it is given, so a
 /// processed segment arrived without its separator and the committed
 /// transcript read "what your country can do for you.Ask what you can
-/// do", with every segment boundary closed up, in the typed and the
-/// buffered paths alike.
+/// do", with every segment boundary closed up. Buffered sessions keep the
+/// raw text and process it once at `flush`, so they do not need this.
 fn process_segment(text: &str, text_processor: Option<&TextProcessor>) -> String {
     let Some(tp) = text_processor else {
         return text.to_string();
@@ -703,7 +719,8 @@ mod tests {
         );
         assert_eq!(rec.typed()[1], " Ask what you can do");
 
-        // Buffered mode accumulates the same text without typing it.
+        // Buffered mode keeps the raw text, separators included, and
+        // processes it at flush.
         let mut session = StreamingSession::with_buffer_only(true);
         session
             .commit_segment(&chain, "what your country can do", Some(&tp), None, None)
@@ -877,15 +894,72 @@ mod tests {
         assert_eq!(session.typed_chars(), 0);
     }
 
+    /// Buffered mode types nothing, but a partial delta is still transcript:
+    /// it is held, and `flush` emits it with the rest.
     #[tokio::test]
-    async fn buffer_mode_skips_partials() {
+    async fn buffer_mode_holds_partials_without_typing() {
         let mut session = StreamingSession::with_buffer_only(true);
         session
             .type_partial_delta(&[], "in progress".into(), None, None)
             .await
             .unwrap();
         assert_eq!(session.typed_chars(), 0);
-        assert_eq!(session.finalized_text(), "");
+        assert_eq!(session.partial(), "in progress");
+
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        session.flush(&chain, None, None, None, None).await.unwrap();
+        assert_eq!(rec.typed(), vec!["in progress".to_string()]);
+    }
+
+    /// A backend that types partials sends only the rest of the segment as
+    /// its Final. Buffered mode must keep both halves, apply a revision's
+    /// backspace to the raw partial, and run the TextProcessor once over
+    /// the whole transcript at flush, so a replacement spanning a segment
+    /// boundary still matches.
+    #[tokio::test]
+    async fn buffer_mode_assembles_partials_finals_and_processes_once() {
+        let config = crate::config::TextConfig {
+            replacements: [("vox type".to_string(), "voxtype".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let tp = TextProcessor::new(&config);
+        let mut session = StreamingSession::with_buffer_only(true);
+
+        session
+            .type_partial_delta(&[], "Hello world".into(), None, None)
+            .await
+            .unwrap();
+        session
+            .commit_segment(&[], ". I use vox", Some(&tp), None, None)
+            .await
+            .unwrap();
+        session
+            .type_partial_delta(&[], " tipe".into(), None, None)
+            .await
+            .unwrap();
+        session
+            .replace_and_commit(&[], 4, "type daily.", Some(&tp), None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            session.finalized_text(),
+            "Hello world. I use vox type daily."
+        );
+        assert_eq!(session.typed_chars(), 0);
+
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        session
+            .flush(&chain, Some(&tp), None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            rec.typed(),
+            vec!["Hello world. I use voxtype daily.".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -894,6 +968,6 @@ mod tests {
         // must not re-emit it. With an empty chain this would error if it
         // tried to output, so Ok proves it short-circuited.
         let mut session = StreamingSession::new();
-        session.flush(&[], None, None, None).await.unwrap();
+        session.flush(&[], None, None, None, None).await.unwrap();
     }
 }
