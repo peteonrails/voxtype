@@ -1009,6 +1009,14 @@ impl Daemon {
         }
     }
 
+    /// The `[whisper]` config the model manager loads Whisper models from,
+    /// with the `[vocabulary]` terms merged into `initial_prompt`. Every
+    /// `ModelManager` the daemon builds takes this, not `config.whisper`,
+    /// so dictation gets the same vocabulary as `create_transcriber`.
+    fn whisper_model_config(&self) -> crate::config::WhisperConfig {
+        crate::transcribe::apply_vocabulary_to_whisper(&self.config.whisper, &self.vocabulary_terms)
+    }
+
     /// Play audio feedback sound if enabled
     fn play_feedback(&self, event: SoundEvent) {
         if let Some(ref feedback) = self.audio_feedback {
@@ -3235,7 +3243,8 @@ impl Daemon {
         drop(default_chain); // Not used; chain is created per-transcription
 
         // Initialize model manager for multi-model support (Whisper only)
-        let mut model_manager = ModelManager::new(&self.config.whisper, self.config_path.clone());
+        let mut model_manager =
+            ModelManager::new(&self.whisper_model_config(), self.config_path.clone());
 
         // Pre-load transcription model if on_demand_loading is disabled
         if !self.config.on_demand_loading() {
@@ -3376,7 +3385,7 @@ impl Daemon {
                                     // Start model loading in background
                                     match self.config.engine {
                                         crate::config::TranscriptionEngine::Whisper => {
-                                            let config = self.config.whisper.clone();
+                                            let config = self.whisper_model_config();
                                             let config_path = self.config_path.clone();
                                             let model_to_load = model_override.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
@@ -3587,7 +3596,7 @@ impl Daemon {
                                     // Start model loading in background
                                     match self.config.engine {
                                         crate::config::TranscriptionEngine::Whisper => {
-                                            let config = self.config.whisper.clone();
+                                            let config = self.whisper_model_config();
                                             let config_path = self.config_path.clone();
                                             let model_to_load = model_override.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
@@ -4103,7 +4112,7 @@ impl Daemon {
                             // Start model loading in background
                             match self.config.engine {
                                 crate::config::TranscriptionEngine::Whisper => {
-                                    let config = self.config.whisper.clone();
+                                    let config = self.whisper_model_config();
                                     let config_path = self.config_path.clone();
                                     let model_to_load = model_override.clone();
                                     self.model_load_task = Some(tokio::task::spawn_blocking(move || {
@@ -4783,6 +4792,32 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
         assert_eq!(parsed["status"], "error");
         assert_eq!(parsed["message"], "disk went away");
+    }
+
+    #[test]
+    fn test_whisper_model_config_carries_vocabulary() {
+        let mut config = Config::default();
+        config.whisper.initial_prompt = Some("Technical discussion.".to_string());
+        let daemon = Daemon::new(
+            config,
+            None,
+            vec!["voxtype".to_string(), "Hyprland".to_string()],
+        );
+        assert_eq!(
+            daemon.whisper_model_config().initial_prompt.as_deref(),
+            Some("Technical discussion. voxtype, Hyprland")
+        );
+    }
+
+    #[test]
+    fn test_whisper_model_config_without_vocabulary_is_unchanged() {
+        let mut config = Config::default();
+        config.whisper.initial_prompt = Some("Technical discussion.".to_string());
+        let daemon = Daemon::new(config, None, Vec::new());
+        assert_eq!(
+            daemon.whisper_model_config().initial_prompt.as_deref(),
+            Some("Technical discussion.")
+        );
     }
 
     #[test]
