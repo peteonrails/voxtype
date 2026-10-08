@@ -39,7 +39,7 @@ pub use export::{export_meeting, export_meeting_to_file, ExportFormat, ExportOpt
 pub use state::{ChunkState, MeetingState};
 pub use storage::{MeetingStorage, StorageConfig, StorageError};
 
-use crate::error::{MeetingError, Result};
+use crate::error::{MeetingError, Result, VoxtypeError};
 use crate::output::post_process::PostProcessor;
 use crate::transcribe::{self, Transcriber};
 use std::collections::HashMap;
@@ -134,6 +134,10 @@ impl MeetingDaemon {
         let transcriber: Arc<dyn Transcriber> =
             Arc::from(transcribe::create_transcriber(&meeting_app_config)?);
         let engine_name = format!("{:?}", meeting_app_config.engine).to_lowercase();
+        let vocabulary_terms = app_config
+            .vocabulary
+            .resolve_terms()
+            .map_err(VoxtypeError::Config)?;
 
         let post_processor = app_config.output.post_process.as_ref().map(|cfg| {
             tracing::info!(
@@ -141,7 +145,7 @@ impl MeetingDaemon {
                 cfg.command,
                 cfg.timeout_ms
             );
-            PostProcessor::new(cfg)
+            PostProcessor::new(cfg).with_vocabulary(vocabulary_terms.clone())
         });
 
         // Create diarizer if configured

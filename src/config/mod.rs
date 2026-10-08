@@ -23,6 +23,7 @@ mod status;
 mod streaming;
 pub(crate) mod text;
 mod vad;
+mod vocabulary;
 mod whisper;
 
 pub use audio::{AudioConfig, AudioFeedbackConfig};
@@ -49,6 +50,7 @@ pub use status::{ResolvedIcons, StatusConfig, StatusIconOverrides};
 pub use streaming::StreamingConfig;
 pub use text::TextConfig;
 pub use vad::{VadBackend, VadConfig};
+pub use vocabulary::VocabularyConfig;
 pub use whisper::{WhisperConfig, WhisperMode};
 
 pub(super) fn default_true() -> bool {
