@@ -199,7 +199,7 @@ mod tests {
 
     /// Serializes tests that mutate process env (cargo runs tests on
     /// parallel threads in one process; set_var/remove_var race otherwise).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn make_config(command: &str, timeout_ms: u64) -> PostProcessConfig {
         PostProcessConfig {
@@ -423,7 +423,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_context_env_not_inherited_from_parent() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().await;
         // Even if VOXTYPE_CONTEXT is set in parent env, it should be cleared when context is None.
         // Uses current_thread runtime because std::env::set_var is not thread-safe
         // and will become unsafe in Rust edition 2024.
@@ -446,7 +446,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_vocabulary_env_cleared_when_unset() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().await;
         std::env::set_var("VOXTYPE_VOCABULARY", "stale");
         let config = make_config("echo \"${VOXTYPE_VOCABULARY:-unset}\"", 5000);
         let processor = PostProcessor::new(&config);

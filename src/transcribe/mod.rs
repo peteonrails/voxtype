@@ -554,8 +554,10 @@ mod vocabulary_tests {
 
     #[test]
     fn vocab_appended_to_existing_initial_prompt() {
-        let mut cfg = WhisperConfig::default();
-        cfg.initial_prompt = Some("Technical discussion.".into());
+        let cfg = WhisperConfig {
+            initial_prompt: Some("Technical discussion.".into()),
+            ..Default::default()
+        };
         let out = apply_vocabulary_to_whisper(&cfg, &["voxtype".into(), "jj".into()]);
         assert_eq!(
             out.initial_prompt.as_deref(),
@@ -572,8 +574,10 @@ mod vocabulary_tests {
 
     #[test]
     fn empty_vocab_leaves_config_untouched() {
-        let mut cfg = WhisperConfig::default();
-        cfg.initial_prompt = Some("keep me".into());
+        let cfg = WhisperConfig {
+            initial_prompt: Some("keep me".into()),
+            ..Default::default()
+        };
         let out = apply_vocabulary_to_whisper(&cfg, &[]);
         assert_eq!(out.initial_prompt.as_deref(), Some("keep me"));
     }
