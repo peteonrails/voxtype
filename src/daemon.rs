@@ -3422,11 +3422,6 @@ impl Daemon {
 
                                 tracing::info!("Recording started");
 
-                                // Send notification if enabled
-                                if self.config.output.notification.on_recording_start {
-                                    send_notification_with_lifetime("Push to Talk Active", "Recording...", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
-                                }
-
                                 // Prepare model for transcription
                                 if self.config.on_demand_loading() {
                                     // Start model loading in background
@@ -3536,6 +3531,12 @@ impl Daemon {
                                             self.update_state("recording");
                                             self.play_feedback(SoundEvent::RecordingStart);
 
+                                            // After capture has started, so the notify-send
+                                            // round trip does not delay the microphone.
+                                            if self.config.output.notification.on_recording_start {
+                                                send_notification_with_lifetime("Push to Talk Active", "Recording...", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
+                                            }
+
                                             // Run pre-recording hook (e.g., enter compositor submap for cancel)
                                             if let Some(cmd) = &self.config.output.pre_recording_command {
                                                 if let Err(e) = output::run_hook(cmd, "pre_recording").await {
@@ -3643,10 +3644,6 @@ impl Daemon {
                                 // Start recording
                                 tracing::info!("Recording started (toggle mode)");
 
-                                if self.config.output.notification.on_recording_start {
-                                    send_notification_with_lifetime("Recording Started", "Press hotkey again to stop", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
-                                }
-
                                 // Prepare model for transcription
                                 if self.config.on_demand_loading() {
                                     // Start model loading in background
@@ -3748,6 +3745,12 @@ impl Daemon {
                                             }
                                             self.update_state("recording");
                                             self.play_feedback(SoundEvent::RecordingStart);
+
+                                            // After capture has started, so the notify-send
+                                            // round trip does not delay the microphone.
+                                            if self.config.output.notification.on_recording_start {
+                                                send_notification_with_lifetime("Recording Started", "Press hotkey again to stop", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
+                                            }
 
                                             // Run pre-recording hook (e.g., enter compositor submap for cancel)
                                             if let Some(cmd) = &self.config.output.pre_recording_command {
@@ -4163,10 +4166,6 @@ impl Daemon {
                         let model_override = read_model_override();
                         tracing::info!("Recording started (external trigger), model_override = {:?}", model_override);
 
-                        if self.config.output.notification.on_recording_start {
-                            send_notification_with_lifetime("Recording Started", "External trigger", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
-                        }
-
                         // Prepare model for transcription
                         if self.config.on_demand_loading() {
                             // Start model loading in background
@@ -4267,6 +4266,12 @@ impl Daemon {
                                     }
                                     self.update_state("recording");
                                     self.play_feedback(SoundEvent::RecordingStart);
+
+                                    // After capture has started, so the notify-send
+                                    // round trip does not delay the microphone.
+                                    if self.config.output.notification.on_recording_start {
+                                        send_notification_with_lifetime("Recording Started", "External trigger", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
+                                    }
 
                                     // Run pre-recording hook (e.g., enter compositor submap for cancel)
                                     if let Some(cmd) = &self.config.output.pre_recording_command {
