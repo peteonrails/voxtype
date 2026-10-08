@@ -187,10 +187,11 @@ impl StreamingSession {
     /// through the daemon's [`TextProcessor`] (replacements, spoken
     /// punctuation) first — a segment becoming final is the one point in
     /// a streaming session where text stops being provisional, so this is
-    /// where the batch pipeline's processing applies (#669). Partials are
-    /// never processed: they get revised by backend-supplied backspace
-    /// counts that reference the raw text, and transforming them would
-    /// desynchronize that accounting.
+    /// where the batch pipeline's processing applies (#669), with the
+    /// segment's own leading separator kept (see [`process_segment`]).
+    /// Partials are never processed: they get revised by
+    /// backend-supplied backspace counts that reference the raw text, and
+    /// transforming them would desynchronize that accounting.
     ///
     /// On output error, the session's internal state is **not**
     /// updated; the caller can retry or surface the error.
@@ -207,14 +208,8 @@ impl StreamingSession {
         pre_output_command: Option<&str>,
         post_output_command: Option<&str>,
     ) -> Result<(), OutputError> {
-        let processed;
-        let text = match text_processor {
-            Some(tp) => {
-                processed = tp.process(text);
-                processed.as_str()
-            }
-            None => text,
-        };
+        let processed = process_segment(text, text_processor);
+        let text = processed.as_str();
         if text.is_empty() {
             self.clear_partial();
             return Ok(());
@@ -313,10 +308,8 @@ impl StreamingSession {
             // Nothing was typed, so there is nothing to backspace; just
             // accumulate the final text for the end-of-session flush,
             // processed like any other final.
-            match text_processor {
-                Some(tp) => self.finalized_text.push_str(&tp.process(text)),
-                None => self.finalized_text.push_str(text),
-            }
+            self.finalized_text
+                .push_str(&process_segment(text, text_processor));
             return Ok(());
         }
 
@@ -344,14 +337,8 @@ impl StreamingSession {
             }
         }
 
-        let processed;
-        let text = match text_processor {
-            Some(tp) => {
-                processed = tp.process(text);
-                processed.as_str()
-            }
-            None => text,
-        };
+        let processed = process_segment(text, text_processor);
+        let text = processed.as_str();
         if !text.is_empty() {
             let opts = OutputOptions {
                 pre_output_command,
@@ -473,6 +460,29 @@ impl Default for StreamingSession {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Run a finalized segment through the [`TextProcessor`], keeping the
+/// separator the backend put in front of it.
+///
+/// Streaming backends hand each final over as its own segment and mark
+/// the boundary with a leading space (Deepgram's finals are individually
+/// trimmed sentences; Soniox's final deltas carry the token's own
+/// spacing). `TextProcessor::process` trims the text it is given, so a
+/// processed segment arrived without its separator and the committed
+/// transcript read "what your country can do for you.Ask what you can
+/// do", with every segment boundary closed up, in the typed and the
+/// buffered paths alike.
+fn process_segment(text: &str, text_processor: Option<&TextProcessor>) -> String {
+    let Some(tp) = text_processor else {
+        return text.to_string();
+    };
+    let processed = tp.process(text);
+    let separator = &text[..text.len() - text.trim_start().len()];
+    if processed.is_empty() || separator.is_empty() || processed.starts_with(char::is_whitespace) {
+        return processed;
+    }
+    format!("{separator}{processed}")
 }
 
 /// Backspace `count` chars using the first available method.
@@ -663,6 +673,64 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rec.typed().last().unwrap(), "voxtype,");
+    }
+
+    /// Processing a final must not eat the separator the backend put in
+    /// front of it, in any of the three paths that process one.
+    #[tokio::test]
+    async fn processing_keeps_the_segment_separator() {
+        let config = crate::config::TextConfig {
+            filter_filler_words: true,
+            ..Default::default()
+        };
+        let tp = TextProcessor::new(&config);
+
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+
+        let mut session = StreamingSession::new();
+        session
+            .commit_segment(&chain, "what your country can do", Some(&tp), None, None)
+            .await
+            .unwrap();
+        session
+            .commit_segment(&chain, " Ask what you can do", Some(&tp), None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            session.finalized_text(),
+            "what your country can do Ask what you can do"
+        );
+        assert_eq!(rec.typed()[1], " Ask what you can do");
+
+        // Buffered mode accumulates the same text without typing it.
+        let mut session = StreamingSession::with_buffer_only(true);
+        session
+            .commit_segment(&chain, "what your country can do", Some(&tp), None, None)
+            .await
+            .unwrap();
+        session
+            .commit_segment(&chain, " Ask what you can do", Some(&tp), None, None)
+            .await
+            .unwrap();
+        session
+            .replace_and_commit(&chain, 0, " for your country.", Some(&tp), None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            session.finalized_text(),
+            "what your country can do Ask what you can do for your country."
+        );
+
+        // A filler-only segment still processes down to nothing, and the
+        // separator does not become a stray space.
+        let mut session = StreamingSession::new();
+        session
+            .commit_segment(&chain, " um", Some(&tp), None, None)
+            .await
+            .unwrap();
+        assert_eq!(session.finalized_text(), "");
+        assert_eq!(session.typed_chars(), 0);
     }
 
     #[tokio::test]
