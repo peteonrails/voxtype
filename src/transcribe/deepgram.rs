@@ -376,8 +376,9 @@ async fn run_streaming_session(
     let mut samples_closed = false;
     let mut eof_at: Option<tokio::time::Instant> = None;
     let mut finals_after_stop: u32 = 0;
-    // After end-of-audio we wait for Deepgram to flush trailing finals and
-    // close. If it never closes cleanly, this deadline stops us from waiting
+    let mut fatal: Option<String> = None;
+    // After end-of-audio we wait for Deepgram to acknowledge the finalize.
+    // If that answer never comes, this deadline stops us from waiting
     // (and, in buffer mode, never flushing) forever.
     let mut drain_deadline: Option<tokio::time::Instant> = None;
     let drain_timeout = Duration::from_secs(finish_timeout_secs);
@@ -413,19 +414,26 @@ async fn run_streaming_session(
                 match chunk {
                     Some(c) if !c.is_empty() => {
                         if let Err(e) = handle.send_data(f32_to_pcm_bytes(&c)).await {
-                            send_fatal(&events_tx, format!("Deepgram send audio failed: {e}")).await;
-                            return Ok(());
+                            fatal = Some(format!("Deepgram send audio failed: {e}"));
+                            break;
                         }
                     }
                     Some(_) => { /* empty chunk, skip */ }
                     None => {
-                        // EOF from daemon: close the send side so Deepgram
-                        // flushes remaining finals, then keep reading until
-                        // the server closes the socket or the drain deadline.
+                        // End of audio from the daemon: ask Deepgram to
+                        // finish the segment it is holding. It answers with
+                        // one `from_finalize` result, which ends the drain,
+                        // typically within ~150ms of the mic stopping.
+                        //
+                        // `CloseStream` would be the obvious call and is
+                        // what the server wants eventually, but it also
+                        // stops the client's keep-alives, after which its
+                        // worker gives up on the socket three seconds later
+                        // and the trailing finals never arrive.
                         samples_closed = true;
                         eof_at = Some(tokio::time::Instant::now());
-                        if let Err(e) = handle.close_stream().await {
-                            tracing::warn!("Deepgram close_stream failed: {e}");
+                        if let Err(e) = handle.finalize().await {
+                            tracing::warn!("Deepgram finalize failed: {e}");
                         }
                         drain_deadline = Some(tokio::time::Instant::now() + drain_timeout);
                     }
@@ -436,14 +444,9 @@ async fn run_streaming_session(
             response = handle.receive() => {
                 match response {
                     Some(Ok(resp)) => {
-                        if samples_closed {
-                            if let StreamResponse::TerminalResponse { .. } = &resp {
-                                tracing::debug!(
-                                    "Deepgram terminal metadata received; ending drain early"
-                                );
-                                break;
-                            }
-                        }
+                        let drain_done = samples_closed
+                            && (is_finalize_ack(&resp)
+                                || matches!(resp, StreamResponse::TerminalResponse { .. }));
                         if let Some(text) = extract_final_transcript(&resp) {
                             if !text.is_empty() {
                                 let segment_id = next_segment;
@@ -472,10 +475,14 @@ async fn run_streaming_session(
                                 }
                             }
                         }
+                        if drain_done {
+                            tracing::debug!("Deepgram end-of-audio acknowledged; drain complete");
+                            break;
+                        }
                     }
                     Some(Err(e)) => {
-                        send_fatal(&events_tx, format!("Deepgram stream error: {e}")).await;
-                        return Ok(());
+                        fatal = Some(format!("Deepgram stream error: {e}"));
+                        break;
                     }
                     None => {
                         // Server closed the socket cleanly.
@@ -486,6 +493,17 @@ async fn run_streaming_session(
         }
     }
 
+    // Tell Deepgram we are done so it closes the socket and the client's
+    // worker task ends with it. Every exit path needs this: dropping the
+    // handle alone leaves the worker sitting on an open connection.
+    if let Err(e) = handle.close_stream().await {
+        tracing::debug!("Deepgram close_stream at end of session: {e}");
+    }
+
+    if let Some(msg) = fatal {
+        send_fatal(&events_tx, msg).await;
+        return Ok(());
+    }
     if let Some(t) = eof_at {
         tracing::info!(
             drain_ms = t.elapsed().as_millis() as u64,
@@ -498,6 +516,13 @@ async fn run_streaming_session(
 }
 
 /// Open a Deepgram realtime WebSocket handle with the given options.
+///
+/// Keep-alive is on for the client's sake, not the server's: the
+/// `deepgram` client's socket worker stops polling the connection three
+/// seconds after the last message it sent unless it has keep-alives to
+/// send (`run_worker`'s idle branch awaits `pending()`, 0.9.2 through
+/// 0.12.0). Without this, every response that takes longer than that to
+/// arrive is lost and the socket never reports its close.
 async fn open_handle(
     client: &Deepgram,
     options: Options,
@@ -514,9 +539,22 @@ async fn open_handle(
             Some(ms) => Endpointing::CustomDurationMs(ms),
             None => Endpointing::Enabled,
         })
+        .keep_alive()
         .handle()
         .await
         .map_err(|e| TranscribeError::RemoteError(format!("Failed to open Deepgram stream: {e}")))
+}
+
+/// True for the result Deepgram sends in answer to a `Finalize`: the
+/// end-of-audio acknowledgement, carrying whatever was still in flight.
+fn is_finalize_ack(response: &StreamResponse) -> bool {
+    matches!(
+        response,
+        StreamResponse::TranscriptResponse {
+            from_finalize: true,
+            ..
+        }
+    )
 }
 
 /// A buffer of silence (`SILENCE_PRIMER_MS` of 16 kHz s16le mono).
@@ -686,6 +724,25 @@ mod tests {
         let bytes = f32_to_pcm_bytes(&[2.0, -2.0]);
         assert_eq!(i16::from_le_bytes([bytes[0], bytes[1]]), 32767);
         assert_eq!(i16::from_le_bytes([bytes[2], bytes[3]]), -32767);
+    }
+
+    #[test]
+    fn finalize_ack_is_the_end_of_audio_marker() {
+        // Ordinary results, final or not, keep the drain running.
+        assert!(!is_finalize_ack(&make_transcript_response(false, "hello")));
+        assert!(!is_finalize_ack(&make_transcript_response(true, "hello")));
+
+        let mut ack = make_transcript_response(true, "for your country.");
+        if let StreamResponse::TranscriptResponse { from_finalize, .. } = &mut ack {
+            *from_finalize = true;
+        }
+        assert!(is_finalize_ack(&ack));
+        // The answer to a Finalize carries text of its own, which the
+        // session emits before it stops draining.
+        assert_eq!(
+            extract_final_transcript(&ack).as_deref(),
+            Some("for your country.")
+        );
     }
 
     #[test]
