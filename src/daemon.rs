@@ -809,6 +809,8 @@ pub struct Daemon {
     audio_feedback: Option<AudioFeedback>,
     text_processor: TextProcessor,
     post_processor: Option<PostProcessor>,
+    vocabulary_terms: Vec<String>,
+    streaming_stopped_at: Option<std::time::Instant>,
     /// Last post-processed text and when it was produced, for context in subsequent dictations
     last_dictation: Option<(String, Instant)>,
     /// Audio level broadcaster for the OSD (None when disabled or bind failed)
@@ -892,7 +894,11 @@ pub struct Daemon {
 
 impl Daemon {
     /// Create a new daemon with the given configuration
-    pub fn new(config: Config, config_path: Option<PathBuf>) -> Self {
+    pub fn new(
+        config: Config,
+        config_path: Option<PathBuf>,
+        vocabulary_terms: Vec<String>,
+    ) -> Self {
         let state_file_path = config.resolve_state_file();
 
         // Initialize audio feedback if enabled
@@ -938,7 +944,7 @@ impl Daemon {
                 cfg.command,
                 cfg.timeout_ms
             );
-            PostProcessor::new(cfg)
+            PostProcessor::new(cfg).with_vocabulary(vocabulary_terms.clone())
         });
 
         // Initialize Voice Activity Detection if enabled
@@ -974,6 +980,8 @@ impl Daemon {
             audio_feedback,
             text_processor,
             post_processor,
+            vocabulary_terms,
+            streaming_stopped_at: None,
             last_dictation: None,
             level_hub: None,
             level_emitter_task: None,
@@ -1001,6 +1009,14 @@ impl Daemon {
             ducked_media_streams: Vec::new(),
             media_fade_task: None,
         }
+    }
+
+    /// The `[whisper]` config the model manager loads Whisper models from,
+    /// with the `[vocabulary]` terms merged into `initial_prompt`. Every
+    /// `ModelManager` the daemon builds takes this, not `config.whisper`,
+    /// so dictation gets the same vocabulary as `create_transcriber`.
+    fn whisper_model_config(&self) -> crate::config::WhisperConfig {
+        crate::transcribe::apply_vocabulary_to_whisper(&self.config.whisper, &self.vocabulary_terms)
     }
 
     /// Play audio feedback sound if enabled
@@ -1296,7 +1312,9 @@ impl Daemon {
 
         *audio_capture = Some(capture);
         *streaming_handle = Some(handle);
-        *streaming_session = Some(StreamingSession::new());
+        *streaming_session = Some(StreamingSession::with_buffer_only(
+            self.config.output.streaming_buffer_output,
+        ));
         *streaming_chain = Some(output::create_output_chain(&self.config.output));
         *state = State::Streaming {
             started_at: std::time::Instant::now(),
@@ -1397,14 +1415,21 @@ impl Daemon {
             } else {
                 tracing::info!("Stopping streaming session; closing capture and disowning session");
             }
+            self.streaming_stopped_at = Some(std::time::Instant::now());
             self.stop_streaming_capture(audio_capture).await;
-            if !file_output {
+            // Acknowledge the stop immediately so the user knows it
+            // registered; a buffered transcript pastes a beat later
+            // (which plays TranscriptionComplete).
+            self.play_feedback(SoundEvent::RecordingStop);
+            if !file_output && !self.config.output.streaming_buffer_output {
                 // Drop the typing surface synchronously so any
                 // Final/Partial events the backend emits while
                 // draining its internal buffer reach the event-pump
                 // arm with `streaming_session = None` and get
                 // discarded instead of typed into whatever window
-                // has focus by then.
+                // has focus by then. In buffer mode nothing was typed
+                // during recording; the whole transcript lives in the
+                // session and is emitted once on `Ended`, so keep it.
                 *streaming_session = None;
                 *streaming_chain = None;
             }
@@ -1528,7 +1553,10 @@ impl Daemon {
         streaming_handle: &mut Option<StreamHandle>,
         streaming_session: &mut Option<StreamingSession>,
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
+        flush_buffer: bool,
     ) {
+        let drain_elapsed = self.streaming_stopped_at.take().map(|t| t.elapsed());
+        let finish_started = std::time::Instant::now();
         if let Some(mut c) = audio_capture.take() {
             let _ = c.stop().await;
         }
@@ -1601,6 +1629,37 @@ impl Daemon {
             return;
         }
 
+        // In buffered output mode the finalized transcript was accumulated
+        // but never typed; emit it once now that the backend has flushed all
+        // finals. No-op in incremental mode. Skipped when flush_buffer is
+        // false (backend error: the transcript is known incomplete), on
+        // cancel (which discards the session before calling this), and for
+        // file output, which the branch above has already written.
+        if flush_buffer {
+            if let (Some(s), Some(chain)) = (streaming_session.as_mut(), streaming_chain.as_ref()) {
+                if let Err(e) = s
+                    .flush(
+                        chain,
+                        Some(&self.text_processor),
+                        self.post_processor.as_ref(),
+                        self.config.output.pre_output_command.as_deref(),
+                        self.config.output.post_output_command.as_deref(),
+                    )
+                    .await
+                {
+                    tracing::error!("Streaming buffered flush failed: {}", e);
+                }
+            }
+        }
+        if let Some(drain) = drain_elapsed {
+            let flush_ms = finish_started.elapsed().as_millis() as u64;
+            tracing::info!(
+                drain_ms = drain.as_millis() as u64,
+                flush_ms,
+                total_ms = drain.as_millis() as u64 + flush_ms,
+                "Streaming finish"
+            );
+        }
         *streaming_session = None;
         *streaming_chain = None;
 
@@ -1629,6 +1688,7 @@ impl Daemon {
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
         notification_body: &str,
     ) {
+        self.streaming_stopped_at = None;
         let backend_task = streaming_handle.take().map(|h| {
             let _ = h.cancel.send(());
             h.task
@@ -1796,7 +1856,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Deepgram => {
                     if let Some(t) = self.transcriber_preloaded.clone() {
                         Ok(t)
                     } else {
@@ -2664,7 +2725,8 @@ impl Daemon {
                                 trim: true,
                                 fallback_on_empty: true,
                             };
-                            let profile_processor = PostProcessor::new(&profile_config);
+                            let profile_processor = PostProcessor::new(&profile_config)
+                                .with_vocabulary(self.vocabulary_terms.clone());
                             tracing::info!(
                                 "Post-processing with profile: {:?}, has_context: {}",
                                 profile_override.as_ref().unwrap(),
@@ -3228,7 +3290,8 @@ impl Daemon {
         drop(default_chain); // Not used; chain is created per-transcription
 
         // Initialize model manager for multi-model support (Whisper only)
-        let mut model_manager = ModelManager::new(&self.config.whisper, self.config_path.clone());
+        let mut model_manager =
+            ModelManager::new(&self.whisper_model_config(), self.config_path.clone());
 
         // Pre-load transcription model if on_demand_loading is disabled
         if !self.config.on_demand_loading() {
@@ -3264,7 +3327,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Deepgram => {
                     // Non-Whisper engines do their own setup; Soniox just validates
                     // API key + endpoint at construction (no model to download).
                     self.transcriber_preloaded = Some(Arc::from(
@@ -3359,17 +3423,12 @@ impl Daemon {
 
                                 tracing::info!("Recording started");
 
-                                // Send notification if enabled
-                                if self.config.output.notification.on_recording_start {
-                                    send_notification_with_lifetime("Push to Talk Active", "Recording...", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
-                                }
-
                                 // Prepare model for transcription
                                 if self.config.on_demand_loading() {
                                     // Start model loading in background
                                     match self.config.engine {
                                         crate::config::TranscriptionEngine::Whisper => {
-                                            let config = self.config.whisper.clone();
+                                            let config = self.whisper_model_config();
                                             let config_path = self.config_path.clone();
                                             let model_to_load = model_override.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
@@ -3385,7 +3444,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Deepgram => {
                                             let config = self.config.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                                 crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -3416,7 +3476,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Deepgram => {
                                             if let Some(ref t) = self.transcriber_preloaded {
                                                 let transcriber = t.clone();
                                                 tokio::task::spawn_blocking(move || {
@@ -3471,6 +3532,12 @@ impl Daemon {
                                             self.update_state("recording");
                                             self.play_feedback(SoundEvent::RecordingStart);
 
+                                            // After capture has started, so the notify-send
+                                            // round trip does not delay the microphone.
+                                            if self.config.output.notification.on_recording_start {
+                                                send_notification_with_lifetime("Push to Talk Active", "Recording...", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
+                                            }
+
                                             // Run pre-recording hook (e.g., enter compositor submap for cancel)
                                             if let Some(cmd) = &self.config.output.pre_recording_command {
                                                 if let Err(e) = output::run_hook(cmd, "pre_recording").await {
@@ -3493,12 +3560,19 @@ impl Daemon {
                             if state.is_streaming() {
                                 tracing::debug!("Streaming push-to-talk released; closing audio capture and disowning session");
                                 self.stop_streaming_capture(&mut audio_capture).await;
-                                // Drop session/chain so the backend's
-                                // post-stop flush emission is dropped at
-                                // the event pump instead of typed.
-                                // Matches the SIGUSR2 stop path.
-                                streaming_session = None;
-                                streaming_chain = None;
+                                // Acknowledge the stop immediately; the
+                                // buffered transcript pastes a beat later.
+                                self.play_feedback(SoundEvent::RecordingStop);
+                                // In incremental mode, drop session/chain so
+                                // the backend's post-stop flush emission is
+                                // discarded at the event pump instead of typed.
+                                // In buffer mode the whole transcript lives in
+                                // the session and is emitted once on `Ended`,
+                                // so keep it. Matches the SIGUSR2 stop path.
+                                if !self.config.output.streaming_buffer_output {
+                                    streaming_session = None;
+                                    streaming_chain = None;
+                                }
                             } else if let State::Recording { model_override, .. } = &state {
                                 let model_override = model_override.clone();
 
@@ -3571,16 +3645,12 @@ impl Daemon {
                                 // Start recording
                                 tracing::info!("Recording started (toggle mode)");
 
-                                if self.config.output.notification.on_recording_start {
-                                    send_notification_with_lifetime("Recording Started", "Press hotkey again to stop", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
-                                }
-
                                 // Prepare model for transcription
                                 if self.config.on_demand_loading() {
                                     // Start model loading in background
                                     match self.config.engine {
                                         crate::config::TranscriptionEngine::Whisper => {
-                                            let config = self.config.whisper.clone();
+                                            let config = self.whisper_model_config();
                                             let config_path = self.config_path.clone();
                                             let model_to_load = model_override.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
@@ -3596,7 +3666,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Deepgram => {
                                             let config = self.config.clone();
                                             self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                                 crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -3627,7 +3698,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Deepgram => {
                                             if let Some(ref t) = self.transcriber_preloaded {
                                                 let transcriber = t.clone();
                                                 tokio::task::spawn_blocking(move || {
@@ -3675,6 +3747,12 @@ impl Daemon {
                                             self.update_state("recording");
                                             self.play_feedback(SoundEvent::RecordingStart);
 
+                                            // After capture has started, so the notify-send
+                                            // round trip does not delay the microphone.
+                                            if self.config.output.notification.on_recording_start {
+                                                send_notification_with_lifetime("Recording Started", "Press hotkey again to stop", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
+                                            }
+
                                             // Run pre-recording hook (e.g., enter compositor submap for cancel)
                                             if let Some(cmd) = &self.config.output.pre_recording_command {
                                                 if let Err(e) = output::run_hook(cmd, "pre_recording").await {
@@ -3691,7 +3769,9 @@ impl Daemon {
                                 }
                             } else if state.is_streaming() {
                                 tracing::info!("Toggle stop while streaming; closing capture");
+                                self.streaming_stopped_at = Some(std::time::Instant::now());
                                 self.stop_streaming_capture(&mut audio_capture).await;
+                                self.play_feedback(SoundEvent::RecordingStop);
                             } else if let State::Recording { model_override: current_model_override, .. } = &state {
                                 let model_override = current_model_override.clone();
 
@@ -4087,16 +4167,12 @@ impl Daemon {
                         let model_override = read_model_override();
                         tracing::info!("Recording started (external trigger), model_override = {:?}", model_override);
 
-                        if self.config.output.notification.on_recording_start {
-                            send_notification_with_lifetime("Recording Started", "External trigger", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
-                        }
-
                         // Prepare model for transcription
                         if self.config.on_demand_loading() {
                             // Start model loading in background
                             match self.config.engine {
                                 crate::config::TranscriptionEngine::Whisper => {
-                                    let config = self.config.whisper.clone();
+                                    let config = self.whisper_model_config();
                                     let config_path = self.config_path.clone();
                                     let model_to_load = model_override.clone();
                                     self.model_load_task = Some(tokio::task::spawn_blocking(move || {
@@ -4112,7 +4188,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Deepgram => {
                                     let config = self.config.clone();
                                     self.model_load_task = Some(tokio::task::spawn_blocking(move || {
                                         crate::transcribe::create_transcriber(&config).map(Arc::from)
@@ -4142,7 +4219,8 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Omnilingual
                 | crate::config::TranscriptionEngine::Cohere
                 | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
+                | crate::config::TranscriptionEngine::Soniox
+                | crate::config::TranscriptionEngine::Deepgram => {
                                     if let Some(ref t) = self.transcriber_preloaded {
                                         let transcriber = t.clone();
                                         tokio::task::spawn_blocking(move || {
@@ -4189,6 +4267,12 @@ impl Daemon {
                                     }
                                     self.update_state("recording");
                                     self.play_feedback(SoundEvent::RecordingStart);
+
+                                    // After capture has started, so the notify-send
+                                    // round trip does not delay the microphone.
+                                    if self.config.output.notification.on_recording_start {
+                                        send_notification_with_lifetime("Recording Started", "External trigger", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
+                                    }
 
                                     // Run pre-recording hook (e.g., enter compositor submap for cancel)
                                     if let Some(cmd) = &self.config.output.pre_recording_command {
@@ -4332,6 +4416,7 @@ impl Daemon {
                                 &mut streaming_handle,
                                 &mut streaming_session,
                                 &mut streaming_chain,
+                                false,
                             ).await;
                         }
                         Some(StreamingEvent::Ended) | None => {
@@ -4341,6 +4426,7 @@ impl Daemon {
                                 &mut streaming_handle,
                                 &mut streaming_session,
                                 &mut streaming_chain,
+                                true,
                             ).await;
                         }
                     }
@@ -4776,6 +4862,32 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
         assert_eq!(parsed["status"], "error");
         assert_eq!(parsed["message"], "disk went away");
+    }
+
+    #[test]
+    fn test_whisper_model_config_carries_vocabulary() {
+        let mut config = Config::default();
+        config.whisper.initial_prompt = Some("Technical discussion.".to_string());
+        let daemon = Daemon::new(
+            config,
+            None,
+            vec!["voxtype".to_string(), "Hyprland".to_string()],
+        );
+        assert_eq!(
+            daemon.whisper_model_config().initial_prompt.as_deref(),
+            Some("Technical discussion. voxtype, Hyprland")
+        );
+    }
+
+    #[test]
+    fn test_whisper_model_config_without_vocabulary_is_unchanged() {
+        let mut config = Config::default();
+        config.whisper.initial_prompt = Some("Technical discussion.".to_string());
+        let daemon = Daemon::new(config, None, Vec::new());
+        assert_eq!(
+            daemon.whisper_model_config().initial_prompt.as_deref(),
+            Some("Technical discussion.")
+        );
     }
 
     #[test]

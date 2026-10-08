@@ -1,0 +1,831 @@
+//! Deepgram cloud streaming WebSocket STT backend.
+//!
+//! Implements [`StreamingTranscriber`] for live dictation: audio frames
+//! stream to Deepgram over a WebSocket and finalized transcript segments
+//! stream back. Also implements the one-shot [`Transcriber`] trait (used by
+//! `voxtype transcribe file.wav` and meeting-mode chunking) through
+//! Deepgram's pre-recorded endpoint, which decodes a finished recording
+//! in one request instead of replaying it through the live socket.
+//!
+//! ## Why finals-only
+//!
+//! Deepgram emits interim results that are *cumulative per segment* (each
+//! interim restates the whole in-progress segment), not deltas. The daemon's
+//! [`StreamingSession::type_partial_delta`](crate::output::streaming::StreamingSession)
+//! treats partials as deltas to append. Emitting Deepgram interims as
+//! `Partial` would therefore duplicate text at the cursor. Rather than carry
+//! a prefix-reconciler (as the Soniox backend does), this backend emits only
+//! `Final` segments. Deepgram finalizes at endpointing boundaries (roughly
+//! per utterance), so finals still stream in throughout a recording.
+//!
+//! Errors during the session surface as `StreamingEvent::Error` followed by
+//! `StreamingEvent::Ended`, matching the trait contract.
+
+use crate::config::DeepgramConfig;
+use crate::error::TranscribeError;
+use crate::transcribe::streaming::{SegmentId, StreamHandle, StreamingEvent, StreamingTranscriber};
+use crate::transcribe::Transcriber;
+use deepgram::common::audio_source::AudioSource;
+use deepgram::common::options::{Encoding, Endpointing, Language, Model, Options};
+use deepgram::common::stream_response::{Channel, StreamResponse};
+use deepgram::listen::websocket::WebsocketHandle;
+use deepgram::{Deepgram, DeepgramError};
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
+
+/// 16 kHz mono — matches [`crate::audio::AudioCapture`]'s output.
+const SAMPLE_RATE: u32 = 16000;
+
+/// Deepgram drops audio in the first ~200-300ms after the WebSocket opens.
+/// A brief silence primer warms the connection without adding latency.
+const SILENCE_PRIMER_MS: u64 = 300;
+
+/// Max time to wait for the WebSocket handshake before giving up, so a
+/// stalled connect can't pin the daemon in `State::Streaming` forever.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Deepgram's hard limit: 500 tokens total across all keyterms.
+/// https://developers.deepgram.com/docs/keyterm
+const KEYTERM_TOKEN_BUDGET: usize = 500;
+
+/// nova-3 and flux models take `keyterm` params; older models
+/// (nova-2/nova-1/enhanced/base) take `keywords`. nova-3 rejects
+/// `keywords` with a 400 — never send both.
+fn uses_keyterms(model: &str) -> bool {
+    model.starts_with("nova-3") || model.starts_with("flux")
+}
+
+/// Legacy `keywords` param: hard limit 100 keywords per request.
+/// https://developers.deepgram.com/docs/keywords
+const KEYWORDS_TERM_LIMIT: usize = 100;
+
+/// Enforce the model-appropriate vocabulary limit: keyterm mode uses the
+/// 500-token budget (whitespace-token approximation); keywords mode caps
+/// at 100 terms. Drops trailing terms and warns with their names.
+fn budget_terms(terms: &[String], keyterm_mode: bool) -> Vec<String> {
+    let mut used = 0usize;
+    let mut kept: Vec<String> = Vec::new();
+    let mut dropped: Vec<&str> = Vec::new();
+    for term in terms {
+        let fits = if keyterm_mode {
+            let cost = term.split_whitespace().count().max(1);
+            if used + cost <= KEYTERM_TOKEN_BUDGET {
+                used += cost;
+                true
+            } else {
+                false
+            }
+        } else {
+            kept.len() < KEYWORDS_TERM_LIMIT
+        };
+        if fits {
+            kept.push(term.clone());
+        } else {
+            dropped.push(term.as_str());
+        }
+    }
+    if !dropped.is_empty() {
+        tracing::warn!(
+            "Deepgram vocabulary exceeds the {} limit; dropped: {}",
+            if keyterm_mode {
+                format!("{KEYTERM_TOKEN_BUDGET}-token keyterm")
+            } else {
+                format!("{KEYWORDS_TERM_LIMIT}-keyword")
+            },
+            dropped.join(", ")
+        );
+    }
+    kept
+}
+
+/// Install a default rustls `CryptoProvider` for this process.
+///
+/// The `deepgram` crate's dependency tree enables both the `aws-lc-rs`
+/// (via reqwest) and `ring` (via tokio-tungstenite) rustls providers, so
+/// rustls cannot select one automatically and panics on the first TLS
+/// handshake. We install aws-lc-rs explicitly (matching reqwest's choice).
+/// Idempotent: the `Once` guard plus the ignored result make repeated
+/// calls and an already-installed provider both safe.
+fn ensure_crypto_provider() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
+
+/// A Deepgram streaming transcriber.
+pub struct DeepgramTranscriber {
+    config: DeepgramConfig,
+    /// Unified vocabulary terms, already resolved by the factory.
+    vocabulary: Vec<String>,
+}
+
+impl DeepgramTranscriber {
+    pub fn new(config: DeepgramConfig, vocabulary: Vec<String>) -> Result<Self, TranscribeError> {
+        let key_present = config
+            .api_key
+            .as_deref()
+            .map(|k| !k.trim().is_empty())
+            .unwrap_or(false);
+        if !key_present {
+            return Err(TranscribeError::ConfigError(
+                "Deepgram API key is required. Set it in [deepgram] api_key \
+                 or the DEEPGRAM_API_KEY environment variable."
+                    .to_string(),
+            ));
+        }
+        // deepgram's deps make rustls' provider ambiguous; pin it before
+        // any TLS handshake happens.
+        ensure_crypto_provider();
+        Ok(Self { config, vocabulary })
+    }
+
+    /// Build a Deepgram client from the configured endpoint + key.
+    fn build_client(&self) -> Result<Deepgram, TranscribeError> {
+        let api_key = self.config.api_key.as_deref().unwrap_or_default();
+        if self.config.endpoint == crate::config::DEFAULT_DEEPGRAM_ENDPOINT {
+            return Deepgram::new(api_key)
+                .map_err(|e| map_client_error(e, "Failed to initialize Deepgram client"));
+        }
+        let base_url = endpoint_to_base_url(&self.config.endpoint)?;
+        Deepgram::with_base_url_and_api_key(base_url.as_str(), api_key).map_err(|e| {
+            map_client_error(
+                e,
+                "Failed to initialize Deepgram client with custom endpoint",
+            )
+        })
+    }
+
+    fn options(&self) -> Options {
+        let mut builder = Options::builder()
+            .model(Model::from(self.config.model.clone()))
+            .language(Language::from(self.config.language.clone()))
+            .smart_format(self.config.smart_format);
+        if !self.vocabulary.is_empty() {
+            let keyterm_mode = uses_keyterms(&self.config.model);
+            let kept = budget_terms(&self.vocabulary, keyterm_mode);
+            tracing::debug!(
+                terms = kept.len(),
+                model = %self.config.model,
+                "Applying vocabulary to Deepgram request"
+            );
+            if keyterm_mode {
+                builder = builder.keyterms(kept.iter().map(String::as_str));
+            } else {
+                builder = builder.keywords(kept.iter().map(String::as_str));
+            }
+        }
+        builder.build()
+    }
+
+    /// One-shot transcription of a finished recording (`voxtype
+    /// transcribe file.wav`, meeting-mode chunks) through Deepgram's
+    /// pre-recorded endpoint: one request, one JSON response with the
+    /// whole transcript, decoded faster than real time.
+    ///
+    /// The realtime socket is the wrong tool here even though the engine
+    /// already holds one open for dictation: it decodes a backlog at
+    /// roughly playback speed, so a 10s file took ~9s and a long meeting
+    /// chunk would run past any sane deadline.
+    async fn batch_transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
+        let client = self.build_client()?;
+        let audio_secs = samples.len() as u64 / SAMPLE_RATE as u64;
+        // The request has to finish, but how long "finished" takes scales
+        // with the recording: the configured finish timeout is the budget
+        // for a short clip, plus one second of slack per second of audio.
+        let timeout = Duration::from_secs(self.config.finish_timeout_secs + audio_secs);
+        let source =
+            AudioSource::from_buffer_with_mime_type(encode_wav_s16le(samples)?, "audio/wav");
+
+        let response = match tokio::time::timeout(
+            timeout,
+            client.transcription().prerecorded(source, &self.options()),
+        )
+        .await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                return Err(map_client_error(e, "Deepgram transcription failed"));
+            }
+            Err(_) => {
+                return Err(TranscribeError::RemoteError(format!(
+                    "Deepgram transcription timed out after {}s",
+                    timeout.as_secs()
+                )));
+            }
+        };
+
+        Ok(response
+            .results
+            .channels
+            .first()
+            .and_then(|c| c.alternatives.first())
+            .map(|a| a.transcript.trim().to_string())
+            .unwrap_or_default())
+    }
+}
+
+/// Encode 16 kHz f32 mono samples as a WAV byte buffer (PCM 16-bit LE)
+/// for upload to Deepgram's pre-recorded endpoint. Mirrors the helper in
+/// `transcribe/soniox.rs` so both cloud backends upload one WAV format.
+fn encode_wav_s16le(samples: &[f32]) -> Result<Vec<u8>, TranscribeError> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: SAMPLE_RATE,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    let mut writer = hound::WavWriter::new(&mut buffer, spec)
+        .map_err(|e| TranscribeError::AudioFormat(format!("WAV writer init: {e}")))?;
+    for &sample in samples {
+        let clamped = sample.clamp(-1.0, 1.0);
+        writer
+            .write_sample((clamped * 32767.0) as i16)
+            .map_err(|e| TranscribeError::AudioFormat(format!("WAV sample write: {e}")))?;
+    }
+    writer
+        .finalize()
+        .map_err(|e| TranscribeError::AudioFormat(format!("WAV finalize: {e}")))?;
+    Ok(buffer.into_inner())
+}
+
+impl Transcriber for DeepgramTranscriber {
+    fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
+        if samples.is_empty() {
+            return Err(TranscribeError::AudioFormat("Empty audio buffer".into()));
+        }
+        // Bridge sync trait method to the async backend. When called from
+        // within voxtype's multi-threaded runtime, use block_in_place; from a
+        // bare CLI context with no runtime, spin up a private one.
+        let run = async { self.batch_transcribe(samples).await };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(run)),
+            Err(_) => {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| {
+                        TranscribeError::InferenceFailed(format!("Failed to create runtime: {e}"))
+                    })?;
+                rt.block_on(run)
+            }
+        }
+    }
+
+    fn as_streaming(&self) -> Option<&dyn StreamingTranscriber> {
+        self.config.streaming.then_some(self as _)
+    }
+}
+
+impl StreamingTranscriber for DeepgramTranscriber {
+    fn start_stream(
+        &self,
+        samples_rx: mpsc::Receiver<Vec<f32>>,
+    ) -> Result<StreamHandle, TranscribeError> {
+        // Build the client up front so auth/URL errors surface synchronously.
+        let client = self.build_client()?;
+        let options = self.options();
+        let endpointing_ms = self.config.endpointing_ms;
+        let finish_timeout_secs = self.config.finish_timeout_secs;
+
+        let (events_tx, events_rx) = mpsc::channel::<StreamingEvent>(64);
+        let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+
+        let task = tokio::spawn(async move {
+            run_streaming_session(
+                client,
+                options,
+                endpointing_ms,
+                finish_timeout_secs,
+                samples_rx,
+                events_tx,
+                cancel_rx,
+            )
+            .await
+        });
+
+        Ok(StreamHandle {
+            events: events_rx,
+            cancel: cancel_tx,
+            task,
+        })
+    }
+}
+
+/// Emit `Error` then `Ended` so the daemon surfaces a notification and resets
+/// to idle cleanly. Mirrors the Soniox backend's fatal-path pattern.
+async fn send_fatal(events_tx: &mpsc::Sender<StreamingEvent>, msg: String) {
+    let _ = events_tx
+        .send(StreamingEvent::Error(TranscribeError::RemoteError(msg)))
+        .await;
+    let _ = events_tx.send(StreamingEvent::Ended).await;
+}
+
+async fn run_streaming_session(
+    client: Deepgram,
+    options: Options,
+    endpointing_ms: Option<u32>,
+    finish_timeout_secs: u64,
+    mut samples_rx: mpsc::Receiver<Vec<f32>>,
+    events_tx: mpsc::Sender<StreamingEvent>,
+    mut cancel_rx: oneshot::Receiver<()>,
+) -> Result<(), TranscribeError> {
+    // Connect, racing against cancel and a hard timeout so a stalled
+    // handshake can't pin the daemon in State::Streaming forever.
+    let mut handle = {
+        tokio::select! {
+            biased;
+            _ = &mut cancel_rx => {
+                tracing::debug!("Deepgram streaming cancelled during connect");
+                let _ = events_tx.send(StreamingEvent::Ended).await;
+                return Ok(());
+            }
+            result = tokio::time::timeout(
+                CONNECT_TIMEOUT,
+                open_handle(&client, options, endpointing_ms),
+            ) => {
+                match result {
+                    Ok(Ok(h)) => h,
+                    Ok(Err(e)) => {
+                        send_fatal(&events_tx, format!("Deepgram connect failed: {e}")).await;
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        send_fatal(
+                            &events_tx,
+                            format!("Deepgram connect timed out after {}s", CONNECT_TIMEOUT.as_secs()),
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    };
+
+    // Warm-up primer so the first ~300ms of speech isn't dropped.
+    if let Err(e) = handle.send_data(silence_primer()).await {
+        tracing::warn!("Deepgram silence primer send failed: {e}");
+    }
+
+    let mut next_segment: SegmentId = 0;
+    let mut samples_closed = false;
+    let mut eof_at: Option<tokio::time::Instant> = None;
+    let mut finals_after_stop: u32 = 0;
+    let mut fatal: Option<String> = None;
+    // After end-of-audio we wait for Deepgram to acknowledge the finalize.
+    // If that answer never comes, this deadline stops us from waiting
+    // (and, in buffer mode, never flushing) forever.
+    let mut drain_deadline: Option<tokio::time::Instant> = None;
+    let drain_timeout = Duration::from_secs(finish_timeout_secs);
+
+    loop {
+        let drain_timer = async {
+            match drain_deadline {
+                Some(d) => tokio::time::sleep_until(d).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+
+        tokio::select! {
+            biased;
+
+            // Cancel from the daemon: stop immediately, no flush.
+            _ = &mut cancel_rx => {
+                tracing::debug!("Deepgram streaming session cancelled");
+                break;
+            }
+
+            // Drain deadline hit after end-of-audio without a clean close.
+            _ = drain_timer, if drain_deadline.is_some() => {
+                tracing::warn!(
+                    "Deepgram drain timeout ({}s) after end-of-audio; trailing finals may be lost",
+                    drain_timeout.as_secs()
+                );
+                break;
+            }
+
+            // Outgoing audio frames.
+            chunk = samples_rx.recv(), if !samples_closed => {
+                match chunk {
+                    Some(c) if !c.is_empty() => {
+                        if let Err(e) = handle.send_data(f32_to_pcm_bytes(&c)).await {
+                            fatal = Some(format!("Deepgram send audio failed: {e}"));
+                            break;
+                        }
+                    }
+                    Some(_) => { /* empty chunk, skip */ }
+                    None => {
+                        // End of audio from the daemon: ask Deepgram to
+                        // finish the segment it is holding. It answers with
+                        // one `from_finalize` result, which ends the drain —
+                        // typically within ~150ms of the mic stopping.
+                        //
+                        // `CloseStream` would be the obvious call and is
+                        // what the server wants eventually, but it also
+                        // stops the client's keep-alives, after which its
+                        // worker gives up on the socket three seconds later
+                        // and the trailing finals never arrive.
+                        samples_closed = true;
+                        eof_at = Some(tokio::time::Instant::now());
+                        if let Err(e) = handle.finalize().await {
+                            tracing::warn!("Deepgram finalize failed: {e}");
+                        }
+                        drain_deadline = Some(tokio::time::Instant::now() + drain_timeout);
+                    }
+                }
+            }
+
+            // Incoming transcripts.
+            response = handle.receive() => {
+                match response {
+                    Some(Ok(resp)) => {
+                        let drain_done = samples_closed
+                            && (is_finalize_ack(&resp)
+                                || matches!(resp, StreamResponse::TerminalResponse { .. }));
+                        if let Some(text) = extract_final_transcript(&resp) {
+                            if !text.is_empty() {
+                                let segment_id = next_segment;
+                                // Deepgram finals are individually trimmed,
+                                // complete segments ("Hello world." then
+                                // "How are you?"). Join them with a space so
+                                // concatenation doesn't run segments together
+                                // ("Hello world.How are you?").
+                                let text = if segment_id > 0 {
+                                    format!(" {text}")
+                                } else {
+                                    text
+                                };
+                                next_segment += 1;
+                                if samples_closed {
+                                    finals_after_stop += 1;
+                                }
+                                if events_tx
+                                    .send(StreamingEvent::Final { text, segment_id })
+                                    .await
+                                    .is_err()
+                                {
+                                    // Daemon dropped the receiver; nothing
+                                    // more to do.
+                                    break;
+                                }
+                            }
+                        }
+                        if drain_done {
+                            tracing::debug!("Deepgram end-of-audio acknowledged; drain complete");
+                            break;
+                        }
+                    }
+                    Some(Err(e)) => {
+                        fatal = Some(format!("Deepgram stream error: {e}"));
+                        break;
+                    }
+                    None => {
+                        // Server closed the socket cleanly.
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Tell Deepgram we are done so it closes the socket and the client's
+    // worker task ends with it. Every exit path needs this: dropping the
+    // handle alone leaves the worker sitting on an open connection.
+    if let Err(e) = handle.close_stream().await {
+        tracing::debug!("Deepgram close_stream at end of session: {e}");
+    }
+
+    if let Some(msg) = fatal {
+        send_fatal(&events_tx, msg).await;
+        return Ok(());
+    }
+    if let Some(t) = eof_at {
+        tracing::info!(
+            drain_ms = t.elapsed().as_millis() as u64,
+            finals_after_stop,
+            "Deepgram drain complete"
+        );
+    }
+    let _ = events_tx.send(StreamingEvent::Ended).await;
+    Ok(())
+}
+
+/// Open a Deepgram realtime WebSocket handle with the given options.
+///
+/// Keep-alive is on for the client's sake, not the server's: the
+/// `deepgram` client's socket worker stops polling the connection three
+/// seconds after the last message it sent unless it has keep-alives to
+/// send (`run_worker`'s idle branch awaits `pending()`, 0.9.2 through
+/// 0.12.0). Without this, every response that takes longer than that to
+/// arrive is lost and the socket never reports its close.
+async fn open_handle(
+    client: &Deepgram,
+    options: Options,
+    endpointing_ms: Option<u32>,
+) -> Result<WebsocketHandle, TranscribeError> {
+    client
+        .transcription()
+        .stream_request_with_options(options)
+        .encoding(Encoding::Linear16)
+        .sample_rate(SAMPLE_RATE)
+        .channels(1)
+        .interim_results(true)
+        .endpointing(match endpointing_ms {
+            Some(ms) => Endpointing::CustomDurationMs(ms),
+            None => Endpointing::Enabled,
+        })
+        .keep_alive()
+        .handle()
+        .await
+        .map_err(|e| TranscribeError::RemoteError(format!("Failed to open Deepgram stream: {e}")))
+}
+
+/// True for the result Deepgram sends in answer to a `Finalize`: the
+/// end-of-audio acknowledgement, carrying whatever was still in flight.
+fn is_finalize_ack(response: &StreamResponse) -> bool {
+    matches!(
+        response,
+        StreamResponse::TranscriptResponse {
+            from_finalize: true,
+            ..
+        }
+    )
+}
+
+/// A buffer of silence (`SILENCE_PRIMER_MS` of 16 kHz s16le mono).
+fn silence_primer() -> Vec<u8> {
+    // 16 kHz × 2 bytes/sample × ms/1000.
+    vec![0u8; (SILENCE_PRIMER_MS * SAMPLE_RATE as u64 * 2 / 1000) as usize]
+}
+
+/// Convert f32 audio samples (-1.0..1.0) to PCM i16 little-endian bytes.
+fn f32_to_pcm_bytes(samples: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(samples.len() * 2);
+    for &sample in samples {
+        let clamped = sample.clamp(-1.0, 1.0);
+        let i16_val = (clamped * 32767.0) as i16;
+        bytes.extend_from_slice(&i16_val.to_le_bytes());
+    }
+    bytes
+}
+
+fn extract_final_transcript(response: &StreamResponse) -> Option<String> {
+    match response {
+        StreamResponse::TranscriptResponse {
+            is_final, channel, ..
+        } if *is_final => extract_transcript(channel),
+        _ => None,
+    }
+}
+
+fn extract_transcript(channel: &Channel) -> Option<String> {
+    Some(channel.alternatives.first()?.transcript.trim().to_string())
+}
+
+fn map_client_error(err: DeepgramError, context: &str) -> TranscribeError {
+    match err {
+        DeepgramError::InvalidUrl => {
+            TranscribeError::ConfigError("Invalid Deepgram endpoint URL".to_string())
+        }
+        other => TranscribeError::RemoteError(format!("{context}: {other}")),
+    }
+}
+
+/// Derive a base URL (scheme + host) from a full `/v1/listen` endpoint, for
+/// pointing the Deepgram client at a self-hosted instance.
+///
+/// The base URL serves both APIs: the realtime socket and the pre-recorded
+/// REST requests one-shot transcription makes. reqwest refuses a ws/wss
+/// scheme, so the documented `wss://host/v1/listen` form maps to
+/// `https://host`; the client maps http(s) back to ws(s) when it opens the
+/// socket.
+fn endpoint_to_base_url(endpoint: &str) -> Result<String, TranscribeError> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return Err(TranscribeError::ConfigError(
+            "Deepgram endpoint URL cannot be empty".to_string(),
+        ));
+    }
+
+    let without_query = endpoint
+        .split('?')
+        .next()
+        .unwrap_or(endpoint)
+        .trim_end_matches('/');
+
+    let base = match without_query.strip_suffix("/v1/listen") {
+        Some(base) if !base.is_empty() => base,
+        _ => {
+            let scheme_sep = without_query.find("://").ok_or_else(|| {
+                TranscribeError::ConfigError("Invalid Deepgram endpoint URL".to_string())
+            })?;
+            let host_start = scheme_sep + 3;
+            let host_and_path = &without_query[host_start..];
+            if host_and_path.is_empty() {
+                return Err(TranscribeError::ConfigError(
+                    "Invalid Deepgram endpoint URL".to_string(),
+                ));
+            }
+
+            let host_end = host_and_path
+                .find('/')
+                .map(|idx| host_start + idx)
+                .unwrap_or(without_query.len());
+            let base = &without_query[..host_end];
+            if base.ends_with("://") {
+                return Err(TranscribeError::ConfigError(
+                    "Invalid Deepgram endpoint URL".to_string(),
+                ));
+            }
+            base
+        }
+    };
+
+    if let Some(rest) = base.strip_prefix("wss://") {
+        return Ok(format!("https://{rest}"));
+    }
+    if let Some(rest) = base.strip_prefix("ws://") {
+        return Ok(format!("http://{rest}"));
+    }
+    Ok(base.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use deepgram::common::stream_response::{Alternatives, Metadata, ModelInfo};
+
+    fn make_transcript_response(is_final: bool, transcript: &str) -> StreamResponse {
+        StreamResponse::TranscriptResponse {
+            type_field: "Results".to_string(),
+            start: 0.0,
+            duration: 1.0,
+            is_final,
+            speech_final: false,
+            from_finalize: false,
+            channel: Channel {
+                alternatives: vec![Alternatives {
+                    transcript: transcript.to_string(),
+                    words: Vec::new(),
+                    confidence: 0.99,
+                    languages: vec!["en".to_string()],
+                }],
+            },
+            metadata: Metadata {
+                request_id: "req-123".to_string(),
+                model_info: ModelInfo {
+                    name: "nova-3".to_string(),
+                    version: "latest".to_string(),
+                    arch: "nova".to_string(),
+                },
+                model_uuid: "model-123".to_string(),
+            },
+            channel_index: vec![0],
+        }
+    }
+
+    #[test]
+    fn keyterm_models_selected_by_prefix() {
+        assert!(uses_keyterms("nova-3"));
+        assert!(uses_keyterms("nova-3-medical"));
+        assert!(uses_keyterms("flux-general-en"));
+        assert!(!uses_keyterms("nova-2"));
+        assert!(!uses_keyterms("enhanced"));
+        assert!(!uses_keyterms("base"));
+    }
+
+    #[test]
+    fn budget_keeps_keyterms_within_500_tokens() {
+        // 260 two-word terms = 520 tokens; only 250 fit in keyterm mode.
+        let terms: Vec<String> = (0..260).map(|i| format!("term number{i}")).collect();
+        let kept = budget_terms(&terms, true);
+        assert_eq!(kept.len(), 250);
+        assert_eq!(kept[0], "term number0");
+    }
+
+    #[test]
+    fn budget_caps_keywords_at_100_terms() {
+        // Legacy keywords param: hard limit 100 keywords per request.
+        let terms: Vec<String> = (0..150).map(|i| format!("term{i}")).collect();
+        let kept = budget_terms(&terms, false);
+        assert_eq!(kept.len(), 100);
+        assert_eq!(kept[0], "term0");
+    }
+
+    #[test]
+    fn budget_passes_small_lists_through() {
+        let terms = vec!["voxtype".to_string(), "Hyprland".to_string()];
+        assert_eq!(budget_terms(&terms, true), terms);
+        assert_eq!(budget_terms(&terms, false), terms);
+    }
+
+    #[test]
+    fn pcm_silence_is_zero() {
+        let bytes = f32_to_pcm_bytes(&[0.0; 4]);
+        assert_eq!(bytes.len(), 8);
+        assert!(bytes.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn pcm_clamps_out_of_range() {
+        let bytes = f32_to_pcm_bytes(&[2.0, -2.0]);
+        assert_eq!(i16::from_le_bytes([bytes[0], bytes[1]]), 32767);
+        assert_eq!(i16::from_le_bytes([bytes[2], bytes[3]]), -32767);
+    }
+
+    #[test]
+    fn finalize_ack_is_the_end_of_audio_marker() {
+        // Ordinary results, final or not, keep the drain running.
+        assert!(!is_finalize_ack(&make_transcript_response(false, "hello")));
+        assert!(!is_finalize_ack(&make_transcript_response(true, "hello")));
+
+        let mut ack = make_transcript_response(true, "for your country.");
+        if let StreamResponse::TranscriptResponse { from_finalize, .. } = &mut ack {
+            *from_finalize = true;
+        }
+        assert!(is_finalize_ack(&ack));
+        // The answer to a Finalize carries text of its own, which the
+        // session emits before it stops draining.
+        assert_eq!(
+            extract_final_transcript(&ack).as_deref(),
+            Some("for your country.")
+        );
+    }
+
+    #[test]
+    fn wav_upload_is_16_bit_mono_16k() {
+        let wav = encode_wav_s16le(&[0.0, 1.0, -1.0, 2.0]).unwrap();
+        let mut reader = hound::WavReader::new(std::io::Cursor::new(wav)).unwrap();
+        let spec = reader.spec();
+        assert_eq!(spec.channels, 1);
+        assert_eq!(spec.sample_rate, SAMPLE_RATE);
+        assert_eq!(spec.bits_per_sample, 16);
+        let samples: Vec<i16> = reader.samples::<i16>().map(|s| s.unwrap()).collect();
+        assert_eq!(samples, vec![0, 32767, -32767, 32767]);
+    }
+
+    #[test]
+    fn final_transcript_extracted_only_when_final() {
+        let f = make_transcript_response(true, "hello world");
+        assert_eq!(
+            extract_final_transcript(&f),
+            Some("hello world".to_string())
+        );
+        let interim = make_transcript_response(false, "hello");
+        assert_eq!(extract_final_transcript(&interim), None);
+    }
+
+    #[test]
+    fn silence_primer_sizing() {
+        // 300ms @ 16kHz, 2 bytes/sample = 9600 bytes.
+        assert_eq!(silence_primer().len(), 9600);
+    }
+
+    #[test]
+    fn base_url_from_full_endpoint() {
+        assert_eq!(
+            endpoint_to_base_url("wss://api.deepgram.com/v1/listen").unwrap(),
+            "https://api.deepgram.com"
+        );
+        assert_eq!(
+            endpoint_to_base_url("wss://api.deepgram.com/v1/listen?model=nova-3").unwrap(),
+            "https://api.deepgram.com"
+        );
+    }
+
+    /// The documented endpoint is a WebSocket URL, but the same base URL
+    /// also serves the pre-recorded REST requests, which reqwest refuses
+    /// with a ws/wss scheme. The client maps http(s) back to ws(s) for the
+    /// socket itself.
+    #[test]
+    fn base_url_uses_an_http_scheme_for_both_apis() {
+        assert_eq!(
+            endpoint_to_base_url("ws://deepgram.internal:8080/v1/listen").unwrap(),
+            "http://deepgram.internal:8080"
+        );
+        assert_eq!(
+            endpoint_to_base_url("wss://deepgram.internal/custom/path").unwrap(),
+            "https://deepgram.internal"
+        );
+        assert_eq!(
+            endpoint_to_base_url("https://deepgram.internal/v1/listen").unwrap(),
+            "https://deepgram.internal"
+        );
+        let client = Deepgram::with_base_url_and_api_key(
+            endpoint_to_base_url("wss://deepgram.internal/v1/listen")
+                .unwrap()
+                .as_str(),
+            "key",
+        );
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn new_rejects_missing_key() {
+        let cfg = DeepgramConfig::default();
+        assert!(DeepgramTranscriber::new(cfg, Vec::new()).is_err());
+    }
+}

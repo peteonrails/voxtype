@@ -539,6 +539,8 @@ fn detect_missing_model() -> Option<MissingModel> {
         // OpenVINO models are stored as multi-file IR directories; skip the
         // generic probe here until the TUI grows engine-specific validation.
         config::TranscriptionEngine::OpenVino => return None,
+        // Deepgram is cloud-only, no local model to probe.
+        config::TranscriptionEngine::Deepgram => return None,
     };
 
     if model.is_empty() {

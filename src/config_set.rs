@@ -87,8 +87,9 @@ impl ConfigSetError {
 
 /// Engines `config set engine` and the settings UIs offer, in
 /// [`TranscriptionEngine`] declaration order. Deliberately narrower than the
-/// enum: `soniox` is configured through its own `[soniox]` table and is not
-/// offered by the TUI picker or `config set engine`, so it is excluded here.
+/// enum: `soniox` and `deepgram` are configured through their own
+/// `[soniox]`/`[deepgram]` tables and are not offered by the TUI picker or
+/// `config set engine`, so they are excluded here.
 /// The `engine_names_track_the_enum` test pins this list against the enum so
 /// a new variant can't be silently forgotten.
 pub const ENGINE_NAMES: &[&str] = &[
@@ -142,6 +143,7 @@ pub fn engine_feature_compiled(name: &str) -> bool {
         TranscriptionEngine::Omnilingual => cfg!(feature = "omnilingual"),
         TranscriptionEngine::Cohere => cfg!(feature = "cohere"),
         TranscriptionEngine::OpenVino => cfg!(feature = "openvino-whisper"),
+        TranscriptionEngine::Deepgram => cfg!(feature = "deepgram"),
     }
 }
 
@@ -266,7 +268,7 @@ mod tests {
             .collect();
         assert_eq!(
             excluded,
-            [&"soniox"],
+            [&"soniox", &"deepgram"],
             "new engine variants must be added to ENGINE_NAMES or documented as excluded"
         );
     }

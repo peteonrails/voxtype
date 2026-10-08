@@ -1508,6 +1508,62 @@ mod tests {
         assert_eq!(r.typed_partial, "");
     }
 
+    /// With `type_partials` on (the default), a Final carries only the text
+    /// after what was already sent as a Partial, and a revision is a
+    /// Replace against that partial. A buffered-output session types
+    /// nothing during the session, so it has to hold the partials itself
+    /// to end up with the whole transcript.
+    #[tokio::test]
+    async fn reconciler_events_assemble_in_a_buffered_session() {
+        use crate::output::streaming::StreamingSession;
+
+        let mut r = Reconciler::default();
+        let mut session = StreamingSession::with_buffer_only(true);
+        let messages = [
+            msg(vec![("Hello world", false)], false),
+            msg(vec![("Hello world.", true)], false),
+            msg(vec![(" How", false)], false),
+            msg(vec![(" How are you?", true)], false),
+            msg(vec![(" Thanks", false)], false),
+            msg(vec![(" Thank you.", true)], true),
+        ];
+        let mut seen = Vec::new();
+        for m in &messages {
+            for event in r.process(m, true).events {
+                seen.push(extract(std::slice::from_ref(&event))[0].clone());
+                match event {
+                    StreamingEvent::Partial { text, .. } => session
+                        .type_partial_delta(&[], text, None, None)
+                        .await
+                        .unwrap(),
+                    StreamingEvent::Final { text, .. } => session
+                        .commit_segment(&[], &text, None, None, None)
+                        .await
+                        .unwrap(),
+                    StreamingEvent::Replace {
+                        backspace, text, ..
+                    } => session
+                        .replace_and_commit(&[], backspace, &text, None, None, None)
+                        .await
+                        .unwrap(),
+                    _ => {}
+                }
+            }
+        }
+        // The Finals alone would read ". are you? you." in the buffer.
+        assert!(seen.contains(&("Final", ".".to_string())), "{seen:?}");
+        assert!(
+            seen.contains(&("Final", " are you?".to_string())),
+            "{seen:?}"
+        );
+        session.finalize_pending_partial();
+        assert_eq!(
+            session.finalized_text(),
+            "Hello world. How are you? Thank you."
+        );
+        assert_eq!(session.typed_chars(), 0);
+    }
+
     #[test]
     fn reconciler_punctuation_revision_emits_minimal_replace() {
         // Real-world case: Soniox finalized "tévedések." but the partial
