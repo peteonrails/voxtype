@@ -1978,7 +1978,10 @@ Language code in BCP-47 form, for example `"en"` or `"en-US"`.
 
 Deepgram's production realtime WebSocket endpoint. Override it for a self-hosted or on-prem Deepgram instance.
 
-Voxtype uses only the endpoint's scheme and host. A trailing `/v1/listen` is stripped, and custom path prefixes and query parameters are not preserved.
+Voxtype uses only the endpoint's host and whether it is secure. The same host serves the realtime
+socket (`wss://` or `ws://`) and the pre-recorded requests that one-shot transcription makes
+(`https://` or `http://`), so either form of the URL works. A trailing `/v1/listen` is stripped,
+and custom path prefixes and query parameters are not preserved.
 
 ### smart_format
 
@@ -2005,7 +2008,7 @@ How long Deepgram waits after silence before finalizing a transcript segment, in
 Activation mode for the Deepgram backend:
 
 - `true` - Live WebSocket session. Deepgram finalizes and returns segments while recording. With `[output] streaming_buffer_output = false`, finalized segments are typed as they arrive and push-to-talk is automatically promoted to toggle. With buffered output enabled, nothing is typed until recording stops, so push-to-talk remains safe.
-- `false` - Batch mode. Audio is buffered while the hotkey is held. On release, voxtype opens one WebSocket session, sends the full buffer, waits for finalization, and types the complete transcript. Push-to-talk compatible.
+- `false` - Batch mode. Audio is buffered while the hotkey is held. On release, voxtype uploads the recording to Deepgram's pre-recorded endpoint and types the transcript from the one response. Push-to-talk compatible. `voxtype transcribe file.wav` takes this path whatever this option is set to.
 
 ### finish_timeout_secs
 
@@ -2013,7 +2016,9 @@ Activation mode for the Deepgram backend:
 **Default:** `15`
 **Required:** No
 
-Maximum seconds to wait for Deepgram to finalize transcription after recording stops. Increase this for longer recordings that need more time to flush remaining segments.
+In a live session, the maximum seconds to wait after recording stops for Deepgram to acknowledge
+the end of the audio and return the last segment. For `voxtype transcribe` and other one-shot
+transcription, it is the request deadline, plus one second for every second of audio.
 
 ### Configuration Summary
 
