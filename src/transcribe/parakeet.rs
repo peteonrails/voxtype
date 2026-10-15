@@ -18,9 +18,63 @@ use crate::error::TranscribeError;
 use parakeet_rs::ExecutionProvider;
 use parakeet_rs::{
     ExecutionConfig, Parakeet, ParakeetTDT, Transcriber as ParakeetTranscriberTrait,
+    TranscriptionResult as ParakeetResult,
 };
 use std::path::PathBuf;
 use std::sync::Mutex;
+
+/// Bound each encoder invocation independently of the recording duration.
+fn transcribe_chunked(
+    samples: &[f32],
+    mut infer: impl FnMut(&[f32]) -> Result<ParakeetResult, TranscribeError>,
+) -> Result<ParakeetResult, TranscribeError> {
+    const SAMPLE_RATE: usize = 16000;
+    const MAX_CHUNK_SAMPLES: usize = 60 * SAMPLE_RATE;
+    if samples.is_empty() {
+        return Err(TranscribeError::AudioFormat("Empty audio buffer".into()));
+    }
+    if samples.len() <= MAX_CHUNK_SAMPLES {
+        return infer(samples);
+    }
+
+    // The TDT ONNX exports have a finite positional-encoding window. Sending
+    // several minutes in one encoder call fails with a self_attn/Add_2 shape
+    // error, and attention memory grows quadratically even below that limit.
+    // Reuse the eager path's pause-aware cuts, without requiring eager mode.
+    let config = crate::eager::EagerConfig {
+        chunk_secs: 60.0,
+        sample_rate: SAMPLE_RATE as u32,
+    };
+    let mut boundaries = crate::eager::chunk_boundaries(samples, &config);
+    // Avoid a tiny final encoder input when a recording ends just past a cut.
+    if let Some(last) = boundaries.last_mut() {
+        *last = (*last).min(samples.len() - SAMPLE_RATE / 2);
+    }
+    boundaries.push(samples.len());
+    let mut combined = ParakeetResult {
+        text: String::new(),
+        tokens: Vec::new(),
+    };
+    let mut start = 0;
+    for end in boundaries {
+        let mut result = infer(&samples[start..end])?;
+        let text = result.text.trim();
+        if !text.is_empty() {
+            if !combined.text.is_empty() {
+                combined.text.push(' ');
+            }
+            combined.text.push_str(text);
+        }
+        let offset_secs = start as f32 / SAMPLE_RATE as f32;
+        for token in &mut result.tokens {
+            token.start += offset_secs;
+            token.end += offset_secs;
+        }
+        combined.tokens.extend(result.tokens);
+        start = end;
+    }
+    Ok(combined)
+}
 
 /// Internal enum to hold either CTC or TDT model instance
 enum ParakeetModel {
@@ -83,6 +137,59 @@ impl ParakeetTranscriber {
 
         Ok(Self { model, model_type })
     }
+
+    fn transcribe_chunk(&self, samples: &[f32]) -> Result<ParakeetResult, TranscribeError> {
+        match &self.model {
+            ParakeetModel::Ctc(parakeet) => {
+                let mut parakeet = parakeet.lock().map_err(|e| {
+                    TranscribeError::InferenceFailed(format!(
+                        "Failed to lock Parakeet mutex: {}",
+                        e
+                    ))
+                })?;
+
+                let result = parakeet
+                    .transcribe_samples(
+                        samples.to_vec(),
+                        16000, // sample rate
+                        1,     // mono
+                        None,  // default timestamp mode
+                    )
+                    .map_err(|e| {
+                        TranscribeError::InferenceFailed(format!(
+                            "Parakeet CTC inference failed: {}",
+                            e
+                        ))
+                    })?;
+
+                Ok(result)
+            }
+            ParakeetModel::Tdt(parakeet) => {
+                let mut parakeet = parakeet.lock().map_err(|e| {
+                    TranscribeError::InferenceFailed(format!(
+                        "Failed to lock Parakeet mutex: {}",
+                        e
+                    ))
+                })?;
+
+                let result = parakeet
+                    .transcribe_samples(
+                        samples.to_vec(),
+                        16000, // sample rate
+                        1,     // mono
+                        None,  // default timestamp mode
+                    )
+                    .map_err(|e| {
+                        TranscribeError::InferenceFailed(format!(
+                            "Parakeet TDT inference failed: {}",
+                            e
+                        ))
+                    })?;
+
+                Ok(result)
+            }
+        }
+    }
 }
 
 impl Transcriber for ParakeetTranscriber {
@@ -103,56 +210,10 @@ impl Transcriber for ParakeetTranscriber {
 
         let start = std::time::Instant::now();
 
-        let text = match &self.model {
-            ParakeetModel::Ctc(parakeet) => {
-                let mut parakeet = parakeet.lock().map_err(|e| {
-                    TranscribeError::InferenceFailed(format!(
-                        "Failed to lock Parakeet mutex: {}",
-                        e
-                    ))
-                })?;
-
-                let result = parakeet
-                    .transcribe_samples(
-                        samples.to_vec(),
-                        16000, // sample rate
-                        1,     // mono
-                        None,  // default timestamp mode
-                    )
-                    .map_err(|e| {
-                        TranscribeError::InferenceFailed(format!(
-                            "Parakeet CTC inference failed: {}",
-                            e
-                        ))
-                    })?;
-
-                result.text.trim().to_string()
-            }
-            ParakeetModel::Tdt(parakeet) => {
-                let mut parakeet = parakeet.lock().map_err(|e| {
-                    TranscribeError::InferenceFailed(format!(
-                        "Failed to lock Parakeet mutex: {}",
-                        e
-                    ))
-                })?;
-
-                let result = parakeet
-                    .transcribe_samples(
-                        samples.to_vec(),
-                        16000, // sample rate
-                        1,     // mono
-                        None,  // default timestamp mode
-                    )
-                    .map_err(|e| {
-                        TranscribeError::InferenceFailed(format!(
-                            "Parakeet TDT inference failed: {}",
-                            e
-                        ))
-                    })?;
-
-                result.text.trim().to_string()
-            }
-        };
+        let text = transcribe_chunked(samples, |chunk| self.transcribe_chunk(chunk))?
+            .text
+            .trim()
+            .to_string();
 
         tracing::info!(
             "Parakeet {:?} transcription completed in {:.2}s: {:?}",
@@ -171,40 +232,7 @@ impl Transcriber for ParakeetTranscriber {
     fn transcribe_timed(&self, samples: &[f32]) -> Result<Vec<TimedSegment>, TranscribeError> {
         let start = std::time::Instant::now();
 
-        let result = match &self.model {
-            ParakeetModel::Ctc(parakeet) => {
-                let mut parakeet = parakeet.lock().map_err(|e| {
-                    TranscribeError::InferenceFailed(format!(
-                        "Failed to lock Parakeet mutex: {}",
-                        e
-                    ))
-                })?;
-                parakeet
-                    .transcribe_samples(samples.to_vec(), 16000, 1, None)
-                    .map_err(|e| {
-                        TranscribeError::InferenceFailed(format!(
-                            "Parakeet CTC inference failed: {}",
-                            e
-                        ))
-                    })?
-            }
-            ParakeetModel::Tdt(parakeet) => {
-                let mut parakeet = parakeet.lock().map_err(|e| {
-                    TranscribeError::InferenceFailed(format!(
-                        "Failed to lock Parakeet mutex: {}",
-                        e
-                    ))
-                })?;
-                parakeet
-                    .transcribe_samples(samples.to_vec(), 16000, 1, None)
-                    .map_err(|e| {
-                        TranscribeError::InferenceFailed(format!(
-                            "Parakeet TDT inference failed: {}",
-                            e
-                        ))
-                    })?
-            }
-        };
+        let result = transcribe_chunked(samples, |chunk| self.transcribe_chunk(chunk))?;
 
         // Split the full text on sentence boundaries (.!?) and map each sentence
         // back to token timestamps. result.text is properly assembled by parakeet-rs;
@@ -516,6 +544,96 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn near_boundary_recordings_have_no_tiny_tail_or_missing_samples() {
+        for length in [60 * 16000 + 1, 120 * 16000, 120 * 16000 + 1] {
+            let samples = vec![0.0; length];
+            let mut consumed = 0;
+            transcribe_chunked(&samples, |chunk| {
+                assert!((8000..=60 * 16000).contains(&chunk.len()));
+                consumed += chunk.len();
+                Ok(ParakeetResult {
+                    text: String::new(),
+                    tokens: vec![],
+                })
+            })
+            .unwrap();
+            assert_eq!(consumed, length);
+        }
+    }
+
+    #[test]
+    fn empty_input_does_not_call_encoder() {
+        assert!(transcribe_chunked(&[], |_| panic!("empty encoder input")).is_err());
+    }
+
+    #[test]
+    fn long_audio_never_reaches_encoder_as_one_buffer() {
+        let samples: Vec<f32> = (0..463 * 16000).map(|n| n as f32).collect();
+        let mut consumed = 0;
+        let mut calls = 0;
+        let result = transcribe_chunked(&samples, |chunk| {
+            assert!(chunk.len() <= 60 * 16000, "unbounded encoder input");
+            assert!(!chunk.is_empty());
+            assert_eq!(chunk, &samples[consumed..consumed + chunk.len()]);
+            consumed += chunk.len();
+            calls += 1;
+            Ok(ParakeetResult {
+                text: format!("chunk{calls}"),
+                tokens: vec![parakeet_rs::TimedToken {
+                    text: format!("chunk{calls}"),
+                    start: 0.0,
+                    end: chunk.len() as f32 / 16000.0,
+                }],
+            })
+        })
+        .unwrap();
+        assert_eq!(consumed, samples.len(), "tail was lost");
+        assert!(calls > 1);
+        assert_eq!(result.text.split_whitespace().count(), calls);
+        assert_eq!(result.tokens.first().unwrap().start, 0.0);
+        assert!((result.tokens.last().unwrap().end - 463.0).abs() < 0.001);
+        for pair in result.tokens.windows(2) {
+            assert!((pair[0].end - pair[1].start).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn short_audio_uses_one_unchanged_inference() {
+        let samples = vec![0.25; 16000];
+        let mut calls = 0;
+        let result = transcribe_chunked(&samples, |chunk| {
+            calls += 1;
+            assert_eq!(chunk, samples);
+            Ok(ParakeetResult {
+                text: "  Keep punctuation!  ".into(),
+                tokens: vec![],
+            })
+        })
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(result.text, "  Keep punctuation!  ");
+    }
+
+    #[test]
+    fn chunk_failure_does_not_return_a_successful_partial_transcript() {
+        let samples = vec![0.0; 121 * 16000];
+        let mut calls = 0;
+        let result = transcribe_chunked(&samples, |_| {
+            calls += 1;
+            if calls == 2 {
+                Err(TranscribeError::InferenceFailed("injected failure".into()))
+            } else {
+                Ok(ParakeetResult {
+                    text: "partial".into(),
+                    tokens: vec![],
+                })
+            }
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, 2);
+    }
 
     #[test]
     fn test_detect_model_type_tdt_with_encoder_and_decoder() {
