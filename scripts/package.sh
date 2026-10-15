@@ -733,6 +733,8 @@ if [[ "$BUILD_DEB" == "true" ]]; then
         --deb-recommends pipewire-alsa \
         --deb-recommends wtype \
         --deb-recommends wl-clipboard \
+        --deb-recommends "libgtk-4-1" \
+        --deb-recommends libgtk4-layer-shell0 \
         --deb-suggests ydotool \
         --deb-suggests libnotify-bin \
         --deb-suggests libvulkan1 \
@@ -765,6 +767,8 @@ if [[ "$BUILD_RPM" == "true" ]]; then
         --depends "glibc" \
         --depends "curl" \
         --depends "pipewire-alsa" \
+        --depends "gtk4" \
+        --depends "gtk4-layer-shell" \
         --rpm-summary "$DESCRIPTION" \
         --package "$RPM_FILE" \
         usr etc
