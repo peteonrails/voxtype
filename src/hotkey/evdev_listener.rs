@@ -455,9 +455,15 @@ enum TargetKeyAction {
 /// `modifiers = ["RIGHTCTRL"]`, letting go of Ctrl before Alt would otherwise
 /// drop the Alt release and leave the recording running to
 /// `max_duration_secs`.
+///
+/// When a wireless keyboard (such as Logitech Bolt/Unifying receivers) wakes
+/// from RF sleep after an idle period, the initial key-down event (`value = 1`)
+/// can be lost during the RF link handshake while the user holds the push-to-talk key.
+/// Treating `value = 2` (repeat) as a press when `!is_pressed` ensures recording
+/// starts immediately without requiring a second press.
 fn target_key_action(value: i32, is_pressed: bool, modifiers_satisfied: bool) -> TargetKeyAction {
     match value {
-        1 if !is_pressed && modifiers_satisfied => TargetKeyAction::Press,
+        1 | 2 if !is_pressed && modifiers_satisfied => TargetKeyAction::Press,
         0 if is_pressed => TargetKeyAction::Release,
         _ => TargetKeyAction::Ignore,
     }
@@ -576,7 +582,7 @@ fn evdev_listener_loop(
             // Track modifier state
             if modifier_keys.contains(&key) {
                 match value {
-                    1 => {
+                    1 | 2 => {
                         active_modifiers.insert(key);
                     }
                     0 => {
@@ -590,7 +596,7 @@ fn evdev_listener_loop(
             if let Some(mm) = model_modifier {
                 if key == mm {
                     match value {
-                        1 => model_modifier_held = true,
+                        1 | 2 => model_modifier_held = true,
                         0 => model_modifier_held = false,
                         _ => {}
                     }
@@ -600,7 +606,7 @@ fn evdev_listener_loop(
             // Track profile modifier state
             if let Some(profile_name) = profile_modifiers.get(&key) {
                 match value {
-                    1 => {
+                    1 | 2 => {
                         held_profile_modifiers.insert(key);
                         last_pressed_profile = Some(profile_name.clone());
                     }
@@ -970,6 +976,15 @@ mod tests {
             "idle device change must not emit a release"
         );
         assert!(!is_pressed);
+    }
+
+    /// When waking from wireless RF sleep, the initial press (value=1) is lost in
+    /// the RF handshake; the first event received while held is repeat (value=2).
+    /// It must trigger the press.
+    #[test]
+    fn repeat_on_idle_triggers_press_for_wireless_wake() {
+        assert_eq!(target_key_action(2, false, true), TargetKeyAction::Press);
+        assert_eq!(target_key_action(2, false, false), TargetKeyAction::Ignore);
     }
 
     #[test]
