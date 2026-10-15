@@ -180,6 +180,7 @@ pub fn engine_icon(engine: crate::config::TranscriptionEngine) -> &'static str {
         crate::config::TranscriptionEngine::Cohere => "\u{1F4DD}",   // 📝
         crate::config::TranscriptionEngine::Soniox => "\u{2601}\u{FE0F}", // ☁️
         crate::config::TranscriptionEngine::OpenVino => "\u{1F9E0}", // 🧠
+        crate::config::TranscriptionEngine::Whistle => "\u{1F4AC}",  // speech
     }
 }
 

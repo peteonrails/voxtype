@@ -2,9 +2,9 @@
 //!
 //! Extracted from `src/tui/engine.rs` so `voxtype info models --json` and the
 //! TUI's engine picker enumerate the same models. Whisper, Parakeet,
-//! Moonshine and SenseVoice come from the central `setup::model` registry;
-//! the remaining ONNX engines aren't registered there yet, so their
-//! canonical names are listed here.
+//! Moonshine, SenseVoice, OpenVINO and Whistle use the central
+//! `setup::model` registry; the other engines' canonical names are listed
+//! here.
 
 use std::path::Path;
 
@@ -24,6 +24,7 @@ pub const CATALOG_ENGINES: &[&str] = &[
     "omnilingual",
     "cohere",
     "openvino",
+    "whistle",
 ];
 
 /// Models voxtype knows how to download for `engine`.
@@ -43,6 +44,7 @@ pub fn model_catalog(engine: &str) -> Vec<&'static str> {
             "cohere-transcribe-fp16",
         ],
         "openvino" => model::valid_openvino_model_names(),
+        "whistle" => model::valid_whistle_model_names(),
         _ => Vec::new(),
     }
 }
@@ -61,6 +63,7 @@ pub const fn default_model(engine: &str) -> &'static str {
         b"omnilingual" => "omnilingual-300m",
         b"cohere" => "cohere-transcribe-q4f16",
         b"openvino" => "base.en-int8",
+        b"whistle" => "whistle.cact",
         _ => "",
     }
 }
@@ -81,6 +84,7 @@ pub fn model_dir_name(engine: &str, model: &str) -> String {
             .unwrap_or(model)
             .to_string(),
         "openvino" => model::openvino_dir_name(model).unwrap_or(model).to_string(),
+        "whistle" => model::whistle_dir_name(model).unwrap_or(model).to_string(),
         _ => model.to_string(),
     }
 }
@@ -96,7 +100,7 @@ pub fn model_dir_name(engine: &str, model: &str) -> String {
 /// The remaining engines' catalog names are already directory names.
 pub fn download_arg(engine: &str, model: &str) -> Option<String> {
     match engine {
-        "whisper" | "parakeet" | "openvino" => Some(model.to_string()),
+        "whisper" | "parakeet" | "openvino" | "whistle" => Some(model.to_string()),
         "sensevoice" | "moonshine" => Some(model_dir_name(engine, model)),
         "paraformer" | "dolphin" | "omnilingual" | "cohere" => Some(model.to_string()),
         _ => None,
