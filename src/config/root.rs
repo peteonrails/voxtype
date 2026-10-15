@@ -2,7 +2,7 @@ use super::{
     AudioConfig, CohereConfig, DolphinConfig, HotkeyConfig, MeetingConfig, MoonshineConfig,
     OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig, ParakeetConfig, Profile,
     SenseVoiceConfig, SonioxConfig, StatusConfig, StreamingConfig, TextConfig, TranscriptionEngine,
-    VadConfig, WhisperConfig,
+    VadConfig, WhisperConfig, WhistleConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -69,6 +69,11 @@ pub struct Config {
     #[serde(default)]
     pub soniox: Option<SonioxConfig>,
 
+    /// Whistle on-device ASR configuration
+    /// (optional, only used when engine = "whistle")
+    #[serde(default)]
+    pub whistle: Option<WhistleConfig>,
+
     /// Shared sliding-window streaming engine tuning, used by every batch
     /// backend wrapped in `transcribe::sliding_window` (currently `whisper`
     /// and `openvino`). `None` when config.toml has no `[streaming]`
@@ -130,6 +135,7 @@ impl Default for Config {
             cohere: None,
             openvino: None,
             soniox: None,
+            whistle: None,
             streaming: None,
             text: TextConfig::default(),
             vad: VadConfig::default(),
@@ -391,6 +397,11 @@ impl Config {
                 .unwrap_or(false),
             // Soniox is a cloud backend; nothing to load on demand.
             TranscriptionEngine::Soniox => false,
+            TranscriptionEngine::Whistle => self
+                .whistle
+                .as_ref()
+                .map(|w| w.on_demand_loading)
+                .unwrap_or(false),
         }
     }
 
@@ -415,6 +426,11 @@ impl Config {
             TranscriptionEngine::SenseVoice => {
                 self.sensevoice.as_ref().map(|s| s.language.as_str())?
             }
+            TranscriptionEngine::Whistle => self
+                .whistle
+                .as_ref()
+                .map(|w| w.language.as_str())
+                .unwrap_or(""),
             // Parakeet, Moonshine, Paraformer, Dolphin, Omnilingual and Soniox
             // either detect the language or are fixed to one.
             _ => return None,
@@ -475,6 +491,11 @@ impl Config {
                 .as_ref()
                 .map(|s| s.model.as_str())
                 .unwrap_or("soniox (not configured)"),
+            TranscriptionEngine::Whistle => self
+                .whistle
+                .as_ref()
+                .map(|w| w.model.as_str())
+                .unwrap_or("whistle (not configured)"),
         }
     }
 
@@ -517,6 +538,9 @@ impl Config {
             }
             TranscriptionEngine::Soniox => {
                 self.soniox.get_or_insert_with(Default::default).model = model
+            }
+            TranscriptionEngine::Whistle => {
+                self.whistle.get_or_insert_with(Default::default).model = model
             }
         }
     }
