@@ -22,6 +22,7 @@ pub mod soniox;
 pub mod streaming;
 pub mod subprocess;
 pub mod whisper;
+pub mod whistle;
 pub mod worker;
 
 pub use sliding_window::{SlidingWindowConfig, SlidingWindowStreamingTranscriber};
@@ -301,6 +302,14 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
                 )
             })?;
             Ok(Box::new(soniox::SonioxTranscriber::new(cfg.clone())?))
+        }
+        TranscriptionEngine::Whistle => {
+            let cfg = config.whistle.as_ref().ok_or_else(|| {
+                TranscribeError::InitFailed(
+                    "Whistle engine selected but [whistle] config section is missing".to_string(),
+                )
+            })?;
+            Ok(Box::new(whistle::WhistleTranscriber::new(cfg)?))
         }
         #[cfg(feature = "openvino-whisper")]
         TranscriptionEngine::OpenVino => {

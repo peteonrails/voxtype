@@ -855,6 +855,9 @@ Voxtype supports seven speech-to-text engines. Whisper uses whisper.cpp and work
 | **Dolphin** | Dictation-optimized, fast CTC | No | Chinese + English |
 | **Omnilingual** | Broadest language coverage in ONNX engines | No | 50+ languages |
 | **Cohere** | #1 Open ASR Leaderboard accuracy | Optional (CUDA via `cohere-cuda`) | Arabic, German, English, Spanish, French, Hindi, Italian, Japanese, Korean, Dutch, Portuguese, Russian, Turkish, Chinese (14) |
+| **Whistle** | Tiny on-device model, 7 languages | No | English, German, French, Spanish, Italian, Dutch, Polish (7) |
+
+**Whistle** is the exception to the ONNX-binary rule above: it runs as a local subprocess through Cactus's `needle` runner, so it needs no ONNX Runtime and no GPU. Neither the runner nor the 16.9 MB `whistle.cact` weights ship with voxtype — install both yourself. See [WHISTLE.md](WHISTLE.md).
 
 ### Selecting an Engine
 
@@ -872,6 +875,9 @@ engine = "paraformer"
 engine = "dolphin"
 engine = "omnilingual"
 engine = "cohere"
+
+# Local subprocess engine (external needle runner)
+engine = "whistle"
 ```
 
 **Via CLI flag** (overrides config):
@@ -885,9 +891,10 @@ voxtype --engine paraformer daemon
 voxtype --engine dolphin daemon
 voxtype --engine omnilingual daemon
 voxtype --engine cohere daemon
+voxtype --engine whistle daemon
 ```
 
-Valid `--engine` values: `whisper`, `parakeet`, `moonshine`, `sensevoice`, `paraformer`, `dolphin`, `omnilingual`, `cohere`.
+Valid `--engine` values: `whisper`, `parakeet`, `moonshine`, `sensevoice`, `paraformer`, `dolphin`, `omnilingual`, `cohere`, `whistle`.
 
 ### Switching to an ONNX Engine
 
@@ -1105,6 +1112,37 @@ voxtype setup model      # Pick the Cohere section, confirm the size warning
 ```
 
 The download fetches five files from the `cstr/cohere-transcribe-onnx-int8` HuggingFace repository (Apache 2.0 licensed, not gated): the encoder/decoder ONNX graphs, their weight sidecars, and `tokens.txt`.
+
+### Whistle
+
+Whistle is Cactus Compute's 16.9 MB on-device ASR model. Voxtype runs it as a local subprocess through Cactus's `needle` CLI runner and reads the transcript from its JSON output. It offers:
+
+- **Tiny footprint**: 16.9 MB of weights, no GPU, no ONNX Runtime
+- **Seven languages**: English, German, French, Spanish, Italian, Dutch, Polish (with auto-detection)
+- **Keyword biasing** (`keywords_file`) and optional per-word timestamps
+- Ships in every binary, so no `setup onnx` switch is needed
+
+**Requirements:**
+- The `needle` runner binary (not bundled) — download from https://huggingface.co/Cactus-Compute/needle3
+- The `whistle.cact` weights (16.9 MB, not bundled) — download from https://huggingface.co/Cactus-Compute/whistle
+- `voxtype setup model` does not fetch either artifact
+
+**Configuration:**
+
+```toml
+engine = "whistle"
+
+[whistle]
+model = "whistle.cact"        # or an absolute path
+# runner_path = "/usr/local/bin/needle"
+# language = "en"             # en, de, fr, es, it, nl, pl; omit to auto-detect
+# keywords_file = "/home/me/voxtype-keywords.txt"
+# word_timestamps = false
+# threads = 4
+# on_demand_loading = false
+```
+
+See [WHISTLE.md](WHISTLE.md) for detailed setup instructions.
 
 ---
 
