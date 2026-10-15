@@ -1,0 +1,15 @@
+post_install() {
+    cat <<'EOF'
+Voxtype development build installed (tracks upstream dev).
+Run `voxtype configure` to choose a model and configure dictation.
+See /usr/share/doc/voxtype-git/INSTALL.md for hotkeys and service setup.
+For ONNX engines, install onnxruntime>=1.24.0, then run:
+  sudo voxtype setup onnx --enable
+For Whisper GPU acceleration, install your GPU's Vulkan driver, then run:
+  sudo voxtype setup gpu --enable
+EOF
+}
+
+post_upgrade() {
+    echo 'Restart the daemon to use the new build: systemctl --user restart voxtype'
+}
