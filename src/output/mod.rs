@@ -227,6 +227,10 @@ pub async fn send_transcription_notification(
 }
 
 /// Trait for text output implementations
+// See the note on `AudioCapture`: `async_trait` generates a redundant
+// `#[must_use]` on desugared async methods, tripping clippy's
+// `double_must_use` under CI's `-D warnings`. Fixed upstream in 0.1.92.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait TextOutput: Send + Sync {
     /// Output text (type it or copy to clipboard)
