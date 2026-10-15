@@ -200,6 +200,7 @@ parakeet-cuda = ["parakeet", "parakeet-rs/cuda"]
 parakeet-tensorrt = ["parakeet", "parakeet-rs/tensorrt"]
 parakeet-migraphx = ["parakeet", "parakeet-rs/migraphx"]
 parakeet-coreml = ["parakeet", "parakeet-rs/coreml"]
+parakeet-webgpu = ["parakeet", "parakeet-rs/webgpu"]
 # Dynamic loading for system ONNX Runtime (used by Nix builds)
 parakeet-load-dynamic = ["parakeet", "parakeet-rs/load-dynamic"]
 # Shared ONNX dependencies for engines using fbank/CTC preprocessing

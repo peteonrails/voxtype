@@ -29,6 +29,14 @@ Parakeet support requires an ONNX-enabled binary. Download from the releases pag
 
 The AVX2 binary works on most modern x86_64 CPUs. Use AVX-512 if your CPU supports it for better performance.
 
+### WebGPU (experimental)
+
+A source build with `--features parakeet-webgpu` selects ONNX Runtime's WebGPU execution provider, which runs on Vulkan through Google's Dawn library on Linux. No release binary ships with it. parakeet-rs marks the provider as experimental and warns that it may produce incorrect results, so check the transcription output before relying on it.
+
+The prebuilt ONNX Runtime that the build downloads links Dawn as a shared library, so the binary needs `libwebgpu_dawn.so` on the loader path (next to the binary via an rpath, or on `LD_LIBRARY_PATH`) at start-up. If the library is missing, the binary fails to start; it does not fall back to CPU. If the library loads but the provider cannot be registered, ONNX Runtime logs a warning and runs on CPU.
+
+`voxtype info accel` and `voxtype setup gpu` do not recognise the WebGPU provider yet, so they report no GPU acceleration for such a build.
+
 ## Downloading the Model
 
 Download the Parakeet TDT 0.6B model:
