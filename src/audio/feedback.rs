@@ -4,9 +4,10 @@
 //! Supports multiple sound themes and custom sound files.
 
 use crate::config::AudioFeedbackConfig;
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
+use rodio::{Decoder, OutputStream, Sink, Source};
 use std::io::Cursor;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 /// Sound event types
 #[derive(Debug, Clone, Copy)]
@@ -25,8 +26,6 @@ pub enum SoundEvent {
 
 /// Audio feedback player
 pub struct AudioFeedback {
-    _stream: OutputStream,
-    stream_handle: OutputStreamHandle,
     config: AudioFeedbackConfig,
     theme: SoundTheme,
 }
@@ -47,14 +46,9 @@ impl AudioFeedback {
             return Err("Audio feedback is disabled".to_string());
         }
 
-        let (stream, stream_handle) = OutputStream::try_default()
-            .map_err(|e| format!("Failed to open audio output: {}", e))?;
-
         let theme = load_theme(&config.theme)?;
 
         Ok(Self {
-            _stream: stream,
-            stream_handle,
             config: config.clone(),
             theme,
         })
@@ -86,11 +80,27 @@ impl AudioFeedback {
         // Apply volume control
         let source = source.amplify(self.config.volume);
 
-        let sink = Sink::try_new(&self.stream_handle)
-            .map_err(|e| format!("Failed to create audio sink: {}", e))?;
-
-        sink.append(source);
-        sink.detach(); // Let it play in the background
+        std::thread::spawn(move || {
+            let (_stream, stream_handle) = match OutputStream::try_default() {
+                Ok(stream) => stream,
+                Err(e) => {
+                    tracing::warn!("Failed to open audio output: {}", e);
+                    return;
+                }
+            };
+            match Sink::try_new(&stream_handle) {
+                Ok(sink) => {
+                    let deadline = Instant::now()
+                        + source.total_duration().unwrap_or(Duration::from_secs(5))
+                        + Duration::from_secs(1);
+                    sink.append(source);
+                    while !sink.empty() && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                }
+                Err(e) => tracing::warn!("Failed to create audio sink: {}", e),
+            }
+        });
 
         Ok(())
     }
