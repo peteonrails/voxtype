@@ -353,6 +353,9 @@ fn sliding_window_config(
         partial_min_words: resolved.partial_min_words,
         type_partials: resolved.type_partials,
         revision_mode: resolved.revision_mode,
+        question_mark_lookback_words: resolved.question_mark_lookback_words,
+        stability_passes: resolved.stability_passes,
+        revision_lag_words: resolved.revision_lag_words,
     }
 }
 
@@ -368,6 +371,7 @@ fn sliding_window_config_from_whisper(config: &Config) -> SlidingWindowConfig {
         partial_min_words: config.whisper.streaming_partial_min_words,
         type_partials: config.whisper.streaming_type_partials,
         revision_mode: config.whisper.streaming_revision_mode,
+        ..StreamingConfig::default()
     };
     sliding_window_config(config, legacy, "whisper")
 }
@@ -388,6 +392,7 @@ fn sliding_window_config_from_openvino(
         partial_min_words: openvino.streaming_partial_min_words,
         type_partials: openvino.streaming_type_partials,
         revision_mode: openvino.streaming_revision_mode,
+        ..StreamingConfig::default()
     };
     sliding_window_config(config, legacy, "openvino")
 }
@@ -490,7 +495,7 @@ mod tests {
     }
 
     /// A config with no streaming settings anywhere still resolves to the
-    /// documented defaults, matching pre-unification behavior exactly.
+    /// documented defaults.
     #[test]
     fn config_with_no_streaming_settings_uses_documented_defaults() {
         let config = Config::default();
@@ -502,7 +507,8 @@ mod tests {
         assert_eq!(resolved.min_audio_s, 1.0);
         assert_eq!(resolved.partial_min_words, 1);
         assert!(resolved.type_partials);
-        assert!(!resolved.revision_mode);
+        // Type-then-correct is the default commit policy.
+        assert!(resolved.revision_mode);
     }
 
     /// A new-style `[streaming]` section takes priority over any legacy
