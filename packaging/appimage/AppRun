@@ -5,5 +5,6 @@
 APPDIR="$(dirname "$(readlink -f "$0")")"
 
 export VOXTYPE_LIB="$APPDIR/usr/lib/voxtype"
+export XDG_DATA_DIRS="$APPDIR/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 
 exec "$APPDIR/usr/bin/voxtype" "$@"

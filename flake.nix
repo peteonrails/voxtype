@@ -181,6 +181,8 @@
               # Default config
               install -Dm644 config/default.toml \
                 $out/share/voxtype/default-config.toml
+              install -Dm644 packaging/io.voxtype.Voxtype.desktop \
+                $out/share/applications/io.voxtype.Voxtype.desktop
             '';
 
             meta = with pkgs.lib; {
