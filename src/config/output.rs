@@ -55,6 +55,15 @@ pub struct OutputConfig {
     #[serde(default)]
     pub wtype_delay_ms: u32,
 
+    /// Wait after changing the X11 keyboard mapping before pressing the keys
+    /// that depend on it (ms). Only used by the `x11` driver, which binds each
+    /// distinct character of a transcription to a spare keycode: clients
+    /// (GTK4, Qt6, Chromium, terminals) resolve keycodes through their own copy
+    /// of the mapping, refreshed on a keymap-change notification, and pressing
+    /// a remapped keycode before they catch up drops the character.
+    #[serde(default = "default_x11_keymap_settle_ms")]
+    pub x11_keymap_settle_ms: u32,
+
     /// Automatically submit (send Enter key) after outputting transcribed text
     /// Useful for chat applications, command lines, or forms where you want
     /// to auto-submit after dictation
@@ -197,6 +206,7 @@ impl Default for OutputConfig {
             type_delay_ms: 0,
             pre_type_delay_ms: 0,
             wtype_delay_ms: 0,
+            x11_keymap_settle_ms: default_x11_keymap_settle_ms(),
             auto_submit: false,
             append_text: None,
             shift_enter_newlines: false,
@@ -224,6 +234,13 @@ impl Default for OutputConfig {
 
 fn default_modifier_release_timeout_ms() -> u64 {
     750
+}
+
+/// 20 ms is roughly 4x the smallest wait that made a GTK4 entry resolve a
+/// remapped keycode correctly on a 5-year-old laptop CPU (5 ms); slower clients
+/// or slower machines get the margin.
+fn default_x11_keymap_settle_ms() -> u32 {
+    20
 }
 
 /// Result of applying a per-language XKB layout/variant hint to output config.
@@ -373,6 +390,9 @@ pub enum OutputDriver {
     Eitype,
     /// dotool - Works on X11/Wayland/TTY, supports keyboard layouts
     Dotool,
+    /// x11 - Native X11 typing via XTEST with a generated Unicode keymap,
+    /// no external tool required. Opt-in: not part of the default chain.
+    X11,
     /// ydotool - Works on X11/Wayland/TTY, requires daemon
     Ydotool,
     /// Clipboard via wl-copy (Wayland)
@@ -387,6 +407,7 @@ impl std::fmt::Display for OutputDriver {
             OutputDriver::Wtype => write!(f, "wtype"),
             OutputDriver::Eitype => write!(f, "eitype"),
             OutputDriver::Dotool => write!(f, "dotool"),
+            OutputDriver::X11 => write!(f, "x11"),
             OutputDriver::Ydotool => write!(f, "ydotool"),
             OutputDriver::Clipboard => write!(f, "clipboard"),
             OutputDriver::Xclip => write!(f, "xclip"),
@@ -402,11 +423,12 @@ impl std::str::FromStr for OutputDriver {
             "wtype" => Ok(OutputDriver::Wtype),
             "eitype" => Ok(OutputDriver::Eitype),
             "dotool" => Ok(OutputDriver::Dotool),
+            "x11" => Ok(OutputDriver::X11),
             "ydotool" => Ok(OutputDriver::Ydotool),
             "clipboard" => Ok(OutputDriver::Clipboard),
             "xclip" => Ok(OutputDriver::Xclip),
             _ => Err(format!(
-                "Unknown driver '{}'. Valid options: wtype, eitype, dotool, ydotool, clipboard, xclip",
+                "Unknown driver '{}'. Valid options: wtype, eitype, dotool, x11, ydotool, clipboard, xclip",
                 s
             )),
         }
@@ -499,6 +521,7 @@ mod tests {
             "dotool".parse::<OutputDriver>().unwrap(),
             OutputDriver::Dotool
         );
+        assert_eq!("x11".parse::<OutputDriver>().unwrap(), OutputDriver::X11);
         assert_eq!(
             "ydotool".parse::<OutputDriver>().unwrap(),
             OutputDriver::Ydotool
@@ -532,6 +555,7 @@ mod tests {
     fn test_output_driver_display() {
         assert_eq!(OutputDriver::Wtype.to_string(), "wtype");
         assert_eq!(OutputDriver::Dotool.to_string(), "dotool");
+        assert_eq!(OutputDriver::X11.to_string(), "x11");
         assert_eq!(OutputDriver::Ydotool.to_string(), "ydotool");
         assert_eq!(OutputDriver::Clipboard.to_string(), "clipboard");
         assert_eq!(OutputDriver::Xclip.to_string(), "xclip");
