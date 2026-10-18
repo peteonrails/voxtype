@@ -2,7 +2,26 @@
 xtask = "run --package xtask --"
 
 [env]
-# The transcribe.cpp static crate does not carry the optional system BLAS
-# library through to Voxtype's final link on Linux. Its scalar decoder path
-# needs no extra runtime dependency and matches upstream's distributable build.
-TRANSCRIBE_CMAKE_ARGS = "-DTRANSCRIBE_USE_SYSTEM_BLAS=OFF"
+# transcribe.cpp's CMake build is not reached by the GGML_* environment
+# variables or CMAKE_C_FLAGS that the release Dockerfiles set: those are
+# honoured by whisper-rs-sys, while transcribe-cpp-sys only forwards
+# TRANSCRIBE_CMAKE_ARGS (and CMAKE_ARGS) to its own cmake invocation. Both
+# settings below therefore have to travel through this variable.
+#
+# 1. System BLAS off. The static crate does not carry the optional system
+#    BLAS library through to Voxtype's final link on Linux. Its scalar
+#    decoder path needs no extra runtime dependency, and measured faster
+#    than reference netlib cblas on an n=1 GEMV decode loop anyway.
+#
+# 2. x86-64-v3 ISA floor. transcribe-cpp-sys only enables its conservative
+#    floor under the `dynamic-backends` feature, which we do not use, so a
+#    static build compiles ggml's CPU tiers against the build host and leaks
+#    AVX-512 and AVX-VNNI into the binary -- caught by Dockerfile.vulkan's
+#    ISA guard. TRANSCRIBE_X86_CONSERVATIVE defaults every tier (including
+#    tiers added upstream later) to OFF; the explicit GGML_* flags then
+#    restore the Haswell floor, and explicit -D wins over the conservative
+#    defaults.
+#
+# A Dockerfile that wants a different posture can set TRANSCRIBE_CMAKE_ARGS
+# in the environment: cargo's [env] does not override an existing value.
+TRANSCRIBE_CMAKE_ARGS = "-DTRANSCRIBE_USE_SYSTEM_BLAS=OFF -DTRANSCRIBE_X86_CONSERVATIVE=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON"
