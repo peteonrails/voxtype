@@ -171,15 +171,12 @@ impl WhisperTranscriber {
 
     fn run_full(
         &self,
+        state: &mut whisper_rs::WhisperState,
         samples: &[f32],
         selected_language: Option<&str>,
         duration_secs: f32,
         retry: bool,
     ) -> Result<String, TranscribeError> {
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
         let params = self.build_params(selected_language, duration_secs, retry);
 
         state
@@ -276,7 +273,10 @@ impl Transcriber for WhisperTranscriber {
 
         let start = std::time::Instant::now();
 
-        // Create state for this transcription
+        // One state serves language detection, the decode and any retry:
+        // whisper_full_with_state resets results on each call, and
+        // allocating a state (KV caches, compute buffers) is not free on
+        // GPU backends.
         let mut state = self
             .ctx
             .create_state()
@@ -308,8 +308,13 @@ impl Transcriber for WhisperTranscriber {
             *guard = selected_language.clone();
         }
 
-        let mut result =
-            self.run_full(samples, selected_language.as_deref(), duration_secs, false)?;
+        let mut result = self.run_full(
+            &mut state,
+            samples,
+            selected_language.as_deref(),
+            duration_secs,
+            false,
+        )?;
 
         if duration_secs >= 1.0 && is_degenerate_transcript(&result) {
             tracing::warn!(
@@ -317,8 +322,13 @@ impl Transcriber for WhisperTranscriber {
                 result,
                 duration_secs
             );
-            let retry_result =
-                self.run_full(samples, selected_language.as_deref(), duration_secs, true)?;
+            let retry_result = self.run_full(
+                &mut state,
+                samples,
+                selected_language.as_deref(),
+                duration_secs,
+                true,
+            )?;
             if is_degenerate_transcript(&retry_result) {
                 tracing::warn!(
                     "Whisper retry also returned degenerate transcript {:?}; treating as empty",
