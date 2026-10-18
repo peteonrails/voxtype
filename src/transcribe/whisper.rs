@@ -311,6 +311,16 @@ impl Transcriber for WhisperTranscriber {
         let mut result =
             self.run_full(samples, selected_language.as_deref(), duration_secs, false)?;
 
+        if self.context_window_optimization && calculate_audio_ctx(duration_secs).is_some() {
+            if let Some(trimmed) = drop_restarted_copy(&result) {
+                tracing::warn!(
+                    "Whisper repeated the transcript for {:.2}s audio; keeping the first copy",
+                    duration_secs
+                );
+                result = trimmed;
+            }
+        }
+
         if duration_secs >= 1.0 && has_repetition_loop(&result) {
             tracing::warn!(
                 "Whisper looped on a phrase for {:.2}s audio; retrying with beam search",
@@ -390,6 +400,23 @@ fn find_repetition_loop(words: &[&str]) -> Option<(usize, usize, usize)> {
         }
     }
     None
+}
+
+/// How many opening words a copy at the end must repeat to count as a restart
+const RESTART_MIN_WORDS: usize = 6;
+
+/// With a reduced audio context, Whisper sometimes reaches the end of the
+/// speech and transcribes the clip again from the start. If the text ends with
+/// a copy of its own opening, returns the text before that copy.
+fn drop_restarted_copy(text: &str) -> Option<String> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() < 2 * RESTART_MIN_WORDS {
+        return None;
+    }
+    let keys: Vec<String> = words.iter().map(|w| loop_key(w)).collect();
+    (RESTART_MIN_WORDS..=keys.len() - RESTART_MIN_WORDS)
+        .find(|&start| keys[start..] == keys[..keys.len() - start])
+        .map(|start| words[..start].join(" "))
 }
 
 fn has_repetition_loop(text: &str) -> bool {
@@ -533,6 +560,39 @@ pub fn get_model_url(model: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_drop_restarted_copy() {
+        // Transcripts Whisper returned with the reduced audio context
+        assert_eq!(
+            drop_restarted_copy(
+                "It has required my password to login. It has required my password to login."
+            )
+            .as_deref(),
+            Some("It has required my password to login.")
+        );
+        assert_eq!(
+            drop_restarted_copy(
+                "Can you look into fixing that bug then in the original 654 PR driver? \
+                 We can make another PR that fixes that to their branch. \
+                 Can you look into fixing that bug then in the original 654 PR driver?"
+            )
+            .as_deref(),
+            Some(
+                "Can you look into fixing that bug then in the original 654 PR driver? \
+                 We can make another PR that fixes that to their branch."
+            )
+        );
+        // An opening said twice with different words after it is kept
+        assert_eq!(
+            drop_restarted_copy(
+                "It has required my password to login. It has required my password to unlock it."
+            ),
+            None
+        );
+        assert_eq!(drop_restarted_copy("It has required my password."), None);
+        assert_eq!(drop_restarted_copy(""), None);
+    }
 
     #[test]
     fn test_repetition_loops() {
