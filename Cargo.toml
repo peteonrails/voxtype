@@ -271,6 +271,7 @@ openvino-whisper = ["dep:openvino-genai"]
 [build-dependencies]
 clap = { version = "4", features = ["derive"] }
 clap_mangen = "0.2"
+clap_complete = "4.6.11"
 
 [dev-dependencies]
 dirs = "5.0"
