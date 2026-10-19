@@ -67,7 +67,11 @@ impl PostProcessor {
                 }
             }
             Err(e) => {
-                tracing::warn!("Post-process command failed: {}, using original text", e);
+                // Debug-format the error so a failing command's stderr (it
+                // can echo the dictated text) stays escaped on this one
+                // journal line instead of landing verbatim on lines of its
+                // own, where it could forge other log events.
+                tracing::warn!("Post-process command failed: {:?}, using original text", e);
                 text.to_string()
             }
         }

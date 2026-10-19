@@ -233,6 +233,32 @@ voxtype status --format json --icon-theme nerd-font  # Use specific icon theme
 }
 ```
 
+### `voxtype stats`
+
+Summarize words-per-minute statistics from your dictation history. The daemon
+logs one `DictationStats` line per completed dictation (word count of the final
+cleaned text, divided by VAD speech time when available, else total audio
+duration); this command reads those back from the journal.
+
+```bash
+voxtype stats                # Summary plus the 10 most recent dictations
+voxtype stats --lines 25     # List the 25 most recent dictations
+voxtype stats --json         # Machine-readable stat array for tooling
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--lines N` | Number of recent dictations to list (default: 10) |
+| `--json` | Emit the raw stat array as JSON |
+
+**Note on streaming mode:** dictations made with streaming output
+(`[streaming]` enabled) intentionally produce **no** stats. A streaming
+dictation is unbounded — its duration and word count accrue incrementally, so
+a per-dictation WPM figure is not meaningful. Only standard (PTT/eager)
+dictations are counted.
+
 ### `voxtype setup gpu`
 
 Manage GPU acceleration backends.
