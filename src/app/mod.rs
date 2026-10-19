@@ -5,7 +5,7 @@
 //! The rest of this module is organised by subcommand — each long handler
 //! lives in its own file (`record.rs`, `status.rs`, `meeting.rs`,
 //! `transcribe_file.rs`, `info.rs`, `config_show.rs`, `config_set.rs`,
-//! `config_get.rs`, `config_schema.rs`,
+//! `config_get.rs`, `config_schema.rs`, `learn.rs`,
 //! `updates.rs`, `macos.rs`). Shared binary-side plumbing lives in
 //! `dispatch.rs` (the top-level subcommand router), `overrides.rs` (CLI →
 //! Config layering), and `sigpipe.rs`. Cross-binary helpers like daemon
@@ -22,6 +22,7 @@ mod config_set;
 mod config_show;
 mod dispatch;
 mod info;
+mod learn;
 #[cfg(target_os = "macos")]
 mod macos;
 mod meeting;
