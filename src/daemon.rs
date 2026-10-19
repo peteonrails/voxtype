@@ -1842,6 +1842,12 @@ impl Daemon {
         streaming_session: &mut Option<StreamingSession>,
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
     ) {
+        // Note: streaming sessions intentionally emit no DictationStats.
+        // A streaming dictation is unbounded — duration and word count
+        // accrue incrementally — so a per-dictation WPM figure is not
+        // meaningful. `voxtype stats` covers standard (PTT/eager)
+        // dictations only; see the `voxtype stats` section of
+        // docs/USER_MANUAL.md. Do not "fix" this.
         if let Some(mut c) = audio_capture.take() {
             let _ = c.stop().await;
         }
@@ -3213,7 +3219,11 @@ impl Daemon {
                     self.publish_empty_outcome();
                     return None;
                 }
-                Ok(Ok(_)) => {}
+                Ok(Ok(result)) => {
+                    if let Some(timing) = self.dictation_timing.as_mut() {
+                        timing.speech_secs = Some(result.speech_duration_secs);
+                    }
+                }
                 Ok(Err(e)) => tracing::warn!("VAD failed, proceeding anyway: {}", e),
                 Err(e) => tracing::warn!("VAD task failed, proceeding anyway: {}", e),
             }
