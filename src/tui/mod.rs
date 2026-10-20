@@ -1,17 +1,19 @@
 //! Terminal UI for `voxtype configure`.
 //!
-//! Renders an interactive view over voxtype settings. The General section
-//! (variant picker + daemon status) is functional today; remaining sections
-//! ship as placeholders and will be filled in over subsequent PRs.
+//! The page list on the left, the open page on the right, one status line
+//! and a footer of keys. `s` saves every change and restarts voxtype so it
+//! uses them. See `docs/TUI_DESIGN.md` for the design this follows.
 
 mod advanced_section;
 mod app;
 mod audio;
+mod basics;
+mod build;
+mod chrome;
 mod common;
 mod compositor_bindings;
 mod config_editor;
 mod engine;
-mod general;
 mod hotkey;
 mod meeting_section;
 mod notifications_section;
@@ -20,6 +22,7 @@ mod output_section;
 mod section;
 mod sidebar;
 mod text_section;
+mod theme;
 mod vad_section;
 mod waybar_section;
 
@@ -40,9 +43,6 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
-    text::{Line, Span},
-    widgets::Paragraph,
     Frame, Terminal,
 };
 use std::io::{self, Stdout};
@@ -62,9 +62,9 @@ pub fn probe_audio_devices() {
 
 /// Launch the TUI.
 ///
-/// `config_path` is the `-c/--config` value; when set, every section reads and
-/// writes that file instead of the default. Installed before the first section
-/// loads, because a section that has already read the default would save back
+/// `config_path` is the `-c/--config` value; when set, every page reads and
+/// writes that file instead of the default. Installed before the first page
+/// loads, because a page that has already read the default would save back
 /// to it (#595).
 pub fn run(
     force_package_mode: bool,
@@ -74,12 +74,7 @@ pub fn run(
     let mut terminal = enter_terminal()?;
     let result = event_loop(&mut terminal, force_package_mode);
     leave_terminal(&mut terminal)?;
-    if result? {
-        // Printed after the alternate screen is torn down so it lands in
-        // the user's shell, not the vanished TUI.
-        println!("Restarted the voxtype daemon to apply saved config changes.");
-    }
-    Ok(())
+    result
 }
 
 fn enter_terminal() -> anyhow::Result<Tui> {
@@ -100,30 +95,26 @@ fn leave_terminal(terminal: &mut Tui) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Returns `true` when the daemon was restarted on the way out so `run()`
-/// can tell the user once the terminal is back to normal.
-fn event_loop(terminal: &mut Tui, force_package_mode: bool) -> anyhow::Result<bool> {
+fn event_loop(terminal: &mut Tui, force_package_mode: bool) -> anyhow::Result<()> {
     let mut app = App::new(force_package_mode);
-    let mut last_general_refresh = std::time::Instant::now();
-    let general_refresh_interval = Duration::from_secs(2);
+    let mut last_refresh = std::time::Instant::now();
 
     loop {
         app.poll_background();
         terminal.draw(|f| draw(f, &app))?;
 
         if !event::poll(Duration::from_millis(250))? {
-            // Idle tick. Refresh the General-screen state (daemon status,
-            // active variant, inventory) so the green/red dot stays current
-            // without the user pressing `r`.
-            if app.current_section == Section::General
-                && last_general_refresh.elapsed() >= general_refresh_interval
+            // Keep the Build page and the Basics problem rows current while
+            // they are on screen.
+            if matches!(app.current_section, Section::Basics | Section::Build)
+                && last_refresh.elapsed() >= Duration::from_secs(2)
             {
                 app.refresh_inventory();
-                last_general_refresh = std::time::Instant::now();
+                last_refresh = std::time::Instant::now();
             }
             continue;
         }
-        match event::read()? {
+        let action = match event::read()? {
             Event::Key(key) => {
                 if !matches!(
                     key.kind,
@@ -131,31 +122,26 @@ fn event_loop(terminal: &mut Tui, force_package_mode: bool) -> anyhow::Result<bo
                 ) {
                     continue;
                 }
-
-                // Global shortcuts handled before delegating to the focused pane.
-                if let Some(action) = handle_global_key(&mut app, key) {
-                    match dispatch_action(terminal, &mut app, action)? {
-                        LoopControl::Continue => continue,
-                        LoopControl::Quit => return Ok(restart_if_config_newer(&app)),
-                    }
-                }
-
-                let action = if app.sidebar_focused {
-                    handle_sidebar_key(&mut app, key)
-                } else {
-                    handle_section_key(&mut app, key)
-                };
-
-                match dispatch_action(terminal, &mut app, action)? {
-                    LoopControl::Continue => {}
-                    LoopControl::Quit => return Ok(restart_if_config_newer(&app)),
-                }
+                handle_key(&mut app, key)
             }
             Event::Mouse(mouse) => {
-                handle_mouse(&mut app, mouse);
+                let size = terminal.size()?;
+                handle_mouse(&mut app, mouse, Rect::new(0, 0, size.width, size.height));
+                Action::None
             }
-            _ => {}
+            _ => continue,
+        };
+        if matches!(
+            dispatch_action(terminal, &mut app, action)?,
+            LoopControl::Quit
+        ) {
+            return Ok(());
         }
+        // The last result stays up until something changes again.
+        if app.unsaved_count() > 0 {
+            app.notice = None;
+        }
+        app.capture_baselines();
     }
 }
 
@@ -170,195 +156,198 @@ fn dispatch_action(
     action: Action,
 ) -> anyhow::Result<LoopControl> {
     match action {
-        // Quit goes through a save-on-exit prompt when any section has been
-        // loaded (the user might have unsaved field edits). If nothing is
-        // loaded, exit immediately — no edits possible.
-        Action::Quit => {
-            if app.any_section_loaded() {
-                app.quit_pending = true;
-                Ok(LoopControl::Continue)
-            } else {
+        Action::Quit if app.unsaved_count() > 0 => {
+            app.quit_pending = true;
+            Ok(LoopControl::Continue)
+        }
+        Action::Quit | Action::ForceQuit => Ok(LoopControl::Quit),
+        Action::Save => {
+            save_and_apply(terminal, app)?;
+            Ok(LoopControl::Continue)
+        }
+        Action::SaveAndQuit => {
+            if save_and_apply(terminal, app)? {
                 Ok(LoopControl::Quit)
+            } else {
+                Ok(LoopControl::Continue)
             }
         }
-        // ForceQuit is the prompt's resolved-decision exit: the user already
-        // chose Save or Discard, so skip the any_section_loaded re-check that
-        // would otherwise re-open the prompt and loop forever.
-        Action::ForceQuit => Ok(LoopControl::Quit),
-        Action::SwitchVariant(variant) => {
-            // Drop out of the alternate screen so pkexec can prompt.
-            leave_terminal(terminal)?;
-            let outcome = run_pkexec_switch(variant);
-            *terminal = enter_terminal()?;
-            terminal.clear()?;
-            app.record_switch_attempt(variant, outcome);
-            restart_voxtype_daemon(app);
-            Ok(LoopControl::Continue)
-        }
-        Action::DownloadModel { engine, model } => {
-            leave_terminal(terminal)?;
-            let outcome = run_setup_model(&engine, &model);
-            *terminal = enter_terminal()?;
-            terminal.clear()?;
-            app.record_download_attempt(&engine, &model, outcome);
-            restart_voxtype_daemon(app);
-            Ok(LoopControl::Continue)
-        }
-        Action::SwitchVariantAndDownload {
-            variant,
-            engine,
-            model,
-        } => {
-            leave_terminal(terminal)?;
-            let switch_outcome = run_pkexec_switch(variant);
-            // Always attempt the download even if the switch failed: the
-            // download writes to ~/.local/share/voxtype/models, no symlink
-            // needed. The user can retry the switch from General afterwards.
-            let download_outcome = run_setup_model(&engine, &model);
-            *terminal = enter_terminal()?;
-            terminal.clear()?;
-            app.record_switch_attempt(variant, switch_outcome);
-            app.record_download_attempt(&engine, &model, download_outcome);
-            restart_voxtype_daemon(app);
-            Ok(LoopControl::Continue)
-        }
         Action::None => Ok(LoopControl::Continue),
+        other => {
+            run_followups(terminal, app, vec![other])?;
+            Ok(LoopControl::Continue)
+        }
     }
 }
 
-/// Download a model in the parent shell so the user sees the progress. We
-/// invoke whichever voxtype is on PATH because that's the user's installed
-/// binary; the TUI's own image might be an uninstalled host build that
-/// doesn't have the engine feature flags.
-///
-/// `setup model` takes no positional argument (see `SetupAction::Model` in
-/// `src/cli/setup.rs`) — the download entry point is the top-level
-/// `setup --download --model <NAME>`. Passing the name positionally made
-/// clap reject the command before it did anything.
+/// `s`: save every page, do what the saves need (download a model, switch
+/// build), then restart voxtype so it uses the new settings.
+fn save_and_apply(terminal: &mut Tui, app: &mut App) -> anyhow::Result<bool> {
+    let (failed, followups) = app.save_all();
+    // A page that failed keeps its edits and shows why on its status line.
+    if let Some(section) = failed.first() {
+        app.jump_to_section(*section);
+        return Ok(false);
+    }
+    if followups.is_empty() {
+        app.apply_saved();
+    } else {
+        run_followups(terminal, app, followups)?;
+    }
+    Ok(true)
+}
+
+/// Downloads and build switches run in the plain terminal so their
+/// progress and password prompt are visible, then voxtype restarts.
+fn run_followups(terminal: &mut Tui, app: &mut App, actions: Vec<Action>) -> anyhow::Result<()> {
+    leave_terminal(terminal)?;
+    let mut ok = true;
+    for action in actions {
+        match action {
+            Action::SwitchVariant(variant) => {
+                let outcome = run_pkexec_switch(variant);
+                ok &= outcome.is_ok();
+                app.record_switch_attempt(variant, outcome);
+            }
+            Action::DownloadModel { engine, model } => {
+                let outcome = run_setup_model(&engine, &model);
+                ok &= outcome.is_ok();
+                app.record_download_attempt(&model, outcome);
+            }
+            Action::SwitchVariantAndDownload {
+                variant,
+                engine,
+                model,
+            } => {
+                // The download writes to the models directory and needs no
+                // switch, so it runs even when the switch fails.
+                let switched = run_pkexec_switch(variant);
+                let downloaded = run_setup_model(&engine, &model);
+                ok &= switched.is_ok() && downloaded.is_ok();
+                app.record_switch_attempt(variant, switched);
+                if ok {
+                    app.record_download_attempt(&model, downloaded);
+                }
+            }
+            _ => {}
+        }
+    }
+    *terminal = enter_terminal()?;
+    terminal.clear()?;
+    if ok {
+        app.apply_saved();
+    }
+    Ok(())
+}
+
+/// Download a model in the plain terminal so its progress shows. Runs the
+/// `voxtype` on PATH, which is the installed build the daemon uses; this
+/// TUI may be a build without that engine.
 fn run_setup_model(engine: &str, model: &str) -> Result<(), String> {
     let _ = engine;
     let status = std::process::Command::new("voxtype")
         .args(["setup", "--download", "--model", model])
         .status()
-        .map_err(|e| format!("could not invoke `voxtype setup --download`: {}", e))?;
+        .map_err(|e| format!("couldn't run voxtype setup --download ({})", e))?;
     if status.success() {
         Ok(())
     } else {
-        Err(format!("voxtype setup --download exited with {}", status))
+        Err(format!(
+            "the download stopped. Run: voxtype setup --download --model {}",
+            model
+        ))
     }
 }
 
-/// Best-effort `systemctl --user restart voxtype` after a binary swap or
-/// model download so the changes take effect immediately. Logs the outcome
-/// to the General switch-outcome banner so the user sees it on next focus.
-fn restart_voxtype_daemon(app: &mut App) {
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "restart", "voxtype"])
-        .status();
-    // The freshly (re)started daemon has read the config as it stands now,
-    // so quitting doesn't need another restart unless a later save lands.
-    app.config_synced_mtime = app::config_file_mtime();
-    app.refresh_inventory();
-}
-
-/// Restart the daemon on the way out of the TUI when a save landed after
-/// the daemon's last known (re)start, so config-only changes (an engine
-/// switch on a binary that supports both, a hotkey edit, ...) take effect
-/// without a manual `systemctl --user restart voxtype`. The decision logic
-/// lives in `app::should_restart_on_quit`; see its doc for the cases.
-fn restart_if_config_newer(app: &App) -> bool {
-    let restart = app::should_restart_on_quit(
-        crate::daemon_status::is_daemon_running(),
-        app.config_synced_mtime,
-        app::config_file_mtime(),
-    );
-    if restart {
-        let _ = std::process::Command::new("systemctl")
-            .args(["--user", "restart", "voxtype"])
-            .status();
-    }
-    restart
-}
-
-/// Routes keypresses while the save-on-exit prompt is showing.
-///
-/// - `s` save every loaded section's current field values, then quit.
-/// - `d` discard: quit without saving.
-/// - `c` or `Esc` cancel: dismiss the prompt and stay in the TUI.
-/// - anything else is swallowed.
-fn handle_quit_prompt_key(app: &mut App, key: KeyEvent) -> Action {
-    match key.code {
-        KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Enter => {
-            app.save_all_loaded_sections();
-            app.quit_pending = false;
-            Action::ForceQuit
-        }
-        KeyCode::Char('d') | KeyCode::Char('D') => {
-            app.quit_pending = false;
-            Action::ForceQuit
-        }
-        KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
-            app.quit_pending = false;
-            Action::None
-        }
-        _ => Action::None,
+fn run_pkexec_switch(variant: crate::setup::binary::Variant) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {}", e))?;
+    let status = std::process::Command::new("pkexec")
+        .arg(exe)
+        .arg("setup")
+        .arg("variant")
+        .arg("--to")
+        .arg(variant.binary_name())
+        .status()
+        .map_err(|e| format!("couldn't run pkexec ({}); is polkit installed?", e))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "pkexec didn't finish. Run: sudo voxtype setup variant --to {}",
+            variant.binary_name()
+        ))
     }
 }
 
-fn handle_global_key(app: &mut App, key: KeyEvent) -> Option<Action> {
-    // While the active section is inline-editing a text field, swallow
-    // global shortcuts so the user can type 'q', press Esc, etc. into the
-    // input. The section's handle_key gets the key instead.
+fn handle_key(app: &mut App, key: KeyEvent) -> Action {
+    // While a value is being typed, every key goes to it.
     if app.is_editing() {
-        return None;
+        return handle_section_key(app, key);
     }
-
-    // Save-on-exit prompt: takes precedence over every other key. Only
-    // recognized keys do anything; everything else is swallowed so the
-    // user can't accidentally interact with the obscured TUI.
     if app.quit_pending {
-        return Some(handle_quit_prompt_key(app, key));
+        app.quit_pending = false;
+        return match key.code {
+            // Quits only once everything saved; a failure stays open on
+            // the page that failed.
+            KeyCode::Enter | KeyCode::Char('s') | KeyCode::Char('y') => Action::SaveAndQuit,
+            KeyCode::Char('d') | KeyCode::Char('D') => Action::ForceQuit,
+            _ => Action::None,
+        };
     }
-
-    // Help overlay: any key dismisses it (including ?).
     if app.help_open {
-        app.help_open = false;
-        return Some(Action::None);
-    }
-    if matches!(key.code, KeyCode::Char('?')) {
-        app.help_open = true;
-        return Some(Action::None);
+        let scroll = app.help_scroll.get();
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => app.help_scroll.set(scroll.saturating_add(1)),
+            KeyCode::Up | KeyCode::Char('k') => app.help_scroll.set(scroll.saturating_sub(1)),
+            KeyCode::PageDown | KeyCode::Char(' ') => {
+                app.help_scroll.set(scroll.saturating_add(10))
+            }
+            KeyCode::PageUp => app.help_scroll.set(scroll.saturating_sub(10)),
+            _ => app.help_open = false,
+        }
+        return Action::None;
     }
 
     match (key.code, key.modifiers) {
-        (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Action::Quit),
-        (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => Some(Action::Quit),
-        // F2 jumps to the General section, where the variant-matrix picker
-        // lives. Mentioned in the variant-mismatch banner so a user landing
-        // on (say) Audio can fix the engine/binary mismatch without
-        // navigating the sidebar by hand. See #450.
-        (KeyCode::F(2), _) => {
-            app.jump_to_section(Section::General);
-            Some(Action::None)
+        (KeyCode::Char('?'), _) => {
+            app.help_open = true;
+            app.help_scroll.set(0);
+            Action::None
         }
-        (KeyCode::Tab, _) => {
+        (KeyCode::Char('q'), KeyModifiers::NONE) => Action::Quit,
+        (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => Action::Quit,
+        (KeyCode::Char('s'), KeyModifiers::NONE) => {
+            if app.unsaved_count() > 0 {
+                Action::Save
+            } else {
+                Action::None
+            }
+        }
+        (KeyCode::PageDown, _) => {
+            let s = app.guidance_scroll.get();
+            app.guidance_scroll.set(s.saturating_add(3));
+            Action::None
+        }
+        (KeyCode::PageUp, _) => {
+            let s = app.guidance_scroll.get();
+            app.guidance_scroll.set(s.saturating_sub(3));
+            Action::None
+        }
+        (KeyCode::Tab, _) | (KeyCode::BackTab, _) => {
             if app.sidebar_focused {
                 app.focus_content();
             } else {
                 app.focus_sidebar();
             }
-            Some(Action::None)
+            Action::None
         }
+        (KeyCode::Esc, _) if app.sidebar_focused => Action::Quit,
         (KeyCode::Esc, _) => {
-            if !app.sidebar_focused {
-                // First Esc returns focus to sidebar, second quits.
-                app.focus_sidebar();
-                Some(Action::None)
-            } else {
-                Some(Action::Quit)
-            }
+            app.focus_sidebar();
+            Action::None
         }
-        _ => None,
+        _ if app.sidebar_focused => handle_sidebar_key(app, key),
+        _ => handle_section_key(app, key),
     }
 }
 
@@ -367,53 +356,122 @@ fn handle_sidebar_key(app: &mut App, key: KeyEvent) -> Action {
         KeyCode::Up | KeyCode::Char('k') => {
             app.move_sidebar(-1);
             app.open_hovered_section();
-            Action::None
+            app.guidance_scroll.set(0);
         }
         KeyCode::Down | KeyCode::Char('j') => {
             app.move_sidebar(1);
             app.open_hovered_section();
-            Action::None
+            app.guidance_scroll.set(0);
         }
         KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
             app.open_hovered_section();
             app.focus_content();
-            Action::None
         }
-        _ => Action::None,
+        _ => {}
+    }
+    Action::None
+}
+
+/// Screen regions, computed once so drawing and mouse hit-testing agree.
+struct ScreenLayout {
+    list: Rect,
+    page: Rect,
+    status: Rect,
+    footer: Rect,
+}
+
+/// Widest the page pane grows.
+const PAGE_MAX_WIDTH: u16 = 96;
+
+fn screen_layout(area: Rect) -> ScreenLayout {
+    let [body, status, footer] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+    let [list, page] = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(sidebar::WIDTH), Constraint::Min(0)])
+        .areas(body);
+    // A margin so the pane doesn't touch the terminal edge, and a cap so
+    // settings and their values stay close together on wide terminals.
+    let page = Rect {
+        width: page.width.saturating_sub(1).min(PAGE_MAX_WIDTH),
+        ..page
+    };
+    ScreenLayout {
+        list,
+        page,
+        status,
+        footer,
     }
 }
 
-fn handle_mouse(app: &mut App, mouse: MouseEvent) {
-    // Ignore mouse input while help overlay is open or a text field is editing.
-    if app.help_open || app.is_editing() {
+fn handle_mouse(app: &mut App, mouse: MouseEvent, screen: Rect) {
+    if app.help_open || app.quit_pending || app.is_editing() {
         return;
     }
     if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
         return;
     }
+    let layout = screen_layout(screen);
+    let (col, row) = (mouse.column, mouse.row);
+    let inside = |r: Rect| col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height;
 
-    let col = mouse.column;
-    let row = mouse.row;
-
-    // Title bar occupies row 0; sidebar inner rows begin at absolute row 1.
-    if col < sidebar::WIDTH && row >= 1 {
-        let idx = (row - 1) as usize;
-        if idx < Section::ALL.len() {
+    if inside(layout.list) {
+        if let Some(idx) = sidebar::item_at(layout.list, sidebar::focus_index(app), row) {
             app.sidebar_cursor = idx;
             app.open_hovered_section();
-            app.focus_sidebar();
+            app.guidance_scroll.set(0);
         }
-        return;
-    }
-
-    if col >= sidebar::WIDTH {
+        app.focus_sidebar();
+    } else if inside(layout.page) {
         app.focus_content();
     }
 }
 
 fn handle_section_key(app: &mut App, key: KeyEvent) -> Action {
+    let moving = matches!(
+        key.code,
+        KeyCode::Up | KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('k')
+    );
+    if !app.is_editing() && moving {
+        app.guidance_scroll.set(0);
+    }
+    // Enter types a value; on a setting that can't be typed it changes it,
+    // as → does, so Enter never does nothing.
+    let advance = key.code == KeyCode::Enter && !app.is_editing();
+    let before = advance.then(|| focused_value(app));
+    let action = section_key(app, key);
+    if advance
+        && action == Action::None
+        && !app.is_editing()
+        && focused_value(app) == before.flatten()
+    {
+        return section_key(app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    }
+    action
+}
+
+/// The focused row's value on the open page, to tell whether a key did
+/// anything.
+fn focused_value(app: &App) -> Option<String> {
+    let rows = app.section_rows(app.current_section)?;
+    rows.into_iter().find(|r| r.focused).map(|r| r.value)
+}
+
+fn section_key(app: &mut App, key: KeyEvent) -> Action {
+    // Pages save through `s` above; their own `s` handlers would save one
+    // page without applying it.
+    if !app.is_editing() && key.code == KeyCode::Char('s') {
+        return Action::None;
+    }
     match app.current_section {
-        Section::General => general::handle_key(app, key),
+        Section::Basics => basics::handle_key(app, key),
+        Section::Build => build::handle_key(app, key),
         Section::Hotkey => hotkey::handle_key(app, key),
         Section::Audio => audio::handle_key(app, key),
         Section::Engine => engine::handle_key(app, key),
@@ -429,276 +487,29 @@ fn handle_section_key(app: &mut App, key: KeyEvent) -> Action {
 }
 
 fn draw(f: &mut Frame, app: &App) {
-    // Reserve a row for the variant-mismatch banner when it's active. Slotting
-    // it between the title and the sidebar/content split means it stays
-    // visible no matter which section the user is on, which is the whole
-    // point — the General section's existing model-missing banner sits
-    // *inside* its section pane and disappears when the user navigates
-    // away. See #450.
-    let banner_height = if app.variant_mismatch.is_some() { 2 } else { 0 };
-    let outer = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),             // title bar
-            Constraint::Length(banner_height), // variant-mismatch banner (0 when absent)
-            Constraint::Min(0),                // body (sidebar + content)
-            Constraint::Length(1),             // footer / help
-        ])
-        .split(f.area());
-
-    render_title(f, outer[0]);
-    if app.variant_mismatch.is_some() {
-        render_variant_mismatch_banner(f, outer[1], app);
+    let area = f.area();
+    if area.width < chrome::MIN_WIDTH || area.height < chrome::MIN_HEIGHT {
+        chrome::render_too_small(f, area);
+        return;
     }
-
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(sidebar::WIDTH), Constraint::Min(0)])
-        .split(outer[2]);
-
-    sidebar::render(f, body[0], app);
-    render_section(f, body[1], app);
-
-    render_footer(f, outer[3], app);
+    let layout = screen_layout(area);
+    sidebar::render(f, layout.list, app);
+    render_section(f, layout.page, app);
+    chrome::render_status_line(f, layout.status, app);
+    chrome::render_footer(f, layout.footer, app);
 
     if app.help_open {
-        render_help_overlay(f);
+        chrome::render_help_overlay(f, app);
     }
     if app.quit_pending {
-        render_quit_prompt(f);
+        chrome::render_quit_prompt(f, app);
     }
-}
-
-fn render_quit_prompt(f: &mut Frame) {
-    let area = f.area();
-    let w = 60.min(area.width.saturating_sub(4));
-    let h = 7.min(area.height.saturating_sub(2));
-    let x = area.x + area.width.saturating_sub(w) / 2;
-    let y = area.y + area.height.saturating_sub(h) / 2;
-    let rect = Rect {
-        x,
-        y,
-        width: w,
-        height: h,
-    };
-
-    f.render_widget(ratatui::widgets::Clear, rect);
-
-    let block = ratatui::widgets::Block::default()
-        .borders(ratatui::widgets::Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow))
-        .title(" Save before quitting? ");
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
-
-    let lines = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            "  s  Save and quit",
-            Style::default().fg(Color::Green),
-        )),
-        Line::from(Span::styled(
-            "  d  Discard and quit",
-            Style::default().fg(Color::Red),
-        )),
-        Line::from(Span::styled(
-            "  c / Esc  Cancel",
-            Style::default().fg(Color::Gray),
-        )),
-    ];
-    f.render_widget(Paragraph::new(lines), inner);
-}
-
-fn render_help_overlay(f: &mut Frame) {
-    let area = f.area();
-    // Centered modal: ~70% width, ~85% height, capped at 78x30.
-    let w = area.width.saturating_sub(8).min(78);
-    let h = area.height.saturating_sub(4).min(30);
-    let x = area.x + area.width.saturating_sub(w) / 2;
-    let y = area.y + area.height.saturating_sub(h) / 2;
-    let rect = Rect {
-        x,
-        y,
-        width: w,
-        height: h,
-    };
-
-    // Clear under the modal so it overpaints whatever's behind.
-    f.render_widget(ratatui::widgets::Clear, rect);
-
-    let block = ratatui::widgets::Block::default()
-        .borders(ratatui::widgets::Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(" Voxtype Configuration — Help ");
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
-
-    let bold = Style::default().add_modifier(ratatui::style::Modifier::BOLD);
-    let dim = Style::default().fg(Color::Gray);
-
-    let lines = vec![
-        Line::from(Span::styled("Global", bold)),
-        Line::from("  Tab          Toggle focus between sidebar and section"),
-        Line::from("  Esc          Sidebar focus / quit from sidebar"),
-        Line::from("  q, Ctrl-C    Quit"),
-        Line::from("  ?            Toggle this help"),
-        Line::from("  F2           Jump to General (variant picker)"),
-        Line::from(""),
-        Line::from(Span::styled("Sidebar", bold)),
-        Line::from("  ↑↓ / jk      Navigate sections"),
-        Line::from("  Enter, →, l  Open section / focus content"),
-        Line::from(""),
-        Line::from(Span::styled("General section", bold)),
-        Line::from("  ↑↓←→ / hjkl Navigate variant matrix"),
-        Line::from("  Enter        Switch to variant under cursor"),
-        Line::from("  D            Start or restart the voxtype daemon"),
-        Line::from("  r            Refresh inventory"),
-        Line::from(""),
-        Line::from(Span::styled("Section forms", bold)),
-        Line::from("  ↑↓ / jk      Navigate fields"),
-        Line::from("  ←→ / hl      Cycle field value"),
-        Line::from("  Space        Toggle / advance"),
-        Line::from("  Enter, i     Edit text field"),
-        Line::from("  s            Save changes to config.toml"),
-        Line::from("  r            Revert unsaved changes"),
-        Line::from(""),
-        Line::from(Span::styled("Inline text editing", bold)),
-        Line::from("  type         Insert at cursor"),
-        Line::from("  ←→           Move cursor"),
-        Line::from("  Home / End   Beginning / end of line"),
-        Line::from("  Backspace    Delete previous char"),
-        Line::from("  Delete       Delete next char"),
-        Line::from("  Ctrl-W       Delete previous word"),
-        Line::from("  Ctrl-U       Clear line"),
-        Line::from("  Enter        Commit"),
-        Line::from("  Esc, Ctrl-C  Cancel"),
-        Line::from(""),
-        Line::from(Span::styled("Press any key to dismiss.", dim)),
-    ];
-    f.render_widget(Paragraph::new(lines), inner);
-}
-
-fn render_title(f: &mut Frame, area: Rect) {
-    // The version shown is the *daemon's*, not this TUI's. Someone editing
-    // settings wants to know what will act on them, and after an upgrade
-    // that was installed but never restarted those are different numbers.
-    // Showing the TUI's own build here would quietly answer the wrong
-    // question.
-    let daemon = crate::daemon_status::running_version();
-    let (version_text, version_style) = match &daemon {
-        crate::daemon_status::DaemonVersion::Running(v) if daemon.differs_from_caller() => (
-            format!("daemon {} · this TUI {}", v, crate::cli::VERSION),
-            Style::default().fg(Color::Yellow),
-        ),
-        crate::daemon_status::DaemonVersion::Running(v) => (
-            format!("daemon {}", v),
-            Style::default().fg(Color::DarkGray),
-        ),
-        crate::daemon_status::DaemonVersion::NotRunning => (
-            "daemon not running".to_string(),
-            Style::default().fg(Color::DarkGray),
-        ),
-        crate::daemon_status::DaemonVersion::Unknown => (
-            "daemon running, version unknown".to_string(),
-            Style::default().fg(Color::DarkGray),
-        ),
-    };
-
-    let line = Line::from(vec![
-        Span::raw(" Voxtype Configuration"),
-        Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            "edit settings without leaving the terminal",
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
-        Span::styled(version_text, version_style),
-    ]);
-    f.render_widget(Paragraph::new(line), area);
-}
-
-/// Persistent two-line banner shown at the top of every section when the
-/// running binary can't service the configured engine (see #450). The
-/// emoji-free, monochrome-bright style matches the existing TUI feedback
-/// banners (yellow accent, plain ASCII glyphs) so it renders the same in
-/// any palette.
-fn render_variant_mismatch_banner(f: &mut Frame, area: Rect, app: &App) {
-    use crate::setup::variant_check::Remediation;
-    let Some(m) = app.variant_mismatch.as_ref() else {
-        return;
-    };
-    let warn = Style::default().fg(Color::Yellow);
-    let dim = Style::default().fg(Color::DarkGray);
-    let bold = Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(ratatui::style::Modifier::BOLD);
-
-    let active = m
-        .active_variant_name
-        .as_deref()
-        .unwrap_or("the running binary");
-
-    let line1 = Line::from(vec![
-        Span::styled(" ! ", bold),
-        Span::styled("engine = ", warn),
-        Span::styled(m.configured_engine, bold),
-        Span::styled(" but ", warn),
-        Span::styled(active, bold),
-        Span::styled(" was built without ", warn),
-        Span::styled(format!("--features {}", m.required_feature), bold),
-    ]);
-
-    let line2 = match &m.remediation {
-        Remediation::SwitchToVariant { target } => Line::from(vec![
-            Span::styled("   Fix: press ", dim),
-            Span::styled("F2", warn),
-            Span::styled(" to open the variant picker, or run ", dim),
-            Span::styled("sudo voxtype setup onnx --enable", warn),
-            Span::styled(format!("  (recommended: {})", target.binary_name()), dim),
-        ]),
-        Remediation::Rebuild { feature } => Line::from(vec![
-            Span::styled("   Fix: rebuild voxtype with ", dim),
-            Span::styled(format!("--features {}", feature), warn),
-        ]),
-    };
-
-    f.render_widget(Paragraph::new(vec![line1, line2]), area);
-}
-
-fn render_footer(f: &mut Frame, area: Rect, app: &App) {
-    // Global keymap shown in every state. Section forms add `s save · r revert`
-    // when the right pane is focused on an editable section. General has
-    // `R restart daemon` instead.
-    let global = " ? help · q quit ";
-
-    let line = if app.sidebar_focused {
-        let summary = Section::ALL
-            .get(app.sidebar_cursor)
-            .map(|s| s.summary())
-            .unwrap_or("");
-        Line::from(vec![
-            Span::styled(
-                format!(" ↑↓ navigate · Enter open · Tab content ·{}", global),
-                Style::default().fg(Color::Gray),
-            ),
-            Span::styled(format!("│  {}", summary), Style::default().fg(Color::Cyan)),
-        ])
-    } else {
-        let section_keys = match app.current_section {
-            Section::General => " D start/restart daemon · r refresh ",
-            _ => " s save · r revert ",
-        };
-        Line::from(Span::styled(
-            format!(" Tab/Esc sidebar ·{}·{}", section_keys, global),
-            Style::default().fg(Color::Gray),
-        ))
-    };
-    f.render_widget(Paragraph::new(line), area);
 }
 
 fn render_section(f: &mut Frame, area: Rect, app: &App) {
     match app.current_section {
-        Section::General => general::render(f, area, app),
+        Section::Basics => basics::render(f, area, app),
+        Section::Build => build::render(f, area, app),
         Section::Hotkey => hotkey::render(f, area, app),
         Section::Audio => audio::render(f, area, app),
         Section::Engine => engine::render(f, area, app),
@@ -710,23 +521,5 @@ fn render_section(f: &mut Frame, area: Rect, app: &App) {
         Section::Osd => osd_section::render(f, area, app),
         Section::Waybar => waybar_section::render(f, area, app),
         Section::Advanced => advanced_section::render(f, area, app),
-    }
-}
-
-fn run_pkexec_switch(variant: crate::setup::binary::Variant) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {}", e))?;
-    let status = std::process::Command::new("pkexec")
-        .arg(exe)
-        .arg("setup")
-        .arg("variant")
-        .arg("--to")
-        .arg(variant.binary_name())
-        .status()
-        .map_err(|e| format!("failed to launch pkexec: {} (is polkit installed?)", e))?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("pkexec exited with {}", status))
     }
 }

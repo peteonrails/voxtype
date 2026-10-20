@@ -256,6 +256,7 @@ impl ConfigEditor {
             return Some(current);
         }
         for segment in dotted.split('.') {
+            promote_inline_table(current, segment);
             current = current.get_mut(segment).and_then(|i| i.as_table_mut())?;
         }
         Some(current)
@@ -277,6 +278,33 @@ impl ConfigEditor {
     /// `[text.replacements]`).
     pub fn raw_table(&self, dotted: &str) -> Option<&toml_edit::Table> {
         self.table(dotted)
+    }
+
+    /// The string entries of a table, whether the file writes it as a
+    /// `[section]` or inline as `key = { ... }`.
+    pub fn string_entries(&self, dotted: &str) -> Vec<(String, String)> {
+        let (parent, last) = match dotted.rsplit_once('.') {
+            Some((parent, last)) => (parent, last),
+            None => ("", dotted),
+        };
+        let Some(item) = self.table(parent).and_then(|t| t.get(last)) else {
+            return Vec::new();
+        };
+        let pairs: Vec<(String, Option<String>)> = if let Some(t) = item.as_table() {
+            t.iter()
+                .map(|(k, v)| (k.to_string(), v.as_str().map(str::to_string)))
+                .collect()
+        } else if let Some(t) = item.as_inline_table() {
+            t.iter()
+                .map(|(k, v)| (k.to_string(), v.as_str().map(str::to_string)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        pairs
+            .into_iter()
+            .filter_map(|(k, v)| Some((k, v?)))
+            .collect()
     }
 
     pub fn get_string(&self, table: &str, key: &str) -> Option<String> {
@@ -323,6 +351,7 @@ impl ConfigEditor {
         // Walk through (or create) intermediate tables.
         let mut current: &mut toml_edit::Table = self.document.as_table_mut();
         for segment in rest {
+            promote_inline_table(current, segment);
             if !current.get(segment).map(|i| i.is_table()).unwrap_or(false) {
                 current.insert(segment, Item::Table(toml_edit::Table::new()));
             }
@@ -331,6 +360,7 @@ impl ConfigEditor {
                 .expect("just inserted a table");
         }
 
+        promote_inline_table(current, last);
         if !current.get(last).map(|i| i.is_table()).unwrap_or(false) {
             current.insert(last, Item::Table(toml_edit::Table::new()));
         }
@@ -495,6 +525,16 @@ fn detached(item: &Item) -> Item {
     }
 }
 
+/// Turn `key = { ... }` into a `[key]` table with the same entries, so
+/// writing into it keeps what was there instead of replacing it with an
+/// empty table.
+fn promote_inline_table(parent: &mut toml_edit::Table, key: &str) {
+    if let Some(inline) = parent.get(key).and_then(|i| i.as_inline_table()) {
+        let table = inline.clone().into_table();
+        parent.insert(key, Item::Table(table));
+    }
+}
+
 /// The parsed value of `item`, ignoring formatting and comments, so an
 /// overlay that restates an existing value isn't reported as a change.
 fn semantic(item: &Item) -> Option<toml::Value> {
@@ -564,6 +604,31 @@ mod tests {
             written.contains("large-v3"),
             "the file that was loaded must be the file that is written"
         );
+    }
+
+    /// An inline `replacements = { ... }` must read like a `[table]`, and
+    /// adding an entry must keep the ones already there.
+    #[test]
+    fn inline_tables_are_read_and_kept_when_written_to() {
+        let (_dir, path) =
+            temp_config("[text]\nreplacements = { \"hyperwhisper\" = \"hyprwhspr\" }\n");
+        let mut ed = ConfigEditor::load_from(path.clone()).unwrap();
+        assert_eq!(
+            ed.string_entries("text.replacements"),
+            vec![("hyperwhisper".to_string(), "hyprwhspr".to_string())]
+        );
+        ed.set_string("text.replacements", "vox type", "voxtype");
+        let mut entries = ed.string_entries("text.replacements");
+        entries.sort();
+        assert_eq!(
+            entries,
+            vec![
+                ("hyperwhisper".to_string(), "hyprwhspr".to_string()),
+                ("vox type".to_string(), "voxtype".to_string()),
+            ]
+        );
+        ed.unset("text.replacements", "hyperwhisper");
+        assert_eq!(ed.string_entries("text.replacements").len(), 1);
     }
 
     #[test]
