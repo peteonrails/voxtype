@@ -1613,7 +1613,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Float { min: 0.0, max: 1.0 },
         "OSD",
         "Opacity",
-        "Background opacity of the panel.",
+        "Opacity of the GTK4 and native OSD card. It stays the same while the card is shown.",
     ),
     spec(
         "osd.waveform_window_secs",
