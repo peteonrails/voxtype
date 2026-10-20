@@ -225,8 +225,10 @@ mod tests {
 
     #[test]
     fn missing_named_model_offers_download_command() {
-        let mut config = Config::default();
-        config.engine = TranscriptionEngine::Parakeet;
+        let config = Config {
+            engine: TranscriptionEngine::Parakeet,
+            ..Default::default()
+        };
         let err = TranscribeError::ModelNotFound(
             "Parakeet model 'parakeet-tdt-0.6b-v3' not found\n  Run 'voxtype setup'".into(),
         );
@@ -261,8 +263,10 @@ mod tests {
 
     #[test]
     fn remote_engine_does_not_suggest_download() {
-        let mut config = Config::default();
-        config.engine = TranscriptionEngine::Soniox;
+        let config = Config {
+            engine: TranscriptionEngine::Soniox,
+            ..Default::default()
+        };
         let err = TranscribeError::ConfigError("missing API key".into());
         let n = model_load_failed(&config, "stt-rt", &err, false);
         assert!(n.body.contains("missing API key"));
@@ -272,8 +276,10 @@ mod tests {
 
     #[test]
     fn engine_missing_from_build_points_at_variant_switch() {
-        let mut config = Config::default();
-        config.engine = TranscriptionEngine::Parakeet;
+        let config = Config {
+            engine: TranscriptionEngine::Parakeet,
+            ..Default::default()
+        };
         let err = TranscribeError::InitFailed(
             "Parakeet engine requested but voxtype was not compiled with --features parakeet"
                 .into(),
