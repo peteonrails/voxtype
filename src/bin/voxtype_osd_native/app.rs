@@ -42,8 +42,10 @@ use smithay_client_toolkit::{
 use voxtype::audio::levels::AudioFrame;
 use voxtype::osd::config::{OsdConfig, OsdPosition};
 use voxtype::osd::ipc::FrameRing;
+use voxtype::osd::placement::card_top;
 use voxtype::osd::visual::{
-    peak_meter_fraction, project_envelope, EnvelopeColumn, MeterZone, Palette, PeakHold,
+    peak_meter_fraction, project_envelope, waveform_gain_db, waveform_level, EnvelopeColumn,
+    MeterZone, Palette, PeakHold,
 };
 
 /// State shared between the IPC thread and the render thread.
@@ -221,11 +223,14 @@ impl App {
         );
 
         let cfg = &self.shared.config;
-        let (anchor, margin_top, margin_bottom, margin_left, margin_right) =
+        // Span the full height of whichever output the compositor picks
+        // (the focused one: no output is requested) and place the card
+        // inside it once the configure reports that output's height.
+        let (anchor, margin_left, margin_right) =
             position_to_anchor_and_margins(cfg.position, cfg.margin_px as i32);
         layer.set_anchor(anchor);
-        layer.set_margin(margin_top, margin_right, margin_bottom, margin_left);
-        layer.set_size(cfg.width_px, cfg.height_px);
+        layer.set_margin(0, margin_right, 0, margin_left);
+        layer.set_size(cfg.width_px, 0);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         layer.set_exclusive_zone(0);
 
@@ -412,19 +417,30 @@ impl App {
             (p, h)
         };
 
-        let width_px = rs.width;
-        let height_px = rs.height;
-        let gain = self.shared.config.waveform_gain;
+        let card = egui::Rect::from_min_size(
+            egui::pos2(
+                0.0,
+                card_top(
+                    cfg.position,
+                    rs.height as f32,
+                    cfg.height_px as f32,
+                    cfg.margin_px as f32,
+                    cfg.top_margin,
+                )
+                .round(),
+            ),
+            egui::vec2(rs.width as f32, cfg.height_px as f32),
+        );
+        let gain_db = waveform_gain_db(cfg.waveform_gain);
         let full_output = rs.egui_ctx.run_ui(raw_input, |ui| {
             draw_ui(
                 ui,
-                width_px,
-                height_px,
+                card,
                 &palette,
                 &envelope_cols,
                 peak_dbfs,
                 held_dbfs,
-                gain,
+                gain_db,
             );
         });
 
@@ -457,7 +473,6 @@ impl App {
         );
 
         {
-            let bg = palette.background;
             let mut rpass = encoder
                 .begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("voxtype-osd-pass"),
@@ -465,12 +480,9 @@ impl App {
                         view: &view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: bg.r as f64,
-                                g: bg.g as f64,
-                                b: bg.b as f64,
-                                a: bg.a as f64,
-                            }),
+                            // Outside the card the full-height surface is
+                            // transparent; draw_ui paints the card itself.
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                             store: wgpu::StoreOp::Store,
                         },
                         depth_slice: None,
@@ -512,41 +524,42 @@ fn reconfigure_surface(rs: &mut RenderSurface) {
     rs.surface.configure(&rs.device, &surface_config);
 }
 
-fn position_to_anchor_and_margins(pos: OsdPosition, margin: i32) -> (Anchor, i32, i32, i32, i32) {
-    // (anchor, top, bottom, left, right)
+/// Anchors and horizontal margins `(anchor, left, right)`. Vertically the
+/// surface always spans the output; `card_top` places the card.
+fn position_to_anchor_and_margins(pos: OsdPosition, margin: i32) -> (Anchor, i32, i32) {
+    let vertical = Anchor::TOP | Anchor::BOTTOM;
     match pos {
-        OsdPosition::BottomCenter => (Anchor::BOTTOM, 0, margin, 0, 0),
-        OsdPosition::TopCenter => (Anchor::TOP, margin, 0, 0, 0),
-        OsdPosition::BottomLeft => (Anchor::BOTTOM | Anchor::LEFT, 0, margin, margin, 0),
-        OsdPosition::BottomRight => (Anchor::BOTTOM | Anchor::RIGHT, 0, margin, 0, margin),
-        OsdPosition::TopLeft => (Anchor::TOP | Anchor::LEFT, margin, 0, margin, 0),
-        OsdPosition::TopRight => (Anchor::TOP | Anchor::RIGHT, margin, 0, 0, margin),
+        OsdPosition::BottomCenter | OsdPosition::TopCenter => (vertical, 0, 0),
+        OsdPosition::BottomLeft | OsdPosition::TopLeft => (vertical | Anchor::LEFT, margin, 0),
+        OsdPosition::BottomRight | OsdPosition::TopRight => (vertical | Anchor::RIGHT, 0, margin),
     }
 }
 
 /// Render the egui UI: scrolling waveform on the left, segmented vertical
 /// peak meter on the right.
-#[allow(clippy::too_many_arguments)]
 fn draw_ui(
     ui: &mut egui::Ui,
-    width: u32,
-    height: u32,
+    card: egui::Rect,
     palette: &Palette,
     envelope: &[EnvelopeColumn],
     peak_dbfs: f32,
     held_dbfs: f32,
-    gain: f32,
+    gain_db: f32,
 ) {
     use egui::{Pos2, Rect};
     let painter = ui.painter().clone();
-    let w = width as f32;
-    let h = height as f32;
+    painter.rect_filled(card, 0.0, color_to_egui(palette.background));
+    let w = card.width();
+    let h = card.height();
     let meter_w = (w * 0.05).max(8.0);
     let waveform_w = w - meter_w - 4.0;
-    let waveform_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(waveform_w, h));
-    let meter_rect = Rect::from_min_size(Pos2::new(w - meter_w, 0.0), egui::vec2(meter_w, h));
+    let waveform_rect = Rect::from_min_size(card.min, egui::vec2(waveform_w, h));
+    let meter_rect = Rect::from_min_size(
+        Pos2::new(card.min.x + w - meter_w, card.min.y),
+        egui::vec2(meter_w, h),
+    );
 
-    draw_waveform(&painter, waveform_rect, palette, envelope, gain);
+    draw_waveform(&painter, waveform_rect, palette, envelope, gain_db);
     draw_meter(&painter, meter_rect, palette, peak_dbfs, held_dbfs);
 }
 
@@ -555,7 +568,7 @@ fn draw_waveform(
     rect: egui::Rect,
     palette: &Palette,
     envelope: &[EnvelopeColumn],
-    gain: f32,
+    gain_db: f32,
 ) {
     use egui::{pos2, Shape};
     if envelope.is_empty() {
@@ -574,8 +587,8 @@ fn draw_waveform(
     let mut bottom_edge = Vec::with_capacity(n);
     for (i, col) in envelope.iter().enumerate() {
         let x = rect.left() + (i as f32 + 0.5) * col_w;
-        let top = mid_y - (col.max * gain).clamp(-1.0, 1.0) * half_h;
-        let bot = mid_y - (col.min * gain).clamp(-1.0, 1.0) * half_h;
+        let top = mid_y - waveform_level(col.max, gain_db) * half_h;
+        let bot = mid_y - waveform_level(col.min, gain_db) * half_h;
         mesh.colored_vertex(pos2(x, top), fill);
         mesh.colored_vertex(pos2(x, bot), fill);
         top_edge.push(pos2(x, top));

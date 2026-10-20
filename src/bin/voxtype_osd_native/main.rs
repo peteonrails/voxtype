@@ -78,9 +78,9 @@ struct Args {
     #[arg(long, env = "VOXTYPE_OSD_OPACITY")]
     opacity: Option<f32>,
 
-    /// Visual gain applied to audio samples before drawing the waveform.
-    /// Higher = waveform fills more of the vertical for quiet inputs.
-    /// Reduce for hot mics (e.g. 4.0); raise for quiet sources (e.g. 14.0).
+    /// Waveform sensitivity. 10 is neutral; each doubling shows the input
+    /// 6 dB louder. Reduce for hot mics (e.g. 5.0); raise for quiet
+    /// sources (e.g. 20.0). The waveform always stays inside the card.
     #[arg(long, env = "VOXTYPE_OSD_GAIN")]
     waveform_gain: Option<f32>,
 }

@@ -215,6 +215,48 @@ pub fn project_envelope(
     out
 }
 
+/// Quietest level the waveform shows, in dBFS at the reference gain.
+/// A typical mic's noise floor sits below it, so silence reads as a flat
+/// line while quiet speech (around -40..-30 dBFS) is already visible.
+/// Normal speech (around -20 dBFS) lands near mid-height and only input
+/// close to clipping reaches the top.
+pub const WAVEFORM_FLOOR_DBFS: f32 = -48.0;
+
+/// `waveform_gain` that leaves the display curve unshifted. It is the
+/// default, so existing configs that never touched the key keep the
+/// default look.
+pub const WAVEFORM_REFERENCE_GAIN: f32 = 10.0;
+
+/// Convert the `waveform_gain` config value into a dB shift of the display
+/// curve: 10 is neutral and every doubling adds 6 dB. Non-positive or
+/// non-finite values fall back to neutral.
+pub fn waveform_gain_db(gain: f32) -> f32 {
+    if gain.is_finite() && gain > 0.0 {
+        20.0 * (gain / WAVEFORM_REFERENCE_GAIN).log10()
+    } else {
+        0.0
+    }
+}
+
+/// Map a signed sample amplitude (-1.0..=1.0 of full scale) to a signed
+/// display height in -1.0..=1.0 of the waveform's half-height.
+///
+/// The mapping is fixed and absolute: linear in decibels between
+/// [`WAVEFORM_FLOOR_DBFS`] and 0 dBFS, shifted only by the configured
+/// `gain_db` (see [`waveform_gain_db`]). There is no auto-gain or
+/// normalization to recent input, so louder speech always draws taller
+/// than normal speech, and since 0 dBFS (full scale) maps to the top at the
+/// reference gain, normal speech never fills or overflows the card.
+pub fn waveform_level(sample: f32, gain_db: f32) -> f32 {
+    let magnitude = sample.abs();
+    if magnitude.is_nan() || magnitude <= 0.0 {
+        return 0.0;
+    }
+    let db = 20.0 * magnitude.log10() + gain_db;
+    let level = ((db - WAVEFORM_FLOOR_DBFS) / -WAVEFORM_FLOOR_DBFS).clamp(0.0, 1.0);
+    level.copysign(sample)
+}
+
 /// Map a dBFS peak to a normalized 0.0..=1.0 fill level for the meter.
 ///
 /// `floor_dbfs` is the dBFS value that maps to 0.0 (typically -60 dBFS for
@@ -291,6 +333,52 @@ mod tests {
     fn peak_meter_fraction_clamps_silence() {
         assert_eq!(peak_meter_fraction(-120.0, -60.0), 0.0);
         assert_eq!(peak_meter_fraction(f32::NEG_INFINITY, -60.0), 0.0);
+    }
+
+    #[test]
+    fn waveform_level_is_bounded_for_any_input() {
+        for gain in [0.5, 1.0, 10.0, 40.0, 1000.0] {
+            let g = waveform_gain_db(gain);
+            for s in [-2.0, -1.0, -0.5, -0.01, 0.0, 0.001, 0.3, 1.0, 5.0] {
+                let level = waveform_level(s, g);
+                assert!((-1.0..=1.0).contains(&level), "{s} at gain {gain}");
+                assert!(level == 0.0 || level.signum() == s.signum());
+            }
+        }
+        assert_eq!(waveform_level(f32::NAN, 0.0), 0.0);
+        assert_eq!(waveform_level(f32::INFINITY, 0.0), 1.0);
+    }
+
+    #[test]
+    fn waveform_level_leaves_headroom_for_speech_at_default_gain() {
+        let g = waveform_gain_db(10.0);
+        let db = |dbfs: f32| waveform_level(10f32.powf(dbfs / 20.0), g);
+        // Old mapping (sample * 10, clamped) pinned everything above
+        // -20 dBFS to the edge. Now normal speech sits around mid-height,
+        // louder speech draws taller, and only near-clipping input reaches
+        // the top.
+        assert!((0.45..=0.65).contains(&db(-20.0)));
+        assert!(db(-12.0) < 0.8);
+        assert!(db(-6.0) < 0.9);
+        assert!(db(-3.0) > 0.9);
+        // Quiet speech is still clearly visible; the noise floor is not.
+        assert!(db(-40.0) > 0.15);
+        assert_eq!(db(-60.0), 0.0);
+        assert!((db(0.0) - 1.0).abs() < 1e-6);
+        // Monotonic.
+        assert!(db(-30.0) < db(-20.0) && db(-20.0) < db(-10.0));
+    }
+
+    #[test]
+    fn waveform_gain_shifts_the_curve_in_db() {
+        assert_eq!(waveform_gain_db(10.0), 0.0);
+        assert!((waveform_gain_db(20.0) - 6.0206).abs() < 1e-3);
+        assert!((waveform_gain_db(5.0) + 6.0206).abs() < 1e-3);
+        assert_eq!(waveform_gain_db(0.0), 0.0);
+        assert_eq!(waveform_gain_db(-3.0), 0.0);
+        assert_eq!(waveform_gain_db(f32::NAN), 0.0);
+        let quiet = 10f32.powf(-40.0 / 20.0);
+        assert!(waveform_level(quiet, waveform_gain_db(20.0)) > waveform_level(quiet, 0.0));
     }
 
     #[test]
