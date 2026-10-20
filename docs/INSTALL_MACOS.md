@@ -69,7 +69,7 @@ Hold **Right Option** (⌥) to record, release to transcribe. Text is typed into
 voxtype status              # Check daemon status
 voxtype record start        # Start recording manually
 voxtype record stop         # Stop and transcribe
-voxtype setup check         # Verify setup
+voxtype doctor              # Verify setup, with fixes
 voxtype menubar             # Show menu bar status icon
 ```
 

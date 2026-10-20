@@ -35,6 +35,43 @@ pub struct VariantMismatch {
     pub remediation: Remediation,
 }
 
+impl VariantMismatch {
+    /// One-paragraph explanation plus fix, shared by the daemon's startup
+    /// notification and `voxtype doctor`. The fix comes from
+    /// [`crate::setup::install_hint`], so it names the command for how
+    /// voxtype was installed on this machine.
+    pub fn explanation(&self) -> String {
+        use crate::setup::install_hint::{self, Hint, Need};
+
+        let active = self
+            .active_variant_name
+            .as_deref()
+            .unwrap_or("the running binary");
+        let hint = install_hint::hint(Need::Feature(self.required_feature));
+        match (&self.remediation, &hint) {
+            (Remediation::SwitchToVariant { target }, Hint::Switch { command }) => format!(
+                "{} was built without --features {}. \
+                 Run `{}` (or open `voxtype configure` and press F2) \
+                 to switch to {}.",
+                active,
+                self.required_feature,
+                command,
+                target.binary_name(),
+            ),
+            (Remediation::SwitchToVariant { .. }, hint) => format!(
+                "{} was built without --features {}, and no installed variant has it. \
+                 To enable the {} engine, {}.",
+                active, self.required_feature, self.configured_engine, hint,
+            ),
+            (Remediation::Rebuild { feature }, hint) => format!(
+                "This source build was compiled without --features {}. \
+                 To enable the {} engine, {}.",
+                feature, self.configured_engine, hint,
+            ),
+        }
+    }
+}
+
 /// How to fix the mismatch, tailored to how voxtype was installed.
 ///
 /// `Source` and `Package` are very different recovery paths: package users
