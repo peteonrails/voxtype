@@ -476,9 +476,13 @@ with severity `ok`, `warn` or `error`.
 exits 0.
 
 **At daemon startup** voxtype runs the quick subset of these checks (model
-files, VAD model, output tools, display environment, OSD and meeting tools)
-and sends one desktop notification listing every error with its fix.
-Warnings only go to the log (`journalctl --user -u voxtype`).
+files, VAD model, output tools, display environment, OSD and meeting tools),
+logs every problem, and sends one desktop notification listing the errors
+with their fixes. Model and VAD model failures are left out of that
+notification because they get their own. If the daemon restarts with the
+same problems (for example in a systemd restart loop), it does not notify
+again until the set of problems changes or a start comes up clean. Warnings
+only go to the log (`journalctl --user -u voxtype`).
 
 ### `voxtype config`
 

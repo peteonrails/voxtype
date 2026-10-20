@@ -1049,10 +1049,68 @@ pub fn render_json(report: &Report) -> String {
     serde_json::to_string_pretty(&value).unwrap_or_default()
 }
 
+/// Checks the startup notification leaves to someone else. Model load
+/// failures get their own notification from the transcriber path at startup
+/// and at record time, and VAD model failures from VAD setup, so repeating
+/// them here would notify twice. They are still logged at startup and shown
+/// by `voxtype doctor`.
+fn notified_elsewhere(id: &str) -> bool {
+    id.starts_with("transcription.") || id.starts_with("vad.")
+}
+
+/// The errors the startup notification reports.
+fn notifiable_errors(report: &Report) -> Vec<&Check> {
+    report
+        .errors()
+        .filter(|c| !notified_elsewhere(c.id))
+        .collect()
+}
+
+/// Identity of a set of failures: the sorted, de-duplicated check ids. The
+/// marker file stores this so a systemd restart loop with the same failures
+/// notifies once, and a different set of failures notifies again.
+fn failure_key(errors: &[&Check]) -> String {
+    let mut ids: Vec<&str> = errors.iter().map(|c| c.id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids.join(",")
+}
+
+/// Marker in the runtime dir holding the last notified [`failure_key`].
+/// The runtime dir is per boot (tmpfs), so a reboot notifies again.
+fn startup_marker_path() -> PathBuf {
+    Config::runtime_dir().join("doctor-startup-notified")
+}
+
+/// What to do with the marker and whether to notify, given the previous
+/// marker contents and this start's failures.
+#[derive(Debug, PartialEq, Eq)]
+enum MarkerAction {
+    /// Clean start: remove the marker so the next failure notifies.
+    Clear,
+    /// Same failures as last time: stay quiet.
+    Keep,
+    /// New or changed failures: notify and record this key.
+    Notify(String),
+}
+
+fn marker_action(previous: Option<&str>, errors: &[&Check]) -> MarkerAction {
+    if errors.is_empty() {
+        return MarkerAction::Clear;
+    }
+    let key = failure_key(errors);
+    if previous.map(str::trim) == Some(key.as_str()) {
+        MarkerAction::Keep
+    } else {
+        MarkerAction::Notify(key)
+    }
+}
+
 /// Title and body of the daemon's grouped startup notification, or `None`
-/// when there are no errors. Warnings stay in the log and in `voxtype doctor`.
+/// when there are no errors to report. Warnings stay in the log and in
+/// `voxtype doctor`.
 pub fn startup_notification(report: &Report) -> Option<(String, String)> {
-    let errors: Vec<&Check> = report.errors().collect();
+    let errors = notifiable_errors(report);
     if errors.is_empty() {
         return None;
     }
@@ -1085,8 +1143,29 @@ pub async fn startup_summary(config: &Config) {
             Severity::Ok => tracing::debug!(check = check.id, "{}", check.message),
         }
     }
-    if let Some((title, body)) = startup_notification(&report) {
-        crate::notification::send_sync(&title, &body);
+
+    let marker = startup_marker_path();
+    let previous = std::fs::read_to_string(&marker).ok();
+    match marker_action(previous.as_deref(), &notifiable_errors(&report)) {
+        MarkerAction::Clear => {
+            let _ = std::fs::remove_file(&marker);
+        }
+        MarkerAction::Keep => {
+            tracing::info!(
+                "Startup problems unchanged since the last notification; not notifying again"
+            );
+        }
+        MarkerAction::Notify(key) => {
+            if let Some((title, body)) = startup_notification(&report) {
+                crate::notification::send_sync(&title, &body);
+            }
+            if let Some(dir) = marker.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if let Err(e) = std::fs::write(&marker, key) {
+                tracing::debug!("Could not write {:?}: {}", marker, e);
+            }
+        }
     }
 }
 
@@ -1547,20 +1626,67 @@ mod tests {
         assert!(startup_notification(&r).is_none());
 
         let r = report(vec![
-            Check::error("vad.model", "VAD model missing", "Run: voxtype setup vad"),
+            Check::error("osd.frontend", "OSD broken", "Install the OSD"),
             Check::warn("b.warn", "meh", "do x"),
             Check::error("output.method", "No output", "Install wtype"),
         ]);
         let (title, body) = startup_notification(&r).unwrap();
         assert_eq!(title, "Voxtype: 2 problems need attention");
-        assert!(body.contains("VAD model missing"));
-        assert!(body.contains("Run: voxtype setup vad"));
+        assert!(body.contains("OSD broken"));
+        assert!(body.contains("Install the OSD"));
         assert!(body.contains("No output"));
         assert!(
             !body.contains("meh"),
             "warnings stay out of the notification"
         );
         assert!(body.ends_with("Run `voxtype doctor` for details."));
+    }
+
+    #[test]
+    fn model_and_vad_errors_are_left_to_their_own_notifications() {
+        let r = report(vec![
+            Check::error("transcription.model", "model missing", "download it"),
+            Check::error("vad.model", "VAD missing", "voxtype setup vad"),
+        ]);
+        assert!(startup_notification(&r).is_none());
+        assert_eq!(
+            marker_action(None, &notifiable_errors(&r)),
+            MarkerAction::Clear
+        );
+
+        let r = report(vec![
+            Check::error("transcription.model", "model missing", "download it"),
+            Check::error("vad.model", "VAD missing", "voxtype setup vad"),
+            Check::error("output.method", "No output", "Install wtype"),
+        ]);
+        let (title, body) = startup_notification(&r).unwrap();
+        assert_eq!(title, "Voxtype: 1 problem needs attention");
+        assert!(body.contains("No output"));
+        assert!(!body.contains("model missing") && !body.contains("VAD missing"));
+    }
+
+    #[test]
+    fn marker_notifies_once_per_distinct_failure_set() {
+        let vad = Check::error("vad.model", "VAD missing", "fix");
+        let out = Check::error("output.method", "No output", "fix");
+
+        // First failure notifies and records the sorted ids.
+        assert_eq!(
+            marker_action(None, &[&vad, &out]),
+            MarkerAction::Notify("output.method,vad.model".into())
+        );
+        // A restart with the same failures, in any order, stays quiet.
+        assert_eq!(
+            marker_action(Some("output.method,vad.model\n"), &[&out, &vad]),
+            MarkerAction::Keep
+        );
+        // A changed set notifies again.
+        assert_eq!(
+            marker_action(Some("output.method,vad.model"), &[&vad]),
+            MarkerAction::Notify("vad.model".into())
+        );
+        // A clean start clears the marker.
+        assert_eq!(marker_action(Some("vad.model"), &[]), MarkerAction::Clear);
     }
 
     #[test]
