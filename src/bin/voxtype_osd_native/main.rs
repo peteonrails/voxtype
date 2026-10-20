@@ -30,10 +30,10 @@ use anyhow::Context as _;
 use clap::Parser;
 
 use voxtype::audio::levels::{AudioFrame, FRAME_HZ};
-use voxtype::osd::config::OsdConfig;
+use voxtype::osd::config::{OsdConfig, OsdPaletteSource};
 use voxtype::osd::ipc::{resolve_socket_path, run_ipc_loop, FrameRing};
-use voxtype::osd::theme::ThemeWatcher;
-use voxtype::osd::visual::PeakHold;
+use voxtype::osd::theme;
+use voxtype::osd::visual::{Palette, PeakHold};
 
 use crate::app::SharedState;
 
@@ -153,8 +153,30 @@ fn main() -> anyhow::Result<()> {
         osd_config.height_px
     );
 
-    let theme = ThemeWatcher::new();
-    let palette = theme.palette();
+    // Same palette roles as the GTK4 and Quickshell frontends: the active
+    // Omarchy theme unless `[osd] palette` pins another source.
+    let follow_omarchy = osd_config.palette.unwrap_or_default() == OsdPaletteSource::Omarchy;
+    let palette = Arc::new(Mutex::new(if follow_omarchy {
+        theme::load_palette()
+    } else {
+        Palette::fallback()
+    }));
+
+    // Follow Omarchy theme switches live, like the Quickshell OSD. The next
+    // rendered frame picks up the new palette; no redraw is forced, so a
+    // theme switch never makes a hidden OSD appear.
+    let _theme_watch = if follow_omarchy {
+        let palette = Arc::clone(&palette);
+        theme::watch_current_theme(move || {
+            let reloaded = theme::load_palette();
+            tracing::info!("Omarchy theme changed; reloaded OSD palette");
+            if let Ok(mut p) = palette.lock() {
+                *p = reloaded;
+            }
+        })
+    } else {
+        None
+    };
 
     let shared = SharedState {
         ring: Arc::new(Mutex::new(FrameRing::for_window(
