@@ -343,7 +343,7 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
     # the Dockerfile.baseline notes, ymm/FMA counts cannot be gated statically
     # (runtime-dispatched kernels); only execution on a pre-AVX2 CPU proves it.
     if ! verify_no_forbidden_instructions "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-baseline" "voxtype-baseline"; then
-        VALIDATION_FAILED=1
+        VERIFY_FAILED=true
     fi
     if ! verify_no_forbidden_instructions "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2" "voxtype-avx2"; then
         VERIFY_FAILED=true
