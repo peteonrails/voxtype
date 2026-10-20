@@ -538,6 +538,10 @@ jobs:
       # fpm and rpmbuild both run cleanly on ubuntu-latest. The script
       # honors --skip-build so it consumes the binaries already in
       # releases/$VERSION/ from the collect step above; no rebuild.
+      # This job has no target/release, so the script renders the man pages
+      # itself with `cargo xtask man` (the runner image ships cargo). v1.1.1
+      # went out without man pages because the script only looked in
+      # target/release and merely warned when they were absent.
       - name: Install fpm and rpmbuild
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
