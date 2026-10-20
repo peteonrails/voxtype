@@ -2763,8 +2763,8 @@ voxtype --vad daemon
 ### VAD Backends
 
 - **auto** (compatibility default when omitted): Selects a backend for your transcription engine
-  - Whisper engine → Whisper VAD (requires model download)
-  - Parakeet engine → Energy VAD (no model needed)
+  - Whisper engine → Whisper VAD (requires model download; falls back to Energy VAD if the model is missing)
+  - Other engines → Energy VAD (no model needed)
 - **energy**: Fast RMS-based detection. Works with any engine, no model download required.
 - **whisper**: Silero VAD via whisper-rs. More accurate but requires downloading the model:
   ```bash
