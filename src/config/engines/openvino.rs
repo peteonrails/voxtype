@@ -144,13 +144,21 @@ impl OpenVinoConfig {
     }
 }
 
+/// Arch Linux packages a single OpenVINO device needs.
+pub fn driver_packages(device: &str) -> &'static str {
+    match device.trim().to_ascii_uppercase().as_str() {
+        "NPU" => "openvino openvino-intel-npu-plugin intel-npu-driver",
+        "GPU" => "openvino openvino-intel-gpu-plugin level-zero-loader intel-compute-runtime",
+        "CPU" => "openvino",
+        _ => "openvino and the plugin/driver for the selected device",
+    }
+}
+
 /// Return actionable Linux setup guidance for an OpenVINO device selection.
 pub fn installation_guidance(device: &str) -> String {
     let device = device.trim().to_ascii_uppercase();
     let packages = match device.as_str() {
-        "NPU" => "openvino openvino-intel-npu-plugin intel-npu-driver",
-        "GPU" => "openvino openvino-intel-gpu-plugin level-zero-loader intel-compute-runtime",
-        "CPU" => "openvino",
+        "NPU" | "GPU" | "CPU" => driver_packages(&device),
         "AUTO" => {
             "openvino plus the plugin/driver for each device AUTO may use:\n  \
              NPU: openvino-intel-npu-plugin intel-npu-driver\n  \

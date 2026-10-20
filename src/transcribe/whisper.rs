@@ -91,6 +91,10 @@ impl WhisperTranscriber {
 
         tracing::info!("Model loaded in {:.2}s", start.elapsed().as_secs_f32());
 
+        if let Some(backend) = GPU_BACKEND {
+            report_gpu_outcome(backend, device_index.unwrap_or(0), &ggml_gpu_devices());
+        }
+
         let threads = config.threads.unwrap_or_else(|| num_cpus::get().min(4));
 
         Ok(Self {
@@ -473,9 +477,214 @@ pub fn get_model_url(model: &str) -> String {
     )
 }
 
+/// The GPU backend compiled into whisper.cpp, if any. CPU-only builds never
+/// ask whisper.cpp for a GPU, so there is nothing to fall back from.
+const GPU_BACKEND: Option<&str> = if cfg!(feature = "gpu-vulkan") {
+    Some("vulkan")
+} else if cfg!(feature = "gpu-cuda") {
+    Some("cuda")
+} else if cfg!(feature = "gpu-hipblas") {
+    Some("hip")
+} else if cfg!(feature = "gpu-metal") {
+    Some("metal")
+} else {
+    None
+};
+
+/// Names of the GPU devices ggml registered, in the order whisper.cpp counts
+/// them for `gpu_device`. This is the same enumeration
+/// `whisper_backend_init_gpu` walks, so an empty list (or one shorter than
+/// the requested index) is exactly the case where whisper.cpp logs
+/// `no GPU found` and quietly runs on CPU.
+#[cfg(any(
+    feature = "gpu-vulkan",
+    feature = "gpu-cuda",
+    feature = "gpu-hipblas",
+    feature = "gpu-metal"
+))]
+fn ggml_gpu_devices() -> Vec<String> {
+    use whisper_rs::whisper_rs_sys as sys;
+    let mut names = Vec::new();
+    // SAFETY: the ggml backend registry is a process-wide static that
+    // whisper.cpp has already initialized by loading the model; these calls
+    // only read it. Device names are NUL-terminated strings owned by ggml.
+    unsafe {
+        for i in 0..sys::ggml_backend_dev_count() {
+            let dev = sys::ggml_backend_dev_get(i);
+            let kind = sys::ggml_backend_dev_type(dev);
+            if kind == sys::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_GPU
+                || kind == sys::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_IGPU
+            {
+                let desc = sys::ggml_backend_dev_description(dev);
+                let name = if desc.is_null() {
+                    sys::ggml_backend_dev_name(dev)
+                } else {
+                    desc
+                };
+                names.push(
+                    std::ffi::CStr::from_ptr(name)
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+        }
+    }
+    names
+}
+
+#[cfg(not(any(
+    feature = "gpu-vulkan",
+    feature = "gpu-cuda",
+    feature = "gpu-hipblas",
+    feature = "gpu-metal"
+)))]
+fn ggml_gpu_devices() -> Vec<String> {
+    Vec::new()
+}
+
+/// What a model load on a GPU build actually got.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum GpuOutcome {
+    /// Running on this device.
+    Gpu(String),
+    /// ggml registered no GPU at all.
+    NoGpu,
+    /// GPUs exist, but `[whisper] gpu_device` points past the end of the list.
+    BadIndex { requested: i32, found: usize },
+}
+
+pub(crate) fn gpu_outcome(devices: &[String], requested: i32) -> GpuOutcome {
+    match usize::try_from(requested).ok().and_then(|i| devices.get(i)) {
+        Some(name) => GpuOutcome::Gpu(name.clone()),
+        None if devices.is_empty() => GpuOutcome::NoGpu,
+        None => GpuOutcome::BadIndex {
+            requested,
+            found: devices.len(),
+        },
+    }
+}
+
+/// The notification for a CPU fallback: what happened and the exact fix.
+pub(crate) fn fallback_message(backend: &str, outcome: &GpuOutcome) -> Option<String> {
+    let fix = match backend {
+        "vulkan" => {
+            "Install your GPU's Vulkan driver (Arch: vulkan-radeon, vulkan-intel or \
+             nvidia-utils; Debian/Ubuntu/Fedora: mesa-vulkan-drivers, or the NVIDIA \
+             driver), check it with `vulkaninfo --summary`, then restart voxtype"
+        }
+        "cuda" => {
+            "Install the NVIDIA driver and CUDA runtime (Arch: nvidia-utils cuda), \
+             check it with `nvidia-smi`, then restart voxtype"
+        }
+        "hip" => {
+            "Install ROCm (Arch: rocm-hip-runtime), check it with `rocminfo`, \
+             then restart voxtype"
+        }
+        _ => "Check that this machine has a supported GPU, then restart voxtype",
+    };
+    match outcome {
+        GpuOutcome::Gpu(_) => None,
+        GpuOutcome::NoGpu => Some(format!(
+            "This GPU build of Whisper found no {} GPU and is transcribing on CPU. {}. \
+             Details: voxtype info accel",
+            backend_label(backend),
+            fix
+        )),
+        GpuOutcome::BadIndex { requested, found } => Some(format!(
+            "[whisper] gpu_device = {} but only {} GPU(s) were found (numbered from 0), \
+             so Whisper is transcribing on CPU. Fix gpu_device in config.toml, \
+             then restart voxtype. Details: voxtype info accel",
+            requested, found
+        )),
+    }
+}
+
+fn backend_label(backend: &str) -> &'static str {
+    match backend {
+        "vulkan" => "Vulkan",
+        "cuda" => "CUDA",
+        "hip" => "ROCm",
+        "metal" => "Metal",
+        _ => "usable",
+    }
+}
+
+/// Publish the outcome for `voxtype info accel`, and tell the user once per
+/// daemon start when a GPU build is running on CPU. Transcription carries on
+/// either way: CPU is slow, not broken.
+fn report_gpu_outcome(backend: &str, requested: i32, devices: &[String]) {
+    use crate::setup::accel::{self, AccelState};
+    let outcome = gpu_outcome(devices, requested);
+    match fallback_message(backend, &outcome) {
+        None => {
+            if let GpuOutcome::Gpu(name) = outcome {
+                tracing::info!("Whisper is running on GPU: {}", name);
+                accel::publish(AccelState::Gpu, Some(backend), Some(name));
+            }
+        }
+        Some(message) => {
+            tracing::warn!("{}", message);
+            let detail = match outcome {
+                GpuOutcome::BadIndex { requested, found } => {
+                    format!("gpu_device = {} but {} GPU(s) found", requested, found)
+                }
+                _ => format!("ggml found no {} GPU", backend_label(backend)),
+            };
+            if accel::publish(AccelState::CpuFallback, Some(backend), Some(detail)) {
+                crate::notification::send_sync("Voxtype: Whisper is running on CPU", &message);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpu_outcome_matches_whisper_cpp_device_selection() {
+        let gpus = vec![
+            "NVIDIA GeForce RTX 3090".to_string(),
+            "AMD iGPU".to_string(),
+        ];
+        assert_eq!(
+            gpu_outcome(&gpus, 0),
+            GpuOutcome::Gpu("NVIDIA GeForce RTX 3090".to_string())
+        );
+        assert_eq!(
+            gpu_outcome(&gpus, 1),
+            GpuOutcome::Gpu("AMD iGPU".to_string())
+        );
+        assert_eq!(
+            gpu_outcome(&gpus, 2),
+            GpuOutcome::BadIndex {
+                requested: 2,
+                found: 2
+            }
+        );
+        assert_eq!(gpu_outcome(&[], 0), GpuOutcome::NoGpu);
+    }
+
+    #[test]
+    fn fallback_message_names_the_fix() {
+        assert!(fallback_message("vulkan", &GpuOutcome::Gpu("x".into())).is_none());
+
+        let no_gpu = fallback_message("vulkan", &GpuOutcome::NoGpu).unwrap();
+        assert!(no_gpu.contains("no Vulkan GPU"));
+        assert!(no_gpu.contains("vulkaninfo --summary"));
+        assert!(no_gpu.contains("voxtype info accel"));
+
+        let bad = fallback_message(
+            "vulkan",
+            &GpuOutcome::BadIndex {
+                requested: 3,
+                found: 1,
+            },
+        )
+        .unwrap();
+        assert!(bad.contains("gpu_device = 3"));
+        assert!(bad.contains("only 1 GPU(s)"));
+    }
 
     #[test]
     fn test_model_url() {

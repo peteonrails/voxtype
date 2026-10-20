@@ -16,7 +16,7 @@ pub use cohere::CohereConfig;
 pub use dolphin::DolphinConfig;
 pub use moonshine::MoonshineConfig;
 pub use omnilingual::OmnilingualConfig;
-pub use openvino::OpenVinoConfig;
+pub use openvino::{driver_packages as openvino_driver_packages, OpenVinoConfig};
 pub use paraformer::ParaformerConfig;
 pub use parakeet::{ParakeetConfig, ParakeetModelType};
 pub use sensevoice::SenseVoiceConfig;

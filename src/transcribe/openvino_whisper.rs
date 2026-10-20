@@ -331,10 +331,12 @@ impl OpenVinoTranscriber {
         let candidates = device_candidates(&config.device);
 
         let mut pipeline = None;
+        let mut used_device = candidates[0];
         let mut first_error: Option<(String, openvino_genai::SetupError)> = None;
         for (i, device) in candidates.iter().enumerate() {
             match inputs.build(device) {
                 Ok(p) => {
+                    used_device = device;
                     if i > 0 {
                         tracing::warn!(
                             "OpenVINO device '{}' failed to initialize ({}); fell back to '{}'. \
@@ -374,10 +376,12 @@ impl OpenVinoTranscriber {
             ))
         })?;
         tracing::info!(
-            "OpenVINO GenAI Whisper pipeline created in {:.2}s (device={})",
+            "OpenVINO GenAI Whisper pipeline created in {:.2}s (configured device={}, using {})",
             start.elapsed().as_secs_f32(),
             config.device,
+            used_device,
         );
+        report_device_outcome(&config.device, used_device);
 
         Ok(pipeline)
     }
@@ -698,9 +702,84 @@ fn resolve_model_path(model: &str, quantized: bool) -> Result<PathBuf, Transcrib
     )))
 }
 
+/// The notification for an OpenVINO device fallback: the configured device
+/// failed and another one is doing the work. `None` when the configured
+/// device is the one in use.
+pub(crate) fn device_fallback_message(configured: &str, used: &str) -> Option<String> {
+    if configured.eq_ignore_ascii_case(used) {
+        return None;
+    }
+    let configured_up = configured.trim().to_ascii_uppercase();
+    let check = if configured_up == "NPU" {
+        "reboot, check it with `voxtype setup npu --status`"
+    } else {
+        "check it with `voxtype setup npu --status`"
+    };
+    Some(format!(
+        "OpenVINO could not use the configured device {} and is transcribing on {}. \
+         Install its driver (Arch: sudo pacman -S {}), {}, then restart voxtype. \
+         Details: voxtype info accel",
+        configured_up,
+        used.to_ascii_uppercase(),
+        crate::config::openvino_driver_packages(&configured_up),
+        check,
+    ))
+}
+
+/// Publish the device actually in use for `voxtype info accel`, and tell the
+/// user once per daemon start when it isn't the one they configured.
+fn report_device_outcome(configured: &str, used: &str) {
+    use crate::setup::accel::{self, AccelState};
+    let used_up = used.to_ascii_uppercase();
+    let state = match used_up.as_str() {
+        "CPU" => AccelState::CpuFallback,
+        "NPU" | "GPU" => AccelState::Gpu,
+        // AUTO picks internally and doesn't say which; claim nothing.
+        _ => return,
+    };
+    match device_fallback_message(configured, used) {
+        None => {
+            // Configured CPU is a choice, not a fallback.
+            if state == AccelState::Gpu {
+                accel::publish(
+                    state,
+                    Some("openvino"),
+                    Some(format!("OpenVINO {}", used_up)),
+                );
+            }
+        }
+        Some(message) => {
+            tracing::warn!("{}", message);
+            let detail = format!(
+                "OpenVINO device {} failed, using {}",
+                configured.to_ascii_uppercase(),
+                used_up
+            );
+            if accel::publish(state, Some("openvino"), Some(detail)) {
+                crate::notification::send_sync(
+                    &format!("Voxtype: OpenVINO fell back to {}", used_up),
+                    &message,
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_fallback_names_the_fix() {
+        assert!(device_fallback_message("NPU", "npu").is_none());
+        let msg = device_fallback_message("npu", "CPU").unwrap();
+        assert!(msg.contains("configured device NPU"));
+        assert!(msg.contains("transcribing on CPU"));
+        assert!(msg.contains("intel-npu-driver"));
+        assert!(msg.contains("voxtype setup npu --status"));
+        let gpu = device_fallback_message("GPU", "CPU").unwrap();
+        assert!(gpu.contains("intel-compute-runtime"));
+    }
 
     #[test]
     fn device_fallback_order_prefers_gpu_before_cpu() {
