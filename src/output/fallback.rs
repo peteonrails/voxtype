@@ -329,27 +329,35 @@ pub async fn notify_delivered(
     }
 }
 
-/// Where an undelivered transcription is saved.
-pub fn undelivered_path() -> PathBuf {
-    crate::config::Config::runtime_dir().join("undelivered_transcription.txt")
+/// How many undelivered transcriptions to keep. Each is a short text file,
+/// so this is generous; it only exists so a long-broken setup can't fill the
+/// disk.
+const UNDELIVERED_KEEP: usize = 200;
+
+/// Directory holding transcriptions no output method could deliver:
+/// `$XDG_STATE_HOME/voxtype/undelivered` (default `~/.local/state`). State,
+/// not runtime: a dictation must survive a logout or reboot.
+pub fn undelivered_dir() -> PathBuf {
+    crate::config::Config::state_dir().join("undelivered")
 }
 
 /// Every output method failed: save the text where the user can get it back
 /// and say so in a notification, along with what failed.
 pub async fn notify_failed(report: &OutputReport, err: &OutputError, text: &str) {
-    let path = undelivered_path();
-    let saved = match save_private(&path, text) {
-        Ok(()) => Some(path.as_path()),
+    let dir = undelivered_dir();
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S-%3f").to_string();
+    let saved = match save_undelivered(&dir, &stamp, text, UNDELIVERED_KEEP) {
+        Ok(path) => Some(path),
         Err(e) => {
             tracing::warn!(
-                "Could not save the undelivered transcription to {:?}: {}",
-                path,
+                "Could not save the undelivered transcription in {:?}: {}",
+                dir,
                 e
             );
             None
         }
     };
-    let notice = failure_notice(report, err, text, saved, &FixEnv::gather());
+    let notice = failure_notice(report, err, text, saved.as_deref(), &FixEnv::gather());
     tracing::error!("{}: {}", notice.title, notice.body.replace('\n', " | "));
     crate::notification::send_status(
         &notice.title,
@@ -360,21 +368,44 @@ pub async fn notify_failed(report: &OutputReport, err: &OutputError, text: &str)
     .await;
 }
 
-/// Write `text` readable only by the user: a transcript can be private.
-fn save_private(path: &Path, text: &str) -> std::io::Result<()> {
+/// Save `text` as `<dir>/<stamp>.txt`, readable only by the user (a
+/// transcript can be private), then prune the directory to the newest
+/// `keep` files. Stamps sort chronologically, so name order is age order.
+fn save_undelivered(dir: &Path, stamp: &str, text: &str, keep: usize) -> std::io::Result<PathBuf> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+
+    // Two failures within the same millisecond must not overwrite each other.
+    // `_` sorts after `.`, so the suffixed file still sorts as the newer one.
+    let mut path = dir.join(format!("{stamp}.txt"));
+    let mut n = 1;
+    while path.exists() {
+        path = dir.join(format!("{stamp}_{n}.txt"));
+        n += 1;
     }
     let mut file = std::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
-        .open(path)?;
+        .open(&path)?;
     file.write_all(text.as_bytes())?;
-    file.write_all(b"\n")
+    file.write_all(b"\n")?;
+
+    let mut saved: Vec<PathBuf> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "txt"))
+        .collect();
+    if saved.len() > keep {
+        saved.sort();
+        for old in &saved[..saved.len() - keep] {
+            let _ = std::fs::remove_file(old);
+        }
+    }
+    Ok(path)
 }
 
 /// Run each method in `chain` until one delivers `text`, recording what was
@@ -596,7 +627,7 @@ mod tests {
             &OutputError::AllMethodsFailed,
             "hello world",
             Some(Path::new(
-                "/run/user/1000/voxtype/undelivered_transcription.txt",
+                "/home/u/.local/state/voxtype/undelivered/20261020-093900-123.txt",
             )),
             &env(DisplaySession::Wayland, false),
         );
@@ -605,9 +636,9 @@ mod tests {
         assert!(notice.body.contains(
             "paste: needs wl-copy plus wtype, eitype or ydotool. Fix: sudo pacman -S wl-clipboard wtype"
         ));
-        assert!(notice
-            .body
-            .contains("Text saved to /run/user/1000/voxtype/undelivered_transcription.txt"));
+        assert!(notice.body.contains(
+            "Text saved to /home/u/.local/state/voxtype/undelivered/20261020-093900-123.txt"
+        ));
         assert!(notice.body.ends_with("Text: hello world"));
     }
 
@@ -644,13 +675,27 @@ mod tests {
     }
 
     #[test]
-    fn save_private_is_user_only() {
+    fn save_undelivered_is_user_only_and_pruned() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sub/undelivered.txt");
-        save_private(&path, "secret words").unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "secret words\n");
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("state/voxtype/undelivered");
+
+        let first = save_undelivered(&dir, "20261020-093900-001", "secret words", 2).unwrap();
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "secret words\n");
+        let mode = std::fs::metadata(&first).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+        let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+        assert_eq!(dir_mode & 0o777, 0o700);
+
+        // Same stamp: a second file, not an overwrite.
+        let twin = save_undelivered(&dir, "20261020-093900-001", "other", 2).unwrap();
+        assert_ne!(twin, first);
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "secret words\n");
+
+        // A third file prunes the oldest, keeping the newest two.
+        let third = save_undelivered(&dir, "20261020-094000-000", "newest", 2).unwrap();
+        assert!(!first.exists());
+        assert!(twin.exists());
+        assert!(third.exists());
     }
 }

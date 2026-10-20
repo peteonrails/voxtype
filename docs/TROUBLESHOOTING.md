@@ -1182,10 +1182,11 @@ If you set `mode = "clipboard"` or a `driver_order` with only clipboard drivers,
 
 **Cause:** Every output method failed, including the clipboard (or the clipboard fallback is off). The notification lists what failed and how to fix it, and includes the text.
 
-**Solution:** The full text is saved to `$XDG_RUNTIME_DIR/voxtype/undelivered_transcription.txt` (readable only by you, cleared at logout), so you can recover it with:
+**Solution:** Nothing is lost. Each undelivered transcription is saved as its own file in `~/.local/state/voxtype/undelivered/` (or `$XDG_STATE_HOME/voxtype/undelivered/`), named by date and time, readable only by you, and kept across logouts and reboots. The newest 200 are kept. The notification names the exact file. To see the latest one:
 
 ```bash
-cat "$XDG_RUNTIME_DIR/voxtype/undelivered_transcription.txt"
+ls -t ~/.local/state/voxtype/undelivered/ | head
+cat "$(ls -t ~/.local/state/voxtype/undelivered/*.txt | head -1)"
 ```
 
 Then install the tool the notification names.
