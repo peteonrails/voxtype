@@ -12,9 +12,12 @@
 //! ```
 //!
 //! The command receives the transcribed text on stdin and should output
-//! the processed text on stdout. On any failure, the original text is used.
+//! the processed text on stdout. On any failure, the original text is used,
+//! and the user gets a desktop notice saying cleanup did not run (see
+//! [`crate::output::deferred_notice`]).
 
 use crate::config::PostProcessConfig;
+use crate::output::deferred_notice::{self, Notice};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
@@ -27,7 +30,49 @@ pub struct PostProcessor {
     timeout: Duration,
     trim: bool,
     fallback_on_empty: bool,
+    origin: Origin,
 }
+
+/// Where the command came from, so a notice names the setting to change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Origin {
+    /// `[output.post_process]`
+    Output,
+    /// `[profiles.<name>]`, whose keys are `post_process_command` and
+    /// `post_process_timeout_ms`.
+    Profile(String),
+}
+
+impl Origin {
+    fn command_setting(&self) -> String {
+        match self {
+            Origin::Output => "`command` in [output.post_process]".to_string(),
+            Origin::Profile(name) => format!("`post_process_command` in [profiles.{name}]"),
+        }
+    }
+
+    /// Key prefix for the notice rate limiter. Per origin, so a working
+    /// default command doesn't re-arm the notice of a broken profile one.
+    fn notice_source(&self) -> String {
+        match self {
+            Origin::Output => "post_process:output:".to_string(),
+            Origin::Profile(name) => format!("post_process:profile:{name}:"),
+        }
+    }
+
+    fn timeout_fix(&self) -> String {
+        match self {
+            Origin::Output => "Raise `timeout_ms` in [output.post_process] \
+                 (`voxtype config set output.post_process.timeout_ms 60000`)"
+                .to_string(),
+            Origin::Profile(name) => {
+                format!("Raise `post_process_timeout_ms` in [profiles.{name}]")
+            }
+        }
+    }
+}
+
+const USED_AS_IS: &str = "The text was used as transcribed, without cleanup.";
 
 impl PostProcessor {
     /// Create a new post-processor from configuration
@@ -37,6 +82,109 @@ impl PostProcessor {
             timeout: Duration::from_millis(config.timeout_ms),
             trim: config.trim,
             fallback_on_empty: config.fallback_on_empty,
+            origin: Origin::Output,
+        }
+    }
+
+    /// Mark this processor as running a profile's `post_process_command`, so
+    /// failure notices point at the profile's settings.
+    pub fn for_profile(mut self, name: &str) -> Self {
+        self.origin = Origin::Profile(name.to_string());
+        self
+    }
+
+    fn report(&self, kind: &str, notice: Notice) {
+        deferred_notice::report(&format!("{}{kind}", self.origin.notice_source()), notice);
+    }
+
+    /// The notice for a failed run, with the failure kind it is rate-limited by.
+    fn failure_notice(&self, err: &PostProcessError) -> (&'static str, Notice) {
+        let fix_command = format!(
+            "Run the command by hand to see why, or fix {}.",
+            self.origin.command_setting()
+        );
+        match err {
+            // `sh -c` reports a missing program as exit 127, and one it
+            // cannot execute as 126.
+            PostProcessError::NonZeroExit {
+                code: Some(code @ (126 | 127)),
+                stderr,
+            } => {
+                let what = if stderr.is_empty() {
+                    format!(
+                        "`{}` was not found (exit {code})",
+                        deferred_notice::detail(&self.command)
+                    )
+                } else {
+                    deferred_notice::detail(stderr)
+                };
+                (
+                    "not_found",
+                    Notice {
+                        title: "Voxtype: post-processing command not found".to_string(),
+                        body: format!(
+                            "{what}. {USED_AS_IS} Install the program or fix {}.",
+                            self.origin.command_setting()
+                        ),
+                    },
+                )
+            }
+            PostProcessError::NonZeroExit { code, stderr } => {
+                let status = match code {
+                    Some(code) => format!("exited with code {code}"),
+                    None => "was killed by a signal".to_string(),
+                };
+                let reason = if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", deferred_notice::detail(stderr))
+                };
+                (
+                    "exit",
+                    Notice {
+                        title: "Voxtype: post-processing failed".to_string(),
+                        body: format!("The command {status}{reason}. {USED_AS_IS} {fix_command}"),
+                    },
+                )
+            }
+            PostProcessError::Timeout(ms) => (
+                "timeout",
+                Notice {
+                    title: "Voxtype: post-processing timed out".to_string(),
+                    body: format!(
+                        "The command did not finish within {ms} ms. {USED_AS_IS} {} \
+                         or use a faster command or model.",
+                        self.origin.timeout_fix()
+                    ),
+                },
+            ),
+            other => (
+                "other",
+                Notice {
+                    title: "Voxtype: post-processing failed".to_string(),
+                    body: format!(
+                        "{}. {USED_AS_IS} {fix_command}",
+                        deferred_notice::detail(&other.to_string())
+                    ),
+                },
+            ),
+        }
+    }
+
+    fn empty_output_notice(&self) -> Notice {
+        let intended = match self.origin {
+            Origin::Output => {
+                " If empty output is intended, set `fallback_on_empty = false` \
+                 in [output.post_process]."
+            }
+            Origin::Profile(_) => "",
+        };
+        Notice {
+            title: "Voxtype: post-processing returned nothing".to_string(),
+            body: format!(
+                "The command printed nothing on stdout. {USED_AS_IS} \
+                 Check that it writes the cleaned text to stdout.{intended}"
+            ),
         }
     }
 
@@ -53,11 +201,14 @@ impl PostProcessor {
                     tracing::warn!(
                         "Post-process command returned empty output, using original text"
                     );
+                    self.report("empty", self.empty_output_notice());
                     text.to_string()
                 } else if processed.is_empty() {
                     tracing::debug!("Post-process command returned empty output");
+                    deferred_notice::succeeded(&self.origin.notice_source());
                     String::new()
                 } else {
+                    deferred_notice::succeeded(&self.origin.notice_source());
                     tracing::debug!(
                         "Post-processed ({} -> {} chars)",
                         text.len(),
@@ -68,6 +219,8 @@ impl PostProcessor {
             }
             Err(e) => {
                 tracing::warn!("Post-process command failed: {}, using original text", e);
+                let (kind, notice) = self.failure_notice(&e);
+                self.report(kind, notice);
                 text.to_string()
             }
         }
@@ -115,7 +268,7 @@ impl PostProcessor {
         // Wait for completion with timeout
         let output = timeout(self.timeout, child.wait_with_output())
             .await
-            .map_err(|_| PostProcessError::Timeout(self.timeout.as_secs()))?
+            .map_err(|_| PostProcessError::Timeout(self.timeout.as_millis() as u64))?
             .map_err(|e| PostProcessError::WaitFailed(e.to_string()))?;
 
         // Check exit status
@@ -147,7 +300,7 @@ pub enum PostProcessError {
     SpawnFailed(String),
     /// Failed to write text to stdin
     WriteFailed(String),
-    /// Command timed out
+    /// Command timed out (the timeout, in milliseconds)
     Timeout(u64),
     /// Failed to wait for command completion
     WaitFailed(String),
@@ -162,7 +315,7 @@ impl std::fmt::Display for PostProcessError {
         match self {
             Self::SpawnFailed(e) => write!(f, "failed to spawn command: {}", e),
             Self::WriteFailed(e) => write!(f, "failed to write to stdin: {}", e),
-            Self::Timeout(secs) => write!(f, "command timed out after {}s", secs),
+            Self::Timeout(ms) => write!(f, "command timed out after {}ms", ms),
             Self::WaitFailed(e) => write!(f, "failed to wait for command: {}", e),
             Self::NonZeroExit { code, stderr } => {
                 if stderr.is_empty() {
@@ -189,6 +342,70 @@ mod tests {
             trim: true,
             fallback_on_empty: true,
         }
+    }
+
+    #[test]
+    fn missing_command_notice_says_not_found_and_names_the_setting() {
+        let p = PostProcessor::new(&make_config("ollama run x", 5000));
+        let (kind, n) = p.failure_notice(&PostProcessError::NonZeroExit {
+            code: Some(127),
+            stderr: "sh: line 1: ollama: command not found".into(),
+        });
+        assert_eq!(kind, "not_found");
+        assert_eq!(n.title, "Voxtype: post-processing command not found");
+        assert!(n.body.starts_with("sh: line 1: ollama: command not found."));
+        assert!(n.body.contains("without cleanup"));
+        assert!(n.body.contains("`command` in [output.post_process]"));
+    }
+
+    #[test]
+    fn non_zero_exit_notice_quotes_first_stderr_line() {
+        let p = PostProcessor::new(&make_config("cleanup.sh", 5000));
+        let (kind, n) = p.failure_notice(&PostProcessError::NonZeroExit {
+            code: Some(2),
+            stderr: "model not loaded\nstack trace".into(),
+        });
+        assert_eq!(kind, "exit");
+        assert!(n
+            .body
+            .starts_with("The command exited with code 2: model not loaded."));
+        assert!(!n.body.contains("stack trace"));
+    }
+
+    #[test]
+    fn timeout_notice_gives_the_timeout_and_how_to_raise_it() {
+        let p = PostProcessor::new(&make_config("cleanup.sh", 5000));
+        let (kind, n) = p.failure_notice(&PostProcessError::Timeout(5000));
+        assert_eq!(kind, "timeout");
+        assert!(n.body.contains("within 5000 ms"));
+        assert!(n
+            .body
+            .contains("voxtype config set output.post_process.timeout_ms 60000"));
+    }
+
+    #[test]
+    fn profile_notices_point_at_the_profile_keys() {
+        let p = PostProcessor::new(&make_config("cleanup.sh", 5000)).for_profile("slack");
+        let (_, n) = p.failure_notice(&PostProcessError::Timeout(5000));
+        assert!(n
+            .body
+            .contains("`post_process_timeout_ms` in [profiles.slack]"));
+        let (_, n) = p.failure_notice(&PostProcessError::NonZeroExit {
+            code: Some(1),
+            stderr: String::new(),
+        });
+        assert!(n
+            .body
+            .contains("`post_process_command` in [profiles.slack]"));
+        assert!(!p.empty_output_notice().body.contains("fallback_on_empty"));
+    }
+
+    #[test]
+    fn empty_output_notice_mentions_fallback_on_empty() {
+        let p = PostProcessor::new(&make_config("true", 5000));
+        let n = p.empty_output_notice();
+        assert_eq!(n.title, "Voxtype: post-processing returned nothing");
+        assert!(n.body.contains("fallback_on_empty = false"));
     }
 
     #[tokio::test]

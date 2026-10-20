@@ -22,6 +22,7 @@
 #[cfg(target_os = "macos")]
 pub mod cgevent;
 pub mod clipboard;
+pub mod deferred_notice;
 pub mod dotool;
 pub mod eitype;
 // modifier_guard is evdev-based; macOS has its own osascript modifier handling.
@@ -431,22 +432,72 @@ fn file_mode_lacks_path(config: &OutputConfig) -> bool {
 pub async fn run_hook(command: &str, hook_name: &str) -> Result<(), String> {
     tracing::debug!("Running {} hook: {}", hook_name, command);
 
-    let output = Command::new("sh")
+    let output = match Command::new("sh")
         .arg("-c")
         .arg(command)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
         .await
-        .map_err(|e| format!("{} hook failed to execute: {}", hook_name, e))?;
+    {
+        Ok(output) => output,
+        Err(e) => {
+            report_hook_failure(hook_name, &format!("could not be started: {e}"));
+            return Err(format!("{} hook failed to execute: {}", hook_name, e));
+        }
+    };
 
     if output.status.success() {
         tracing::info!("{} hook completed successfully", hook_name);
+        deferred_notice::succeeded(&format!("hook:{hook_name}:"));
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        report_hook_failure(
+            hook_name,
+            &hook_failure_reason(output.status.code(), &stderr),
+        );
         Err(format!("{} hook failed: {}", hook_name, stderr))
     }
+}
+
+/// What went wrong with a hook that ran, for its notice.
+fn hook_failure_reason(code: Option<i32>, stderr: &str) -> String {
+    let status = match code {
+        Some(127) => "was not found (exit 127)".to_string(),
+        Some(code) => format!("exited with code {code}"),
+        None => "was killed by a signal".to_string(),
+    };
+    let detail = deferred_notice::detail(stderr);
+    if detail.is_empty() {
+        status
+    } else {
+        format!("{status}: {detail}")
+    }
+}
+
+/// The notice for a failed hook. A failed pre/post output hook usually
+/// leaves a compositor submap or similar state wrong, which the user would
+/// otherwise only find out about by its side effects.
+fn hook_failure_notice(hook_name: &str, reason: &str) -> deferred_notice::Notice {
+    let setting = match hook_name {
+        "external_trigger_stop" => "`external_trigger_stop_command` in [audio]".to_string(),
+        name => format!("`{name}_command` in [output]"),
+    };
+    deferred_notice::Notice {
+        title: format!("Voxtype: {hook_name} hook failed"),
+        body: format!(
+            "The {hook_name} command {reason}. The dictation itself was not affected. \
+             Run the command by hand to see why, or fix {setting}."
+        ),
+    }
+}
+
+fn report_hook_failure(hook_name: &str, reason: &str) {
+    deferred_notice::report(
+        &format!("hook:{hook_name}:failed"),
+        hook_failure_notice(hook_name, reason),
+    );
 }
 
 /// Output configuration for the fallback chain
@@ -698,6 +749,22 @@ mod tests {
         std::env::remove_var("YDOTOOL_SOCKET");
 
         assert_eq!(result, Some(sock_path));
+    }
+
+    #[test]
+    fn hook_notice_names_the_hook_and_its_setting() {
+        let n = hook_failure_notice(
+            "post_output",
+            &hook_failure_reason(Some(1), "hyprctl: no such submap\nmore"),
+        );
+        assert_eq!(n.title, "Voxtype: post_output hook failed");
+        assert!(n
+            .body
+            .starts_with("The post_output command exited with code 1: hyprctl: no such submap."));
+        assert!(n.body.contains("`post_output_command` in [output]"));
+        let n = hook_failure_notice("external_trigger_stop", &hook_failure_reason(None, ""));
+        assert!(n.body.contains("was killed by a signal."));
+        assert!(n.body.contains("[audio]"));
     }
 
     #[test]
