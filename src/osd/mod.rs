@@ -11,6 +11,7 @@
 //! - [`ipc`] — Unix-socket connection, frame decode, ring buffer, reconnect.
 //! - [`visual`] — peak-hold decay, waveform envelope helpers, palette types.
 //! - [`config`] — `[osd]` config block (`OsdConfig`).
+//! - [`select`] — which frontend `voxtype-osd` launches (`auto` detection, fallback).
 //! - [`theme`] — Omarchy theme parsing + change watcher.
 //! - [`gtk_env`] — environment workarounds for GTK4 bugs (GTK frontend only).
 
@@ -18,6 +19,7 @@ pub mod config;
 pub mod gtk_env;
 pub mod ipc;
 pub mod recipe;
+pub mod select;
 pub mod style;
 pub mod supervisor;
 pub mod theme;

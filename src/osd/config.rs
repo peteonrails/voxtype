@@ -26,14 +26,20 @@ pub enum OsdPosition {
 /// The wrapper treats this as a *preference*: if the chosen frontend's
 /// binary isn't on PATH (e.g. the user built voxtype with only one of
 /// `osd-gtk4`/`osd-native`/`osd-quickshell`), the wrapper falls back to
-/// whichever it can find and logs a warning. Default is `Gtk4` because
-/// GTK4 ships with most Hyprland setups already (Omarchy pulls it in via
-/// swayosd, walker, etc.) so there's no extra runtime cost for the
-/// typical user.
+/// whichever it can find, logs a warning, and the daemon sends one desktop
+/// notification about it.
+///
+/// The default is `Auto`: Quickshell on Omarchy (whose own shell is
+/// Quickshell, so `qs` is already installed and the OSD follows Omarchy
+/// themes live), GTK4 everywhere else, which is what every release before
+/// `Auto` launched. An explicit value always wins. See
+/// [`crate::osd::select`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OsdFrontend {
+    /// Pick a frontend for this system. Not a binary of its own.
     #[default]
+    Auto,
     Gtk4,
     Native,
     Quickshell,
@@ -41,17 +47,30 @@ pub enum OsdFrontend {
 
 impl OsdFrontend {
     /// Name of the binary that implements this frontend, suitable for a
-    /// PATH lookup or `Command::new`.
+    /// PATH lookup or `Command::new`. `Auto` names the `voxtype-osd`
+    /// wrapper, the binary that does the picking.
     pub fn binary_name(self) -> &'static str {
         match self {
+            OsdFrontend::Auto => "voxtype-osd",
             OsdFrontend::Gtk4 => "voxtype-osd-gtk4",
             OsdFrontend::Native => "voxtype-osd-native",
             OsdFrontend::Quickshell => "voxtype-osd-quickshell",
         }
     }
 
+    /// Config-file spelling, as accepted by `parse_str` and serde.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OsdFrontend::Auto => "auto",
+            OsdFrontend::Gtk4 => "gtk4",
+            OsdFrontend::Native => "native",
+            OsdFrontend::Quickshell => "quickshell",
+        }
+    }
+
     pub fn parse_str(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(OsdFrontend::Auto),
             "gtk4" | "gtk" => Some(OsdFrontend::Gtk4),
             "native" | "wgpu" | "egui" => Some(OsdFrontend::Native),
             "quickshell" | "qml" | "qs" => Some(OsdFrontend::Quickshell),
@@ -336,7 +355,7 @@ pub struct OsdConfig {
     /// the default; reduce for hot mics, increase for quiet sources.
     pub waveform_gain: f32,
     /// Which OSD frontend the `voxtype-osd` wrapper launches. Defaults to
-    /// `Gtk4` since GTK4 ships with most Hyprland setups already.
+    /// `Auto`: Quickshell on Omarchy when `qs` is installed, GTK4 otherwise.
     pub frontend: OsdFrontend,
     /// Quickshell style name, package name, or package path.
     pub style: String,
@@ -415,9 +434,32 @@ mod tests {
     }
 
     #[test]
-    fn frontend_default_is_gtk4() {
-        assert_eq!(OsdFrontend::default(), OsdFrontend::Gtk4);
-        assert_eq!(OsdConfig::default().frontend, OsdFrontend::Gtk4);
+    fn frontend_default_is_auto() {
+        assert_eq!(OsdFrontend::default(), OsdFrontend::Auto);
+        assert_eq!(OsdConfig::default().frontend, OsdFrontend::Auto);
+        let c: OsdConfig = toml::from_str("enabled = true\n").unwrap();
+        assert_eq!(c.frontend, OsdFrontend::Auto);
+    }
+
+    #[test]
+    fn frontend_explicit_gtk4_still_parses() {
+        // Configs written by earlier `voxtype setup` runs say gtk4 outright.
+        let c: OsdConfig = toml::from_str("frontend = \"gtk4\"\n").unwrap();
+        assert_eq!(c.frontend, OsdFrontend::Gtk4);
+    }
+
+    #[test]
+    fn frontend_as_str_round_trips() {
+        for f in [
+            OsdFrontend::Auto,
+            OsdFrontend::Gtk4,
+            OsdFrontend::Native,
+            OsdFrontend::Quickshell,
+        ] {
+            assert_eq!(OsdFrontend::parse_str(f.as_str()), Some(f));
+            let json = serde_json::to_string(&f).unwrap();
+            assert_eq!(json, format!("\"{}\"", f.as_str()));
+        }
     }
 
     #[test]
@@ -432,6 +474,7 @@ mod tests {
 
     #[test]
     fn frontend_parse_str_accepts_aliases() {
+        assert_eq!(OsdFrontend::parse_str("Auto"), Some(OsdFrontend::Auto));
         assert_eq!(OsdFrontend::parse_str("gtk4"), Some(OsdFrontend::Gtk4));
         assert_eq!(OsdFrontend::parse_str("GTK"), Some(OsdFrontend::Gtk4));
         assert_eq!(OsdFrontend::parse_str("native"), Some(OsdFrontend::Native));

@@ -1211,6 +1211,29 @@ problem from a missing `playerctl`. Some players (notably certain browsers)
 report unreliable MPRIS status; skip those with
 `pause_media_ignored_players`.
 
+## OSD shows a different frontend than configured
+
+`voxtype-osd` falls back to another installed frontend when the one you set in
+`[osd] frontend` is missing, and the daemon sends a notification titled
+"Voxtype: OSD frontend '...' unavailable" once per start. Check which one ran
+and why:
+
+```bash
+journalctl --user -u voxtype -b | grep -i "osd frontend"
+```
+
+Common causes:
+
+- **`qs` not installed** with `frontend = "quickshell"`: install Quickshell
+  (Arch: `sudo pacman -S quickshell`).
+- **`voxtype-osd-quickshell` not found**: the `voxtype-osd` that ran looks for
+  frontends next to itself, then on PATH. A copy of `voxtype-osd` in
+  `~/.local/bin` (from a source build or test install) shadows the packaged
+  `/usr/bin/voxtype-osd` and won't see the frontends in `/usr/lib/voxtype/`.
+  Remove the stale copy, or put `voxtype-osd-quickshell` beside it.
+- **`frontend = "gtk4"` written by an older `voxtype setup`**: on Omarchy, set
+  `voxtype config set osd.frontend auto` to get Quickshell by default.
+
 ## Quickshell OSD Issues
 
 These apply when `[osd] frontend = "quickshell"`. See the

@@ -238,7 +238,7 @@ const VAD_BACKEND_CHOICES: &[&str] = &["auto", "energy", "whisper"];
 const LOOPBACK_CHOICES: &[&str] = &["auto", "disabled"];
 const ECHO_CANCEL_CHOICES: &[&str] = &["auto", "disabled"];
 
-const OSD_FRONTEND_CHOICES: &[&str] = &["gtk4", "native", "quickshell"];
+const OSD_FRONTEND_CHOICES: &[&str] = &["auto", "gtk4", "native", "quickshell"];
 /// `auto` is absent on purpose: the config field is `Option`, and "auto"
 /// means absent. Use `voxtype config unset osd.palette`.
 const OSD_PALETTE_CHOICES: &[&str] = &["omarchy", "fallback", "package", "custom"];
@@ -1237,7 +1237,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         closed(OSD_FRONTEND_CHOICES),
         "OSD",
         "Frontend",
-        "Which OSD renderer the daemon launches.",
+        "Which OSD renderer the daemon launches. auto picks quickshell on Omarchy, gtk4 elsewhere.",
     ),
     spec(
         "osd.style",

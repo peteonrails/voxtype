@@ -4,15 +4,17 @@
 //!
 //! The user's preference comes from (in priority order):
 //!
-//! 1. `--frontend gtk4|native|quickshell` on the command line
-//! 2. `VOXTYPE_OSD_FRONTEND=gtk4|native|quickshell` env var
-//! 3. `[osd] frontend = "gtk4|native|quickshell"` in `~/.config/voxtype/config.toml`
-//! 4. Default: `gtk4`
+//! 1. `--frontend auto|gtk4|native|quickshell` on the command line
+//! 2. `VOXTYPE_OSD_FRONTEND=auto|gtk4|native|quickshell` env var
+//! 3. `[osd] frontend = "auto|gtk4|native|quickshell"` in `~/.config/voxtype/config.toml`
+//! 4. Default: `auto` (Quickshell on Omarchy when `qs` is installed, else GTK4)
 //!
 //! That preference is then reconciled with what's actually installed: the
 //! preferred frontend's binary is searched alongside this launcher and on
 //! `$PATH`; if missing, the launcher tries the other installed frontends
-//! in a fixed fallback order and warns about the substitution. If nothing
+//! in a fixed fallback order and warns about the substitution (see
+//! `voxtype::osd::select`, which the daemon also runs so it can notify
+//! the user about the substitution). If nothing
 //! is installed at all the launcher exits with a clear error pointing to
 //! the build feature flags.
 //!
@@ -45,6 +47,7 @@ use std::process::{Command, ExitCode};
 
 use voxtype::config::Config as VoxtypeConfig;
 use voxtype::osd::config::{OsdConfig, OsdFrontend};
+use voxtype::osd::select::{self, Environment};
 
 const NATIVE_BIN: &str = "voxtype-osd-native";
 const GTK4_BIN: &str = "voxtype-osd-gtk4";
@@ -74,7 +77,7 @@ fn main() -> ExitCode {
     let (cli_frontend, config_path, rest) = parse_frontend_and_config(&raw_args);
 
     // Resolve preference: CLI > env > config file > default.
-    let preferred = cli_frontend
+    let requested = cli_frontend
         .or_else(|| {
             env::var("VOXTYPE_OSD_FRONTEND")
                 .ok()
@@ -82,7 +85,8 @@ fn main() -> ExitCode {
         })
         .unwrap_or_else(|| load_frontend_from_config(config_path.as_deref()));
 
-    let chosen = match resolve_installed(preferred) {
+    let selection = select::select(requested, Environment::probe(), find_binary);
+    let (frontend, path) = match selection.chosen.clone() {
         Some(c) => c,
         None => {
             eprintln!(
@@ -101,12 +105,16 @@ fn main() -> ExitCode {
         }
     };
 
-    if chosen.frontend != preferred {
-        tracing::warn!(
-            "preferred frontend '{}' not installed; using '{}' instead",
-            preferred.binary_name(),
-            chosen.frontend.binary_name(),
+    if let Some(notice) = selection.notice() {
+        tracing::warn!("{}: {}", notice.title, notice.body);
+    } else if frontend != selection.preferred {
+        tracing::info!(
+            "frontend '{}' not installed; using '{}'",
+            selection.preferred.as_str(),
+            frontend.as_str(),
         );
+    } else if requested == OsdFrontend::Auto {
+        tracing::info!("frontend auto: using '{}'", frontend.as_str());
     }
 
     // Build the final argv. If the supervisor invoked us AND we're
@@ -115,16 +123,13 @@ fn main() -> ExitCode {
     let supervised = env::var("VOXTYPE_OSD_SUPERVISED")
         .map(|v| v == "1")
         .unwrap_or(false);
-    let final_args = build_child_args(chosen.frontend, supervised, &rest);
+    let final_args = build_child_args(frontend, supervised, &rest);
 
     // Hand off. exec replaces this process so the child inherits stdin,
     // stdout, stderr, signals, and process group cleanly. There's no return
     // path on success.
-    let err = Command::new(&chosen.path).args(&final_args).exec();
-    eprintln!(
-        "voxtype-osd: failed to exec '{}': {err}",
-        chosen.path.display()
-    );
+    let err = Command::new(&path).args(&final_args).exec();
+    eprintln!("voxtype-osd: failed to exec '{}': {err}", path.display());
     ExitCode::from(1)
 }
 
@@ -133,13 +138,15 @@ fn print_help() {
         "voxtype-osd {} — launcher for the on-screen mic visualizer\n\
          \n\
          USAGE:\n    \
-             voxtype-osd [--frontend gtk4|native|quickshell] [FRONTEND ARGS...]\n\
+             voxtype-osd [--frontend auto|gtk4|native|quickshell] [FRONTEND ARGS...]\n\
          \n\
          OPTIONS:\n    \
-             --frontend <gtk4|native|quickshell>\n    \
-                                          Which frontend to launch. Falls back to\n\
-                                          whatever is installed if the preferred\n\
-                                          frontend isn't found on PATH.\n    \
+             --frontend <auto|gtk4|native|quickshell>\n    \
+                                          Which frontend to launch. auto (the\n\
+                                          default) picks quickshell on Omarchy\n\
+                                          when qs is installed, gtk4 otherwise.\n\
+                                          Falls back to whatever is installed if\n\
+                                          the chosen frontend isn't found.\n    \
              -h, --help                   Show this message.\n    \
              -V, --version                Show version.\n\
          \n\
@@ -149,7 +156,7 @@ fn print_help() {
          \n\
          CONFIG:\n    \
              [osd]\n    \
-             frontend = \"gtk4\"  # or \"native\", \"quickshell\"\n\
+             frontend = \"auto\"  # or \"gtk4\", \"native\", \"quickshell\"\n\
          \n\
          ENV:\n    \
              VOXTYPE_OSD_FRONTEND   Same as --frontend.\n    \
@@ -245,39 +252,6 @@ fn load_frontend_from_config(explicit: Option<&Path>) -> OsdFrontend {
         Ok(p) => p.osd.map(|o| o.frontend).unwrap_or_default(),
         Err(_) => OsdFrontend::default(),
     }
-}
-
-struct ResolvedFrontend {
-    frontend: OsdFrontend,
-    path: PathBuf,
-}
-
-/// Find the binary for `preferred`; if missing, fall back to the next
-/// available frontend in a fixed order. Quickshell sits at the bottom of
-/// non-Quickshell chains because users who didn't ask for it usually
-/// don't have `qs` installed; conversely a Quickshell user who's missing
-/// their launcher falls back to Gtk4 (the default) before Native.
-fn resolve_installed(preferred: OsdFrontend) -> Option<ResolvedFrontend> {
-    let chain: [OsdFrontend; 3] = match preferred {
-        OsdFrontend::Gtk4 => [
-            OsdFrontend::Gtk4,
-            OsdFrontend::Native,
-            OsdFrontend::Quickshell,
-        ],
-        OsdFrontend::Native => [
-            OsdFrontend::Native,
-            OsdFrontend::Gtk4,
-            OsdFrontend::Quickshell,
-        ],
-        OsdFrontend::Quickshell => [
-            OsdFrontend::Quickshell,
-            OsdFrontend::Gtk4,
-            OsdFrontend::Native,
-        ],
-    };
-    chain.into_iter().find_map(|f| {
-        find_binary(f.binary_name()).map(|path| ResolvedFrontend { frontend: f, path })
-    })
 }
 
 /// Locate a binary by name. First checks alongside `voxtype-osd` itself
