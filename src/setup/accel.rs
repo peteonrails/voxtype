@@ -300,7 +300,12 @@ pub(crate) fn classify_line(line: &str) -> Option<(Signal, Option<&'static str>)
 
     // ONNX Runtime failures. The provider .so files are dlopened at runtime,
     // so a missing companion library shows up here and nowhere else.
-    if l.contains("failed to load library libonnxruntime_providers")
+    // ORT names the provider by full path when it sits beside the binary
+    // ("Failed to load library /usr/lib/voxtype/cuda-13/libonnxruntime_...").
+    if l.contains("cudnn") && (l.contains("cannot open") || l.contains("missing")) {
+        return Some((Signal::Negative, Some("cuda")));
+    }
+    if (l.contains("failed to load library") && l.contains("libonnxruntime_providers"))
         || (l.contains("failed to create") && l.contains("executionprovider"))
         || l.contains("falling back to cpu")
         || l.contains("ep registration failed")
@@ -329,7 +334,7 @@ pub(crate) fn classify_line(line: &str) -> Option<(Signal, Option<&'static str>)
 /// Journal patterns worth pulling out of a daemon's log. Passed to
 /// `journalctl -g` so the filtering happens there rather than by streaming
 /// every line of a weeks-old daemon's journal into this process.
-const JOURNAL_PATTERN: &str = "use gpu|whisper_backend_init_gpu|ggml_vulkan|ggml_cuda|execution provider|onnxruntime|falling back to cpu|no cuda devices";
+const JOURNAL_PATTERN: &str = "use gpu|whisper_backend_init_gpu|ggml_vulkan|ggml_cuda|execution provider|onnxruntime|falling back to cpu|no cuda devices|cudnn";
 
 /// Read the GPU-relevant lines this PID logged.
 fn scan_journal(pid: i32) -> Signals {
@@ -586,8 +591,42 @@ pub(crate) fn report_for(pid: Option<i32>) -> AccelReport {
         };
     }
 
-    let signals = scan_journal(pid);
+    let mut signals = scan_journal(pid);
     let vram = vram_held_by(pid);
+
+    // A provider that cannot resolve its libraries can never load, whatever
+    // the journal says or no longer says after rotation.
+    let mut fix: Vec<String> = Vec::new();
+    if let Some(exe) = binary::running_binary_path(pid) {
+        if let Some(missing) =
+            super::gpu::unresolved_provider_deps_at(&exe).filter(|m| !m.is_empty())
+        {
+            let name = exe
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            signals.negative.push(Observation {
+                text: format!(
+                    "the GPU execution provider beside {} cannot load: missing {}",
+                    exe.display(),
+                    missing.join(", ")
+                ),
+                count: 1,
+            });
+            fix = super::gpu::provider_fix_lines(&name, &missing);
+        }
+    }
+    if fix.is_empty()
+        && signals
+            .negative
+            .iter()
+            .any(|o| o.text.to_ascii_lowercase().contains("cudnn"))
+    {
+        fix = super::parakeet::CUDNN_INSTALL_HINT
+            .lines()
+            .map(str::to_string)
+            .collect();
+    }
 
     if let Some((bytes, tool)) = vram {
         evidence.push(format!(
@@ -598,6 +637,7 @@ pub(crate) fn report_for(pid: Option<i32>) -> AccelReport {
         ));
     }
     evidence.extend(signals.evidence_lines());
+    evidence.extend(fix.iter().map(|line| format!("fix: {}", line.trim())));
 
     let (state, backend) = decide(variant, &signals, vram.map(|(bytes, _)| bytes));
     if state == AccelState::Unknown && signals.intent.is_empty() && signals.positive.is_empty() {
@@ -763,6 +803,20 @@ mod tests {
         assert_eq!(
             classify_line("Failed to create MIGraphXExecutionProvider"),
             Some((Signal::Negative, None))
+        );
+        // As ORT really logs it when the provider sits beside the binary
+        // and cuDNN is not installed.
+        assert_eq!(
+            classify_line(
+                "[E:onnxruntime:Default, provider_bridge_ort.cc:1745] Failed to load library /usr/lib/voxtype/cuda-13/libonnxruntime_providers_cuda.so with error: libcudnn.so.9: cannot open shared object file: No such file or directory"
+            ),
+            Some((Signal::Negative, Some("cuda")))
+        );
+        assert_eq!(
+            classify_line(
+                "ERROR CUDA is installed but cuDNN (libcudnn.so.9) is missing, so the CUDA execution provider cannot load: falling back to CPU."
+            ),
+            Some((Signal::Negative, Some("cuda")))
         );
         // Partial assignment still runs most of the graph on the GPU.
         assert_eq!(
