@@ -48,6 +48,9 @@ pub struct ChunkBuffer {
     start_offset_ms: u64,
     /// Sample rate in Hz
     sample_rate: u32,
+    /// Speech was already detected in this chunk's audio before it was
+    /// enhanced (see `mark_speech_checked`), so the energy gate is skipped.
+    speech_checked: bool,
 }
 
 impl ChunkBuffer {
@@ -60,7 +63,18 @@ impl ChunkBuffer {
             source,
             start_offset_ms,
             sample_rate,
+            speech_checked: false,
         }
+    }
+
+    /// Record that speech was already found in this chunk's raw audio.
+    ///
+    /// Speech enhancement (GTCRN) can lower a mic's level by several times,
+    /// pushing real speech under the absolute RMS threshold of the energy
+    /// gate. The caller gates the raw audio instead and marks the enhanced
+    /// buffer, so `process_chunk` does not gate it a second time.
+    pub fn mark_speech_checked(&mut self) {
+        self.speech_checked = true;
     }
 
     /// Add audio samples to the buffer
@@ -241,6 +255,7 @@ impl ChunkProcessor {
         let chunk_id = buffer.chunk_id;
         let source = buffer.source;
         let start_offset_ms = buffer.start_offset_ms;
+        let speech_checked = buffer.speech_checked;
 
         let samples = buffer.samples;
         let sample_rate = self.config.sample_rate as f64;
@@ -263,8 +278,8 @@ impl ChunkProcessor {
             });
         }
 
-        // Check for speech
-        if !self.vad.contains_speech(&samples) {
+        // Check for speech (unless the caller already did, on the raw audio)
+        if !speech_checked && !self.vad.contains_speech(&samples) {
             tracing::debug!(
                 chunk_id,
                 source = %source,
@@ -362,6 +377,38 @@ mod tests {
     fn create_silent_samples(duration_secs: f32) -> Vec<f32> {
         let num_samples = (duration_secs * 16000.0) as usize;
         vec![0.0; num_samples]
+    }
+
+    struct FixedTranscriber;
+
+    impl Transcriber for FixedTranscriber {
+        fn transcribe(&self, _samples: &[f32]) -> Result<String, TranscribeError> {
+            Ok("hello".to_string())
+        }
+    }
+
+    #[test]
+    fn test_speech_checked_chunk_is_not_gated_again() {
+        // Speech whose level enhancement brought under the gate's threshold:
+        // RMS of a 0.012-amplitude sine is about 0.0085, under 0.01.
+        let quiet = create_test_samples(2.0, 440.0, 0.012);
+        let mut processor = ChunkProcessor::new(ChunkConfig::default(), Arc::new(FixedTranscriber));
+
+        let mut buffer = processor.new_buffer(0, AudioSource::Microphone, 0);
+        buffer.add_samples(&quiet);
+        let gated = processor.process_chunk(buffer).unwrap();
+        assert!(gated.segments.is_empty(), "the gate skips it on its own");
+
+        let mut buffer = processor.new_buffer(1, AudioSource::Microphone, 0);
+        buffer.add_samples(&quiet);
+        buffer.mark_speech_checked();
+        let checked = processor.process_chunk(buffer).unwrap();
+        assert_eq!(
+            checked.segments.len(),
+            1,
+            "speech found before enhancement is transcribed"
+        );
+        assert_eq!(checked.segments[0].text, "hello");
     }
 
     #[test]
