@@ -123,9 +123,15 @@ impl HotkeyListener for EvdevListener {
         let secondary_model = self.secondary_model.clone();
         let profile_modifiers = self.profile_modifiers.clone();
 
+        // Open the keyboards here rather than in the task, so a daemon with
+        // no usable keyboard (most often a missing 'input' group) gets the
+        // error back instead of a listener thread that quietly exits.
+        let manager = DeviceManager::new()?;
+
         // Spawn the listener task
         tokio::task::spawn_blocking(move || {
             if let Err(e) = evdev_listener_loop(
+                manager,
                 target_key,
                 modifier_keys,
                 cancel_key,
@@ -160,6 +166,8 @@ struct DeviceManager {
     inotify_buffer: [u8; 1024],
     /// Last time we did a full validation
     last_validation: Instant,
+    /// First event device that could not be opened for lack of permission
+    denied_device: Option<PathBuf>,
 }
 
 impl DeviceManager {
@@ -180,13 +188,19 @@ impl DeviceManager {
             inotify,
             inotify_buffer: [0u8; 1024],
             last_validation: Instant::now(),
+            denied_device: None,
         };
 
         // Initial device enumeration
         manager.enumerate_devices()?;
 
         if manager.devices.is_empty() {
-            return Err(HotkeyError::NoKeyboard);
+            let denied = manager
+                .denied_device
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned());
+            let status = super::access::input_group_status();
+            return Err(super::access::no_keyboard_error(denied.as_deref(), status));
         }
 
         Ok(manager)
@@ -268,7 +282,11 @@ impl DeviceManager {
                 }
             }
             Err(e) => {
-                if e.kind() != std::io::ErrorKind::PermissionDenied {
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    if self.denied_device.is_none() {
+                        self.denied_device = Some(path.clone());
+                    }
+                } else {
                     tracing::trace!("Skipping {:?}: {}", path, e);
                 }
             }
@@ -466,6 +484,7 @@ fn target_key_action(value: i32, is_pressed: bool, modifiers_satisfied: bool) ->
 /// Main listener loop running in a blocking task
 #[allow(clippy::too_many_arguments)]
 fn evdev_listener_loop(
+    mut manager: DeviceManager,
     target_key: Key,
     modifier_keys: HashSet<Key>,
     cancel_key: Option<Key>,
@@ -475,8 +494,6 @@ fn evdev_listener_loop(
     tx: mpsc::Sender<HotkeyEvent>,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<(), HotkeyError> {
-    let mut manager = DeviceManager::new()?;
-
     // Track currently held modifier keys
     let mut active_modifiers: HashSet<Key> = HashSet::new();
 

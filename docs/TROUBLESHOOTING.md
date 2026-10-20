@@ -206,6 +206,15 @@ sudo usermod -aG input $USER
 groups | grep input
 ```
 
+When `[hotkey] enabled = true` and the daemon cannot open any keyboard, it keeps running for `voxtype record` commands and shows a "Voxtype: hotkey not working" desktop notification once at startup. The notification names the cause:
+
+- **Not in the `input` group:** run `sudo usermod -aG input $USER`, then log out and back in.
+- **In the group, but this session started before you were added:** `/etc/group` lists you, but the running daemon does not have the group yet. Log out completely and back in, or reboot. A systemd user service keeps the old groups until every session of yours has ended.
+- **In the group and still denied:** the device nodes have unusual ownership or permissions. Check `ls -l /dev/input/event*`.
+- **No keyboard found:** nothing in `/dev/input` looks like a keyboard. Plug one in and restart voxtype.
+
+If you would rather not grant `input` access at all, bind `voxtype record toggle` (or `record start`/`record stop`) in your compositor and set `[hotkey] enabled = false`.
+
 ### "Failed to access /dev/input/event*"
 
 **Cause:** udev rules preventing access, or input group not applied.
