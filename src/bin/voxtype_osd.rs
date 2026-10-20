@@ -12,9 +12,10 @@
 //! That preference is then reconciled with what's actually installed by
 //! `voxtype::osd::frontend::resolve`. `auto` picks Quickshell, then GTK4,
 //! then native, by what this system can run. An explicit frontend's binary
-//! is searched alongside this launcher and on `$PATH`; if missing, the
-//! launcher tries the other installed frontends in a fixed fallback order
-//! and warns about the substitution. If nothing is installed at all the
+//! is searched alongside this launcher and on `$PATH`; if missing (or, for
+//! Quickshell, if `qs` isn't on `$PATH`), the launcher tries the other
+//! installed frontends in a fixed fallback order and warns about the
+//! substitution. If nothing is installed at all the
 //! launcher exits with a clear error pointing to the build feature flags.
 //!
 //! Source builders who only enabled one of `osd-gtk4`/`osd-native`/
@@ -107,11 +108,7 @@ fn main() -> ExitCode {
     if preferred == OsdFrontend::Auto {
         tracing::info!("OSD frontend: {} ({})", active.as_str(), resolution.reason);
     } else if active != preferred {
-        tracing::warn!(
-            "preferred frontend '{}' not installed; using '{}' instead",
-            preferred.binary_name(),
-            active.binary_name(),
-        );
+        tracing::warn!("OSD frontend: {} ({})", active.as_str(), resolution.reason);
     }
 
     // Build the final argv. If the supervisor invoked us AND we're

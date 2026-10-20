@@ -1616,6 +1616,12 @@ impl Daemon {
         use osd::config::OsdFrontend;
         let configured = osd::frontend::effective_configured(self.config.osd.frontend);
         let resolution = osd::frontend::resolve(configured, &osd::frontend::SystemProbe);
+        // Tell the user once per start when the OSD they asked for won't be
+        // the one shown. Respawns don't repeat it. Off the runtime threads,
+        // since the notification is sent synchronously.
+        if let Some((title, body)) = osd::frontend::fallback_notice(&resolution) {
+            tokio::task::spawn_blocking(move || crate::notification::send_sync(&title, &body));
+        }
         let Some(active) = resolution.active else {
             tracing::warn!(
                 "OSD frontend: none ({}). Run `voxtype setup osd --status` for details, \
