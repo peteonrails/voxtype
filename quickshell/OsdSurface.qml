@@ -141,18 +141,24 @@ PanelWindow {
       : daemonState === "transcribing" ? panel._styleColor("transcribing", VT.Theme.transcribingColor)
       :                                  panel._styleColor("idle", VT.Theme.idleColor)
 
-    // Ring of recent per-frame peaks (0.0..1.0). Capacity = 3 s @ 100 Hz.
-    // Stored as a plain array; we shift() when full to keep newest-on-right.
-    readonly property int waveformColumns: Math.round(VT.Theme.waveformWindowSecs * 100)
-    property var ring: []
+    // Frames across the visible waveform window (100 per second).
+    readonly property int waveformColumns: Math.round(panel._styleNumber("waveform_window_secs", VT.Theme.waveformWindowSecs) * 100)
 
-    // Peak meter state (kept in dBFS so the held-peak decay math matches
-    // src/osd/visual.rs's PeakHold verbatim).
+    // Recent per-frame peaks (0.0..1.0), oldest first. Mutated in place
+    // (no change signal per frame); the renderer reads it on every paint.
+    // Holds the visible window plus the playout delay on both sides.
+    property var ring: []
+    // Frames received this recording, and the wall-clock origin of the
+    // scroll clock. Together they place every frame at a fixed position in
+    // time, so the waveform scrolls at a constant rate and past audio never
+    // changes shape. Mirrors osd::ipc::FrameRing.
+    property int framesReceived: 0
+    property real clockOriginMs: -1
+    readonly property real playoutDelayFrames: 5
+
     property real currentPeakDbfs: -120
-    property real heldDbfs: -120
     property real currentPeak: 0
     property real currentRms: 0
-    property real lastFrameTsMs: 0
     readonly property string customQmlUrl: _customQmlUrl()
     readonly property bool hasCustomQml: customQmlUrl.length > 0
     /// Set when the custom QML package fails to load, so the built-in
@@ -162,7 +168,6 @@ PanelWindow {
     /// Every built-in element keys its visibility off this so a broken
     /// package falls back to the default card.
     readonly property bool customActive: hasCustomQml && !customQmlFailed
-    readonly property real voiceEnergy: Math.min(1.0, Math.max(0.0, currentRms * 6.0 + currentPeak * 0.85))
     readonly property real orbHaloEnergy: Math.min(1.0, Math.max(0.0, currentRms * 10.0 + currentPeak * 1.8))
 
     onCustomQmlUrlChanged: customQmlFailed = false
@@ -198,6 +203,18 @@ PanelWindow {
             ? Number(style.config.top_margin)
             : 0.85;
         return isFinite(value) ? Math.max(0.0, Math.min(1.0, value)) : 0.85;
+    }
+
+    function _styleNumber(key, fallback) {
+        const value = style && style.config && style.config[key] !== undefined
+            ? Number(style.config[key])
+            : fallback;
+        return isFinite(value) ? value : fallback;
+    }
+
+    // `[osd] opacity`: the card's opacity, fixed while it is shown.
+    function _styleOpacity() {
+        return Math.max(0.0, Math.min(1.0, _styleNumber("opacity", VT.Theme.defaultOpacity)));
     }
 
     function _styleWaveformGain() {
@@ -326,11 +343,12 @@ PanelWindow {
 
     function _resetMeters() {
         ring = [];
+        framesReceived = 0;
+        clockOriginMs = -1;
         currentPeakDbfs = -120;
-        heldDbfs = -120;
         currentPeak = 0;
         currentRms = 0;
-        lastFrameTsMs = 0;
+        recipeRenderer.resetMeter();
         recipeRenderer.repaint();
     }
 
@@ -340,37 +358,28 @@ PanelWindow {
         function onFrameReceived(peak, rms, vad, tsMs) {
             panel.currentPeak = peak;
             panel.currentRms = rms;
+            panel.currentPeakDbfs = peak > 0.0 ? 20 * Math.log10(peak) : -120;
 
-            // Push the new peak onto the ring; drop the oldest when full.
-            const r = panel.ring.slice();
+            // Scroll clock: frames advance at 100 per second of wall time,
+            // held back by the playout delay so capture batches arriving in
+            // bursts still scroll smoothly. Batch arrivals never move the
+            // clock; only an underrun re-anchors it, resuming where the
+            // display stopped instead of jumping.
+            const now = Date.now();
+            if (panel.clockOriginMs < 0) panel.clockOriginMs = now;
+            const elapsed = (now - panel.clockOriginMs) / 10;
+            if (elapsed > panel.framesReceived + panel.playoutDelayFrames) {
+                const stoppedAt = Math.max(0, panel.framesReceived - 1);
+                panel.clockOriginMs = now - (stoppedAt + panel.playoutDelayFrames) * 10;
+            }
+
+            const r = panel.ring;
             r.push(peak);
-            while (r.length > panel.waveformColumns) {
-                r.shift();
-            }
-            panel.ring = r;
-
-            // dBFS from linear peak. Floor at -120 to match visual.rs's
-            // PeakHold::held_dbfs sentinel for "effectively silent".
-            const dbfs = peak > 0.0 ? 20 * Math.log10(peak) : -120;
-            panel.currentPeakDbfs = dbfs;
-
-            // Held-peak: snap up on a louder peak, otherwise decay at
-            // peakDecayDbPerSec. dt comes from the frame timestamps so
-            // a paused daemon (no frames) doesn't unrealistically decay
-            // before we receive the next frame.
-            const dtMs = panel.lastFrameTsMs > 0
-                ? Math.max(0, tsMs - panel.lastFrameTsMs)
-                : 10;
-            panel.lastFrameTsMs = tsMs;
-            const dt = dtMs / 1000;
-            if (dbfs > panel.heldDbfs) {
-                panel.heldDbfs = dbfs;
-            } else {
-                const decayed = panel.heldDbfs - VT.Theme.peakDecayDbPerSec * dt;
-                panel.heldDbfs = decayed < -120 ? -120 : decayed;
-            }
-            // No repaint here: the renderer's animation timer already
-            // drives painting whenever the OSD is visible.
+            const capacity = panel.waveformColumns + 2 * panel.playoutDelayFrames + 2;
+            if (r.length > capacity) r.splice(0, r.length - capacity);
+            panel.framesReceived += 1;
+            // No repaint here: the renderer repaints on every display frame
+            // while the OSD is visible.
         }
         function onDisconnected() {
             panel._resetMeters();
@@ -435,14 +444,13 @@ PanelWindow {
         shadowHorizontalOffset: 0
         shadowVerticalOffset: 0
         shadowColor: panel._styleColor("accent", panel.stateColor)
-        shadowOpacity: panel.daemonState === "recording" ? 0.18 + panel.voiceEnergy * 0.34 : 0.0
-        shadowBlur: 0.68 + panel.voiceEnergy * 0.22
-        shadowScale: 1.02 + panel.voiceEnergy * 0.055
+        // A steady glow: it used to swell and fade with the voice, which
+        // read as the whole OSD changing transparency while you spoke.
+        shadowOpacity: 0.3
+        shadowBlur: 0.75
+        shadowScale: 1.04
         blurMax: 64
-        opacity: panel.daemonState === "recording" ? 1.0 : 0.0
-        Behavior on shadowOpacity { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } }
-        Behavior on shadowBlur { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
-        Behavior on shadowScale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+        opacity: panel.daemonState === "recording" ? panel._styleOpacity() : 0.0
         Behavior on opacity { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
     }
 
@@ -455,10 +463,9 @@ PanelWindow {
         radius: card.radius + 1.5
         color: "transparent"
         border.color: panel._styleColor("accent", panel.stateColor)
-        border.width: 1 + panel.voiceEnergy * 1.4
-        opacity: panel.daemonState === "recording" ? 0.12 + panel.voiceEnergy * 0.28 : 0.0
+        border.width: 1.5
+        opacity: panel.daemonState === "recording" ? 0.24 * panel._styleOpacity() : 0.0
         Behavior on opacity { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
-        Behavior on border.width { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } }
     }
 
     Canvas {
@@ -537,9 +544,10 @@ PanelWindow {
         color: panel._frameBackgroundColor()
         border.width: panel._frameBorderWidth()
         border.color: panel._frameBorderColor()
-        opacity: (panel.daemonState === "recording" && panel.audio && panel.audio.running && !panel.audio.vad)
-                 ? 0.78 : 1.0
-        Behavior on opacity { NumberAnimation { duration: 120 } }
+        // `[osd] opacity`, constant while shown. It used to drop to 0.78
+        // whenever the bridge's voice-activity flag (peak above -40 dBFS)
+        // was off, which flickered between words.
+        opacity: panel._styleOpacity()
 
         Row {
             anchors.fill: parent
@@ -579,15 +587,17 @@ PanelWindow {
                         anchors.fill: parent
                         style: panel.style
                         ring: panel.ring
+                        framesReceived: panel.framesReceived
+                        clockOriginMs: panel.clockOriginMs
+                        playoutDelayFrames: panel.playoutDelayFrames
+                        peakDecayDbPerSec: panel._styleNumber("peak_decay_db_per_sec", VT.Theme.peakDecayDbPerSec)
                         daemonState: panel.daemonState
                         vad: panel.audio && panel.audio.vad
                         currentPeakDbfs: panel.currentPeakDbfs
-                        heldDbfs: panel.heldDbfs
                         peak: panel.currentPeak
                         rms: panel.currentRms
                         waveformColumns: panel.waveformColumns
                         waveformGain: panel._styleWaveformGain()
-                        meterFloorDbfs: VT.Theme.meterFloorDbfs
                     }
                 }
             }

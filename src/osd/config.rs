@@ -323,7 +323,7 @@ pub struct OsdConfig {
     /// distance from the top that `bottom-center` keeps from the bottom).
     /// See `osd::placement::card_top`.
     pub top_margin: f32,
-    /// Background opacity, 0.0..=1.0.
+    /// Opacity of the OSD card, 0.0..=1.0. Constant while the card is shown.
     pub opacity: f32,
     /// Visible waveform window in seconds (3.0 per BRIEF).
     pub waveform_window_secs: f32,

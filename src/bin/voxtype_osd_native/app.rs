@@ -44,15 +44,15 @@ use voxtype::osd::config::{OsdConfig, OsdPosition};
 use voxtype::osd::ipc::FrameRing;
 use voxtype::osd::placement::card_top;
 use voxtype::osd::visual::{
-    peak_meter_fraction, project_envelope, waveform_gain_db, waveform_level, EnvelopeColumn,
-    MeterZone, Palette, PeakHold,
+    level_dbfs, project_envelope, waveform_gain_db, waveform_level, EnvelopeColumn, LevelMeter,
+    MeterZone, Palette,
 };
 
 /// State shared between the IPC thread and the render thread.
 #[derive(Clone)]
 pub struct SharedState {
     pub ring: Arc<Mutex<FrameRing>>,
-    pub peak_hold: Arc<Mutex<PeakHold>>,
+    pub meter: Arc<Mutex<LevelMeter>>,
     /// Wall-clock timestamp of the most recent frame. Used to drive idle
     /// teardown when no frames have arrived for a while.
     pub last_frame_at: Arc<Mutex<Option<Instant>>>,
@@ -101,6 +101,8 @@ struct RenderSurface {
     /// Whether we've received the first configure (and thus may render).
     configured: bool,
     frame_pending: bool,
+    /// When the previous frame was drawn; paces the level meter.
+    last_render: Option<Instant>,
 
     // wgpu plumbing.
     _instance: wgpu::Instance,
@@ -319,6 +321,7 @@ impl App {
             height: cfg.height_px,
             configured: false,
             frame_pending: false,
+            last_render: None,
             _instance: instance,
             surface,
             device,
@@ -405,17 +408,21 @@ impl App {
             )
         };
 
-        let (peak_dbfs, held_dbfs) = {
-            let ring = self.shared.ring.lock().expect("ring poisoned");
-            let p = ring.latest().map(|f| f.peak_dbfs).unwrap_or(-120.0);
-            let h = self
-                .shared
-                .peak_hold
-                .lock()
-                .map(|x| x.held_dbfs)
-                .unwrap_or(-120.0);
-            (p, h)
+        let gain_db = waveform_gain_db(cfg.waveform_gain);
+        // Advance the meter by the time since the previous drawn frame; a
+        // fresh surface (new recording) starts it from the floor.
+        let now = Instant::now();
+        let meter = {
+            let mut m = self.shared.meter.lock().expect("meter poisoned");
+            if rs.last_render.is_none() {
+                m.reset();
+            }
+            let dt = rs
+                .last_render
+                .map_or(0.0, |t| now.duration_since(t).as_secs_f32());
+            m.advance(dt, gain_db)
         };
+        rs.last_render = Some(now);
 
         let card = egui::Rect::from_min_size(
             egui::pos2(
@@ -431,17 +438,9 @@ impl App {
             ),
             egui::vec2(rs.width as f32, cfg.height_px as f32),
         );
-        let gain_db = waveform_gain_db(cfg.waveform_gain);
+        let opacity = cfg.opacity.clamp(0.0, 1.0);
         let full_output = rs.egui_ctx.run_ui(raw_input, |ui| {
-            draw_ui(
-                ui,
-                card,
-                &palette,
-                &envelope_cols,
-                peak_dbfs,
-                held_dbfs,
-                gain_db,
-            );
+            draw_ui(ui, card, &palette, &envelope_cols, meter, gain_db, opacity);
         });
 
         let primitives = rs
@@ -542,12 +541,14 @@ fn draw_ui(
     card: egui::Rect,
     palette: &Palette,
     envelope: &[EnvelopeColumn],
-    peak_dbfs: f32,
-    held_dbfs: f32,
+    meter: (f32, f32),
     gain_db: f32,
+    opacity: f32,
 ) {
     use egui::{Pos2, Rect};
-    let painter = ui.painter().clone();
+    let mut painter = ui.painter().clone();
+    // `[osd] opacity`, fixed for as long as the card is shown.
+    painter.set_opacity(opacity);
     painter.rect_filled(card, 0.0, color_to_egui(palette.background));
     let w = card.width();
     let h = card.height();
@@ -560,7 +561,7 @@ fn draw_ui(
     );
 
     draw_waveform(&painter, waveform_rect, palette, envelope, gain_db);
-    draw_meter(&painter, meter_rect, palette, peak_dbfs, held_dbfs);
+    draw_meter(&painter, meter_rect, palette, meter, gain_db);
 }
 
 fn draw_waveform(
@@ -617,18 +618,15 @@ fn draw_meter(
     painter: &egui::Painter,
     rect: egui::Rect,
     palette: &Palette,
-    peak_dbfs: f32,
-    held_dbfs: f32,
+    (lit_fraction, held_fraction): (f32, f32),
+    gain_db: f32,
 ) {
     use egui::{pos2, Rect};
     const SEGMENTS: usize = 10;
-    const FLOOR_DBFS: f32 = -60.0;
 
     let segment_h = rect.height() / SEGMENTS as f32;
     let segment_gap = (segment_h * 0.15).clamp(1.0, 3.0);
     let inner_w = rect.width() - 4.0;
-    let lit_fraction = peak_meter_fraction(peak_dbfs, FLOOR_DBFS);
-    let lit_segments = (lit_fraction * SEGMENTS as f32).round() as usize;
 
     for i in 0..SEGMENTS {
         // Segment 0 is the BOTTOM of the bar (low dB == bottom).
@@ -639,20 +637,24 @@ fn draw_meter(
             pos2(rect.left() + 2.0 + inner_w, y_bot),
         );
 
-        let segment_peak_dbfs = FLOOR_DBFS * (1.0 - i as f32 / SEGMENTS as f32);
-        let zone = MeterZone::from_dbfs(segment_peak_dbfs);
-        let lit = i < lit_segments;
+        let frac_bottom = i as f32 / SEGMENTS as f32;
+        let frac_top = (i as f32 + 1.0) / SEGMENTS as f32;
+        let zone = MeterZone::from_dbfs(level_dbfs(frac_top, gain_db));
         let base = zone.color(palette);
-        let color = if lit {
-            color_to_egui(base)
-        } else {
-            color_to_egui(base.with_alpha(0.18))
-        };
-        painter.rect_filled(seg_rect, 1.0, color);
+        painter.rect_filled(seg_rect, 1.0, color_to_egui(base.with_alpha(0.18)));
+        // Light the segment as far as the level reaches into it, so the
+        // meter moves smoothly instead of in tenths.
+        let lit = ((lit_fraction - frac_bottom) * SEGMENTS as f32).clamp(0.0, 1.0);
+        if lit > 0.0 {
+            let lit_rect = Rect::from_min_max(
+                pos2(seg_rect.left(), y_bot - (y_bot - y_top) * lit),
+                seg_rect.max,
+            );
+            painter.rect_filled(lit_rect, 1.0, color_to_egui(base));
+        }
     }
 
     // Held-peak tick, drawn as a thin foreground bar.
-    let held_fraction = peak_meter_fraction(held_dbfs, FLOOR_DBFS);
     if held_fraction > 0.0 {
         let y = rect.bottom() - held_fraction * rect.height();
         let tick_rect = Rect::from_min_max(

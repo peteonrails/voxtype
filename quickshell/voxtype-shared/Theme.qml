@@ -101,7 +101,7 @@ QtObject {
     /// neutral, each doubling +6 dB. Mirrors OsdConfig::waveform_gain.
     property real waveformGain: 10.0
 
-    /// dBFS floor for the peak meter. Anything quieter renders as an
-    /// empty bar. -60 dB matches the GTK4/native frontends.
+    /// Former peak-meter floor. The built-in meter now shares the
+    /// waveform's dB scale; kept for custom QML packages that read it.
     property real meterFloorDbfs: -60.0
 }

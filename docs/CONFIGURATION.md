@@ -3887,7 +3887,8 @@ margin_px = 24               # gap from the screen edges, logical pixels
 top_margin = 0.85            # centered positions: top edge as a fraction
                              # of the output's height (like swayosd)
 waveform_gain = 10.0         # waveform sensitivity, 10 = neutral
-peak_decay_db_per_sec = 6.0  # how fast the peak meter's held tick falls
+peak_decay_db_per_sec = 6.0  # how fast the level meter's held-peak tick falls
+opacity = 0.95               # card opacity, constant while shown
 ```
 
 The OSD appears on the focused output and is placed using only that output's
@@ -3919,6 +3920,19 @@ never draws outside the card at any value. Earlier versions multiplied
 the raw samples by this key, which pushed everything above -20 dBFS (most speech) off
 the card; an old config that keeps the default 10 gets the new scale
 unchanged.
+
+The waveform scrolls at a constant 100 frames per second of wall time, a
+fixed 50 ms behind the newest audio so capture batches arriving in bursts
+don't make it stutter. Each moment of audio keeps its shape as it scrolls.
+
+The level meter uses the same scale, so a loudness that reaches half the
+waveform's height fills half the meter. It moves on every display frame:
+it rises within about 15 ms of a louder sound and falls back over about
+300 ms. Its held-peak tick marks the loudest recent peak and falls at
+`peak_decay_db_per_sec`.
+
+`opacity` sets the card's opacity, which stays the same while the card is
+shown: it no longer dims between words or pulses with your voice.
 
 ### Quickshell OSD customization
 
