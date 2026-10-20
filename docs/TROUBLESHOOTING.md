@@ -1284,6 +1284,25 @@ restore_clipboard_delay_ms = 500  # Try 300-500ms for slow applications
 
 3. On X11, make sure `xclip` is installed for clipboard restoration support.
 
+### "Post-processing failed", "timed out", "command not found", "returned nothing" or "edit list rejected"
+
+**Cause:** The `[output.post_process]` command (or a profile's `post_process_command`) didn't produce cleaned text, so Voxtype typed the original transcription instead. The notification says which case it was.
+
+**Solution:**
+- **Command not found:** install the program, or use its full path in `command`. A daemon started by systemd may not have the same `PATH` as your shell.
+- **Exited with code N:** run the command by hand with a sample on stdin, e.g. `echo "hello world" | ollama run llama3.2:1b 'Clean up:'`, and fix what its error says (often the model isn't pulled or the server isn't running).
+- **Timed out:** raise the timeout, e.g. `voxtype config set output.post_process.timeout_ms 60000` (for a profile, `post_process_timeout_ms` in `[profiles.<name>]`), or use a smaller model. The first call to a local LLM can be slow while the model loads.
+- **Returned nothing:** make the command print the cleaned text on stdout. If empty output is intended (to drop `[BLANK_AUDIO]`, say), set `fallback_on_empty = false`.
+- **Edit list rejected:** with `edit_list = true`, the command must print only a JSON array of `find`/`replace`/`reason` edits whose targets occur once in the transcription. The notification gives the reason the list was rejected; fix the prompt or script, or set `edit_list = false` in `[output.post_process]`.
+
+The same failure is only notified once every 5 minutes; run `journalctl --user -u voxtype -f` to see every occurrence.
+
+### "pre_output hook failed" or "post_output hook failed"
+
+**Cause:** `pre_output_command` or `post_output_command` exited with an error. The text was still delivered, but whatever the hook does (switching a compositor submap, for example) didn't happen.
+
+**Solution:** run the command from the notification in a terminal and fix it, or correct it in the `[output]` section of `config.toml`.
+
 ### No desktop notification
 
 **Cause:** notify-send not installed or notifications disabled.

@@ -2264,6 +2264,7 @@ impl Daemon {
                     self.play_feedback(SoundEvent::Error);
                 }
             }
+            output::deferred_notice::flush().await;
 
             *state = State::Idle;
             self.update_state("idle");
@@ -2286,6 +2287,7 @@ impl Daemon {
                 tracing::warn!("{}", e);
             }
         }
+        output::deferred_notice::flush().await;
 
         *state = State::Idle;
         self.update_state("idle");
@@ -4193,6 +4195,7 @@ impl Daemon {
                 tracing::warn!("{}", e);
             }
         }
+        output::deferred_notice::flush().await;
     }
 
     /// Spawn a transcription task for a single chunk (eager processing)
@@ -4681,10 +4684,12 @@ impl Daemon {
                                     .as_ref()
                                     .is_some_and(|config| config.edit_list),
                             };
-                            let profile_processor = PostProcessor::new(&profile_config);
+                            let profile_name = profile_override.as_deref().unwrap_or_default();
+                            let profile_processor =
+                                PostProcessor::new(&profile_config).for_profile(profile_name);
                             tracing::info!(
                                 "Post-processing with profile: {:?}, has_context: {}",
-                                profile_override.as_ref().unwrap(),
+                                profile_name,
                                 recent_context.is_some()
                             );
                             tracing::debug!("Post-processing context: {:?}", recent_context);
@@ -4811,6 +4816,7 @@ impl Daemon {
                                 self.play_feedback(SoundEvent::Error);
                             }
                         }
+                        output::deferred_notice::flush().await;
 
                         *state = State::Idle;
                         self.update_state("idle");
@@ -4946,6 +4952,9 @@ impl Daemon {
                             .await;
                         }
                     }
+                    // After the "Transcribed" notification, which would
+                    // otherwise replace a post-process or hook failure notice.
+                    output::deferred_notice::flush().await;
 
                     *state = State::Idle;
                     self.update_state("idle");
