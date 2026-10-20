@@ -1986,29 +1986,61 @@ The `paste` mode is an alternative for non-US keyboard layouts. Instead of typin
 ### paste_keys
 
 **Type:** String
-**Default:** `"shift+insert"` in the shipped `config.toml`; `"ctrl+v"` is the built-in fallback if the key is removed from the file entirely
+**Default:** `"shift+insert"` in the shipped `config.toml`; `"auto"` when the key is absent from the file (the config written by `voxtype setup` leaves it out)
 **Required:** No
 
-Keystroke to simulate for paste mode. The shipped default is `shift+insert` because it pastes correctly in terminal emulators as well as GUI apps — many terminals bind `ctrl+v` to their own function (readline's literal-insert, a tmux/screen prefix, etc.) rather than treating it as paste. Change this if your environment uses a different paste shortcut.
+Keystroke to simulate for paste mode, or `"auto"` to pick one per window.
 
-**Format:** `"modifier+key"` or `"modifier+modifier+key"` (case-insensitive)
+With `"auto"`, voxtype asks the compositor which window has focus just before pasting. Terminals get `paste_keys_terminal` (default `ctrl+shift+v`); everything else gets `ctrl+v`. A terminal can't use `ctrl+v`: the terminal passes it to the running program as a raw `^V`, which readline treats as literal-insert, tmux and screen may use as a prefix, and the Codex CLI treats as "paste an image from the clipboard", so the dictation never arrives.
+
+Terminal detection works on:
+- **Hyprland**: `hyprctl activewindow -j`. A window with the `terminal` tag counts as a terminal (Omarchy tags every terminal it knows, and dynamic tags such as `terminal*` match too); otherwise the window class is checked against a list of known terminals.
+- **Sway**: `swaymsg -t get_tree`, matching the focused window's app_id or X11 class.
+- **niri**: `niri msg --json focused-window`, matching its app_id.
+
+On other desktops, or if the query fails or takes longer than 250ms, `auto` sends `ctrl+v`, which is what paste mode sent before `auto` existed. The query runs during the pre-paste delay, so it adds no latency.
+
+An explicit keystroke such as `"shift+insert"` is sent everywhere, exactly as before, unless `paste_keys_terminal` is also set.
+
+**Format:** `"auto"`, `"modifier+key"` or `"modifier+modifier+key"` (case-insensitive)
 
 **Common values:**
-- `"shift+insert"` - Universal paste shortcut, works in terminals and GUI apps (shipped default)
+- `"auto"` - `ctrl+v` in GUI apps, `paste_keys_terminal` in terminals (built-in default)
+- `"shift+insert"` - Pastes in GUI apps and in terminals that map it to the clipboard (Omarchy's do); stock Ghostty, Kitty, Alacritty, foot and WezTerm paste the primary selection with it instead (shipped default)
 - `"ctrl+v"` - Standard GUI paste shortcut
-- `"ctrl+shift+v"` - Some terminal emulators
+- `"ctrl+shift+v"` - Clipboard paste in most terminal emulators
 
 **Example:**
 ```toml
 [output]
 mode = "paste"
-paste_keys = "shift+insert"  # For Hyprland/Omarchy
+paste_keys = "auto"
 ```
 
 **Supported keys:**
 - Modifiers: `ctrl`, `shift`, `alt`, `super` (also `leftctrl`, `rightctrl`, etc.)
 - Letters: `a-z`
 - Special: `insert`, `enter`
+
+### paste_keys_terminal
+
+**Type:** String
+**Default:** `"ctrl+shift+v"`
+**Required:** No
+
+Keystroke paste mode sends when the focused window is a terminal. Used by `paste_keys = "auto"`, and also when `paste_keys` holds an explicit keystroke: setting both makes `paste_keys` the GUI keystroke and this one the terminal keystroke.
+
+The default, `ctrl+shift+v`, is the clipboard paste binding in stock Ghostty, Kitty, Alacritty, foot, WezTerm, Konsole and GNOME Terminal, and in Omarchy's terminal configs. If your terminals map `shift+insert` to the clipboard, as Omarchy's do, you can use that to match Omarchy's universal paste (Super+V).
+
+**Example:**
+```toml
+[output]
+mode = "paste"
+paste_keys = "auto"
+paste_keys_terminal = "shift+insert"
+```
+
+Also settable with `--paste-keys-terminal` and `VOXTYPE_PASTE_KEYS_TERMINAL`.
 
 ### restore_clipboard
 
@@ -3605,6 +3637,7 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_TYPE_DELAY` | integer | `output.type_delay_ms` |
 | `VOXTYPE_FALLBACK_TO_CLIPBOARD` | bool | `output.fallback_to_clipboard` |
 | `VOXTYPE_PASTE_KEYS` | string | `output.paste_keys` |
+| `VOXTYPE_PASTE_KEYS_TERMINAL` | string | `output.paste_keys_terminal` |
 | `VOXTYPE_DOTOOL_XKB_LAYOUT` | string | `output.dotool_xkb_layout` |
 | `VOXTYPE_DOTOOL_XKB_VARIANT` | string | `output.dotool_xkb_variant` |
 | `VOXTYPE_EITYPE_XKB_LAYOUT` | string | `output.eitype_xkb_layout` |

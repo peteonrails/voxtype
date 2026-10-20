@@ -291,7 +291,7 @@ pub const REPLACEMENTS_TABLE: &str = "text.replacements";
 
 const FILE_MODE_CHOICES: &[&str] = &["overwrite", "append"];
 const URGENCY_CHOICES: &[&str] = &["low", "normal", "critical"];
-const PASTE_KEY_CHOICES: &[&str] = &["shift+insert", "ctrl+v", "ctrl+shift+v", "super+v"];
+const PASTE_KEY_CHOICES: &[&str] = &["auto", "shift+insert", "ctrl+v", "ctrl+shift+v", "super+v"];
 const STATE_FILE_CHOICES: &[&str] = &["auto", "disabled"];
 const MEETING_STORAGE_CHOICES: &[&str] = &["auto"];
 const DIARIZATION_BACKEND_CHOICES: &[&str] = &["simple", "ml"];
@@ -1564,7 +1564,16 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         open(PASTE_KEY_CHOICES),
         "Output",
         "Paste keystroke",
-        "Keystroke paste mode sends after copying, e.g. shift+insert or ctrl+shift+v for terminals.",
+        "Keystroke paste mode sends after copying. auto (the default) sends ctrl+v to GUI apps and the terminal keystroke to terminals.",
+    ),
+    spec(
+        "output.paste_keys_terminal",
+        "output",
+        "paste_keys_terminal",
+        open(PASTE_KEY_CHOICES),
+        "Output",
+        "Terminal paste keystroke",
+        "Keystroke paste mode sends when the focused window is a terminal (Hyprland, Sway, niri). Default ctrl+shift+v.",
     ),
     spec(
         "output.restore_clipboard",
@@ -2642,6 +2651,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "output.file_mode" => json!(cfg.output.file_mode),
         "output.type_delay_ms" => json!(cfg.output.type_delay_ms),
         "output.paste_keys" => opt_str(cfg.output.paste_keys.as_ref()),
+        "output.paste_keys_terminal" => opt_str(cfg.output.paste_keys_terminal.as_ref()),
         "output.restore_clipboard" => json!(cfg.output.restore_clipboard),
         "output.restore_clipboard_delay_ms" => json!(cfg.output.restore_clipboard_delay_ms),
         "output.wait_for_modifier_release" => json!(cfg.output.wait_for_modifier_release),

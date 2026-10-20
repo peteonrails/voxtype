@@ -287,6 +287,9 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if let Some(ref keys) = cli.paste_keys {
         config.output.paste_keys = Some(keys.clone());
     }
+    if let Some(ref keys) = cli.paste_keys_terminal {
+        config.output.paste_keys_terminal = Some(keys.clone());
+    }
     if let Some(ref layout) = cli.dotool_xkb_layout {
         config.output.dotool_xkb_layout = Some(layout.clone());
     }

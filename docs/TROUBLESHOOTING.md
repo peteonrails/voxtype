@@ -928,6 +928,44 @@ echo "test" | wl-copy
 wl-paste
 ```
 
+### Ctrl+V pastes an image in Codex, or a ^V in a terminal
+
+**Symptom:** In paste mode, dictation into a terminal never arrives. The
+Codex CLI reports that it found no image on the clipboard, a shell prints
+nothing or a literal `^V`, or tmux waits for the rest of a key sequence.
+
+**Cause:** Paste mode sent Ctrl+V. Terminals don't treat Ctrl+V as paste:
+they pass it to the running program, and Codex uses it to paste an image,
+readline to insert the next key literally.
+
+**Solution:** Let voxtype pick the keystroke per window:
+
+```toml
+[output]
+mode = "paste"
+paste_keys = "auto"   # or remove paste_keys entirely
+```
+
+On Hyprland, Sway and niri, `auto` sends `paste_keys_terminal` (default
+Ctrl+Shift+V) when a terminal has focus and Ctrl+V elsewhere. If a
+terminal still gets Ctrl+V:
+
+1. Check that the terminal is detected. On Hyprland run
+   `hyprctl activewindow -j` with the terminal focused: it needs a
+   `terminal` (or `terminal*`) tag, or a class voxtype knows. For an
+   unknown terminal, add a Hyprland window rule that gives its class the
+   `terminal` tag (Omarchy's rule is in
+   `~/.local/share/omarchy/default/hypr/apps/terminals.lua`).
+2. Check which keystroke your terminal pastes the clipboard with. If it
+   isn't Ctrl+Shift+V, set it, for example
+   `paste_keys_terminal = "shift+insert"` for Omarchy's terminals.
+3. Run `voxtype -vv` and look for `Focused window terminal check` and
+   `Text pasted via clipboard + ...` in the log.
+
+On desktops without detection (GNOME, KDE, X11), pick one keystroke that
+works in both places, such as `paste_keys = "shift+insert"` if your
+terminals map it to the clipboard, or switch to type mode.
+
 ### Clipboard not restored after paste
 
 **Cause:** The restore delay may be too short for your application, or `wl-paste` is not installed.

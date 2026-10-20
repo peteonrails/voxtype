@@ -19,6 +19,7 @@
 //!
 //! Paste mode (clipboard + Ctrl+V) helps with system with non US keyboard layouts.
 
+pub mod active_window;
 #[cfg(target_os = "macos")]
 pub mod cgevent;
 pub mod clipboard;
@@ -396,6 +397,7 @@ pub fn create_output_chain_with_override(
                 config.auto_submit,
                 config.append_text.clone(),
                 config.paste_keys.clone(),
+                config.paste_keys_terminal.clone(),
                 config.driver_order.clone(),
                 config.type_delay_ms,
                 pre_type_delay_ms,

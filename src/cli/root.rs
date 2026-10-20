@@ -330,7 +330,9 @@ pub struct Cli {
     )]
     pub no_fallback_to_clipboard: bool,
 
-    /// Keystroke for paste mode (e.g., ctrl+v, shift+insert, ctrl+shift+v)
+    /// Keystroke for paste mode (e.g., ctrl+v, shift+insert, ctrl+shift+v), or
+    /// "auto" (the default) for ctrl+v in GUI apps and --paste-keys-terminal in
+    /// terminals
     #[arg(
         long,
         value_name = "KEYS",
@@ -338,6 +340,16 @@ pub struct Cli {
         hide_short_help = true
     )]
     pub paste_keys: Option<String>,
+
+    /// Keystroke for paste mode when the focused window is a terminal
+    /// (default: ctrl+shift+v; detected on Hyprland, Sway and niri)
+    #[arg(
+        long,
+        value_name = "KEYS",
+        help_heading = "Output",
+        hide_short_help = true
+    )]
+    pub paste_keys_terminal: Option<String>,
 
     /// File path for file output mode
     #[arg(long, value_name = "PATH", help_heading = "Output")]

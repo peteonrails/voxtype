@@ -215,6 +215,9 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     if let Ok(keys) = std::env::var("VOXTYPE_PASTE_KEYS") {
         config.output.paste_keys = Some(keys);
     }
+    if let Ok(keys) = std::env::var("VOXTYPE_PASTE_KEYS_TERMINAL") {
+        config.output.paste_keys_terminal = Some(keys);
+    }
     if let Ok(layout) = std::env::var("VOXTYPE_DOTOOL_XKB_LAYOUT") {
         config.output.dotool_xkb_layout = Some(layout);
     }

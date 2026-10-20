@@ -182,6 +182,18 @@ pub(crate) async fn show_config(config: &config::Config) -> anyhow::Result<()> {
     }
     println!("  type_delay_ms = {}", config.output.type_delay_ms);
     println!("  pre_type_delay_ms = {}", config.output.pre_type_delay_ms);
+    println!(
+        "  paste_keys = {:?}",
+        config.output.paste_keys.as_deref().unwrap_or("auto")
+    );
+    println!(
+        "  paste_keys_terminal = {:?}",
+        config
+            .output
+            .paste_keys_terminal
+            .as_deref()
+            .unwrap_or("ctrl+shift+v")
+    );
     println!("  restore_clipboard = {}", config.output.restore_clipboard);
     println!(
         "  restore_clipboard_delay_ms = {}",

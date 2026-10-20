@@ -1672,7 +1672,7 @@ mode = "paste"
 **How it works**:
 1. Copies transcribed text to clipboard via `wl-copy`
 2. Waits briefly for clipboard to settle
-3. Simulates Ctrl+V keypress via `ydotool`
+3. Simulates the paste keystroke (Ctrl+V, or Ctrl+Shift+V in terminals; see below)
 
 **Pros**:
 - Works with any keyboard layout
@@ -1681,9 +1681,20 @@ mode = "paste"
 
 **Cons**:
 - Requires both wl-copy and ydotool
-- Won't work in applications where Ctrl+V has a different meaning (e.g., Vim command mode)
+- Won't work in applications where the paste keystroke has a different meaning (e.g., Vim command mode)
 - Overwrites clipboard contents (unless clipboard restoration is enabled)
 - No fallback behavior
+
+**Pasting into terminals**: Ctrl+V doesn't paste in a terminal. The terminal hands it to the running program as a raw `^V`, and a program like the Codex CLI reads that as "paste an image", so the dictation never shows up. When `paste_keys` is unset or set to `"auto"`, voxtype checks the focused window before each paste on Hyprland, Sway and niri, and sends Ctrl+Shift+V to terminals and Ctrl+V to everything else. On Hyprland, any window with Omarchy's `terminal` tag counts as a terminal; other windows are matched by class against a list of known terminal emulators. On other desktops `auto` sends Ctrl+V.
+
+```toml
+[output]
+mode = "paste"
+paste_keys = "auto"                  # the default when unset
+paste_keys_terminal = "ctrl+shift+v" # the default; Omarchy users can use "shift+insert"
+```
+
+An explicit `paste_keys = "shift+insert"` (the value in the shipped `/etc/voxtype/config.toml`) keeps sending that keystroke everywhere. Both settings are also available as `--paste-keys` / `--paste-keys-terminal` and `VOXTYPE_PASTE_KEYS` / `VOXTYPE_PASTE_KEYS_TERMINAL`. See [paste_keys](CONFIGURATION.md#paste_keys).
 
 **Clipboard Restoration**: By default, paste mode overwrites your clipboard with the transcribed text. If you want to preserve your clipboard contents, enable clipboard restoration:
 
