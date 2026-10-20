@@ -2857,22 +2857,34 @@ impl Daemon {
     async fn process_meeting_audio_pair(&mut self, mic_chunk: Vec<f32>, loopback_chunk: Vec<f32>) {
         #[cfg_attr(not(feature = "onnx-common"), allow(unused_mut))]
         let mut mic_chunk = mic_chunk;
+        #[cfg_attr(not(feature = "onnx-common"), allow(unused_mut))]
+        let mut mic_speech_checked = false;
 
-        // Enhance mic audio with GTCRN if available (removes echo/noise)
+        // Enhance mic audio with GTCRN if available (removes noise). The
+        // energy gate is applied to the raw chunk first: enhancement can
+        // lower a normal mic's level by several times, under the gate's
+        // absolute RMS threshold, and whole chunks of speech were then
+        // skipped. A chunk without speech is left as it is (and skipped by
+        // the gate), which also saves its enhancement.
         #[cfg(feature = "onnx-common")]
         {
             if !mic_chunk.is_empty() {
-                if let Some(ref enhancer) = self.speech_enhancer {
-                    match enhancer.enhance(&mic_chunk) {
-                        Ok(enhanced) => {
-                            tracing::debug!(
-                                "GTCRN enhanced mic chunk ({} samples)",
-                                enhanced.len()
-                            );
-                            mic_chunk = enhanced;
-                        }
-                        Err(e) => {
-                            tracing::warn!("GTCRN enhancement failed, using raw mic: {}", e);
+                if let (Some(ref enhancer), Some(ref daemon)) =
+                    (&self.speech_enhancer, &self.meeting_daemon)
+                {
+                    if daemon.contains_speech(&mic_chunk) {
+                        match enhancer.enhance(&mic_chunk) {
+                            Ok(enhanced) => {
+                                tracing::debug!(
+                                    "GTCRN enhanced mic chunk ({} samples)",
+                                    enhanced.len()
+                                );
+                                mic_chunk = enhanced;
+                                mic_speech_checked = true;
+                            }
+                            Err(e) => {
+                                tracing::warn!("GTCRN enhancement failed, using raw mic: {}", e);
+                            }
                         }
                     }
                 }
@@ -2884,7 +2896,11 @@ impl Daemon {
 
             if !mic_chunk.is_empty() {
                 match daemon
-                    .process_chunk_with_source(mic_chunk, meeting::data::AudioSource::Microphone)
+                    .process_chunk_with_source_checked(
+                        mic_chunk,
+                        meeting::data::AudioSource::Microphone,
+                        mic_speech_checked,
+                    )
                     .await
                 {
                     Ok(Some(segments)) => {
