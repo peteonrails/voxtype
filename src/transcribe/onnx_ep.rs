@@ -33,6 +33,7 @@ use ort::session::builder::{BuilderResult, SessionBuilder};
 /// the modified builder; if no EPs are compiled in or registration
 /// fails, falls through unchanged and ort uses the CPU EP.
 #[cfg(feature = "onnx-common")]
+#[allow(clippy::result_large_err)] // BuilderResult is ort's type, not ours to shrink
 pub fn register_gpu_eps(
     builder: SessionBuilder,
     engine_label: &str,
@@ -55,17 +56,17 @@ fn compiled_providers() -> Vec<(&'static str, ExecutionProviderDispatch)> {
 
     #[cfg(feature = "onnx-tensorrt-enabled")]
     {
-        use ort::execution_providers::{ExecutionProvider, TensorRTExecutionProvider};
+        use ort::execution_providers::TensorRTExecutionProvider;
         providers.push(("TensorRT", TensorRTExecutionProvider::default().build()));
     }
     #[cfg(feature = "onnx-cuda-enabled")]
     {
-        use ort::execution_providers::{CUDAExecutionProvider, ExecutionProvider};
+        use ort::execution_providers::CUDAExecutionProvider;
         providers.push(("CUDA", CUDAExecutionProvider::default().build()));
     }
     #[cfg(feature = "onnx-migraphx-enabled")]
     {
-        use ort::execution_providers::{ExecutionProvider, MIGraphXExecutionProvider};
+        use ort::execution_providers::MIGraphXExecutionProvider;
         providers.push(("MIGraphX", MIGraphXExecutionProvider::default().build()));
     }
 

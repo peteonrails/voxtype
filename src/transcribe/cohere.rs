@@ -343,15 +343,16 @@ impl CohereTranscriber {
             let num_logits = Tensor::<i64>::from_array(([] as [usize; 0], vec![1_i64]))
                 .map_err(|e| TranscribeError::InferenceFailed(format!("num_logits tensor: {e}")))?;
 
-            let mut inputs: Vec<(Cow<str>, ort::session::SessionInputValue)> = Vec::new();
-            inputs.push((Cow::Borrowed("input_ids"), input_ids.into()));
-            inputs.push((Cow::Borrowed("attention_mask"), attention_mask.into()));
-            inputs.push((Cow::Borrowed("position_ids"), position_ids.into()));
-            inputs.push((Cow::Borrowed("num_logits_to_keep"), num_logits.into()));
-            inputs.push((
-                Cow::Borrowed("encoder_hidden_states"),
-                ort::session::SessionInputValue::from(&encoder_hidden),
-            ));
+            let mut inputs: Vec<(Cow<str>, ort::session::SessionInputValue)> = vec![
+                (Cow::Borrowed("input_ids"), input_ids.into()),
+                (Cow::Borrowed("attention_mask"), attention_mask.into()),
+                (Cow::Borrowed("position_ids"), position_ids.into()),
+                (Cow::Borrowed("num_logits_to_keep"), num_logits.into()),
+                (
+                    Cow::Borrowed("encoder_hidden_states"),
+                    ort::session::SessionInputValue::from(&encoder_hidden),
+                ),
+            ];
 
             for layer in 0..N_LAYERS {
                 let dk_name = format!("past_key_values.{layer}.decoder.key");
@@ -397,28 +398,28 @@ impl CohereTranscriber {
                 let mut present_enc: Vec<DynValue> = Vec::with_capacity(N_LAYERS * 2);
                 for layer in 0..N_LAYERS {
                     let dk = outputs
-                        .remove(&format!("present.{layer}.decoder.key"))
+                        .remove(format!("present.{layer}.decoder.key"))
                         .ok_or_else(|| {
                             TranscribeError::InferenceFailed(format!(
                                 "missing present.{layer}.decoder.key"
                             ))
                         })?;
                     let dv = outputs
-                        .remove(&format!("present.{layer}.decoder.value"))
+                        .remove(format!("present.{layer}.decoder.value"))
                         .ok_or_else(|| {
                             TranscribeError::InferenceFailed(format!(
                                 "missing present.{layer}.decoder.value"
                             ))
                         })?;
                     let ek = outputs
-                        .remove(&format!("present.{layer}.encoder.key"))
+                        .remove(format!("present.{layer}.encoder.key"))
                         .ok_or_else(|| {
                             TranscribeError::InferenceFailed(format!(
                                 "missing present.{layer}.encoder.key"
                             ))
                         })?;
                     let ev = outputs
-                        .remove(&format!("present.{layer}.encoder.value"))
+                        .remove(format!("present.{layer}.encoder.value"))
                         .ok_or_else(|| {
                             TranscribeError::InferenceFailed(format!(
                                 "missing present.{layer}.encoder.value"

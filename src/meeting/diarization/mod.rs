@@ -180,10 +180,10 @@ pub fn create_diarizer(config: &DiarizationConfig) -> Box<dyn Diarizer> {
                         return Box::new(simple::SimpleDiarizer::new());
                     }
                     tracing::info!("Using ML diarization with ONNX");
-                    return Box::new(diarizer);
+                    Box::new(diarizer)
                 } else {
                     tracing::warn!("ML diarization model not found, falling back to simple");
-                    return Box::new(simple::SimpleDiarizer::new());
+                    Box::new(simple::SimpleDiarizer::new())
                 }
             }
             #[cfg(not(feature = "ml-diarization"))]
