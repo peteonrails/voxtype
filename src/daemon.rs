@@ -679,6 +679,56 @@ fn ack_meeting_start() {
     let _ = std::fs::remove_file(Config::runtime_dir().join("meeting_start"));
 }
 
+/// 20 ms frames at 16 kHz, the unit `record_until_quiet` measures in
+const TAIL_FRAME: usize = 320;
+/// How many quiet frames in a row end the tail
+const TAIL_QUIET_FRAMES: usize = 8;
+
+/// The level below which a frame counts as quiet: three times the recording's
+/// noise floor (its 10th-percentile frame), so it follows the mic's gain and
+/// the room. Frames of digital silence at the start of a stream don't count,
+/// or the floor would be 0. The cap keeps the bar under quiet speech in a
+/// noisy room, and a recording too short to measure a floor gets the cap.
+fn tail_quiet_threshold(frame_rms: &[f32]) -> f32 {
+    const CAP: f32 = 0.05;
+    let mut sorted: Vec<f32> = frame_rms.iter().copied().filter(|&f| f >= 1e-4).collect();
+    if sorted.len() < TAIL_QUIET_FRAMES * 2 {
+        return CAP;
+    }
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    (sorted[sorted.len() / 10] * 3.0).clamp(0.001, CAP)
+}
+
+/// Keeps recording after a stop until the mic goes quiet, for at most
+/// `max_tail`, so a word still being spoken isn't cut off. When the speaker
+/// had already stopped, the usual case, it returns at once. Returns the
+/// samples captured so far; the capture's `stop` gives the rest.
+async fn record_until_quiet(capture: &mut dyn AudioCapture, max_tail: Duration) -> Vec<f32> {
+    let rms = |f: &[f32]| (f.iter().map(|s| s * s).sum::<f32>() / f.len() as f32).sqrt();
+    let mut samples = capture.get_samples().await;
+    let mut frames: Vec<f32> = samples.chunks_exact(TAIL_FRAME).map(rms).collect();
+    if frames.len() < TAIL_QUIET_FRAMES {
+        return samples;
+    }
+    let threshold = tail_quiet_threshold(&frames);
+    let started = std::time::Instant::now();
+    while frames[frames.len() - TAIL_QUIET_FRAMES..]
+        .iter()
+        .any(|&f| f >= threshold)
+        && started.elapsed() < max_tail
+    {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let measured = frames.len() * TAIL_FRAME;
+        samples.extend(capture.get_samples().await);
+        frames.extend(samples[measured..].chunks_exact(TAIL_FRAME).map(rms));
+    }
+    let tail = started.elapsed();
+    if tail >= Duration::from_millis(20) {
+        tracing::info!("Kept recording {} ms past the stop", tail.as_millis());
+    }
+    samples
+}
+
 /// Check for meeting stop command (via file trigger)
 fn check_meeting_stop() -> bool {
     let stop_file = Config::runtime_dir().join("meeting_stop");
@@ -3240,7 +3290,13 @@ impl Daemon {
         // Stop recording before waiting on model loading or doing any
         // transcription work, then restore media immediately.
         if let Some(mut capture) = audio_capture.take() {
-            let stop_result = capture.stop().await;
+            let max_tail = Duration::from_millis(self.config.audio.stop_tail_ms.into());
+            let head = if max_tail.is_zero() {
+                Vec::new()
+            } else {
+                record_until_quiet(capture.as_mut(), max_tail).await
+            };
+            let stop_result = capture.stop().await.map(|rest| [head, rest].concat());
             self.restore_recording_media();
 
             self.play_feedback(SoundEvent::RecordingStop);
@@ -5140,6 +5196,21 @@ mod tests {
     use crate::config::{TranscriptionEngine, WhisperMode};
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_tail_quiet_threshold() {
+        // Too short to measure a floor: the cap
+        assert_eq!(tail_quiet_threshold(&[0.01; 10]), 0.05);
+        // Three times the 10th-percentile frame, ignoring digital silence
+        let mut frames = vec![0.0; 50];
+        frames.extend([0.004; 20]);
+        frames.extend([0.2; 80]);
+        assert!((tail_quiet_threshold(&frames) - 0.012).abs() < 1e-6);
+        // A noisy room still leaves the bar under quiet speech
+        assert_eq!(tail_quiet_threshold(&[0.03; 100]), 0.05);
+        // A gated mic that sends near-zeros gets the floor
+        assert_eq!(tail_quiet_threshold(&[0.0002; 100]), 0.001);
+    }
 
     /// Fallback output that records what it was handed.
     struct RecordingOutput {
