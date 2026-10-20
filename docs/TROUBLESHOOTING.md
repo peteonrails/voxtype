@@ -302,6 +302,12 @@ aplay test.wav
 max_duration_secs = 120  # 2 minutes
 ```
 
+### Meeting transcript has no remote participants
+
+**Cause:** Meeting mode records other participants through a PulseAudio/PipeWire monitor source via `pactl` and `parec`. When those tools, the PulseAudio server, or a monitor source are missing, the meeting records the microphone only. The daemon shows a "Meeting started with limitations" notification saying which one.
+
+**Solution:** Install `libpulse` (Arch) or `pulseaudio-utils` (Debian, Ubuntu, Fedora); on PipeWire, make sure `pipewire-pulse` is running; or set `[meeting.audio] loopback_device` to a source from `pactl list short sources`. See [Meeting Mode troubleshooting](MEETING_MODE.md#troubleshooting) for the other meeting notifications.
+
 ---
 
 ## Transcription Issues

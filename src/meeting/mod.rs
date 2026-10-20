@@ -107,6 +107,8 @@ pub struct MeetingDaemon {
     current_meeting: Option<MeetingData>,
     transcriber: Option<Arc<dyn Transcriber>>,
     diarizer: Option<Box<dyn diarization::Diarizer>>,
+    /// Why the configured diarization backend was replaced, for the user
+    diarization_notice: Option<String>,
     engine_name: String,
     event_tx: mpsc::Sender<MeetingEvent>,
     post_processor: Option<PostProcessor>,
@@ -127,8 +129,13 @@ impl MeetingDaemon {
         app_config: &crate::config::Config,
         event_tx: mpsc::Sender<MeetingEvent>,
     ) -> Result<Self> {
-        let storage = MeetingStorage::open(config.storage.clone())
-            .map_err(|e| MeetingError::Storage(e.to_string()))?;
+        let storage = MeetingStorage::open(config.storage.clone()).map_err(|e| {
+            MeetingError::Storage(format!(
+                "{} at {}. Check [meeting] storage_path",
+                e,
+                config.storage.storage_path.display()
+            ))
+        })?;
 
         let meeting_app_config = app_config.with_meeting_mode_overrides();
         let transcriber: Arc<dyn Transcriber> =
@@ -145,10 +152,12 @@ impl MeetingDaemon {
         });
 
         // Create diarizer if configured
+        let mut diarization_notice = None;
         let diarizer = config.diarization.as_ref().and_then(|diar_config| {
             if diar_config.enabled {
-                let d = diarization::create_diarizer(diar_config);
+                let (d, notice) = diarization::create_diarizer(diar_config);
                 tracing::info!("Meeting diarization enabled: {}", d.name());
+                diarization_notice = notice;
                 Some(d)
             } else {
                 None
@@ -162,12 +171,19 @@ impl MeetingDaemon {
             current_meeting: None,
             transcriber: Some(transcriber),
             diarizer,
+            diarization_notice,
             engine_name,
             event_tx,
             post_processor,
             last_chunk_text: HashMap::new(),
             source_offsets: HashMap::new(),
         })
+    }
+
+    /// Why the configured diarization backend could not be used, if it
+    /// could not. Speaker labels then come from the simple backend.
+    pub fn diarization_notice(&self) -> Option<&str> {
+        self.diarization_notice.as_deref()
     }
 
     /// Start a new meeting

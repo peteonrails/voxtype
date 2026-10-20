@@ -24,6 +24,7 @@ Meeting mode provides continuous transcription for meetings, lectures, interview
   - [Summarization Settings](#summarization-settings)
 - [Storage](#storage)
 - [Tips for Best Results](#tips-for-best-results)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -352,3 +353,25 @@ The `index.db` SQLite database stores meeting metadata for fast listing and look
 **Label speakers after the meeting.** Run `voxtype meeting list` to find the meeting ID, then use `voxtype meeting label` to assign names to auto-detected speaker IDs. This makes the exported transcript much more readable.
 
 **Export in multiple formats.** You can export the same meeting in different formats for different purposes: markdown for reading, JSON for processing in other tools, SRT/VTT for adding subtitles to a recording.
+
+---
+
+## Troubleshooting
+
+The daemon tells you with a desktop notification when a meeting cannot start or starts without something it needs. Each problem is also logged; see the full detail with `journalctl --user -u voxtype`.
+
+**"Meeting did not start".** The meeting was never created. The notification carries the error, for example a `[meeting] storage_path` that cannot be written or a transcription model that cannot be loaded. Fix the cause and run `voxtype meeting start` again.
+
+**"Meeting started with limitations".** The meeting is recording, but part of it will be missing. One notification lists every problem:
+
+| Message | Cause | Fix |
+|---------|-------|-----|
+| Remote audio is not recorded: pactl/parec is not installed | Loopback capture uses PulseAudio's command-line tools | Install `libpulse` (Arch) or `pulseaudio-utils` (Debian, Ubuntu, Fedora) |
+| Remote audio is not recorded: pactl could not list sources | No PulseAudio server answers | On PipeWire, install `pipewire-pulse` and run `systemctl --user enable --now pipewire-pulse.socket` |
+| Remote audio is not recorded: no monitor source was found | The audio server lists no `.monitor` source | Set `[meeting.audio] loopback_device` to a source from `pactl list short sources` |
+| Speaker labels fall back to mic/remote only | The ML diarization model is missing or failed to load, or the binary has no ML diarization | Run the download command in the notification, use an ONNX binary, or set `backend = "simple"` |
+| Echo cancellation is off | The GTCRN model is missing or failed to load | Run the download command in the notification, or set `[meeting.audio] echo_cancel = "disabled"` |
+
+Missing remote audio is reported at every meeting start, since every meeting loses that side of the conversation. Missing models are reported once per daemon run.
+
+**"Meeting transcription failed".** A chunk could not be transcribed, so that part of the meeting is missing from the transcript. The meeting keeps recording. Only the first failure in a meeting raises a notification; later ones are logged.

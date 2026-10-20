@@ -2192,6 +2192,30 @@ const ECAPA_MODEL_URL: &str =
     "https://huggingface.co/pranjal-pravesh/ecapa_tdnn_onnx/resolve/main/ecapa_tdnn.onnx";
 const ECAPA_MODEL_FILENAME: &str = "ecapa_tdnn.onnx";
 
+/// Shell command that downloads a model file into the models directory.
+#[cfg(any(feature = "onnx-common", feature = "ml-diarization"))]
+fn model_download_command(url: &str, filename: &str) -> String {
+    format!(
+        "curl -L --create-dirs -o '{}' {}",
+        Config::models_dir().join(filename).display(),
+        url
+    )
+}
+
+/// Command that installs the GTCRN echo-cancellation model by hand, for
+/// when the automatic download failed.
+#[cfg(feature = "onnx-common")]
+pub fn gtcrn_download_command() -> String {
+    model_download_command(GTCRN_MODEL_URL, GTCRN_MODEL_FILENAME)
+}
+
+/// Command that installs the ECAPA-TDNN speaker model by hand, for when
+/// the automatic download failed.
+#[cfg(feature = "ml-diarization")]
+pub fn ecapa_download_command() -> String {
+    model_download_command(ECAPA_MODEL_URL, ECAPA_MODEL_FILENAME)
+}
+
 /// Ensure the GTCRN speech enhancement model is downloaded.
 /// Returns the path to the model file if available, or None if download fails.
 pub fn ensure_gtcrn_model() -> Option<std::path::PathBuf> {
