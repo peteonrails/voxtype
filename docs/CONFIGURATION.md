@@ -379,7 +379,9 @@ sample_rate = 16000
 **Default:** `60`
 **Required:** No
 
-Maximum recording duration in seconds. Recording automatically stops after this limit as a safety measure. When the limit is reached, the captured audio is transcribed and output normally rather than being discarded.
+Maximum recording duration in seconds. Recording automatically stops after this limit as a safety measure. When the limit is reached, the captured audio is transcribed and output normally rather than being discarded, and a "Recording Limit Reached" notification says so. A "Recording Limit Approaching" notification comes first, 30 seconds before the limit (10 seconds for limits under two minutes, none under 30 seconds).
+
+Raise it for long dictations. A recording uses about 3.8 MB of memory per minute while it is captured. Parakeet transcribes recordings longer than 60 seconds in windows cut at pauses, so long recordings no longer hit the model's length limit.
 
 **Example:**
 ```toml

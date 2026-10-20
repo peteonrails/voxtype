@@ -120,6 +120,36 @@ pub fn chunk_boundaries(audio: &[f32], config: &EagerConfig) -> Vec<usize> {
     boundaries
 }
 
+/// Split a finished recording into windows no longer than `max_window`
+/// samples, for engines that cannot take the whole recording in one pass.
+///
+/// Audio that already fits comes back as a single `(0, len)` range, so short
+/// recordings take exactly the path they always did. Longer audio is cut the
+/// same way eager chunks are: contiguous, non-overlapping windows that end at
+/// the quietest stretch within `search` samples before each nominal boundary.
+/// The nominal length is what remains divided evenly over the windows still
+/// needed, so the last window is never a sliver, and every window stays
+/// within `max_window` because a cut never lands after its nominal boundary.
+pub fn long_audio_windows(audio: &[f32], max_window: usize, search: usize) -> Vec<(usize, usize)> {
+    let len = audio.len();
+    let max_window = max_window.max(2 * FRAME_SAMPLES);
+    if len <= max_window {
+        return vec![(0, len)];
+    }
+    let search = search.min(max_window / 2);
+    let mut windows = Vec::new();
+    let mut start = 0;
+    while len - start > max_window {
+        let remaining = len - start;
+        let nominal = start + remaining / remaining.div_ceil(max_window);
+        let cut = quietest_cut(audio, nominal - search, nominal).max(start + 1);
+        windows.push((start, cut));
+        start = cut;
+    }
+    windows.push((start, len));
+    windows
+}
+
 /// Sample range of chunk `index`, or None if that chunk isn't complete yet.
 pub fn chunk_range(boundaries: &[usize], index: usize) -> Option<(usize, usize)> {
     let end = *boundaries.get(index)?;
@@ -346,6 +376,55 @@ mod tests {
         let boundaries = chunk_boundaries(&audio, &test_config());
         assert_eq!(boundaries.len(), 2);
         assert!((3 * SR + SR / 2..=5 * SR).contains(&boundaries[0]));
+    }
+
+    #[test]
+    fn audio_that_fits_is_one_window() {
+        let audio = speech_with_gaps(30.0, &[10.0], 200);
+        assert_eq!(
+            long_audio_windows(&audio, 30 * SR, 5 * SR),
+            vec![(0, audio.len())]
+        );
+        assert_eq!(long_audio_windows(&[], 30 * SR, 5 * SR), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn long_audio_windows_are_contiguous_bounded_and_cover_everything() {
+        // 10 minutes of continuous "speech", the case #288 hit.
+        let audio = speech_with_gaps(600.0, &[], 0);
+        let max = 60 * SR;
+        let windows = long_audio_windows(&audio, max, 10 * SR);
+        assert_eq!(windows.first().unwrap().0, 0);
+        assert_eq!(windows.last().unwrap().1, audio.len());
+        for pair in windows.windows(2) {
+            assert_eq!(pair[0].1, pair[1].0, "windows must not overlap or gap");
+        }
+        for &(start, end) in &windows {
+            assert!(end > start);
+            assert!(end - start <= max, "window of {} samples", end - start);
+        }
+    }
+
+    #[test]
+    fn long_audio_cuts_land_in_pauses() {
+        // 150s with pauses near where 3 even windows would end (50s, 100s).
+        let audio = speech_with_gaps(150.0, &[46.0, 97.5], 300);
+        let windows = long_audio_windows(&audio, 60 * SR, 10 * SR);
+        assert_eq!(windows.len(), 3);
+        let cut1 = windows[0].1 as f32 / SR as f32;
+        let cut2 = windows[1].1 as f32 / SR as f32;
+        assert!((46.0..46.3).contains(&cut1), "first cut at {cut1}s");
+        assert!((97.5..97.8).contains(&cut2), "second cut at {cut2}s");
+    }
+
+    #[test]
+    fn long_audio_never_leaves_a_sliver_at_the_end() {
+        // Just over one window: split roughly in half, not 60s + 1s.
+        let audio = speech_with_gaps(61.0, &[], 0);
+        let windows = long_audio_windows(&audio, 60 * SR, 10 * SR);
+        assert_eq!(windows.len(), 2);
+        let last = windows[1].1 - windows[1].0;
+        assert!(last >= 25 * SR, "last window is {}s", last / SR);
     }
 
     #[test]

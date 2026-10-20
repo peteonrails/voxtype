@@ -112,6 +112,22 @@ async fn end_recording_notification(
     }
 }
 
+/// Time left before `max_duration` stops a recording, when it is close
+/// enough to warn about: 30s ahead for caps of two minutes or more, 10s for
+/// shorter ones, and never for caps under 30s, where a warning would arrive
+/// within seconds of starting to speak.
+fn cap_warning_due(elapsed: Duration, max_duration: Duration) -> Option<Duration> {
+    let lead = if max_duration >= Duration::from_secs(120) {
+        Duration::from_secs(30)
+    } else if max_duration >= Duration::from_secs(30) {
+        Duration::from_secs(10)
+    } else {
+        return None;
+    };
+    let left = max_duration.saturating_sub(elapsed);
+    (left <= lead).then_some(left)
+}
+
 /// Whether a transcription task's `JoinError` means the engine that ran it
 /// is suspect. A `JoinError` has exactly two causes: the daemon aborted the
 /// task (a cancel — our own doing, the engine is fine) or the task panicked
@@ -2242,6 +2258,85 @@ impl Daemon {
         }
     }
 
+    /// Tell the user the recording will stop soon because of the cap.
+    async fn warn_recording_cap(&self, left: Duration, max_duration: Duration) {
+        tracing::info!(
+            "Recording reaches the {:.0}s limit in {:.0}s",
+            max_duration.as_secs_f32(),
+            left.as_secs_f32()
+        );
+        send_notification_with_lifetime(
+            "Recording Limit Approaching",
+            &format!(
+                "Recording stops in {:.0}s (limit: audio.max_duration_secs = {}).",
+                left.as_secs_f32().ceil(),
+                max_duration.as_secs()
+            ),
+            self.config.output.notification.show_engine_icon,
+            self.config.engine,
+            &self.config.output.notification.urgency,
+            Lifetime::Millis(5000),
+        )
+        .await;
+    }
+
+    /// Tell the user the recording was cut off by the cap, not by them, and
+    /// how to raise it. Without this a long dictation just stopped.
+    async fn notify_recording_capped(&self, max_duration: Duration) {
+        send_notification_with_lifetime(
+            "Recording Limit Reached",
+            &format!(
+                "Stopped at {}s and transcribing what was captured. To record longer: \
+                 voxtype config set audio.max_duration_secs <SECS> (or --max-duration).",
+                max_duration.as_secs()
+            ),
+            self.config.output.notification.show_engine_icon,
+            self.config.engine,
+            "critical",
+            Lifetime::Millis(10000),
+        )
+        .await;
+    }
+
+    /// Save the audio of a recording whose transcription failed, so the
+    /// failure costs a retry instead of the whole dictation, and tell the
+    /// user where it is and how to retry it.
+    async fn keep_failed_recording(&self, state: &State) {
+        let State::Transcribing { audio } = state else {
+            return;
+        };
+        if audio.is_empty() {
+            return;
+        }
+        let audio = audio.clone();
+        let saved = tokio::task::spawn_blocking(move || crate::failed_recording::save(&audio))
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|r| r);
+        match saved {
+            Ok(path) => {
+                tracing::error!(
+                    "Recording saved to {}. Retry with: voxtype transcribe {}",
+                    path.display(),
+                    path.display()
+                );
+                send_notification_with_lifetime(
+                    "Transcription Failed",
+                    &format!(
+                        "Recording saved. Retry with:\nvoxtype transcribe {}",
+                        path.display()
+                    ),
+                    self.config.output.notification.show_engine_icon,
+                    self.config.engine,
+                    "critical",
+                    Lifetime::UntilClosed,
+                )
+                .await;
+            }
+            Err(e) => tracing::error!("Could not save the failed recording: {}", e),
+        }
+    }
+
     /// Tell the user a recording was discarded because VAD heard no speech.
     /// Logged at info and notified (unless `on_no_speech` is off): at debug
     /// it read as a hang, since nothing else happens after the stop.
@@ -3672,6 +3767,7 @@ impl Daemon {
             }
             Ok(Err(e)) => {
                 tracing::error!("Transcription failed: {}", e);
+                self.keep_failed_recording(state).await;
                 self.reset_to_idle(state).await;
             }
             Err(e) => {
@@ -3680,6 +3776,7 @@ impl Daemon {
                     tracing::debug!("Transcription task was cancelled");
                 } else {
                     tracing::error!("Transcription task panicked: {}", e);
+                    self.keep_failed_recording(state).await;
 
                     // spawn_blocking already kept the panic from reaching the
                     // daemon, so this is not about survival. It is about not
@@ -3758,6 +3855,39 @@ impl Daemon {
         crate::notification::send_sync(&title, &body);
     }
 
+    /// Say loudly, once per start, when this is a GPU build whose execution
+    /// provider cannot load (e.g. cuDNN missing for voxtype-onnx-cuda).
+    /// ONNX Runtime would otherwise fall back to CPU with only a raw dlopen
+    /// error in the journal, and dictation would just be slow for no
+    /// visible reason. Dictation keeps working on CPU either way.
+    fn warn_on_unloadable_gpu_provider(&self) {
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        let Some(missing) = crate::setup::gpu::unresolved_provider_deps_at(&exe) else {
+            return;
+        };
+        if missing.is_empty() {
+            return;
+        }
+        let binary = exe
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let fix = crate::setup::gpu::provider_fix_lines(&binary, &missing);
+        tracing::error!(
+            "GPU acceleration unavailable: {} cannot load its GPU execution provider \
+             (missing {}), falling back to CPU. {}",
+            binary,
+            missing.join(", "),
+            fix.join(" ")
+        );
+        crate::notification::send_sync(
+            "Voxtype: GPU unavailable, using CPU",
+            &format!("Missing {}.\n{}", missing.join(", "), fix.join("\n")),
+        );
+    }
+
     /// Run the daemon main loop
     pub async fn run(&mut self) -> Result<()> {
         tracing::info!("Starting voxtype daemon");
@@ -3775,6 +3905,7 @@ impl Daemon {
         // notify-send pops up where the user is actually looking. See
         // #450 — the silent v0.6.x to v0.7.0 wrapper-flip incident.
         self.warn_on_variant_mismatch();
+        self.warn_on_unloadable_gpu_provider();
 
         // Streaming dictation types characters at the cursor while the user is
         // still holding the PTT key. On Wayland compositors backed by libinput
@@ -4057,6 +4188,10 @@ impl Daemon {
         // deadline across iterations, so a missed tick fires on the next one.
         let mut recording_poll = tokio::time::interval(Duration::from_millis(100));
         recording_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Whether the current recording was already warned that it is nearing
+        // max_duration_secs. Re-arms whenever a recording is further than the
+        // warning lead from the cap, so it needs no per-session reset.
+        let mut cap_warned = false;
         let mut transcribing_poll = tokio::time::interval(Duration::from_millis(100));
         transcribing_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -4571,6 +4706,19 @@ impl Daemon {
                     // already gone so we don't re-fire cleanup on every 100ms
                     // tick while the streaming session drains server-side
                     // (state stays Streaming until Ended arrives).
+                    if let (true, Some(elapsed)) =
+                        (audio_capture.is_some(), state.recording_duration())
+                    {
+                        match cap_warning_due(elapsed, max_duration) {
+                            Some(left) if !cap_warned => {
+                                cap_warned = true;
+                                self.warn_recording_cap(left, max_duration).await;
+                            }
+                            Some(_) => {}
+                            None => cap_warned = false,
+                        }
+                    }
+
                     let timeout_fired = audio_capture.is_some()
                         && state.recording_duration().is_some_and(|d| d > max_duration);
                     if timeout_fired {
@@ -4590,6 +4738,7 @@ impl Daemon {
                                 max_duration.as_secs_f32()
                             );
                             self.stop_streaming_capture(&mut audio_capture).await;
+                            self.notify_recording_capped(max_duration).await;
                             continue;
                         }
 
@@ -4626,6 +4775,7 @@ impl Daemon {
                             };
 
                             self.update_state("transcribing");
+                            self.notify_recording_capped(max_duration).await;
 
                             if let Some(text) = self.finish_eager_recording(&mut state, transcriber).await {
                                 state = State::Transcribing { audio: Vec::new() };
@@ -4640,11 +4790,15 @@ impl Daemon {
                                 task.abort();
                             }
 
-                            self.start_transcription_task(
+                            // After the "Recording Stopped" notification this
+                            // posts, so it is not replaced by that one.
+                            if self.start_transcription_task(
                                 &mut state,
                                 &mut audio_capture,
                                 model_override,
-                            ).await;
+                            ).await {
+                                self.notify_recording_capped(max_duration).await;
+                            }
                         }
                     }
                 }
@@ -5962,6 +6116,21 @@ mod tests {
             assert!(!cleaned, "Lockfile with running PID should not be cleaned");
             assert!(lock_path.exists(), "Lockfile should still exist");
         });
+    }
+
+    #[test]
+    fn cap_warning_comes_once_the_lead_is_reached() {
+        let secs = Duration::from_secs;
+        // 600s cap: warn from 30s left.
+        assert_eq!(cap_warning_due(secs(500), secs(600)), None);
+        assert_eq!(cap_warning_due(secs(570), secs(600)), Some(secs(30)));
+        assert_eq!(cap_warning_due(secs(590), secs(600)), Some(secs(10)));
+        assert_eq!(cap_warning_due(secs(700), secs(600)), Some(secs(0)));
+        // Default 60s cap: warn from 10s left.
+        assert_eq!(cap_warning_due(secs(45), secs(60)), None);
+        assert_eq!(cap_warning_due(secs(50), secs(60)), Some(secs(10)));
+        // Very short caps never warn.
+        assert_eq!(cap_warning_due(secs(15), secs(20)), None);
     }
 
     #[test]

@@ -294,13 +294,25 @@ aplay test.wav
 
 ### Recording stops unexpectedly
 
-**Cause:** `max_duration_secs` limit reached.
+**Cause:** `max_duration_secs` limit reached. Voxtype shows a "Recording Limit Approaching" notification shortly before the limit (30 seconds before for limits of two minutes or more, 10 seconds before for shorter ones) and a "Recording Limit Reached" notification when it stops. What was captured up to the limit is still transcribed.
 
 **Solution:** Increase the limit:
 ```toml
 [audio]
 max_duration_secs = 120  # 2 minutes
 ```
+
+Or from the command line: `voxtype config set audio.max_duration_secs 1800`, or `voxtype --max-duration 1800` for a single daemon run.
+
+### Transcription failed and I lost my dictation
+
+A recording whose transcription fails is not thrown away. Voxtype saves it as a WAV file in `~/.local/state/voxtype/failed-audio/` (or `$XDG_STATE_HOME/voxtype/failed-audio/`), logs the path, and shows a "Transcription Failed" notification with the command to retry it:
+
+```bash
+voxtype transcribe ~/.local/state/voxtype/failed-audio/recording-20261020-143015.wav
+```
+
+The 20 most recent failed recordings are kept; older ones are removed automatically.
 
 ---
 
@@ -352,6 +364,34 @@ voxtype setup --download --model <model-name>
 ```
 
 Setup skips the compile when the model's cache blob already exists, so rerunning after a successful compile is cheap.
+
+### Parakeet fails on long recordings ("Attempting to broadcast an axis by a dimension other than 1")
+
+**Cause:** Older versions passed the whole recording to the Parakeet model in one call. The model's ONNX export only covers about 400 seconds of audio per call, so anything longer failed with an error in `/layers.0/self_attn/Add_2`, and long single calls were slow even below that limit.
+
+**Solution:** Upgrade. Parakeet now transcribes recordings longer than 60 seconds in windows of at most 60 seconds, cut at pauses, and joins the text. Shorter recordings are transcribed in one call as before. See also [Transcription failed and I lost my dictation](#transcription-failed-and-i-lost-my-dictation).
+
+### ONNX engines run on CPU despite an NVIDIA GPU (cuDNN missing)
+
+**Symptoms:** `voxtype-onnx-cuda` is installed and selected, but transcription is slow, and the journal shows:
+
+```
+Failed to load library /usr/lib/voxtype/cuda-13/libonnxruntime_providers_cuda.so with error: libcudnn.so.9: cannot open shared object file
+```
+
+**Cause:** ONNX Runtime's CUDA execution provider links against cuDNN 9, which is a separate package from the CUDA toolkit. Without it the provider cannot load and every ONNX engine (Parakeet, Moonshine, SenseVoice and the rest) runs on CPU.
+
+Voxtype reports this at daemon start with a "GPU unavailable, using CPU" notification, in `voxtype info accel` (state `cpu-fallback` with `fix:` lines), and in `voxtype setup gpu --status`.
+
+**Solution:** Install cuDNN 9, then restart the daemon (`systemctl --user restart voxtype`):
+
+```bash
+# Arch
+sudo pacman -S cudnn
+
+# Debian/Ubuntu/Fedora: from NVIDIA's CUDA repository, matching your variant
+sudo apt install libcudnn9-cuda-12   # or libcudnn9-cuda-13 for voxtype-onnx-cuda-13
+```
 
 ### Voxtype crashes during transcription (Linux)
 
