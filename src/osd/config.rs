@@ -309,31 +309,32 @@ pub struct OsdConfig {
     pub height_px: u32,
     /// Anchor on the focused output.
     pub position: OsdPosition,
-    /// Margin from the screen edge in physical pixels. Used for corner
-    /// anchors (`top-left`, `bottom-right`, etc.) and as a fallback for
-    /// centered anchors. Centered anchors (`bottom-center`, `top-center`)
-    /// prefer `top_margin` (fractional) so v0.7.0 ships swayosd-aligned
-    /// vertical positioning out of the box; this field still sets the
-    /// horizontal margin for corner anchors.
+    /// Distance from the screen edges in logical pixels. Corner anchors
+    /// (`top-left`, `bottom-right`, etc.) sit exactly this far from both
+    /// edges. For centered anchors it is the minimum distance from the top
+    /// and bottom edges: `top_margin` can never push the card closer.
     pub margin_px: u32,
-    /// Vertical position of the OSD's top edge as a fraction of the
-    /// monitor's height, mirroring `swayosd-server --top-margin`. Default
-    /// 0.85 puts the panel just above the bottom of the screen, matching
-    /// the swayosd default so the voxtype OSD lands in the same band as
-    /// volume/brightness/media-key feedback users are used to. Only
-    /// applied when `position` is `bottom-center` or `top-center` —
-    /// corner anchors keep using `margin_px`.
+    /// Vertical position of the OSD's top edge as a fraction of the height
+    /// of the output it is shown on (the focused one), mirroring
+    /// `swayosd-server --top-margin`. Default 0.85 puts the panel just
+    /// above the bottom of the screen, in the same band as swayosd's
+    /// volume/brightness feedback. Only applied to centered anchors. For
+    /// `top-center`, a value above 0.5 is mirrored (0.85 gives the same
+    /// distance from the top that `bottom-center` keeps from the bottom).
+    /// See `osd::placement::card_top`.
     pub top_margin: f32,
-    /// Background opacity, 0.0..=1.0.
+    /// Opacity of the OSD card, 0.0..=1.0. Constant while the card is shown.
     pub opacity: f32,
     /// Visible waveform window in seconds (3.0 per BRIEF).
     pub waveform_window_secs: f32,
-    /// Held-peak decay rate in dB/sec (6.0 per BRIEF).
+    /// How fast the peak meter's held-peak tick falls back, in dB/sec
+    /// (6.0 per BRIEF). Only affects the tick, not the waveform.
     pub peak_decay_db_per_sec: f32,
-    /// Visual gain applied to audio samples before drawing the waveform.
-    /// Mic-level voice typically peaks at ~0.1..=0.3 of full-scale; gain
-    /// scales that up so the envelope fills the available height. 10.0 is
-    /// the default; reduce for hot mics, increase for quiet sources.
+    /// Waveform sensitivity. The waveform shows absolute input level on a
+    /// fixed dB scale (-48 dBFS at the centerline, 0 dBFS at the edge),
+    /// with no auto-gain. This shifts that scale: 10.0 is neutral and each
+    /// doubling shows the input 6 dB louder (20.0 = +6 dB, 5.0 = -6 dB).
+    /// The waveform never draws outside the card at any value.
     pub waveform_gain: f32,
     /// Which OSD frontend the `voxtype-osd` wrapper launches. Defaults to
     /// `Gtk4` since GTK4 ships with most Hyprland setups already.

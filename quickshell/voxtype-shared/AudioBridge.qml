@@ -72,6 +72,12 @@ Item {
     /// the daemon).
     property var tsMs: 0
 
+    /// Signed sample range of the latest frame (-1..1), for drawing the
+    /// waveform envelope. Older bridges don't send it; then it mirrors
+    /// the peak.
+    property real sampleMin: 0.0
+    property real sampleMax: 0.0
+
     /// Emitted on every parsed audio frame. Consumers that need the
     /// full history (waveform renderer) should push to their own ring
     /// buffer in this handler.
@@ -113,6 +119,8 @@ Item {
             root.rms = obj.rms;
             root.vad = !!obj.vad;
             root.tsMs = obj.ts_ms !== undefined ? obj.ts_ms : 0;
+            root.sampleMin = typeof obj.min === "number" ? obj.min : -obj.peak;
+            root.sampleMax = typeof obj.max === "number" ? obj.max : obj.peak;
             if (!root.running) {
                 root.running = true;
             }

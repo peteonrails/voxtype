@@ -3875,6 +3875,65 @@ symlink is what puts the sidecar on PATH where the QML expects it. Pass
 `--skip-bridge` if your install already has the bridge on PATH. See the
 [user manual](USER_MANUAL.md#voxtype-setup-quickshell) for details.
 
+### OSD placement and waveform
+
+These keys apply to every frontend.
+
+```toml
+[osd]
+position = "bottom-center"   # bottom-center, top-center, bottom-left,
+                             # bottom-right, top-left, top-right
+margin_px = 24               # gap from the screen edges, logical pixels
+top_margin = 0.85            # centered positions: top edge as a fraction
+                             # of the output's height (like swayosd)
+waveform_gain = 10.0         # waveform sensitivity, 10 = neutral
+peak_decay_db_per_sec = 6.0  # how fast the level meter's held-peak tick falls
+opacity = 0.95               # card opacity, constant while shown
+```
+
+The OSD appears on the focused output and is placed using only that output's
+size, in its logical pixels, so monitors with different resolutions, scales
+or offsets each get the same relative placement.
+
+- **Corner positions** sit `margin_px` from both edges they are anchored to.
+- **`bottom-center`** puts the card's top edge at `top_margin` of the
+  output's height. With the default 0.85 the card sits in the same band as
+  swayosd's volume and brightness popups.
+- **`top-center`** uses `top_margin` the same way when it is 0.5 or less.
+  A larger value (such as the 0.85 default) is mirrored, so the card keeps
+  the same distance from the top edge that `bottom-center` keeps from the
+  bottom one.
+- With any position, `margin_px` is the minimum gap to the top and bottom
+  edges, so `top_margin` can never push the card off the screen.
+
+The waveform shows the absolute input level on a fixed decibel scale: the
+centerline is -48 dBFS (a typical mic's noise floor sits below it, so
+silence is flat) and the card's edge is 0 dBFS, the loudest input the mic
+can produce. Normal speech lands around mid-height, louder speech draws
+taller, and only input close to clipping reaches the edge. There is no
+automatic gain, so the height always reflects how loud the mic actually is.
+
+`waveform_gain` shifts that scale. 10 is neutral; every doubling shows the
+input 6 dB louder (20 = +6 dB, 40 = +12 dB) and every halving 6 dB quieter
+(5 = -6 dB). Raise it for a quiet mic, lower it for a hot one. The waveform
+never draws outside the card at any value. Earlier versions multiplied
+the raw samples by this key, which pushed everything above -20 dBFS (most speech) off
+the card; an old config that keeps the default 10 gets the new scale
+unchanged.
+
+The waveform scrolls at a constant 100 frames per second of wall time, a
+fixed 50 ms behind the newest audio so capture batches arriving in bursts
+don't make it stutter. Each moment of audio keeps its shape as it scrolls.
+
+The level meter uses the same scale, so a loudness that reaches half the
+waveform's height fills half the meter. It moves on every display frame:
+it rises within about 15 ms of a louder sound and falls back over about
+300 ms. Its held-peak tick marks the loudest recent peak and falls at
+`peak_decay_db_per_sec`.
+
+`opacity` sets the card's opacity, which stays the same while the card is
+shown: it no longer dims between words or pulses with your voice.
+
 ### Quickshell OSD customization
 
 The Quickshell frontend can customize the whole OSD without editing VoxType's
@@ -3950,6 +4009,14 @@ gradient stops keep the `warning`/`error` roles; on `shadow` layers,
 `layout` controls the outer OSD frame. `compact`, `wide`, and `minimal` are
 strip layouts; `tile` is a square card; `orb` is a circular frame intended for
 ring-focused recipes.
+
+With the defaults (`style = "default"`, `layout = "compact"`, no
+`[[osd.visual.layers]]` of your own), the Quickshell frontend draws the same
+card as the GTK4 and native frontends: a `width_px` by `height_px` card with
+the waveform on the left and a ten-segment level meter on the right, in the
+same theme colors, shown while audio arrives and hidden 150 ms after it
+stops. Picking another style or layout, or writing your own visual layers,
+switches to the recipe renderer described above.
 
 `[osd.frame]` controls the host frame around the recipe. Set
 `background = "none"` or `border = "none"` for frameless recipes; the visual
