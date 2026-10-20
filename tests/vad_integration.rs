@@ -270,7 +270,7 @@ fn create_vad_energy_backend_explicit() {
 
     // Verify it works with test audio
     let samples = load_wav("silence_2s.wav");
-    let result = vad.unwrap().detect(&samples).unwrap();
+    let result = vad.unwrap().detector.detect(&samples).unwrap();
     assert!(!result.has_speech);
 }
 

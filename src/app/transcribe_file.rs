@@ -62,8 +62,13 @@ pub(crate) fn transcribe_file(config: &config::Config, path: &PathBuf) -> anyhow
     );
 
     // Run VAD if enabled
-    if let Ok(Some(vad)) = vad::create_vad(config) {
-        match vad.detect(&final_samples) {
+    let vad = vad::create_vad(config).unwrap_or_else(|e| {
+        eprintln!("{}", vad::unavailable_notice(&config.vad, &e).1);
+        None
+    });
+    if let Some(vad) = vad {
+        println!("VAD backend: {:?}", vad.backend);
+        match vad.detector.detect(&final_samples) {
             Ok(result) => {
                 println!(
                     "VAD: {:.2}s speech ({:.1}% of audio)",

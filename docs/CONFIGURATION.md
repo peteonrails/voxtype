@@ -3098,10 +3098,10 @@ voxtype --vad daemon
 VAD detection algorithm to use:
 
 - `auto` - Automatically select based on transcription engine:
-  - Whisper engine: uses Whisper VAD (more accurate, requires model)
-  - Parakeet engine: uses Energy VAD (fast, no model needed)
+  - Whisper engine: uses Whisper VAD (more accurate, requires model). If the Silero model is missing or fails to load, falls back to Energy VAD and logs a warning.
+  - Other engines: use Energy VAD (fast, no model needed)
 - `energy` - Simple RMS energy-based detection. Fast and works with any engine, no model download required.
-- `whisper` - Silero VAD via whisper-rs. More accurate speech detection but requires downloading the VAD model with `voxtype setup vad`.
+- `whisper` - Silero VAD via whisper-rs. More accurate speech detection but requires downloading the VAD model with `voxtype setup vad`. If the model is missing or fails to load, the daemon runs without VAD and shows a desktop notification at startup with the fix.
 
 **Example:**
 ```toml
