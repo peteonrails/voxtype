@@ -44,7 +44,12 @@ PanelWindow {
     /// visual recipe layers, and optional custom QML package entry.
     property var style: null
 
-    visible: !osdSuppressed && daemonState !== "idle" && daemonState !== ""
+    // The classic card shows while audio frames arrive and hides 150 ms
+    // after they stop, like the GTK4 and native frontends. Recipe styles
+    // follow the daemon state.
+    visible: !osdSuppressed && (classicCard
+        ? framesFresh
+        : daemonState !== "idle" && daemonState !== "")
     anchors {
         top: true
         bottom: true
@@ -121,7 +126,11 @@ PanelWindow {
     WlrLayershell.namespace: "voxtype-osd"
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
-    exclusionMode: ExclusionMode.Ignore
+    // The classic card spans the output's usable height (between bars),
+    // like the GTK4 and native surfaces with exclusive zone 0, so all
+    // three place it at the same spot.
+    exclusionMode: classicCard ? ExclusionMode.Normal : ExclusionMode.Ignore
+    exclusiveZone: 0
 
     // Subtract the whole panel area from the input region, so pointer
     // events fall through to windows underneath instead of getting
@@ -148,6 +157,12 @@ PanelWindow {
     // (no change signal per frame); the renderer reads it on every paint.
     // Holds the visible window plus the playout delay on both sides.
     property var ring: []
+    // Signed sample range per frame, parallel to `ring`.
+    property var ringMin: []
+    property var ringMax: []
+    // Classic card: true while frames keep arriving (see frameIdleTimer).
+    property bool framesFresh: false
+    readonly property bool classicCard: !!(style && style.config && style.config.classic_card)
     // Frames received this recording, and the wall-clock origin of the
     // scroll clock. Together they place every frame at a fixed position in
     // time, so the waveform scrolls at a constant rate and past audio never
@@ -265,6 +280,7 @@ PanelWindow {
     }
 
     function _cardWidth() {
+        if (classicCard) return Math.max(1, _styleNumber("width_px", VT.Theme.defaultWidthPx));
         const layout = _styleLayout();
         if (layout === "wide") return Math.max(VT.Theme.defaultWidthPx, 560);
         if (layout === "minimal") return Math.min(VT.Theme.defaultWidthPx, 260);
@@ -274,6 +290,7 @@ PanelWindow {
     }
 
     function _cardHeight() {
+        if (classicCard) return Math.max(1, _styleNumber("height_px", VT.Theme.defaultHeightPx));
         const layout = _styleLayout();
         if (layout === "minimal") return 48;
         if (layout === "tile") return 176;
@@ -282,6 +299,7 @@ PanelWindow {
     }
 
     function _cardRadius() {
+        if (classicCard) return 0;
         const layout = _styleLayout();
         if (layout === "orb") return Math.round(_cardWidth() / 2);
         if (layout === "tile") return 18;
@@ -343,12 +361,15 @@ PanelWindow {
 
     function _resetMeters() {
         ring = [];
+        ringMin = [];
+        ringMax = [];
         framesReceived = 0;
         clockOriginMs = -1;
         currentPeakDbfs = -120;
         currentPeak = 0;
         currentRms = 0;
         recipeRenderer.resetMeter();
+        classicRenderer.resetMeter();
         recipeRenderer.repaint();
     }
 
@@ -365,19 +386,39 @@ PanelWindow {
             // bursts still scroll smoothly. Batch arrivals never move the
             // clock; only an underrun re-anchors it, resuming where the
             // display stopped instead of jumping.
+            // A new burst after the classic card went idle is a new
+            // recording: start from an empty window, like FrameRing does
+            // on a sequence break.
+            if (panel.classicCard && !panel.framesFresh) panel._resetMeters();
             const now = Date.now();
             if (panel.clockOriginMs < 0) panel.clockOriginMs = now;
             const elapsed = (now - panel.clockOriginMs) / 10;
             if (elapsed > panel.framesReceived + panel.playoutDelayFrames) {
                 const stoppedAt = Math.max(0, panel.framesReceived - 1);
                 panel.clockOriginMs = now - (stoppedAt + panel.playoutDelayFrames) * 10;
+            } else if (elapsed < panel.framesReceived - 4 * panel.playoutDelayFrames) {
+                // A backlog (frames queued in the bridge's pipe while QML was
+                // busy, e.g. at startup) arrived faster than real time. Catch
+                // the clock up rather than trailing the meter for good.
+                panel.clockOriginMs = now - Math.max(0, panel.framesReceived - 1) * 10;
             }
 
             const r = panel.ring;
+            const rMin = panel.ringMin;
+            const rMax = panel.ringMax;
             r.push(peak);
+            rMin.push(panel.audio.sampleMin);
+            rMax.push(panel.audio.sampleMax);
             const capacity = panel.waveformColumns + 2 * panel.playoutDelayFrames + 2;
-            if (r.length > capacity) r.splice(0, r.length - capacity);
+            if (r.length > capacity) {
+                const extra = r.length - capacity;
+                r.splice(0, extra);
+                rMin.splice(0, extra);
+                rMax.splice(0, extra);
+            }
             panel.framesReceived += 1;
+            panel.framesFresh = true;
+            frameIdleTimer.restart();
             // No repaint here: the renderer repaints on every display frame
             // while the OSD is visible.
         }
@@ -434,7 +475,7 @@ PanelWindow {
 
     MultiEffect {
         id: frameGlow
-        visible: !panel.customActive && panel._frameGlowEnabled() && !panel._isOrbLayout()
+        visible: !panel.customActive && !panel.classicCard && panel._frameGlowEnabled() && !panel._isOrbLayout()
         anchors.centerIn: card
         width: frameGlowSource.width
         height: frameGlowSource.height
@@ -456,7 +497,7 @@ PanelWindow {
 
     Rectangle {
         id: frameHalo
-        visible: !panel.customActive && panel._frameHaloEnabled() && !panel._isOrbLayout()
+        visible: !panel.customActive && !panel.classicCard && panel._frameHaloEnabled() && !panel._isOrbLayout()
         width: card.width + 3
         height: card.height + 3
         anchors.centerIn: card
@@ -541,15 +582,36 @@ PanelWindow {
         x: panel._cardX()
         y: panel._cardY()
         radius: panel._cardRadius()
-        color: panel._frameBackgroundColor()
-        border.width: panel._frameBorderWidth()
+        // The classic card's background is painted by the renderer, so
+        // it matches the GTK4 card pixel for pixel.
+        color: panel.classicCard ? "transparent" : panel._frameBackgroundColor()
+        border.width: panel.classicCard ? 0 : panel._frameBorderWidth()
         border.color: panel._frameBorderColor()
         // `[osd] opacity`, constant while shown. It used to drop to 0.78
         // whenever the bridge's voice-activity flag (peak above -40 dBFS)
         // was off, which flickered between words.
         opacity: panel._styleOpacity()
 
+        VT.RecipeRenderer {
+            id: classicRenderer
+            visible: panel.classicCard
+            anchors.fill: parent
+            classic: true
+            style: panel.style
+            ring: panel.ring
+            ringMin: panel.ringMin
+            ringMax: panel.ringMax
+            framesReceived: panel.framesReceived
+            clockOriginMs: panel.clockOriginMs
+            playoutDelayFrames: panel.playoutDelayFrames
+            peakDecayDbPerSec: panel._styleNumber("peak_decay_db_per_sec", VT.Theme.peakDecayDbPerSec)
+            daemonState: panel.daemonState
+            waveformColumns: panel.waveformColumns
+            waveformGain: panel._styleWaveformGain()
+        }
+
         Row {
+            visible: !panel.classicCard
             anchors.fill: parent
             anchors.leftMargin: panel._isBlockLayout() ? 0 : VT.Theme.padding
             anchors.rightMargin: panel._isBlockLayout() ? 0 : VT.Theme.padding
@@ -602,5 +664,13 @@ PanelWindow {
                 }
             }
         }
+    }
+
+    // Hide the classic card 150 ms after the last frame, as GTK4 does.
+    Timer {
+        id: frameIdleTimer
+        interval: 150
+        repeat: false
+        onTriggered: panel.framesFresh = false
     }
 }

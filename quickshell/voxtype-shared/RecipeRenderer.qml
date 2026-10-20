@@ -7,6 +7,12 @@ Item {
 
     property var style: null
     property var ring: []
+    // Signed sample range per frame, parallel to `ring` (classic card).
+    property var ringMin: []
+    property var ringMax: []
+    // Draw the classic card: a port of the GTK4 frontend's drawing
+    // (src/bin/voxtype_osd_gtk4.rs) instead of the recipe layers.
+    property bool classic: false
     // Scroll clock from the host (see OsdSurface.qml): frames received
     // this recording and the wall-clock origin, 100 frames per second.
     property int framesReceived: 0
@@ -609,6 +615,127 @@ Item {
         ctx.restore();
     }
 
+    // ---- Classic card: mirrors draw(), draw_waveform() and
+    // draw_peak_meter() in src/bin/voxtype_osd_gtk4.rs. Keep them in step.
+
+    function _withAlpha(role, fallback, alpha) {
+        return _rgbaString(_colorComponents(_color(role, fallback)), alpha);
+    }
+
+    function _drawClassic(ctx, w, h) {
+        if (w <= 0 || h <= 0) return;
+        ctx.save();
+        ctx.fillStyle = _color("background", "rgba(26, 26, 31, 0.85)");
+        ctx.fillRect(0, 0, w, h);
+        // Waveform on the left, a 1% gap, the meter on the right (7%).
+        const meterW = Math.max(8, w * 0.07);
+        const gap = Math.max(2, w * 0.01);
+        const waveW = Math.max(0, w - meterW - gap);
+        _drawClassicWaveform(ctx, 0, 0, waveW, h);
+        _drawClassicMeter(ctx, waveW + gap, 0, meterW, h);
+        ctx.restore();
+    }
+
+    // Mirrored envelope: the top edge follows each frame's max, the bottom
+    // edge its min, on the shared dB scale, filled in the accent color.
+    // One pixel column per pixel like GTK4, so the frame at absolute index
+    // a sits at x + 0.5 + (n - 1) - (right - a) * (n - 1) / window.
+    function _drawClassicWaveform(ctx, x, y, w, h) {
+        const n = Math.floor(w);
+        if (n < 2) return;
+        const mid = y + h * 0.5;
+        const half = h * 0.5;
+        const r = ring || [];
+        const rMin = ringMin || [];
+        const rMax = ringMax || [];
+        if (r.length > 1 && _scrollPosition >= 0 && rMin.length === r.length && rMax.length === r.length) {
+            const pxPerFrame = (n - 1) / Math.max(1, waveformColumns);
+            const firstIndex = framesReceived - r.length;
+            const xs = [];
+            const tops = [];
+            const bottoms = [];
+            for (let k = 0; k < r.length; k++) {
+                const px = x + 0.5 + (n - 1) - (_scrollPosition - (firstIndex + k)) * pxPerFrame;
+                if (px < x - pxPerFrame || px > x + w + pxPerFrame) continue;
+                xs.push(px);
+                tops.push(mid - _signedLevel(rMax[k]) * half);
+                bottoms.push(mid - _signedLevel(rMin[k]) * half);
+            }
+            if (xs.length > 1) {
+                ctx.save();
+                ctx.beginPath();
+                ctx.rect(x, y, w, h);
+                ctx.clip();
+                ctx.fillStyle = _color("accent", "#66c7ff");
+                ctx.beginPath();
+                ctx.moveTo(xs[0], tops[0]);
+                for (let i = 1; i < xs.length; i++) ctx.lineTo(xs[i], tops[i]);
+                for (let i = xs.length - 1; i >= 0; i--) ctx.lineTo(xs[i], bottoms[i]);
+                ctx.closePath();
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+        // Subtle centerline.
+        ctx.strokeStyle = _withAlpha("foreground", "#ebebf2", 0.15);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x, mid);
+        ctx.lineTo(x + w, mid);
+        ctx.stroke();
+    }
+
+    function _signedLevel(sample) {
+        const level = _displayLevel(sample, waveformGain);
+        return sample < 0 ? -level : level;
+    }
+
+    // osd::visual::MeterZone: red from -3 dBFS, yellow from -12.
+    function _zoneRole(dbfs) {
+        if (dbfs >= -3) return "error";
+        if (dbfs >= -12) return "warning";
+        return "success";
+    }
+
+    function _levelDbfs(level) {
+        const shift = isFinite(waveformGain) && waveformGain > 0 ? 20 * Math.log10(waveformGain / 10) : 0;
+        return waveformFloorDbfs * (1 - _clamp(level, 0, 1)) - shift;
+    }
+
+    // Ten vertical segments, lit as far as the level reaches, plus the
+    // held-peak tick.
+    function _drawClassicMeter(ctx, x, y, w, h) {
+        if (w < 1 || h < 1) return;
+        const fill = _clamp(_meterLevel, 0, 1);
+        const held = _dbfsLevel(_heldDbfs, waveformGain);
+        const segments = 10;
+        const gap = 1.5;
+        const segH = Math.max(1, (h - gap * (segments - 1)) / segments);
+        const fallbacks = { "success": "#4dd973", "warning": "#f2cc4d", "error": "#f2594d" };
+        for (let i = 0; i < segments; i++) {
+            const fracBottom = i / segments;
+            const fracTop = (i + 1) / segments;
+            const role = _zoneRole(_levelDbfs(fracTop));
+            const py = y + h - (i + 1) * segH - i * gap;
+            ctx.fillStyle = _withAlpha(role, fallbacks[role], 0.18);
+            ctx.fillRect(x, py, w, segH);
+            const lit = _clamp((fill - fracBottom) / (fracTop - fracBottom), 0, 1);
+            if (lit > 0) {
+                ctx.fillStyle = _color(role, fallbacks[role]);
+                ctx.fillRect(x, py + segH * (1 - lit), w, segH * lit);
+            }
+        }
+        if (held > 0) {
+            const py = y + h - held * h;
+            ctx.strokeStyle = _withAlpha("foreground", "#ebebf2", 0.95);
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(x, py);
+            ctx.lineTo(x + w, py);
+            ctx.stroke();
+        }
+    }
+
     function repaint() {
         canvas.requestPaint();
     }
@@ -616,7 +743,7 @@ Item {
     // Runs once per rendered display frame, so motion follows the display's
     // refresh rate rather than a fixed timer or socket deliveries.
     FrameAnimation {
-        running: root.visible && root.daemonState !== "idle"
+        running: root.visible && (root.classic || root.daemonState !== "idle")
         onTriggered: {
             const dt = Math.min(0.05, Math.max(0.001, frameTime));
             root._advance(dt);
@@ -641,6 +768,10 @@ Item {
         onPaint: {
             const ctx = getContext("2d");
             ctx.clearRect(0, 0, width, height);
+            if (root.classic) {
+                root._drawClassic(ctx, width, height);
+                return;
+            }
             const layers = root._sortedLayers;
             for (let i = 0; i < layers.length; i++) {
                 const layer = layers[i];
