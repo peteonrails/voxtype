@@ -35,6 +35,32 @@ pub struct VariantMismatch {
     pub remediation: Remediation,
 }
 
+impl VariantMismatch {
+    /// One-paragraph explanation plus fix, shared by the daemon's startup
+    /// notification and `voxtype doctor`.
+    pub fn explanation(&self) -> String {
+        let active = self
+            .active_variant_name
+            .as_deref()
+            .unwrap_or("the running binary");
+        match &self.remediation {
+            Remediation::SwitchToVariant { target } => format!(
+                "{} was built without --features {}. \
+                 Run `sudo voxtype setup onnx --enable` (or open `voxtype configure` and press F2) \
+                 to switch to {}.",
+                active,
+                self.required_feature,
+                target.binary_name(),
+            ),
+            Remediation::Rebuild { feature } => format!(
+                "This source build was compiled without --features {}. \
+                 Rebuild voxtype with that feature to enable the {} engine.",
+                feature, self.configured_engine,
+            ),
+        }
+    }
+}
+
 /// How to fix the mismatch, tailored to how voxtype was installed.
 ///
 /// `Source` and `Package` are very different recovery paths: package users

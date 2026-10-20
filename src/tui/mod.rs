@@ -60,6 +60,13 @@ pub fn probe_audio_devices() {
     audio::print_input_devices();
 }
 
+/// List input devices through the same crash- and hang-proof subprocess the
+/// TUI uses. `None` when the probe failed or timed out.
+pub fn list_input_devices_isolated() -> Option<Vec<String>> {
+    let exe = std::env::current_exe().ok()?;
+    audio::probe_input_devices_via_subprocess(&exe)
+}
+
 /// Launch the TUI.
 ///
 /// `config_path` is the `-c/--config` value; when set, every section reads and

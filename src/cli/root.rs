@@ -23,6 +23,7 @@ QUICK START:
   voxtype setup model         Interactive model selection
   voxtype setup gpu           Manage GPU acceleration
   voxtype status --follow     Watch daemon status (Waybar integration)
+  voxtype doctor              Check the setup and show how to fix problems
 
 See 'voxtype --help' for all options or 'man voxtype' for full docs.")]
 #[command(after_long_help = "\
@@ -35,6 +36,7 @@ QUICK START:
   voxtype record cancel       Cancel current recording
   voxtype status              Show daemon status
   voxtype setup               Check dependencies and download models
+  voxtype doctor              Check the setup and show how to fix problems
   voxtype config              Show current configuration
 
 EXAMPLES:

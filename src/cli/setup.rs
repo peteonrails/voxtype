@@ -4,7 +4,10 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum SetupAction {
-    /// Check system configuration and dependencies
+    /// Check system configuration and dependencies (same report as `voxtype doctor`)
+    ///
+    /// Kept for existing scripts and docs. Always exits 0; use `voxtype
+    /// doctor` for a non-zero exit status on failures, or `--json` output.
     Check,
 
     /// Interactive macOS setup wizard
