@@ -88,7 +88,25 @@ impl ParecCapture {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| AudioError::Connection(format!("Failed to start parec: {}", e)))?;
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    AudioError::Connection(PAREC_NOT_FOUND.to_string())
+                } else {
+                    AudioError::Connection(format!("Failed to start parec: {}", e))
+                }
+            })?;
+
+        // parec exits at once when it cannot reach a PulseAudio server or the
+        // source does not exist. Give it a moment so that failure surfaces
+        // here, at meeting start, rather than as a transcript with no remote
+        // side.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(AudioError::Connection(format!(
+                "parec could not record from '{}' ({})",
+                self.source, status
+            )));
+        }
 
         let mut stdout = child
             .stdout
@@ -167,6 +185,64 @@ impl Drop for ParecCapture {
     }
 }
 
+/// Error text for a missing `parec`, matched by `LoopbackIssue::from_start_error`.
+const PAREC_NOT_FOUND: &str = "parec not found";
+
+/// Why a meeting records only the microphone although loopback was requested.
+///
+/// Without loopback the remote participants vanish from the transcript, so
+/// the daemon tells the user at meeting start, with the fix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoopbackIssue {
+    /// `pactl` is not installed, so no monitor source could be detected.
+    PactlMissing,
+    /// `pactl` ran but could not list sources (usually no PulseAudio server).
+    PactlFailed(String),
+    /// The audio server lists no `.monitor` source.
+    NoMonitorSource,
+    /// `parec` is not installed.
+    ParecMissing,
+    /// `parec` started but could not record from the source.
+    ParecFailed(String),
+}
+
+impl LoopbackIssue {
+    fn from_start_error(error: &AudioError) -> Self {
+        match error {
+            AudioError::Connection(text) if text == PAREC_NOT_FOUND => LoopbackIssue::ParecMissing,
+            AudioError::Connection(text) => LoopbackIssue::ParecFailed(text.clone()),
+            other => LoopbackIssue::ParecFailed(other.to_string()),
+        }
+    }
+
+    /// User-facing text: what is wrong and how to fix it.
+    pub fn message(&self) -> String {
+        const INSTALL: &str = "Install pactl and parec (libpulse on Arch, \
+                               pulseaudio-utils on Debian, Ubuntu and Fedora).";
+        const SERVER: &str = "On PipeWire, install pipewire-pulse and run \
+                              `systemctl --user enable --now pipewire-pulse.socket`.";
+        const PICK: &str = "Set [meeting.audio] loopback_device to a monitor source \
+                            listed by `pactl list short sources`.";
+        match self {
+            LoopbackIssue::PactlMissing => {
+                format!("Remote audio is not recorded: pactl is not installed. {INSTALL}")
+            }
+            LoopbackIssue::PactlFailed(detail) => format!(
+                "Remote audio is not recorded: pactl could not list sources ({detail}). {SERVER}"
+            ),
+            LoopbackIssue::NoMonitorSource => {
+                format!("Remote audio is not recorded: no monitor source was found. {PICK}")
+            }
+            LoopbackIssue::ParecMissing => {
+                format!("Remote audio is not recorded: parec is not installed. {INSTALL}")
+            }
+            LoopbackIssue::ParecFailed(detail) => {
+                format!("Remote audio is not recorded: {detail}. {SERVER} {PICK}")
+            }
+        }
+    }
+}
+
 /// Where the microphone is recorded from.
 enum MicCapture {
     /// The configured device, via cpal/ALSA
@@ -187,6 +263,8 @@ pub struct DualCapture {
     meters: crate::meeting::levels::MeetingMeters,
     /// Feeds the microphone meter from the capture's chunk stream
     mic_meter_task: Option<tokio::task::JoinHandle<()>>,
+    /// Why loopback was requested but is not recording, if it isn't
+    loopback_issue: Option<LoopbackIssue>,
 }
 
 impl DualCapture {
@@ -250,15 +328,17 @@ impl DualCapture {
             .loopback
             .clone()
             .expect("created with a loopback meter");
+        let mut loopback_issue = None;
         let loopback = match loopback_device {
             Some("disabled") | Some("") | None => None,
             Some("auto") => match Self::find_monitor_source() {
-                Some(source) => {
+                Ok(source) => {
                     tracing::info!("Auto-detected loopback source: {}", source);
                     Some(ParecCapture::new(source, loopback_meter))
                 }
-                None => {
-                    tracing::warn!("No monitor source found, using mic only");
+                Err(issue) => {
+                    tracing::warn!("Using mic only: {}", issue.message());
+                    loopback_issue = Some(issue);
                     None
                 }
             },
@@ -277,15 +357,35 @@ impl DualCapture {
             sample_counter: 0,
             meters,
             mic_meter_task: None,
+            loopback_issue,
         })
     }
 
-    /// Find a PipeWire/PulseAudio monitor source via pactl.
-    fn find_monitor_source() -> Option<String> {
+    /// Find a PipeWire/PulseAudio monitor source via pactl, or why there
+    /// is none.
+    fn find_monitor_source() -> Result<String, LoopbackIssue> {
         let sources = std::process::Command::new("pactl")
             .args(["list", "short", "sources"])
             .output()
-            .ok()?;
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    LoopbackIssue::PactlMissing
+                } else {
+                    LoopbackIssue::PactlFailed(e.to_string())
+                }
+            })?;
+
+        if !sources.status.success() {
+            let stderr = String::from_utf8_lossy(&sources.stderr);
+            let detail = stderr
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| sources.status.to_string());
+            return Err(LoopbackIssue::PactlFailed(detail));
+        }
+
         let default_sink = std::process::Command::new("pactl")
             .arg("get-default-sink")
             .output()
@@ -297,6 +397,13 @@ impl DualCapture {
             default_sink.as_deref(),
             &String::from_utf8_lossy(&sources.stdout),
         )
+        .ok_or(LoopbackIssue::NoMonitorSource)
+    }
+
+    /// Why loopback was requested but is not recording. `None` when loopback
+    /// is recording or was never requested. Meaningful after `start()`.
+    pub fn loopback_issue(&self) -> Option<&LoopbackIssue> {
+        self.loopback_issue.as_ref()
     }
 
     /// Check if loopback capture is active
@@ -327,6 +434,7 @@ impl DualCapture {
         if let Some(ref mut loopback) = self.loopback {
             if let Err(e) = loopback.start() {
                 tracing::warn!("Loopback capture failed, continuing with mic only: {}", e);
+                self.loopback_issue = Some(LoopbackIssue::from_start_error(&e));
                 self.loopback = None;
                 self.meters.loopback = None;
             }
@@ -552,6 +660,35 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn loopback_issue_messages_name_the_fix() {
+        assert!(LoopbackIssue::PactlMissing.message().contains("libpulse"));
+        assert!(LoopbackIssue::ParecMissing
+            .message()
+            .contains("pulseaudio-utils"));
+        assert!(LoopbackIssue::PactlFailed("Connection refused".into())
+            .message()
+            .contains("pipewire-pulse"));
+        assert!(LoopbackIssue::NoMonitorSource
+            .message()
+            .contains("loopback_device"));
+    }
+
+    #[test]
+    fn parec_start_errors_classify() {
+        let missing = AudioError::Connection(PAREC_NOT_FOUND.to_string());
+        assert_eq!(
+            LoopbackIssue::from_start_error(&missing),
+            LoopbackIssue::ParecMissing
+        );
+        let failed =
+            AudioError::Connection("parec could not record from 'x' (exit status: 1)".into());
+        assert!(matches!(
+            LoopbackIssue::from_start_error(&failed),
+            LoopbackIssue::ParecFailed(_)
+        ));
+    }
 
     #[test]
     fn test_dual_samples_merge_mic_only() {
