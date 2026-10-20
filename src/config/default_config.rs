@@ -58,6 +58,11 @@ max_duration_secs = 60
 # write nothing; a dictation whose transcription fails is then lost.
 # keep_failed_recordings = true
 
+# Keep recording after the hotkey is released until the microphone goes quiet,
+# for at most this many milliseconds, so a word still being spoken isn't cut
+# off. Stops at once when it's already quiet. 0 disables it.
+# stop_tail_ms = 0
+
 # Pause MPRIS media players (Spotify, Firefox, etc.) before recording starts,
 # then resume them as soon as recording stops. Talks D-Bus directly; no external
 # playerctl binary required.

@@ -593,6 +593,22 @@ keep_failed_recordings = false
 
 Also available as `--no-keep-failed-recordings` (and `--keep-failed-recordings` to override a config that turns it off) or `VOXTYPE_KEEP_FAILED_RECORDINGS=false`.
 
+### stop_tail_ms
+
+**Type:** Integer
+**Default:** `0`
+**Required:** No
+
+After the recording stops, keep capturing until the microphone goes quiet, for at most this many milliseconds. Releasing the hotkey a little before the last word ends no longer cuts that word off. When you'd already stopped speaking, the recording stops at once, so this adds no delay in the usual case.
+
+Quiet means 160 ms below three times the recording's noise floor, so it adapts to the mic's gain and the room. `0` stops as soon as the hotkey is released.
+
+**Example:**
+```toml
+[audio]
+stop_tail_ms = 600
+```
+
 ### pause_media
 
 **Type:** Boolean
