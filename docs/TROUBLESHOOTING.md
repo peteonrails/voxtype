@@ -14,6 +14,8 @@ Solutions to common issues when using Voxtype.
   - [wtype not working on KDE Plasma or GNOME Wayland](#wtype-not-working-on-kde-plasma-or-gnome-wayland)
   - [Text output not working on X11](#text-output-not-working-on-x11)
   - [Wrong characters on non-US keyboard layouts](#wrong-characters-on-non-us-keyboard-layouts-yz-swapped-qwertz-azerty)
+  - [Copied to clipboard, paste manually](#copied-to-clipboard-paste-manually-notification)
+  - [Transcription not delivered](#transcription-not-delivered-notification)
 - [Performance Issues](#performance-issues)
 - [Soniox Backend Issues](#soniox-backend-issues)
 - [Media Does Not Pause While Recording (Omarchy Quattro)](#media-does-not-pause-while-recording-omarchy-quattro)
@@ -829,6 +831,39 @@ systemctl --user status ydotool
 journalctl --user -u ydotool
 ```
 
+### "Copied to clipboard, paste manually" notification
+
+**Symptom:** Instead of typing, voxtype shows a notification titled "Voxtype: copied to clipboard, paste manually" (the first time) or "Copied to clipboard, paste manually" (later dictations).
+
+**Cause:** None of the typing tools in the output chain (wtype, eitype, dotool, ydotool) could be used, so voxtype put the text on the clipboard instead. The first notification after the daemon starts lists each tool and why it was skipped, with the fix, for example:
+
+```
+Voxtype could not type the text, so it is on the clipboard.
+wtype: not installed. Fix: sudo pacman -S wtype
+eitype: not installed. Fix: cargo install eitype
+dotool: not installed. Fix: install it from https://sr.ht/~geb/dotool/
+ydotool: ydotoold is not running. Fix: systemctl --user enable --now ydotool
+```
+
+**Solution:** Apply the fix for one of the listed tools, then try again. Paste the current text with Ctrl+V (Ctrl+Shift+V in most terminals). The warning is shown once per problem per daemon run; the full reason is also in `journalctl --user -u voxtype`.
+
+If you set `mode = "clipboard"` or a `driver_order` with only clipboard drivers, voxtype does not warn: the clipboard is what you asked for.
+
+### "Transcription not delivered" notification
+
+**Symptom:** A critical notification titled "Voxtype: transcription not delivered".
+
+**Cause:** Every output method failed, including the clipboard (or the clipboard fallback is off). The notification lists what failed and how to fix it, and includes the text.
+
+**Solution:** Nothing is lost. Each undelivered transcription is saved as its own file in `~/.local/state/voxtype/undelivered/` (or `$XDG_STATE_HOME/voxtype/undelivered/`), named by date and time, readable only by you, and kept across logouts and reboots. The newest 200 are kept. The notification names the exact file. To see the latest one:
+
+```bash
+ls -t ~/.local/state/voxtype/undelivered/ | head
+cat "$(ls -t ~/.local/state/voxtype/undelivered/*.txt | head -1)"
+```
+
+Then install the tool the notification names.
+
 ### Text not typed / nothing happens
 
 **Possible causes:**
@@ -1294,14 +1329,26 @@ journalctl --user -u voxtype -n 50
 
 ### Service starts but doesn't work
 
-**Cause:** Session environment not available.
+**Symptom:** A notification at startup titled "Voxtype: no display in its environment", or text is never typed when voxtype runs as a service but works from a terminal.
 
-**Solution:** Ensure you're running under a graphical session:
+**Cause:** The systemd user manager does not have `WAYLAND_DISPLAY` (or `DISPLAY` on X11), so the voxtype service doesn't either, and wtype, wl-copy and friends cannot reach your desktop. This happens when the compositor does not import its environment into systemd.
+
+**Solution:** From a terminal in your desktop session, import the variables and restart the service:
 ```bash
-# Check environment
-echo $XDG_RUNTIME_DIR
-echo $WAYLAND_DISPLAY
+systemctl --user import-environment WAYLAND_DISPLAY DISPLAY
+systemctl --user restart voxtype
 ```
+
+To make it permanent, run the import when your compositor starts, before voxtype:
+```
+# Hyprland (hyprland.conf)
+exec-once = systemctl --user import-environment WAYLAND_DISPLAY DISPLAY
+
+# Sway (config)
+exec systemctl --user import-environment WAYLAND_DISPLAY DISPLAY
+```
+
+`voxtype setup systemd` also checks the user manager's environment and prints this fix when the variables are missing.
 
 ### Service doesn't start on login
 

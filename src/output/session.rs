@@ -62,6 +62,43 @@ where
     DisplaySession::Wayland
 }
 
+/// Neither `WAYLAND_DISPLAY` nor `DISPLAY` is set, so no typing or clipboard
+/// tool can reach the desktop. This is what a systemd user service sees when
+/// the compositor never imported its environment into the user manager.
+pub fn display_env_missing() -> bool {
+    display_env_missing_with_env(|name| std::env::var(name).ok())
+}
+
+fn display_env_missing_with_env<F>(get: F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let set = |name| get(name).is_some_and(|v: String| !v.is_empty());
+    !set("WAYLAND_DISPLAY") && !set("DISPLAY")
+}
+
+/// Title and body of the startup notification for a daemon with no display
+/// in its environment. `under_systemd` picks the fix: importing the
+/// variables into the user manager, or starting voxtype from the session.
+pub fn display_env_notice(under_systemd: bool) -> (String, String) {
+    let title = "Voxtype: no display in its environment".to_string();
+    let body = if under_systemd {
+        "The voxtype service has neither WAYLAND_DISPLAY nor DISPLAY, so it cannot type \
+         or copy text. From a terminal in your desktop session run:\n\
+         systemctl --user import-environment WAYLAND_DISPLAY DISPLAY && \
+         systemctl --user restart voxtype\n\
+         To fix it for good, run that import when your compositor starts \
+         (Hyprland: exec-once = systemctl --user import-environment WAYLAND_DISPLAY DISPLAY)."
+            .to_string()
+    } else {
+        "Voxtype was started with neither WAYLAND_DISPLAY nor DISPLAY set, so it cannot \
+         type or copy text. Start it from inside your desktop session, or install the \
+         service with: voxtype setup systemd"
+            .to_string()
+    };
+    (title, body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +165,34 @@ mod tests {
     fn no_env_defaults_to_wayland() {
         let get = env(&[]);
         assert_eq!(detect_with_env(get), DisplaySession::Wayland);
+    }
+
+    #[test]
+    fn display_env_missing_needs_both_unset_or_empty() {
+        assert!(display_env_missing_with_env(env(&[])));
+        assert!(display_env_missing_with_env(env(&[(
+            "WAYLAND_DISPLAY",
+            ""
+        )])));
+        assert!(display_env_missing_with_env(env(&[(
+            "XDG_SESSION_TYPE",
+            "wayland"
+        )])));
+        assert!(!display_env_missing_with_env(env(&[(
+            "WAYLAND_DISPLAY",
+            "wayland-1"
+        )])));
+        assert!(!display_env_missing_with_env(env(&[("DISPLAY", ":0")])));
+    }
+
+    #[test]
+    fn display_env_notice_gives_the_systemd_fix() {
+        let (title, body) = display_env_notice(true);
+        assert_eq!(title, "Voxtype: no display in its environment");
+        assert!(body.contains(
+            "systemctl --user import-environment WAYLAND_DISPLAY DISPLAY && systemctl --user restart voxtype"
+        ));
+        let (_, body) = display_env_notice(false);
+        assert!(body.contains("voxtype setup systemd"));
     }
 }

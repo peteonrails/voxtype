@@ -24,6 +24,7 @@ pub mod cgevent;
 pub mod clipboard;
 pub mod dotool;
 pub mod eitype;
+pub mod fallback;
 // modifier_guard is evdev-based; macOS has its own osascript modifier handling.
 #[cfg(target_os = "linux")]
 pub mod modifier_guard;
@@ -200,6 +201,19 @@ pub async fn send_transcription_notification(
     engine: crate::config::TranscriptionEngine,
     urgency: &str,
 ) {
+    send_transcription_notification_titled(text, show_engine_icon, engine, urgency, "Transcribed")
+        .await;
+}
+
+/// Send a transcription notification under `label` ("Transcribed", or a
+/// label saying the text is on the clipboard after a fallback).
+pub async fn send_transcription_notification_titled(
+    text: &str,
+    show_engine_icon: bool,
+    engine: crate::config::TranscriptionEngine,
+    urgency: &str,
+    label: &str,
+) {
     // Truncate preview for notification (use chars() to handle multi-byte UTF-8)
     let preview = if text.chars().count() > 80 {
         format!("{}...", text.chars().take(80).collect::<String>())
@@ -208,9 +222,9 @@ pub async fn send_transcription_notification(
     };
 
     let title = if show_engine_icon {
-        format!("{} Transcribed", engine_icon(engine))
+        format!("{} {}", engine_icon(engine), label)
     } else {
-        "Transcribed".to_string()
+        label.to_string()
     };
 
     // Through the notification module rather than straight to notify-send:
@@ -484,6 +498,17 @@ pub async fn output_with_fallback(
     text: &str,
     options: OutputOptions<'_>,
 ) -> Result<(), OutputError> {
+    output_with_fallback_report(chain, text, options).await.1
+}
+
+/// `output_with_fallback`, also reporting which method delivered the text and
+/// which were skipped on the way, so the caller can tell the user when the
+/// text landed on the clipboard instead of being typed.
+pub async fn output_with_fallback_report(
+    chain: &[Box<dyn TextOutput>],
+    text: &str,
+    options: OutputOptions<'_>,
+) -> (fallback::OutputReport, Result<(), OutputError>) {
     // Normalize curly quotes to ASCII to prevent line break issues with keyboard tools
     let normalized_text = normalize_quotes(text);
 
@@ -532,33 +557,8 @@ pub async fn output_with_fallback(
         }
     }
 
-    // Try each output method
-    let mut result = Err(OutputError::AllMethodsFailed);
-    for output in chain {
-        if skip_keystroke_methods && is_keystroke_method(output.name()) {
-            tracing::debug!(
-                "{} skipped (modifier still held), trying next",
-                output.name()
-            );
-            continue;
-        }
-
-        if !output.is_available().await {
-            tracing::debug!("{} not available, trying next", output.name());
-            continue;
-        }
-
-        match output.output(&normalized_text).await {
-            Ok(()) => {
-                tracing::debug!("Text output via {}", output.name());
-                result = Ok(());
-                break;
-            }
-            Err(e) => {
-                tracing::warn!("{} failed: {}, trying next", output.name(), e);
-            }
-        }
-    }
+    let (report, result) =
+        fallback::run_chain(chain, &normalized_text, skip_keystroke_methods).await;
 
     // Run post-output hook if configured (e.g., reset submap)
     // Always run this, even on failure, to ensure cleanup
@@ -568,7 +568,7 @@ pub async fn output_with_fallback(
         }
     }
 
-    result
+    (report, result)
 }
 
 #[cfg(test)]

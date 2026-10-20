@@ -321,6 +321,14 @@ impl Config {
         }
     }
 
+    /// Voxtype's user state directory, honoring `$XDG_STATE_HOME` (default
+    /// `~/.local/state`). For data that must outlive a session but isn't
+    /// configuration, like transcriptions that could not be delivered.
+    pub fn state_dir() -> PathBuf {
+        Self::xdg_dir("XDG_STATE_HOME", ".local/state", None)
+            .unwrap_or_else(|| Self::runtime_dir().join("state"))
+    }
+
     /// Get the models directory path
     pub fn models_dir() -> PathBuf {
         Self::data_dir().join("models")
