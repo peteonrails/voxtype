@@ -152,6 +152,21 @@ Item {
         return _peak;
     }
 
+    // Mirrors osd::visual::waveform_level in the Rust frontends: absolute
+    // input level on a fixed dB scale, -48 dBFS at the floor and 0 dBFS at
+    // full height, shifted by `gain` (10 is neutral, each doubling +6 dB).
+    // No normalization to recent input, so louder speech always draws
+    // taller and normal speech (around -20 dBFS) sits near mid-height.
+    readonly property real waveformFloorDbfs: -48.0
+
+    function _displayLevel(sample, gain) {
+        const magnitude = Math.abs(sample);
+        if (!(magnitude > 0)) return 0.0;
+        const shift = isFinite(gain) && gain > 0 ? 20 * Math.log10(gain / 10) : 0;
+        const db = 20 * Math.log10(magnitude) + shift;
+        return _clamp((db - waveformFloorDbfs) / -waveformFloorDbfs, 0, 1);
+    }
+
     function _meterFill(dbfs) {
         const floor = meterFloorDbfs;
         if (!isFinite(dbfs) || dbfs <= floor) return 0.0;
@@ -179,7 +194,7 @@ Item {
             return n > 0 ? sum / n : 0.0;
         }
         const breath = 0.5 + 0.5 * Math.sin(fallbackPhase * 0.35);
-        return 0.010 + breath * 0.006;
+        return 0.004 + breath * 0.003;
     }
 
     // Per-column temporal smoothing: rise quickly, fall more slowly, which
@@ -332,7 +347,7 @@ Item {
             const position = bars <= 1 ? 0.5 : i / (bars - 1);
             const weight = 0.72 + 0.28 * Math.cos((i - center) / Math.max(1, center) * Math.PI);
             const sample = _barValue(i, bars);
-            const level = _clamp(sample * gain * weight * breath + _energy * 0.045, 0.028, 1.0);
+            const level = _clamp(_displayLevel(sample, gain) * weight * breath + _energy * 0.045, 0.028, 1.0);
             const eased = _easeOutCubic(level);
             const h = Math.max(3, rect.h * eased);
             const x = rect.x + i * (barW + gap) + gap * 0.5;
@@ -384,7 +399,7 @@ Item {
             ctx.beginPath();
             for (let i = 0; i < cols; i++) {
                 const t = cols <= 1 ? 0 : i / (cols - 1);
-                const envelope = _clamp(samples[i] * gain, 0.015, 1.0);
+                const envelope = _clamp(_displayLevel(samples[i], gain), 0.015, 1.0);
                 const wave = Math.sin(_phase * 2.0 + t * Math.PI * 3.0) * 0.04;
                 const x = rect.x + t * rect.w;
                 const y = cy - (envelope + wave) * amp;
@@ -394,7 +409,7 @@ Item {
             if (mirror) {
                 for (let i = cols - 1; i >= 0; i--) {
                     const t = cols <= 1 ? 0 : i / (cols - 1);
-                    const envelope = _clamp(samples[i] * gain, 0.015, 1.0);
+                    const envelope = _clamp(_displayLevel(samples[i], gain), 0.015, 1.0);
                     const wave = Math.sin(_phase * 2.0 + t * Math.PI * 3.0) * 0.04;
                     const x = rect.x + t * rect.w;
                     const y = cy + (envelope - wave) * amp;
@@ -417,7 +432,7 @@ Item {
             ctx.beginPath();
             for (let i = 0; i < cols; i++) {
                 const t = cols <= 1 ? 0 : i / (cols - 1);
-                const envelope = _clamp(samples[i] * gain, 0.015, 1.0);
+                const envelope = _clamp(_displayLevel(samples[i], gain), 0.015, 1.0);
                 const x = rect.x + t * rect.w;
                 const y = cy - envelope * amp;
                 if (i === 0) ctx.moveTo(x, y);

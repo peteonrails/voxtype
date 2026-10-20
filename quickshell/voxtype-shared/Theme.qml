@@ -96,10 +96,9 @@ QtObject {
     /// rate while the signal sits below it.
     property real peakDecayDbPerSec: 6.0
 
-    /// Visual gain applied to per-frame peak before drawing the
-    /// waveform envelope. Mic-level voice peaks around 0.1..0.3 of
-    /// full-scale, so the gain scales the envelope up to fill the
-    /// available canvas height. Mirrors OsdConfig::waveform_gain.
+    /// Default waveform sensitivity when the resolved style carries no
+    /// `waveform_gain`. Shifts the fixed dB display scale: 10 is
+    /// neutral, each doubling +6 dB. Mirrors OsdConfig::waveform_gain.
     property real waveformGain: 10.0
 
     /// dBFS floor for the peak meter. Anything quieter renders as an

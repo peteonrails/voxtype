@@ -53,6 +53,71 @@ PanelWindow {
     }
     color: "transparent"
 
+    // Put the surface on the focused output. Without an explicit screen
+    // Quickshell leaves the window on Qt's default screen, so with two
+    // monitors the OSD could show up on the one you are not looking at.
+    // The target only changes while the OSD is hidden, so it never jumps
+    // between outputs mid-recording. The compositor probe is created from
+    // a string so a Quickshell build without that module still loads this
+    // surface; with no probe the screen is left as before.
+    property var _focusProbe: null
+    property var _targetScreen: null
+    readonly property string _focusedOutputName: _focusProbe && _focusProbe.name ? _focusProbe.name : ""
+
+    function _createFocusProbe() {
+        const hyprland = (Quickshell.env("HYPRLAND_INSTANCE_SIGNATURE") || "") !== "";
+        const i3 = (Quickshell.env("SWAYSOCK") || "") !== "" || (Quickshell.env("I3SOCK") || "") !== "";
+        const source = hyprland
+            ? 'import QtQuick; import Quickshell.Hyprland; QtObject { readonly property string name: Hyprland.focusedMonitor ? Hyprland.focusedMonitor.name : "" }'
+            : i3
+                ? 'import QtQuick; import Quickshell.I3; QtObject { readonly property string name: I3.focusedMonitor ? I3.focusedMonitor.name : "" }'
+                : "";
+        if (!source) return null;
+        try {
+            return Qt.createQmlObject(source, panel, "voxtypeFocusedOutput");
+        } catch (e) {
+            console.warn("voxtype OSD: cannot track the focused output:", e);
+            return null;
+        }
+    }
+
+    function _screenNamed(name) {
+        if (!name) return null;
+        const screens = Quickshell.screens;
+        for (let i = 0; i < screens.length; i++) {
+            if (screens[i].name === name) return screens[i];
+        }
+        return null;
+    }
+
+    function _retargetScreen() {
+        if (panel.visible) return;
+        const target = _screenNamed(_focusedOutputName);
+        if (target) panel._targetScreen = target;
+    }
+
+    Component.onCompleted: {
+        _focusProbe = _createFocusProbe();
+        _retargetScreen();
+    }
+    on_FocusedOutputNameChanged: _retargetScreen()
+    onVisibleChanged: _retargetScreen()
+
+    Connections {
+        target: Quickshell
+        function onScreensChanged() {
+            panel._targetScreen = null;
+            panel._retargetScreen();
+        }
+    }
+
+    Binding {
+        target: panel
+        property: "screen"
+        value: panel._targetScreen
+        when: panel._targetScreen !== null
+    }
+
     WlrLayershell.namespace: "voxtype-osd"
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
@@ -132,7 +197,14 @@ PanelWindow {
         const value = style && style.config && style.config.top_margin !== undefined
             ? Number(style.config.top_margin)
             : 0.85;
-        return Math.max(0.0, Math.min(1.0, value));
+        return isFinite(value) ? Math.max(0.0, Math.min(1.0, value)) : 0.85;
+    }
+
+    function _styleWaveformGain() {
+        const value = style && style.config && style.config.waveform_gain !== undefined
+            ? Number(style.config.waveform_gain)
+            : VT.Theme.waveformGain;
+        return isFinite(value) && value > 0 ? value : VT.Theme.waveformGain;
     }
 
     function _frameConfig() {
@@ -207,15 +279,22 @@ PanelWindow {
         return Math.max(margin, (panel.width - _cardWidth()) / 2);
     }
 
+    // Mirrors osd::placement::card_top. panel.height is the full height
+    // of the output this surface is on, in its logical pixels.
     function _cardY() {
         const position = _stylePosition();
         const margin = _styleMarginPx();
-        if ((position === "top-left") || (position === "top-right")) return margin;
-        if ((position === "bottom-left") || (position === "bottom-right")) {
-            return Math.max(margin, panel.height - _cardHeight() - margin);
-        }
-        const y = panel.height * _styleTopMargin();
-        return Math.max(margin, Math.min(panel.height - _cardHeight() - margin, y));
+        const area = panel.height;
+        const h = _cardHeight();
+        const fraction = _styleTopMargin();
+        let y;
+        if ((position === "top-left") || (position === "top-right")) y = margin;
+        else if ((position === "bottom-left") || (position === "bottom-right")) y = area - h - margin;
+        else if (position === "top-center") y = fraction <= 0.5 ? area * fraction : area * (1 - fraction) - h;
+        else y = area * fraction;
+        const lowest = area - h - margin;
+        if (lowest < margin) return Math.max(0, (area - h) / 2);
+        return Math.max(margin, Math.min(lowest, y));
     }
 
     function _isBlockLayout() {
@@ -507,7 +586,7 @@ PanelWindow {
                         peak: panel.currentPeak
                         rms: panel.currentRms
                         waveformColumns: panel.waveformColumns
-                        waveformGain: VT.Theme.waveformGain
+                        waveformGain: panel._styleWaveformGain()
                         meterFloorDbfs: VT.Theme.meterFloorDbfs
                     }
                 }

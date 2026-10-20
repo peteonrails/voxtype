@@ -3875,6 +3875,51 @@ symlink is what puts the sidecar on PATH where the QML expects it. Pass
 `--skip-bridge` if your install already has the bridge on PATH. See the
 [user manual](USER_MANUAL.md#voxtype-setup-quickshell) for details.
 
+### OSD placement and waveform
+
+These keys apply to every frontend.
+
+```toml
+[osd]
+position = "bottom-center"   # bottom-center, top-center, bottom-left,
+                             # bottom-right, top-left, top-right
+margin_px = 24               # gap from the screen edges, logical pixels
+top_margin = 0.85            # centered positions: top edge as a fraction
+                             # of the output's height (like swayosd)
+waveform_gain = 10.0         # waveform sensitivity, 10 = neutral
+peak_decay_db_per_sec = 6.0  # how fast the peak meter's held tick falls
+```
+
+The OSD appears on the focused output and is placed using only that output's
+size, in its logical pixels, so monitors with different resolutions, scales
+or offsets each get the same relative placement.
+
+- **Corner positions** sit `margin_px` from both edges they are anchored to.
+- **`bottom-center`** puts the card's top edge at `top_margin` of the
+  output's height. With the default 0.85 the card sits in the same band as
+  swayosd's volume and brightness popups.
+- **`top-center`** uses `top_margin` the same way when it is 0.5 or less.
+  A larger value (such as the 0.85 default) is mirrored, so the card keeps
+  the same distance from the top edge that `bottom-center` keeps from the
+  bottom one.
+- With any position, `margin_px` is the minimum gap to the top and bottom
+  edges, so `top_margin` can never push the card off the screen.
+
+The waveform shows the absolute input level on a fixed decibel scale: the
+centerline is -48 dBFS (a typical mic's noise floor sits below it, so
+silence is flat) and the card's edge is 0 dBFS, the loudest input the mic
+can produce. Normal speech lands around mid-height, louder speech draws
+taller, and only input close to clipping reaches the edge. There is no
+automatic gain, so the height always reflects how loud the mic actually is.
+
+`waveform_gain` shifts that scale. 10 is neutral; every doubling shows the
+input 6 dB louder (20 = +6 dB, 40 = +12 dB) and every halving 6 dB quieter
+(5 = -6 dB). Raise it for a quiet mic, lower it for a hot one. The waveform
+never draws outside the card at any value. Earlier versions multiplied
+the raw samples by this key, which pushed everything above -20 dBFS (most speech) off
+the card; an old config that keeps the default 10 gets the new scale
+unchanged.
+
 ### Quickshell OSD customization
 
 The Quickshell frontend can customize the whole OSD without editing VoxType's

@@ -1247,6 +1247,25 @@ in the foreground to see the QML error:
 voxtype-osd-quickshell --no-daemonize
 ```
 
+### The GTK4 OSD runs even though `frontend = "quickshell"`
+
+The daemon starts `voxtype-osd`, which launches the configured frontend and
+falls back to another installed one when it can't find it. Check which
+`voxtype-osd` the daemon started and what it said:
+
+```bash
+journalctl --user -u voxtype | grep -iE "osd|frontend"
+```
+
+A warning like `preferred frontend 'voxtype-osd-quickshell' not installed;
+using 'voxtype-osd-gtk4' instead` means the launcher that ran could not see
+the Quickshell launcher next to itself or on `PATH`. The usual cause is an
+old or development `voxtype-osd` earlier on `PATH` (for example in
+`~/.local/bin`) shadowing the packaged one in `/usr/lib/voxtype/`. Remove
+the stale copy and restart the daemon. Versions before this fix also fell
+back to `PATH` whenever the daemon ran a CUDA or MIGraphX build, because
+those binaries live one directory below the packaged `voxtype-osd`.
+
 ### OSD looks or behaves like an older version after a binary upgrade
 
 The Quickshell frontend is two parts: the launcher binary and the QML tree it
