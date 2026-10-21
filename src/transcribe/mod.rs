@@ -79,6 +79,10 @@ pub mod cohere;
 #[cfg(feature = "cohere-gguf")]
 pub mod cohere_gguf;
 
+/// transcribe.cpp session loading shared by the GGUF engines.
+#[cfg(feature = "cohere-gguf")]
+mod gguf;
+
 #[cfg(any(feature = "cohere", feature = "cohere-gguf"))]
 mod cohere_chunking;
 
