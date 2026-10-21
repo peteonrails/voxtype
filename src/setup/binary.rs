@@ -860,7 +860,7 @@ pub fn compiled_features() -> Vec<&'static str> {
     let mut f = Vec::new();
     // ASR engines. Whisper is unconditional and not a Cargo feature, so
     // it never appears here; only optional engines are listed.
-    if cfg!(feature = "parakeet") {
+    if cfg!(any(feature = "parakeet", feature = "parakeet-gguf")) {
         f.push("parakeet");
     }
     if cfg!(feature = "moonshine") {

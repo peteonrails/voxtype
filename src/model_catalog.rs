@@ -30,7 +30,11 @@ pub const CATALOG_ENGINES: &[&str] = &[
 pub fn model_catalog(engine: &str) -> Vec<&'static str> {
     match engine {
         "whisper" => model::valid_model_names(),
-        "parakeet" => model::valid_parakeet_model_names(),
+        "parakeet" => {
+            let mut models = model::valid_parakeet_model_names();
+            models.extend(model::parakeet_gguf_models().iter().map(|entry| entry.name));
+            models
+        }
         "moonshine" => model::valid_moonshine_model_names(),
         "sensevoice" => model::valid_sensevoice_model_names(),
         "paraformer" => vec!["paraformer-zh", "paraformer-en"],
@@ -116,7 +120,7 @@ pub fn download_command(engine: &str, model: &str) -> String {
     format!("voxtype setup --download --model {arg}")
 }
 
-/// On-disk location of a model: a single file for Whisper and Cohere GGUF,
+/// On-disk location of a model: a single file for Whisper and GGUF models,
 /// a directory for every ONNX engine.
 fn model_path(models_dir: &Path, engine: &str, model: &str) -> std::path::PathBuf {
     if engine == "whisper" {
@@ -185,13 +189,11 @@ pub(crate) fn model_health_in(models_dir: &Path, engine: &str, model: &str) -> M
         };
     }
 
-    if engine == "cohere" {
-        if let Some(gguf) = model::find_cohere_gguf_model(model) {
-            return match model::validate_cohere_gguf_model(&path, gguf) {
-                Ok(()) => ModelHealth::Present,
-                Err(e) => ModelHealth::Corrupt(vec![format!("{}: {}", display_name(&path), e)]),
-            };
-        }
+    if let Some(gguf) = model::find_gguf_model(model).filter(|gguf| gguf.engine == engine) {
+        return match model::validate_gguf_model(&path, gguf) {
+            Ok(()) => ModelHealth::Present,
+            Err(e) => ModelHealth::Corrupt(vec![format!("{}: {}", display_name(&path), e)]),
+        };
     }
 
     if engine == "openvino" {
@@ -260,15 +262,11 @@ pub(crate) fn verify_model_in(models_dir: &Path, engine: &str, model: &str) -> M
         );
     }
 
-    if engine == "cohere" {
-        if let Some(gguf) = model::find_cohere_gguf_model(model) {
-            return match model::verify_cohere_gguf_model(&path, gguf) {
-                Ok(()) => ModelVerification::Ok,
-                Err(e) => {
-                    ModelVerification::Corrupt(vec![format!("{}: {}", display_name(&path), e)])
-                }
-            };
-        }
+    if let Some(gguf) = model::find_gguf_model(model).filter(|gguf| gguf.engine == engine) {
+        return match model::verify_gguf_model(&path, gguf) {
+            Ok(()) => ModelVerification::Ok,
+            Err(e) => ModelVerification::Corrupt(vec![format!("{}: {}", display_name(&path), e)]),
+        };
     }
 
     let Some(manifest) = read_cached_manifest(&path) else {
@@ -604,6 +602,45 @@ mod tests {
             other => panic!("expected corrupt, got {:?}", other),
         }
         assert!(!model_installed_in(tmp.path(), "whisper", "tiny"));
+    }
+
+    /// A Parakeet GGUF is one file, checked by its header and pinned size,
+    /// and listed under the parakeet engine only. Without the GGUF branch the
+    /// ONNX checks would look for encoder files inside it and call it corrupt.
+    #[test]
+    fn parakeet_gguf_health_rests_on_header_and_size() {
+        let name = "parakeet-tdt-0.6b-v3-Q8_0.gguf";
+        assert!(model_catalog("parakeet").contains(&name));
+        assert!(!model_catalog("cohere").contains(&name));
+        assert_eq!(
+            resolve_model(name),
+            Some(ResolvedModel {
+                engine: "parakeet",
+                model: name.to_string(),
+            })
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            model_health_in(tmp.path(), "parakeet", name),
+            ModelHealth::Missing
+        );
+
+        // Sparse, so the test does not write the real 740 MB.
+        let size = model::find_gguf_model(name).unwrap().size;
+        let file = std::fs::File::create(tmp.path().join(name)).unwrap();
+        std::io::Write::write_all(&mut &file, b"GGUF").unwrap();
+        file.set_len(size).unwrap();
+        assert_eq!(
+            model_health_in(tmp.path(), "parakeet", name),
+            ModelHealth::Present
+        );
+
+        file.set_len(size - 1).unwrap();
+        assert!(matches!(
+            model_health_in(tmp.path(), "parakeet", name),
+            ModelHealth::Corrupt(_)
+        ));
     }
 
     /// Why the slow tier exists: content can rot without the size changing,

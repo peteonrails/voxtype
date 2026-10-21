@@ -67,7 +67,7 @@ pub enum Commands {
         /// Whisper: tiny, base, small, medium, large-v3, large-v3-turbo (and .en variants).
         /// Parakeet: parakeet-tdt-0.6b-v3, parakeet-tdt-0.6b-v3-int8.
         /// Other engines take the names shown by `voxtype info models`:
-        /// directory names for ONNX models, or a .gguf filename for Cohere.
+        /// directory names for ONNX models, or a .gguf filename for Cohere and Parakeet.
         #[arg(long, value_name = "NAME")]
         model: Option<String>,
 

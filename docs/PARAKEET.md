@@ -134,6 +134,41 @@ Model load time: ~1.2 seconds (one-time at daemon startup)
 
 Parakeet on CPU is significantly faster than Whisper on CPU, and competitive with Whisper on GPU.
 
+## GGUF on Vulkan (transcribe.cpp)
+
+Voxtype can also run Parakeet TDT 0.6B v3 as a GGUF model through [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp), inside the daemon, on a Vulkan GPU. It is the same `parakeet` engine: a `[parakeet] model` ending in `.gguf` selects transcribe.cpp, anything else selects ONNX Runtime. It needs no ONNX Runtime, so a binary built with `--features gpu-vulkan` (or `--features parakeet-gguf` for the CPU runtime only) runs it.
+
+Run `voxtype setup model` and pick a Parakeet GGUF, or download one directly:
+
+```sh
+voxtype setup --download --model parakeet-tdt-0.6b-v3-F16.gguf --activate
+```
+
+Then select the GPU explicitly:
+
+```toml
+engine = "parakeet"
+
+[parakeet]
+model = "parakeet-tdt-0.6b-v3-F16.gguf"
+gguf_backend = "vulkan"
+```
+
+`parakeet-tdt-0.6b-v3-Q8_0.gguf` is a smaller download (0.74 GB against 1.26 GB) with the same accuracy and speed in the tests below. Setup verifies both against the SHA-256 published by handy-computer in [parakeet-tdt-0.6b-v3-gguf](https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf); the other quantizations there work by absolute path.
+
+Long recordings are split with the same `max_window_secs` and `window_overlap_secs` as the ONNX models, because transcribe.cpp's encoder uses full attention and its memory grows with the square of the input length. `streaming = true` is not supported with GGUF models and is reported as a configuration error.
+
+Seconds to transcribe after the model is loaded, on a Ryzen AI 9 HX 370 with a Radeon 890M iGPU (transcribe.cpp 0.2.3; ONNX fp32 on the CPU):
+
+| Audio | GGUF Vulkan F16 | GGUF Vulkan Q8_0 | ONNX CPU, 4 threads | ONNX CPU, 12 threads |
+|-------|-----------------|------------------|---------------------|----------------------|
+| 5 s | 0.11 | 0.09 | 0.35 | 0.26 |
+| 12 s | 0.19 | 0.20 | 0.68 | 0.52 |
+| 1 min | 0.95 | 0.91 | 3.83 | 2.81 |
+| 3 min | 3.43 | 3.42 | 12.3 | 9.30 |
+
+Word error rate on LibriSpeech test-clean was the same for all three: 1.7% on the 1-minute clip and 0.8% on the 3-minute clip. transcribe.cpp on its CPU backend was slower than ONNX (13.5 s for the 3-minute clip at 12 threads), so GGUF is the GPU path. Keep the ONNX model on machines without a hardware Vulkan device.
+
 ## Known Limitations
 
 ### Repetition Hallucination

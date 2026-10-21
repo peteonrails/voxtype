@@ -43,8 +43,9 @@ pub enum TranscriptionEngine {
     /// Use Whisper (whisper.cpp via whisper-rs)
     #[default]
     Whisper,
-    /// Use Parakeet (NVIDIA's FastConformer via ONNX Runtime)
-    /// Requires: cargo build --features parakeet
+    /// Use Parakeet (NVIDIA's FastConformer) through ONNX Runtime or
+    /// transcribe.cpp GGUF.
+    /// Requires `parakeet` for ONNX or `parakeet-gguf` for GGUF.
     Parakeet,
     /// Use Moonshine (encoder-decoder ASR via ONNX Runtime)
     /// Requires: cargo build --features moonshine

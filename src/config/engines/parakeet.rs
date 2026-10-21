@@ -15,19 +15,31 @@ pub enum ParakeetModelType {
     Tdt,
 }
 
-/// Parakeet speech-to-text configuration (ONNX-based, alternative to Whisper)
-/// Requires: cargo build --features parakeet
+/// Parakeet speech-to-text configuration (ONNX or GGUF, alternative to Whisper)
+/// Requires `parakeet` for ONNX or `parakeet-gguf` for GGUF.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ParakeetConfig {
-    /// Path to model directory containing ONNX model files
+    /// Model name, ONNX model directory, or path to a transcribe.cpp GGUF file.
     /// For TDT: encoder-model.onnx, decoder_joint-model.onnx, vocab.txt
     /// For CTC: model.onnx, tokenizer.json
+    /// A name ending in `.gguf` runs through transcribe.cpp instead.
     pub model: String,
+
+    /// transcribe.cpp compute backend for GGUF models (auto, cpu, vulkan, etc.).
+    #[serde(default = "default_gguf_backend")]
+    pub gguf_backend: String,
 
     /// Model architecture type: "tdt" (default, recommended) or "ctc"
     /// Auto-detected from model directory structure if not specified
     #[serde(default)]
     pub model_type: Option<ParakeetModelType>,
+
+    /// Number of CPU threads for ONNX Runtime intra-op parallelism
+    /// (default: 4, parakeet-rs's). Long dictations on the CPU are fastest
+    /// at the physical core count. For GGUF models, transcribe.cpp's CPU
+    /// threads (default: the library's).
+    #[serde(default)]
+    pub threads: Option<usize>,
 
     /// Load model on-demand when recording starts (true) or keep loaded (false)
     #[serde(default = "default_on_demand_loading")]
@@ -81,6 +93,10 @@ pub struct ParakeetConfig {
     pub streaming_right_context_secs: f32,
 }
 
+fn default_gguf_backend() -> String {
+    "auto".to_string()
+}
+
 /// Under the ~295s ceiling inferred from the #288 report, with margin.
 fn default_parakeet_max_window_secs() -> f32 {
     240.0
@@ -108,7 +124,9 @@ impl Default for ParakeetConfig {
     fn default() -> Self {
         Self {
             model: "parakeet-tdt-0.6b-v3".to_string(),
+            gguf_backend: default_gguf_backend(),
             model_type: None, // Auto-detect
+            threads: None,
             on_demand_loading: false,
             max_window_secs: default_parakeet_max_window_secs(),
             window_overlap_secs: default_parakeet_window_overlap_secs(),

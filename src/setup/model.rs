@@ -644,18 +644,42 @@ const COHERE_MODELS: &[CohereModelInfo] = &[
     },
 ];
 
-/// Curated transcribe.cpp Cohere weights. The repository revision and SHA-256
+/// One curated transcribe.cpp GGUF file. The repository revision and SHA-256
 /// values come from the official handy-computer Hugging Face file metadata.
-/// Q4_K_M is the small, Vulkan-tested default; Q8_0 is the larger reference
-/// quantization. The intermediate and 4 GB variants are still usable by path.
-pub(crate) struct CohereGgufModelInfo {
+/// Other published quantizations are still usable by path.
+pub(crate) struct GgufModelInfo {
+    /// Engine whose `[section] model` this file is, and its R2 prefix.
+    pub engine: &'static str,
     pub name: &'static str,
-    /// R2 directory under the `cohere` prefix. Spelled out rather than
+    /// R2 directory under the engine's prefix. Spelled out rather than
     /// derived from `name` so the mirrored layout stays greppable.
     pub r2_dir: &'static str,
     pub size: u64,
     pub sha256: &'static str,
+    /// Weights license, shown before the download is confirmed.
+    pub license: &'static str,
     pub description: &'static str,
+}
+
+impl GgufModelInfo {
+    /// Cargo feature that compiles this engine's GGUF runtime.
+    pub(crate) fn feature(&self) -> &'static str {
+        match self.engine {
+            "parakeet" => "parakeet-gguf",
+            _ => "cohere-gguf",
+        }
+    }
+
+    /// Whether this binary can load the file.
+    // Each arm folds to a constant per feature set, which clippy then reads
+    // as a `matches!`; the per-engine arms are the point.
+    #[allow(clippy::match_like_matches_macro)]
+    pub(crate) fn compiled(&self) -> bool {
+        match self.engine {
+            "parakeet" => cfg!(feature = "parakeet-gguf"),
+            _ => cfg!(feature = "cohere-gguf"),
+        }
+    }
 }
 
 /// Upstream these were mirrored from, and the revision the pinned sha256s
@@ -665,39 +689,84 @@ pub(crate) struct CohereGgufModelInfo {
 const COHERE_GGUF_REPO: &str = "handy-computer/cohere-transcribe-03-2026-gguf";
 #[allow(dead_code)]
 const COHERE_GGUF_REVISION: &str = "ab667acedcb5d8d56837ef3ed3568c3ad50dde47";
-const COHERE_GGUF_MODELS: &[CohereGgufModelInfo] = &[
-    CohereGgufModelInfo {
+/// Q4_K_M is the small, Vulkan-tested default; Q8_0 is the larger reference
+/// quantization. The intermediate and 4 GB variants are usable by path.
+const COHERE_GGUF_MODELS: &[GgufModelInfo] = &[
+    GgufModelInfo {
+        engine: "cohere",
         name: "cohere-transcribe-03-2026-Q4_K_M.gguf",
         r2_dir: "cohere-transcribe-03-2026-q4_k_m-gguf",
         size: 1_558_162_944,
         sha256: "0ea56826d8bd5d74b7143a4a04e022dc1bb75452cfae49d98b6acb0c1d16a1fb",
+        license: "Apache-2.0",
         description: "Q4_K_M, smaller and tested on Intel Vulkan",
     },
-    CohereGgufModelInfo {
+    GgufModelInfo {
+        engine: "cohere",
         name: "cohere-transcribe-03-2026-Q8_0.gguf",
         r2_dir: "cohere-transcribe-03-2026-q8_0-gguf",
         size: 2_410_655_232,
         sha256: "931916663432fd895423a4291a8400221802b288967ca2d435fc5e3141c9e71e",
+        license: "Apache-2.0",
         description: "Q8_0, larger reference quantization",
     },
 ];
 
-pub(crate) fn cohere_gguf_models() -> &'static [CohereGgufModelInfo] {
+/// Upstream of the Parakeet GGUF entries and the revision their sha256s were
+/// taken at, kept for whoever mirrors them to R2, as for Cohere's above.
+#[allow(dead_code)]
+const PARAKEET_GGUF_REPO: &str = "handy-computer/parakeet-tdt-0.6b-v3-gguf";
+#[allow(dead_code)]
+const PARAKEET_GGUF_REVISION: &str = "d8d8c32cb2017c57e5307767343e97870f8a7f53";
+/// F16 is the reference precision; Q8_0 is the smaller download and matched
+/// its LibriSpeech WER and Vulkan speed in our tests. The F32 and 4-6 bit
+/// variants are usable by path.
+const PARAKEET_GGUF_MODELS: &[GgufModelInfo] = &[
+    GgufModelInfo {
+        engine: "parakeet",
+        name: "parakeet-tdt-0.6b-v3-F16.gguf",
+        r2_dir: "parakeet-tdt-0.6b-v3-f16-gguf",
+        size: 1_255_869_856,
+        sha256: "d9ec7e2c39da7b4fec3e01e71e82c7f7bbe97741e08c0c054091bf3d520a41d3",
+        license: "CC-BY-4.0",
+        description: "F16, reference precision for Vulkan GPUs",
+    },
+    GgufModelInfo {
+        engine: "parakeet",
+        name: "parakeet-tdt-0.6b-v3-Q8_0.gguf",
+        r2_dir: "parakeet-tdt-0.6b-v3-q8_0-gguf",
+        size: 739_508_576,
+        sha256: "5859f77944efcd8eafa23a6350731960b2b55b2203df51f319665c807d802cc7",
+        license: "CC-BY-4.0",
+        description: "Q8_0, smaller with the same accuracy in our tests",
+    },
+];
+
+pub(crate) fn cohere_gguf_models() -> &'static [GgufModelInfo] {
     COHERE_GGUF_MODELS
 }
 
-pub(crate) fn find_cohere_gguf_model(name: &str) -> Option<&'static CohereGgufModelInfo> {
-    COHERE_GGUF_MODELS.iter().find(|model| model.name == name)
+pub(crate) fn parakeet_gguf_models() -> &'static [GgufModelInfo] {
+    PARAKEET_GGUF_MODELS
 }
 
-/// Both quantizations are mirrored to R2 under the `cohere` prefix. The
-/// runtime never reaches HuggingFace: see the R2-only policy from #459.
-/// `COHERE_GGUF_REPO` and `COHERE_GGUF_REVISION` stay as provenance for
-/// whoever re-mirrors these, and as the source of the pinned sha256s.
-fn cohere_gguf_url(model: &CohereGgufModelInfo) -> String {
+/// A curated GGUF of any engine, by file name.
+pub(crate) fn find_gguf_model(name: &str) -> Option<&'static GgufModelInfo> {
+    COHERE_GGUF_MODELS
+        .iter()
+        .chain(PARAKEET_GGUF_MODELS)
+        .find(|model| model.name == name)
+}
+
+/// GGUF weights are mirrored to R2 under their engine's prefix. The runtime
+/// never reaches HuggingFace: see the R2-only policy from #459. The
+/// `*_GGUF_REPO` and `*_GGUF_REVISION` consts stay as provenance for whoever
+/// re-mirrors these, and as the source of the pinned sha256s.
+fn gguf_url(model: &GgufModelInfo) -> String {
     format!(
-        "{}/cohere/{}/{}",
+        "{}/{}/{}/{}",
         crate::setup::manifest::MODELS_BASE_URL,
+        model.engine,
         model.r2_dir,
         model.name
     )
@@ -1499,6 +1568,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let omnilingual_available = cfg!(feature = "omnilingual");
     let cohere_available = cfg!(feature = "cohere");
     let cohere_gguf_available = cfg!(feature = "cohere-gguf");
+    let parakeet_gguf_available = cfg!(feature = "parakeet-gguf");
     let openvino_available = cfg!(feature = "openvino-whisper");
     let whisper_count = MODELS.len();
     let parakeet_count = PARAKEET_MODELS.len();
@@ -1509,6 +1579,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
     let omnilingual_count = OMNILINGUAL_MODELS.len();
     let cohere_count = COHERE_MODELS.len();
     let cohere_gguf_count = COHERE_GGUF_MODELS.len();
+    let parakeet_gguf_count = PARAKEET_GGUF_MODELS.len();
     let openvino_count = OPENVINO_MODELS.len();
 
     let available_count = |available: bool, count: usize| if available { count } else { 0 };
@@ -1521,6 +1592,7 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         + available_count(omnilingual_available, omnilingual_count)
         + available_count(cohere_available, cohere_count)
         + available_count(cohere_gguf_available, cohere_gguf_count)
+        + available_count(parakeet_gguf_available, parakeet_gguf_count)
         + available_count(openvino_available, openvino_count);
 
     // --- Whisper Section ---
@@ -1820,34 +1892,28 @@ pub async fn interactive_select() -> anyhow::Result<()> {
 
     let cohere_gguf_offset = cohere_offset + available_count(cohere_available, cohere_count);
     println!("\n--- Cohere Transcribe GGUF (transcribe.cpp, Vulkan-capable) ---\n");
-    if cohere_gguf_available {
-        for (i, model) in COHERE_GGUF_MODELS.iter().enumerate() {
-            let path = models_dir.join(model.name);
-            let installed = validate_cohere_gguf_model(&path, model).is_ok();
-            let is_current = is_cohere_engine && current_cohere_model == Some(model.name);
-            let star = if is_current { "*" } else { " " };
-            let status = if installed {
-                "\x1b[32m[installed]\x1b[0m"
-            } else {
-                ""
-            };
-            println!(
-                " {}[{:>2}] {:<44} ({:.2} GB) {} {}",
-                star,
-                cohere_gguf_offset + i + 1,
-                model.name,
-                model.size as f64 / 1_000_000_000.0,
-                model.description,
-                status
-            );
-        }
-    } else {
-        println!("  \x1b[90m(not available - rebuild with --features cohere-gguf)\x1b[0m");
-    }
+    print_gguf_section(
+        COHERE_GGUF_MODELS,
+        cohere_gguf_available,
+        cohere_gguf_offset,
+        is_cohere_engine.then_some(current_cohere_model).flatten(),
+    );
+
+    let parakeet_gguf_offset =
+        cohere_gguf_offset + available_count(cohere_gguf_available, cohere_gguf_count);
+    println!("\n--- Parakeet GGUF (transcribe.cpp, Vulkan-capable) ---\n");
+    print_gguf_section(
+        PARAKEET_GGUF_MODELS,
+        parakeet_gguf_available,
+        parakeet_gguf_offset,
+        is_parakeet_engine
+            .then_some(current_parakeet_model)
+            .flatten(),
+    );
 
     // --- OpenVINO Section ---
     let openvino_offset =
-        cohere_gguf_offset + available_count(cohere_gguf_available, cohere_gguf_count);
+        parakeet_gguf_offset + available_count(parakeet_gguf_available, parakeet_gguf_count);
     println!("\n--- OpenVINO Whisper (Intel NPU/CPU/GPU via OpenVINO) ---\n");
 
     if openvino_available {
@@ -1933,13 +1999,60 @@ pub async fn interactive_select() -> anyhow::Result<()> {
         handle_cohere_selection(idx).await
     } else if cohere_gguf_available && selection <= cohere_gguf_offset + cohere_gguf_count {
         let idx = selection - cohere_gguf_offset;
-        handle_cohere_gguf_selection(idx).await
+        handle_gguf_selection(COHERE_GGUF_MODELS, idx).await
+    } else if parakeet_gguf_available && selection <= parakeet_gguf_offset + parakeet_gguf_count {
+        let idx = selection - parakeet_gguf_offset;
+        handle_gguf_selection(PARAKEET_GGUF_MODELS, idx).await
     } else if openvino_available && selection <= openvino_offset + openvino_count {
         let idx = selection - openvino_offset;
         handle_openvino_selection(idx, &config).await
     } else {
         println!("\nInvalid selection.");
         Ok(())
+    }
+}
+
+/// One GGUF section of the interactive picker, numbered from `offset + 1`.
+/// `current` is the configured model when its engine is the active one.
+fn print_gguf_section(
+    models: &[GgufModelInfo],
+    available: bool,
+    offset: usize,
+    current: Option<&str>,
+) {
+    let Some(first) = models.first() else {
+        return;
+    };
+    if !available {
+        println!(
+            "  \x1b[90m(not available - rebuild with --features {})\x1b[0m",
+            first.feature()
+        );
+        return;
+    }
+    let models_dir = Config::models_dir();
+    for (i, model) in models.iter().enumerate() {
+        let path = models_dir.join(model.name);
+        let installed = validate_gguf_model(&path, model).is_ok();
+        let star = if current == Some(model.name) {
+            "*"
+        } else {
+            " "
+        };
+        let status = if installed {
+            "\x1b[32m[installed]\x1b[0m"
+        } else {
+            ""
+        };
+        println!(
+            " {}[{:>2}] {:<44} ({:.2} GB) {} {}",
+            star,
+            offset + i + 1,
+            model.name,
+            model.size as f64 / 1_000_000_000.0,
+            model.description,
+            status
+        );
     }
 }
 
@@ -2886,6 +2999,16 @@ pub fn cohere_setup_model_names() -> Vec<&'static str> {
         .collect()
 }
 
+/// Parakeet names to show for `voxtype setup --model`: the ONNX models, then
+/// the curated GGUF files.
+pub fn parakeet_setup_model_names() -> Vec<&'static str> {
+    PARAKEET_MODELS
+        .iter()
+        .map(|m| m.name)
+        .chain(PARAKEET_GGUF_MODELS.iter().map(|m| m.name))
+        .collect()
+}
+
 /// Validate that a Cohere model directory has the required files.
 ///
 /// The downloader renames variant-specific ONNX files to canonical names
@@ -2955,18 +3078,12 @@ pub fn download_cohere_model(model_name: &str) -> anyhow::Result<()> {
 
 /// Cheap GGUF presence check for catalog listings; full verification hashes
 /// the file and is used before setup skips a download or activates a model.
-pub(crate) fn validate_cohere_gguf_model(
-    path: &Path,
-    model: &CohereGgufModelInfo,
-) -> anyhow::Result<()> {
+pub(crate) fn validate_gguf_model(path: &Path, model: &GgufModelInfo) -> anyhow::Result<()> {
     validate_download(path, Some(model.size), ContentCheck::Gguf)
 }
 
-pub(crate) fn verify_cohere_gguf_model(
-    path: &Path,
-    model: &CohereGgufModelInfo,
-) -> anyhow::Result<()> {
-    validate_cohere_gguf_model(path, model)?;
+pub(crate) fn verify_gguf_model(path: &Path, model: &GgufModelInfo) -> anyhow::Result<()> {
+    validate_gguf_model(path, model)?;
     let observed = sha256_file(path)?;
     if observed != model.sha256 {
         anyhow::bail!(
@@ -2979,16 +3096,16 @@ pub(crate) fn verify_cohere_gguf_model(
     Ok(())
 }
 
-/// Download one pinned, checksum-verified Cohere GGUF from the official
-/// transcribe.cpp publisher. R2 does not mirror these files yet, so this is
-/// an explicit source rather than a fallback from the manifest downloader.
-pub fn download_cohere_gguf_model(name: &str) -> anyhow::Result<()> {
-    let model = find_cohere_gguf_model(name)
-        .ok_or_else(|| anyhow::anyhow!("Unknown Cohere GGUF model: {name}"))?;
+/// Download one pinned, checksum-verified GGUF from its R2 mirror. These are
+/// single files with a pinned publisher hash, so they bypass the manifest
+/// downloader the ONNX model directories use.
+pub fn download_gguf_model(name: &str) -> anyhow::Result<()> {
+    let model =
+        find_gguf_model(name).ok_or_else(|| anyhow::anyhow!("Unknown GGUF model: {name}"))?;
     let models_dir = Config::models_dir();
     std::fs::create_dir_all(&models_dir)?;
     let dest = models_dir.join(model.name);
-    let url = cohere_gguf_url(model);
+    let url = gguf_url(model);
     if !progress::is_json() {
         println!(
             "\nDownloading {} ({:.2} GB)...",
@@ -2997,9 +3114,9 @@ pub fn download_cohere_gguf_model(name: &str) -> anyhow::Result<()> {
         );
     }
     let part = download_to_part(&url, &dest, model.name, model.name, Some(model.size))?;
-    if let Err(e) = verify_cohere_gguf_model(&part, model) {
+    if let Err(e) = verify_gguf_model(&part, model) {
         let _ = std::fs::remove_file(&part);
-        anyhow::bail!("Downloaded Cohere GGUF failed verification: {e}");
+        anyhow::bail!("Downloaded GGUF failed verification: {e}");
     }
     promote_part(&part, &dest)?;
     if !progress::is_json() {
@@ -3008,16 +3125,21 @@ pub fn download_cohere_gguf_model(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_cohere_gguf_selection(selection: usize) -> anyhow::Result<()> {
-    let Some(model) = selection
-        .checked_sub(1)
-        .and_then(|index| COHERE_GGUF_MODELS.get(index))
-    else {
+/// Write `engine = "<model's engine>"` and its `[section] model`.
+fn update_config_gguf(model: &GgufModelInfo) -> anyhow::Result<()> {
+    match model.engine {
+        "parakeet" => update_config_parakeet(model.name),
+        _ => update_config_cohere(model.name),
+    }
+}
+
+async fn handle_gguf_selection(models: &[GgufModelInfo], selection: usize) -> anyhow::Result<()> {
+    let Some(model) = selection.checked_sub(1).and_then(|index| models.get(index)) else {
         println!("\nCancelled.");
         return Ok(());
     };
     let path = Config::models_dir().join(model.name);
-    if verify_cohere_gguf_model(&path, model).is_ok() {
+    if verify_gguf_model(&path, model).is_ok() {
         println!("\nModel '{}' is already installed.\n", model.name);
         println!("  [1] Set as default model (update config)");
         println!("  [2] Re-download");
@@ -3028,7 +3150,7 @@ async fn handle_cohere_gguf_selection(selection: usize) -> anyhow::Result<()> {
         io::stdin().read_line(&mut choice)?;
         match choice.trim() {
             "" | "1" => {
-                update_config_cohere(model.name)?;
+                update_config_gguf(model)?;
                 restart_daemon_if_running().await;
                 return Ok(());
             }
@@ -3042,7 +3164,10 @@ async fn handle_cohere_gguf_selection(selection: usize) -> anyhow::Result<()> {
         model.name,
         model.size as f64 / 1_000_000_000.0
     ));
-    print_info("This Apache-2.0 model runs entirely on your device.");
+    print_info(&format!(
+        "This {} model runs entirely on your device.",
+        model.license
+    ));
     print!("Continue? [Y/n]: ");
     io::stdout().flush()?;
     let mut confirm = String::new();
@@ -3051,8 +3176,8 @@ async fn handle_cohere_gguf_selection(selection: usize) -> anyhow::Result<()> {
         println!("Cancelled.");
         return Ok(());
     }
-    download_cohere_gguf_model(model.name)?;
-    update_config_cohere(model.name)?;
+    download_gguf_model(model.name)?;
+    update_config_gguf(model)?;
     restart_daemon_if_running().await;
     Ok(())
 }
@@ -5233,32 +5358,66 @@ mode = "type"
     fn cohere_gguf_validation_checks_size_magic_and_publisher_hash() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cohere.gguf");
-        let model = CohereGgufModelInfo {
+        let model = GgufModelInfo {
+            engine: "cohere",
             name: "cohere.gguf",
             r2_dir: "cohere-gguf-test",
             size: 11,
             sha256: "70d5523972d92139e4d1f62ee3d7cd79054f08ac90b5ba3b87df19c08adb3b17",
+            license: "test",
             description: "test fixture",
         };
 
         std::fs::write(&path, b"GGUFpayload").unwrap();
-        verify_cohere_gguf_model(&path, &model).unwrap();
+        verify_gguf_model(&path, &model).unwrap();
 
         std::fs::write(&path, b"GGUFshort").unwrap();
-        assert!(validate_cohere_gguf_model(&path, &model).is_err());
+        assert!(validate_gguf_model(&path, &model).is_err());
 
         std::fs::write(&path, b"HTMLpayload").unwrap();
-        assert!(validate_cohere_gguf_model(&path, &model)
+        assert!(validate_gguf_model(&path, &model)
             .unwrap_err()
             .to_string()
             .contains("not a GGUF model"));
 
         std::fs::write(&path, b"GGUFpayloae").unwrap();
-        validate_cohere_gguf_model(&path, &model).unwrap();
-        assert!(verify_cohere_gguf_model(&path, &model)
+        validate_gguf_model(&path, &model).unwrap();
+        assert!(verify_gguf_model(&path, &model)
             .unwrap_err()
             .to_string()
             .contains("sha256 mismatch"));
+    }
+
+    /// The curated Parakeet GGUFs download from R2 under the `parakeet`
+    /// prefix, stay out of the ONNX name list (they have no registry entry
+    /// or directory), and are found by the same lookup as Cohere's.
+    #[test]
+    fn parakeet_gguf_entries_are_single_files_under_the_parakeet_prefix() {
+        assert_eq!(parakeet_gguf_models().len(), 2);
+        for model in parakeet_gguf_models() {
+            assert_eq!(model.engine, "parakeet");
+            assert!(model.name.ends_with(".gguf"), "{}", model.name);
+            assert_eq!(model.sha256.len(), 64, "{}", model.name);
+            assert_eq!(model.feature(), "parakeet-gguf");
+            assert!(std::ptr::eq(find_gguf_model(model.name).unwrap(), model));
+            assert!(!is_parakeet_model(model.name), "{}", model.name);
+            assert!(parakeet_setup_model_names().contains(&model.name));
+            assert_eq!(
+                gguf_url(model),
+                format!(
+                    "{}/parakeet/{}/{}",
+                    crate::setup::manifest::MODELS_BASE_URL,
+                    model.r2_dir,
+                    model.name
+                )
+            );
+        }
+        // Cohere's URLs keep the layout 2f3d95e mirrored them under.
+        let cohere = find_gguf_model("cohere-transcribe-03-2026-Q8_0.gguf").unwrap();
+        assert!(gguf_url(cohere).ends_with(
+            "/cohere/cohere-transcribe-03-2026-q8_0-gguf/cohere-transcribe-03-2026-Q8_0.gguf"
+        ));
+        assert_eq!(cohere.feature(), "cohere-gguf");
     }
 
     /// The whole staging sequence, offline: bytes land on the `.part` path,

@@ -6,6 +6,7 @@
 //! - CLI subprocess using whisper-cli (fallback for glibc 2.42+ compatibility)
 //! - Subprocess isolation for GPU memory release
 //! - Optionally NVIDIA Parakeet via ONNX Runtime (when `parakeet` feature is enabled)
+//!   or transcribe.cpp GGUF (when `parakeet-gguf` feature is enabled)
 //! - Optionally Moonshine via ONNX Runtime (when `moonshine` feature is enabled)
 //! - Optionally SenseVoice via ONNX Runtime (when `sensevoice` feature is enabled)
 //! - Optionally Paraformer via ONNX Runtime (when `paraformer` feature is enabled)
@@ -57,6 +58,9 @@ pub mod ctc;
 #[cfg(feature = "parakeet")]
 pub mod parakeet;
 
+#[cfg(feature = "parakeet-gguf")]
+pub mod parakeet_gguf;
+
 #[cfg(feature = "moonshine")]
 pub mod moonshine;
 
@@ -78,6 +82,10 @@ pub mod cohere;
 
 #[cfg(feature = "cohere-gguf")]
 pub mod cohere_gguf;
+
+/// transcribe.cpp session loading shared by the GGUF engines.
+#[cfg(any(feature = "cohere-gguf", feature = "parakeet-gguf"))]
+mod gguf;
 
 #[cfg(any(feature = "cohere", feature = "cohere-gguf"))]
 mod cohere_chunking;
@@ -189,28 +197,47 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
                 Ok(transcriber)
             }
         }
-        #[cfg(feature = "parakeet")]
         TranscriptionEngine::Parakeet => {
             let parakeet_config = config.parakeet.as_ref().ok_or_else(|| {
                 TranscribeError::InitFailed(
                     "Parakeet engine selected but [parakeet] config section is missing".to_string(),
                 )
             })?;
-            if parakeet_config.streaming {
-                Ok(Box::new(
-                    parakeet_streaming::ParakeetStreamingTranscriber::new(parakeet_config)?,
+            if is_gguf_model(&parakeet_config.model) {
+                #[cfg(feature = "parakeet-gguf")]
+                {
+                    return Ok(Box::new(parakeet_gguf::ParakeetGgufTranscriber::new(
+                        parakeet_config,
+                    )?));
+                }
+                #[cfg(not(feature = "parakeet-gguf"))]
+                {
+                    return Err(TranscribeError::InitFailed(
+                        "Parakeet GGUF requires --features parakeet-gguf (or gpu-vulkan)"
+                            .to_string(),
+                    ));
+                }
+            }
+            #[cfg(feature = "parakeet")]
+            {
+                if parakeet_config.streaming {
+                    Ok(Box::new(
+                        parakeet_streaming::ParakeetStreamingTranscriber::new(parakeet_config)?,
+                    ))
+                } else {
+                    Ok(Box::new(parakeet::ParakeetTranscriber::new(
+                        parakeet_config,
+                    )?))
+                }
+            }
+            #[cfg(not(feature = "parakeet"))]
+            {
+                Err(TranscribeError::InitFailed(
+                    "Parakeet engine requested but voxtype was not compiled with --features parakeet"
+                        .to_string(),
                 ))
-            } else {
-                Ok(Box::new(parakeet::ParakeetTranscriber::new(
-                    parakeet_config,
-                )?))
             }
         }
-        #[cfg(not(feature = "parakeet"))]
-        TranscriptionEngine::Parakeet => Err(TranscribeError::InitFailed(
-            "Parakeet engine requested but voxtype was not compiled with --features parakeet"
-                .to_string(),
-        )),
         #[cfg(feature = "moonshine")]
         TranscriptionEngine::Moonshine => {
             let moonshine_config = config.moonshine.as_ref().ok_or_else(|| {
@@ -295,7 +322,7 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
                     "Cohere engine selected but [cohere] config section is missing".to_string(),
                 )
             })?;
-            if cfg.model.to_ascii_lowercase().ends_with(".gguf") {
+            if is_gguf_model(&cfg.model) {
                 #[cfg(feature = "cohere-gguf")]
                 { return Ok(Box::new(cohere_gguf::CohereGgufTranscriber::new(cfg)?)); }
                 #[cfg(not(feature = "cohere-gguf"))]
@@ -334,6 +361,13 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
                 .to_string(),
         )),
     }
+}
+
+/// Whether an engine's `model` setting names a transcribe.cpp GGUF file
+/// rather than an ONNX model directory. Cohere and Parakeet both dispatch on
+/// it, so the same spelling selects the same runtime for either.
+fn is_gguf_model(model: &str) -> bool {
+    model.to_ascii_lowercase().ends_with(".gguf")
 }
 
 /// Factory function to create Whisper transcriber (local or remote)
@@ -466,6 +500,57 @@ pub fn create_transcriber_with_config_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gguf_is_chosen_by_extension_in_any_case() {
+        assert!(is_gguf_model("parakeet-tdt-0.6b-v3-F16.gguf"));
+        assert!(is_gguf_model("/models/Parakeet.GGUF"));
+        assert!(!is_gguf_model("parakeet-tdt-0.6b-v3"));
+        assert!(!is_gguf_model("/models/parakeet-tdt-0.6b-v3-gguf"));
+    }
+
+    fn parakeet_config(model: &str) -> Config {
+        Config {
+            engine: TranscriptionEngine::Parakeet,
+            parakeet: Some(crate::config::ParakeetConfig {
+                model: model.to_string(),
+                ..Default::default()
+            }),
+            ..Config::default()
+        }
+    }
+
+    fn init_error(config: &Config) -> String {
+        match create_transcriber(config) {
+            Ok(_) => panic!("a missing model must not load"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    /// A `.gguf` Parakeet model goes to transcribe.cpp, which reports the
+    /// missing file by path, or says which feature the build lacks.
+    #[test]
+    fn parakeet_gguf_models_dispatch_to_transcribe_cpp() {
+        let err = init_error(&parakeet_config("/nonexistent/voxtype/parakeet.gguf"));
+        if cfg!(feature = "parakeet-gguf") {
+            assert!(err.contains("/nonexistent/voxtype/parakeet.gguf"), "{err}");
+            assert!(!err.contains("Parakeet model '"), "{err}");
+        } else {
+            assert!(err.contains("parakeet-gguf"), "{err}");
+        }
+    }
+
+    /// Anything else stays on the ONNX path, exactly as before GGUF support.
+    #[test]
+    fn parakeet_onnx_models_dispatch_to_onnx_runtime() {
+        let err = init_error(&parakeet_config("/nonexistent/voxtype/parakeet-tdt"));
+        if cfg!(feature = "parakeet") {
+            assert!(err.contains("Parakeet model '"), "{err}");
+        } else {
+            assert!(err.contains("--features parakeet"), "{err}");
+            assert!(!err.contains("parakeet-gguf"), "{err}");
+        }
+    }
 
     /// An old-style config.toml — no `[streaming]` section at all, just the
     /// per-engine `streaming_*` fields that predate it — must resolve to

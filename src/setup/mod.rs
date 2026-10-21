@@ -627,6 +627,7 @@ pub(crate) enum ModelKind {
     Omnilingual,
     Cohere,
     CohereGguf,
+    ParakeetGguf,
     OpenVino,
 }
 
@@ -658,8 +659,11 @@ pub(crate) fn classify_model_override(name: &str) -> anyhow::Result<ModelKind> {
         Ok(ModelKind::Omnilingual)
     } else if model::is_cohere_model(name) {
         Ok(ModelKind::Cohere)
-    } else if model::find_cohere_gguf_model(name).is_some() {
-        Ok(ModelKind::CohereGguf)
+    } else if let Some(gguf) = model::find_gguf_model(name) {
+        Ok(match gguf.engine {
+            "parakeet" => ModelKind::ParakeetGguf,
+            _ => ModelKind::CohereGguf,
+        })
     } else if model::is_openvino_model(name) {
         Ok(ModelKind::OpenVino)
     } else {
@@ -669,7 +673,7 @@ pub(crate) fn classify_model_override(name: &str) -> anyhow::Result<ModelKind> {
              Cohere: {}\n  OpenVINO: {}",
             name,
             model::valid_model_names().join(", "),
-            model::valid_parakeet_model_names().join(", "),
+            model::parakeet_setup_model_names().join(", "),
             model::sensevoice_setup_model_names().join(", "),
             model::moonshine_setup_model_names().join(", "),
             model::paraformer_setup_model_names().join(", "),
@@ -833,7 +837,7 @@ pub async fn run_setup(
     let is_parakeet = kind == Some(ModelKind::Parakeet);
     let is_sensevoice = kind == Some(ModelKind::SenseVoice);
     let is_openvino = kind == Some(ModelKind::OpenVino);
-    let is_cohere_gguf = kind == Some(ModelKind::CohereGguf);
+    let is_gguf = matches!(kind, Some(ModelKind::CohereGguf | ModelKind::ParakeetGguf));
 
     if let Some(route) = kind.and_then(onnx_setup_route) {
         // Engines whose downloads were picker-only until #687: routed
@@ -902,17 +906,18 @@ pub async fn run_setup(
                 model_name
             );
         }
-    } else if is_cohere_gguf {
+    } else if is_gguf {
         let name = model_override.unwrap(); // Safe: classifier matched GGUF
-        let model = model::find_cohere_gguf_model(name).unwrap();
+        let model = model::find_gguf_model(name).unwrap();
         let path = models_dir.join(model.name);
-        if !cfg!(feature = "cohere-gguf") {
+        if !model.compiled() {
             anyhow::bail!(
-                "Cohere GGUF model '{}' requires the 'cohere-gguf' feature",
-                name
+                "GGUF model '{}' requires the '{}' feature",
+                name,
+                model.feature()
             );
         }
-        let verification = model::verify_cohere_gguf_model(&path, model);
+        let verification = model::verify_gguf_model(&path, model);
         match &verification {
             Ok(()) => {
                 if !quiet {
@@ -923,7 +928,7 @@ pub async fn run_setup(
                     ));
                 }
             }
-            Err(_) if download => model::download_cohere_gguf_model(name)?,
+            Err(_) if download => model::download_gguf_model(name)?,
             Err(e) if path.exists() => {
                 left_damaged = true;
                 if !quiet {
@@ -939,11 +944,11 @@ pub async fn run_setup(
             }
         }
         if activate && (verification.is_ok() || download) {
-            model::set_engine_model_config("cohere", model.name)?;
+            model::set_engine_model_config(model.engine, model.name)?;
             if !quiet {
                 print_success(&format!(
-                    "Config updated: engine = \"cohere\", model = \"{}\"",
-                    model.name
+                    "Config updated: engine = \"{}\", model = \"{}\"",
+                    model.engine, model.name
                 ));
             }
         }
@@ -1694,6 +1699,8 @@ mod tests {
                 "cohere-transcribe-03-2026-Q4_K_M.gguf",
                 ModelKind::CohereGguf,
             ),
+            ("parakeet-tdt-0.6b-v3-F16.gguf", ModelKind::ParakeetGguf),
+            ("parakeet-tdt-0.6b-v3-Q8_0.gguf", ModelKind::ParakeetGguf),
         ] {
             assert_eq!(classify_model_override(name).unwrap(), expected, "{}", name);
         }
@@ -1784,6 +1791,7 @@ mod tests {
                 };
                 let expected = match *engine {
                     "whisper" => ModelKind::Whisper,
+                    "parakeet" if model.ends_with(".gguf") => ModelKind::ParakeetGguf,
                     "parakeet" => ModelKind::Parakeet,
                     "sensevoice" => ModelKind::SenseVoice,
                     "moonshine" => ModelKind::Moonshine,

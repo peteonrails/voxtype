@@ -178,7 +178,7 @@ impl KeySpec {
 /// `cfg!` blocks can't drift.
 pub fn feature_compiled(feature: &str) -> bool {
     match feature {
-        "parakeet" => cfg!(feature = "parakeet"),
+        "parakeet" => cfg!(any(feature = "parakeet", feature = "parakeet-gguf")),
         "moonshine" => cfg!(feature = "moonshine"),
         "sensevoice" => cfg!(feature = "sensevoice"),
         "paraformer" => cfg!(feature = "paraformer"),
@@ -422,7 +422,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::DynamicEnum { source: "models" },
         "Engine",
         "Model",
-        "Parakeet model directory name under the voxtype models dir.",
+        "Parakeet ONNX model directory, or path to a transcribe.cpp GGUF file.",
     )
     .for_onnx_engine("parakeet"),
     spec(
@@ -433,6 +433,26 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Engine",
         "Decoder type",
         "Force the decoder family instead of auto-detecting it from the model directory.",
+    )
+    .for_onnx_engine("parakeet"),
+    spec(
+        "parakeet.threads",
+        "parakeet",
+        "threads",
+        KeyType::Int { min: 1, max: 256 },
+        "Engine",
+        "Threads",
+        "ONNX Runtime intra-op threads. Unset uses 4; long CPU dictations are fastest at the physical core count. GGUF models: transcribe.cpp CPU threads.",
+    )
+    .for_onnx_engine("parakeet"),
+    spec(
+        "parakeet.gguf_backend",
+        "parakeet",
+        "gguf_backend",
+        closed(&["auto", "cpu", "cpu_accel", "vulkan", "metal", "cuda", "rocm"]),
+        "Engine",
+        "GGUF backend",
+        "Compute backend for transcribe.cpp GGUF inference.",
     )
     .for_onnx_engine("parakeet"),
     spec(
@@ -2553,6 +2573,11 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             Some(t) => serde_json::to_value(t).ok()?,
             None => Json::Null,
         },
+        "parakeet.threads" => match pk().threads {
+            Some(n) => json!(n),
+            None => Json::Null,
+        },
+        "parakeet.gguf_backend" => json!(pk().gguf_backend),
         "parakeet.on_demand_loading" => json!(pk().on_demand_loading),
         "parakeet.streaming" => json!(pk().streaming),
 
