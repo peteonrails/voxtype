@@ -1321,7 +1321,7 @@ See [PARAKEET.md](PARAKEET.md) for detailed setup instructions.
 **Default:** `"parakeet-tdt-0.6b-v3"`
 **Required:** No
 
-The Parakeet model to use. Can be a model name (looked up in `~/.local/share/voxtype/models/`) or an absolute path to a model directory.
+The Parakeet model to use. Can be a model name (looked up in `~/.local/share/voxtype/models/`) or an absolute path to a model directory. A name or path ending in `.gguf` is a transcribe.cpp GGUF file instead of an ONNX model directory, and runs through transcribe.cpp (see [gguf_backend](#gguf_backend)).
 
 **Example:**
 ```toml
@@ -1333,6 +1333,13 @@ model = "parakeet-tdt-0.6b-v3"
 ```toml
 [parakeet]
 model = "/opt/models/parakeet-tdt-0.6b-v3"
+```
+
+**GGUF on a Vulkan GPU:**
+```toml
+[parakeet]
+model = "parakeet-tdt-0.6b-v3-F16.gguf"
+gguf_backend = "vulkan"
 ```
 
 ### model_type
@@ -1364,11 +1371,23 @@ Number of CPU threads for ONNX Runtime intra-op parallelism. Applies to the batc
 
 Parakeet's wait after you stop talking grows with the length of the dictation, so this matters most for long recordings on the CPU. On a 12-core Ryzen AI 9 HX 370, 12 threads took a 3-minute dictation from 11.7 s to 8.6 s, and more threads than physical cores were slower again. Leave it unset on battery-sensitive laptops, or set it to your physical core count for the shortest wait.
 
+With a GGUF model, this is transcribe.cpp's CPU thread count instead, and unset leaves the library's default.
+
 **Example:**
 ```toml
 [parakeet]
 threads = 12
 ```
+
+### gguf_backend
+
+**Type:** String
+**Default:** `"auto"`
+**Required:** No
+
+The transcribe.cpp compute backend for GGUF models. Ignored for ONNX models. Accepts the same values as `[cohere] gguf_backend`: `auto`, `cpu`, `cpu_accel`, `vulkan`, `metal`, `cuda`, `rocm`.
+
+`"vulkan"` requires a hardware Vulkan device and reports an error if transcribe.cpp would run on a software renderer such as llvmpipe; `"auto"` lets transcribe.cpp choose. GGUF support is built with `--features parakeet-gguf`, and `--features gpu-vulkan` includes it with Vulkan. GGUF models do not support `streaming = true`. See [PARAKEET.md](PARAKEET.md#gguf-on-vulkan-transcribecpp) for timings.
 
 ### on_demand_loading
 

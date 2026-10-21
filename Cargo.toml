@@ -193,7 +193,12 @@ osd-native = [
     "dep:bytemuck",
 ]
 osd-gtk4 = ["dep:gtk4", "dep:gtk4-layer-shell", "dep:cairo-rs", "dep:glib"]
-gpu-vulkan = ["whisper-rs/vulkan", "cohere-gguf", "transcribe-cpp/vulkan"]
+gpu-vulkan = [
+    "whisper-rs/vulkan",
+    "cohere-gguf",
+    "parakeet-gguf",
+    "transcribe-cpp/vulkan",
+]
 gpu-cuda = ["whisper-rs/cuda"]
 gpu-metal = ["whisper-rs/metal"]
 gpu-hipblas = ["whisper-rs/hipblas"]
@@ -205,6 +210,10 @@ parakeet-cuda = ["parakeet", "parakeet-rs/cuda"]
 parakeet-tensorrt = ["parakeet", "parakeet-rs/tensorrt"]
 parakeet-migraphx = ["parakeet", "parakeet-rs/migraphx"]
 parakeet-coreml = ["parakeet", "parakeet-rs/coreml"]
+# Parakeet GGUF models run in-process through transcribe.cpp, like Cohere's.
+# Not implied by `parakeet`: ONNX builds would otherwise compile ggml for a
+# runtime that is only faster on a GPU. `gpu-vulkan` enables it.
+parakeet-gguf = ["dep:transcribe-cpp"]
 # Dynamic loading for system ONNX Runtime (used by Nix builds)
 parakeet-load-dynamic = ["parakeet", "parakeet-rs/load-dynamic"]
 # Inverse text normalization for dictated numbers, dates, currency and URLs.

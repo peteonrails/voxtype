@@ -116,6 +116,12 @@ impl GgufSession {
             .lock()
             .map_err(|e| TranscribeError::InferenceFailed(format!("GGUF session lock: {e}")))
     }
+
+    /// The model's `general.architecture`, e.g. "parakeet".
+    #[cfg_attr(not(feature = "parakeet-gguf"), allow(dead_code))]
+    pub fn arch(&self) -> Result<String, TranscribeError> {
+        Ok(self.lock()?.model().arch())
+    }
 }
 
 /// One forward pass, with the library's error mapped into voxtype's.
