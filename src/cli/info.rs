@@ -25,7 +25,7 @@ pub enum InfoAction {
     ///
     /// Every listing runs a cheap integrity check: file sizes against the
     /// manifest recorded at download time, the ggml header for Whisper, and
-    /// the size and GGUF header for Cohere GGUF. A model that fails is
+    /// the size and GGUF header for GGUF models. A model that fails is
     /// reported as not installed.
     Models {
         /// Emit machine-readable JSON instead of human-readable text

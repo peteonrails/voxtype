@@ -138,15 +138,23 @@ Parakeet on CPU is significantly faster than Whisper on CPU, and competitive wit
 
 Voxtype can also run Parakeet TDT 0.6B v3 as a GGUF model through [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp), inside the daemon, on a Vulkan GPU. It is the same `parakeet` engine: a `[parakeet] model` ending in `.gguf` selects transcribe.cpp, anything else selects ONNX Runtime. It needs no ONNX Runtime, so a binary built with `--features gpu-vulkan` (or `--features parakeet-gguf` for the CPU runtime only) runs it.
 
-The GGUF files are published by handy-computer in [parakeet-tdt-0.6b-v3-gguf](https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf). Configure one by path:
+Run `voxtype setup model` and pick a Parakeet GGUF, or download one directly:
+
+```sh
+voxtype setup --download --model parakeet-tdt-0.6b-v3-F16.gguf --activate
+```
+
+Then select the GPU explicitly:
 
 ```toml
 engine = "parakeet"
 
 [parakeet]
-model = "/absolute/path/parakeet-tdt-0.6b-v3-F16.gguf"
+model = "parakeet-tdt-0.6b-v3-F16.gguf"
 gguf_backend = "vulkan"
 ```
+
+`parakeet-tdt-0.6b-v3-Q8_0.gguf` is a smaller download (0.74 GB against 1.26 GB) with the same accuracy and speed in the tests below. Setup verifies both against the SHA-256 published by handy-computer in [parakeet-tdt-0.6b-v3-gguf](https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf); the other quantizations there work by absolute path.
 
 Long recordings are split with the same `max_window_secs` and `window_overlap_secs` as the ONNX models, because transcribe.cpp's encoder uses full attention and its memory grows with the square of the input length. `streaming = true` is not supported with GGUF models and is reported as a configuration error.
 

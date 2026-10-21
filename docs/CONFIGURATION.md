@@ -1335,6 +1335,8 @@ model = "parakeet-tdt-0.6b-v3"
 model = "/opt/models/parakeet-tdt-0.6b-v3"
 ```
 
+Setup downloads two GGUF files, `parakeet-tdt-0.6b-v3-F16.gguf` (1.26 GB) and `parakeet-tdt-0.6b-v3-Q8_0.gguf` (0.74 GB), through `voxtype setup model` or `voxtype setup --download --model <name>`, and verifies them against the publisher's SHA-256.
+
 **GGUF on a Vulkan GPU:**
 ```toml
 [parakeet]
