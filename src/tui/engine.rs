@@ -71,6 +71,7 @@ pub struct AllFields {
     // Parakeet
     pub pk_model: String,
     pub pk_model_type: Option<String>, // "tdt", "ctc", or None for auto-detect
+    pub pk_threads: Option<i64>,
     pub pk_on_demand_loading: bool,
     /// True if the [parakeet] table existed in the config at load time. We
     /// only write back to it on save if either this is true or parakeet is
@@ -159,6 +160,7 @@ pub enum FieldId {
     // Parakeet
     PkModel,
     PkModelType,
+    PkThreads,
     PkOnDemandLoading,
 
     // Moonshine
@@ -248,6 +250,7 @@ fn rows_for_engine_with_mode(engine: &str, whisper_mode: &str) -> Vec<FieldId> {
         "parakeet" => rows.extend_from_slice(&[
             FieldId::PkModel,
             FieldId::PkModelType,
+            FieldId::PkThreads,
             FieldId::PkOnDemandLoading,
         ]),
         "moonshine" => rows.extend_from_slice(&[
@@ -328,6 +331,7 @@ impl EngineState {
                 .get_string("parakeet", "model")
                 .unwrap_or_else(|| default_model("parakeet").to_string()),
             pk_model_type: ed.get_string("parakeet", "model_type"),
+            pk_threads: ed.get_int("parakeet", "threads"),
             pk_on_demand_loading: ed
                 .get_bool("parakeet", "on_demand_loading")
                 .unwrap_or(false),
@@ -574,6 +578,10 @@ impl EngineState {
             match &f.pk_model_type {
                 Some(m) => ed.set_string("parakeet", "model_type", m),
                 None => ed.unset("parakeet", "model_type"),
+            }
+            match f.pk_threads {
+                Some(n) => ed.set_int("parakeet", "threads", n),
+                None => ed.unset("parakeet", "threads"),
             }
             ed.set_bool("parakeet", "on_demand_loading", f.pk_on_demand_loading);
         }
@@ -862,6 +870,7 @@ impl EngineState {
                 let n = (idx + delta).rem_euclid(PARAKEET_MODEL_TYPES.len() as i32);
                 f.pk_model_type = PARAKEET_MODEL_TYPES[n as usize].map(|s| s.to_string());
             }
+            FieldId::PkThreads => f.pk_threads = cycle_threads(f.pk_threads, delta),
             FieldId::PkOnDemandLoading => f.pk_on_demand_loading = !f.pk_on_demand_loading,
 
             FieldId::MnModel => f.mn_model = cycle_model("moonshine", &f.mn_model, delta),
@@ -1212,6 +1221,12 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
                 .as_deref()
                 .unwrap_or("auto-detect")
                 .to_string(),
+        ),
+        FieldId::PkThreads => (
+            "Parakeet · threads",
+            f.pk_threads
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "auto".to_string()),
         ),
         FieldId::PkOnDemandLoading => (
             "Parakeet · on-demand model load",
@@ -1634,6 +1649,7 @@ fn guidance(state: &EngineState) -> Vec<Line<'_>> {
                 Style::default().fg(Color::Gray),
             )),
         ],
+        FieldId::PkThreads => threads_guidance("Parakeet"),
         FieldId::PkOnDemandLoading => vec![
             heading("Parakeet · on-demand model loading"),
             Line::from(""),
