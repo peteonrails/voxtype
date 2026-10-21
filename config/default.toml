@@ -3,7 +3,8 @@
 # Location: ~/.config/voxtype/config.toml
 # All settings can be overridden via CLI flags
 
-# Transcription engine: "whisper" (default) or "parakeet"
+# Transcription engine: "whisper" (default), "parakeet", or another engine
+# reported by `voxtype info engines`, including the cloud-hosted "seedasr".
 # Whisper: whisper.cpp via whisper-rs (most compatible)
 # Parakeet: NVIDIA FastConformer via ONNX Runtime (requires --features parakeet)
 # engine = "whisper"
@@ -142,6 +143,22 @@ on_demand_loading = false
 # model_type = "tdt"
 #
 # on_demand_loading = false
+
+# [seedasr]
+# Volcengine Seed-ASR cloud WebSocket engine (engine = "seedasr").
+# Use either api_key or the legacy app_id + access_token pair.
+# api_key = "your-api-key"             # Or SEEDASR_API_KEY
+# app_id = "your-app-id"               # Or SEEDASR_APP_ID
+# access_token = "your-access-token"   # Or SEEDASR_ACCESS_TOKEN
+# resource_id = "volc.seedasr.sauc.duration"
+# url = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
+# streaming = true
+# type_partials = false
+# language = "auto"
+# enable_itn = true
+# enable_punc = true
+# enable_ddc = false
+# end_window_ms = 800
 
 [output]
 # Primary output mode: "type", "clipboard", or "paste"
