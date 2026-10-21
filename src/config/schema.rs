@@ -3614,7 +3614,8 @@ mod tests {
         .iter()
         .map(|t| format!("[{t}]\nmodel = \"m\"\n"))
         .collect();
-        src.push_str("[streaming]\n[output.post_process]\ncommand = \"cat\"\n");
+        // Seed-ASR has no `model` key.
+        src.push_str("[seedasr]\n[streaming]\n[output.post_process]\ncommand = \"cat\"\n");
         let cfg: Config = toml::from_str(&src).expect("materialized config parses");
 
         let mut leaves = Vec::new();

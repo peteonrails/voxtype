@@ -5672,7 +5672,9 @@ mod tests {
             let delivery = deliver_file(&target, text).await;
             let outcome = finish_streaming_file_output(&target, text, &delivery, Some(&error));
             assert_eq!(outcome, TranscriptOutcome::error(&error.to_string()));
-            assert_eq!(fs::read_to_string(&target).unwrap(), format!("{text}\n"));
+            // An empty transcript writes an empty file, not a blank line.
+            let expected = if text.is_empty() { "" } else { "半句话\n" };
+            assert_eq!(fs::read_to_string(&target).unwrap(), expected);
             let sidecar = fs::read_to_string(result_sidecar_path(&target)).unwrap();
             let parsed: serde_json::Value = serde_json::from_str(&sidecar).unwrap();
             assert_eq!(parsed["status"], "error");

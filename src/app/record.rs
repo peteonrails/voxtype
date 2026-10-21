@@ -621,9 +621,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let transcript = dir.path().join("dictation.txt");
         std::fs::write(&transcript, "incomplete transcript\n").unwrap();
-        let sidecar =
-            serde_json::to_string(&voxtype::daemon::TranscriptOutcome::error("stream interrupted"))
-                .unwrap();
+        let sidecar = serde_json::to_string(&voxtype::daemon::TranscriptOutcome::error(
+            "stream interrupted",
+        ))
+        .unwrap();
 
         let outcome = finish(&transcript, &sidecar);
         assert_eq!(outcome.status, "error");

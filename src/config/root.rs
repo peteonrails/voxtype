@@ -533,6 +533,9 @@ impl Config {
             TranscriptionEngine::Soniox => {
                 self.soniox.get_or_insert_with(Default::default).model = model
             }
+            // Seed-ASR has no model setting; the endpoint is chosen by
+            // `resource_id` and `url`.
+            TranscriptionEngine::SeedAsr => {}
         }
     }
 
