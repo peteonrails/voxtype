@@ -12,6 +12,18 @@ on:
 # job names; if you rename or remove one here, update branch protection.
 
 jobs:
+  website-versions:
+    # main only moves at release time; on dev, Cargo.toml is bumped before
+    # the release exists, so pinned links would point at nothing yet (#844)
+    name: website-versions
+    if: github.ref == 'refs/heads/main' || github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download links pin the Cargo.toml version
+        run: ./scripts/check-website-versions.sh
+
   fmt:
     name: fmt
     runs-on: ubuntu-latest

@@ -1007,7 +1007,7 @@ option = "value"</code></pre>
 **Checklist for releases:**
 1. Create GitHub release with notes following the style above
 2. Add matching article to `website/news/index.html`
-3. Update download examples in `website/index.html` (deb/rpm URLs with new version)
+3. Update pinned download URLs and version badges in `website/index.html`, `website/download/index.html`, `website/compare/*.html`, and `docs/INSTALL.md`. Run `./scripts/check-website-versions.sh` to find them; CI runs it against `main`.
 4. Update `packaging/arch-bin/voxtype-bin.install` post_upgrade() message with current version highlights
 5. Check `skills/voxtype-setup/SKILL.md` against the release: every command, flag and config key it names still exists (`voxtype --help`, `voxtype config schema`), and its engine, model and output advice covers what shipped. Features it calls "on the roadmap" (such as built-in history, #209) get rewritten once they ship
 6. Commit and push website changes
