@@ -225,7 +225,10 @@ pub async fn run() -> anyhow::Result<()> {
     } else {
         println!("Voxtype needs to be installed as an app bundle for proper macOS integration.\n");
         println!("This will:");
-        println!("  - Create /Applications/Voxtype.app");
+        println!(
+            "  - Create {}",
+            super::app_bundle::app_bundle_path().display()
+        );
         println!("  - Enable proper permission prompts");
         println!("  - Allow adding to Login Items\n");
 
@@ -306,7 +309,13 @@ pub async fn run() -> anyhow::Result<()> {
         println!();
         println!("    \x1b[1mAction required:\x1b[0m");
         println!("    1. Click the '+' button");
-        println!("    2. Navigate to /Applications");
+        println!(
+            "    2. Navigate to {}",
+            super::app_bundle::app_bundle_path()
+                .parent()
+                .unwrap()
+                .display()
+        );
         println!("    3. Select 'Voxtype.app'");
         println!("    4. Ensure the toggle is ON");
         println!();
@@ -335,7 +344,13 @@ pub async fn run() -> anyhow::Result<()> {
             println!();
             println!("    \x1b[1mAction required:\x1b[0m");
             println!("    1. Click the '+' button");
-            println!("    2. Navigate to /Applications");
+            println!(
+                "    2. Navigate to {}",
+                super::app_bundle::app_bundle_path()
+                    .parent()
+                    .unwrap()
+                    .display()
+            );
             println!("    3. Select 'Voxtype.app'");
             println!("    4. Ensure the toggle is ON");
             println!();
@@ -635,7 +650,10 @@ pub async fn run() -> anyhow::Result<()> {
 
     println!("Your Voxtype installation is ready. Here's a summary:\n");
 
-    println!("  App bundle:     /Applications/Voxtype.app");
+    println!(
+        "  App bundle:     {}",
+        super::app_bundle::app_bundle_path().display()
+    );
     if use_hammerspoon {
         println!("  Hotkey method:  Hammerspoon");
     } else {
