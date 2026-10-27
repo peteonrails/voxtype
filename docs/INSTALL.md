@@ -431,15 +431,17 @@ Then point voxtype at it and restart the daemon:
 
 ```bash
 sudo ln -sf cuda-13/voxtype-onnx-cuda-13 /usr/lib/voxtype/voxtype-onnx-cuda-13
+sudo ln -sf cuda-13/voxtype-onnx-cuda-13 /usr/lib/voxtype/voxtype-onnx-cuda
 sudo voxtype setup onnx --enable
+sudo voxtype setup gpu --enable
 systemctl --user restart voxtype
 ```
 
-`voxtype setup onnx --enable` picks the CUDA build when an NVIDIA GPU is
-present. With the daemon running, `voxtype info accel` reports `State: gpu`
-when the model is on the GPU. ONNX Runtime falls back to the CPU silently
-when the CUDA provider fails to load, so check this rather than the startup
-log. Parakeet and Cohere use the GPU in this build.
+The two setup commands enable ONNX and select CUDA, including when ONNX is
+already running on the CPU. With the daemon running, `voxtype info accel`
+reports `State: gpu` when the model is on the GPU. ONNX Runtime falls back
+to the CPU silently when the CUDA provider fails to load, so check this
+rather than the startup log. Parakeet and Cohere use the GPU in this build.
 
 On GPU, use the fp32 Parakeet models (`parakeet-tdt-0.6b-v2`). Under the
 CUDA execution provider the int8 models leave about 740 copy nodes on the

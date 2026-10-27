@@ -36,16 +36,21 @@ pub const SYSTEM_BIN: &str = "/usr/bin/voxtype";
 /// `binary_path` may be the top-level convenience symlink (e.g.
 /// /usr/lib/voxtype/voxtype-onnx-migraphx) or the canonical real path;
 /// this function canonicalizes before deciding wrapper vs symlink.
-/// Variant basenames that need a wrapper script. The ORT EPs they ship
-/// with (`libonnxruntime_providers_{cuda,migraphx}.so`) resolve their
-/// loader path from argv[0], so /usr/bin/voxtype has to be a script
-/// that execs the real binary by absolute path. Plain symlinks fail
-/// the load and silently fall back to CPU. See issue #443.
-const VARIANTS_NEEDING_WRAPPER: &[&str] = &[
-    "voxtype-onnx-cuda-12",
-    "voxtype-onnx-cuda-13",
-    "voxtype-onnx-migraphx",
-];
+/// Whether a variant basename needs a wrapper script. The CUDA and MIGraphX
+/// builds ship ORT EPs (`libonnxruntime_providers_{cuda,migraphx}.so`) that
+/// resolve their loader path from argv[0], so /usr/bin/voxtype has to be a
+/// script that execs the real binary by absolute path. Plain symlinks fail
+/// the load and silently fall back to CPU. See issue #443. This includes the
+/// unversioned `voxtype-onnx-cuda` alias that packages point at cuda-12/ or
+/// cuda-13/.
+fn needs_wrapper(basename: &str) -> bool {
+    Variant::from_binary_name(basename).is_some_and(|v| {
+        matches!(
+            v.acceleration(),
+            Acceleration::Cuda | Acceleration::Migraphx
+        )
+    })
+}
 
 /// Return the subdirectory under /usr/lib/voxtype/ where a wrapper-needing
 /// variant's real binary lives. Used to reconstruct the canonical exec
@@ -173,7 +178,7 @@ pub fn install_active_binary(
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("");
-    let needs_wrapper = VARIANTS_NEEDING_WRAPPER.contains(&basename);
+    let needs_wrapper = needs_wrapper(basename);
 
     // Resolve the canonical exec target. If canonicalize succeeds, trust
     // it (follows the full symlink chain to the real binary). If it
@@ -359,6 +364,22 @@ impl Variant {
         }
     }
 
+    /// Installed filename, preferring the current name over older package names.
+    pub(crate) fn installed_binary_name(self, lib_dir: &Path) -> Option<&'static str> {
+        let legacy = match self {
+            // The AUR source package uses voxtype-native; aarch64 binary
+            // packages use the release asset's cpu name.
+            Variant::WhisperNative => Some("voxtype-cpu"),
+            Variant::OnnxAvx512 => Some("voxtype-parakeet-avx512"),
+            Variant::OnnxAvx2 => Some("voxtype-parakeet-avx2"),
+            Variant::OnnxNative => Some("voxtype-parakeet"),
+            _ => None,
+        };
+        std::iter::once(self.binary_name())
+            .chain(legacy)
+            .find(|name| lib_dir.join(name).exists())
+    }
+
     pub const fn family(self) -> EngineFamily {
         match self {
             Variant::WhisperBaseline
@@ -426,15 +447,15 @@ impl Variant {
         }
     }
 
-    /// Reverse lookup. Accepts current names plus legacy `voxtype-parakeet*`
-    /// names from before the ONNX rename.
+    /// Reverse lookup. Accepts current names plus `voxtype-cpu` from aarch64
+    /// packages and legacy `voxtype-parakeet*` names from before the ONNX rename.
     pub fn from_binary_name(name: &str) -> Option<Self> {
         match name {
             "voxtype-baseline" => Some(Variant::WhisperBaseline),
             "voxtype-avx2" => Some(Variant::WhisperAvx2),
             "voxtype-avx512" => Some(Variant::WhisperAvx512),
             "voxtype-vulkan" => Some(Variant::WhisperVulkan),
-            "voxtype-native" => Some(Variant::WhisperNative),
+            "voxtype-native" | "voxtype-cpu" => Some(Variant::WhisperNative),
             "voxtype-onnx-avx2" | "voxtype-parakeet-avx2" => Some(Variant::OnnxAvx2),
             "voxtype-onnx-avx512" | "voxtype-parakeet-avx512" => Some(Variant::OnnxAvx512),
             "voxtype-onnx-cuda-12" => Some(Variant::OnnxCuda12),
@@ -671,10 +692,7 @@ fn recommend_whisper(cpu: &Cpu, gpus: &Gpus, installed: &[Variant]) -> (Variant,
 /// `installed` only matters off x86-64, where the packages ship no CUDA
 /// build: CUDA is recommended there only when one is present.
 fn recommend_onnx(cpu: &Cpu, gpus: &Gpus, installed: &[Variant]) -> (Variant, &'static str) {
-    let cuda_present = cpu.is_x86_64()
-        || installed
-            .iter()
-            .any(|v| v.acceleration() == Acceleration::Cuda);
+    let cuda_present = cpu.is_x86_64() || installed.contains(&Variant::OnnxCuda);
     if gpus.nvidia && variant_runs_on_cpu(Variant::OnnxCuda, cpu) && cuda_present {
         return (
             Variant::OnnxCuda,
@@ -828,7 +846,7 @@ pub fn active_variant() -> Option<Variant> {
 pub fn enumerate_installed() -> Vec<Variant> {
     Variant::ALL
         .iter()
-        .filter(|v| Path::new(LIB_DIR).join(v.binary_name()).exists())
+        .filter(|v| v.installed_binary_name(Path::new(LIB_DIR)).is_some())
         .copied()
         .collect()
 }
@@ -849,13 +867,16 @@ pub fn variant_statuses(
 ) -> Vec<VariantStatus> {
     Variant::ALL
         .iter()
-        .map(|&v| VariantStatus {
-            variant: v,
-            binary_name: v.binary_name().to_string(),
-            installed: lib_dir.join(v.binary_name()).exists(),
-            runs_on_this_cpu: variant_runs_on_cpu(v, cpu),
-            gpu_available: variant_gpu_available(v, gpus),
-            active: active == Some(v),
+        .map(|&v| {
+            let name = v.installed_binary_name(lib_dir);
+            VariantStatus {
+                variant: v,
+                binary_name: name.unwrap_or(v.binary_name()).to_string(),
+                installed: name.is_some(),
+                runs_on_this_cpu: variant_runs_on_cpu(v, cpu),
+                gpu_available: variant_gpu_available(v, gpus),
+                active: active == Some(v),
+            }
         })
         .collect()
 }
@@ -1013,7 +1034,12 @@ pub fn inventory() -> Inventory {
 /// Rewrite `/usr/bin/voxtype` to point at the requested variant's binary.
 /// Requires write access to `/usr/bin/`; callers should run with sudo.
 pub fn switch_to(variant: Variant) -> anyhow::Result<()> {
-    let binary_path = Path::new(LIB_DIR).join(variant.binary_name());
+    let lib_dir = Path::new(LIB_DIR);
+    let binary_path = lib_dir.join(
+        variant
+            .installed_binary_name(lib_dir)
+            .unwrap_or(variant.binary_name()),
+    );
 
     if !binary_path.exists() {
         anyhow::bail!(
@@ -1054,6 +1080,37 @@ mod tests {
     fn round_trip_binary_names() {
         for v in Variant::ALL {
             assert_eq!(Variant::from_binary_name(v.binary_name()), Some(*v));
+        }
+        assert_eq!(
+            Variant::from_binary_name("voxtype-cpu"),
+            Some(Variant::WhisperNative)
+        );
+    }
+
+    #[test]
+    fn native_cpu_package_names_are_selectable() {
+        let dir = tempfile::tempdir().unwrap();
+        let cpu = Cpu {
+            avx2: false,
+            avx512: false,
+            arch: "aarch64",
+        };
+        let gpus = Gpus {
+            nvidia: true,
+            amd: false,
+        };
+        for name in ["voxtype-cpu", "voxtype-native"] {
+            fs::write(dir.path().join(name), b"").unwrap();
+            let status = variant_statuses(dir.path(), &cpu, &gpus, None)
+                .into_iter()
+                .find(|s| s.variant == Variant::WhisperNative)
+                .unwrap();
+            assert!(status.installed && status.runs_on_this_cpu);
+            assert_eq!(status.binary_name, name);
+            assert_eq!(
+                Variant::WhisperNative.installed_binary_name(dir.path()),
+                Some(name)
+            );
         }
     }
 
@@ -1333,7 +1390,7 @@ mod tests {
         assert_eq!(r.whisper, Variant::WhisperVulkan);
         assert_eq!(r.onnx, Variant::OnnxNative);
 
-        // With the aarch64 CUDA build installed, an NVIDIA GPU gets it.
+        // A versioned build alone does not install the TUI's generic CUDA cell.
         let r = recommend(
             &arm,
             &Gpus {
@@ -1341,6 +1398,17 @@ mod tests {
                 amd: false,
             },
             &[Variant::OnnxNative, Variant::OnnxCuda13],
+        );
+        assert_eq!(r.onnx, Variant::OnnxNative);
+
+        // The package/manual-install alias makes the CUDA cell selectable.
+        let r = recommend(
+            &arm,
+            &Gpus {
+                nvidia: true,
+                amd: false,
+            },
+            &[Variant::OnnxNative, Variant::OnnxCuda, Variant::OnnxCuda13],
         );
         assert_eq!(r.onnx, Variant::OnnxCuda);
     }
@@ -1488,8 +1556,8 @@ mod tests {
             let path = std::path::Path::new("/nonexistent/usr/lib/voxtype").join(variant);
             let basename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
             assert!(
-                VARIANTS_NEEDING_WRAPPER.contains(&basename),
-                "variant {} should be in the wrapper list",
+                needs_wrapper(basename),
+                "variant {} should need a wrapper",
                 variant
             );
             assert!(
@@ -1498,6 +1566,14 @@ mod tests {
                 variant
             );
         }
+    }
+
+    /// The TUI's CUDA cell switches to the unversioned alias, which packages
+    /// point at cuda-12/ or cuda-13/. It needs the wrapper as much as the
+    /// versioned names, or ORT silently falls back to CPU.
+    #[test]
+    fn generic_cuda_alias_gets_a_wrapper() {
+        assert!(needs_wrapper(Variant::OnnxCuda.binary_name()));
     }
 
     /// Variants without ORT EP `.so` companions (Whisper avx2/avx512/vulkan,
@@ -1513,7 +1589,7 @@ mod tests {
             "voxtype-onnx-avx512",
         ] {
             assert!(
-                !VARIANTS_NEEDING_WRAPPER.contains(&variant),
+                !needs_wrapper(variant),
                 "variant {} should NOT need a wrapper",
                 variant
             );
