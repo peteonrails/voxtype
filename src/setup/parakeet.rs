@@ -452,7 +452,11 @@ mod tests {
     ) -> Vec<binary::VariantStatus> {
         binary::variant_statuses(
             dir.path(),
-            &binary::Cpu { avx2: true, avx512 },
+            &binary::Cpu {
+                avx2: true,
+                avx512,
+                arch: "x86_64",
+            },
             &binary::Gpus { nvidia, amd },
             Some(Variant::WhisperAvx512),
         )
