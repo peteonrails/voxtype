@@ -429,8 +429,10 @@ sudo ln -sf libonnxruntime.so.1.31.1 /usr/lib/voxtype/cuda-13/libonnxruntime.so
 
 Run the daemon from that path (for example, in the `ExecStart=` of a
 systemd override) so ONNX Runtime finds its libraries next to the binary.
-`voxtype -v transcribe` logs `Configuring CUDA execution provider` when the
-GPU is in use.
+With the daemon running, `voxtype info accel` reports `State: gpu` when the
+model is on the GPU. ONNX Runtime falls back to the CPU silently when the
+CUDA provider fails to load, so check this rather than the startup log.
+Parakeet and Cohere use the GPU in this build.
 
 On GPU, use the fp32 Parakeet models (`parakeet-tdt-0.6b-v2`). Under the
 CUDA execution provider the int8 models leave about 740 copy nodes on the
