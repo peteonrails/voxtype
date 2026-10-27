@@ -622,7 +622,7 @@ pub struct Recommendation {
 /// Vulkan binary: Vulkan is recommended there only when one is present.
 pub fn recommend(cpu: &Cpu, gpus: &Gpus, installed: &[Variant]) -> Recommendation {
     let whisper = recommend_whisper(cpu, gpus, installed);
-    let onnx = recommend_onnx(cpu, gpus);
+    let onnx = recommend_onnx(cpu, gpus, installed);
     Recommendation {
         whisper: whisper.0,
         whisper_reason: whisper.1,
@@ -668,20 +668,25 @@ fn recommend_whisper(cpu: &Cpu, gpus: &Gpus, installed: &[Variant]) -> (Variant,
     )
 }
 
-fn recommend_onnx(cpu: &Cpu, gpus: &Gpus) -> (Variant, &'static str) {
+/// `installed` only matters off x86-64, where the packages ship no CUDA
+/// build: CUDA is recommended there only when one is present.
+fn recommend_onnx(cpu: &Cpu, gpus: &Gpus, installed: &[Variant]) -> (Variant, &'static str) {
+    let cuda_present = cpu.is_x86_64()
+        || installed
+            .iter()
+            .any(|v| v.acceleration() == Acceleration::Cuda);
+    if gpus.nvidia && variant_runs_on_cpu(Variant::OnnxCuda, cpu) && cuda_present {
+        return (
+            Variant::OnnxCuda,
+            "NVIDIA GPU with a CPU that runs the CUDA build; the CUDA execution provider is \
+             the fastest Parakeet path.",
+        );
+    }
     if !cpu.is_x86_64() {
         return (
             Variant::OnnxNative,
-            "Non-x86 CPU; the AVX, CUDA and MIGraphX ONNX builds are x86-64 only, \
-             so ONNX runs on the native CPU build.",
-        );
-    }
-    // CUDA/MIGraphX bundles ship with AVX-512 ONNX Runtime, so the CPU has to
-    // support it before we can recommend a GPU variant.
-    if gpus.nvidia && cpu.avx512 {
-        return (
-            Variant::OnnxCuda,
-            "NVIDIA GPU + AVX-512 CPU; CUDA execution provider is the fastest Parakeet path.",
+            "Non-x86 CPU without an installed GPU build, so ONNX runs on the native CPU \
+             build. NVIDIA GPUs can use the aarch64 onnx-cuda-13 release build.",
         );
     }
     if gpus.amd && cpu.avx512 {
@@ -858,10 +863,11 @@ pub fn variant_statuses(
 pub(crate) fn variant_runs_on_cpu(v: Variant, cpu: &Cpu) -> bool {
     if !cpu.is_x86_64() {
         // Off x86-64 the AVX flags are always false and say nothing about
-        // what runs: the Vulkan and native binaries are built for the host.
+        // what runs: the Vulkan, native and CUDA binaries are built for the
+        // host (CUDA ships as the aarch64 onnx-cuda-13 build).
         return matches!(
             v.acceleration(),
-            Acceleration::Vulkan | Acceleration::Native
+            Acceleration::Vulkan | Acceleration::Native | Acceleration::Cuda
         );
     }
     match v.acceleration() {
@@ -1277,9 +1283,9 @@ mod tests {
         assert!(!variant_runs_on_cpu(Variant::WhisperAvx512, &arm));
         assert!(!variant_runs_on_cpu(Variant::OnnxAvx2, &arm));
         assert!(!variant_runs_on_cpu(Variant::OnnxAvx512, &arm));
-        assert!(!variant_runs_on_cpu(Variant::OnnxCuda, &arm));
-        assert!(!variant_runs_on_cpu(Variant::OnnxCuda12, &arm));
-        assert!(!variant_runs_on_cpu(Variant::OnnxCuda13, &arm));
+        assert!(variant_runs_on_cpu(Variant::OnnxCuda, &arm));
+        assert!(variant_runs_on_cpu(Variant::OnnxCuda12, &arm));
+        assert!(variant_runs_on_cpu(Variant::OnnxCuda13, &arm));
         assert!(!variant_runs_on_cpu(Variant::OnnxMigraphx, &arm));
     }
 
@@ -1326,6 +1332,17 @@ mod tests {
         );
         assert_eq!(r.whisper, Variant::WhisperVulkan);
         assert_eq!(r.onnx, Variant::OnnxNative);
+
+        // With the aarch64 CUDA build installed, an NVIDIA GPU gets it.
+        let r = recommend(
+            &arm,
+            &Gpus {
+                nvidia: true,
+                amd: false,
+            },
+            &[Variant::OnnxNative, Variant::OnnxCuda13],
+        );
+        assert_eq!(r.onnx, Variant::OnnxCuda);
     }
 
     #[test]
