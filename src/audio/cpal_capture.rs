@@ -278,7 +278,13 @@ impl AudioCapture for CpalCapture {
             loop {
                 match cmd_rx.recv() {
                     Ok(CaptureCommand::Stop(response_tx)) => {
-                        // Stop the stream (drop it)
+                        // Pause before dropping. On macOS, cpal 0.15 keeps a
+                        // clone of a non-default device's stream inside its
+                        // own disconnect listener, so dropping it alone never
+                        // stops the AudioUnit: the callback keeps appending to
+                        // `samples` after every recording and the daemon grows
+                        // without bound.
+                        let _ = stream.pause();
                         drop(stream);
 
                         // A stream error is terminal: cpal stops delivering
@@ -309,10 +315,11 @@ impl AudioCapture for CpalCapture {
                             }
                         }
 
-                        // Get collected samples
+                        // Take, not clone: the leaked stream closure above
+                        // still holds this buffer, so leave it empty.
                         let collected = {
-                            let guard = samples_clone.lock().unwrap();
-                            guard.clone()
+                            let mut guard = samples_clone.lock().unwrap();
+                            std::mem::take(&mut *guard)
                         };
 
                         // Send samples back
@@ -328,8 +335,10 @@ impl AudioCapture for CpalCapture {
                         let _ = response_tx.send(samples);
                     }
                     Err(_) => {
-                        // Channel closed, exit thread
+                        // Channel closed, exit thread. Pause for the same
+                        // reason as Stop: drop alone may not stop the unit.
                         tracing::debug!("Command channel closed");
+                        let _ = stream.pause();
                         break;
                     }
                 }
