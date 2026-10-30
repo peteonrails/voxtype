@@ -800,7 +800,7 @@ Packages are output to `releases/${VERSION}/`:
 - `voxtype_${VERSION}-1_amd64.deb`
 - `voxtype-${VERSION}-1.x86_64.rpm`
 
-Requirements: `fpm` (gem install fpm), `rpmbuild` for RPM
+Requirements: `fpm` (gem install fpm), `rpmbuild` for RPM, and `cargo`: the man pages are rendered with `cargo xtask man`, which compiles only clap and clap_mangen. Packaging fails if they cannot be rendered.
 
 ## AUR Packages
 

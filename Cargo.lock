@@ -7470,6 +7470,9 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
+ "clap_mangen",
+ "toml 0.8.23",
 ]
 
 [[package]]
