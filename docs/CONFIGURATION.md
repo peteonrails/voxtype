@@ -1354,6 +1354,22 @@ model = "parakeet-tdt-0.6b-v3"
 model_type = "tdt"
 ```
 
+### threads
+
+**Type:** Integer (optional)
+**Default:** unset (4 threads)
+**Required:** No
+
+Number of CPU threads for ONNX Runtime intra-op parallelism. Applies to the batch and streaming pipelines, and to the CPU part of a GPU run.
+
+Parakeet's wait after you stop talking grows with the length of the dictation, so this matters most for long recordings on the CPU. On a 12-core Ryzen AI 9 HX 370, 12 threads took a 3-minute dictation from 11.7 s to 8.6 s, and more threads than physical cores were slower again. Leave it unset on battery-sensitive laptops, or set it to your physical core count for the shortest wait.
+
+**Example:**
+```toml
+[parakeet]
+threads = 12
+```
+
 ### on_demand_loading
 
 **Type:** Boolean
