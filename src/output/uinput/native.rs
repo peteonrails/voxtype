@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use evdev::{
     uinput::VirtualDevice, AttributeSet, BusType, Device, InputEvent, InputId, KeyCode as Key,
@@ -29,11 +29,25 @@ struct Stroke {
 }
 
 type Plan = Vec<Vec<Stroke>>;
+type Characters = BTreeMap<char, Vec<Stroke>>;
+
+// Frames sent back to back before yielding. Each frame is a key event plus
+// SYN_REPORT, so a burst stays well inside evdev's 64-event client buffer
+// and the display server cannot overrun it into SYN_DROPPED.
+const BURST_FRAMES: usize = 16;
+const BURST_PAUSE: Duration = Duration::from_micros(500);
+
+/// Compiled layout, reused across dictations: compiling the keymap and
+/// indexing dead-key sequences costs far more than typing a sentence.
+struct Layout {
+    characters: Characters,
+    keymap: String,
+}
 
 struct Planner {
     keymap: xkb::Keymap,
     compose: compose::Table,
-    characters: BTreeMap<char, Vec<Stroke>>,
+    characters: Characters,
 }
 
 fn stopped(reason: impl Into<String>) -> OutputError {
@@ -167,26 +181,31 @@ impl Planner {
         }
     }
 
+    #[cfg(test)]
     fn plan(&self, text: &str) -> Result<Plan, OutputError> {
-        text.chars()
-            .enumerate()
-            .map(|(index, character)| {
-                // A transcription line break must not execute a terminal command.
-                let character = if matches!(character, '\n' | '\r') {
-                    ' '
-                } else {
-                    character
-                };
-                self.characters.get(&character).cloned().ok_or_else(|| {
-                    stopped(format!(
-                        "unsupported character U+{:04X} at character {}; nothing was typed",
-                        character as u32,
-                        index + 1,
-                    ))
-                })
-            })
-            .collect()
+        plan_characters(&self.characters, text)
     }
+}
+
+fn plan_characters(characters: &Characters, text: &str) -> Result<Plan, OutputError> {
+    text.chars()
+        .enumerate()
+        .map(|(index, character)| {
+            // A transcription line break must not execute a terminal command.
+            let character = if matches!(character, '\n' | '\r') {
+                ' '
+            } else {
+                character
+            };
+            characters.get(&character).cloned().ok_or_else(|| {
+                stopped(format!(
+                    "unsupported character U+{:04X} at character {}; nothing was typed",
+                    character as u32,
+                    index + 1,
+                ))
+            })
+        })
+        .collect()
 }
 
 trait Sink {
@@ -202,7 +221,14 @@ fn dispatch(
 ) -> Result<(), OutputError> {
     let mut pressed = BTreeSet::new();
     let mut completed = 0;
+    let mut frames = 0;
     let result = (|| {
+        let mut pace = |sink: &mut _| {
+            frames += 1;
+            if frames % BURST_FRAMES == 0 {
+                Sink::pause(sink, BURST_PAUSE);
+            }
+        };
         for character in plan {
             for stroke in character {
                 guard()?;
@@ -211,15 +237,18 @@ fn dispatch(
                     // accepted an event but the surrounding operation failed.
                     pressed.insert(key);
                     sink.key(key, true).map_err(|e| stopped(e.to_string()))?;
-                    sink.pause(delay);
+                    pace(sink);
                 }
                 for &key in std::iter::once(&stroke.key).chain(stroke.modifiers.iter().rev()) {
                     sink.key(key, false).map_err(|e| stopped(e.to_string()))?;
                     pressed.remove(&key);
-                    sink.pause(delay);
+                    pace(sink);
                 }
             }
             completed += 1;
+            if !delay.is_zero() {
+                sink.pause(delay);
+            }
         }
         Ok(())
     })();
@@ -255,6 +284,25 @@ impl Sink for KernelSink<'_> {
 
 struct Guard(Vec<Device>);
 impl Guard {
+    /// Enumerating /dev/input costs hundreds of milliseconds on hosts with
+    /// many devices (#543), so the keyboard list is kept until a device is
+    /// added or removed, which changes the directory's modification time.
+    fn cached() -> Result<std::sync::MutexGuard<'static, Option<(SystemTime, Guard)>>, OutputError>
+    {
+        static CACHE: Mutex<Option<(SystemTime, Guard)>> = Mutex::new(None);
+        let mut cache = CACHE
+            .lock()
+            .map_err(|_| stopped("keyboard state lock was poisoned"))?;
+        let modified = std::fs::metadata("/dev/input")
+            .and_then(|m| m.modified())
+            .map_err(|e| stopped(format!("cannot inspect /dev/input: {e}")))?;
+        if cache.as_ref().is_none_or(|(seen, _)| *seen != modified) {
+            *cache = None;
+            *cache = Some((modified, Guard::new()?));
+        }
+        Ok(cache)
+    }
+
     fn new() -> Result<Self, OutputError> {
         let devices: Vec<_> = evdev::enumerate()
             .map(|(_, device)| device)
@@ -331,6 +379,38 @@ fn create_device() -> Result<VirtualDevice, OutputError> {
     Ok(device)
 }
 
+fn layout_for(config: &OutputConfig) -> Result<Arc<Layout>, OutputError> {
+    type Key = (Option<String>, Option<String>, String);
+    static CACHE: Mutex<Option<(Key, Arc<Layout>)>> = Mutex::new(None);
+    let key = (
+        config.uinput_xkb_layout.clone(),
+        config.uinput_xkb_variant.clone(),
+        locale(),
+    );
+    let mut cache = CACHE
+        .lock()
+        .map_err(|_| stopped("keyboard layout lock was poisoned"))?;
+    if let Some((cached, layout)) = cache.as_ref() {
+        if *cached == key {
+            return Ok(layout.clone());
+        }
+    }
+    let planner = planner_for(config)?;
+    let layout = Arc::new(Layout {
+        keymap: planner.keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1),
+        characters: planner.characters,
+    });
+    *cache = Some((key, layout.clone()));
+    Ok(layout)
+}
+
+fn locale() -> String {
+    ["LC_ALL", "LC_CTYPE", "LANG"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "en_US.UTF-8".into())
+}
+
 fn planner_for(config: &OutputConfig) -> Result<Planner, OutputError> {
     let layout = config.uinput_xkb_layout.as_deref().ok_or_else(|| {
         stopped(
@@ -338,17 +418,13 @@ fn planner_for(config: &OutputConfig) -> Result<Planner, OutputError> {
         )
     })?;
     let variant = config.uinput_xkb_variant.as_deref().unwrap_or("");
-    let locale = ["LC_ALL", "LC_CTYPE", "LANG"]
-        .iter()
-        .find_map(|name| std::env::var(name).ok().filter(|s| !s.is_empty()))
-        .unwrap_or_else(|| "en_US.UTF-8".into());
-    Planner::new(layout, variant, &locale)
+    Planner::new(layout, variant, &locale())
 }
 
 fn plan_text(config: &OutputConfig, text: &str) -> Result<Plan, OutputError> {
-    let planner = planner_for(config)?;
+    let layout = layout_for(config)?;
     let text = format!("{}{}", text, config.append_text.as_deref().unwrap_or(""));
-    let mut plan = planner.plan(&text)?;
+    let mut plan = plan_characters(&layout.characters, &text)?;
     if config.auto_submit {
         plan.push(vec![Stroke {
             key: 28,
@@ -428,12 +504,10 @@ pub(super) async fn output(
         let readiness_map = config
             .uinput_ready_command
             .as_ref()
-            .map(|_| {
-                planner_for(&config)
-                    .map(|planner| planner.keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1))
-            })
+            .map(|_| layout_for(&config).map(|layout| layout.keymap.clone()))
             .transpose()?;
-        let mut guard = Guard::new()?;
+        let mut cache = Guard::cached()?;
+        let guard = &mut cache.as_mut().unwrap().1;
         guard.wait(Duration::from_millis(config.modifier_release_timeout_ms))?;
         std::thread::sleep(Duration::from_millis(u64::from(config.pre_type_delay_ms)));
         let mut slot = device
@@ -448,7 +522,7 @@ pub(super) async fn output(
                 return Err(error);
             }
         }
-        let delay = Duration::from_millis(u64::from(config.type_delay_ms.max(5)));
+        let delay = Duration::from_millis(u64::from(config.type_delay_ms));
         let result = dispatch(
             &plan,
             &mut KernelSink(slot.as_mut().unwrap()),
@@ -456,6 +530,8 @@ pub(super) async fn output(
             delay,
         );
         if result.is_err() {
+            // A vanished keyboard must not keep failing later dictations.
+            *cache = None;
             // Destroying the device also releases any keys whose explicit
             // release failed. Never reuse an uncertain modifier state.
             *slot = None;
