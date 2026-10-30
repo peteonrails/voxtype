@@ -5,7 +5,7 @@
 #   1. All expected binaries exist
 #   2. All binaries report the correct version
 #   3. All binaries have unique SHA256 hashes
-#   4. AVX2/Vulkan binaries have no AVX-512 contamination
+#   4. Baseline/AVX2/Vulkan binaries have no AVX-512 contamination
 #   5. AVX-512 binaries have AVX-512 instructions
 #
 # Usage:
@@ -35,6 +35,7 @@ BASE_VERSION="${VERSION%%-*}"
 # named here that is missing fails validation (see #351, #436, and the
 # v1.0.0-rc1 post-mortem).
 WHISPER_BINARIES=(
+    "voxtype-${VERSION}-linux-x86_64-baseline"
     "voxtype-${VERSION}-linux-x86_64-avx2"
     "voxtype-${VERSION}-linux-x86_64-avx512"
     "voxtype-${VERSION}-linux-x86_64-vulkan"
@@ -63,6 +64,7 @@ COMPANION_BINARIES=(
 
 # Binaries that must NOT have AVX-512 instructions
 MUST_BE_CLEAN=(
+    "voxtype-${VERSION}-linux-x86_64-baseline"
     "voxtype-${VERSION}-linux-x86_64-avx2"
     "voxtype-${VERSION}-linux-x86_64-vulkan"
 )
