@@ -352,7 +352,7 @@ For the ONNX engines (Parakeet, Cohere, etc.) the equivalent is `voxtype setup m
 systemctl --user enable --now voxtype
 
 # Or run in foreground for testing
-voxtype daemon -v
+voxtype daemon
 ```
 
 ### 4. Wire up a hotkey
