@@ -409,6 +409,9 @@ pub fn configured_primary_method(
             OutputDriver::Ydotool => status.ydotool.available,
             OutputDriver::Clipboard => status.wl_copy.available,
             OutputDriver::Xclip => status.xclip.available,
+            // Native delivery needs no installed binary; the daemon checks
+            // device readiness at each dictation instead.
+            OutputDriver::Uinput => cfg!(target_os = "linux"),
         };
         if available {
             return Some(match driver {
@@ -1509,6 +1512,17 @@ mod tests {
         assert_eq!(
             configured_primary_method(&wayland_status(false), &cfg).as_deref(),
             Some("dotool")
+        );
+    }
+
+    #[test]
+    fn primary_method_names_the_native_driver_when_configured() {
+        // The daemon uses uinput whenever it is in the order; readiness is
+        // checked per dictation, so setup reports it as the primary method.
+        let cfg = output(OutputMode::Type, Some(vec![OutputDriver::Uinput]));
+        assert_eq!(
+            configured_primary_method(&wayland_status(false), &cfg).as_deref(),
+            Some("uinput")
         );
     }
 
