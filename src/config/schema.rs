@@ -899,6 +899,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Secondary-model modifier",
         "Hold this alongside the hotkey to transcribe with whisper.secondary_model.",
     ),
+    spec(
+        "hotkey.cancel_on_other_key",
+        "hotkey",
+        "cancel_on_other_key",
+        KeyType::Bool,
+        "Hotkey",
+        "Cancel on other key",
+        "Cancel the recording when a non-modifier key is pressed while the hotkey is held, so a shortcut like Right Ctrl+C doesn't dictate.",
+    ),
     // -- Audio --------------------------------------------------------------
     spec(
         "audio.device",
@@ -2543,6 +2552,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         }),
         "hotkey.cancel_key" => opt_str(cfg.hotkey.cancel_key.as_ref()),
         "hotkey.model_modifier" => opt_str(cfg.hotkey.model_modifier.as_ref()),
+        "hotkey.cancel_on_other_key" => json!(cfg.hotkey.cancel_on_other_key),
 
         "audio.device" => json!(cfg.audio.device),
         "audio.max_duration_secs" => json!(cfg.audio.max_duration_secs),
