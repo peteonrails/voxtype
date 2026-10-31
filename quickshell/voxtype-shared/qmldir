@@ -5,3 +5,6 @@ StateReader 1.0 StateReader.qml
 AudioBridge 1.0 AudioBridge.qml
 StyleLoader 1.0 StyleLoader.qml
 RecipeRenderer 1.0 RecipeRenderer.qml
+StateIcon 1.0 StateIcon.qml
+ShellMetrics 1.0 ShellMetrics.qml
+ShellBorder 1.0 ShellBorder.qml

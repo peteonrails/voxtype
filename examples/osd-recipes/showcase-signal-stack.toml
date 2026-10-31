@@ -1,10 +1,10 @@
 # Signal-stack showcase.
 #
 # Design intent:
-# - close to the default waveform language
+# - close to the default waveform language, on a wide card
 # - visible panel background behind the signal
-# - richer layered waveform presence for demos/screenshots: the muted
-#   trace rides above the accent trace as a ghost echo
+# - one waveform: a scrolling envelope whose outline is the signal and
+#   whose gradient body fades toward the peaks, over a soft accent pulse
 # - still inherits Omarchy colors rather than hardcoding a palette
 # - meter inset from the edges so its held-peak tick and corners stay
 #   clear of the panel's rounded edge
@@ -36,7 +36,7 @@ gain = 1.0
 opacity = 0.62
 radius = 12
 
-# Subtle accent breathing behind the traces. An accent tint stays
+# Subtle accent breathing behind the waveform. An accent tint stays
 # visible over the dark surface where a background-colored pulse
 # would disappear into it.
 [[osd.visual.layers]]
@@ -55,26 +55,13 @@ radius = 10
 [[osd.visual.layers]]
 type = "waveform"
 source = "peak"
-color = "muted"
-order = 10
-x = 0.03
-y = 0.04
-width = 0.94
-height = 0.48
-gain = 0.62
-opacity = 0.70
-mirror = true
-
-[[osd.visual.layers]]
-type = "waveform"
-source = "peak"
 color = "accent"
 order = 20
 x = 0.03
-y = 0.18
+y = 0.04
 width = 0.94
-height = 0.52
-gain = 0.9
+height = 0.68
+gain = 0.95
 opacity = 1.0
 mirror = true
 

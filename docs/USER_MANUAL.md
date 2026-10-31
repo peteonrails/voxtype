@@ -298,6 +298,16 @@ files under `$XDG_RUNTIME_DIR/voxtype/`. The OSD itself does not need a
 keybinding; it activates automatically when the daemon enters the
 recording state.
 
+While you record, the Quickshell HUD shows a live waveform and the elapsed
+time. Near `audio.max_duration_secs` the clock turns into a countdown
+(amber, then red for the last 5 seconds), so a long dictation is not cut off
+by surprise. The engine and model serving the recording appear briefly when
+it starts. While transcribing, the waveform becomes a slow ripple. When the
+session ends, the HUD confirms the result for a moment (a check with the
+number of characters, or "No speech detected", "Transcription failed", and
+so on) before it fades out. Cancelled recordings and `--no-osd` recordings
+show no result.
+
 Quickshell also supports OSD customization through `[osd]`:
 
 ```toml
@@ -305,7 +315,7 @@ Quickshell also supports OSD customization through `[osd]`:
 frontend = "quickshell"
 style = "default"      # built-in style, package name, or package path
 # palette = "omarchy" # omit for auto, or force active Omarchy theme colors
-layout = "compact"    # compact, wide, minimal, tile, orb, custom
+layout = "compact"    # compact, wide, minimal, pill, shell, tile, orb, custom
 
 [osd.frame]
 background = "none"   # semantic role, literal color, or none
@@ -318,7 +328,7 @@ layers such as `shadow`, `pulse`, `bars`, `waveform`, `ring`, `meter`, `icon`,
 and `label`. Colors are
 semantic Omarchy tokens by default (`accent`, `background`, `foreground`,
 `success`, `warning`, `error`). `layout` changes the outer frame: strip-style
-layouts use `compact`, `wide`, or `minimal`, while `tile` and `orb` create
+layouts use `compact`, `wide`, `minimal`, `pill`, or `shell`, while `tile` and `orb` create
 non-strip OSD frames. `[osd.frame]` can remove or recolor the host background
 and border without changing QML. The styling system was contributed by
 [OldJobobo](https://github.com/OldJobobo)
@@ -337,7 +347,15 @@ are plain `[osd]` config presets rather than installable packages. Apply one
 with `voxtype setup osd --recipe <name>`, which writes its keys into your
 config without duplicating any that are already there and prints each
 changed key with its previous value; `--dry-run` previews the change and
-`voxtype setup osd --list` shows what's installed. Recipes resolve against
+`voxtype setup osd --list` shows what's installed. For a quiet HUD, the
+`capsule`, `shell-line`, `shell-dots`, `aura`, and `halo` recipes show only
+the state, your live voice level, and the clock; the `showcase-*` recipes
+layer more instruments. `shell-line` keeps Capsule's flowing lines, while
+`shell-dots` uses Aura's voice-assistant dots. Both follow Omarchy Shell's
+corner rounding, popup border, monospace text, and spacing instead of the
+fully rounded pill shape. Their theme background stays steady, with no
+glow or dimming between words.
+Recipes resolve against
 `~/.config/voxtype/osd-recipes/`, `~/.local/share/voxtype/osd-recipes/`, and
 `/usr/share/voxtype/osd-recipes/`, and `--recipe` also accepts a path to a
 `.toml` file. While developing a package, set

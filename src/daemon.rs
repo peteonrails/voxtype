@@ -17,6 +17,7 @@ use crate::model_catalog;
 use crate::model_catalog::override_config;
 use crate::model_manager::ModelManager;
 use crate::notification::{self, Lifetime};
+use crate::osd;
 use crate::output;
 use crate::output::post_process::PostProcessor;
 use crate::output::streaming::StreamingSession;
@@ -1126,6 +1127,13 @@ pub struct Daemon {
     // so the next duck/restore can serialize against it; see
     // `duck_media_streams` for why capturing originals mid-fade is unsafe.
     media_fade_task: Option<tokio::task::JoinHandle<()>>,
+    // Set when `max_duration_secs` ends the session in flight, so the
+    // outcome published for the OSD can say the limit stopped it.
+    osd_limit_reached: bool,
+    // Whether this session's outcome has been published. The first one
+    // wins: some paths report a specific outcome (no speech) and then
+    // fall through a generic one (empty result) on the way to idle.
+    osd_outcome_sent: std::sync::atomic::AtomicBool,
 }
 
 impl Daemon {
@@ -1241,6 +1249,8 @@ impl Daemon {
             paused_media_players: Vec::new(),
             ducked_media_streams: Vec::new(),
             media_fade_task: None,
+            osd_limit_reached: false,
+            osd_outcome_sent: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -1341,9 +1351,92 @@ impl Daemon {
                     set_osd_suppressed(true);
                 }
             }
-            "idle" | "stopped" => set_osd_suppressed(false),
+            "idle" | "stopped" => {
+                set_osd_suppressed(false);
+                if self.state_file_path.is_some() {
+                    osd::session::clear_session(&Config::runtime_dir());
+                }
+            }
             _ => {}
         }
+    }
+
+    /// Publish `recording.json` for the session `state` just started, so OSD
+    /// frontends can show elapsed time, the remaining time before
+    /// `max_duration_secs`, and which engine and model this recording uses.
+    /// Skipped when the state file is disabled, like every runtime file the
+    /// OSD reads.
+    fn begin_osd_session(&mut self, state: &State) {
+        self.osd_limit_reached = false;
+        self.osd_outcome_sent
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        if self.state_file_path.is_none() {
+            return;
+        }
+        let (mode, model_override) = match state {
+            State::Recording { model_override, .. }
+            | State::EagerRecording { model_override, .. } => ("recording", model_override),
+            State::Streaming { model_override, .. } => ("streaming", model_override),
+            _ => return,
+        };
+        let (engine, model) = self.recording_engine_and_model(model_override.as_deref());
+        osd::session::write_session(
+            &Config::runtime_dir(),
+            &osd::session::OsdSession {
+                mode: mode.to_string(),
+                started_at_ms: osd::session::now_unix_ms(),
+                max_duration_secs: u64::from(self.config.audio.max_duration_secs),
+                engine,
+                model,
+            },
+        );
+    }
+
+    /// The engine and model that will serve a recording, after any
+    /// per-recording `--model` override.
+    fn recording_engine_and_model(&self, model_override: Option<&str>) -> (String, String) {
+        let engine = self.config.engine.to_string();
+        let Some(name) = model_override else {
+            return (engine, self.config.model_name().to_string());
+        };
+        match crate::model_catalog::override_route(&self.config, name) {
+            Ok(crate::model_catalog::OverrideRoute::Separate { engine, model }) => {
+                (engine.to_string(), model)
+            }
+            _ => (engine, name.to_string()),
+        }
+    }
+
+    /// Publish the outcome of a session that delivered `text`.
+    fn publish_osd_text_outcome(&self, text: &str) {
+        let chars = text.chars().count();
+        let kind = if chars == 0 {
+            osd::session::OutcomeKind::Empty
+        } else {
+            osd::session::OutcomeKind::Ok
+        };
+        self.publish_osd_outcome(kind, chars);
+    }
+
+    /// Publish `outcome.json` saying how the session just ended, for OSD
+    /// frontends to confirm the result.
+    fn publish_osd_outcome(&self, outcome: osd::session::OutcomeKind, chars: usize) {
+        if self.state_file_path.is_none()
+            || self
+                .osd_outcome_sent
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        osd::session::write_outcome(
+            &Config::runtime_dir(),
+            &osd::session::OsdOutcome {
+                outcome,
+                chars,
+                limit_reached: self.osd_limit_reached,
+                at_ms: osd::session::now_unix_ms(),
+            },
+        );
     }
 
     /// Build a `SpeechTracker` for silence-based auto-stop, if `armed` and
@@ -1599,6 +1692,7 @@ impl Daemon {
             file_output_path,
         };
         self.update_state("streaming");
+        self.begin_osd_session(state);
         self.play_feedback(SoundEvent::RecordingStart);
 
         if let Some(cmd) = &self.config.output.pre_recording_command {
@@ -1757,6 +1851,7 @@ impl Daemon {
                 self.handle_transcription_result(state, Ok(Ok(text))).await;
             } else {
                 tracing::debug!("Eager recording produced empty result");
+                self.publish_osd_outcome(osd::session::OutcomeKind::Empty, 0);
                 self.reset_to_idle(state).await;
             }
             *eager_transcriber = None;
@@ -1875,10 +1970,17 @@ impl Daemon {
                         FileMode::Append => "appended",
                     };
                     tracing::info!("{} streamed transcription to {:?}", mode_str, output_path);
+                    self.publish_osd_text_outcome(&final_text);
                     self.play_feedback(SoundEvent::TranscriptionComplete);
                 }
-                FileDelivery::FellBack(_) => self.play_feedback(SoundEvent::TranscriptionComplete),
-                FileDelivery::Lost(_) => self.play_feedback(SoundEvent::Error),
+                FileDelivery::FellBack(_) => {
+                    self.publish_osd_text_outcome(&final_text);
+                    self.play_feedback(SoundEvent::TranscriptionComplete);
+                }
+                FileDelivery::Lost(_) => {
+                    self.publish_osd_outcome(osd::session::OutcomeKind::OutputFailed, 0);
+                    self.play_feedback(SoundEvent::Error);
+                }
             }
 
             *state = State::Idle;
@@ -1886,6 +1988,11 @@ impl Daemon {
             return;
         }
 
+        let streamed = streaming_session
+            .as_ref()
+            .map(|s| s.finalized_text().to_string())
+            .unwrap_or_default();
+        self.publish_osd_text_outcome(&streamed);
         *streaming_session = None;
         *streaming_chain = None;
 
@@ -1968,6 +2075,7 @@ impl Daemon {
             self.end_external_session(true).await;
             *state = State::Idle;
             *eager_transcriber = None;
+            self.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
             self.update_state("idle");
             self.play_feedback(SoundEvent::Cancelled);
 
@@ -2001,6 +2109,7 @@ impl Daemon {
 
             discard_recording_overrides();
             *state = State::Idle;
+            self.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
             self.update_state("idle");
             self.play_feedback(SoundEvent::Cancelled);
 
@@ -2057,6 +2166,7 @@ impl Daemon {
 
         discard_recording_overrides();
         *state = State::Idle;
+        self.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
         self.update_state("idle");
         self.play_feedback(SoundEvent::Cancelled);
 
@@ -2264,6 +2374,7 @@ impl Daemon {
             )
             .await;
         }
+        self.publish_osd_outcome(osd::session::OutcomeKind::NoSpeech, 0);
     }
 
     async fn report_override_problem(&self, problem: &str) {
@@ -2396,7 +2507,22 @@ impl Daemon {
     /// A `--model` override the active transcriber can't serve gets its own.
     ///
     /// Returns Ok(transcriber) on success, Err(()) if an error occurred and caller should skip to next iteration
+    /// `get_transcriber_for_recording_inner`, publishing an error outcome
+    /// for the OSD when no transcriber can serve the recording.
     async fn get_transcriber_for_recording(
+        &mut self,
+        model_override: Option<&str>,
+    ) -> std::result::Result<Arc<dyn Transcriber>, ()> {
+        let result = self
+            .get_transcriber_for_recording_inner(model_override)
+            .await;
+        if result.is_err() {
+            self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
+        }
+        result
+    }
+
+    async fn get_transcriber_for_recording_inner(
         &mut self,
         model_override: Option<&str>,
     ) -> std::result::Result<Arc<dyn Transcriber>, ()> {
@@ -3261,6 +3387,7 @@ impl Daemon {
                     if audio_duration < 0.3 {
                         tracing::debug!("Recording too short ({:.2}s), ignoring", audio_duration);
                         self.publish_empty_outcome();
+                        self.publish_osd_outcome(osd::session::OutcomeKind::TooShort, 0);
                         self.reset_to_idle(state).await;
                         return false;
                     }
@@ -3318,6 +3445,7 @@ impl Daemon {
                 }
                 Err(e) => {
                     tracing::warn!("Recording error: {}", e);
+                    self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
                     self.reset_to_idle(state).await;
                     false
                 }
@@ -3357,6 +3485,7 @@ impl Daemon {
             Ok(Ok(text)) => {
                 if text.is_empty() {
                     tracing::debug!("Transcription was empty");
+                    self.publish_osd_outcome(osd::session::OutcomeKind::Empty, 0);
                     self.reset_to_idle(state).await;
                 } else {
                     tracing::info!("Transcribed: {:?}", text);
@@ -3521,6 +3650,7 @@ impl Daemon {
                                     TranscriptOutcome::ok(final_text.chars().count())
                                 };
                                 write_result_sidecar(&output_path, &outcome);
+                                self.publish_osd_text_outcome(&final_text);
                                 self.play_feedback(SoundEvent::TranscriptionComplete);
                             }
                             FileDelivery::FellBack(err) => {
@@ -3530,10 +3660,15 @@ impl Daemon {
                                         "{err}; copied to the clipboard instead"
                                     )),
                                 );
+                                self.publish_osd_text_outcome(&final_text);
                                 self.play_feedback(SoundEvent::TranscriptionComplete);
                             }
                             FileDelivery::Lost(err) => {
                                 write_result_sidecar(&output_path, &TranscriptOutcome::error(&err));
+                                self.publish_osd_outcome(
+                                    osd::session::OutcomeKind::OutputFailed,
+                                    0,
+                                );
                                 self.play_feedback(SoundEvent::Error);
                             }
                         }
@@ -3651,7 +3786,9 @@ impl Daemon {
                             .await
                     {
                         tracing::error!("Output failed: {}", e);
+                        self.publish_osd_outcome(osd::session::OutcomeKind::OutputFailed, 0);
                     } else {
+                        self.publish_osd_text_outcome(&final_text);
                         self.play_feedback(SoundEvent::TranscriptionComplete);
 
                         if self.config.output.notification.on_transcription {
@@ -3672,6 +3809,7 @@ impl Daemon {
             }
             Ok(Err(e)) => {
                 tracing::error!("Transcription failed: {}", e);
+                self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
                 self.reset_to_idle(state).await;
             }
             Err(e) => {
@@ -3680,6 +3818,7 @@ impl Daemon {
                     tracing::debug!("Transcription task was cancelled");
                 } else {
                     tracing::error!("Transcription task panicked: {}", e);
+                    self.publish_osd_outcome(osd::session::OutcomeKind::Error, 0);
 
                     // spawn_blocking already kept the panic from reaching the
                     // daemon, so this is not about survival. It is about not
@@ -4135,6 +4274,7 @@ impl Daemon {
                                                 };
                                             }
                                             self.update_state("recording");
+                                            self.begin_osd_session(&state);
                                             self.play_feedback(SoundEvent::RecordingStart);
 
                                             // Run pre-recording hook (e.g., enter compositor submap for cancel)
@@ -4217,6 +4357,7 @@ impl Daemon {
                                     self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
                                 } else {
                                     tracing::debug!("Eager recording produced empty result");
+                                    self.publish_osd_outcome(osd::session::OutcomeKind::Empty, 0);
                                     self.reset_to_idle(&mut state).await;
                                 }
                                 eager_transcriber = None;
@@ -4282,6 +4423,7 @@ impl Daemon {
                                                 };
                                             }
                                             self.update_state("recording");
+                                            self.begin_osd_session(&state);
                                             self.play_feedback(SoundEvent::RecordingStart);
 
                                             // Run pre-recording hook (e.g., enter compositor submap for cancel)
@@ -4352,6 +4494,7 @@ impl Daemon {
                                     self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
                                 } else {
                                     tracing::debug!("Eager recording produced empty result");
+                                    self.publish_osd_outcome(osd::session::OutcomeKind::Empty, 0);
                                     self.reset_to_idle(&mut state).await;
                                 }
                                 eager_transcriber = None;
@@ -4403,6 +4546,7 @@ impl Daemon {
 
                                 discard_recording_overrides();
                                 state = State::Idle;
+                                self.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
                                 self.update_state("idle");
                                 self.play_feedback(SoundEvent::Cancelled);
 
@@ -4427,6 +4571,7 @@ impl Daemon {
 
                                 discard_recording_overrides();
                                 state = State::Idle;
+                                self.publish_osd_outcome(osd::session::OutcomeKind::Cancelled, 0);
                                 self.update_state("idle");
                                 self.play_feedback(SoundEvent::Cancelled);
 
@@ -4574,6 +4719,7 @@ impl Daemon {
                     let timeout_fired = audio_capture.is_some()
                         && state.recording_duration().is_some_and(|d| d > max_duration);
                     if timeout_fired {
+                        self.osd_limit_reached = true;
                         // A hard-capped session is ending on voxtype's own
                         // initiative (not the caller's `record stop`) — end
                         // it as an external-trigger session so the caller is
@@ -4632,6 +4778,7 @@ impl Daemon {
                                 self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
                             } else {
                                 tracing::debug!("Eager recording timeout produced empty result");
+                                self.publish_osd_outcome(osd::session::OutcomeKind::Empty, 0);
                                 self.reset_to_idle(&mut state).await;
                             }
                             eager_transcriber = None;
@@ -4725,6 +4872,7 @@ impl Daemon {
                                         };
                                     }
                                     self.update_state("recording");
+                                    self.begin_osd_session(&state);
                                     self.play_feedback(SoundEvent::RecordingStart);
 
                                     // Run pre-recording hook (e.g., enter compositor submap for cancel)

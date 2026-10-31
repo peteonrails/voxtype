@@ -1,0 +1,35 @@
+# Halo: a round badge with a gradient edge and a voice line across it.
+#
+# Design intent:
+# - the orb shape, without the rings: one aura edge and one line
+# - the aura edge turns with the voice and spins up while transcribing
+# - the line sits across the middle and swells with the current level
+# - the clock and results sit outside the disc, as on the other orb styles
+
+[osd]
+frontend = "quickshell"
+style = "default"
+palette = "omarchy"
+layout = "orb"
+position = "bottom-center"
+top_margin = 0.74
+
+[osd.frame]
+background = "background"
+border = "aura"
+glow = false
+halo = false
+
+[[osd.visual.layers]]
+type = "line"
+source = "peak"
+color = "accent"
+secondary_color = "foreground"
+order = 10
+x = 0.14
+y = 0.22
+width = 0.72
+height = 0.56
+gain = 1.0
+opacity = 1.0
+radius = 2.4

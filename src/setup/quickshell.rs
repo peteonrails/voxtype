@@ -56,6 +56,7 @@ const SHARED_FILES: &[&str] = &[
     "AudioBridge.qml",
     "StyleLoader.qml",
     "RecipeRenderer.qml",
+    "StateIcon.qml",
     "qmldir",
     "README.md",
 ];

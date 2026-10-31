@@ -337,11 +337,12 @@ style = "default"
 # - custom: use literal recipe colors
 # palette = "omarchy"
 
-# Quickshell host layout: compact, wide, minimal, tile, orb, or custom.
+# Quickshell host layout: compact, wide, minimal, pill, tile, orb, or custom.
 layout = "compact"
 
 # Quickshell host frame. Background/border accept semantic color roles,
-# literal CSS colors, or "none".
+# literal CSS colors, or "none". border = "aura" draws an animated
+# gradient edge that brightens with your voice.
 # [osd.frame]
 # background = "background"
 # border = "state"
@@ -353,7 +354,7 @@ layout = "compact"
 
 # Declarative Quickshell visual recipe. Layers render in order.
 # [[osd.visual.layers]]
-# type = "bars"       # shadow, waveform, bars, pulse, ring, meter, background, icon, label
+# type = "bars"       # shadow, waveform, line, bars, dots, pulse, ring, meter, background, icon, label
 # source = "peak"     # peak, rms, vad, state
 # color = "accent"    # Omarchy token or literal color
 # order = 10

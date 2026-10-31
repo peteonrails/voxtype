@@ -244,8 +244,10 @@ const OSD_FRONTEND_CHOICES: &[&str] = &["gtk4", "native", "quickshell"];
 const OSD_PALETTE_CHOICES: &[&str] = &["omarchy", "fallback", "package", "custom"];
 /// Canonical hints only — any palette role name or literal color is accepted.
 const OSD_FRAME_BACKGROUND_CHOICES: &[&str] = &["background", "none"];
-const OSD_FRAME_BORDER_CHOICES: &[&str] = &["state", "accent", "none"];
-const OSD_LAYOUT_CHOICES: &[&str] = &["compact", "wide", "minimal", "tile", "orb", "custom"];
+const OSD_FRAME_BORDER_CHOICES: &[&str] = &["state", "accent", "aura", "none"];
+const OSD_LAYOUT_CHOICES: &[&str] = &[
+    "compact", "wide", "minimal", "pill", "shell", "tile", "orb", "custom",
+];
 const OSD_POSITION_CHOICES: &[&str] = &[
     "bottom-center",
     "top-center",

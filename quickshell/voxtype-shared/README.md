@@ -36,18 +36,27 @@ Public properties:
 ### `StateReader`
 
 Watches `$XDG_RUNTIME_DIR/voxtype/state` for changes and exposes the
-current daemon state.
+current daemon state, plus the sibling runtime files the daemon writes for
+OSD frontends (`osd_suppressed`, `recording.json`, `outcome.json`).
 
 Public properties:
 
-| Property    | Default                                  | Purpose                              |
-|-------------|------------------------------------------|--------------------------------------|
-| `statePath` | `$XDG_RUNTIME_DIR/voxtype/state`         | Override for tests / custom setups   |
-| `state`     | `"idle"`                                 | Current daemon state                 |
+| Property        | Default                                  | Purpose                              |
+|-----------------|------------------------------------------|--------------------------------------|
+| `statePath`     | `$XDG_RUNTIME_DIR/voxtype/state`         | Override for tests / custom setups. The other files are read from the same directory. |
+| `state`         | `"idle"`                                 | Current daemon state                 |
+| `osdSuppressed` | `false`                                  | True while a `record start --no-osd` session runs |
+| `session`       | `null`                                   | Parsed `recording.json`: `mode`, `started_at_ms`, `max_duration_secs`, `engine`, `model`. `null` when idle. |
+| `outcome`       | `null`                                   | Parsed `outcome.json`: `outcome`, `chars`, `limit_reached`, `at_ms`. `null` before the first session ends. |
+
+`session` and `outcome` stay `null` against a daemon too old to write those
+files. An empty read of the state file (the daemon rewrites it in place)
+keeps the previous state instead of reporting `idle`.
 
 Signals:
 
-- `stateChanged(string newState)` — fired on every transition.
+- `stateChanged()` is QML's automatic change signal for `state`; read the
+  new value from the property.
 
 ### `AudioBridge`
 
@@ -61,7 +70,8 @@ Public properties:
 |------------------|--------------------------|--------------------------------------------------------------------|
 | `bridgeBinary`   | `voxtype-audio-bridge`   | Path or PATH-resolvable name of the sidecar                        |
 | `bridgeArgs`     | `[]`                     | Additional CLI args for the bridge                                 |
-| `restartDelayMs` | `1000`                   | Delay between exit and respawn                                     |
+| `restartDelayMs` | `1000`                   | Delay before the first respawn after an exit; doubles on each consecutive exit |
+| `maxRestartDelayMs` | `30000`               | Ceiling for the respawn delay; it resets once the bridge connects  |
 | `running`        | `false`                  | True once frames are arriving                                      |
 | `peak`           | `0.0`                    | Latest peak amplitude (0.0..=1.0)                                  |
 | `rms`            | `0.0`                    | Latest RMS amplitude (0.0..=1.0)                                   |
@@ -84,18 +94,67 @@ Public properties and helpers:
 
 | Property / function | Purpose |
 |---------------------|---------|
-| `config`            | Parsed runtime style object |
+| `config`            | Parsed runtime style object; `config.shell` holds resolved shell chrome only for the `shell` layout |
+| `shellCornerRadius` | Effective Hyprland rounding for the shell layout; zero without Hyprland |
 | `color(role, fallback)` | Resolve semantic tokens or literal colors |
 | `customQmlUrl()`    | `file://` URL for an explicitly selected trusted QML package entry |
 
+### `ShellMetrics` and `ShellBorder`
+
+`ShellMetrics` queries Hyprland rounding on activation and config reload,
+without polling or starting processes for other layouts. `ShellBorder`
+draws a static rounded edge with the resolved popup gradient, alpha, and
+uniform thickness. Neither imports Omarchy's shell modules. TOML tokens and
+aliases are resolved in Rust (`src/osd/shell_style.rs`).
+
 ### `RecipeRenderer`
 
-Canvas renderer for no-code OSD visual recipes. It consumes a style
-loader, recent audio peak ring, peak-hold state, and daemon state. Layer
-types are `shadow`, `background`, `waveform`, `bars`, `pulse`, `ring`,
-`meter`, `icon`, and `label`. Colors are semantic roles by default (`accent`,
+Renderer for no-code OSD visual recipes. Each layer is its own scene-graph
+item (Rectangles, Text, and QtQuick.Shapes paths with static gradients)
+rather than strokes on a software Canvas, so the GPU does the drawing. One
+animation tick (about 60 Hz, running only while `active` and not idle)
+reads the newest audio values, smooths them, and updates every layer.
+
+Layer types are `shadow`, `background`, `waveform`, `line`, `bars`, `dots`,
+`pulse`, `ring`, `meter`, `icon`, and `label`. Colors are semantic roles by default (`accent`,
 `background`, `foreground`, `success`, `warning`, `error`) and normally
-come from the active Omarchy theme.
+come from the active Omarchy theme. `waveform` and `bars` map peaks onto a
+-52..-6 dBFS scale, taking the loudest sample in each column. While
+`daemonState` is `transcribing` they show a slow travelling ripple instead
+of the last audio, and the meter drains.
+
+Public properties and functions:
+
+| Property / function | Purpose |
+|---------------------|---------|
+| `style`             | A `StyleLoader`; layers come from `style.config.visual.layers` |
+| `active`            | False while the host window is hidden; stops the tick |
+| `daemonState`       | Daemon state; outside `recording`/`streaming` audio input is ignored |
+| `meter`             | Optional live object `{ peak, rms, vad, peakDbfs, heldDbfs, ring }`, read once per tick. A host receiving 100 Hz frames can mutate it in place so frames trigger no bindings. When `null`, the `peak`, `rms`, `vad`, `currentPeakDbfs`, `heldDbfs`, and `ring` properties are used instead. |
+| `waveformColumns`   | Capacity of the peak history ring (default 300, 3 s at 100 Hz) |
+| `meterFloorDbfs`    | Meter floor (default -60) |
+| `waveformGain`      | Unused since levels moved to a decibel scale; kept so hosts that set it still load |
+| `voiceEnergy`       | Output: smoothed voice energy (0..1) for host glows and halos |
+| `haloEnergy`        | Output: a hotter mix of the same signal, used by the orb halo |
+| `voiceActivity`     | Output: voice activity eased toward 0 or 1 over about 120 ms |
+| `phase`             | Output: animation time in seconds, for decorations that move in step with the layers |
+| `reset()`           | Drop all smoothed state, e.g. when a new recording starts |
+| `repaint()`         | Advance one tick now |
+
+### `StateIcon`
+
+Vector state icon drawn with QtQuick.Shapes, so it renders without a Nerd
+Font installed. Shows a microphone for `recording`, audio lines for
+`streaming`, and a spinner for `transcribing`. Setting `result` shows how a
+session ended instead.
+
+| Property      | Default     | Purpose |
+|---------------|-------------|---------|
+| `daemonState` | `recording` | Which state icon to draw |
+| `result`      | `""`        | Overrides the state icon: `done` (check), `nospeech` (crossed-out microphone), or `error` (crossed circle) |
+| `color`       | `#dcdfe4`   | Stroke color |
+| `phase`       | `0.0`       | Seconds of animation time; turns the spinner. The host advances it on its own tick, so the icon never runs a free animation. |
+| `strokeWidth` | `2.0`       | Stroke width on the icon's 24x24 grid |
 
 ## Minimal import
 
@@ -106,8 +165,8 @@ Rectangle {
     color: VT.Theme.bgColor
 
     VT.StateReader {
-        id: state
-        onStateChanged: console.log("state:", newState)
+        id: stateReader
+        onStateChanged: console.log("state:", stateReader.state)
     }
 
     VT.AudioBridge {
@@ -123,7 +182,7 @@ Rectangle {
 ```
 
 The directory is structured as a QML module (`qmldir` registers
-`Theme` as a singleton plus the two `Item` subclasses), so the import
+`Theme` as a singleton plus the other components), so the import
 above resolves when Quickshell is launched from the parent
 `quickshell/` directory or when the module is symlinked into the
 user's Quickshell config tree.
