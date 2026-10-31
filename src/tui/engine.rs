@@ -445,6 +445,14 @@ impl EngineState {
 
         let inv = binary::inventory();
 
+        // Whistle runs as an external process (Cactus Compute's `needle`
+        // runner), so no voxtype binary links against it: there's nothing to
+        // switch to and nothing to block on. Every variant supports it, so
+        // skip the family logic entirely rather than demand an ONNX swap.
+        if self.engine == "whistle" {
+            return;
+        }
+
         // OpenVINO isn't part of the prebuilt binary distribution: no
         // Whisper or ONNX variant links against openvino-genai (it's an
         // entirely separate Intel runtime, not an ONNX execution provider),
@@ -960,6 +968,7 @@ fn installed_engine_choices() -> std::collections::HashSet<&'static str> {
             "omnilingual",
             "cohere",
             "openvino",
+            "whistle",
         ] {
             if variant.supports_engine(engine) {
                 out.insert(engine);
@@ -973,6 +982,9 @@ fn installed_engine_choices() -> std::collections::HashSet<&'static str> {
     // Whisper is always present.
     let inv = binary::inventory();
     out.insert("whisper");
+    // Whistle is unconditional and subprocess-driven: the running binary can
+    // always launch it, regardless of which engines were compiled in.
+    out.insert("whistle");
     for f in &inv.compiled_features {
         for engine in [
             "parakeet",
@@ -1410,6 +1422,12 @@ fn engine_guidance(state: &EngineState) -> Vec<Line<'static>> {
             "OpenVINO GenAI Whisper (Intel NPU/GPU/CPU). Included in the \
              x86_64 ONNX release binaries; its runtime and device drivers \
              are loaded only when this engine is selected.",
+        ),
+        (
+            "whistle",
+            "Cactus Compute Whistle. 16.9 MB, 7 languages, run as an external \
+             process via the `needle` CLI runner. Neither artifact is \
+             bundled — see docs/WHISTLE.md. Any voxtype binary can run it.",
         ),
     ] {
         lines.push(Line::from(Span::styled(
@@ -1934,6 +1952,7 @@ fn display_engine(engine: &str) -> &'static str {
         "omnilingual" => "Omnilingual",
         "cohere" => "Cohere",
         "openvino" => "OpenVINO",
+        "whistle" => "Whistle",
         _ => "Engine",
     }
 }

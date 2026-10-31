@@ -718,12 +718,19 @@ mod tests {
     }
 
     /// The catalog covers every engine `config set engine` accepts, minus
-    /// cloud engines that have no downloadable model.
+    /// engines whose model isn't served from models.voxtype.io.
+    ///
+    /// `soniox` isn't in `ENGINE_NAMES` at all, so it never reaches here.
+    /// `whistle` is selectable but ships nothing to download: both its
+    /// weights (`whistle.cact`) and its engine (`needle`) come from Cactus
+    /// Compute's own HuggingFace repos, and `setup --download` only knows
+    /// about models.voxtype.io. See `docs/WHISTLE.md`.
     #[test]
     fn catalog_covers_the_settable_engines() {
+        const NOT_CATALOGED: &[&str] = &["whistle"];
         for name in ENGINE_NAMES {
             assert!(
-                CATALOG_ENGINES.contains(name),
+                NOT_CATALOGED.contains(name) || CATALOG_ENGINES.contains(name),
                 "engine '{}' is settable but has no model catalog",
                 name
             );
