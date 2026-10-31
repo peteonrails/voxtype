@@ -899,6 +899,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Secondary-model modifier",
         "Hold this alongside the hotkey to transcribe with whisper.secondary_model.",
     ),
+    spec(
+        "hotkey.double_tap_latch",
+        "hotkey",
+        "double_tap_latch",
+        KeyType::Bool,
+        "Hotkey",
+        "Double-tap latch",
+        "push_to_talk only. Double-tap to keep recording until the next press; a single short tap is discarded.",
+    ),
     // -- Audio --------------------------------------------------------------
     spec(
         "audio.device",
@@ -2543,6 +2552,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         }),
         "hotkey.cancel_key" => opt_str(cfg.hotkey.cancel_key.as_ref()),
         "hotkey.model_modifier" => opt_str(cfg.hotkey.model_modifier.as_ref()),
+        "hotkey.double_tap_latch" => json!(cfg.hotkey.double_tap_latch),
 
         "audio.device" => json!(cfg.audio.device),
         "audio.max_duration_secs" => json!(cfg.audio.max_duration_secs),
