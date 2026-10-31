@@ -7,7 +7,7 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::{get_voxtype_path, print_failure, print_info, print_success, print_warning};
@@ -16,8 +16,38 @@ const APP_NAME: &str = "Voxtype.app";
 pub const BUNDLE_ID: &str = "io.voxtype.daemon";
 
 /// Get the path to the app bundle
+///
+/// Prefers an existing install (system-wide, then per-user). For a fresh install it uses
+/// `/Applications`, falling back to `~/Applications` for standard (non-admin) accounts
+/// that cannot write there.
 pub fn app_bundle_path() -> PathBuf {
-    PathBuf::from("/Applications").join(APP_NAME)
+    resolve_bundle_path(
+        Path::new("/Applications"),
+        dirs::home_dir().map(|h| h.join("Applications")).as_deref(),
+    )
+}
+
+fn resolve_bundle_path(system_dir: &Path, user_dir: Option<&Path>) -> PathBuf {
+    let system_bundle = system_dir.join(APP_NAME);
+    let Some(user_dir) = user_dir else {
+        return system_bundle;
+    };
+    let user_bundle = user_dir.join(APP_NAME);
+    if system_bundle.exists() {
+        system_bundle
+    } else if user_bundle.exists() || !is_writable(system_dir) {
+        user_bundle
+    } else {
+        system_bundle
+    }
+}
+
+fn is_writable(dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(dir.as_os_str().as_bytes())
+        // SAFETY: the pointer is a valid NUL-terminated string for the duration of the call
+        .map(|c| unsafe { libc::access(c.as_ptr(), libc::W_OK) } == 0)
+        .unwrap_or(false)
 }
 
 /// Get the path to the binary inside the app bundle
@@ -79,7 +109,9 @@ pub fn create_app_bundle() -> anyhow::Result<()> {
     let macos_path = contents_path.join("MacOS");
 
     // Create directory structure
-    fs::create_dir_all(&macos_path)?;
+    fs::create_dir_all(&macos_path).map_err(|e| {
+        anyhow::anyhow!("Cannot create app bundle at {}: {}", app_path.display(), e)
+    })?;
 
     // Get version from current binary
     let version = env!("CARGO_PKG_VERSION");
@@ -247,7 +279,10 @@ pub async fn install() -> anyhow::Result<()> {
         print_success("Launched Voxtype.app");
     } else {
         print_warning("Could not launch automatically");
-        print_info("Start manually: open /Applications/Voxtype.app");
+        print_info(&format!(
+            "Start manually: open {}",
+            app_bundle_path().display()
+        ));
     }
 
     println!("\n---");
@@ -329,7 +364,7 @@ pub async fn status() -> anyhow::Result<()> {
         }
         _ => {
             print_info("Not currently running");
-            print_info("Start with: open /Applications/Voxtype.app");
+            print_info(&format!("Start with: open {}", app_bundle_path().display()));
         }
     }
 
@@ -350,4 +385,53 @@ pub async fn status() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn falls_back_to_user_dir_when_system_dir_not_writable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user = tmp.path().join("Applications");
+        let missing = tmp.path().join("no-such-system-dir");
+        assert_eq!(
+            resolve_bundle_path(&missing, Some(&user)),
+            user.join(APP_NAME)
+        );
+    }
+
+    #[test]
+    fn uses_system_dir_when_writable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user = tmp.path().join("user");
+        assert_eq!(
+            resolve_bundle_path(tmp.path(), Some(&user)),
+            tmp.path().join(APP_NAME)
+        );
+    }
+
+    #[test]
+    fn existing_user_bundle_wins_over_writable_system_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user = tmp.path().join("user");
+        fs::create_dir_all(user.join(APP_NAME)).unwrap();
+        assert_eq!(
+            resolve_bundle_path(tmp.path(), Some(&user)),
+            user.join(APP_NAME)
+        );
+    }
+
+    #[test]
+    fn existing_system_bundle_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user = tmp.path().join("user");
+        fs::create_dir_all(user.join(APP_NAME)).unwrap();
+        fs::create_dir_all(tmp.path().join(APP_NAME)).unwrap();
+        assert_eq!(
+            resolve_bundle_path(tmp.path(), Some(&user)),
+            tmp.path().join(APP_NAME)
+        );
+    }
 }
