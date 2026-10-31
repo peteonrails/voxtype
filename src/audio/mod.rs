@@ -20,6 +20,12 @@ use crate::error::AudioError;
 use tokio::sync::mpsc;
 
 /// Trait for audio capture implementations
+// `async_trait` generates `#[must_use]` on every desugared `async fn` whose
+// return type is already `#[must_use]` (`Pin<Box<dyn Future>>`), which clippy's
+// `double_must_use` lint rejects under CI's `-D warnings`. It was fixed
+// upstream in async-trait 0.1.92; until then, allow it here rather than bump
+// the dependency.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait AudioCapture: Send + Sync {
     /// Start capturing audio
