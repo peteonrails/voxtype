@@ -405,6 +405,23 @@ impl DeviceManager {
         events
     }
 
+    /// Block until a device or the inotify watch has something to read, or
+    /// until `timeout`. A hung-up fd also wakes it, so `poll_events` can drop it.
+    fn wait_for_input(&self, timeout: Duration) {
+        let mut fds: Vec<libc::pollfd> = std::iter::once(self.inotify.as_raw_fd())
+            .chain(self.devices.values().map(|d| d.as_raw_fd()))
+            .map(|fd| libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            })
+            .collect();
+        let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+        // EINTR and other errors just end the wait early; the loop rechecks
+        // everything anyway.
+        unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_ms) };
+    }
+
     /// Check if we have any devices
     fn has_devices(&self) -> bool {
         !self.devices.is_empty()
@@ -678,8 +695,9 @@ fn evdev_listener_loop(
             }
         }
 
-        // Small sleep to avoid busy-waiting
-        std::thread::sleep(Duration::from_millis(5));
+        // Sleep until a key event or a device change. The timeout bounds how
+        // late the stop signal and the periodic validation are noticed.
+        manager.wait_for_input(Duration::from_millis(100));
     }
 }
 
