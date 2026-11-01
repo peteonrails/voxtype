@@ -1827,7 +1827,7 @@ Configuration for the OpenVINO Whisper speech-to-text engine. This section is on
 | `device` | String | `"NPU"` | OpenVINO device: `"NPU"`, `"CPU"`, `"GPU"`, or `"AUTO"`. On a genuine device error (missing driver, unsupported op, no NPU on this chip) voxtype falls back automatically: configured device → GPU → CPU, skipping a device already tried. This is for actual errors only — see the note below on large models, which don't error on NPU, just compile slowly the first time. When config.toml has an `[openvino]` section with `device = "NPU"`, `voxtype setup` also compiles a newly downloaded or activated model for the NPU before it finishes, so the first recording does not absorb that wait (see Compiled model caching below). |
 | `quantized` | Boolean | `true` | Prefer int8 quantized model variants |
 | `threads` | Integer | system-detected | CPU inference threads |
-| `language` | String | `"en"` | Whisper language code |
+| `language` | String | `"en"` | Whisper language code, or `"auto"` to detect it (multilingual models only) |
 | `translate` | Boolean | `false` | Translate non-English speech to English |
 | `on_demand_loading` | Boolean | `false` | Load the model when recording begins |
 | `streaming` | Boolean | `false` | Live streaming transcription via the shared sliding-window engine — see `[streaming]` for tuning |
