@@ -9,7 +9,8 @@
 //! ## Module layout
 //!
 //! - [`ipc`] — Unix-socket connection, frame decode, ring buffer, reconnect.
-//! - [`visual`] — peak-hold decay, waveform envelope helpers, palette types.
+//! - [`visual`] — peak-hold decay, waveform envelope and level mapping, palette types.
+//! - [`placement`] — where the card sits on the output the OSD lands on.
 //! - [`config`] — `[osd]` config block (`OsdConfig`).
 //! - [`theme`] — Omarchy theme parsing + change watcher.
 //! - [`gtk_env`] — environment workarounds for GTK4 bugs (GTK frontend only).
@@ -17,6 +18,7 @@
 pub mod config;
 pub mod gtk_env;
 pub mod ipc;
+pub mod placement;
 pub mod recipe;
 pub mod style;
 pub mod supervisor;

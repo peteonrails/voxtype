@@ -32,6 +32,17 @@ pub struct RuntimeOsdStyle {
     pub position: OsdPosition,
     pub margin_px: u32,
     pub top_margin: f32,
+    pub waveform_gain: f32,
+    pub opacity: f32,
+    pub waveform_window_secs: f32,
+    pub peak_decay_db_per_sec: f32,
+    pub width_px: u32,
+    pub height_px: u32,
+    /// Draw the card exactly like the GTK4 and native frontends: true for
+    /// the default style and `compact` layout with the default visual
+    /// recipe and no custom QML. Other styles, layouts and customized
+    /// recipes keep the recipe renderer.
+    pub classic_card: bool,
     pub package_dir: Option<PathBuf>,
     pub asset_root: Option<PathBuf>,
     pub custom_qml: Option<PathBuf>,
@@ -100,6 +111,13 @@ pub fn resolve_runtime_style(
         }
     }
 
+    let classic_card = style_name == "default"
+        && package_dir.is_none()
+        && custom_qml.is_none()
+        && layout == OsdLayout::Compact
+        && serde_json::to_value(&visual).ok()
+            == serde_json::to_value(OsdVisualConfig::default()).ok();
+
     Ok(RuntimeOsdStyle {
         style: style_name,
         palette: palette_source,
@@ -107,6 +125,13 @@ pub fn resolve_runtime_style(
         position: osd.position,
         margin_px: osd.margin_px,
         top_margin: osd.top_margin,
+        waveform_gain: osd.waveform_gain,
+        opacity: osd.opacity,
+        waveform_window_secs: osd.waveform_window_secs,
+        peak_decay_db_per_sec: osd.peak_decay_db_per_sec,
+        width_px: osd.width_px,
+        height_px: osd.height_px,
+        classic_card,
         package_dir,
         asset_root,
         custom_qml,
@@ -430,6 +455,26 @@ mod tests {
     use super::*;
     use crate::osd::config::{OsdLayerKind, OsdPaletteSource};
     use tempfile::tempdir;
+
+    #[test]
+    fn default_style_draws_the_classic_card() {
+        let style = resolve_runtime_style(&OsdConfig::default(), None).unwrap();
+        assert!(style.classic_card);
+        assert_eq!((style.width_px, style.height_px), (400, 48));
+    }
+
+    #[test]
+    fn other_layouts_and_custom_recipes_keep_the_recipe_renderer() {
+        let wide = OsdConfig {
+            layout: OsdLayout::Wide,
+            ..OsdConfig::default()
+        };
+        assert!(!resolve_runtime_style(&wide, None).unwrap().classic_card);
+
+        let mut recipe = OsdConfig::default();
+        recipe.visual.layers.truncate(1);
+        assert!(!resolve_runtime_style(&recipe, None).unwrap().classic_card);
+    }
 
     #[test]
     fn default_style_has_no_package_and_uses_omarchy_palette() {

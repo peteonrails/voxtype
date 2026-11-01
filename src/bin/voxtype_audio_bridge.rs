@@ -10,7 +10,7 @@
 //! object per line on stdout:
 //!
 //! ```json
-//! {"peak":0.421,"rms":0.180,"vad":1,"ts_ms":1234567}
+//! {"peak":0.421,"rms":0.180,"vad":1,"ts_ms":1234567,"min":-0.39800,"max":0.42100}
 //! ```
 //!
 //! Connection state changes are signalled inline:
@@ -35,6 +35,10 @@
 //!   is an approximation; the wire frame does not carry true RMS.
 //! - `vad`: heuristic, `peak_dbfs > VAD_THRESHOLD_DBFS` (-40 dBFS).
 //! - `ts_ms`: milliseconds since the bridge started, monotonic.
+//! - `min`, `max`: the frame's signed sample range, clamped to `[-1, 1]`.
+//!   Added after the original four keys, so older readers ignore them.
+//!   The Quickshell OSD draws the waveform envelope from them, like the
+//!   GTK4 and native frontends.
 //!
 //! ## Reconnect behaviour
 //!
@@ -200,8 +204,8 @@ fn emit_status(status: &str) -> io::Result<()> {
 
 /// Encode one [`AudioFrame`] as a single NDJSON line (terminated by `\n`).
 ///
-/// Values are rounded to 3 decimal places to keep lines compact (~50 B)
-/// while preserving enough resolution for a 100 Hz waveform display.
+/// Values are rounded to 5 decimal places: 3 left the quietest levels the
+/// OSD draws (-48 dBFS is about 0.004) in steps of several dB.
 fn encode_frame(frame: &AudioFrame, elapsed: Duration) -> String {
     let peak = peak_amplitude(frame);
     let rms = rms_approx(frame);
@@ -213,9 +217,24 @@ fn encode_frame(frame: &AudioFrame, elapsed: Duration) -> String {
     let ts_ms = elapsed.as_millis() as u64;
 
     format!(
-        "{{\"peak\":{:.3},\"rms\":{:.3},\"vad\":{},\"ts_ms\":{}}}\n",
-        peak, rms, vad, ts_ms
+        "{{\"peak\":{:.5},\"rms\":{:.5},\"vad\":{},\"ts_ms\":{},\"min\":{:.5},\"max\":{:.5}}}\n",
+        peak,
+        rms,
+        vad,
+        ts_ms,
+        clamp_sample(frame.min),
+        clamp_sample(frame.max),
     )
+}
+
+/// A signed sample clamped to `[-1, 1]`; NaN becomes 0 so the line stays
+/// valid JSON.
+fn clamp_sample(v: f32) -> f32 {
+    if v.is_nan() {
+        0.0
+    } else {
+        v.clamp(-1.0, 1.0)
+    }
 }
 
 /// Per-frame absolute peak in [0, 1].
@@ -294,6 +313,19 @@ mod tests {
         assert!(parsed.get("vad").is_some());
         assert!(parsed.get("ts_ms").is_some());
         assert_eq!(parsed["ts_ms"], 1234);
+        assert_eq!(parsed["min"], -0.5);
+        assert_eq!(parsed["max"], 0.5);
+        // The original four keys still come first.
+        assert!(payload.starts_with("{\"peak\":"));
+    }
+
+    #[test]
+    fn encode_frame_keeps_min_max_valid_json() {
+        let f = make_frame(f32::NAN, 3.0, 0.0);
+        let parsed: serde_json::Value =
+            serde_json::from_str(encode_frame(&f, Duration::ZERO).trim_end()).unwrap();
+        assert_eq!(parsed["min"], 0.0);
+        assert_eq!(parsed["max"], 1.0);
     }
 
     #[test]

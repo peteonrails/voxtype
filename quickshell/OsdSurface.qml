@@ -44,7 +44,12 @@ PanelWindow {
     /// visual recipe layers, and optional custom QML package entry.
     property var style: null
 
-    visible: !osdSuppressed && daemonState !== "idle" && daemonState !== ""
+    // The classic card shows while audio frames arrive and hides 150 ms
+    // after they stop, like the GTK4 and native frontends. Recipe styles
+    // follow the daemon state.
+    visible: !osdSuppressed && (classicCard
+        ? framesFresh
+        : daemonState !== "idle" && daemonState !== "")
     anchors {
         top: true
         bottom: true
@@ -53,10 +58,79 @@ PanelWindow {
     }
     color: "transparent"
 
+    // Put the surface on the focused output. Without an explicit screen
+    // Quickshell leaves the window on Qt's default screen, so with two
+    // monitors the OSD could show up on the one you are not looking at.
+    // The target only changes while the OSD is hidden, so it never jumps
+    // between outputs mid-recording. The compositor probe is created from
+    // a string so a Quickshell build without that module still loads this
+    // surface; with no probe the screen is left as before.
+    property var _focusProbe: null
+    property var _targetScreen: null
+    readonly property string _focusedOutputName: _focusProbe && _focusProbe.name ? _focusProbe.name : ""
+
+    function _createFocusProbe() {
+        const hyprland = (Quickshell.env("HYPRLAND_INSTANCE_SIGNATURE") || "") !== "";
+        const i3 = (Quickshell.env("SWAYSOCK") || "") !== "" || (Quickshell.env("I3SOCK") || "") !== "";
+        const source = hyprland
+            ? 'import QtQuick; import Quickshell.Hyprland; QtObject { readonly property string name: Hyprland.focusedMonitor ? Hyprland.focusedMonitor.name : "" }'
+            : i3
+                ? 'import QtQuick; import Quickshell.I3; QtObject { readonly property string name: I3.focusedMonitor ? I3.focusedMonitor.name : "" }'
+                : "";
+        if (!source) return null;
+        try {
+            return Qt.createQmlObject(source, panel, "voxtypeFocusedOutput");
+        } catch (e) {
+            console.warn("voxtype OSD: cannot track the focused output:", e);
+            return null;
+        }
+    }
+
+    function _screenNamed(name) {
+        if (!name) return null;
+        const screens = Quickshell.screens;
+        for (let i = 0; i < screens.length; i++) {
+            if (screens[i].name === name) return screens[i];
+        }
+        return null;
+    }
+
+    function _retargetScreen() {
+        if (panel.visible) return;
+        const target = _screenNamed(_focusedOutputName);
+        if (target) panel._targetScreen = target;
+    }
+
+    Component.onCompleted: {
+        _focusProbe = _createFocusProbe();
+        _retargetScreen();
+    }
+    on_FocusedOutputNameChanged: _retargetScreen()
+    onVisibleChanged: _retargetScreen()
+
+    Connections {
+        target: Quickshell
+        function onScreensChanged() {
+            panel._targetScreen = null;
+            panel._retargetScreen();
+        }
+    }
+
+    Binding {
+        target: panel
+        property: "screen"
+        value: panel._targetScreen
+        when: panel._targetScreen !== null
+    }
+
     WlrLayershell.namespace: "voxtype-osd"
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
-    exclusionMode: ExclusionMode.Ignore
+    // The classic card spans the output's usable height (between bars),
+    // like the GTK4 and native surfaces with exclusive zone 0, so all
+    // three place it at the same spot.
+    exclusionMode: classicCard ? ExclusionMode.Normal : ExclusionMode.Ignore
+    exclusiveZone: 0
 
     // Subtract the whole panel area from the input region, so pointer
     // events fall through to windows underneath instead of getting
@@ -76,18 +150,30 @@ PanelWindow {
       : daemonState === "transcribing" ? panel._styleColor("transcribing", VT.Theme.transcribingColor)
       :                                  panel._styleColor("idle", VT.Theme.idleColor)
 
-    // Ring of recent per-frame peaks (0.0..1.0). Capacity = 3 s @ 100 Hz.
-    // Stored as a plain array; we shift() when full to keep newest-on-right.
-    readonly property int waveformColumns: Math.round(VT.Theme.waveformWindowSecs * 100)
-    property var ring: []
+    // Frames across the visible waveform window (100 per second).
+    readonly property int waveformColumns: Math.round(panel._styleNumber("waveform_window_secs", VT.Theme.waveformWindowSecs) * 100)
 
-    // Peak meter state (kept in dBFS so the held-peak decay math matches
-    // src/osd/visual.rs's PeakHold verbatim).
+    // Recent per-frame peaks (0.0..1.0), oldest first. Mutated in place
+    // (no change signal per frame); the renderer reads it on every paint.
+    // Holds the visible window plus the playout delay on both sides.
+    property var ring: []
+    // Signed sample range per frame, parallel to `ring`.
+    property var ringMin: []
+    property var ringMax: []
+    // Classic card: true while frames keep arriving (see frameIdleTimer).
+    property bool framesFresh: false
+    readonly property bool classicCard: !!(style && style.config && style.config.classic_card)
+    // Frames received this recording, and the wall-clock origin of the
+    // scroll clock. Together they place every frame at a fixed position in
+    // time, so the waveform scrolls at a constant rate and past audio never
+    // changes shape. Mirrors osd::ipc::FrameRing.
+    property int framesReceived: 0
+    property real clockOriginMs: -1
+    readonly property real playoutDelayFrames: 5
+
     property real currentPeakDbfs: -120
-    property real heldDbfs: -120
     property real currentPeak: 0
     property real currentRms: 0
-    property real lastFrameTsMs: 0
     readonly property string customQmlUrl: _customQmlUrl()
     readonly property bool hasCustomQml: customQmlUrl.length > 0
     /// Set when the custom QML package fails to load, so the built-in
@@ -97,7 +183,6 @@ PanelWindow {
     /// Every built-in element keys its visibility off this so a broken
     /// package falls back to the default card.
     readonly property bool customActive: hasCustomQml && !customQmlFailed
-    readonly property real voiceEnergy: Math.min(1.0, Math.max(0.0, currentRms * 6.0 + currentPeak * 0.85))
     readonly property real orbHaloEnergy: Math.min(1.0, Math.max(0.0, currentRms * 10.0 + currentPeak * 1.8))
 
     onCustomQmlUrlChanged: customQmlFailed = false
@@ -132,7 +217,26 @@ PanelWindow {
         const value = style && style.config && style.config.top_margin !== undefined
             ? Number(style.config.top_margin)
             : 0.85;
-        return Math.max(0.0, Math.min(1.0, value));
+        return isFinite(value) ? Math.max(0.0, Math.min(1.0, value)) : 0.85;
+    }
+
+    function _styleNumber(key, fallback) {
+        const value = style && style.config && style.config[key] !== undefined
+            ? Number(style.config[key])
+            : fallback;
+        return isFinite(value) ? value : fallback;
+    }
+
+    // `[osd] opacity`: the card's opacity, fixed while it is shown.
+    function _styleOpacity() {
+        return Math.max(0.0, Math.min(1.0, _styleNumber("opacity", VT.Theme.defaultOpacity)));
+    }
+
+    function _styleWaveformGain() {
+        const value = style && style.config && style.config.waveform_gain !== undefined
+            ? Number(style.config.waveform_gain)
+            : VT.Theme.waveformGain;
+        return isFinite(value) && value > 0 ? value : VT.Theme.waveformGain;
     }
 
     function _frameConfig() {
@@ -176,6 +280,7 @@ PanelWindow {
     }
 
     function _cardWidth() {
+        if (classicCard) return Math.max(1, _styleNumber("width_px", VT.Theme.defaultWidthPx));
         const layout = _styleLayout();
         if (layout === "wide") return Math.max(VT.Theme.defaultWidthPx, 560);
         if (layout === "minimal") return Math.min(VT.Theme.defaultWidthPx, 260);
@@ -185,6 +290,7 @@ PanelWindow {
     }
 
     function _cardHeight() {
+        if (classicCard) return Math.max(1, _styleNumber("height_px", VT.Theme.defaultHeightPx));
         const layout = _styleLayout();
         if (layout === "minimal") return 48;
         if (layout === "tile") return 176;
@@ -193,6 +299,7 @@ PanelWindow {
     }
 
     function _cardRadius() {
+        if (classicCard) return 0;
         const layout = _styleLayout();
         if (layout === "orb") return Math.round(_cardWidth() / 2);
         if (layout === "tile") return 18;
@@ -207,15 +314,22 @@ PanelWindow {
         return Math.max(margin, (panel.width - _cardWidth()) / 2);
     }
 
+    // Mirrors osd::placement::card_top. panel.height is the full height
+    // of the output this surface is on, in its logical pixels.
     function _cardY() {
         const position = _stylePosition();
         const margin = _styleMarginPx();
-        if ((position === "top-left") || (position === "top-right")) return margin;
-        if ((position === "bottom-left") || (position === "bottom-right")) {
-            return Math.max(margin, panel.height - _cardHeight() - margin);
-        }
-        const y = panel.height * _styleTopMargin();
-        return Math.max(margin, Math.min(panel.height - _cardHeight() - margin, y));
+        const area = panel.height;
+        const h = _cardHeight();
+        const fraction = _styleTopMargin();
+        let y;
+        if ((position === "top-left") || (position === "top-right")) y = margin;
+        else if ((position === "bottom-left") || (position === "bottom-right")) y = area - h - margin;
+        else if (position === "top-center") y = fraction <= 0.5 ? area * fraction : area * (1 - fraction) - h;
+        else y = area * fraction;
+        const lowest = area - h - margin;
+        if (lowest < margin) return Math.max(0, (area - h) / 2);
+        return Math.max(margin, Math.min(lowest, y));
     }
 
     function _isBlockLayout() {
@@ -247,11 +361,15 @@ PanelWindow {
 
     function _resetMeters() {
         ring = [];
+        ringMin = [];
+        ringMax = [];
+        framesReceived = 0;
+        clockOriginMs = -1;
         currentPeakDbfs = -120;
-        heldDbfs = -120;
         currentPeak = 0;
         currentRms = 0;
-        lastFrameTsMs = 0;
+        recipeRenderer.resetMeter();
+        classicRenderer.resetMeter();
         recipeRenderer.repaint();
     }
 
@@ -261,37 +379,48 @@ PanelWindow {
         function onFrameReceived(peak, rms, vad, tsMs) {
             panel.currentPeak = peak;
             panel.currentRms = rms;
+            panel.currentPeakDbfs = peak > 0.0 ? 20 * Math.log10(peak) : -120;
 
-            // Push the new peak onto the ring; drop the oldest when full.
-            const r = panel.ring.slice();
+            // Scroll clock: frames advance at 100 per second of wall time,
+            // held back by the playout delay so capture batches arriving in
+            // bursts still scroll smoothly. Batch arrivals never move the
+            // clock; only an underrun re-anchors it, resuming where the
+            // display stopped instead of jumping.
+            // A new burst after the classic card went idle is a new
+            // recording: start from an empty window, like FrameRing does
+            // on a sequence break.
+            if (panel.classicCard && !panel.framesFresh) panel._resetMeters();
+            const now = Date.now();
+            if (panel.clockOriginMs < 0) panel.clockOriginMs = now;
+            const elapsed = (now - panel.clockOriginMs) / 10;
+            if (elapsed > panel.framesReceived + panel.playoutDelayFrames) {
+                const stoppedAt = Math.max(0, panel.framesReceived - 1);
+                panel.clockOriginMs = now - (stoppedAt + panel.playoutDelayFrames) * 10;
+            } else if (elapsed < panel.framesReceived - 4 * panel.playoutDelayFrames) {
+                // A backlog (frames queued in the bridge's pipe while QML was
+                // busy, e.g. at startup) arrived faster than real time. Catch
+                // the clock up rather than trailing the meter for good.
+                panel.clockOriginMs = now - Math.max(0, panel.framesReceived - 1) * 10;
+            }
+
+            const r = panel.ring;
+            const rMin = panel.ringMin;
+            const rMax = panel.ringMax;
             r.push(peak);
-            while (r.length > panel.waveformColumns) {
-                r.shift();
+            rMin.push(panel.audio.sampleMin);
+            rMax.push(panel.audio.sampleMax);
+            const capacity = panel.waveformColumns + 2 * panel.playoutDelayFrames + 2;
+            if (r.length > capacity) {
+                const extra = r.length - capacity;
+                r.splice(0, extra);
+                rMin.splice(0, extra);
+                rMax.splice(0, extra);
             }
-            panel.ring = r;
-
-            // dBFS from linear peak. Floor at -120 to match visual.rs's
-            // PeakHold::held_dbfs sentinel for "effectively silent".
-            const dbfs = peak > 0.0 ? 20 * Math.log10(peak) : -120;
-            panel.currentPeakDbfs = dbfs;
-
-            // Held-peak: snap up on a louder peak, otherwise decay at
-            // peakDecayDbPerSec. dt comes from the frame timestamps so
-            // a paused daemon (no frames) doesn't unrealistically decay
-            // before we receive the next frame.
-            const dtMs = panel.lastFrameTsMs > 0
-                ? Math.max(0, tsMs - panel.lastFrameTsMs)
-                : 10;
-            panel.lastFrameTsMs = tsMs;
-            const dt = dtMs / 1000;
-            if (dbfs > panel.heldDbfs) {
-                panel.heldDbfs = dbfs;
-            } else {
-                const decayed = panel.heldDbfs - VT.Theme.peakDecayDbPerSec * dt;
-                panel.heldDbfs = decayed < -120 ? -120 : decayed;
-            }
-            // No repaint here: the renderer's animation timer already
-            // drives painting whenever the OSD is visible.
+            panel.framesReceived += 1;
+            panel.framesFresh = true;
+            frameIdleTimer.restart();
+            // No repaint here: the renderer repaints on every display frame
+            // while the OSD is visible.
         }
         function onDisconnected() {
             panel._resetMeters();
@@ -346,7 +475,7 @@ PanelWindow {
 
     MultiEffect {
         id: frameGlow
-        visible: !panel.customActive && panel._frameGlowEnabled() && !panel._isOrbLayout()
+        visible: !panel.customActive && !panel.classicCard && panel._frameGlowEnabled() && !panel._isOrbLayout()
         anchors.centerIn: card
         width: frameGlowSource.width
         height: frameGlowSource.height
@@ -356,30 +485,28 @@ PanelWindow {
         shadowHorizontalOffset: 0
         shadowVerticalOffset: 0
         shadowColor: panel._styleColor("accent", panel.stateColor)
-        shadowOpacity: panel.daemonState === "recording" ? 0.18 + panel.voiceEnergy * 0.34 : 0.0
-        shadowBlur: 0.68 + panel.voiceEnergy * 0.22
-        shadowScale: 1.02 + panel.voiceEnergy * 0.055
+        // A steady glow: it used to swell and fade with the voice, which
+        // read as the whole OSD changing transparency while you spoke.
+        shadowOpacity: 0.3
+        shadowBlur: 0.75
+        shadowScale: 1.04
         blurMax: 64
-        opacity: panel.daemonState === "recording" ? 1.0 : 0.0
-        Behavior on shadowOpacity { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } }
-        Behavior on shadowBlur { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
-        Behavior on shadowScale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+        opacity: panel.daemonState === "recording" ? panel._styleOpacity() : 0.0
         Behavior on opacity { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
     }
 
     Rectangle {
         id: frameHalo
-        visible: !panel.customActive && panel._frameHaloEnabled() && !panel._isOrbLayout()
+        visible: !panel.customActive && !panel.classicCard && panel._frameHaloEnabled() && !panel._isOrbLayout()
         width: card.width + 3
         height: card.height + 3
         anchors.centerIn: card
         radius: card.radius + 1.5
         color: "transparent"
         border.color: panel._styleColor("accent", panel.stateColor)
-        border.width: 1 + panel.voiceEnergy * 1.4
-        opacity: panel.daemonState === "recording" ? 0.12 + panel.voiceEnergy * 0.28 : 0.0
+        border.width: 1.5
+        opacity: panel.daemonState === "recording" ? 0.24 * panel._styleOpacity() : 0.0
         Behavior on opacity { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
-        Behavior on border.width { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } }
     }
 
     Canvas {
@@ -455,14 +582,36 @@ PanelWindow {
         x: panel._cardX()
         y: panel._cardY()
         radius: panel._cardRadius()
-        color: panel._frameBackgroundColor()
-        border.width: panel._frameBorderWidth()
+        // The classic card's background is painted by the renderer, so
+        // it matches the GTK4 card pixel for pixel.
+        color: panel.classicCard ? "transparent" : panel._frameBackgroundColor()
+        border.width: panel.classicCard ? 0 : panel._frameBorderWidth()
         border.color: panel._frameBorderColor()
-        opacity: (panel.daemonState === "recording" && panel.audio && panel.audio.running && !panel.audio.vad)
-                 ? 0.78 : 1.0
-        Behavior on opacity { NumberAnimation { duration: 120 } }
+        // `[osd] opacity`, constant while shown. It used to drop to 0.78
+        // whenever the bridge's voice-activity flag (peak above -40 dBFS)
+        // was off, which flickered between words.
+        opacity: panel._styleOpacity()
+
+        VT.RecipeRenderer {
+            id: classicRenderer
+            visible: panel.classicCard
+            anchors.fill: parent
+            classic: true
+            style: panel.style
+            ring: panel.ring
+            ringMin: panel.ringMin
+            ringMax: panel.ringMax
+            framesReceived: panel.framesReceived
+            clockOriginMs: panel.clockOriginMs
+            playoutDelayFrames: panel.playoutDelayFrames
+            peakDecayDbPerSec: panel._styleNumber("peak_decay_db_per_sec", VT.Theme.peakDecayDbPerSec)
+            daemonState: panel.daemonState
+            waveformColumns: panel.waveformColumns
+            waveformGain: panel._styleWaveformGain()
+        }
 
         Row {
+            visible: !panel.classicCard
             anchors.fill: parent
             anchors.leftMargin: panel._isBlockLayout() ? 0 : VT.Theme.padding
             anchors.rightMargin: panel._isBlockLayout() ? 0 : VT.Theme.padding
@@ -500,18 +649,28 @@ PanelWindow {
                         anchors.fill: parent
                         style: panel.style
                         ring: panel.ring
+                        framesReceived: panel.framesReceived
+                        clockOriginMs: panel.clockOriginMs
+                        playoutDelayFrames: panel.playoutDelayFrames
+                        peakDecayDbPerSec: panel._styleNumber("peak_decay_db_per_sec", VT.Theme.peakDecayDbPerSec)
                         daemonState: panel.daemonState
                         vad: panel.audio && panel.audio.vad
                         currentPeakDbfs: panel.currentPeakDbfs
-                        heldDbfs: panel.heldDbfs
                         peak: panel.currentPeak
                         rms: panel.currentRms
                         waveformColumns: panel.waveformColumns
-                        waveformGain: VT.Theme.waveformGain
-                        meterFloorDbfs: VT.Theme.meterFloorDbfs
+                        waveformGain: panel._styleWaveformGain()
                     }
                 }
             }
         }
+    }
+
+    // Hide the classic card 150 ms after the last frame, as GTK4 does.
+    Timer {
+        id: frameIdleTimer
+        interval: 150
+        repeat: false
+        onTriggered: panel.framesFresh = false
     }
 }

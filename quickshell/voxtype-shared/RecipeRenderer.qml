@@ -7,24 +7,41 @@ Item {
 
     property var style: null
     property var ring: []
+    // Signed sample range per frame, parallel to `ring` (classic card).
+    property var ringMin: []
+    property var ringMax: []
+    // Draw the classic card: a port of the GTK4 frontend's drawing
+    // (src/bin/voxtype_osd_gtk4.rs) instead of the recipe layers.
+    property bool classic: false
+    // Scroll clock from the host (see OsdSurface.qml): frames received
+    // this recording and the wall-clock origin, 100 frames per second.
+    property int framesReceived: 0
+    property real clockOriginMs: -1
+    property real playoutDelayFrames: 5
+    property real peakDecayDbPerSec: 6.0
     property string daemonState: "idle"
     property bool vad: false
     property real currentPeakDbfs: -120
-    property real heldDbfs: -120
     property real rms: 0.0
     property real peak: 0.0
     property int waveformColumns: 300
     property real waveformGain: 10.0
-    property real meterFloorDbfs: -60.0
 
     property real _peak: 0.0
     property real _rms: 0.0
     property real _vad: 0.0
     property real _energy: 0.0
     property real _phase: 0.0
-    property real _lastTick: Date.now()
     property var _barLevels: []
-    property var _waveLevels: []
+    // Absolute frame index at the waveform's right edge, advanced on every
+    // display frame from the scroll clock.
+    property real _scrollPosition: -1
+    // Level meter on the waveform's display scale, advanced once per
+    // display frame (see osd::visual::LevelMeter).
+    property real _meterLevel: 0.0
+    property real _meterTargetDbfs: -120
+    property real _heldDbfs: -120
+    property int _meterFramesSeen: 0
     // Layers sorted by order, cached so the per-frame paint loop doesn't
     // re-slice and re-sort the recipe on every frame.
     property var _sortedLayers: []
@@ -152,11 +169,61 @@ Item {
         return _peak;
     }
 
-    function _meterFill(dbfs) {
-        const floor = meterFloorDbfs;
-        if (!isFinite(dbfs) || dbfs <= floor) return 0.0;
-        const clipped = Math.min(dbfs, 0);
-        return _clamp((clipped - floor) / -floor, 0, 1);
+    // Mirrors osd::visual::waveform_level in the Rust frontends: absolute
+    // input level on a fixed dB scale, -48 dBFS at the floor and 0 dBFS at
+    // full height, shifted by `gain` (10 is neutral, each doubling +6 dB).
+    // No normalization to recent input, so louder speech always draws
+    // taller and normal speech (around -20 dBFS) sits near mid-height.
+    readonly property real waveformFloorDbfs: -48.0
+
+    function _displayLevel(sample, gain) {
+        const magnitude = Math.abs(sample);
+        if (!(magnitude > 0)) return 0.0;
+        const shift = isFinite(gain) && gain > 0 ? 20 * Math.log10(gain / 10) : 0;
+        const db = 20 * Math.log10(magnitude) + shift;
+        return _clamp((db - waveformFloorDbfs) / -waveformFloorDbfs, 0, 1);
+    }
+
+    function _dbfsLevel(dbfs, gain) {
+        if (!isFinite(dbfs)) return 0.0;
+        const shift = isFinite(gain) && gain > 0 ? 20 * Math.log10(gain / 10) : 0;
+        return _clamp((dbfs + shift - waveformFloorDbfs) / -waveformFloorDbfs, 0, 1);
+    }
+
+    function resetMeter() {
+        _meterLevel = 0.0;
+        _meterTargetDbfs = -120;
+        _heldDbfs = -120;
+        _meterFramesSeen = 0;
+        _scrollPosition = -1;
+    }
+
+    // Advance the meter and the scroll position by one display frame.
+    // Mirrors osd::visual::LevelMeter: deliveries only set the target (the
+    // loudest frame since the last display frame); the meter rises with a
+    // 15 ms time constant and falls with 300 ms, and the held peak falls
+    // at peakDecayDbPerSec.
+    function _advance(dt) {
+        const r = ring || [];
+        const fresh = Math.min(r.length, Math.max(0, framesReceived - _meterFramesSeen));
+        _meterFramesSeen = framesReceived;
+        if (fresh > 0) {
+            let loudest = 0.0;
+            for (let i = r.length - fresh; i < r.length; i++) loudest = Math.max(loudest, r[i]);
+            _meterTargetDbfs = loudest > 0 ? 20 * Math.log10(loudest) : -120;
+        }
+        const step = Math.min(0.25, Math.max(0, dt));
+        const target = _dbfsLevel(_meterTargetDbfs, waveformGain);
+        const tau = target > _meterLevel ? 0.015 : 0.3;
+        _meterLevel += (target - _meterLevel) * (1 - Math.exp(-step / tau));
+        _heldDbfs = Math.max(_meterTargetDbfs, Math.max(-120, _heldDbfs - peakDecayDbPerSec * step));
+
+        if (clockOriginMs < 0 || framesReceived === 0) {
+            _scrollPosition = -1;
+        } else {
+            const elapsed = (Date.now() - clockOriginMs) / 10;
+            _scrollPosition = Math.min(framesReceived - 1, elapsed - playoutDelayFrames);
+        }
     }
 
     function _sampleRing(index, count, fallbackPhase) {
@@ -179,11 +246,11 @@ Item {
             return n > 0 ? sum / n : 0.0;
         }
         const breath = 0.5 + 0.5 * Math.sin(fallbackPhase * 0.35);
-        return 0.010 + breath * 0.006;
+        return 0.004 + breath * 0.003;
     }
 
-    // Per-column temporal smoothing: rise quickly, fall more slowly, which
-    // reads as intentional meter inertia instead of sample-by-sample jitter.
+    // Per-column temporal smoothing for the bars layer: rise quickly, fall
+    // more slowly, which reads as intentional meter inertia.
     function _updateLevels(levels, count, rise, fall, dt) {
         const next = levels.length === count ? levels.slice() : [];
         while (next.length < count) next.push(0.0);
@@ -332,7 +399,7 @@ Item {
             const position = bars <= 1 ? 0.5 : i / (bars - 1);
             const weight = 0.72 + 0.28 * Math.cos((i - center) / Math.max(1, center) * Math.PI);
             const sample = _barValue(i, bars);
-            const level = _clamp(sample * gain * weight * breath + _energy * 0.045, 0.028, 1.0);
+            const level = _clamp(_displayLevel(sample, gain) * weight * breath + _energy * 0.045, 0.028, 1.0);
             const eased = _easeOutCubic(level);
             const h = Math.max(3, rect.h * eased);
             const x = rect.x + i * (barW + gap) + gap * 0.5;
@@ -354,83 +421,93 @@ Item {
         ctx.restore();
     }
 
+    // Scrolling waveform. Every frame sits at a fixed x for its place in
+    // time, offset by the scroll clock, so the trace slides at a constant
+    // rate and audio already drawn never changes shape: no re-bucketing of
+    // frames into columns, no per-column smoothing, no animated wobble.
     function _drawWaveform(ctx, layer, rect) {
         const color = _color(layer.color || "accent", "#66c7ff");
         const opacity = _num(layer.opacity, 1.0);
         const gain = _num(layer.gain, 1.0) * waveformGain;
-        const cols = Math.max(24, Math.min(96, Math.floor(rect.w / 5)));
         // mirror=false anchors the envelope to the bottom edge instead of
         // reflecting it around the vertical center.
         const mirror = layer.mirror !== false;
         const cy = mirror ? rect.y + rect.h / 2 : rect.y + rect.h;
         const amp = Math.max(1, rect.h * (mirror ? 0.45 : 0.9));
-
-        // Read the temporally smoothed wave levels once per column per
-        // frame, then apply 3-tap neighbor smoothing: ring samples hop
-        // between column buckets as history scrolls, which reads as
-        // single-column spike flicker.
-        const raw = new Array(cols);
-        for (let i = 0; i < cols; i++) {
-            raw[i] = _levelAt(_waveLevels, i, cols);
-        }
-        const samples = new Array(cols);
-        for (let i = 0; i < cols; i++) {
-            const prev = raw[Math.max(0, i - 1)];
-            const next = raw[Math.min(cols - 1, i + 1)];
-            samples[i] = prev * 0.25 + raw[i] * 0.5 + next * 0.25;
-        }
-
-        function path() {
-            ctx.beginPath();
-            for (let i = 0; i < cols; i++) {
-                const t = cols <= 1 ? 0 : i / (cols - 1);
-                const envelope = _clamp(samples[i] * gain, 0.015, 1.0);
-                const wave = Math.sin(_phase * 2.0 + t * Math.PI * 3.0) * 0.04;
-                const x = rect.x + t * rect.w;
-                const y = cy - (envelope + wave) * amp;
-                if (i === 0) ctx.moveTo(x, y);
-                else ctx.lineTo(x, y);
-            }
-            if (mirror) {
-                for (let i = cols - 1; i >= 0; i--) {
-                    const t = cols <= 1 ? 0 : i / (cols - 1);
-                    const envelope = _clamp(samples[i] * gain, 0.015, 1.0);
-                    const wave = Math.sin(_phase * 2.0 + t * Math.PI * 3.0) * 0.04;
-                    const x = rect.x + t * rect.w;
-                    const y = cy + (envelope - wave) * amp;
-                    ctx.lineTo(x, y);
-                }
-            } else {
-                ctx.lineTo(rect.x + rect.w, cy);
-                ctx.lineTo(rect.x, cy);
-            }
-            ctx.closePath();
-        }
+        const minLevel = 0.015;
 
         ctx.save();
+        ctx.beginPath();
+        ctx.rect(rect.x, rect.y, rect.w, rect.h);
+        ctx.clip();
+
+        // Baseline across the whole window, so silence and the part of the
+        // window before the recording started read as a flat line.
+        ctx.globalAlpha = opacity * 0.35;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(rect.x, cy - minLevel * amp);
+        ctx.lineTo(rect.x + rect.w, cy - minLevel * amp);
+        if (mirror) {
+            ctx.moveTo(rect.x, cy + minLevel * amp);
+            ctx.lineTo(rect.x + rect.w, cy + minLevel * amp);
+        }
+        ctx.stroke();
+
+        const r = ring || [];
+        if (r.length === 0 || _scrollPosition < 0) {
+            ctx.restore();
+            return;
+        }
+        const span = Math.max(2, waveformColumns) - 1;
+        const step = rect.w / span;
+        const firstIndex = framesReceived - r.length;
+        const right = _scrollPosition;
+        const xs = [];
+        const levels = [];
+        for (let k = 0; k < r.length; k++) {
+            const x = rect.x + rect.w - (right - (firstIndex + k)) * step;
+            if (x < rect.x - step || x > rect.x + rect.w + step) continue;
+            xs.push(x);
+            levels.push(Math.max(minLevel, _displayLevel(r[k], gain)));
+        }
+        if (xs.length < 2) {
+            ctx.restore();
+            return;
+        }
+
+        function edge(sign) {
+            ctx.moveTo(xs[0], cy - sign * levels[0] * amp);
+            for (let i = 1; i < xs.length; i++) ctx.lineTo(xs[i], cy - sign * levels[i] * amp);
+        }
+
         ctx.globalAlpha = opacity * 0.18;
         ctx.fillStyle = color;
-        path();
+        ctx.beginPath();
+        edge(1);
+        if (mirror) {
+            for (let i = xs.length - 1; i >= 0; i--) ctx.lineTo(xs[i], cy + levels[i] * amp);
+        } else {
+            ctx.lineTo(xs[xs.length - 1], cy);
+            ctx.lineTo(xs[0], cy);
+        }
+        ctx.closePath();
         ctx.fill();
 
         _strokeSoftLine(ctx, color, opacity * 0.75, 1.4, function() {
             ctx.beginPath();
-            for (let i = 0; i < cols; i++) {
-                const t = cols <= 1 ? 0 : i / (cols - 1);
-                const envelope = _clamp(samples[i] * gain, 0.015, 1.0);
-                const x = rect.x + t * rect.w;
-                const y = cy - envelope * amp;
-                if (i === 0) ctx.moveTo(x, y);
-                else ctx.lineTo(x, y);
-            }
+            edge(1);
+            if (mirror) edge(-1);
         });
         ctx.restore();
     }
 
+    // Same scale as the waveform: a loudness that reaches half the
+    // waveform's height fills half the meter.
     function _drawMeter(ctx, layer, rect) {
-        const liveFill = _meterFill(currentPeakDbfs);
-        const heldFill = _meterFill(heldDbfs);
-        const fill = _clamp(Math.max(liveFill, _energy * 0.08), 0, 1);
+        const fill = _clamp(_meterLevel, 0, 1);
+        const heldFill = _dbfsLevel(_heldDbfs, waveformGain);
         const opacity = _num(layer.opacity, 1.0);
         const radius = _num(layer.radius, rect.h / 2);
 
@@ -538,19 +615,138 @@ Item {
         ctx.restore();
     }
 
+    // ---- Classic card: mirrors draw(), draw_waveform() and
+    // draw_peak_meter() in src/bin/voxtype_osd_gtk4.rs. Keep them in step.
+
+    function _withAlpha(role, fallback, alpha) {
+        return _rgbaString(_colorComponents(_color(role, fallback)), alpha);
+    }
+
+    function _drawClassic(ctx, w, h) {
+        if (w <= 0 || h <= 0) return;
+        ctx.save();
+        ctx.fillStyle = _color("background", "rgba(26, 26, 31, 0.85)");
+        ctx.fillRect(0, 0, w, h);
+        // Waveform on the left, a 1% gap, the meter on the right (7%).
+        const meterW = Math.max(8, w * 0.07);
+        const gap = Math.max(2, w * 0.01);
+        const waveW = Math.max(0, w - meterW - gap);
+        _drawClassicWaveform(ctx, 0, 0, waveW, h);
+        _drawClassicMeter(ctx, waveW + gap, 0, meterW, h);
+        ctx.restore();
+    }
+
+    // Mirrored envelope: the top edge follows each frame's max, the bottom
+    // edge its min, on the shared dB scale, filled in the accent color.
+    // One pixel column per pixel like GTK4, so the frame at absolute index
+    // a sits at x + 0.5 + (n - 1) - (right - a) * (n - 1) / window.
+    function _drawClassicWaveform(ctx, x, y, w, h) {
+        const n = Math.floor(w);
+        if (n < 2) return;
+        const mid = y + h * 0.5;
+        const half = h * 0.5;
+        const r = ring || [];
+        const rMin = ringMin || [];
+        const rMax = ringMax || [];
+        if (r.length > 1 && _scrollPosition >= 0 && rMin.length === r.length && rMax.length === r.length) {
+            const pxPerFrame = (n - 1) / Math.max(1, waveformColumns);
+            const firstIndex = framesReceived - r.length;
+            const xs = [];
+            const tops = [];
+            const bottoms = [];
+            for (let k = 0; k < r.length; k++) {
+                const px = x + 0.5 + (n - 1) - (_scrollPosition - (firstIndex + k)) * pxPerFrame;
+                if (px < x - pxPerFrame || px > x + w + pxPerFrame) continue;
+                xs.push(px);
+                tops.push(mid - _signedLevel(rMax[k]) * half);
+                bottoms.push(mid - _signedLevel(rMin[k]) * half);
+            }
+            if (xs.length > 1) {
+                ctx.save();
+                ctx.beginPath();
+                ctx.rect(x, y, w, h);
+                ctx.clip();
+                ctx.fillStyle = _color("accent", "#66c7ff");
+                ctx.beginPath();
+                ctx.moveTo(xs[0], tops[0]);
+                for (let i = 1; i < xs.length; i++) ctx.lineTo(xs[i], tops[i]);
+                for (let i = xs.length - 1; i >= 0; i--) ctx.lineTo(xs[i], bottoms[i]);
+                ctx.closePath();
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+        // Subtle centerline.
+        ctx.strokeStyle = _withAlpha("foreground", "#ebebf2", 0.15);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x, mid);
+        ctx.lineTo(x + w, mid);
+        ctx.stroke();
+    }
+
+    function _signedLevel(sample) {
+        const level = _displayLevel(sample, waveformGain);
+        return sample < 0 ? -level : level;
+    }
+
+    // osd::visual::MeterZone: red from -3 dBFS, yellow from -12.
+    function _zoneRole(dbfs) {
+        if (dbfs >= -3) return "error";
+        if (dbfs >= -12) return "warning";
+        return "success";
+    }
+
+    function _levelDbfs(level) {
+        const shift = isFinite(waveformGain) && waveformGain > 0 ? 20 * Math.log10(waveformGain / 10) : 0;
+        return waveformFloorDbfs * (1 - _clamp(level, 0, 1)) - shift;
+    }
+
+    // Ten vertical segments, lit as far as the level reaches, plus the
+    // held-peak tick.
+    function _drawClassicMeter(ctx, x, y, w, h) {
+        if (w < 1 || h < 1) return;
+        const fill = _clamp(_meterLevel, 0, 1);
+        const held = _dbfsLevel(_heldDbfs, waveformGain);
+        const segments = 10;
+        const gap = 1.5;
+        const segH = Math.max(1, (h - gap * (segments - 1)) / segments);
+        const fallbacks = { "success": "#4dd973", "warning": "#f2cc4d", "error": "#f2594d" };
+        for (let i = 0; i < segments; i++) {
+            const fracBottom = i / segments;
+            const fracTop = (i + 1) / segments;
+            const role = _zoneRole(_levelDbfs(fracTop));
+            const py = y + h - (i + 1) * segH - i * gap;
+            ctx.fillStyle = _withAlpha(role, fallbacks[role], 0.18);
+            ctx.fillRect(x, py, w, segH);
+            const lit = _clamp((fill - fracBottom) / (fracTop - fracBottom), 0, 1);
+            if (lit > 0) {
+                ctx.fillStyle = _color(role, fallbacks[role]);
+                ctx.fillRect(x, py + segH * (1 - lit), w, segH * lit);
+            }
+        }
+        if (held > 0) {
+            const py = y + h - held * h;
+            ctx.strokeStyle = _withAlpha("foreground", "#ebebf2", 0.95);
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(x, py);
+            ctx.lineTo(x + w, py);
+            ctx.stroke();
+        }
+    }
+
     function repaint() {
         canvas.requestPaint();
     }
 
-    Timer {
-        interval: root.daemonState === "recording" ? 16 : 33
-        repeat: true
-        running: root.visible && root.daemonState !== "idle"
-        triggeredOnStart: true
+    // Runs once per rendered display frame, so motion follows the display's
+    // refresh rate rather than a fixed timer or socket deliveries.
+    FrameAnimation {
+        running: root.visible && (root.classic || root.daemonState !== "idle")
         onTriggered: {
-            const now = Date.now();
-            const dt = Math.min(0.05, Math.max(0.001, (now - root._lastTick) / 1000));
-            root._lastTick = now;
+            const dt = Math.min(0.05, Math.max(0.001, frameTime));
+            root._advance(dt);
 
             const targetPeak = root.daemonState === "idle" ? 0 : root._clamp(root.peak, 0, 1);
             const targetRms = root.daemonState === "idle" ? 0 : root._clamp(root.rms, 0, 1);
@@ -560,8 +756,6 @@ Item {
             root._vad = root._approach(root._vad, targetVad, 8.0, dt);
             root._energy = root._approach(root._energy, Math.max(root._peak, root._rms * 1.6, root._vad * 0.08), 7.0, dt);
             root._barLevels = root._updateLevels(root._barLevels, 40, 18.0, 6.5, dt);
-            // Stiffer than bars so scrolling history trails only ~2 columns.
-            root._waveLevels = root._updateLevels(root._waveLevels, 96, 30.0, 14.0, dt);
             root._phase += dt;
             root.repaint();
         }
@@ -574,6 +768,10 @@ Item {
         onPaint: {
             const ctx = getContext("2d");
             ctx.clearRect(0, 0, width, height);
+            if (root.classic) {
+                root._drawClassic(ctx, width, height);
+                return;
+            }
             const layers = root._sortedLayers;
             for (let i = 0; i < layers.length; i++) {
                 const layer = layers[i];

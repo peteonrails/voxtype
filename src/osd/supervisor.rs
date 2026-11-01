@@ -28,7 +28,7 @@
 //! `kill_on_drop` would have nothing to kill, and the supervisor would
 //! respawn in a loop thinking the child died (see issue #395).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::task::JoinHandle;
@@ -42,14 +42,33 @@ const RAPID_FAIL_WINDOW: Duration = Duration::from_secs(5);
 
 fn resolve_osd_binary() -> PathBuf {
     if let Ok(current) = std::env::current_exe() {
-        if let Some(dir) = current.parent() {
-            let sibling = dir.join(OSD_BINARY);
-            if sibling.is_file() {
-                return sibling;
-            }
+        if let Some(found) = osd_binary_candidates(&current)
+            .into_iter()
+            .find(|p| p.is_file())
+        {
+            return found;
         }
     }
     PathBuf::from(OSD_BINARY)
+}
+
+/// Places to look for the packaged `voxtype-osd` before falling back to
+/// `$PATH`, given the daemon's resolved executable.
+///
+/// `current_exe()` resolves symlinks, so a daemon started as
+/// `/usr/bin/voxtype` reports the variant it points at. The CUDA and
+/// MIGraphX variants live in their own subdirectory
+/// (`/usr/lib/voxtype/cuda-13/voxtype-onnx-cuda-13`) next to their
+/// provider libraries, one level below the packaged `voxtype-osd`, so the
+/// parent directory is searched too. Without it those installs fell back
+/// to `$PATH`, where any other `voxtype-osd` earlier on `$PATH` (a dev
+/// build in `~/.local/bin`, say) won over the packaged one.
+fn osd_binary_candidates(exe: &Path) -> Vec<PathBuf> {
+    exe.ancestors()
+        .skip(1)
+        .take(2)
+        .map(|dir| dir.join(OSD_BINARY))
+        .collect()
 }
 
 /// Spawn a tokio task that supervises `voxtype-osd`. The returned handle's
@@ -124,5 +143,29 @@ async fn supervise() {
 
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(RESTART_MAX);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn candidates_cover_variant_subdirectories() {
+        let candidates =
+            osd_binary_candidates(Path::new("/usr/lib/voxtype/cuda-13/voxtype-onnx-cuda-13"));
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("/usr/lib/voxtype/cuda-13/voxtype-osd"),
+                PathBuf::from("/usr/lib/voxtype/voxtype-osd"),
+            ]
+        );
+    }
+
+    #[test]
+    fn candidates_prefer_the_sibling() {
+        let candidates = osd_binary_candidates(Path::new("/usr/lib/voxtype/voxtype-avx2"));
+        assert_eq!(candidates[0], PathBuf::from("/usr/lib/voxtype/voxtype-osd"));
     }
 }
