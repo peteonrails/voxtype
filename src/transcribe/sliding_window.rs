@@ -849,9 +849,9 @@ fn dedupe_against_emitted(already_emitted_full: &str, candidate: &str) -> String
 /// Strategies, in order:
 /// 1. Longest suffix→prefix word overlap (the common case).
 /// 2. Verbatim string-prefix check.
-/// 3. Greedy forward scan — how far into `curr` the `prev` words reach,
-///    trusting the position when ≥50% matched (handles Whisper punctuation
-///    / casing rewrites).
+/// 3. In-order alignment of the `prev` words within `curr`, skipping words
+///    on either side, trusting the position when ≥50% matched (handles
+///    Whisper punctuation, casing and single-word rewrites).
 ///
 /// Returns `None` when none of these find a confident anchor — the caller
 /// should treat that as "nothing safe to commit this pass", not as "no new
@@ -891,24 +891,42 @@ fn extract_new_text_confident(prev: &str, curr: &str) -> Option<String> {
         return Some(rest.trim().to_string());
     }
 
-    // 3. Greedy forward scan.
-    let mut pi = 0;
-    let mut best_ci = 0;
-    for (ci, cw) in curr_words.iter().enumerate() {
-        if pi >= prev_words.len() {
-            break;
-        }
-        if word_eq(prev_words[pi], cw) {
-            pi += 1;
-            best_ci = ci + 1;
-        }
-        // else: skip — Whisper rewrote this word, keep scanning.
-    }
-    if pi as f32 >= prev_words.len() as f32 * 0.5 {
-        return Some(curr_words[best_ci..].join(" "));
+    // 3. In-order alignment. Skipping `prev` words matters as much as
+    // skipping `curr` words: when Whisper hears a committed word
+    // differently on later passes, that word must not block the words
+    // after it, or nothing commits again until the recording ends.
+    let (matched, end) = align_end(&prev_words, &curr_words);
+    if matched as f32 >= prev_words.len() as f32 * 0.5 {
+        return Some(curr_words[end..].join(" "));
     }
 
     None
+}
+
+/// Longest in-order alignment of `prev` against `curr`: the longest
+/// common subsequence (LCS) of the two, comparing words with `word_eq`.
+/// Returns the match count and the shortest prefix of `curr` that reaches
+/// it, so a repeated word in fresh speech can't pull the anchor forward
+/// past new text.
+fn align_end(prev: &[&str], curr: &[&str]) -> (usize, usize) {
+    // row[j] = LCS length of prev[..i] and curr[..j], built one prev word
+    // at a time.
+    let mut row = vec![0usize; curr.len() + 1];
+    for pw in prev {
+        let mut diag = 0;
+        for j in 1..=curr.len() {
+            let up = row[j];
+            row[j] = if word_eq(pw, curr[j - 1]) {
+                diag + 1
+            } else {
+                up.max(row[j - 1])
+            };
+            diag = up;
+        }
+    }
+    let best = row[curr.len()];
+    let end = row.iter().position(|&n| n == best).unwrap_or(0);
+    (best, end)
 }
 
 /// Return the portion of `curr` that is new compared to `prev`.
@@ -1019,6 +1037,31 @@ mod tests {
     fn extract_new_text_fuzzy_scan() {
         // Whisper rewrote punctuation: prev matches 2/3 words fuzzily.
         assert_eq!(extract_new_text("hello, world", "hello world foo"), "foo");
+    }
+
+    #[test]
+    fn extract_new_text_confident_skips_a_reworded_committed_word() {
+        // Found live: "although" was typed, then every later window heard
+        // "oh" there. A scan that can't skip a prev word stops at
+        // "although" with 8 of 20 matched, under the 50% bar, and the
+        // session never commits again.
+        let prev = "and... oh, that doesn't really make any sense, although that \
+                    doesn't really make any sense, but it's definitely still going.";
+        let curr = "So maybe I need to get into Claude and oh that doesn't really \
+                    make any sense, but it's definitely still going. I kept talking";
+        assert_eq!(
+            extract_new_text_confident(prev, curr).as_deref(),
+            Some("I kept talking")
+        );
+    }
+
+    #[test]
+    fn align_end_takes_the_shortest_prefix() {
+        // "going" comes up again in the new speech. The anchor stays
+        // after the first one.
+        let prev = ["still", "going"];
+        let curr = ["still", "going", "and", "going"];
+        assert_eq!(align_end(&prev, &curr), (2, 2));
     }
 
     #[test]
