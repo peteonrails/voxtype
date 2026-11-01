@@ -464,16 +464,20 @@ impl Transcriber for OpenVinoTranscriber {
 
         if is_multilingual {
             // GenAI expects language tokens in "<|xx|>" format (matching lang_to_id keys
-            // in generation_config.json), while voxtype config uses bare codes like "en"
+            // in generation_config.json), while voxtype config uses bare codes like "en".
+            // "auto" is not one of those tokens - GenAI's unset default already runs its
+            // own language-detection pass, so leave it unset.
             let lang = &self.config.language;
-            let lang_token = if lang.starts_with("<|") {
-                lang.to_string()
-            } else {
-                format!("<|{}|>", lang)
-            };
-            gen_config.set_language(&lang_token).map_err(|e| {
-                TranscribeError::InferenceFailed(format!("Failed to set language: {}", e))
-            })?;
+            if lang != "auto" {
+                let lang_token = if lang.starts_with("<|") {
+                    lang.to_string()
+                } else {
+                    format!("<|{}|>", lang)
+                };
+                gen_config.set_language(&lang_token).map_err(|e| {
+                    TranscribeError::InferenceFailed(format!("Failed to set language: {}", e))
+                })?;
+            }
 
             let task = if self.config.translate {
                 "translate"
