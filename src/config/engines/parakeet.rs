@@ -29,6 +29,12 @@ pub struct ParakeetConfig {
     #[serde(default)]
     pub model_type: Option<ParakeetModelType>,
 
+    /// Number of CPU threads for ONNX Runtime intra-op parallelism
+    /// (default: 4, parakeet-rs's). Long dictations on the CPU are fastest
+    /// at the physical core count.
+    #[serde(default)]
+    pub threads: Option<usize>,
+
     /// Load model on-demand when recording starts (true) or keep loaded (false)
     #[serde(default = "default_on_demand_loading")]
     pub on_demand_loading: bool,
@@ -75,6 +81,7 @@ impl Default for ParakeetConfig {
         Self {
             model: "parakeet-tdt-0.6b-v3".to_string(),
             model_type: None, // Auto-detect
+            threads: None,
             on_demand_loading: false,
             streaming: false,
             streaming_chunk_secs: default_streaming_chunk_secs(),

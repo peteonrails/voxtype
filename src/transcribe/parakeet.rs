@@ -56,7 +56,7 @@ impl ParakeetTranscriber {
         let start = std::time::Instant::now();
 
         // Configure execution provider based on feature flags
-        let exec_config = build_execution_config();
+        let exec_config = build_execution_config(config.threads);
 
         let model = match model_type {
             ParakeetModelType::Ctc => {
@@ -286,8 +286,19 @@ impl Transcriber for ParakeetTranscriber {
     }
 }
 
-/// Build execution config based on compile-time feature flags
-pub(super) fn build_execution_config() -> Option<ExecutionConfig> {
+/// Build the ONNX Runtime session config: the execution provider the
+/// features select, with `threads` intra-op threads when it is set. Unset
+/// keeps parakeet-rs's default of 4.
+pub(super) fn build_execution_config(threads: Option<usize>) -> Option<ExecutionConfig> {
+    let config = provider_execution_config();
+    match threads {
+        Some(n) => Some(config.unwrap_or_default().with_intra_threads(n)),
+        None => config,
+    }
+}
+
+/// Execution provider config based on compile-time feature flags
+fn provider_execution_config() -> Option<ExecutionConfig> {
     #[cfg(feature = "parakeet-cuda")]
     {
         if probe_cuda_runtime() {
@@ -515,6 +526,22 @@ pub(super) fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn threads_set_the_onnx_intra_op_thread_count() {
+        let config = build_execution_config(Some(12)).expect("threads set");
+        assert_eq!(config.intra_threads, 12);
+    }
+
+    #[cfg(not(any(
+        feature = "parakeet-cuda",
+        feature = "parakeet-tensorrt",
+        feature = "parakeet-migraphx"
+    )))]
+    #[test]
+    fn unset_threads_keep_the_parakeet_rs_default_on_the_cpu() {
+        assert!(build_execution_config(None).is_none());
+    }
     use tempfile::TempDir;
 
     #[test]

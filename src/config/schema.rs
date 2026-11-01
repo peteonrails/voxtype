@@ -436,6 +436,16 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
     )
     .for_onnx_engine("parakeet"),
     spec(
+        "parakeet.threads",
+        "parakeet",
+        "threads",
+        KeyType::Int { min: 1, max: 256 },
+        "Engine",
+        "Threads",
+        "ONNX Runtime intra-op threads. Unset uses 4; long CPU dictations are fastest at the physical core count.",
+    )
+    .for_onnx_engine("parakeet"),
+    spec(
         "parakeet.on_demand_loading",
         "parakeet",
         "on_demand_loading",
@@ -2458,6 +2468,10 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "parakeet.model" => json!(pk().model),
         "parakeet.model_type" => match pk().model_type {
             Some(t) => serde_json::to_value(t).ok()?,
+            None => Json::Null,
+        },
+        "parakeet.threads" => match pk().threads {
+            Some(n) => json!(n),
             None => Json::Null,
         },
         "parakeet.on_demand_loading" => json!(pk().on_demand_loading),
