@@ -17,7 +17,7 @@
 //! the output path.
 
 use evdev::{AttributeSet, Device, KeyCode as Key};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Modifier keys whose presence we treat as "do not type yet". All of these
@@ -67,36 +67,36 @@ impl ModifierGuard {
             }
         };
 
-        let mut devices = Vec::new();
-        for entry in entries.flatten() {
-            let path: PathBuf = entry.path();
-            let is_event_device = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.starts_with("event"))
-                .unwrap_or(false);
-            if !is_event_device {
-                continue;
-            }
+        let paths: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("event"))
+            })
+            .collect();
 
-            // Per-device permission errors are common (e.g. some event nodes
-            // are owned by other groups); skip silently.
-            let Ok(device) = Device::open(&path) else {
-                continue;
-            };
-
-            let is_keyboard = device
-                .supported_keys()
-                .map(|keys| {
-                    keys.contains(Key::KEY_A)
-                        && keys.contains(Key::KEY_Z)
-                        && keys.contains(Key::KEY_ENTER)
-                })
-                .unwrap_or(false);
-            if is_keyboard {
-                devices.push(device);
-            }
-        }
+        // Opening an event device costs 10-35 ms on some laptops (the evdev
+        // crate queries name, capabilities and axes up front), and this runs
+        // before every output. One thread per device makes the scan as slow
+        // as the slowest device instead of the sum of all of them.
+        let start = Instant::now();
+        let devices: Vec<Device> = std::thread::scope(|scope| {
+            let handles: Vec<_> = paths
+                .iter()
+                .map(|path| scope.spawn(move || open_keyboard(path)))
+                .collect();
+            handles
+                .into_iter()
+                .filter_map(|handle| handle.join().ok().flatten())
+                .collect()
+        });
+        tracing::debug!(
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            scanned = paths.len(),
+            "modifier_guard: scanned input devices"
+        );
 
         if devices.is_empty() {
             tracing::debug!("modifier_guard: no readable keyboard devices, disabling");
@@ -147,6 +147,19 @@ impl ModifierGuard {
         }
         Ok(())
     }
+}
+
+/// Open `path` if it is a keyboard. Per-device permission errors are common
+/// (some event nodes are owned by other groups), so they are skipped silently.
+fn open_keyboard(path: &Path) -> Option<Device> {
+    let device = Device::open(path).ok()?;
+    let is_keyboard = device
+        .supported_keys()
+        .map(|keys| {
+            keys.contains(Key::KEY_A) && keys.contains(Key::KEY_Z) && keys.contains(Key::KEY_ENTER)
+        })
+        .unwrap_or(false);
+    is_keyboard.then_some(device)
 }
 
 /// Returned when `wait_for_release` gives up because modifiers were still held
