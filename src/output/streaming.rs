@@ -280,7 +280,7 @@ impl StreamingSession {
         // Cap backspace at what we've actually typed.
         let n = backspace.min(self.typed_chars);
         if n > 0 {
-            let emitted = emit_backspaces(n).await;
+            let emitted = emit_backspaces_for_chain(chain, n).await?;
             if emitted == 0 {
                 // No backspace-capable backend ran. The cursor still
                 // shows the old partial — DO NOT touch our bookkeeping,
@@ -353,21 +353,20 @@ impl StreamingSession {
         self.clear_partial();
     }
 
-    /// Best-effort rewind: emit `typed_chars` BackSpace key events via
-    /// wtype, falling back to dotool then ydotool. Returns `Ok(())`
-    /// even if no backspace backend is available, since the user has
-    /// already cancelled and we should not propagate further errors.
+    /// Rewind using the output driver's own keyboard when provided,
+    /// otherwise the legacy wtype/dotool/ydotool sequence. Propagate errors
+    /// without clearing the counter so unsuccessful cancellation is visible.
     ///
     /// Resets the session's typed-chars counter to zero on success.
     /// The session can be re-used after rewind, though the daemon
     /// typically discards it.
-    pub async fn rewind(&mut self) -> Result<(), OutputError> {
+    pub async fn rewind(&mut self, chain: &[Box<dyn TextOutput>]) -> Result<(), OutputError> {
         let count = self.typed_chars;
         if count == 0 {
             return Ok(());
         }
 
-        if emit_backspaces(count).await > 0 {
+        if emit_backspaces_for_chain(chain, count).await? > 0 {
             self.typed_chars = 0;
             return Ok(());
         }
@@ -390,6 +389,18 @@ impl Default for StreamingSession {
 
 /// Backspace `count` chars using the first available method.
 /// Returns the actual number of backspaces emitted.
+async fn emit_backspaces_for_chain(
+    chain: &[Box<dyn TextOutput>],
+    count: usize,
+) -> Result<usize, OutputError> {
+    for output in chain {
+        if let Some(result) = output.backspace(count).await {
+            return result;
+        }
+    }
+    Ok(emit_backspaces(count).await)
+}
+
 async fn emit_backspaces(count: usize) -> usize {
     if count == 0 {
         return 0;
@@ -517,6 +528,83 @@ mod tests {
             }
         }
         vec![Box::new(Wrap(out))]
+    }
+
+    struct BackspaceOutput {
+        events: std::sync::Arc<Mutex<Vec<String>>>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl TextOutput for BackspaceOutput {
+        async fn output(&self, text: &str) -> Result<(), OutputError> {
+            self.events.lock().unwrap().push(format!("type:{text}"));
+            Ok(())
+        }
+        async fn is_available(&self) -> bool {
+            true
+        }
+        fn name(&self) -> &'static str {
+            "backspace-test"
+        }
+        async fn backspace(&self, count: usize) -> Option<Result<usize, OutputError>> {
+            self.events.lock().unwrap().push(format!("erase:{count}"));
+            Some(if self.fail {
+                Err(OutputError::KeyboardStopped("injected failure".into()))
+            } else {
+                Ok(count)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn corrections_and_cancel_use_the_selected_keyboard() {
+        let events = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let chain: Vec<Box<dyn TextOutput>> = vec![Box::new(BackspaceOutput {
+            events: events.clone(),
+            fail: false,
+        })];
+        let mut session = StreamingSession::new();
+        session
+            .type_partial_delta(&chain, "hello old".into(), None, None)
+            .await
+            .unwrap();
+        session
+            .replace_and_commit(&chain, 3, "new", None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(session.finalized_text(), "hello new");
+        assert_eq!(session.typed_chars(), 9);
+        session.rewind(&chain).await.unwrap();
+        assert_eq!(session.typed_chars(), 0);
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["type:hello old", "erase:3", "type:new", "erase:9"]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_keyboard_correction_does_not_append_or_forget_text() {
+        let events = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let chain: Vec<Box<dyn TextOutput>> = vec![Box::new(BackspaceOutput {
+            events: events.clone(),
+            fail: true,
+        })];
+        let mut session = StreamingSession::new();
+        session
+            .type_partial_delta(&chain, "old".into(), None, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            session
+                .replace_and_commit(&chain, 3, "new", None, None, None)
+                .await,
+            Err(OutputError::KeyboardStopped(_))
+        ));
+        assert_eq!(session.typed_chars(), 3);
+        assert_eq!(*events.lock().unwrap(), ["type:old", "erase:3"]);
+        assert!(session.rewind(&chain).await.is_err());
+        assert_eq!(session.typed_chars(), 3);
     }
 
     #[tokio::test]
@@ -700,7 +788,7 @@ mod tests {
     async fn rewind_with_zero_chars_is_ok() {
         let mut session = StreamingSession::new();
         // Should succeed without spawning anything.
-        session.rewind().await.unwrap();
+        session.rewind(&[]).await.unwrap();
         assert_eq!(session.typed_chars(), 0);
     }
 }

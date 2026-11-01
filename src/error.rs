@@ -115,6 +115,10 @@ pub enum VadError {
 /// Errors related to text output
 #[derive(Error, Debug)]
 pub enum OutputError {
+    #[error(
+        "Keyboard output stopped: {0}. No fallback was attempted; native output did not access the clipboard."
+    )]
+    KeyboardStopped(String),
     #[error("ydotool daemon not running.\n  Start with: systemctl --user start ydotool\n  Enable at boot: systemctl --user enable ydotool")]
     YdotoolNotRunning,
 

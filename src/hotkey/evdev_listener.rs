@@ -869,7 +869,10 @@ fn parse_prefixed_keycode(s: &str) -> Result<Option<Key>, HotkeyError> {
 /// CPU. See issue #445.
 fn is_injection_keyboard(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    n.contains("dotool") || n.contains("wtype") || n.contains("xdotool")
+    n.contains("dotool")
+        || n.contains("wtype")
+        || n.contains("xdotool")
+        || name == "Voxtype virtual keyboard"
 }
 
 /// Return true if `fd` is hung up, errored, or invalid according to poll().
@@ -980,6 +983,7 @@ mod tests {
         assert!(is_injection_keyboard("ydotool virtual keyboard"));
         assert!(is_injection_keyboard("wtype"));
         assert!(is_injection_keyboard("xdotool"));
+        assert!(is_injection_keyboard("Voxtype virtual keyboard"));
         // case-insensitive
         assert!(is_injection_keyboard("YDOTOOL Virtual Device"));
     }
@@ -1012,6 +1016,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "creates a kernel input device; run only in an isolated input session"]
     fn poll_guard_drops_real_torn_down_evdev_device() {
         use evdev::{uinput::VirtualDevice, AttributeSet};
         use std::thread::sleep;
@@ -1113,6 +1118,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "generates real keyboard events; run only in an isolated input session"]
     fn synced_fetch_recovers_multiple_held_keys_after_overflow() {
         use evdev::{uinput::VirtualDevice, AttributeSet, InputEvent};
         use std::thread::sleep;
