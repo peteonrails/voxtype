@@ -6,6 +6,9 @@ Item {
     id: root
 
     property var style: null
+    /// False while the host window is hidden. Item.visible can't be used
+    /// for this: it stays true inside an unmapped window.
+    property bool active: true
     property var ring: []
     property string daemonState: "idle"
     property bool vad: false
@@ -545,7 +548,7 @@ Item {
     Timer {
         interval: root.daemonState === "recording" ? 16 : 33
         repeat: true
-        running: root.visible && root.daemonState !== "idle"
+        running: root.active && root.visible && root.daemonState !== "idle"
         triggeredOnStart: true
         onTriggered: {
             const now = Date.now();

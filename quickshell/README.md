@@ -10,7 +10,7 @@ OSD frontends. Intended for users running a Quickshell-based desktop shell
 | File | Purpose |
 |------|---------|
 | `shell.qml` | Composition root. Wires the shared state and audio bridges into each widget. |
-| `OsdSurface.qml` | Recipe-driven recording HUD: state icon + tint, scrolling waveform, peak meter, and optional trusted custom QML style package. Visible whenever the daemon is not idle. |
+| `OsdSurface.qml` | Recipe-driven recording HUD: state icon + tint, scrolling waveform, peak meter, and optional trusted custom QML style package. Visible whenever the daemon is not idle, on the focused output under Hyprland and Sway/i3, and on every output elsewhere. |
 | `EnginePicker.qml` | Floating panel listing every transcription engine, with the active one marked. Switches engines via `voxtype config set engine <name>`. Engines not compiled into the running binary are shown dimmed. |
 | `MeetingControls.qml` | Meeting status panel (title, elapsed time, chunk count) with Start / Stop / Pause / Resume buttons that shell out to `voxtype meeting <action>`. |
 | `voxtype-shared/` | Shared QML module: `Theme` (palette/sizing singleton), `StateReader` (daemon state file watcher), `AudioBridge` (wrapper around the `voxtype-audio-bridge` sidecar), `StyleLoader`, and `RecipeRenderer`. See [voxtype-shared/README.md](voxtype-shared/README.md). |
@@ -92,9 +92,12 @@ bind = SUPER, M, exec, mkdir -p $XDG_RUNTIME_DIR/voxtype && touch $XDG_RUNTIME_D
   `[osd.visual.layers]`. The default recipe matches the compact waveform and
   peak-meter card, and users can customize the surface without editing
   packaged QML.
-- **Surfaces**: each widget is a `PanelWindow` on the `WlrLayer.Overlay`
-  layer with no keyboard focus, matching the GTK4 frontend's surface
-  semantics.
+- **Surfaces**: the HUD is a `PanelWindow` on the `WlrLayer.Overlay` layer
+  with no keyboard focus, matching the GTK4 frontend's surface semantics.
+  It follows the focused output when the compositor reports one (Hyprland,
+  Sway/i3) and shows on every output otherwise. The engine picker and
+  meeting controls sit on `WlrLayer.Top`, take keyboard focus while open,
+  and open on the focused output.
 - **No new daemon IPC**: the picker and meeting controls read existing
   files (`config.toml`, `meeting_state`) and shell out to existing CLI
   commands (`voxtype config set`, `voxtype meeting <action>`,

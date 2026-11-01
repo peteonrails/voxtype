@@ -52,6 +52,15 @@ Item {
     /// conditions.
     property int restartDelayMs: 1000
 
+    /// Ceiling for the respawn delay. The bridge reconnects to the daemon
+    /// socket by itself, so it only exits when something is wrong with
+    /// the binary (e.g. not installed). Each consecutive exit doubles the
+    /// delay up to this cap, rather than spawning a doomed process every
+    /// second for the life of the shell.
+    property int maxRestartDelayMs: 30000
+
+    property int _nextRestartDelayMs: restartDelayMs
+
     /// True once the bridge process has emitted at least one frame.
     /// Distinct from `process.running`, which only reflects whether
     /// the OS process exists. A bridge that's connected to the daemon
@@ -98,6 +107,7 @@ Item {
             return;
         }
         if (obj.status === "connected") {
+            root._nextRestartDelayMs = root.restartDelayMs;
             root.connected();
             return;
         }
@@ -131,14 +141,17 @@ Item {
         }
 
         // Restart the bridge when it exits. Quickshell's Process with
-        // `running: true` would respawn instantly; the small delay
-        // keeps a crash-looping binary from hammering the CPU.
+        // `running: true` would respawn instantly; the delay keeps a
+        // crash-looping binary from hammering the CPU.
         onRunningChanged: {
             if (!process.running) {
                 if (root.running) {
                     root.running = false;
                     root.disconnected();
                 }
+                restartTimer.interval = root._nextRestartDelayMs;
+                root._nextRestartDelayMs = Math.min(root.maxRestartDelayMs,
+                                                    root._nextRestartDelayMs * 2);
                 restartTimer.restart();
             }
         }
@@ -146,7 +159,6 @@ Item {
 
     Timer {
         id: restartTimer
-        interval: root.restartDelayMs
         repeat: false
         onTriggered: {
             if (!process.running) {
