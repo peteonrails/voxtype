@@ -1037,6 +1037,24 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "String added to the end of every transcription, e.g. a trailing space.",
     ),
     spec(
+        "output.return_to_start_window",
+        "output",
+        "return_to_start_window",
+        KeyType::Bool,
+        "Output",
+        "Return to start window",
+        "Re-focus the window that was active when recording started before delivering text.",
+    ),
+    spec(
+        "output.focus_restore_delay_ms",
+        "output",
+        "focus_restore_delay_ms",
+        KeyType::Int { min: 0, max: 5000 },
+        "Output",
+        "Focus restore delay",
+        "Pause in milliseconds after re-focusing the start window, before text is delivered.",
+    ),
+    spec(
         "output.post_process.command",
         "output.post_process",
         "command",
@@ -2560,6 +2578,8 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "output.shift_enter_newlines" => json!(cfg.output.shift_enter_newlines),
         "output.pre_type_delay_ms" => json!(cfg.output.pre_type_delay_ms),
         "output.append_text" => opt_str(cfg.output.append_text.as_ref()),
+        "output.return_to_start_window" => json!(cfg.output.return_to_start_window),
+        "output.focus_restore_delay_ms" => json!(cfg.output.focus_restore_delay_ms),
         "output.post_process.command" => match &cfg.output.post_process {
             Some(p) => json!(p.command),
             None => Json::Null,
