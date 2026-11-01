@@ -22,10 +22,11 @@
 //! pipeline (that lives in the multitalker / EOU model). Until we add VAD-
 //! based segmentation, this implementation:
 //!
-//! - emits one [`StreamingEvent::Partial`] per audio chunk with the
-//!   *cumulative* transcript so far;
-//! - emits exactly one [`StreamingEvent::Final`] with the flushed text on
-//!   stream close (samples sender dropped or cancel signal);
+//! - emits one [`StreamingEvent::Partial`] per audio chunk that decoded new
+//!   tokens, carrying *only those tokens* (a delta, not the cumulative
+//!   transcript — `ParakeetUnified::transcribe_chunk` returns deltas);
+//! - emits exactly one [`StreamingEvent::Final`] with the flushed tail on
+//!   stream close (samples sender dropped or cancel signal), also a delta;
 //! - emits exactly one [`StreamingEvent::Ended`] last.
 //!
 //! This gives us live OSD partials throughout the recording, with the final
@@ -210,7 +211,6 @@ impl StreamingTranscriber for ParakeetStreamingTranscriber {
         let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
 
         let task = tokio::task::spawn_blocking(move || -> Result<(), TranscribeError> {
-            let mut last_text = String::new();
             let segment_id: u64 = 0;
             let runtime = tokio::runtime::Handle::current();
 
@@ -250,19 +250,24 @@ impl StreamingTranscriber for ParakeetStreamingTranscriber {
                     }
                 };
 
-                if text != last_text {
-                    last_text = text.clone();
+                // Every non-empty delta is new text. Comparing against the
+                // previous delta (as a cumulative-transcript backend would)
+                // drops genuine repeats like "no, no" spoken across chunks.
+                if !text.is_empty() {
                     let _ = runtime
                         .block_on(events_tx.send(StreamingEvent::Partial { text, segment_id }));
                 }
             }
 
-            // Drain any buffered audio with flush() on close.
+            // Drain any buffered audio with flush() on close. The tail is a
+            // delta too, so it is not trimmed: its leading space is the word
+            // boundary with the text already emitted. On failure nothing new
+            // was decoded, so there is no tail to send.
             let final_text = match unified.flush() {
-                Ok(t) => t.trim().to_string(),
+                Ok(t) => t,
                 Err(e) => {
                     tracing::warn!("ParakeetUnified::flush failed: {}", e);
-                    last_text.trim().to_string()
+                    String::new()
                 }
             };
 
@@ -311,6 +316,20 @@ mod tests {
             right_context_secs: 0.5,
         };
         assert!(cfg.validate().is_err());
+    }
+
+    /// The `[parakeet] streaming_*_secs` defaults must pass parakeet-rs's
+    /// own validation (each length a multiple of 80ms), or enabling
+    /// streaming without hand-tuned values fails at model load.
+    #[test]
+    fn voxtype_streaming_defaults_validate() {
+        let config = ParakeetConfig::default();
+        let cfg = UnifiedStreamingConfig {
+            chunk_secs: config.streaming_chunk_secs,
+            left_context_secs: config.streaming_left_context_secs,
+            right_context_secs: config.streaming_right_context_secs,
+        };
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

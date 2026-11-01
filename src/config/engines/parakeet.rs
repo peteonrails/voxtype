@@ -58,16 +58,19 @@ pub struct ParakeetConfig {
     pub streaming_right_context_secs: f32,
 }
 
+// parakeet-rs validates that each context length maps to a mel-frame count
+// divisible by 8 (80ms steps); the previous 0.5/1.5/0.5 defaults failed that
+// check, so streaming = true without explicit values could never start.
 fn default_streaming_chunk_secs() -> f32 {
-    0.5
+    0.32
 }
 
 fn default_streaming_left_context_secs() -> f32 {
-    1.5
+    5.6
 }
 
 fn default_streaming_right_context_secs() -> f32 {
-    0.5
+    0.32
 }
 
 impl Default for ParakeetConfig {
