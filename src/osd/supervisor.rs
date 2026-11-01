@@ -17,6 +17,13 @@
 //! the frontend's own `--reconnect-secs` loop handles a clean re-attach
 //! after `systemctl --user restart voxtype`.
 //!
+//! `kill_on_drop` only runs when the supervisor task is dropped, which a
+//! daemon that is killed or crashes never gets to do, and every such exit
+//! used to leave a `qs` orphan drawing its own pill over the next daemon's.
+//! On Linux the child also asks the kernel for SIGTERM when the daemon
+//! dies (`PR_SET_PDEATHSIG`); that survives the dispatcher's `exec` into
+//! the frontend, so it covers the process actually drawing the OSD.
+//!
 //! ### `VOXTYPE_OSD_SUPERVISED`
 //!
 //! We set `VOXTYPE_OSD_SUPERVISED=1` on the child's environment so the
@@ -52,6 +59,28 @@ fn resolve_osd_binary() -> PathBuf {
     PathBuf::from(OSD_BINARY)
 }
 
+/// Have the kernel send the OSD child SIGTERM when the daemon exits, however
+/// it exits.
+#[cfg(target_os = "linux")]
+fn die_with_daemon(cmd: &mut Command) {
+    let daemon_pid = std::process::id() as libc::pid_t;
+    // SAFETY: the closure runs in the forked child before exec and only
+    // makes async-signal-safe calls (prctl, getppid, raise).
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // The daemon may have died between fork and prctl; the death
+            // signal would then never come.
+            if libc::getppid() != daemon_pid {
+                libc::raise(libc::SIGTERM);
+            }
+            Ok(())
+        });
+    }
+}
+
 /// Spawn a tokio task that supervises `voxtype-osd`. The returned handle's
 /// drop kills the child via `kill_on_drop`. Holding the handle keeps the
 /// supervisor alive for the daemon's lifetime.
@@ -74,6 +103,8 @@ async fn supervise() {
         // the Quickshell launcher (otherwise kill_on_drop has nothing
         // to kill — see #395).
         cmd.env("VOXTYPE_OSD_SUPERVISED", "1");
+        #[cfg(target_os = "linux")]
+        die_with_daemon(&mut cmd);
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,
