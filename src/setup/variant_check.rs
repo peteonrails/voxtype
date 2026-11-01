@@ -14,8 +14,8 @@ use crate::setup::binary::{Inventory, Variant};
 
 /// What's wrong when the running binary can't serve the configured engine.
 ///
-/// `None` means everything checks out: either the engine is Whisper (always
-/// available) or the running binary's `compiled_features` includes the
+/// `None` means everything checks out: either the engine is always available
+/// (Whisper or Soniox) or the running binary's `compiled_features` includes the
 /// engine's feature flag.
 #[derive(Debug, Clone)]
 pub struct VariantMismatch {
@@ -57,13 +57,11 @@ pub enum Remediation {
 /// Map a `TranscriptionEngine` to its required Cargo feature, or `None`
 /// for engines that have no compile-time gate.
 ///
-/// Whisper is unconditional in every variant (the engine itself is the
-/// reason whisper-rs is a non-optional dependency). Every other engine is
-/// behind a feature flag of the same name — so once Whisper is excluded
-/// the feature name is just the engine's canonical name.
+/// Whisper and Soniox are unconditional in every variant. The remaining
+/// engines are behind feature flags matching their canonical names.
 pub fn required_feature(engine: TranscriptionEngine) -> Option<&'static str> {
     match engine {
-        TranscriptionEngine::Whisper => None,
+        TranscriptionEngine::Whisper | TranscriptionEngine::Soniox => None,
         other => Some(other.name()),
     }
 }
@@ -168,6 +166,19 @@ mod tests {
     }
 
     #[test]
+    fn soniox_engine_never_mismatches() {
+        for variant in [
+            Variant::WhisperAvx2,
+            Variant::WhisperVulkan,
+            Variant::OnnxAvx2,
+        ] {
+            let inv = fake_inventory(InstallKind::Package, vec![], variant, Variant::OnnxAvx2);
+            let cfg = config_with_engine(TranscriptionEngine::Soniox);
+            assert!(detect_mismatch(&cfg, &inv).is_none());
+        }
+    }
+
+    #[test]
     fn parakeet_on_cpu_whisper_binary_is_mismatch() {
         // The Ryan case from Discord: engine = parakeet, running binary
         // is the CPU Whisper variant with no ONNX features compiled in.
@@ -222,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn every_non_whisper_engine_has_a_required_feature() {
+    fn every_optional_engine_has_a_required_feature() {
         // Regression guard: if a new engine is added to TranscriptionEngine
         // without updating required_feature, this catches it before it
         // ships as a silent always-passes mismatch check.
@@ -234,7 +245,6 @@ mod tests {
             TranscriptionEngine::Dolphin,
             TranscriptionEngine::Omnilingual,
             TranscriptionEngine::Cohere,
-            TranscriptionEngine::Soniox,
         ];
         for e in engines {
             assert!(
