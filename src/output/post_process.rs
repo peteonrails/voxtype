@@ -113,7 +113,7 @@ impl PostProcessor {
         }
 
         // Wait for completion with timeout
-        let output = timeout(self.timeout, child.wait_with_output())
+        let output = timeout(self.timeout, super::wait_for_shell_output(child))
             .await
             .map_err(|_| PostProcessError::Timeout(self.timeout.as_secs()))?
             .map_err(|e| PostProcessError::WaitFailed(e.to_string()))?;
@@ -221,6 +221,23 @@ mod tests {
         let processor = PostProcessor::new(&config);
         let result = processor.process("original text").await;
         assert_eq!(result, "original text"); // Falls back to original
+    }
+
+    #[tokio::test]
+    async fn test_background_child_does_not_hold_the_result() {
+        // A cleanup script that starts a helper in the background (a model
+        // server, `wl-copy`) leaves the helper holding the stdout pipe. The
+        // result must come back when the script exits, not at the timeout.
+        let config = make_config("tr '[:lower:]' '[:upper:]'; sleep 5 &", 3000);
+        let processor = PostProcessor::new(&config);
+        let start = std::time::Instant::now();
+        let result = processor.process("hello world").await;
+        assert_eq!(result, "HELLO WORLD");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "waited {:?} for a background child",
+            start.elapsed()
+        );
     }
 
     #[tokio::test]

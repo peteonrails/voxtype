@@ -47,8 +47,10 @@ use std::borrow::Cow;
 use std::fs;
 use std::os::unix::fs::FileTypeExt;
 use std::path::PathBuf;
-use std::process::Stdio;
-use tokio::process::Command;
+use std::process::{Output, Stdio};
+use std::time::Duration;
+use tokio::io::AsyncReadExt;
+use tokio::process::{Child, Command};
 
 /// Find the ydotool daemon socket by checking known locations.
 ///
@@ -427,16 +429,70 @@ fn file_mode_lacks_path(config: &OutputConfig) -> bool {
     config.mode == crate::config::OutputMode::File && config.file_path.is_none()
 }
 
+/// How long to keep reading a shell command's output once the shell itself
+/// has exited. Whatever the command printed is in the pipe by then; the grace
+/// only bounds the wait on a background process (`wl-copy` serving the
+/// clipboard, a model server started with `&`) that inherited the pipe and
+/// keeps it open.
+const PIPE_DRAIN_GRACE: Duration = Duration::from_millis(100);
+
+/// Like `Child::wait_with_output`, but done when the shell exits rather than
+/// when its stdout/stderr pipes close. A command that leaves a process in the
+/// background would otherwise hold the caller until that process exits.
+pub(crate) async fn wait_for_shell_output(mut child: Child) -> std::io::Result<Output> {
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+
+    let status = {
+        // Read both pipes while waiting, so a chatty command can't fill one
+        // and block. Read errors only cut the captured output short.
+        let drain = async {
+            let out = async {
+                if let Some(pipe) = stdout_pipe.as_mut() {
+                    let _ = pipe.read_to_end(&mut stdout).await;
+                }
+            };
+            let err = async {
+                if let Some(pipe) = stderr_pipe.as_mut() {
+                    let _ = pipe.read_to_end(&mut stderr).await;
+                }
+            };
+            tokio::join!(out, err);
+        };
+        let wait = child.wait();
+        tokio::pin!(drain, wait);
+
+        tokio::select! {
+            status = &mut wait => {
+                let _ = tokio::time::timeout(PIPE_DRAIN_GRACE, &mut drain).await;
+                status?
+            }
+            () = &mut drain => (&mut wait).await?,
+        }
+    };
+
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 /// Run a shell command (for pre/post hooks)
 pub async fn run_hook(command: &str, hook_name: &str) -> Result<(), String> {
     tracing::debug!("Running {} hook: {}", hook_name, command);
 
-    let output = Command::new("sh")
+    let child = Command::new("sh")
         .arg("-c")
         .arg(command)
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .output()
+        .spawn()
+        .map_err(|e| format!("{} hook failed to execute: {}", hook_name, e))?;
+    let output = wait_for_shell_output(child)
         .await
         .map_err(|e| format!("{} hook failed to execute: {}", hook_name, e))?;
 
@@ -574,6 +630,26 @@ pub async fn output_with_fallback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn run_hook_returns_when_the_shell_exits() {
+        // A hook that leaves a process in the background (e.g. `wl-copy`
+        // restoring the clipboard) must not stall output until that process
+        // exits: the background child inherits the hook's stderr pipe.
+        let start = std::time::Instant::now();
+        run_hook("sleep 5 &", "test").await.unwrap();
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "waited {:?} for a background child",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn run_hook_reports_stderr_of_a_failing_hook() {
+        let err = run_hook("echo boom >&2; exit 3", "test").await.unwrap_err();
+        assert!(err.contains("boom"), "{err}");
+    }
 
     #[test]
     fn file_mode_warns_only_without_a_path() {
