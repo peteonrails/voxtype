@@ -1829,6 +1829,7 @@ Configuration for the OpenVINO Whisper speech-to-text engine. This section is on
 | `threads` | Integer | system-detected | CPU inference threads |
 | `language` | String | `"en"` | Whisper language code |
 | `translate` | Boolean | `false` | Translate non-English speech to English |
+| `initial_prompt` | String | None | Vocabulary and spelling hints, same as `[whisper] initial_prompt`. GPU and CPU only, see [`openvino.initial_prompt`](#openvinoinitial_prompt) |
 | `on_demand_loading` | Boolean | `false` | Load the model when recording begins |
 | `streaming` | Boolean | `false` | Live streaming transcription via the shared sliding-window engine — see `[streaming]` for tuning |
 
@@ -1845,6 +1846,24 @@ Safe to delete (`rm -rf ~/.cache/voxtype/openvino`) if you switch models/devices
 When config.toml has an `[openvino]` section with `device = "NPU"`, `voxtype setup` runs this compile itself right after downloading or activating a model, instead of leaving the wait to your first recording. It is skipped when the model's cache blob already exists. A failed setup-time compile prints a warning and setup continues: the model files and config changes are still in place, and the daemon compiles the model on first use, falling back to GPU or CPU when the NPU is unavailable. See the troubleshooting guide entry on the setup-time NPU compile for details.
 
 **Large models on NPU compile *much* slower the first time — this is normal, not a hang.** Confirmed live: `large-v3-int4`'s first NPU compile took ~887s (about 15 minutes) on Lunar Lake, with no output in between (the VPU compiler's tiling-strategy search logs plenty at `OV_NPU_LOG_LEVEL=LOG_DEBUG`, including alarming-looking `ERROR_INPUT_TOO_BIG` lines, but at default log levels voxtype prints nothing until it either succeeds or genuinely fails). It's a real one-time cost, not a bug — every load after the first uses the cached blob and is fast, same as any other model. If you don't want to wait through it, use `device = "GPU"` instead (compiles in ~11s for a model this size, no long first-load tax) or a smaller model. voxtype logs an info-level message before attempting NPU on any non-CPU device warning that this can happen, so it's not silent, but there's still nothing else to look at during the wait itself.
+
+### openvino.initial_prompt
+
+**Type:** String
+**Default:** None (empty)
+**Required:** No
+
+The OpenVINO engine's counterpart of [`[whisper] initial_prompt`](#initial_prompt): text passed to the decoder as previous context so names, product terms and jargon come out spelled the way you write them. It is set separately because `[openvino]` has its own section, and the `--initial-prompt` CLI flag only overrides the `[whisper]` value.
+
+```toml
+[openvino]
+model = "large-v3-int8"
+device = "GPU"
+language = "it"
+initial_prompt = "Voxtype, Hyprland, Omarchy, OpenRouter."
+```
+
+Works on `GPU` and `CPU`. The NPU runs Whisper as a static pipeline that rejects any initial prompt at inference time. When that happens, voxtype logs a warning, transcribes the same audio again without the prompt, and leaves the prompt out for the rest of the session, so a dictation is never lost to it.
 
 ### openvino.streaming
 

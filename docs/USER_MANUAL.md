@@ -1221,6 +1221,7 @@ voxtype --initial-prompt "Discussion about Terraform and AWS Lambda" daemon
 - Update the prompt when your context changes (different project, client, or domain)
 - Combine with a larger model (`small.en` or `medium.en`) for best results on difficult vocabulary
 - The prompt guides Whisper's expectations but doesn't guarantee exact transcription
+- With `engine = "openvino"`, set the prompt as `initial_prompt` in the `[openvino]` section instead. It applies on GPU and CPU; the NPU does not support it and voxtype drops it there
 
 ---
 

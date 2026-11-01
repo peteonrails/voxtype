@@ -733,6 +733,16 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
     )
     .for_onnx_engine("openvino"),
     spec(
+        "openvino.initial_prompt",
+        "openvino",
+        "initial_prompt",
+        KeyType::String,
+        "Engine",
+        "Initial prompt",
+        "Text given to the decoder as context to bias vocabulary and spelling. Not supported on NPU.",
+    )
+    .for_onnx_engine("openvino"),
+    spec(
         "openvino.on_demand_loading",
         "openvino",
         "on_demand_loading",
@@ -2518,6 +2528,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         },
         "openvino.language" => json!(ov().language),
         "openvino.translate" => json!(ov().translate),
+        "openvino.initial_prompt" => opt_str(ov().initial_prompt.as_ref()),
         "openvino.on_demand_loading" => json!(ov().on_demand_loading),
         "openvino.openvino_dir" => opt_str(ov().openvino_dir.as_ref()),
         "openvino.streaming" => json!(ov().streaming),
