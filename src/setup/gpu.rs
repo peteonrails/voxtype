@@ -17,7 +17,7 @@
 //!
 //! This sets VK_LOADER_DRIVERS_SELECT internally to filter Vulkan ICDs.
 
-use super::binary::{install_active_binary, resolve_active_binary};
+use super::binary::{install_active_binary, resolve_active_binary, Variant};
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
@@ -1100,16 +1100,11 @@ pub fn show_status() {
 fn detect_best_parakeet_gpu_backend() -> Option<(&'static str, &'static str)> {
     let gpus = detect_gpus();
 
-    // The CUDA and MIGraphX binaries bundle ONNX Runtime which contains AVX-512
-    // instructions. On CPUs without AVX-512 (e.g., Zen 3), these binaries will
-    // crash with SIGILL. Only select GPU backends if the CPU supports AVX-512.
-    let has_avx512 = fs::read_to_string("/proc/cpuinfo")
-        .map(|info| info.contains("avx512f"))
-        .unwrap_or(false);
-
-    if !has_avx512 {
-        return None;
-    }
+    // On x86-64 the CUDA and MIGraphX binaries bundle an AVX-512 ONNX Runtime
+    // and crash with SIGILL without it (e.g. Zen 3). variant_runs_on_cpu owns
+    // that rule for every architecture.
+    let cpu = super::binary::detect_cpu();
+    let runs = |v| super::binary::variant_runs_on_cpu(v, &cpu);
 
     // Helper to find installed binary, preferring new name over legacy
     let find_binary = |new_name: &'static str, legacy_name: &'static str| -> Option<&'static str> {
@@ -1125,7 +1120,7 @@ fn detect_best_parakeet_gpu_backend() -> Option<(&'static str, &'static str)> {
     // Check for AMD GPU and MIGraphX binary (legacy "rocm" name accepted via symlink)
     let has_amd = gpus.iter().any(|g| g.vendor == GpuVendor::Amd);
     if let Some(binary) = find_binary("voxtype-onnx-migraphx", "voxtype-onnx-rocm") {
-        if has_amd {
+        if has_amd && runs(Variant::OnnxMigraphx) {
             return Some((binary, "MIGraphX"));
         }
     }
@@ -1136,7 +1131,7 @@ fn detect_best_parakeet_gpu_backend() -> Option<(&'static str, &'static str)> {
     // ABI) doesn't fail to register at runtime. Mismatched pairings would
     // silently fall back to CPU.
     let has_nvidia = gpus.iter().any(|g| g.vendor == GpuVendor::Nvidia);
-    if has_nvidia {
+    if has_nvidia && runs(Variant::OnnxCuda) {
         let host_cuda_major = crate::setup::parakeet::detect_cuda_runtime_major();
         let cuda_pref: &[&str] = match host_cuda_major {
             Some(13) => &["voxtype-onnx-cuda-13", "voxtype-onnx-cuda"],
@@ -1162,7 +1157,12 @@ fn detect_best_parakeet_gpu_backend() -> Option<(&'static str, &'static str)> {
 
     // Fall back to whichever is installed (user may have external GPU)
     if let Some(binary) = find_binary("voxtype-onnx-migraphx", "voxtype-onnx-rocm") {
-        return Some((binary, "MIGraphX"));
+        if runs(Variant::OnnxMigraphx) {
+            return Some((binary, "MIGraphX"));
+        }
+    }
+    if !runs(Variant::OnnxCuda) {
+        return None;
     }
     for name in [
         "voxtype-onnx-cuda-13",
@@ -1188,11 +1188,17 @@ pub fn enable() -> anyhow::Result<()> {
             let gpus = detect_gpus();
             let has_amd = gpus.iter().any(|g| g.vendor == GpuVendor::Amd);
             let has_nvidia = gpus.iter().any(|g| g.vendor == GpuVendor::Nvidia);
-            let has_avx512 = fs::read_to_string("/proc/cpuinfo")
-                .map(|info| info.contains("avx512f"))
-                .unwrap_or(false);
+            let cpu = super::binary::detect_cpu();
 
-            let hint = if (has_amd || has_nvidia) && !has_avx512 {
+            let hint = if has_nvidia && !cpu.is_x86_64() {
+                "You have an NVIDIA GPU. Install the aarch64 onnx-cuda-13 release build into \
+                 /usr/lib/voxtype/cuda-13/ (see \"aarch64 NVIDIA GPUs\" in docs/INSTALL.md), \
+                 then run this command again."
+            } else if has_amd && !cpu.is_x86_64() {
+                "You have an AMD GPU, but the MIGraphX binary is only built for x86-64.\n\n\
+                 Use the Whisper engine with Vulkan GPU acceleration instead:\n  \
+                 voxtype setup onnx --disable && sudo voxtype setup gpu --enable"
+            } else if (has_amd || has_nvidia) && !cpu.avx512 {
                 "You have a GPU, but the ONNX GPU binaries (CUDA/MIGraphX) require a CPU with \
                  AVX-512 support. Your CPU only supports AVX2.\n\n\
                  Use ONNX on CPU instead:\n  \
@@ -1347,28 +1353,11 @@ fn detect_best_cpu_backend() -> Backend {
 
 /// Detect the best ONNX CPU backend for this system
 fn detect_best_parakeet_cpu_backend() -> Option<&'static str> {
-    // Helper to find installed binary, preferring new name over legacy
-    let find_binary = |new_name: &'static str, legacy_name: &'static str| -> Option<&'static str> {
-        if Path::new(VOXTYPE_LIB_DIR).join(new_name).exists() {
-            Some(new_name)
-        } else if Path::new(VOXTYPE_LIB_DIR).join(legacy_name).exists() {
-            Some(legacy_name)
-        } else {
-            None
-        }
-    };
-
-    // Check for AVX-512 support
-    if let Ok(cpuinfo) = fs::read_to_string("/proc/cpuinfo") {
-        if cpuinfo.contains("avx512f") {
-            if let Some(binary) = find_binary("voxtype-onnx-avx512", "voxtype-parakeet-avx512") {
-                return Some(binary);
-            }
-        }
-    }
-
-    // Fall back to AVX2
-    find_binary("voxtype-onnx-avx2", "voxtype-parakeet-avx2")
+    let cpu = super::binary::detect_cpu();
+    [Variant::OnnxAvx512, Variant::OnnxAvx2, Variant::OnnxNative]
+        .into_iter()
+        .filter(|&v| super::binary::variant_runs_on_cpu(v, &cpu))
+        .find_map(|v| v.installed_binary_name(Path::new(VOXTYPE_LIB_DIR)))
 }
 
 /// Switch to an ONNX backend binary (tiered mode). `retry_hint` is the

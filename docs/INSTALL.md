@@ -220,9 +220,8 @@ chmod 755 /tmp/voxtype
 sudo mv /tmp/voxtype /usr/local/bin/voxtype
 ```
 
-These binaries are CPU-only. No CUDA, MIGraphX, or Vulkan support on
-arm64 in 0.7.2 because the Jetson CUDA toolchain is awkward and there
-is no mainstream consumer arm64 hardware with Vulkan GPUs yet.
+These two binaries are CPU-only. For NVIDIA acceleration, use the
+[aarch64 CUDA 13 variant](#aarch64-nvidia-gpus) below.
 
 Once installed, the rest of the setup (input group, models, hotkey)
 is the same as on x86_64. Skip to [Post-Install Setup](#post-install-setup).
@@ -409,6 +408,44 @@ sudo voxtype setup gpu --enable --backend vulkan      # Whisper on Vulkan
 sudo voxtype setup gpu --enable --backend onnx-cuda   # ONNX engines on NVIDIA
 sudo voxtype setup gpu --enable --backend onnx-migraphx  # ONNX engines on AMD
 ```
+
+### aarch64 NVIDIA GPUs
+
+For DGX Spark / GB10 and RTX Spark N1X, each release ships an
+`aarch64-onnx-cuda-13` binary with three companion libraries. The packages
+do not include them yet, so install them by hand into the same layout the
+x86_64 CUDA 13 variant uses. The host needs the CUDA 13 runtime and cuDNN 9
+(on Arch ARM: `sudo pacman -S cuda cudnn`).
+
+```bash
+V=1.1.1   # the release you downloaded
+A=voxtype-$V-linux-aarch64-onnx-cuda-13
+sudo install -Dm755 $A /usr/lib/voxtype/cuda-13/voxtype-onnx-cuda-13
+for lib in libonnxruntime.so.1.31.1 libonnxruntime_providers_cuda.so libonnxruntime_providers_shared.so; do
+  sudo install -Dm644 $A.$lib /usr/lib/voxtype/cuda-13/$lib
+done
+sudo ln -sf libonnxruntime.so.1.31.1 /usr/lib/voxtype/cuda-13/libonnxruntime.so
+```
+
+Then point voxtype at it and restart the daemon:
+
+```bash
+sudo ln -sf cuda-13/voxtype-onnx-cuda-13 /usr/lib/voxtype/voxtype-onnx-cuda-13
+sudo ln -sf cuda-13/voxtype-onnx-cuda-13 /usr/lib/voxtype/voxtype-onnx-cuda
+sudo voxtype setup onnx --enable
+sudo voxtype setup gpu --enable
+systemctl --user restart voxtype
+```
+
+The two setup commands enable ONNX and select CUDA, including when ONNX is
+already running on the CPU. With the daemon running, `voxtype info accel`
+reports `State: gpu` when the model is on the GPU. ONNX Runtime falls back
+to the CPU silently when the CUDA provider fails to load, so check this
+rather than the startup log. Parakeet and Cohere use the GPU in this build.
+
+On GPU, use the fp32 Parakeet models (`parakeet-tdt-0.6b-v2`). Under the
+CUDA execution provider the int8 models leave about 740 copy nodes on the
+CPU, which removes most of the gain.
 
 ### Runtime packages
 

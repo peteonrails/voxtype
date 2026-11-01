@@ -266,7 +266,14 @@ pub fn show_status() {
     if !gpus.nvidia && !gpus.amd {
         println!("GPU: not detected");
     }
-    if (gpus.nvidia || gpus.amd) && !cpu.avx512 {
+    if gpus.nvidia && !cpu.is_x86_64() {
+        println!("\nNote: on aarch64, NVIDIA GPUs use the onnx-cuda-13 release build.");
+        println!("  See \"aarch64 NVIDIA GPUs\" in docs/INSTALL.md.");
+    } else if gpus.amd && !cpu.is_x86_64() {
+        println!("\nNote: the MIGraphX binary is only built for x86-64.");
+        println!("  Use ONNX (native) for CPU-based inference,");
+        println!("  or use the Whisper engine with Vulkan for GPU acceleration.");
+    } else if (gpus.nvidia || gpus.amd) && !cpu.avx512 {
         println!("\nNote: ONNX GPU binaries (CUDA/MIGraphX) require AVX-512 CPU support.");
         println!("  Your CPU supports AVX2 only. Use ONNX (AVX2) for CPU-based inference,");
         println!("  or use the Whisper engine with Vulkan for GPU acceleration.");
@@ -448,7 +455,11 @@ mod tests {
     ) -> Vec<binary::VariantStatus> {
         binary::variant_statuses(
             dir.path(),
-            &binary::Cpu { avx2: true, avx512 },
+            &binary::Cpu {
+                avx2: true,
+                avx512,
+                arch: "x86_64",
+            },
             &binary::Gpus { nvidia, amd },
             Some(Variant::WhisperAvx512),
         )

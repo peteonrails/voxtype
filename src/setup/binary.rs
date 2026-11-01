@@ -36,16 +36,21 @@ pub const SYSTEM_BIN: &str = "/usr/bin/voxtype";
 /// `binary_path` may be the top-level convenience symlink (e.g.
 /// /usr/lib/voxtype/voxtype-onnx-migraphx) or the canonical real path;
 /// this function canonicalizes before deciding wrapper vs symlink.
-/// Variant basenames that need a wrapper script. The ORT EPs they ship
-/// with (`libonnxruntime_providers_{cuda,migraphx}.so`) resolve their
-/// loader path from argv[0], so /usr/bin/voxtype has to be a script
-/// that execs the real binary by absolute path. Plain symlinks fail
-/// the load and silently fall back to CPU. See issue #443.
-const VARIANTS_NEEDING_WRAPPER: &[&str] = &[
-    "voxtype-onnx-cuda-12",
-    "voxtype-onnx-cuda-13",
-    "voxtype-onnx-migraphx",
-];
+/// Whether a variant basename needs a wrapper script. The CUDA and MIGraphX
+/// builds ship ORT EPs (`libonnxruntime_providers_{cuda,migraphx}.so`) that
+/// resolve their loader path from argv[0], so /usr/bin/voxtype has to be a
+/// script that execs the real binary by absolute path. Plain symlinks fail
+/// the load and silently fall back to CPU. See issue #443. This includes the
+/// unversioned `voxtype-onnx-cuda` alias that packages point at cuda-12/ or
+/// cuda-13/.
+fn needs_wrapper(basename: &str) -> bool {
+    Variant::from_binary_name(basename).is_some_and(|v| {
+        matches!(
+            v.acceleration(),
+            Acceleration::Cuda | Acceleration::Migraphx
+        )
+    })
+}
 
 /// Return the subdirectory under /usr/lib/voxtype/ where a wrapper-needing
 /// variant's real binary lives. Used to reconstruct the canonical exec
@@ -173,7 +178,7 @@ pub fn install_active_binary(
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("");
-    let needs_wrapper = VARIANTS_NEEDING_WRAPPER.contains(&basename);
+    let needs_wrapper = needs_wrapper(basename);
 
     // Resolve the canonical exec target. If canonicalize succeeds, trust
     // it (follows the full symlink chain to the real binary). If it
@@ -359,6 +364,22 @@ impl Variant {
         }
     }
 
+    /// Installed filename, preferring the current name over older package names.
+    pub(crate) fn installed_binary_name(self, lib_dir: &Path) -> Option<&'static str> {
+        let legacy = match self {
+            // The AUR source package uses voxtype-native; aarch64 binary
+            // packages use the release asset's cpu name.
+            Variant::WhisperNative => Some("voxtype-cpu"),
+            Variant::OnnxAvx512 => Some("voxtype-parakeet-avx512"),
+            Variant::OnnxAvx2 => Some("voxtype-parakeet-avx2"),
+            Variant::OnnxNative => Some("voxtype-parakeet"),
+            _ => None,
+        };
+        std::iter::once(self.binary_name())
+            .chain(legacy)
+            .find(|name| lib_dir.join(name).exists())
+    }
+
     pub const fn family(self) -> EngineFamily {
         match self {
             Variant::WhisperBaseline
@@ -426,15 +447,15 @@ impl Variant {
         }
     }
 
-    /// Reverse lookup. Accepts current names plus legacy `voxtype-parakeet*`
-    /// names from before the ONNX rename.
+    /// Reverse lookup. Accepts current names plus `voxtype-cpu` from aarch64
+    /// packages and legacy `voxtype-parakeet*` names from before the ONNX rename.
     pub fn from_binary_name(name: &str) -> Option<Self> {
         match name {
             "voxtype-baseline" => Some(Variant::WhisperBaseline),
             "voxtype-avx2" => Some(Variant::WhisperAvx2),
             "voxtype-avx512" => Some(Variant::WhisperAvx512),
             "voxtype-vulkan" => Some(Variant::WhisperVulkan),
-            "voxtype-native" => Some(Variant::WhisperNative),
+            "voxtype-native" | "voxtype-cpu" => Some(Variant::WhisperNative),
             "voxtype-onnx-avx2" | "voxtype-parakeet-avx2" => Some(Variant::OnnxAvx2),
             "voxtype-onnx-avx512" | "voxtype-parakeet-avx512" => Some(Variant::OnnxAvx512),
             "voxtype-onnx-cuda-12" => Some(Variant::OnnxCuda12),
@@ -553,6 +574,15 @@ pub enum InstallKind {
 pub struct Cpu {
     pub avx2: bool,
     pub avx512: bool,
+    /// Architecture of the running binary (`std::env::consts::ARCH`).
+    pub arch: &'static str,
+}
+
+impl Cpu {
+    /// The AVX tiers and the CUDA/MIGraphX bundles only exist as x86-64 builds.
+    pub fn is_x86_64(&self) -> bool {
+        self.arch == "x86_64"
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -609,9 +639,11 @@ pub struct Recommendation {
     pub primary: Variant,
 }
 
-pub fn recommend(cpu: &Cpu, gpus: &Gpus) -> Recommendation {
-    let whisper = recommend_whisper(cpu, gpus);
-    let onnx = recommend_onnx(cpu, gpus);
+/// `installed` only matters off x86-64, where the release pipeline builds no
+/// Vulkan binary: Vulkan is recommended there only when one is present.
+pub fn recommend(cpu: &Cpu, gpus: &Gpus, installed: &[Variant]) -> Recommendation {
+    let whisper = recommend_whisper(cpu, gpus, installed);
+    let onnx = recommend_onnx(cpu, gpus, installed);
     Recommendation {
         whisper: whisper.0,
         whisper_reason: whisper.1,
@@ -621,7 +653,23 @@ pub fn recommend(cpu: &Cpu, gpus: &Gpus) -> Recommendation {
     }
 }
 
-fn recommend_whisper(cpu: &Cpu, gpus: &Gpus) -> (Variant, &'static str) {
+fn recommend_whisper(cpu: &Cpu, gpus: &Gpus, installed: &[Variant]) -> (Variant, &'static str) {
+    if !cpu.is_x86_64() {
+        if installed.contains(&Variant::WhisperVulkan) {
+            return (
+                Variant::WhisperVulkan,
+                "Non-x86 CPU with the Vulkan build installed; Vulkan uses the GPU where the \
+                 driver supports compute (e.g. Asahi on Apple Silicon) and falls back to CPU \
+                 otherwise.",
+            );
+        }
+        return (
+            Variant::WhisperNative,
+            "Non-x86 CPU; release builds for this architecture are CPU-only. Source builds \
+             with Vulkan (e.g. the AUR voxtype package) can use the GPU where the driver \
+             supports compute.",
+        );
+    }
     if gpus.nvidia || gpus.amd {
         // Vulkan covers all GPU vendors and is the most reliable Whisper GPU path.
         return (
@@ -641,13 +689,22 @@ fn recommend_whisper(cpu: &Cpu, gpus: &Gpus) -> (Variant, &'static str) {
     )
 }
 
-fn recommend_onnx(cpu: &Cpu, gpus: &Gpus) -> (Variant, &'static str) {
-    // CUDA/MIGraphX bundles ship with AVX-512 ONNX Runtime, so the CPU has to
-    // support it before we can recommend a GPU variant.
-    if gpus.nvidia && cpu.avx512 {
+/// `installed` only matters off x86-64, where the packages ship no CUDA
+/// build: CUDA is recommended there only when one is present.
+fn recommend_onnx(cpu: &Cpu, gpus: &Gpus, installed: &[Variant]) -> (Variant, &'static str) {
+    let cuda_present = cpu.is_x86_64() || installed.contains(&Variant::OnnxCuda);
+    if gpus.nvidia && variant_runs_on_cpu(Variant::OnnxCuda, cpu) && cuda_present {
         return (
             Variant::OnnxCuda,
-            "NVIDIA GPU + AVX-512 CPU; CUDA execution provider is the fastest Parakeet path.",
+            "NVIDIA GPU with a CPU that runs the CUDA build; the CUDA execution provider is \
+             the fastest Parakeet path.",
+        );
+    }
+    if !cpu.is_x86_64() {
+        return (
+            Variant::OnnxNative,
+            "Non-x86 CPU without an installed GPU build, so ONNX runs on the native CPU \
+             build. NVIDIA GPUs can use the aarch64 onnx-cuda-13 release build.",
         );
     }
     if gpus.amd && cpu.avx512 {
@@ -680,6 +737,7 @@ pub fn detect_cpu() -> Cpu {
         avx2: false,
         #[cfg(not(target_arch = "x86_64"))]
         avx512: false,
+        arch: std::env::consts::ARCH,
     }
 }
 
@@ -788,7 +846,7 @@ pub fn active_variant() -> Option<Variant> {
 pub fn enumerate_installed() -> Vec<Variant> {
     Variant::ALL
         .iter()
-        .filter(|v| Path::new(LIB_DIR).join(v.binary_name()).exists())
+        .filter(|v| v.installed_binary_name(Path::new(LIB_DIR)).is_some())
         .copied()
         .collect()
 }
@@ -809,18 +867,30 @@ pub fn variant_statuses(
 ) -> Vec<VariantStatus> {
     Variant::ALL
         .iter()
-        .map(|&v| VariantStatus {
-            variant: v,
-            binary_name: v.binary_name().to_string(),
-            installed: lib_dir.join(v.binary_name()).exists(),
-            runs_on_this_cpu: variant_runs_on_cpu(v, cpu),
-            gpu_available: variant_gpu_available(v, gpus),
-            active: active == Some(v),
+        .map(|&v| {
+            let name = v.installed_binary_name(lib_dir);
+            VariantStatus {
+                variant: v,
+                binary_name: name.unwrap_or(v.binary_name()).to_string(),
+                installed: name.is_some(),
+                runs_on_this_cpu: variant_runs_on_cpu(v, cpu),
+                gpu_available: variant_gpu_available(v, gpus),
+                active: active == Some(v),
+            }
         })
         .collect()
 }
 
-fn variant_runs_on_cpu(v: Variant, cpu: &Cpu) -> bool {
+pub(crate) fn variant_runs_on_cpu(v: Variant, cpu: &Cpu) -> bool {
+    if !cpu.is_x86_64() {
+        // Off x86-64 the AVX flags are always false and say nothing about
+        // what runs: the Vulkan, native and CUDA binaries are built for the
+        // host (CUDA ships as the aarch64 onnx-cuda-13 build).
+        return matches!(
+            v.acceleration(),
+            Acceleration::Vulkan | Acceleration::Native | Acceleration::Cuda
+        );
+    }
     match v.acceleration() {
         // The floor variant: it exists precisely so there is something to run
         // when nothing else will, so it never disqualifies itself.
@@ -835,7 +905,7 @@ fn variant_runs_on_cpu(v: Variant, cpu: &Cpu) -> bool {
     }
 }
 
-fn variant_gpu_available(v: Variant, g: &Gpus) -> bool {
+pub(crate) fn variant_gpu_available(v: Variant, g: &Gpus) -> bool {
     match v.acceleration() {
         Acceleration::Cuda => g.nvidia,
         Acceleration::Migraphx => g.amd,
@@ -935,7 +1005,16 @@ pub fn inventory() -> Inventory {
         None
     };
 
-    let recommendation = recommend(&cpu, &gpus);
+    // `variants` is empty for source installs, so read the lib dir directly,
+    // and count a source build that has Vulkan compiled in.
+    let mut installed = enumerate_installed();
+    if install_kind == InstallKind::Source
+        && cfg!(feature = "gpu-vulkan")
+        && !installed.contains(&Variant::WhisperVulkan)
+    {
+        installed.push(Variant::WhisperVulkan);
+    }
+    let recommendation = recommend(&cpu, &gpus, &installed);
 
     Inventory {
         install_kind,
@@ -955,7 +1034,12 @@ pub fn inventory() -> Inventory {
 /// Rewrite `/usr/bin/voxtype` to point at the requested variant's binary.
 /// Requires write access to `/usr/bin/`; callers should run with sudo.
 pub fn switch_to(variant: Variant) -> anyhow::Result<()> {
-    let binary_path = Path::new(LIB_DIR).join(variant.binary_name());
+    let lib_dir = Path::new(LIB_DIR);
+    let binary_path = lib_dir.join(
+        variant
+            .installed_binary_name(lib_dir)
+            .unwrap_or(variant.binary_name()),
+    );
 
     if !binary_path.exists() {
         anyhow::bail!(
@@ -996,6 +1080,37 @@ mod tests {
     fn round_trip_binary_names() {
         for v in Variant::ALL {
             assert_eq!(Variant::from_binary_name(v.binary_name()), Some(*v));
+        }
+        assert_eq!(
+            Variant::from_binary_name("voxtype-cpu"),
+            Some(Variant::WhisperNative)
+        );
+    }
+
+    #[test]
+    fn native_cpu_package_names_are_selectable() {
+        let dir = tempfile::tempdir().unwrap();
+        let cpu = Cpu {
+            avx2: false,
+            avx512: false,
+            arch: "aarch64",
+        };
+        let gpus = Gpus {
+            nvidia: true,
+            amd: false,
+        };
+        for name in ["voxtype-cpu", "voxtype-native"] {
+            fs::write(dir.path().join(name), b"").unwrap();
+            let status = variant_statuses(dir.path(), &cpu, &gpus, None)
+                .into_iter()
+                .find(|s| s.variant == Variant::WhisperNative)
+                .unwrap();
+            assert!(status.installed && status.runs_on_this_cpu);
+            assert_eq!(status.binary_name, name);
+            assert_eq!(
+                Variant::WhisperNative.installed_binary_name(dir.path()),
+                Some(name)
+            );
         }
     }
 
@@ -1041,6 +1156,7 @@ mod tests {
         let no_avx512 = Cpu {
             avx2: true,
             avx512: false,
+            arch: "x86_64",
         };
         assert!(variant_runs_on_cpu(Variant::WhisperAvx2, &no_avx512));
         // The floor variant exists to run when nothing else will, so it must
@@ -1048,6 +1164,7 @@ mod tests {
         let pre_haswell = Cpu {
             avx2: false,
             avx512: false,
+            arch: "x86_64",
         };
         assert!(variant_runs_on_cpu(Variant::WhisperBaseline, &pre_haswell));
         assert!(!variant_runs_on_cpu(Variant::WhisperAvx2, &pre_haswell));
@@ -1058,6 +1175,7 @@ mod tests {
         let full = Cpu {
             avx2: true,
             avx512: true,
+            arch: "x86_64",
         };
         assert!(variant_runs_on_cpu(Variant::WhisperAvx512, &full));
         assert!(variant_runs_on_cpu(Variant::OnnxCuda, &full));
@@ -1065,6 +1183,7 @@ mod tests {
         let nothing = Cpu {
             avx2: false,
             avx512: false,
+            arch: "x86_64",
         };
         assert!(!variant_runs_on_cpu(Variant::WhisperAvx2, &nothing));
         assert!(!variant_runs_on_cpu(Variant::WhisperNative, &nothing));
@@ -1112,26 +1231,45 @@ mod tests {
             &Cpu {
                 avx2: true,
                 avx512: false,
+                arch: "x86_64",
             },
             &Gpus {
                 nvidia: false,
                 amd: false,
             },
+            &[],
         );
         assert_eq!(r.whisper, Variant::WhisperAvx2);
         assert_eq!(r.onnx, Variant::OnnxAvx2);
         assert_eq!(r.primary, Variant::WhisperAvx2);
+
+        // On x86-64 the installed list does not change the pick.
+        let r = recommend(
+            &Cpu {
+                avx2: true,
+                avx512: false,
+                arch: "x86_64",
+            },
+            &Gpus {
+                nvidia: false,
+                amd: false,
+            },
+            &[Variant::WhisperVulkan, Variant::WhisperNative],
+        );
+        assert_eq!(r.whisper, Variant::WhisperAvx2);
 
         // No GPU, AVX-512 → Whisper AVX-512 + ONNX AVX-512.
         let r = recommend(
             &Cpu {
                 avx2: true,
                 avx512: true,
+                arch: "x86_64",
             },
             &Gpus {
                 nvidia: false,
                 amd: false,
             },
+            &[],
         );
         assert_eq!(r.whisper, Variant::WhisperAvx512);
         assert_eq!(r.onnx, Variant::OnnxAvx512);
@@ -1141,11 +1279,13 @@ mod tests {
             &Cpu {
                 avx2: true,
                 avx512: true,
+                arch: "x86_64",
             },
             &Gpus {
                 nvidia: true,
                 amd: false,
             },
+            &[],
         );
         assert_eq!(r.whisper, Variant::WhisperVulkan);
         assert_eq!(r.onnx, Variant::OnnxCuda);
@@ -1155,11 +1295,13 @@ mod tests {
             &Cpu {
                 avx2: true,
                 avx512: false,
+                arch: "x86_64",
             },
             &Gpus {
                 nvidia: true,
                 amd: false,
             },
+            &[],
         );
         assert_eq!(r.whisper, Variant::WhisperVulkan);
         assert_eq!(r.onnx, Variant::OnnxAvx2);
@@ -1169,14 +1311,106 @@ mod tests {
             &Cpu {
                 avx2: true,
                 avx512: true,
+                arch: "x86_64",
             },
             &Gpus {
                 nvidia: false,
                 amd: true,
             },
+            &[],
         );
         assert_eq!(r.whisper, Variant::WhisperVulkan);
         assert_eq!(r.onnx, Variant::OnnxAvx512);
+    }
+
+    /// aarch64 reports no AVX, which used to flag the Vulkan and native
+    /// binaries as "won't run" and recommend AVX2 builds that don't exist
+    /// for the architecture.
+    #[test]
+    fn cpu_gating_off_x86() {
+        let arm = Cpu {
+            avx2: false,
+            avx512: false,
+            arch: "aarch64",
+        };
+        assert!(variant_runs_on_cpu(Variant::WhisperVulkan, &arm));
+        assert!(variant_runs_on_cpu(Variant::WhisperNative, &arm));
+        assert!(variant_runs_on_cpu(Variant::OnnxNative, &arm));
+        assert!(!variant_runs_on_cpu(Variant::WhisperAvx2, &arm));
+        assert!(!variant_runs_on_cpu(Variant::WhisperAvx512, &arm));
+        assert!(!variant_runs_on_cpu(Variant::OnnxAvx2, &arm));
+        assert!(!variant_runs_on_cpu(Variant::OnnxAvx512, &arm));
+        assert!(variant_runs_on_cpu(Variant::OnnxCuda, &arm));
+        assert!(variant_runs_on_cpu(Variant::OnnxCuda12, &arm));
+        assert!(variant_runs_on_cpu(Variant::OnnxCuda13, &arm));
+        assert!(!variant_runs_on_cpu(Variant::OnnxMigraphx, &arm));
+    }
+
+    #[test]
+    fn recommendations_off_x86() {
+        let arm = Cpu {
+            avx2: false,
+            avx512: false,
+            arch: "aarch64",
+        };
+        let no_gpu = Gpus {
+            nvidia: false,
+            amd: false,
+        };
+
+        // Release aarch64 builds are CPU-only, so without a Vulkan binary
+        // installed the native build is the recommendation.
+        let r = recommend(&arm, &no_gpu, &[Variant::WhisperNative]);
+        assert_eq!(r.whisper, Variant::WhisperNative);
+        assert_eq!(r.onnx, Variant::OnnxNative);
+        assert_eq!(r.primary, Variant::WhisperNative);
+
+        let r = recommend(&arm, &no_gpu, &[]);
+        assert_eq!(r.whisper, Variant::WhisperNative);
+
+        // A source build that ships voxtype-vulkan (e.g. the AUR package).
+        let r = recommend(
+            &arm,
+            &no_gpu,
+            &[Variant::WhisperNative, Variant::WhisperVulkan],
+        );
+        assert_eq!(r.whisper, Variant::WhisperVulkan);
+        assert_eq!(r.primary, Variant::WhisperVulkan);
+
+        // An NVIDIA GPU on aarch64 (e.g. Jetson) must not pull ONNX toward the
+        // x86-64-only CUDA builds.
+        let r = recommend(
+            &arm,
+            &Gpus {
+                nvidia: true,
+                amd: false,
+            },
+            &[Variant::WhisperVulkan, Variant::OnnxNative],
+        );
+        assert_eq!(r.whisper, Variant::WhisperVulkan);
+        assert_eq!(r.onnx, Variant::OnnxNative);
+
+        // A versioned build alone does not install the TUI's generic CUDA cell.
+        let r = recommend(
+            &arm,
+            &Gpus {
+                nvidia: true,
+                amd: false,
+            },
+            &[Variant::OnnxNative, Variant::OnnxCuda13],
+        );
+        assert_eq!(r.onnx, Variant::OnnxNative);
+
+        // The package/manual-install alias makes the CUDA cell selectable.
+        let r = recommend(
+            &arm,
+            &Gpus {
+                nvidia: true,
+                amd: false,
+            },
+            &[Variant::OnnxNative, Variant::OnnxCuda, Variant::OnnxCuda13],
+        );
+        assert_eq!(r.onnx, Variant::OnnxCuda);
     }
 
     #[test]
@@ -1322,8 +1556,8 @@ mod tests {
             let path = std::path::Path::new("/nonexistent/usr/lib/voxtype").join(variant);
             let basename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
             assert!(
-                VARIANTS_NEEDING_WRAPPER.contains(&basename),
-                "variant {} should be in the wrapper list",
+                needs_wrapper(basename),
+                "variant {} should need a wrapper",
                 variant
             );
             assert!(
@@ -1332,6 +1566,14 @@ mod tests {
                 variant
             );
         }
+    }
+
+    /// The TUI's CUDA cell switches to the unversioned alias, which packages
+    /// point at cuda-12/ or cuda-13/. It needs the wrapper as much as the
+    /// versioned names, or ORT silently falls back to CPU.
+    #[test]
+    fn generic_cuda_alias_gets_a_wrapper() {
+        assert!(needs_wrapper(Variant::OnnxCuda.binary_name()));
     }
 
     /// Variants without ORT EP `.so` companions (Whisper avx2/avx512/vulkan,
@@ -1347,7 +1589,7 @@ mod tests {
             "voxtype-onnx-avx512",
         ] {
             assert!(
-                !VARIANTS_NEEDING_WRAPPER.contains(&variant),
+                !needs_wrapper(variant),
                 "variant {} should NOT need a wrapper",
                 variant
             );
