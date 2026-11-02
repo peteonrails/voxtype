@@ -325,6 +325,17 @@ fn cleanup_cancel_file() {
 /// it signals the daemon, stamped with [`trigger_stamp`].
 pub const START_REQUEST_FILE: &str = "start_requested";
 
+/// Capacity, in chunks, of the channel feeding captured audio to a streaming
+/// backend. The sliding-window engine only drains it between inference
+/// passes, so it must hold at least one pass worth of audio or the overflow
+/// is dropped by `try_send` and never reaches the transcript. Chunk size is
+/// set by the audio backend, not by us: through PipeWire's ALSA plugin a
+/// chunk can be ~2-3 ms, so the previous 64 held only ~0.15 s against a
+/// ~0.6 s Whisper pass. 8192 chunks is ~20 s at that size (more with larger
+/// chunks), a few MB at most, and recordings are capped by
+/// `max_duration_secs` anyway.
+const STREAMING_TAP_CAPACITY: usize = 8192;
+
 /// Wall-clock nanoseconds, the content of the `cancel` and
 /// [`START_REQUEST_FILE`] triggers. Both are written by separate CLI
 /// processes, so only the realtime clock orders them.
@@ -2097,7 +2108,8 @@ impl Daemon {
                 Ok(chunk_rx) => {
                     // Bounded; backed-up streaming backend drops chunks
                     // rather than back-pressuring the capture.
-                    let (streaming_tx, streaming_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(64);
+                    let (streaming_tx, streaming_rx) =
+                        tokio::sync::mpsc::channel::<Vec<f32>>(STREAMING_TAP_CAPACITY);
 
                     if let Some(handle) = self.level_emitter_task.take() {
                         handle.abort();
