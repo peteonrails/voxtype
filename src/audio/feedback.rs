@@ -7,7 +7,13 @@ use crate::config::AudioFeedbackConfig;
 use rodio::{Decoder, OutputStream, Sink, Source};
 use std::io::Cursor;
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
+
+type Cue = rodio::source::Amplify<Decoder<Cursor<Vec<u8>>>>;
+
+const DRAIN_GRACE: Duration = Duration::from_millis(150);
+const STALE_AFTER: Duration = Duration::from_secs(1);
 
 /// Sound event types
 #[derive(Debug, Clone, Copy)]
@@ -28,6 +34,7 @@ pub enum SoundEvent {
 pub struct AudioFeedback {
     config: AudioFeedbackConfig,
     theme: SoundTheme,
+    cues: mpsc::Sender<(Instant, Cue)>,
 }
 
 /// A sound theme containing audio data for different events
@@ -48,9 +55,24 @@ impl AudioFeedback {
 
         let theme = load_theme(&config.theme)?;
 
+        let (cues, rx) = mpsc::channel::<(Instant, Cue)>();
+        std::thread::Builder::new()
+            .name("audio-feedback".into())
+            .spawn(move || {
+                for (queued, cue) in rx {
+                    if queued.elapsed() < STALE_AFTER {
+                        play_cue(cue);
+                    } else {
+                        tracing::warn!("Skipping stale feedback cue");
+                    }
+                }
+            })
+            .map_err(|e| format!("Failed to start audio feedback thread: {}", e))?;
+
         Ok(Self {
             config: config.clone(),
             theme,
+            cues,
         })
     }
 
@@ -80,30 +102,41 @@ impl AudioFeedback {
         // Apply volume control
         let source = source.amplify(self.config.volume);
 
-        std::thread::spawn(move || {
-            let (_stream, stream_handle) = match OutputStream::try_default() {
-                Ok(stream) => stream,
-                Err(e) => {
-                    tracing::warn!("Failed to open audio output: {}", e);
-                    return;
-                }
-            };
-            match Sink::try_new(&stream_handle) {
-                Ok(sink) => {
-                    let deadline = Instant::now()
-                        + source.total_duration().unwrap_or(Duration::from_secs(5))
-                        + Duration::from_secs(1);
-                    sink.append(source);
-                    while !sink.empty() && Instant::now() < deadline {
-                        std::thread::sleep(Duration::from_millis(50));
-                    }
-                }
-                Err(e) => tracing::warn!("Failed to create audio sink: {}", e),
-            }
-        });
-
-        Ok(())
+        self.cues
+            .send((Instant::now(), source))
+            .map_err(|_| "Audio feedback thread has stopped".to_string())
     }
+}
+
+fn play_cue(source: Cue) {
+    let timeout = source.total_duration().unwrap_or_default() + Duration::from_secs(1);
+    let (done_tx, done_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let (_stream, stream_handle) = match OutputStream::try_default() {
+            Ok(stream) => stream,
+            Err(e) => {
+                tracing::warn!("Failed to open audio output: {}", e);
+                return;
+            }
+        };
+        match Sink::try_new(&stream_handle) {
+            Ok(sink) => {
+                let deadline = Instant::now() + timeout;
+                sink.append(source);
+                while !sink.empty() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                if sink.empty() {
+                    std::thread::sleep(DRAIN_GRACE);
+                } else {
+                    tracing::warn!("Audio output stalled, feedback cue abandoned");
+                }
+            }
+            Err(e) => tracing::warn!("Failed to create audio sink: {}", e),
+        }
+        let _ = done_tx.send(());
+    });
+    let _ = done_rx.recv_timeout(timeout + DRAIN_GRACE + Duration::from_secs(1));
 }
 
 /// Load a sound theme by name or path
