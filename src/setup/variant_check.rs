@@ -58,12 +58,15 @@ pub enum Remediation {
 /// for engines that have no compile-time gate.
 ///
 /// Whisper is unconditional in every variant (the engine itself is the
-/// reason whisper-rs is a non-optional dependency). Every other engine is
-/// behind a feature flag of the same name — so once Whisper is excluded
-/// the feature name is just the engine's canonical name.
+/// reason whisper-rs is a non-optional dependency), and so is the Soniox
+/// cloud client, which has no Cargo feature. Every other engine is behind a
+/// feature flag of the same name, so the feature name is just the engine's
+/// canonical name.
 pub fn required_feature(engine: TranscriptionEngine) -> Option<&'static str> {
     match engine {
-        TranscriptionEngine::Whisper => None,
+        // Whisper and the Soniox cloud client are compiled into every
+        // variant; Soniox has no Cargo feature (see Cargo.toml).
+        TranscriptionEngine::Whisper | TranscriptionEngine::Soniox => None,
         other => Some(other.name()),
     }
 }
@@ -168,6 +171,20 @@ mod tests {
     }
 
     #[test]
+    fn soniox_engine_never_mismatches() {
+        // #873: Soniox has no Cargo feature, so a Whisper-only package
+        // build must not warn or recommend switching to an ONNX variant.
+        let inv = fake_inventory(
+            InstallKind::Package,
+            vec![],
+            Variant::WhisperAvx2,
+            Variant::OnnxAvx2,
+        );
+        let cfg = config_with_engine(TranscriptionEngine::Soniox);
+        assert!(detect_mismatch(&cfg, &inv).is_none());
+    }
+
+    #[test]
     fn parakeet_on_cpu_whisper_binary_is_mismatch() {
         // The Ryan case from Discord: engine = parakeet, running binary
         // is the CPU Whisper variant with no ONNX features compiled in.
@@ -234,7 +251,6 @@ mod tests {
             TranscriptionEngine::Dolphin,
             TranscriptionEngine::Omnilingual,
             TranscriptionEngine::Cohere,
-            TranscriptionEngine::Soniox,
         ];
         for e in engines {
             assert!(
@@ -244,5 +260,6 @@ mod tests {
             );
         }
         assert_eq!(required_feature(TranscriptionEngine::Whisper), None);
+        assert_eq!(required_feature(TranscriptionEngine::Soniox), None);
     }
 }
