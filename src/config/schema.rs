@@ -1101,6 +1101,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Remove \"uh\", \"um\" and the rest of text.filler_words from the output.",
     ),
     spec(
+        "text.strip_model_punctuation",
+        "text",
+        "strip_model_punctuation",
+        KeyType::Bool,
+        "Text",
+        "Drop the model's punctuation",
+        "Remove the punctuation the speech model adds, so only spoken punctuation and replacements punctuate the text.",
+    ),
+    spec(
         "text.replacements.<from>",
         REPLACEMENTS_TABLE,
         "<from>",
@@ -2571,6 +2580,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "text.spoken_punctuation" => json!(cfg.text.spoken_punctuation),
         "text.smart_auto_submit" => json!(cfg.text.smart_auto_submit),
         "text.filter_filler_words" => json!(cfg.text.filter_filler_words),
+        "text.strip_model_punctuation" => json!(cfg.text.strip_model_punctuation),
         "text.replacements.<from>" => {
             let map: Map<String, Json> = cfg
                 .text

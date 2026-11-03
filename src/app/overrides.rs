@@ -284,6 +284,11 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         cli.filter_fillers,
         cli.no_filter_fillers,
     );
+    apply_bool_override(
+        &mut config.text.strip_model_punctuation,
+        cli.strip_model_punctuation,
+        cli.no_strip_model_punctuation,
+    );
     if let Some(ref keys) = cli.paste_keys {
         config.output.paste_keys = Some(keys.clone());
     }

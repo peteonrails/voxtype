@@ -3,6 +3,7 @@
 //! Provides post-transcription text transformations including:
 //! - Spoken punctuation conversion (e.g., "period" → ".")
 //! - Custom word replacements
+//! - Filler-word removal and stripping the model's own punctuation
 
 use crate::config::TextConfig;
 use regex::Regex;
@@ -38,6 +39,11 @@ pub struct TextProcessor {
     /// up directly before a sentence terminator (".!?") after filler removal,
     /// e.g. "hello world, uh." -> "hello world,." -> "hello world.".
     filler_connector_before_term_re: Regex,
+    /// Whether to remove the model's own punctuation before anything else.
+    strip_model_punctuation: bool,
+    /// Pre-compiled regex matching sentence punctuation before whitespace or
+    /// the end. Punctuation inside a token ("3.5", "10:30") is left alone.
+    model_punctuation_re: Regex,
 }
 
 /// Default filler entries that are ordinary vocabulary in a given language.
@@ -131,6 +137,9 @@ impl TextProcessor {
             "BUG: connector-before-terminator regex is a compile-time constant and must be valid",
         );
 
+        let model_punctuation_re = Regex::new(r"[.,?!;:…]+(\s|$)")
+            .expect("BUG: model punctuation regex is a compile-time constant and must be valid");
+
         Self {
             spoken_punctuation: config.spoken_punctuation,
             replacements,
@@ -142,12 +151,24 @@ impl TextProcessor {
             filler_punct_re,
             filler_dup_punct_re,
             filler_connector_before_term_re,
+            strip_model_punctuation: config.strip_model_punctuation,
+            model_punctuation_re,
         }
     }
 
     /// Process text by applying all enabled transformations
     pub fn process(&self, text: &str) -> String {
         let mut result = text.to_string();
+
+        // Drop the model's punctuation before anything adds its own, so the
+        // only punctuation left is what spoken_punctuation and replacements
+        // put there.
+        if self.strip_model_punctuation {
+            result = self
+                .model_punctuation_re
+                .replace_all(&result, "$1")
+                .into_owned();
+        }
 
         // Filter filler words first, on the raw transcription. Running before
         // word_replacements lets users override the default list (e.g. by
@@ -920,5 +941,42 @@ mod tests {
         let processor = TextProcessor::new(&config);
 
         assert_eq!(processor.process("well um I think period"), "well I think.");
+    }
+
+    #[test]
+    fn strip_model_punctuation_keeps_only_spoken_punctuation() {
+        let config = TextConfig {
+            strip_model_punctuation: true,
+            ..make_config(true, &[])
+        };
+        let tp = TextProcessor::new(&config);
+
+        assert_eq!(
+            tp.process("Hello, how are you? Fine. Thanks comma Pat period"),
+            "Hello how are you Fine Thanks, Pat."
+        );
+        // Punctuation inside a token is part of it, not a sentence mark.
+        assert_eq!(
+            tp.process("Version 3.5 ships at 10:30."),
+            "Version 3.5 ships at 10:30"
+        );
+        // What the model types for a spoken word is replaced, not stripped.
+        assert_eq!(tp.process("Wait, question mark."), "Wait?");
+    }
+
+    #[test]
+    fn strip_model_punctuation_keeps_replacement_output() {
+        let config = TextConfig {
+            strip_model_punctuation: true,
+            ..make_config(false, &[("sign off", "Cheers.")])
+        };
+        let tp = TextProcessor::new(&config);
+        assert_eq!(tp.process("Thanks. Sign off."), "Thanks Cheers.");
+    }
+
+    #[test]
+    fn model_punctuation_is_kept_by_default() {
+        let tp = TextProcessor::new(&make_config(false, &[]));
+        assert_eq!(tp.process("Hello, world."), "Hello, world.");
     }
 }

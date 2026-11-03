@@ -1821,6 +1821,23 @@ VOXTYPE_FILTER_FILLERS=true voxtype
 
 The filter runs before `replacements` and the `[post_process]` LLM hook, so any custom replacements still apply on top of filtered text.
 
+**Punctuate by voice only:**
+
+Models like Parakeet and Whisper add punctuation on their own. To get punctuation only where you say it, drop the model's and turn on spoken punctuation:
+
+```toml
+[text]
+spoken_punctuation = true
+strip_model_punctuation = true
+```
+
+```
+# You say:       "Hello comma how are you question mark"
+# Voxtype types: "Hello, how are you?"
+```
+
+Punctuation inside a token, such as "3.5" or "10:30", is kept. Also available as `--strip-model-punctuation` and `VOXTYPE_STRIP_MODEL_PUNCTUATION=true`.
+
 **Shift+Enter for newlines:**
 
 ```toml

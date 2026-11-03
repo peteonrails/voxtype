@@ -522,6 +522,19 @@ pub struct Cli {
     )]
     pub no_filter_fillers: bool,
 
+    /// Remove the punctuation the model adds, keeping spoken punctuation
+    #[arg(long, help_heading = "Text Processing")]
+    pub strip_model_punctuation: bool,
+
+    /// Keep the punctuation the model adds (overrides config)
+    #[arg(
+        long,
+        conflicts_with = "strip_model_punctuation",
+        help_heading = "Text Processing",
+        hide_short_help = true
+    )]
+    pub no_strip_model_punctuation: bool,
+
     /// Text to append after each transcription (e.g., " " for trailing space)
     #[arg(
         long,
