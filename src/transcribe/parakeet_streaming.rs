@@ -192,6 +192,12 @@ impl Transcriber for ParakeetStreamingTranscriber {
 }
 
 impl StreamingTranscriber for ParakeetStreamingTranscriber {
+    /// `ParakeetUnified::transcribe_chunk` decodes each chunk once and never
+    /// revisits it, so every delta is final.
+    fn partials_are_final(&self) -> bool {
+        true
+    }
+
     fn start_stream(
         &self,
         mut samples_rx: mpsc::Receiver<Vec<f32>>,

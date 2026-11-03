@@ -67,6 +67,12 @@ pub struct StreamingSession {
     typed_chars: usize,
     /// Most recent partial text (for status only; never typed).
     partial: String,
+    /// Whether partials go through [`type_processed_delta`](Self::type_processed_delta).
+    processes_partials: bool,
+    /// Raw engine text so far, for sessions that process partials.
+    processed_source: String,
+    /// Processed text currently at the cursor, for sessions that process partials.
+    processed_typed: String,
 }
 
 impl StreamingSession {
@@ -76,7 +82,27 @@ impl StreamingSession {
             finalized_text: String::new(),
             typed_chars: 0,
             partial: String::new(),
+            processes_partials: false,
+            processed_source: String::new(),
+            processed_typed: String::new(),
         }
+    }
+
+    /// A session for an engine whose partials are never revised
+    /// ([`StreamingTranscriber::partials_are_final`](crate::transcribe::StreamingTranscriber::partials_are_final)).
+    /// Its partials and final tail go through [`type_processed_delta`](Self::type_processed_delta),
+    /// so `[text]` processing applies to everything typed (#581).
+    pub fn processing_partials() -> Self {
+        Self {
+            processes_partials: true,
+            ..Self::new()
+        }
+    }
+
+    /// Whether this session's partials and final tail should go through
+    /// [`type_processed_delta`](Self::type_processed_delta).
+    pub fn processes_partials(&self) -> bool {
+        self.processes_partials
     }
 
     /// Update the in-memory partial text. Returns the new partial for
@@ -124,6 +150,75 @@ impl StreamingSession {
 
         self.typed_chars += new_partial.chars().count();
         self.partial.push_str(&new_partial);
+        Ok(())
+    }
+
+    /// Append a delta to the session's transcript, run `[text]` processing
+    /// over the transcript, and bring the cursor up to date with the result.
+    ///
+    /// For engines whose partials are final, such as Parakeet's unified
+    /// streaming model. Each delta can't be processed on its own: a spoken
+    /// phrase can arrive split across chunks ("question" then " mark"), and
+    /// the processor trims and tidies punctuation as if its input were a
+    /// whole utterance. So the session keeps the raw transcript, processes
+    /// the part that [`TextProcessor::stable_prefix_len`] says can't change
+    /// any more (all of it at `end_of_stream`), and types the difference
+    /// from what is already at the cursor. What's typed by the end equals
+    /// processing the whole transcript at once, as batch mode does.
+    ///
+    /// The hold-back keeps typed text append-only in practice. When later
+    /// text does change what processing makes of earlier text, the changed
+    /// tail is backspaced and retyped.
+    pub async fn type_processed_delta(
+        &mut self,
+        chain: &[Box<dyn TextOutput>],
+        delta: &str,
+        text_processor: &TextProcessor,
+        end_of_stream: bool,
+        pre_output_command: Option<&str>,
+        post_output_command: Option<&str>,
+    ) -> Result<(), OutputError> {
+        self.processed_source.push_str(delta);
+        let ready = if end_of_stream {
+            self.processed_source.len()
+        } else {
+            text_processor.stable_prefix_len(&self.processed_source)
+        };
+        let wanted = text_processor.process(&self.processed_source[..ready]);
+        let (backspace, mut append) = cursor_edit(&self.processed_typed, &wanted);
+
+        if backspace > 0 {
+            if emit_backspaces(backspace).await == backspace {
+                let keep = self.processed_typed.chars().count() - backspace;
+                self.processed_typed = self.processed_typed.chars().take(keep).collect();
+                self.typed_chars = self.typed_chars.saturating_sub(backspace);
+            } else {
+                // The cursor still shows the old text. Keep it, and type
+                // only what goes beyond it, rather than lose the rest.
+                tracing::warn!(
+                    "Streaming text processing: no backspace-capable backend; \
+                     keeping {} stale chars at the cursor",
+                    backspace
+                );
+                append = wanted
+                    .chars()
+                    .skip(self.processed_typed.chars().count())
+                    .collect();
+            }
+        }
+
+        if !append.is_empty() {
+            let opts = OutputOptions {
+                pre_output_command,
+                post_output_command,
+                wait_for_modifier_release: false,
+                modifier_release_timeout: std::time::Duration::from_millis(0),
+            };
+            output_with_fallback(chain, &append, opts).await?;
+            self.typed_chars += append.chars().count();
+            self.processed_typed.push_str(&append);
+        }
+        self.finalized_text.clone_from(&self.processed_typed);
         Ok(())
     }
 
@@ -388,6 +483,19 @@ impl Default for StreamingSession {
     }
 }
 
+/// How to turn `typed` into `wanted` at the cursor: the number of chars to
+/// backspace off the end of `typed`, then the text to type. Counts are
+/// Unicode scalars, like `typed_chars`.
+fn cursor_edit(typed: &str, wanted: &str) -> (usize, String) {
+    let common = typed
+        .chars()
+        .zip(wanted.chars())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let backspace = typed.chars().count() - common;
+    (backspace, wanted.chars().skip(common).collect())
+}
+
 /// Backspace `count` chars using the first available method.
 /// Returns the actual number of backspaces emitted.
 async fn emit_backspaces(count: usize) -> usize {
@@ -517,6 +625,58 @@ mod tests {
             }
         }
         vec![Box::new(Wrap(out))]
+    }
+
+    /// #581: Parakeet's partials are final, so they go through `[text]`
+    /// processing as well, even when a phrase arrives split across chunks.
+    /// A tail held back because it might continue is typed at end of stream.
+    #[tokio::test]
+    async fn processed_partials_type_what_batch_processing_would() {
+        let config = crate::config::TextConfig {
+            spoken_punctuation: true,
+            ..Default::default()
+        };
+        let tp = TextProcessor::new(&config);
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        let mut session = StreamingSession::processing_partials();
+        assert!(session.processes_partials());
+
+        for delta in ["Hello", " com", "ma how", " are you question"] {
+            session
+                .type_processed_delta(&chain, delta, &tp, false, None, None)
+                .await
+                .unwrap();
+        }
+        assert_eq!(rec.typed().concat(), "Hello, how are you");
+
+        session
+            .type_processed_delta(&chain, "", &tp, true, None, None)
+            .await
+            .unwrap();
+        let expected = "Hello, how are you question";
+        assert_eq!(rec.typed().concat(), expected);
+        assert_eq!(session.finalized_text(), expected);
+        assert_eq!(session.typed_chars(), expected.chars().count());
+    }
+
+    #[test]
+    fn cursor_edit_backspaces_only_the_changed_tail() {
+        assert_eq!(
+            cursor_edit("Hello", "Hello, world"),
+            (0, ", world".to_string())
+        );
+        assert_eq!(
+            cursor_edit("I use fox", "I use voxtype"),
+            (3, "voxtype".to_string())
+        );
+        assert_eq!(cursor_edit("café x", "café"), (2, String::new()));
+        assert_eq!(cursor_edit("", ""), (0, String::new()));
+    }
+
+    #[test]
+    fn plain_sessions_do_not_process_partials() {
+        assert!(!StreamingSession::new().processes_partials());
     }
 
     #[tokio::test]

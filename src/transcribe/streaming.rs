@@ -138,6 +138,15 @@ pub trait StreamingTranscriber: Send + Sync {
         &self,
         samples_rx: mpsc::Receiver<Vec<f32>>,
     ) -> Result<StreamHandle, TranscribeError>;
+
+    /// Whether every `Partial` this backend emits is final: appended text
+    /// that no later `Replace` revises. The daemon then runs `[text]`
+    /// processing on partials as they arrive instead of typing them raw.
+    /// Backends that revise partials must keep the default, because
+    /// `Replace` backspace counts refer to the raw partial text.
+    fn partials_are_final(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
