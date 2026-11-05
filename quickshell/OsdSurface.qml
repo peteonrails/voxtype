@@ -597,6 +597,7 @@ PanelWindow {
             visible: panel.classicCard
             anchors.fill: parent
             classic: true
+            hostVisible: panel.visible
             style: panel.style
             ring: panel.ring
             ringMin: panel.ringMin
@@ -647,6 +648,7 @@ PanelWindow {
                     VT.RecipeRenderer {
                         id: recipeRenderer
                         anchors.fill: parent
+                        hostVisible: panel.visible
                         style: panel.style
                         ring: panel.ring
                         framesReceived: panel.framesReceived

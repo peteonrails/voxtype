@@ -13,6 +13,10 @@ Item {
     // Draw the classic card: a port of the GTK4 frontend's drawing
     // (src/bin/voxtype_osd_gtk4.rs) instead of the recipe layers.
     property bool classic: false
+    // Whether the window hosting this renderer is shown. Hiding a window
+    // leaves its items' `visible` true, so the host has to say so, or the
+    // animation keeps running behind a hidden OSD.
+    property bool hostVisible: true
     // Scroll clock from the host (see OsdSurface.qml): frames received
     // this recording and the wall-clock origin, 100 frames per second.
     property int framesReceived: 0
@@ -743,7 +747,7 @@ Item {
     // Runs once per rendered display frame, so motion follows the display's
     // refresh rate rather than a fixed timer or socket deliveries.
     FrameAnimation {
-        running: root.visible && (root.classic || root.daemonState !== "idle")
+        running: root.hostVisible && root.visible && (root.classic || root.daemonState !== "idle")
         onTriggered: {
             const dt = Math.min(0.05, Math.max(0.001, frameTime));
             root._advance(dt);
