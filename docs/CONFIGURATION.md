@@ -4015,8 +4015,8 @@ With the defaults (`style = "default"`, `layout = "compact"`, no
 card as the GTK4 and native frontends: a `width_px` by `height_px` card with
 the waveform on the left and a ten-segment level meter on the right, in the
 same theme colors, shown while audio arrives and hidden 150 ms after it
-stops. Picking another style or layout, or writing your own visual layers,
-switches to the recipe renderer described above.
+stops. Picking another style or layout, customizing `[osd.frame]`, or writing
+your own visual layers switches to the recipe renderer described above.
 
 `[osd.frame]` controls the host frame around the recipe. Set
 `background = "none"` or `border = "none"` for frameless recipes; the visual

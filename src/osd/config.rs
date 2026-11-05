@@ -235,7 +235,7 @@ fn default_visual_layers() -> Vec<OsdLayerConfig> {
 }
 
 /// Quickshell host-frame styling for no-code recipes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OsdFrameConfig {
     /// Background color role, literal color, or `none`.

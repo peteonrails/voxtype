@@ -39,9 +39,9 @@ pub struct RuntimeOsdStyle {
     pub width_px: u32,
     pub height_px: u32,
     /// Draw the card exactly like the GTK4 and native frontends: true for
-    /// the default style and `compact` layout with the default visual
-    /// recipe and no custom QML. Other styles, layouts and customized
-    /// recipes keep the recipe renderer.
+    /// the default style and `compact` layout with the default frame and
+    /// visual recipe and no custom QML. Other styles, layouts and customized
+    /// frames or recipes keep the recipe renderer.
     pub classic_card: bool,
     pub package_dir: Option<PathBuf>,
     pub asset_root: Option<PathBuf>,
@@ -115,6 +115,7 @@ pub fn resolve_runtime_style(
         && package_dir.is_none()
         && custom_qml.is_none()
         && layout == OsdLayout::Compact
+        && frame == OsdFrameConfig::default()
         && serde_json::to_value(&visual).ok()
             == serde_json::to_value(OsdVisualConfig::default()).ok();
 
@@ -474,6 +475,38 @@ mod tests {
         let mut recipe = OsdConfig::default();
         recipe.visual.layers.truncate(1);
         assert!(!resolve_runtime_style(&recipe, None).unwrap().classic_card);
+    }
+
+    #[test]
+    fn customized_frames_keep_the_recipe_renderer() {
+        let frames = [
+            OsdFrameConfig {
+                background: "none".to_string(),
+                border: "#ff00ff".to_string(),
+                ..OsdFrameConfig::default()
+            },
+            OsdFrameConfig {
+                background: "none".to_string(),
+                ..OsdFrameConfig::default()
+            },
+            OsdFrameConfig {
+                border: "none".to_string(),
+                ..OsdFrameConfig::default()
+            },
+            OsdFrameConfig {
+                glow: false,
+                ..OsdFrameConfig::default()
+            },
+        ];
+        for frame in frames {
+            let osd = OsdConfig {
+                frame: frame.clone(),
+                ..OsdConfig::default()
+            };
+            let style = resolve_runtime_style(&osd, None).unwrap();
+            assert!(!style.classic_card, "{frame:?} drew the classic card");
+            assert_eq!(style.frame, frame);
+        }
     }
 
     #[test]
