@@ -136,7 +136,15 @@ Parakeet on CPU is significantly faster than Whisper on CPU, and competitive wit
 
 ## GGUF on Vulkan (transcribe.cpp)
 
-Voxtype can also run Parakeet TDT 0.6B v3 as a GGUF model through [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp), inside the daemon, on a Vulkan GPU. It is the same `parakeet` engine: a `[parakeet] model` ending in `.gguf` selects transcribe.cpp, anything else selects ONNX Runtime. It needs no ONNX Runtime, so a binary built with `--features gpu-vulkan` (or `--features parakeet-gguf` for the CPU runtime only) runs it.
+Voxtype can also run Parakeet TDT 0.6B v3 as a GGUF model through [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) on a Vulkan GPU. It is the same `parakeet` engine: a `[parakeet] model` ending in `.gguf` selects transcribe.cpp, anything else selects ONNX Runtime. It needs no ONNX Runtime.
+
+transcribe.cpp runs in a helper process, `voxtype-gguf-worker`, which voxtype starts when it loads the model and keeps running so the model stays loaded between recordings. It is a separate program because transcribe.cpp and Whisper each bundle their own copy of the ggml library, and the two copies cannot share one process. Release packages install the worker next to `voxtype`. Building from source, enable GGUF in voxtype with `--features gpu-vulkan` (or `--features parakeet-gguf`), then build the worker with the GPU backend you want:
+
+```sh
+cargo build --release -p voxtype-gguf-worker --features vulkan
+```
+
+and install `target/release/voxtype-gguf-worker` beside `voxtype`, or point `VOXTYPE_GGUF_WORKER` at it.
 
 Run `voxtype setup model` and pick a Parakeet GGUF, or download one directly:
 

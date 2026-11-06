@@ -6201,7 +6201,6 @@ dependencies = [
  "toml_edit 0.22.27",
  "tracing",
  "tracing-subscriber",
- "transcribe-cpp",
  "tray-icon",
  "ureq 2.12.1",
  "uuid",
@@ -6213,6 +6212,20 @@ dependencies = [
  "which",
  "whisper-rs",
  "zbus",
+]
+
+[[package]]
+name = "voxtype-gguf-worker"
+version = "1.2.0"
+dependencies = [
+ "hound",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+ "transcribe-cpp",
+ "voxtype",
 ]
 
 [[package]]

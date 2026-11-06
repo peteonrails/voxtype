@@ -6,7 +6,6 @@
 //! across recordings. Only the run options and the long-audio strategy differ
 //! between families, so those stay in each engine's module.
 
-use crate::config::Config;
 use crate::error::TranscribeError;
 use std::io::Read;
 use std::path::PathBuf;
@@ -38,12 +37,9 @@ pub(crate) struct GgufSession {
 
 impl GgufSession {
     pub fn load(engine: &GgufEngine, load: &GgufLoad) -> Result<Self, TranscribeError> {
-        let configured = PathBuf::from(load.model);
-        let model_path = if configured.exists() || configured.is_absolute() {
-            configured
-        } else {
-            Config::models_dir().join(configured)
-        };
+        // voxtype resolves a bare model name against its models directory
+        // before handing the path over, so it arrives ready to open.
+        let model_path = PathBuf::from(load.model);
         let mut file = std::fs::File::open(&model_path).map_err(|e| {
             TranscribeError::ModelNotFound(format!("{}: {e}", model_path.display()))
         })?;
@@ -118,7 +114,6 @@ impl GgufSession {
     }
 
     /// The model's `general.architecture`, e.g. "parakeet".
-    #[cfg_attr(not(feature = "parakeet-gguf"), allow(dead_code))]
     pub fn arch(&self) -> Result<String, TranscribeError> {
         Ok(self.lock()?.model().arch())
     }

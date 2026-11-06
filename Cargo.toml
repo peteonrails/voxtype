@@ -1,5 +1,5 @@
 [workspace]
-members = ["xtask"]
+members = ["xtask", "crates/gguf-worker"]
 
 [package]
 name = "voxtype"
@@ -90,7 +90,6 @@ ort = { version = "2.0.0-rc.12", optional = true, default-features = false, feat
 ndarray = { version = "0.16", optional = true }
 half = { version = "2", optional = true }
 tokenizers = { version = "0.20", optional = true, default-features = false, features = ["onig"] }
-transcribe-cpp = { version = "=0.2.3", optional = true, default-features = false }
 # Inverse text normalization: spoken-form numbers/dates/currency to written
 # form ("twenty five dollars" -> "$25"). Pure Rust port of NeMo text
 # processing; grammars are compiled in, so no runtime data files.
@@ -197,7 +196,6 @@ gpu-vulkan = [
     "whisper-rs/vulkan",
     "cohere-gguf",
     "parakeet-gguf",
-    "transcribe-cpp/vulkan",
 ]
 gpu-cuda = ["whisper-rs/cuda"]
 gpu-metal = ["whisper-rs/metal"]
@@ -210,10 +208,14 @@ parakeet-cuda = ["parakeet", "parakeet-rs/cuda"]
 parakeet-tensorrt = ["parakeet", "parakeet-rs/tensorrt"]
 parakeet-migraphx = ["parakeet", "parakeet-rs/migraphx"]
 parakeet-coreml = ["parakeet", "parakeet-rs/coreml"]
-# Parakeet GGUF models run in-process through transcribe.cpp, like Cohere's.
-# Not implied by `parakeet`: ONNX builds would otherwise compile ggml for a
-# runtime that is only faster on a GPU. `gpu-vulkan` enables it.
-parakeet-gguf = ["dep:transcribe-cpp"]
+# Parakeet GGUF models run through transcribe.cpp in voxtype-gguf-worker, like
+# Cohere's. Not implied by `parakeet`: transcribe.cpp is only faster than ONNX
+# Runtime on a GPU. `gpu-vulkan` enables it.
+#
+# Both GGUF features only enable the client that drives the worker. voxtype
+# itself must never depend on transcribe-cpp: its ggml collides with
+# whisper-rs's. See crates/gguf-worker/Cargo.toml.
+parakeet-gguf = []
 # Dynamic loading for system ONNX Runtime (used by Nix builds)
 parakeet-load-dynamic = ["parakeet", "parakeet-rs/load-dynamic"]
 # Inverse text normalization for dictated numbers, dates, currency and URLs.
@@ -268,7 +270,7 @@ omnilingual-tensorrt = ["omnilingual", "onnx-tensorrt-enabled"]
 # the standard models directory like other ONNX engines.
 cohere = ["onnx-common", "dep:half", "dep:tokenizers", "cohere-gguf"]
 # GGUF models run in-process through transcribe.cpp's Rust binding.
-cohere-gguf = ["dep:transcribe-cpp"]
+cohere-gguf = []
 cohere-cuda = ["cohere", "onnx-cuda-enabled"]
 cohere-tensorrt = ["cohere", "onnx-tensorrt-enabled"]
 # Soniox is unconditional. Its deps (tokio-tungstenite, futures-util, reqwest)

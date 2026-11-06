@@ -6,9 +6,9 @@
 
 use crate::config::ParakeetConfig;
 use crate::error::TranscribeError;
-use crate::transcribe::gguf::{self, GgufEngine, GgufLoad, GgufSession};
-use crate::transcribe::window;
-use crate::transcribe::Transcriber;
+use crate::gguf::{self, GgufEngine, GgufLoad, GgufSession};
+use crate::window;
+use crate::Transcriber;
 use transcribe_cpp::RunOptions;
 
 const ENGINE: GgufEngine = GgufEngine {

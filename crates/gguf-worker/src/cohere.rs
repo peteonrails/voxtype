@@ -1,10 +1,10 @@
 //! Resident Cohere GGUF inference through transcribe.cpp's Rust binding.
 
+use crate::cohere_chunking::CohereChunking;
 use crate::config::CohereConfig;
 use crate::error::TranscribeError;
-use crate::transcribe::cohere_chunking::CohereChunking;
-use crate::transcribe::gguf::{self, GgufEngine, GgufLoad, GgufSession};
-use crate::transcribe::Transcriber;
+use crate::gguf::{self, GgufEngine, GgufLoad, GgufSession};
+use crate::Transcriber;
 use transcribe_cpp::RunOptions;
 
 const ENGINE: GgufEngine = GgufEngine {

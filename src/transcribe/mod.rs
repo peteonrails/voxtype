@@ -6,7 +6,7 @@
 //! - CLI subprocess using whisper-cli (fallback for glibc 2.42+ compatibility)
 //! - Subprocess isolation for GPU memory release
 //! - Optionally NVIDIA Parakeet via ONNX Runtime (when `parakeet` feature is enabled)
-//!   or transcribe.cpp GGUF (when `parakeet-gguf` feature is enabled)
+//!   or transcribe.cpp GGUF in voxtype-gguf-worker (when `parakeet-gguf` is enabled)
 //! - Optionally Moonshine via ONNX Runtime (when `moonshine` feature is enabled)
 //! - Optionally SenseVoice via ONNX Runtime (when `sensevoice` feature is enabled)
 //! - Optionally Paraformer via ONNX Runtime (when `paraformer` feature is enabled)
@@ -58,9 +58,6 @@ pub mod ctc;
 #[cfg(feature = "parakeet")]
 pub mod parakeet;
 
-#[cfg(feature = "parakeet-gguf")]
-pub mod parakeet_gguf;
-
 #[cfg(feature = "moonshine")]
 pub mod moonshine;
 
@@ -80,14 +77,16 @@ pub mod omnilingual;
 #[cfg(feature = "cohere")]
 pub mod cohere;
 
-#[cfg(feature = "cohere-gguf")]
-pub mod cohere_gguf;
-
-/// transcribe.cpp session loading shared by the GGUF engines.
+/// Drives voxtype-gguf-worker, which runs the transcribe.cpp GGUF engines out of
+/// process. voxtype never links transcribe.cpp: its ggml collides with
+/// whisper-rs's.
 #[cfg(any(feature = "cohere-gguf", feature = "parakeet-gguf"))]
-mod gguf;
+pub mod gguf_subprocess;
 
 #[cfg(any(feature = "cohere", feature = "cohere-gguf"))]
+// Without the ONNX engine, voxtype only validates the settings; the chunker
+// itself runs in voxtype-gguf-worker, which compiles this same file.
+#[cfg_attr(not(feature = "cohere"), allow(dead_code))]
 mod cohere_chunking;
 
 /// Cohere-specific log-mel feature extractor (NeMo conventions, 128 mels).
@@ -206,9 +205,9 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
             if is_gguf_model(&parakeet_config.model) {
                 #[cfg(feature = "parakeet-gguf")]
                 {
-                    return Ok(Box::new(parakeet_gguf::ParakeetGgufTranscriber::new(
-                        parakeet_config,
-                    )?));
+                    return Ok(Box::new(
+                        gguf_subprocess::GgufSubprocessTranscriber::parakeet(parakeet_config)?,
+                    ));
                 }
                 #[cfg(not(feature = "parakeet-gguf"))]
                 {
@@ -324,7 +323,7 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
             })?;
             if is_gguf_model(&cfg.model) {
                 #[cfg(feature = "cohere-gguf")]
-                { return Ok(Box::new(cohere_gguf::CohereGgufTranscriber::new(cfg)?)); }
+                { return Ok(Box::new(gguf_subprocess::GgufSubprocessTranscriber::cohere(cfg)?)); }
                 #[cfg(not(feature = "cohere-gguf"))]
                 { return Err(TranscribeError::InitFailed("Cohere GGUF requires --features cohere-gguf".to_string())); }
             }
