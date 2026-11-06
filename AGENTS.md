@@ -381,7 +381,7 @@ Prior art worth copying, from the competitors:
 - **Handy** puts five items in a sidebar (General, History, Models, Advanced, About). *General* is about eight controls - shortcut, push-to-talk, language, microphone, mute-while-recording, audio feedback, output device, volume - and everything else lives under *Advanced*, grouped App / Output / Transcription. Its *Models* page is the strongest part: cards with accuracy and speed meters, download size, language count, and Active/Recommended badges, plus search and filters. Voxtype's model picker is a flat list by comparison.
 - **AirType** does the same job in a TUI: one status line (service, model, paste mode, hotkey) over a ten-item menu, including a "Doctor" entry.
 
-Both also surface things voxtype has planned but not shipped - Handy has transcript history (#209, currently 1.5.0) and a "Copy Last Transcript" tray entry.
+Both also surface things voxtype has planned but not shipped - Handy has transcript history (#209, now 1.3.1) and a "Copy Last Transcript" tray entry.
 
 **Punctuation spacing is a dialect, not a universal (#696).** `clean_punctuation_spacing` in `src/text/mod.rs` applies one set of rules to every transcription, and several of them are only correct in a particular context. Split it into a general core plus profile- and language-scoped rules, so a coding profile keeps the developer behaviour and prose stops being damaged by it.
 
@@ -396,13 +396,13 @@ Prerequisite: profiles have to reach `TextProcessor`, which they do not today - 
 
 **1.3.0:** parakeet.cpp as a ggml/Vulkan Parakeet backend ([#483](https://github.com/peteonrails/voxtype/issues/483)) - 5-6x faster steady-state than ONNX/MIGraphX on AMD, and the only GPU path for AMD and Intel Arc since ORT has no Vulkan EP. Subprocess-isolated so whisper-rs's ggml and parakeet.cpp's ggml never share an address space (contrast #792's resident, non-subprocess Cohere design - the two GGUF engines take different memory-lifecycle approaches; worth reconciling once both have shipped). Unified profiles ([#519](https://github.com/peteonrails/voxtype/issues/519)) absorbing Dictation Intents and per-record language (#484). The model architecture work moved here from 1.2.0, since GGUF engines are the models it will describe: the model registry out of Rust structs into versioned data ([#648](https://github.com/peteonrails/voxtype/issues/648)) and owning the model download transfer layer ([#647](https://github.com/peteonrails/voxtype/issues/647)). Surviving hard native-code aborts without `gpu_isolation` (#643) pairs with the subprocess isolation above.
 
-**1.3.1:** Internal cleanup (#477, #478, #470, #471) and xdotool as an opt-in driver (#559).
+**1.3.1:** Transcript history ([#209](https://github.com/peteonrails/voxtype/issues/209)) and the OpenAI-compatible local STT API ([#244](https://github.com/peteonrails/voxtype/issues/244)) - single daemon serving hotkey dictation plus an HTTP API - both moved up from later releases. Also internal cleanup (#477, #478, #470, #471) and xdotool as an opt-in driver (#559).
 
 **1.3.2:** KDE output drivers, both opt-in: kdotool (#509) and kwtype (#649).
 
-**1.4.0:** OpenAI-compatible local STT API ([#244](https://github.com/peteonrails/voxtype/issues/244)) - single daemon serving hotkey dictation plus an HTTP API. GigaAM v3 as a Russian specialist (#544). ElevenLabs Scribe streaming (#545). Nemotron ([#47](https://github.com/peteonrails/voxtype/issues/47)), moved from 1.2.0.
+**1.4.0:** GigaAM v3 as a Russian specialist (#544). ElevenLabs Scribe streaming (#545). Nemotron ([#47](https://github.com/peteonrails/voxtype/issues/47)), moved from 1.2.0.
 
-**1.5.0:** Audio and output retention as one feature - caching (#28), history (#209), meeting file import (#489), and fixing `retain_audio`'s dead wiring (#529). Off by default.
+**1.5.0:** Audio retention - caching (#28), meeting file import (#489), and fixing `retain_audio`'s dead wiring (#529), building on the 1.3.1 history. Off by default.
 
 **2.0 (major):** Remove ONNX Runtime support entirely, once every ONNX-backed engine that's staying either has a native ggml/GGUF port (Cohere via #792 lands first, in 1.2.0; parakeet.cpp via #483 in 1.3.0) or is dropped. Moonshine/SenseVoice/Paraformer/Dolphin/Omnilingual still need an explicit per-engine port-or-retire call - not yet made. This also retires the ONNX-specific build/packaging burden: the onnx-avx2/onnx-avx512/onnx-cuda-12/onnx-cuda-13/onnx-migraphx binary targets, the AVX-512-instruction-leakage checks that exist only because of bundled ONNX Runtime prebuilts, and both open items under Blocked/Waiting below become moot rather than needing to be solved.
 
