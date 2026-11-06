@@ -344,7 +344,8 @@ Since omarchy#14625 (2026-10-08), fresh Omarchy installs default to Superwhisper
 ### Feature Roadmap
 
 Milestone-aligned with GitHub so the two don't drift. Based on the 29 Aug 2026 backlog triage,
-updated 25 Sep 2026 for the ggml/GGUF direction below.
+updated 25 Sep 2026 for the ggml/GGUF direction below, and realigned 6 Nov 2026: 1.2.0 holds what
+is already on `rc/1.2.0`, and open work without a fix there moved to later milestones.
 
 **Strategic shift (25 Sep 2026): native ggml/GGUF engines are now a near-term priority, not an
 exploratory item.** Omarchy's Ryan Hughes proved out Cohere Transcribe as a GGUF model on
@@ -356,16 +357,9 @@ Runtime support entirely.** Phase 3 risk (does every ONNX engine have a ggml/GGU
 resolved for the important ones; the rest (exact list TBD) get evaluated for porting or
 retirement closer to 2.0, not before.
 
-**1.0.1 (fast follow-up):** Defects that shipped in 1.0.0 - SIGILL guidance on pre-AVX2 CPUs ([#612](https://github.com/peteonrails/voxtype/issues/612)), `configure --config` overwriting the real config ([#595](https://github.com/peteonrails/voxtype/issues/595)), impossible install instructions ([#604](https://github.com/peteonrails/voxtype/issues/604), [#622](https://github.com/peteonrails/voxtype/issues/622)), stuck push-to-talk ([#556](https://github.com/peteonrails/voxtype/issues/556)), and `voxtype info accel` reading a state file nothing writes. Plus docs corrections (#526, #528, #564).
+**Shipped:** 1.0.1, 1.1.0 and 1.1.1. The planned 1.1.2 (output drivers) and 1.1.3 (macOS) releases were folded into 1.2.0 instead of shipping on their own; their fixes are on `rc/1.2.0`. 1.1.5 was retired and its one item (#603) moved to 1.2.1.
 
-**1.1.x (incremental):**
-- 1.1.0 Daemon core, model plumbing and OSD: #581, #612, #646, #656, #669, #687, #692, #694, #705
-- 1.1.1 GPU selection and display: #577, #611, #430, #578, #580
-- 1.1.2 Output drivers: #530, #538, #543, #507, #552
-- 1.1.3 macOS: #522, #576, #452, #632
-- 1.1.5 Compatibility: #603
-
-**1.2.0 (architecture):** Model registry out of Rust structs into versioned data ([#648](https://github.com/peteonrails/voxtype/issues/648)), owning the model download transfer layer ([#647](https://github.com/peteonrails/voxtype/issues/647)), Nemotron ([#47](https://github.com/peteonrails/voxtype/issues/47)). **Resident Vulkan Cohere GGUF transcription** ([#792](https://github.com/peteonrails/voxtype/pull/792), Jacob Mink) - runs Cohere `.gguf` through the official `transcribe.cpp` Rust binding, model/session resident in-process (no subprocess worker) when `on_demand_loading = false`; also closes the Cohere half of the long-audio windowing gap (#551) via quiet-boundary chunk splitting, shared with the ONNX path. Parakeet's long-audio windowing (#288) is unrelated and still open. Before merge: reconcile the model source (currently a pinned HuggingFace revision from handy-computer's repo) against the R2-only model CDN policy - every other model is R2-mirrored, none are HF-direct - and note the PR explicitly does not implement an end-to-end GPU-probe/fallback policy, which overlaps #611/#577. Dictation cleanup pipeline ([#696](https://github.com/peteonrails/voxtype/issues/696)): staged labelers and rules instead of LLM rewriting - vocabulary, disfluency tagging (LARD-trained, CC-BY), punctuation/casing for the CTC engines that emit neither, ITN via text-processing-rs, user rules last; the LLM keeps only tone/restructuring behind an edit-list contract. Absorbs #535 and the filler-word half of #566; profile vocabularies feed #519.
+**1.2.0 (GGUF Cohere and text cleanup):** **Resident Vulkan Cohere GGUF transcription** ([#792](https://github.com/peteonrails/voxtype/pull/792), Jacob Mink) - runs Cohere `.gguf` through the official `transcribe.cpp` Rust binding, model/session resident in-process (no subprocess worker) when `on_demand_loading = false`, with the weights served from R2 like every other model. It does not implement an end-to-end GPU-probe/fallback policy, which overlaps #611/#577. Long audio is windowed for Cohere (#551) and Parakeet (#288). Also carries the output-driver fixes (#530, #538, #507, #543), the macOS fixes (#522, #576, #452), and mouse-button hotkeys (#546). Dictation cleanup pipeline ([#696](https://github.com/peteonrails/voxtype/issues/696)): staged labelers and rules instead of LLM rewriting - vocabulary, disfluency tagging (LARD-trained, CC-BY), punctuation/casing for the CTC engines that emit neither, ITN via text-processing-rs, user rules last; the LLM keeps only tone/restructuring behind an edit-list contract. Absorbs #535 and the filler-word half of #566; profile vocabularies feed #519.
 
 ### 1.2.0 release preparation
 
@@ -398,13 +392,15 @@ Both also surface things voxtype has planned but not shipped - Handy has transcr
 
 Prerequisite: profiles have to reach `TextProcessor`, which they do not today - it is built once at daemon start from the global `[text]` config (`daemon.rs`), so a profile cannot currently change text processing at all. That plumbing is shared with the profile-vocabulary work in #519.
 
-**1.3.0:** parakeet.cpp as a ggml/Vulkan Parakeet backend ([#483](https://github.com/peteonrails/voxtype/issues/483)) - 5-6x faster steady-state than ONNX/MIGraphX on AMD, and the only GPU path for AMD and Intel Arc since ORT has no Vulkan EP. Subprocess-isolated so whisper-rs's ggml and parakeet.cpp's ggml never share an address space (contrast #792's resident, non-subprocess Cohere design - the two GGUF engines take different memory-lifecycle approaches; worth reconciling once both have shipped). Unified profiles ([#519](https://github.com/peteonrails/voxtype/issues/519)) absorbing Dictation Intents and per-record language (#484).
+**1.2.1 (fast follow-up):** Open bugs with no fix on `rc/1.2.0` yet - the Vulkan runtime not found (#430), the Vulkan destructor abort on Intel iGPUs (#814, mitigated in 1.2.0), VAD check time growing per check (#578), the capture start/stop boundary handshake (#651), broken Moonshine foreign-language models (#460), the OpenRouter `/api/v1` duplicate path (#603), and AppImage install instructions that link to a file that does not exist (#622). Plus the smaller int4 Parakeet laptop model (#474) and the macOS packages' missing ONNX engines (#632, which needs a call on arm64-only ONNX versus waiting for GGUF engines). Two stale PRs need a merge-or-close decision here: corpus capture (#328) and sliding-window streaming with OpenVINO (#592).
+
+**1.3.0:** parakeet.cpp as a ggml/Vulkan Parakeet backend ([#483](https://github.com/peteonrails/voxtype/issues/483)) - 5-6x faster steady-state than ONNX/MIGraphX on AMD, and the only GPU path for AMD and Intel Arc since ORT has no Vulkan EP. Subprocess-isolated so whisper-rs's ggml and parakeet.cpp's ggml never share an address space (contrast #792's resident, non-subprocess Cohere design - the two GGUF engines take different memory-lifecycle approaches; worth reconciling once both have shipped). Unified profiles ([#519](https://github.com/peteonrails/voxtype/issues/519)) absorbing Dictation Intents and per-record language (#484). The model architecture work moved here from 1.2.0, since GGUF engines are the models it will describe: the model registry out of Rust structs into versioned data ([#648](https://github.com/peteonrails/voxtype/issues/648)) and owning the model download transfer layer ([#647](https://github.com/peteonrails/voxtype/issues/647)). Surviving hard native-code aborts without `gpu_isolation` (#643) pairs with the subprocess isolation above.
 
 **1.3.1:** Internal cleanup (#477, #478, #470, #471) and xdotool as an opt-in driver (#559).
 
-**1.3.2:** kdotool as an opt-in driver (#509).
+**1.3.2:** KDE output drivers, both opt-in: kdotool (#509) and kwtype (#649).
 
-**1.4.0:** OpenAI-compatible local STT API ([#244](https://github.com/peteonrails/voxtype/issues/244)) - single daemon serving hotkey dictation plus an HTTP API. GigaAM v3 as a Russian specialist (#544). ElevenLabs Scribe streaming (#545).
+**1.4.0:** OpenAI-compatible local STT API ([#244](https://github.com/peteonrails/voxtype/issues/244)) - single daemon serving hotkey dictation plus an HTTP API. GigaAM v3 as a Russian specialist (#544). ElevenLabs Scribe streaming (#545). Nemotron ([#47](https://github.com/peteonrails/voxtype/issues/47)), moved from 1.2.0.
 
 **1.5.0:** Audio and output retention as one feature - caching (#28), history (#209), meeting file import (#489), and fixing `retain_audio`'s dead wiring (#529). Off by default.
 
