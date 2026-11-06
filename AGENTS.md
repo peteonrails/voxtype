@@ -1,6 +1,6 @@
-# Claude Code Guidelines for Voxtype
+# Agent Guidelines for Voxtype
 
-This document helps Claude Code (and human contributors) understand the voxtype codebase, make good architectural decisions, and submit PRs that align with project standards.
+This document helps coding agents (Claude Code, Codex, Hermes and others) and human contributors understand the voxtype codebase, make good architectural decisions, and submit PRs that align with project standards. Claude Code reads it through `CLAUDE.md`, which imports this file.
 
 ## Table of Contents
 
@@ -1024,4 +1024,4 @@ hash -r  # Clear shell's command cache
 
 See [docs/SMOKE_TESTS.md](docs/SMOKE_TESTS.md) for comprehensive manual testing procedures.
 
-For automated regression testing, use the `/regression-test` skill which covers unit tests, CLI commands, config validation, and binary variant verification.
+For automated regression testing, use the regression-test skill (`.claude/skills/regression-test/SKILL.md`), which covers unit tests, CLI commands, config validation, and binary variant verification.
