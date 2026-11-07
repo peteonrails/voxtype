@@ -62,13 +62,16 @@ ENV CMAKE_CXX_FLAGS="-mno-avx512f -mno-avx512vl -mno-avx512bw -mno-avx512dq -mno
 
 # Build AVX2 binary
 RUN cargo build --release \
-    && cp target/release/voxtype /tmp/voxtype-avx2
+    && cp target/release/voxtype /tmp/voxtype-avx2 \
+    && cargo build --release -p voxtype-gguf-worker \
+    && cp target/release/voxtype-gguf-worker /tmp/voxtype-gguf-worker
 
 # Verify no AVX-512 or GFNI instructions
 RUN echo "=== Verifying AVX2 binary ===" \
-    && zmm_count=$(objdump -d /tmp/voxtype-avx2 | grep -c zmm || echo 0) \
-    && avx512_count=$(objdump -d /tmp/voxtype-avx2 | grep -cE 'vpternlog|vpermt2|vpblendm|\{1to[0-9]+\}' || echo 0) \
-    && gfni_count=$(objdump -d /tmp/voxtype-avx2 | grep -cE 'vgf2p8|gf2p8' || echo 0) \
+    && DUMP=$(objdump -d /tmp/voxtype-avx2; objdump -d /tmp/voxtype-gguf-worker) \
+    && zmm_count=$(echo "$DUMP" | grep -c zmm || true) \
+    && avx512_count=$(echo "$DUMP" | grep -cE 'vpternlog|vpermt2|vpblendm|\{1to[0-9]+\}' || true) \
+    && gfni_count=$(echo "$DUMP" | grep -cE 'vgf2p8|gf2p8' || true) \
     && echo "  zmm registers: $zmm_count" \
     && echo "  AVX-512 EVEX: $avx512_count" \
     && echo "  GFNI: $gfni_count" \
@@ -80,6 +83,8 @@ RUN echo "=== Verifying AVX2 binary ===" \
 # Output stage - copy binary to /output volume
 CMD mkdir -p /output \
     && cp /tmp/voxtype-avx2 /output/voxtype-${VERSION}-linux-x86_64-avx2 \
+    && cp /tmp/voxtype-gguf-worker /output/voxtype-${VERSION}-linux-x86_64-avx2.gguf-worker \
     && chmod 755 /output/voxtype-${VERSION}-linux-x86_64-avx2 \
+    && chmod 755 /output/voxtype-${VERSION}-linux-x86_64-avx2.gguf-worker \
     && echo "Binary copied to /output:" \
     && ls -la /output/voxtype-*

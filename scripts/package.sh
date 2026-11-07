@@ -229,6 +229,10 @@ if [[ "$SKIP_BUILD" == "false" ]]; then
             cargo clean
             cargo build --release
             cp target/release/voxtype "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512"
+            TRANSCRIBE_CMAKE_ARGS="-DTRANSCRIBE_USE_SYSTEM_BLAS=OFF -DTRANSCRIBE_X86_CONSERVATIVE=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=ON -DGGML_AVX512_VBMI=ON -DGGML_AVX512_VNNI=ON" \
+                cargo build --release -p voxtype-gguf-worker
+            cp target/release/voxtype-gguf-worker \
+                "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512.gguf-worker"
         fi
 
         # Build Vulkan GPU release via Docker (clean toolchain, no AVX-512/GFNI)
@@ -245,6 +249,9 @@ if [[ "$SKIP_BUILD" == "false" ]]; then
             echo "Building aarch64 release..."
             cargo build --release --target aarch64-unknown-linux-gnu
             cp target/aarch64-unknown-linux-gnu/release/voxtype "${RELEASE_DIR}/voxtype-${VERSION}-linux-aarch64"
+            cargo build --release --target aarch64-unknown-linux-gnu -p voxtype-gguf-worker
+            cp target/aarch64-unknown-linux-gnu/release/voxtype-gguf-worker \
+                "${RELEASE_DIR}/voxtype-${VERSION}-linux-aarch64.gguf-worker"
         fi
     fi
 else
@@ -255,6 +262,13 @@ else
             echo "  The baseline (pre-AVX2, #612) binary is required from 1.1.0 on."
             exit 1
         fi
+        for variant in baseline avx2 avx512 vulkan onnx-avx2 onnx-avx512 onnx-cuda-12 onnx-cuda-13 onnx-migraphx; do
+            worker="${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-${variant}.gguf-worker"
+            if [[ ! -f "$worker" ]]; then
+                echo "Error: GGUF worker not found: $worker"
+                exit 1
+            fi
+        done
         if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2" ]]; then
             echo "Error: Binary not found: ${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2"
             exit 1
@@ -266,6 +280,10 @@ else
     else
         if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-aarch64" ]]; then
             echo "Error: Binary not found: ${RELEASE_DIR}/voxtype-${VERSION}-linux-aarch64"
+            exit 1
+        fi
+        if [[ ! -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-aarch64.gguf-worker" ]]; then
+            echo "Error: GGUF worker not found: ${RELEASE_DIR}/voxtype-${VERSION}-linux-aarch64.gguf-worker"
             exit 1
         fi
     fi
@@ -346,7 +364,13 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
     if ! verify_no_forbidden_instructions "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-baseline" "voxtype-baseline"; then
         VERIFY_FAILED=true
     fi
+    if ! verify_no_forbidden_instructions "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-baseline.gguf-worker" "voxtype-baseline GGUF worker"; then
+        VERIFY_FAILED=true
+    fi
     if ! verify_no_forbidden_instructions "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2" "voxtype-avx2"; then
+        VERIFY_FAILED=true
+    fi
+    if ! verify_no_forbidden_instructions "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx2.gguf-worker" "voxtype-avx2 GGUF worker"; then
         VERIFY_FAILED=true
     fi
 
@@ -356,9 +380,26 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
     if ! verify_no_forbidden_instructions "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan" "voxtype-vulkan"; then
         VERIFY_FAILED=true
     fi
+    if ! verify_no_forbidden_instructions "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan.gguf-worker" "voxtype-vulkan GGUF worker"; then
+        VERIFY_FAILED=true
+    fi
+
+    for variant in onnx-avx2 onnx-cuda-12 onnx-cuda-13 onnx-migraphx; do
+        if ! verify_no_forbidden_instructions \
+            "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-${variant}.gguf-worker" \
+            "voxtype-${variant} GGUF worker"; then
+            VERIFY_FAILED=true
+        fi
+    done
 
     # AVX512 binary SHOULD have AVX-512 instructions
     if ! verify_has_avx512 "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512" "voxtype-avx512"; then
+        VERIFY_FAILED=true
+    fi
+    if ! verify_has_avx512 "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-avx512.gguf-worker" "voxtype-avx512 GGUF worker"; then
+        VERIFY_FAILED=true
+    fi
+    if ! verify_has_avx512 "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-onnx-avx512.gguf-worker" "voxtype-onnx-avx512 GGUF worker"; then
         VERIFY_FAILED=true
     fi
 
@@ -400,6 +441,16 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
     chmod 755 "$STAGING/usr/lib/voxtype/voxtype-avx2"
     chmod 755 "$STAGING/usr/lib/voxtype/voxtype-avx512"
     chmod 755 "$STAGING/usr/lib/voxtype/voxtype-vulkan"
+
+    # The application first probes beside /proc/self/exe. Install the v2-floor
+    # CPU worker at that fixed name so every packaged x86_64 system can start
+    # it safely. The wrapper selects the Vulkan worker when VOXTYPE_GPU=1.
+    install -Dm755 \
+        "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-baseline.gguf-worker" \
+        "$STAGING/usr/lib/voxtype/voxtype-gguf-worker"
+    install -Dm755 \
+        "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-vulkan.gguf-worker" \
+        "$STAGING/usr/lib/voxtype/voxtype-gguf-worker-vulkan"
 
     # x86_64: ONNX binaries (Parakeet + Moonshine engines via ONNX Runtime)
     if [[ -f "${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-onnx-avx2" ]]; then
@@ -473,6 +524,10 @@ else
     # aarch64: Single binary
     cp "${RELEASE_DIR}/voxtype-${VERSION}-linux-aarch64" "$STAGING/usr/lib/voxtype/voxtype"
     chmod 755 "$STAGING/usr/lib/voxtype/voxtype"
+
+    install -Dm755 \
+        "${RELEASE_DIR}/voxtype-${VERSION}-linux-aarch64.gguf-worker" \
+        "$STAGING/usr/lib/voxtype/voxtype-gguf-worker"
 
     # Install wrapper script as /usr/bin/voxtype
     cp "${SCRIPT_DIR}/voxtype-wrapper.sh" "$STAGING/usr/bin/voxtype"

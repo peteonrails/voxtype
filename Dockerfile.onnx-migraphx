@@ -109,7 +109,11 @@ RUN cargo build --release \
         --features parakeet-migraphx,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,openvino-whisper,ml-diarization \
         --config 'profile.release.lto=false' \
         --config 'profile.release.codegen-units=8' \
-    && cp target/release/voxtype /tmp/voxtype-onnx-migraphx
+    && cp target/release/voxtype /tmp/voxtype-onnx-migraphx \
+    && cargo build --release -p voxtype-gguf-worker \
+        --config 'profile.release.lto=false' \
+        --config 'profile.release.codegen-units=8' \
+    && cp target/release/voxtype-gguf-worker /tmp/voxtype-gguf-worker
 
 # Copy companion provider .so files. ORT computes the .so search path from
 # argv[0]'s dirname (NOT /proc/self/exe), so package.sh installs the binary
@@ -131,6 +135,7 @@ RUN echo "=== Verifying ONNX MIGraphX binary ===" \
 # Output stage: copy binary and companion .so files
 CMD mkdir -p /output \
     && cp /tmp/voxtype-onnx-migraphx /output/voxtype-${VERSION}-linux-x86_64-onnx-migraphx \
+    && cp /tmp/voxtype-gguf-worker /output/voxtype-${VERSION}-linux-x86_64-onnx-migraphx.gguf-worker \
     && cp /tmp/onnx-migraphx-libs/libonnxruntime_providers_migraphx.so /output/voxtype-${VERSION}-linux-x86_64-onnx-migraphx.libonnxruntime_providers_migraphx.so \
     && cp /tmp/onnx-migraphx-libs/libonnxruntime_providers_shared.so /output/voxtype-${VERSION}-linux-x86_64-onnx-migraphx.libonnxruntime_providers_shared.so \
     && echo "Output:" \

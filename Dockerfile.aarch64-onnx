@@ -89,7 +89,11 @@ ENV ORT_STRATEGY=download
 RUN cargo build --release --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,ml-diarization \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
-    && cp target/release/voxtype /tmp/voxtype-aarch64-onnx
+    && cp target/release/voxtype /tmp/voxtype-aarch64-onnx \
+    && cargo build --release -p voxtype-gguf-worker \
+        --config 'profile.release.lto=false' \
+        --config 'profile.release.codegen-units=8' \
+    && cp target/release/voxtype-gguf-worker /tmp/voxtype-gguf-worker
 
 # Build the OSD launcher and frontends in a separate cargo invocation so the
 # daemon binary stays clean of GTK4 / layer-shell baggage. Matches the binary
@@ -115,6 +119,7 @@ RUN echo "=== Verifying aarch64 ONNX binary ===" \
 # Output stage
 CMD mkdir -p /output \
     && cp /tmp/voxtype-aarch64-onnx /output/voxtype-${VERSION}-linux-aarch64-onnx \
+    && cp /tmp/voxtype-gguf-worker /output/voxtype-${VERSION}-linux-aarch64-onnx.gguf-worker \
     && cp /tmp/voxtype-osd /output/voxtype-${VERSION}-linux-aarch64-osd \
     && cp /tmp/voxtype-osd-gtk4 /output/voxtype-${VERSION}-linux-aarch64-osd-gtk4 \
     && cp /tmp/voxtype-osd-quickshell /output/voxtype-${VERSION}-linux-aarch64-osd-quickshell \
