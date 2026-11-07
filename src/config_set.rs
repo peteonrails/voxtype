@@ -134,7 +134,9 @@ pub fn engine_feature_compiled(name: &str) -> bool {
     match engine {
         TranscriptionEngine::Whisper => true,
         TranscriptionEngine::Soniox => true,
-        TranscriptionEngine::Parakeet => cfg!(feature = "parakeet"),
+        TranscriptionEngine::Parakeet => {
+            cfg!(any(feature = "parakeet", feature = "parakeet-gguf"))
+        }
         TranscriptionEngine::Moonshine => cfg!(feature = "moonshine"),
         TranscriptionEngine::SenseVoice => cfg!(feature = "sensevoice"),
         TranscriptionEngine::Paraformer => cfg!(feature = "paraformer"),

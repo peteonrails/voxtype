@@ -129,7 +129,11 @@ RUN cargo build --release \
         --features parakeet-cuda,parakeet-load-dynamic,moonshine-cuda,sensevoice-cuda,paraformer-cuda,dolphin-cuda,omnilingual-cuda,cohere-cuda,openvino-whisper,onnx-load-dynamic,ml-diarization \
         --config 'profile.release.lto=false' \
         --config 'profile.release.codegen-units=8' \
-    && cp target/release/voxtype /tmp/voxtype-onnx-cuda-13
+    && cp target/release/voxtype /tmp/voxtype-onnx-cuda-13 \
+    && cargo build --release -p voxtype-gguf-worker \
+        --config 'profile.release.lto=false' \
+        --config 'profile.release.codegen-units=8' \
+    && cp target/release/voxtype-gguf-worker /tmp/voxtype-gguf-worker
 
 # Stage the bundled libs alongside the binary. Three files ship:
 #   - libonnxruntime.so.${ORT_VERSION}  (real file with Blackwell SASS)
@@ -171,6 +175,7 @@ RUN echo "=== Verifying ONNX CUDA 13 binary ===" \
 # the AUR PKGBUILD can pick them up by predictable filenames.
 CMD mkdir -p /output \
     && cp /tmp/voxtype-onnx-cuda-13 /output/voxtype-${VERSION}-linux-x86_64-onnx-cuda-13 \
+    && cp /tmp/voxtype-gguf-worker /output/voxtype-${VERSION}-linux-x86_64-onnx-cuda-13.gguf-worker \
     && cp /tmp/onnx-cuda-13-libs/libonnxruntime.so.${ORT_VERSION} \
         /output/voxtype-${VERSION}-linux-x86_64-onnx-cuda-13.libonnxruntime.so.${ORT_VERSION} \
     && cp /tmp/onnx-cuda-13-libs/libonnxruntime_providers_cuda.so \

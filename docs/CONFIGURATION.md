@@ -1321,7 +1321,7 @@ See [PARAKEET.md](PARAKEET.md) for detailed setup instructions.
 **Default:** `"parakeet-tdt-0.6b-v3"`
 **Required:** No
 
-The Parakeet model to use. Can be a model name (looked up in `~/.local/share/voxtype/models/`) or an absolute path to a model directory.
+The Parakeet model to use. Can be a model name (looked up in `~/.local/share/voxtype/models/`) or an absolute path to a model directory. A name or path ending in `.gguf` is a transcribe.cpp GGUF file instead of an ONNX model directory, and runs through transcribe.cpp (see [gguf_backend](#gguf_backend)).
 
 **Example:**
 ```toml
@@ -1333,6 +1333,15 @@ model = "parakeet-tdt-0.6b-v3"
 ```toml
 [parakeet]
 model = "/opt/models/parakeet-tdt-0.6b-v3"
+```
+
+Setup downloads two GGUF files, `parakeet-tdt-0.6b-v3-F16.gguf` (1.26 GB) and `parakeet-tdt-0.6b-v3-Q8_0.gguf` (0.74 GB), through `voxtype setup model` or `voxtype setup --download --model <name>`, and verifies them against the publisher's SHA-256.
+
+**GGUF on a Vulkan GPU:**
+```toml
+[parakeet]
+model = "parakeet-tdt-0.6b-v3-F16.gguf"
+gguf_backend = "vulkan"
 ```
 
 ### model_type
@@ -1364,11 +1373,23 @@ Number of CPU threads for ONNX Runtime intra-op parallelism. Applies to the batc
 
 Parakeet's wait after you stop talking grows with the length of the dictation, so this matters most for long recordings on the CPU. On a 12-core Ryzen AI 9 HX 370, 12 threads took a 3-minute dictation from 11.7 s to 8.6 s, and more threads than physical cores were slower again. Leave it unset on battery-sensitive laptops, or set it to your physical core count for the shortest wait.
 
+With a GGUF model, this is transcribe.cpp's CPU thread count instead, and unset leaves the library's default.
+
 **Example:**
 ```toml
 [parakeet]
 threads = 12
 ```
+
+### gguf_backend
+
+**Type:** String
+**Default:** `"auto"`
+**Required:** No
+
+The transcribe.cpp compute backend for GGUF models. Ignored for ONNX models. Accepts the same values as `[cohere] gguf_backend`: `auto`, `cpu`, `cpu_accel`, `vulkan`, `metal`, `cuda`, `rocm`.
+
+`"vulkan"` requires a hardware Vulkan device and reports an error if transcribe.cpp would run on a software renderer such as llvmpipe; `"auto"` lets transcribe.cpp choose. `--features parakeet-gguf` (included in `gpu-vulkan`) lets voxtype use GGUF models; transcribe.cpp itself runs in `voxtype-gguf-worker`, and the backends available are the ones that worker was built with (`--features vulkan` for Vulkan). GGUF models do not support `streaming = true`. See [PARAKEET.md](PARAKEET.md#gguf-on-vulkan-transcribecpp) for timings.
 
 ### on_demand_loading
 
@@ -1695,9 +1716,9 @@ The prebuilt `voxtype-*-onnx-*` release binaries already include `cohere`, so us
 
 ### GGUF with Vulkan
 
-GGUF models use [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) in the Voxtype daemon through its Rust binding. The model and session remain loaded across recordings when `on_demand_loading = false`. This is the same `cohere` engine in Voxtype, with a different inference runtime selected by the `.gguf` extension. The ONNX model directory and GGUF file are distinct formats.
+GGUF models use [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) through its Rust binding, in a helper process, `voxtype-gguf-worker`, that voxtype starts and keeps running. It is separate because transcribe.cpp and Whisper each bundle their own copy of ggml, and the two cannot share one process. The model stays loaded across recordings when `on_demand_loading = false`. This is the same `cohere` engine in Voxtype, with a different inference runtime selected by the `.gguf` extension. The ONNX model directory and GGUF file are distinct formats.
 
-Build Voxtype with `--features gpu-vulkan`, then run `voxtype setup model` and choose a Cohere GGUF variant. To download without activating it:
+Build Voxtype with `--features gpu-vulkan` and the worker with `cargo build --release -p voxtype-gguf-worker --features vulkan` (release packages include both), then run `voxtype setup model` and choose a Cohere GGUF variant. To download without activating it:
 
 ```sh
 voxtype setup --download --model cohere-transcribe-03-2026-Q4_K_M.gguf
@@ -1714,7 +1735,7 @@ gguf_backend = "vulkan"
 language = "en"
 ```
 
-`gguf_backend = "vulkan"` requires a hardware Vulkan device and reports an error if none is selected; `"auto"` lets transcribe.cpp select the backend. `--features cohere-gguf` alone builds the CPU runtime; `--features cohere` also includes GGUF support. The Rust dependency builds transcribe.cpp from source and needs CMake and a C++ compiler; Vulkan builds also need Vulkan and SPIR-V headers plus `glslc`. Setup downloads Q4_K_M and Q8_0 from a pinned revision of the [official transcribe.cpp Cohere GGUF repository](https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf); the other published quantizations remain usable by absolute path.
+`gguf_backend = "vulkan"` requires a hardware Vulkan device and reports an error if none is selected; `"auto"` lets transcribe.cpp select the backend. `--features cohere-gguf` lets voxtype use GGUF models, and `--features cohere` includes it; the backend comes from how `voxtype-gguf-worker` was built, CPU unless built with `--features vulkan`. Building the worker compiles transcribe.cpp from source and needs CMake and a C++ compiler; Vulkan builds also need Vulkan and SPIR-V headers plus `glslc`. Setup downloads Q4_K_M and Q8_0 from Voxtype's model mirror, checked against the SHA-256 of a pinned revision of the [official transcribe.cpp Cohere GGUF repository](https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf); the other published quantizations remain usable by absolute path.
 
 ---
 

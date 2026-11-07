@@ -54,6 +54,7 @@ COPY . .
 ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C target-cpu=x86-64-v4"
 ENV CFLAGS="-march=x86-64-v4"
 ENV CXXFLAGS="-march=x86-64-v4"
+ENV TRANSCRIBE_CMAKE_ARGS="-DTRANSCRIBE_USE_SYSTEM_BLAS=OFF -DTRANSCRIBE_X86_CONSERVATIVE=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=ON -DGGML_AVX512_VBMI=ON -DGGML_AVX512_VNNI=ON"
 
 # ONNX Runtime will be downloaded during build by the ort crate
 ENV ORT_STRATEGY=download
@@ -63,16 +64,22 @@ ENV ORT_STRATEGY=download
 RUN cargo build --release --target x86_64-unknown-linux-gnu --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,openvino-whisper,ml-diarization \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
-    && cp target/x86_64-unknown-linux-gnu/release/voxtype /tmp/voxtype-onnx-avx512
+    && cp target/x86_64-unknown-linux-gnu/release/voxtype /tmp/voxtype-onnx-avx512 \
+    && cargo build --release --target x86_64-unknown-linux-gnu -p voxtype-gguf-worker \
+        --config 'profile.release.lto=false' \
+        --config 'profile.release.codegen-units=8' \
+    && cp target/x86_64-unknown-linux-gnu/release/voxtype-gguf-worker /tmp/voxtype-gguf-worker
 
 # Verify the binary contains AVX-512 instructions. We deliberately do NOT
 # run `--version` here: this Docker build runs on the build host's CPU,
 # which on a GH-hosted runner usually lacks AVX-512 — executing the
 # cross-compiled binary would SIGILL. objdump-based inspection is enough.
 RUN echo "=== Checking for AVX-512 instructions ===" \
-    && avx512_count=$(objdump -d /tmp/voxtype-onnx-avx512 | grep -cE 'zmm|vpternlog|vpermt2|\{1to' || echo 0) \
+    && avx512_count=$(objdump -d /tmp/voxtype-onnx-avx512 | grep -cE 'zmm|vpternlog|vpermt2|\{1to' || true) \
+    && worker_avx512_count=$(objdump -d /tmp/voxtype-gguf-worker | grep -cE 'zmm|vpternlog|vpermt2|\{1to' || true) \
     && echo "  AVX-512 instructions: $avx512_count" \
-    && if [ "$avx512_count" -eq 0 ]; then \
+    && echo "  Worker AVX-512 instructions: $worker_avx512_count" \
+    && if [ "$avx512_count" -eq 0 ] || [ "$worker_avx512_count" -eq 0 ]; then \
          echo "ERROR: ONNX AVX-512 binary contains zero AVX-512 instructions." \
          && echo "  Likely cause: target-cpu and/or march flags reverted to host detection." \
          && exit 1; \
@@ -84,5 +91,6 @@ RUN echo "=== Checking for AVX-512 instructions ===" \
 # Output stage
 CMD mkdir -p /output \
     && cp /tmp/voxtype-onnx-avx512 /output/voxtype-${VERSION}-linux-x86_64-onnx-avx512 \
+    && cp /tmp/voxtype-gguf-worker /output/voxtype-${VERSION}-linux-x86_64-onnx-avx512.gguf-worker \
     && echo "Binary copied to /output:" \
     && ls -la /output/voxtype-*
