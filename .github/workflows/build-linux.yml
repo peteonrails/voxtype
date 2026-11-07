@@ -142,6 +142,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The CUDA, MIGraphX and ONNX images can exhaust the stock runner's disk.
+      # build-onnx-cuda-13 died on 2026-10-31 with 99 MB free while cargo was
+      # cloning a git dependency's submodules, which surfaced as the misleading
+      # "failed to load source for dependency `openvino-genai`". Drop the
+      # preinstalled toolchains the Docker build never touches.
+      - name: Free runner disk space
+        if: startsWith(matrix.variant, 'onnx-')
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force
+          df -h /
+
       - name: Determine version
         id: version
         run: |
