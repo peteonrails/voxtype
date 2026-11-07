@@ -8,7 +8,7 @@ permissions:
 
 # Builds the full 8-binary x86_64 release matrix using Docker for every variant.
 # Each Dockerfile pins a glibc cap via its base image; the matrix mirrors that
-# with a matching ubuntu host runner as belt-and-suspenders. See CLAUDE.md
+# with a matching ubuntu host runner as belt-and-suspenders. See AGENTS.md
 # "Building Release Binaries" for the policy this enforces.
 #
 # The release job signs every binary, companion .so, SHA256SUMS.txt, .deb,
