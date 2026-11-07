@@ -22,7 +22,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14  # Apple Silicon runner for ARM64 build
+    runs-on: macos-15  # Apple Silicon runner for ARM64 build
     # Hoisted to job scope on purpose. A step's `if:` cannot read that same
     # step's own `env:` block, so gating on secrets has to happen against a
     # job-level env var or the step silently never runs.
@@ -39,7 +39,7 @@ jobs:
       # ggml uses and that only exists on macOS 15, on a user running 14.8.
       #
       # Pinning it here makes the build honor the floor we advertise, and
-      # makes it independent of which image GitHub maps `macos-14` to.
+      # makes it independent of which image GitHub maps `macos-15` to.
       MACOSX_DEPLOYMENT_TARGET: "13.0"
     steps:
       - uses: actions/checkout@v4
