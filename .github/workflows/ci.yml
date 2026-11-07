@@ -76,7 +76,7 @@ jobs:
   # writes it.
   macos-check:
     name: macos-check
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       # Match build-macos.yml so PR checks compile against the same floor the
       # release binary is built for. See the long note there (#452).

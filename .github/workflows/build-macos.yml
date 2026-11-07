@@ -22,7 +22,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14  # Apple Silicon runner for ARM64 build
+    runs-on: macos-15  # Apple Silicon runner for ARM64 build
     # Hoisted to job scope on purpose. A step's `if:` cannot read that same
     # step's own `env:` block, so gating on secrets has to happen against a
     # job-level env var or the step silently never runs.
@@ -39,7 +39,7 @@ jobs:
       # ggml uses and that only exists on macOS 15, on a user running 14.8.
       #
       # Pinning it here makes the build honor the floor we advertise, and
-      # makes it independent of which image GitHub maps `macos-14` to.
+      # makes it independent of which image GitHub maps `macos-15` to.
       MACOSX_DEPLOYMENT_TARGET: "13.0"
     steps:
       - uses: actions/checkout@v4
@@ -70,6 +70,22 @@ jobs:
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Resolved VERSION=${VERSION}"
+
+      # With the deployment target below the SDK version, clang compiles
+      # ggml-metal's `@available(macOS 15.0, *)` guards into calls to
+      # `__isPlatformVersionAtLeast`. That symbol lives in clang's own
+      # runtime, libclang_rt.osx.a, which rustc never links because it
+      # invokes the linker with -nodefaultlibs, so the aarch64 link fails
+      # with an undefined symbol. The macos-14 image's SDK predates
+      # MTLResidencySet, so ggml compiled those guards out and this never
+      # surfaced there. The archive is universal, so both targets can use it.
+      - name: Link the clang runtime
+        run: |
+          set -euo pipefail
+          CLANG_RT="$(clang --print-resource-dir)/lib/darwin/libclang_rt.osx.a"
+          test -f "$CLANG_RT"
+          echo "RUSTFLAGS=-C link-arg=${CLANG_RT}" >> "$GITHUB_ENV"
+          echo "Linking ${CLANG_RT}"
 
       - name: Build for x86_64
         run: |
