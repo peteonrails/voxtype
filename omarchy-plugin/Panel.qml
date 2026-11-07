@@ -347,7 +347,10 @@ Item {
   function applySchema(next) {
     root.schemaError = ""
     root.schema = next
-    root.keys = Array.isArray(next.keys) ? next.keys : []
+    // VoxtypeCli validates the parsed JSON array before emitting it. Crossing
+    // its signal(var) can wrap it as a QML sequence: length/indexing survive,
+    // but Array.isArray does not. Rejecting that wrapper hides every section.
+    root.keys = next.keys && next.keys.length !== undefined ? next.keys : []
     root.engine = next.engine === undefined || next.engine === null ? "" : String(next.engine)
     root.voxtypeVersion = next.voxtype_version ? String(next.voxtype_version) : ""
     root.daemonVersionLabel = next.daemon_version_label ? String(next.daemon_version_label) : ""
@@ -389,7 +392,8 @@ Item {
   function computeEngineChoices(list) {
     for (var i = 0; i < list.length; i++) {
       var spec = list[i]
-      if (spec && String(spec.key) === "engine" && Array.isArray(spec.choices)) return spec.choices
+      if (spec && String(spec.key) === "engine" && spec.choices
+          && spec.choices.length !== undefined) return spec.choices
     }
     return []
   }

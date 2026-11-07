@@ -205,6 +205,24 @@ Inside the panel:
 
 ## Development
 
+### Schema boundary regression test
+
+Run `python3 omarchy-plugin/tests/test-schema-boundary.py` from the repository
+root with Quickshell, an Omarchy shell checkout, and a Wayland session available.
+Use `--shell /path/to/omarchy/shell` for a nonstandard checkout. A headless
+compositor may provide the Wayland session in automation.
+
+The test instantiates the actual panel without opening it or changing settings.
+It passes schema JSON through a QML `signal(var)` and checks section discovery,
+engine choices, values, engine filtering, schema reloads, and empty/null keys.
+This must run in QML: a JavaScript-only test misses Qt sequence wrappers that
+retain length and indexed access but fail `Array.isArray`. JSON validation stays
+in `VoxtypeCli` before the signal; consumers must accept the wrapped sequences.
+
+After installing a panel change, verify it in the running shell. If a plugin
+rescan still serves cached QML, `omarchy-restart-shell` loads the new code without
+restarting the Voxtype daemon.
+
 Two things about this panel's environment are worth knowing before adding UI to
 it:
 
