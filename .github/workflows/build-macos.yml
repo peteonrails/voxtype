@@ -71,6 +71,22 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Resolved VERSION=${VERSION}"
 
+      # With the deployment target below the SDK version, clang compiles
+      # ggml-metal's `@available(macOS 15.0, *)` guards into calls to
+      # `__isPlatformVersionAtLeast`. That symbol lives in clang's own
+      # runtime, libclang_rt.osx.a, which rustc never links because it
+      # invokes the linker with -nodefaultlibs, so the aarch64 link fails
+      # with an undefined symbol. The macos-14 image's SDK predates
+      # MTLResidencySet, so ggml compiled those guards out and this never
+      # surfaced there. The archive is universal, so both targets can use it.
+      - name: Link the clang runtime
+        run: |
+          set -euo pipefail
+          CLANG_RT="$(clang --print-resource-dir)/lib/darwin/libclang_rt.osx.a"
+          test -f "$CLANG_RT"
+          echo "RUSTFLAGS=-C link-arg=${CLANG_RT}" >> "$GITHUB_ENV"
+          echo "Linking ${CLANG_RT}"
+
       - name: Build for x86_64
         run: |
           cargo build --release --target x86_64-apple-darwin --features gpu-metal
