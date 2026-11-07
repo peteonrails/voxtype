@@ -22,7 +22,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14  # Apple Silicon runner for ARM64 build
+    runs-on: macos-15  # Apple Silicon runner for ARM64 build
     # Hoisted to job scope on purpose. A step's `if:` cannot read that same
     # step's own `env:` block, so gating on secrets has to happen against a
     # job-level env var or the step silently never runs.
