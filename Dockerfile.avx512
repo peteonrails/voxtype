@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y \
     libappindicator3-dev \
     git \
     binutils \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Rust via rustup
@@ -72,6 +73,13 @@ RUN cargo build --release --target x86_64-unknown-linux-gnu \
     && cargo build --release --target x86_64-unknown-linux-gnu -p voxtype-gguf-worker \
     && cp target/x86_64-unknown-linux-gnu/release/voxtype-gguf-worker /tmp/voxtype-gguf-worker
 
+# Preserve exact build-stage version evidence for collection on another runner.
+# Cross-version metadata is not a claim that AVX-512 executed here.
+RUN mkdir -p /tmp/release-proof \
+    && cp /tmp/voxtype-avx512 /tmp/release-proof/voxtype-${VERSION}-linux-x86_64-avx512 \
+    && python3 scripts/release-artifacts.py record-cross \
+        /tmp/release-proof/voxtype-${VERSION}-linux-x86_64-avx512 "${VERSION}" --source /build
+
 # Verify AVX-512 instructions ARE present. Fail the build if not, so the
 # pipeline never produces a mislabeled binary.
 RUN echo "=== Verifying AVX-512 binary and GGUF worker ===" \
@@ -88,6 +96,7 @@ RUN echo "=== Verifying AVX-512 binary and GGUF worker ===" \
 
 CMD mkdir -p /output \
     && cp /tmp/voxtype-avx512 /output/voxtype-${VERSION}-linux-x86_64-avx512 \
+    && cp /tmp/release-proof/voxtype-${VERSION}-linux-x86_64-avx512.version-proof.json /output/ \
     && cp /tmp/voxtype-gguf-worker /output/voxtype-${VERSION}-linux-x86_64-avx512.gguf-worker \
     && echo "Binary copied to /output:" \
     && ls -la /output/voxtype-*-avx512

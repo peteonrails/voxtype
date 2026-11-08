@@ -45,6 +45,7 @@ RUN apt-get update && apt-get install -y \
     libprotobuf-dev \
     git \
     binutils \
+    python3 \
     meson \
     ninja-build \
     && rm -rf /var/lib/apt/lists/*
@@ -122,6 +123,13 @@ RUN RUSTFLAGS="-C target-cpu=x86-64-v2 -C target-feature=-avx2,-fma,-bmi2,-avx51
     && cp target/release/voxtype-osd-quickshell /tmp/voxtype-osd-quickshell \
     && cp target/release/voxtype-audio-bridge /tmp/voxtype-audio-bridge
 
+# Preserve exact build-stage version evidence for collection on another runner.
+# Cross-version metadata is not a claim that AVX-512 executed here.
+RUN mkdir -p /tmp/release-proof \
+    && cp /tmp/voxtype-osd-gtk4 /tmp/release-proof/voxtype-${VERSION}-linux-x86_64-osd-gtk4 \
+    && python3 scripts/release-artifacts.py record-runtime \
+        /tmp/release-proof/voxtype-${VERSION}-linux-x86_64-osd-gtk4 "${VERSION}"
+
 # Verify binary
 RUN echo "=== Verifying ONNX AVX2 binary ===" \
     && /tmp/voxtype-onnx-avx2 --version \
@@ -142,6 +150,7 @@ CMD mkdir -p /output \
     && cp /tmp/voxtype-gguf-worker /output/voxtype-${VERSION}-linux-x86_64-onnx-avx2.gguf-worker \
     && cp /tmp/voxtype-osd /output/voxtype-${VERSION}-linux-x86_64-osd \
     && cp /tmp/voxtype-osd-gtk4 /output/voxtype-${VERSION}-linux-x86_64-osd-gtk4 \
+    && cp /tmp/release-proof/voxtype-${VERSION}-linux-x86_64-osd-gtk4.version-proof.json /output/ \
     && cp /tmp/voxtype-osd-quickshell /output/voxtype-${VERSION}-linux-x86_64-osd-quickshell \
     && cp /tmp/voxtype-audio-bridge /output/voxtype-${VERSION}-linux-x86_64-audio-bridge \
     && echo "Binaries copied to /output:" \

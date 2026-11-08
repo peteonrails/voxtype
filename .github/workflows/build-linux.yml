@@ -191,7 +191,9 @@ jobs:
           echo "Resolved VERSION=${VERSION} (Cargo.toml: ${CARGO_VERSION})"
 
       - name: Check release transport and desktop assets
-        run: python3 testing/test-release-transport.py
+        run: |
+          python3 testing/test-release-transport.py
+          python3 testing/test-release-validation.py
 
       - name: Build ${{ matrix.variant }} binary in Docker
         run: |
@@ -224,19 +226,9 @@ jobs:
           WORKER="${BIN}.gguf-worker"
           test -f "${BIN}" || { echo "Missing binary: ${BIN}"; ls -la "releases/${VERSION}/"; exit 1; }
           test -f "${WORKER}" || { echo "Missing GGUF worker: ${WORKER}"; ls -la "releases/${VERSION}/"; exit 1; }
-          # The Dockerfile already sets the binary to 755; no chmod needed.
-          # GPU variants may not have CUDA/ROCm on the host runner; --version should
-          # still resolve without loading providers.
-          # AVX-512 variants are cross-compiled with target-cpu=x86-64-v4. Skip
-          # the runtime --version check on those because the GitHub-hosted
-          # runner CPU usually lacks AVX-512 and would SIGILL. The Dockerfile's
-          # in-build AVX-512 presence check already proves the binary is valid.
-          if [[ "${{ matrix.variant }}" == *avx512* ]]; then
-            echo "Skipping --version check on cross-compiled AVX-512 binary (runner CPU lacks AVX-512)."
-            file "${BIN}"
-          else
-            "${BIN}" --version
-          fi
+          # AVX-512 is cross-compiled; its Docker image emits hash-bound
+          # exact compile-version metadata rather than claiming execution.
+          python3 scripts/release-artifacts.py check "${BIN}" "${VERSION}"
 
       - name: Verify glibc cap (max <= ${{ matrix.glibc_cap }})
         run: |
@@ -467,6 +459,9 @@ jobs:
           mkdir -p "releases/${VERSION}"
           # Flatten artifact subdirs into releases/${VERSION}/.
           find artifacts -type f -name 'voxtype-*' -exec mv -n {} "releases/${VERSION}/" \;
+          # download-artifact restores 0644. Restore only known binaries/workers,
+          # never archives, provider libraries, signatures or version proofs.
+          python3 scripts/release-artifacts.py restore "releases/${VERSION}" "${VERSION}"
           echo "Collected files:"
           ls -la "releases/${VERSION}/"
 

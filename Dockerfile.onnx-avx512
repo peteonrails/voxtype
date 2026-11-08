@@ -35,6 +35,7 @@ RUN apt-get update && apt-get install -y \
     libprotobuf-dev \
     git \
     binutils \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Rust
@@ -70,6 +71,13 @@ RUN cargo build --release --target x86_64-unknown-linux-gnu --features parakeet,
         --config 'profile.release.codegen-units=8' \
     && cp target/x86_64-unknown-linux-gnu/release/voxtype-gguf-worker /tmp/voxtype-gguf-worker
 
+# Preserve exact build-stage version evidence for collection on another runner.
+# Cross-version metadata is not a claim that AVX-512 executed here.
+RUN mkdir -p /tmp/release-proof \
+    && cp /tmp/voxtype-onnx-avx512 /tmp/release-proof/voxtype-${VERSION}-linux-x86_64-onnx-avx512 \
+    && python3 scripts/release-artifacts.py record-cross \
+        /tmp/release-proof/voxtype-${VERSION}-linux-x86_64-onnx-avx512 "${VERSION}" --source /build
+
 # Verify the binary contains AVX-512 instructions. We deliberately do NOT
 # run `--version` here: this Docker build runs on the build host's CPU,
 # which on a GH-hosted runner usually lacks AVX-512 — executing the
@@ -91,6 +99,7 @@ RUN echo "=== Checking for AVX-512 instructions ===" \
 # Output stage
 CMD mkdir -p /output \
     && cp /tmp/voxtype-onnx-avx512 /output/voxtype-${VERSION}-linux-x86_64-onnx-avx512 \
+    && cp /tmp/release-proof/voxtype-${VERSION}-linux-x86_64-onnx-avx512.version-proof.json /output/ \
     && cp /tmp/voxtype-gguf-worker /output/voxtype-${VERSION}-linux-x86_64-onnx-avx512.gguf-worker \
     && echo "Binary copied to /output:" \
     && ls -la /output/voxtype-*

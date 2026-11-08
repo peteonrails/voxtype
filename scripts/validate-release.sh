@@ -28,10 +28,7 @@ if [[ ! -d "$RELEASE_DIR" ]]; then
     exit 1
 fi
 
-# Binaries report the base version: a v1.0.0-rc1 tag builds from a crate
-# whose version is 1.0.0, and the --version regex below only captures the
-# numeric triple anyway. Compare against the base so prerelease tags work.
-BASE_VERSION="${VERSION%%-*}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Define expected binaries. This list is the release manifest: anything
 # named here that is missing fails validation (see #351, #436, and the
@@ -128,17 +125,11 @@ if [[ ${#FOUND_BINARIES[@]} -eq 0 ]]; then
     exit 1
 fi
 
-# 2. Check version strings
-#
-# Compared against BASE_VERSION, not VERSION. The regex captures only the
-# numeric triple, so on a v1.0.0-rc1 tag it yields "1.0.0" while VERSION is
-# "1.0.0-rc1" and every binary failed. That mismatch is why the v1.0.0-rc1
-# release job died before uploading a single Linux asset.
-if [[ "$VERSION" != "$BASE_VERSION" ]]; then
-    echo "Checking version strings (prerelease ${VERSION}, expecting v${BASE_VERSION} from binaries)..."
-else
-    echo "Checking version strings..."
-fi
+# 2. Check version strings, including the complete prerelease suffix.
+# AVX-512 uses hash-bound compile metadata from the Docker build stage;
+# the GTK helper can use exact stdout captured where its libraries exist.
+# Neither alternative is represented as native execution on this runner.
+echo "Checking exact version strings..."
 VERSIONED_BINARIES=(
     "${WHISPER_BINARIES[@]}"
     "${ONNX_BINARIES[@]}"
@@ -146,11 +137,7 @@ VERSIONED_BINARIES=(
 )
 for binary in "${VERSIONED_BINARIES[@]}"; do
     [[ -f "${RELEASE_DIR}/${binary}" ]] || continue
-    REPORTED_VERSION=$("${RELEASE_DIR}/${binary}" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-    if [[ "$REPORTED_VERSION" == "$BASE_VERSION" ]]; then
-        echo "  ✓ ${binary}: v${REPORTED_VERSION}"
-    else
-        echo "  ✗ ${binary}: reports v${REPORTED_VERSION}, expected v${BASE_VERSION}"
+    if ! python3 "${SCRIPT_DIR}/release-artifacts.py" check "${RELEASE_DIR}/${binary}" "$VERSION"; then
         FAILED=true
     fi
 done
