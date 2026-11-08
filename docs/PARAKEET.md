@@ -215,3 +215,18 @@ Include:
 - Which binary you're using (avx2/avx512/cuda)
 - The Parakeet model version
 - Sample audio if possible (for accuracy issues)
+
+## Long recordings and files
+
+Offline Parakeet transcription automatically splits audio longer than one minute
+into consecutive chunks of at most 60 seconds, cutting near pauses. This applies
+to dictation, `voxtype transcribe`, and timestamped transcription. You do not need
+to enable eager processing or a streaming model. Short recordings keep the
+single-pass path, and timestamps remain relative to the original recording.
+
+This bounds each ONNX encoder invocation: the bundled TDT exports otherwise fail
+on sufficiently long inputs with a `self_attn/Add_2` broadcast/shape error. This is
+an export/integration constraint, not a limit on the total audio Parakeet can
+transcribe. A failed chunk fails the request instead of silently returning a
+partial transcript. The dictation capture limit is still controlled separately
+by `audio.max_duration_secs`.
