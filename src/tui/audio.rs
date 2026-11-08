@@ -371,7 +371,7 @@ fn start_device_scan() -> Option<mpsc::Receiver<Option<Vec<String>>>> {
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn probe_input_devices_via_subprocess(exe: &std::path::Path) -> Option<Vec<String>> {
+pub(super) fn probe_input_devices_via_subprocess(exe: &std::path::Path) -> Option<Vec<String>> {
     let mut child = std::process::Command::new(exe)
         .args(["configure", "--probe-audio-devices"])
         .stdin(Stdio::null())

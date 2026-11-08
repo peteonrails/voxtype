@@ -12,7 +12,7 @@ mod whisper_vad;
 
 use crate::config::{Config, TranscriptionEngine, VadBackend};
 use crate::error::VadError;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub use energy::EnergyVad;
 pub use whisper_vad::WhisperVad;
@@ -51,27 +51,7 @@ pub fn create_vad(config: &Config) -> Result<Option<Box<dyn VoiceActivityDetecto
         return Ok(None);
     }
 
-    // Determine which backend to use
-    let backend = match config.vad.backend {
-        VadBackend::Auto => {
-            // Auto-select: Whisper VAD for Whisper engine, Energy for Parakeet
-            match config.engine {
-                TranscriptionEngine::Whisper => VadBackend::Whisper,
-                TranscriptionEngine::Parakeet
-                | TranscriptionEngine::Moonshine
-                | TranscriptionEngine::SenseVoice
-                | TranscriptionEngine::Paraformer
-                | TranscriptionEngine::Dolphin
-                | TranscriptionEngine::Omnilingual
-                | TranscriptionEngine::Cohere
-                | TranscriptionEngine::Soniox
-                | TranscriptionEngine::OpenVino => VadBackend::Energy,
-            }
-        }
-        explicit => explicit,
-    };
-
-    let vad: Box<dyn VoiceActivityDetector> = match backend {
+    let vad: Box<dyn VoiceActivityDetector> = match effective_backend(config) {
         VadBackend::Energy | VadBackend::Auto => {
             tracing::info!("Using Energy VAD backend");
             Box::new(EnergyVad::new(&config.vad))
@@ -86,20 +66,46 @@ pub fn create_vad(config: &Config) -> Result<Option<Box<dyn VoiceActivityDetecto
     Ok(Some(vad))
 }
 
+/// The backend `create_vad` will use: `auto` resolves to Whisper VAD for the
+/// Whisper engine and Energy VAD for every other engine.
+pub fn effective_backend(config: &Config) -> VadBackend {
+    match config.vad.backend {
+        VadBackend::Auto => match config.engine {
+            TranscriptionEngine::Whisper => VadBackend::Whisper,
+            TranscriptionEngine::Parakeet
+            | TranscriptionEngine::Moonshine
+            | TranscriptionEngine::SenseVoice
+            | TranscriptionEngine::Paraformer
+            | TranscriptionEngine::Dolphin
+            | TranscriptionEngine::Omnilingual
+            | TranscriptionEngine::Cohere
+            | TranscriptionEngine::Soniox
+            | TranscriptionEngine::OpenVino => VadBackend::Energy,
+        },
+        explicit => explicit,
+    }
+}
+
+/// Where the Whisper VAD model is expected: the configured path, or the
+/// default file in `models_dir`.
+pub fn whisper_vad_model_path(config: &crate::config::VadConfig, models_dir: &Path) -> PathBuf {
+    match config.model {
+        Some(ref model) => PathBuf::from(model),
+        None => models_dir.join(get_whisper_vad_model_filename()),
+    }
+}
+
 /// Resolve the path to the Whisper VAD model
 fn resolve_whisper_vad_model_path(config: &crate::config::VadConfig) -> Result<PathBuf, VadError> {
-    // If model path is explicitly configured, use it
+    let model_path = whisper_vad_model_path(config, &Config::models_dir());
+
+    // An explicitly configured path is reported as given.
     if let Some(ref model) = config.model {
-        let path = PathBuf::from(model);
-        if path.exists() {
-            return Ok(path);
+        if model_path.exists() {
+            return Ok(model_path);
         }
         return Err(VadError::ModelNotFound(model.clone()));
     }
-
-    // Use default model location
-    let models_dir = Config::models_dir();
-    let model_path = models_dir.join("ggml-silero-vad.bin");
 
     if model_path.exists() {
         Ok(model_path)

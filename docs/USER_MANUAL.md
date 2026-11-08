@@ -42,6 +42,9 @@ voxtype setup --download
 
 # 3. Start voxtype
 voxtype
+
+# If something doesn't work, ask voxtype what is wrong
+voxtype doctor
 ```
 
 The setup command will:
@@ -119,6 +122,61 @@ voxtype setup model        # Interactive model selection
 voxtype setup vad          # Download the Silero VAD model
 voxtype setup onnx         # Switch between Whisper and ONNX engines
 ```
+
+### `voxtype doctor`
+
+Check everything voxtype depends on and print the fix for anything that is
+wrong. Run this first whenever something doesn't work.
+
+```bash
+voxtype doctor              # Human-readable report
+voxtype doctor --json       # Machine-readable, for scripts
+voxtype -c alt.toml doctor  # Check against another config file
+```
+
+Each line is marked `✓` (fine), `!` (works but degraded) or `✗` (broken),
+and every `!` and `✗` line is followed by a `Fix:` line with the command or
+setting that resolves it:
+
+```
+Transcription:
+  ✗ whisper model 'medium.en' is not downloaded
+      Fix: Run: voxtype setup --download --model medium.en
+```
+
+Checks follow your configuration, so features you haven't enabled are not
+checked. What is covered:
+
+| Area | Checked |
+|------|---------|
+| System | CPU instruction set compatibility |
+| Configuration | Config directory, models directory, config file |
+| Binary and GPU | The installed variant supports your engine; Vulkan, CUDA or MIGraphX runtime libraries for GPU variants |
+| Transcription | The configured engine's model (every engine, including the Whisper secondary model and the Soniox API key); the Silero model when VAD uses the Whisper backend |
+| Audio | The configured input device exists |
+| Output | A typing or clipboard tool works for your output mode; `WAYLAND_DISPLAY`/`DISPLAY` are visible to the systemd service |
+| Input | `/dev/input/event*` is readable when the built-in hotkey is on |
+| Notifications | `notify-send` and a notification server |
+| OSD | The OSD frontend binary, and Quickshell's `qs`, when the OSD is on |
+| Meeting mode | `pactl` and `parec` when meeting loopback capture is on |
+| Service | The `voxtype.service` user unit is installed, enabled and running |
+
+`voxtype doctor` exits 0 when nothing failed (warnings are allowed) and 1
+when at least one check failed. The JSON form is
+`{"ok", "errors", "warnings", "checks": [{"id", "severity", "message", "fix"}]}`
+with severity `ok`, `warn` or `error`.
+
+`voxtype setup check` prints the same report under its old name and always
+exits 0.
+
+**At daemon startup** voxtype runs the quick subset of these checks (model
+files, VAD model, output tools, display environment, OSD and meeting tools),
+logs every problem, and sends one desktop notification listing the errors
+with their fixes. Model and VAD model failures are left out of that
+notification because they get their own. If the daemon restarts with the
+same problems (for example in a systemd restart loop), it does not notify
+again until the set of problems changes or a start comes up clean. Warnings
+only go to the log (`journalctl --user -u voxtype`).
 
 ### `voxtype config`
 

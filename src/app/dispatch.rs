@@ -183,7 +183,7 @@ pub(crate) async fn dispatch(
             match action {
                 Some(SetupAction::Check) => {
                     warn_if_root("check");
-                    setup::run_checks(&config).await?;
+                    setup::run_checks(&config, config_path.as_deref()).await?;
                 }
                 Some(SetupAction::Systemd { uninstall, status }) => {
                     warn_if_root("systemd");
@@ -455,6 +455,12 @@ pub(crate) async fn dispatch(
 
         Commands::Meeting { action } => {
             run_meeting_command(&config, action).await?;
+        }
+
+        Commands::Doctor { json } => {
+            if setup::doctor::run_cli(&config, config_path.as_deref(), json).await {
+                std::process::exit(1);
+            }
         }
 
         Commands::CheckUpdate => {

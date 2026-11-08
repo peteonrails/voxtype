@@ -16,6 +16,7 @@ pub mod app_bundle;
 pub mod binary;
 pub mod compositor;
 pub mod dms;
+pub mod doctor;
 pub mod gpu;
 #[cfg(target_os = "macos")]
 pub mod hammerspoon;
@@ -202,12 +203,57 @@ pub async fn is_ydotool_daemon_running() -> bool {
         .unwrap_or(false)
 }
 
+/// Every tool the output chain report looks up on PATH.
+const OUTPUT_CHAIN_TOOLS: &[&str] = &[
+    "wtype",
+    "eitype",
+    "dotool",
+    "ydotool",
+    "wl-copy",
+    "xclip",
+    "osascript",
+    "pbcopy",
+];
+
 /// Detect the full output chain status
 pub async fn detect_output_chain() -> OutputChainStatus {
-    let display_server = detect_display_server();
+    let mut paths = std::collections::HashMap::new();
+    for tool in OUTPUT_CHAIN_TOOLS {
+        paths.insert(*tool, get_command_path(tool).await);
+    }
+    let ydotool_daemon = if paths.get("ydotool").is_some_and(Option::is_some) {
+        is_ydotool_daemon_running().await
+    } else {
+        false
+    };
+    build_output_chain(
+        detect_display_server(),
+        |tool| paths.get(tool).cloned().flatten(),
+        ydotool_daemon,
+    )
+}
 
+/// Output chain status without spawning anything: PATH lookups in-process,
+/// and ydotoold assumed up when ydotool is installed (probing it means
+/// running ydotool). For the daemon's startup check, which must stay fast
+/// and only cares whether any output method could work at all.
+pub fn detect_output_chain_quick() -> OutputChainStatus {
+    build_output_chain(
+        detect_display_server(),
+        |tool| which::which(tool).ok().map(|p| p.display().to_string()),
+        true,
+    )
+}
+
+/// Assemble the output chain status from tool lookups. Pure, so the
+/// classification can be tested without the tools installed.
+pub fn build_output_chain(
+    display_server: DisplayServer,
+    lookup: impl Fn(&str) -> Option<String>,
+    ydotool_daemon_running: bool,
+) -> OutputChainStatus {
     // Check wtype
-    let wtype_path = get_command_path("wtype").await;
+    let wtype_path = lookup("wtype");
     let wtype_installed = wtype_path.is_some();
     let wtype_available = wtype_installed && display_server == DisplayServer::Wayland;
     let wtype_note = if wtype_installed && display_server != DisplayServer::Wayland {
@@ -217,7 +263,7 @@ pub async fn detect_output_chain() -> OutputChainStatus {
     };
 
     // Check eitype
-    let eitype_path = get_command_path("eitype").await;
+    let eitype_path = lookup("eitype");
     let eitype_installed = eitype_path.is_some();
     let eitype_available = eitype_installed && display_server == DisplayServer::Wayland;
     let eitype_note = if eitype_installed && display_server != DisplayServer::Wayland {
@@ -228,17 +274,13 @@ pub async fn detect_output_chain() -> OutputChainStatus {
 
     // Check dotool. Same test the dotool driver applies at output time: on
     // PATH is enough, since it writes to uinput on Wayland, X11 and TTY alike.
-    let dotool_path = get_command_path("dotool").await;
+    let dotool_path = lookup("dotool");
     let dotool_installed = dotool_path.is_some();
 
     // Check ydotool
-    let ydotool_path = get_command_path("ydotool").await;
+    let ydotool_path = lookup("ydotool");
     let ydotool_installed = ydotool_path.is_some();
-    let ydotool_daemon = if ydotool_installed {
-        is_ydotool_daemon_running().await
-    } else {
-        false
-    };
+    let ydotool_daemon = ydotool_installed && ydotool_daemon_running;
     let ydotool_available = ydotool_installed && ydotool_daemon;
     let ydotool_note = if ydotool_installed && !ydotool_daemon {
         Some("daemon not running".to_string())
@@ -247,7 +289,7 @@ pub async fn detect_output_chain() -> OutputChainStatus {
     };
 
     // Check wl-copy
-    let wl_copy_path = get_command_path("wl-copy").await;
+    let wl_copy_path = lookup("wl-copy");
     let wl_copy_installed = wl_copy_path.is_some();
     let wl_copy_available = wl_copy_installed && display_server == DisplayServer::Wayland;
     let wl_copy_note = if wl_copy_installed && display_server != DisplayServer::Wayland {
@@ -257,7 +299,7 @@ pub async fn detect_output_chain() -> OutputChainStatus {
     };
 
     // Check xclip
-    let xclip_path = get_command_path("xclip").await;
+    let xclip_path = lookup("xclip");
     let xclip_installed = xclip_path.is_some();
     let xclip_available = xclip_installed && display_server == DisplayServer::X11;
     let xclip_note = if xclip_installed && display_server != DisplayServer::X11 {
@@ -267,7 +309,7 @@ pub async fn detect_output_chain() -> OutputChainStatus {
     };
 
     // Check osascript (macOS)
-    let osascript_path = get_command_path("osascript").await;
+    let osascript_path = lookup("osascript");
     let osascript_installed = osascript_path.is_some();
     let osascript_available = osascript_installed && display_server == DisplayServer::MacOS;
     let osascript_note = if osascript_installed && !osascript_available {
@@ -279,7 +321,7 @@ pub async fn detect_output_chain() -> OutputChainStatus {
     };
 
     // Check pbcopy (macOS)
-    let pbcopy_path = get_command_path("pbcopy").await;
+    let pbcopy_path = lookup("pbcopy");
     let pbcopy_installed = pbcopy_path.is_some();
     let pbcopy_available = pbcopy_installed && display_server == DisplayServer::MacOS;
     let pbcopy_note = if pbcopy_installed && !pbcopy_available {
@@ -1165,7 +1207,7 @@ pub async fn run_setup(
             );
             println!("  2. Start the daemon: voxtype daemon\n");
             println!("Optional:");
-            println!("  voxtype setup check      - Verify system configuration");
+            println!("  voxtype doctor           - Verify system configuration");
             println!("  voxtype setup model      - Download/switch whisper models");
             println!("  voxtype setup systemd    - Install as systemd service");
             println!("  voxtype setup waybar     - Get Waybar integration config");
@@ -1176,272 +1218,15 @@ pub async fn run_setup(
     Ok(())
 }
 
-/// Run system checks (blocking, shows red X for failures)
-pub async fn run_checks(config: &Config) -> anyhow::Result<()> {
-    println!("Voxtype System Check\n");
-    println!("====================\n");
-
-    let mut all_ok = true;
-
-    // Check CPU compatibility
-    println!("CPU:");
-    if let Some(warning) = crate::cpu::check_cpu_compatibility() {
-        print_warning(&warning);
-    } else {
-        print_success("CPU features compatible");
-    }
-    if crate::cpu::is_running_in_vm() {
-        print_info("Running in a virtual machine - ensure CPU features are passed through");
-    }
-
-    // Check directories
-    println!("Directories:");
-    if let Some(config_dir) = Config::config_dir() {
-        if config_dir.exists() {
-            print_success(&format!("Config directory: {:?}", config_dir));
-        } else {
-            print_failure(&format!("Config directory missing: {:?}", config_dir));
-            println!("       Run: voxtype setup");
-            all_ok = false;
-        }
-    }
-
-    let models_dir = Config::models_dir();
-    if models_dir.exists() {
-        print_success(&format!("Models directory: {:?}", models_dir));
-    } else {
-        print_failure(&format!("Models directory missing: {:?}", models_dir));
-        println!("       Run: voxtype setup");
-        all_ok = false;
-    }
-
-    // Check config file
-    if let Some(config_path) = Config::default_path() {
-        if config_path.exists() {
-            print_success(&format!("Config file: {:?}", config_path));
-        } else {
-            print_failure(&format!("Config file missing: {:?}", config_path));
-            println!("       Run: voxtype setup");
-            all_ok = false;
-        }
-    }
-
-    // Check input group
-    println!("\nInput:");
-    if user_in_group("input") {
-        print_success(
-            "User is in 'input' group (evdev hotkeys + modifier-release guard available)",
-        );
-    } else {
-        print_warning("User is not in 'input' group");
-        println!("       evdev hotkeys: unavailable");
-        println!("       Modifier-release guard: unavailable");
-        println!("         (typed text may trigger keybindings if the hotkey is released late)");
-        println!("       Required only for evdev hotkey mode, not compositor keybindings");
-        println!("       To enable: sudo usermod -aG input $USER && logout");
-    }
-
-    // Check output chain
-    let mut output_status = detect_output_chain().await;
-    output_status.primary_method = configured_primary_method(&output_status, &config.output);
-    print_output_chain_status(&output_status);
-
-    if output_status.primary_method.is_none() {
-        print_failure("No text output method available");
-        if output_status.display_server == DisplayServer::Wayland {
-            println!("       Install wtype: sudo pacman -S wtype");
-            println!("       Or eitype:     cargo install eitype");
-        } else {
-            println!("       Install ydotool: sudo pacman -S ydotool");
-        }
-        all_ok = false;
-    } else if output_status.primary_method.as_deref() == Some("clipboard")
-        && config.output.mode == crate::config::OutputMode::Type
-    {
-        print_warning("Only clipboard mode available - typing won't work");
-        if output_status.display_server == DisplayServer::Wayland {
-            println!("       Install wtype: sudo pacman -S wtype");
-            println!("       Or eitype:     cargo install eitype");
-        } else {
-            println!("       Install ydotool: sudo pacman -S ydotool");
-        }
-    }
-
-    // Check whisper model (only if using Whisper engine)
-    if config.engine == crate::config::TranscriptionEngine::Whisper {
-        println!("\nWhisper Model:");
-        let model_name = &config.whisper.model;
-        let model_filename = crate::transcribe::whisper::get_model_filename(model_name);
-        let model_path = models_dir.join(&model_filename);
-
-        let size = std::fs::metadata(&model_path)
-            .map(|m| m.len() as f64 / 1024.0 / 1024.0)
-            .unwrap_or(0.0);
-        if crate::model_catalog::model_installed("whisper", model_name) {
-            print_success(&format!(
-                "Model '{}' installed ({:.0} MB)",
-                model_name, size
-            ));
-        } else if model_path.exists() {
-            // Present but short: an interrupted download used to be reported
-            // as installed, then failed to load at runtime.
-            print_failure(&format!(
-                "Model '{}' is incomplete ({:.0} MB on disk)",
-                model_name, size
-            ));
-            println!(
-                "       Run: voxtype setup --download --model {}",
-                model_name
-            );
-            all_ok = false;
-        } else {
-            print_failure(&format!("Model '{}' not found", model_name));
-            println!("       Run: voxtype setup --download");
-            all_ok = false;
-        }
-    } else {
-        println!("\nWhisper Model:");
-        print_info("Using Parakeet engine (Whisper model not required)");
-    }
-
-    // Check Parakeet models
-    println!("\nParakeet Models:");
-
-    // Find available Parakeet models
-    let mut parakeet_models: Vec<(String, u64)> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&models_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.contains("parakeet") {
-                    // Check if it has the required ONNX files (including quantized variants)
-                    let has_encoder = path.join("encoder-model.onnx").exists()
-                        || path.join("encoder-model.int8.onnx").exists();
-                    let has_decoder = path.join("decoder_joint-model.onnx").exists()
-                        || path.join("decoder_joint-model.int8.onnx").exists()
-                        || path.join("model.onnx").exists();
-                    if has_encoder || has_decoder {
-                        // Get total size of model files
-                        let size = std::fs::read_dir(&path)
-                            .map(|entries| {
-                                entries
-                                    .flatten()
-                                    .filter_map(|e| e.metadata().ok())
-                                    .map(|m| m.len())
-                                    .sum()
-                            })
-                            .unwrap_or(0);
-                        parakeet_models.push((name, size));
-                    }
-                }
-            }
-        }
-    }
-
-    if parakeet_models.is_empty() {
-        print_info("No Parakeet models found");
-        println!("       See docs/PARAKEET.md for download instructions");
-    } else {
-        for (name, size) in &parakeet_models {
-            let size_mb = *size as f64 / 1024.0 / 1024.0;
-            print_success(&format!("Model '{}' installed ({:.0} MB)", name, size_mb));
-        }
-    }
-
-    // Check OpenVINO models
-    println!("\nOpenVINO Whisper Models:");
-
-    let mut openvino_models: Vec<(String, u64)> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&models_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("openvino-whisper")
-                    && model::validate_openvino_model(&path).is_ok()
-                {
-                    let size = std::fs::read_dir(&path)
-                        .map(|entries| {
-                            entries
-                                .flatten()
-                                .filter_map(|e| e.metadata().ok())
-                                .map(|m| m.len())
-                                .sum()
-                        })
-                        .unwrap_or(0);
-                    openvino_models.push((name, size));
-                }
-            }
-        }
-    }
-
-    if openvino_models.is_empty() {
-        print_info("No OpenVINO models found");
-        println!("       Download with: voxtype setup --download --model base.en-int8");
-    } else {
-        for (name, size) in &openvino_models {
-            let size_mb = *size as f64 / 1024.0 / 1024.0;
-            print_success(&format!("Model '{}' installed ({:.0} MB)", name, size_mb));
-        }
-    }
-
-    // Check if OpenVINO is configured but model is missing
-    if config.engine == crate::config::TranscriptionEngine::OpenVino {
-        if let Some(ref openvino_config) = config.openvino {
-            let configured_model = &openvino_config.model;
-            // Resolve the dir name for the configured model
-            let dir_name = model::openvino_dir_name(configured_model);
-            let model_found = match dir_name {
-                Some(dir) => openvino_models.iter().any(|(name, _)| name == dir),
-                None => false,
-            };
-            if !model_found {
-                print_failure(&format!(
-                    "Configured OpenVINO model '{}' not found",
-                    configured_model
-                ));
-                println!(
-                    "       Download with: voxtype setup --download --model {}",
-                    configured_model
-                );
-                all_ok = false;
-            }
-        } else {
-            print_failure("Engine set to 'openvino' but [openvino] config section is missing");
-            all_ok = false;
-        }
-    }
-
-    // Check if Parakeet is configured but model is missing
-    if config.engine == crate::config::TranscriptionEngine::Parakeet {
-        if let Some(ref parakeet_config) = config.parakeet {
-            let configured_model = &parakeet_config.model;
-            let model_found = parakeet_models
-                .iter()
-                .any(|(name, _)| name == configured_model);
-            if !model_found {
-                print_failure(&format!(
-                    "Configured Parakeet model '{}' not found",
-                    configured_model
-                ));
-                println!("       Download the model or change config to use an available model");
-                all_ok = false;
-            }
-        } else {
-            print_failure("Engine set to 'parakeet' but [parakeet] config section is missing");
-            all_ok = false;
-        }
-    }
-
-    // Summary
-    println!("\n---");
-    if all_ok {
-        println!("\x1b[32m✓ All checks passed!\x1b[0m");
-    } else {
-        println!("\x1b[31m✗ Some checks failed.\x1b[0m Please fix the issues above.");
-    }
-
+/// `voxtype setup check`: the `voxtype doctor` report under its old name.
+///
+/// Always succeeds, as it always has, so scripts that run it for its output
+/// keep working; `voxtype doctor` exits non-zero when a check errors.
+pub async fn run_checks(
+    config: &Config,
+    config_path: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    doctor::run_cli(config, config_path, false).await;
     Ok(())
 }
 
