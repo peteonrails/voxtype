@@ -239,6 +239,14 @@ systemctl --user status ydotool
 
 ## Audio Problems
 
+### "Voxtype: microphone not found" or "could not open the microphone" notification
+
+The daemon posts this notification when you start a recording and the microphone can't be opened. It appears once per distinct failure (again after five minutes if the failure persists), so pressing the hotkey repeatedly doesn't stack notifications. The full error is in the log (`journalctl --user -u voxtype`).
+
+- **microphone not found:** the device named in `[audio] device` isn't connected. List what is available with `voxtype info devices`, then `voxtype config set audio.device <name>` (or `default` to follow the system default) and restart voxtype.
+- **no microphone found:** the system has no default input source. Plug in or unmute a microphone and check `wpctl status` or `pactl list sources short`.
+- **could not open the microphone:** the audio server refused the stream. Check that PipeWire or PulseAudio is running: `systemctl --user status pipewire wireplumber`.
+
 ### "No audio captured" or empty transcriptions
 
 **Possible causes and solutions:**
@@ -310,10 +318,18 @@ max_duration_secs = 120  # 2 minutes
 
 **Cause:** Whisper model not downloaded or wrong path.
 
+The daemon also posts a "model missing" or "model failed to load" notification naming the engine and model, for every engine, either when a recording needs the model (on-demand loading) or when the daemon fails to start because of it. Under systemd, the startup notification is posted once, not on every automatic restart.
+
 **Solution:**
 ```bash
 # Download the model
 voxtype setup --download
+
+# Download a specific model, for any engine
+voxtype setup --download --model parakeet-tdt-0.6b-v3
+
+# Pick an installed model interactively
+voxtype setup model
 
 # Or manually download
 mkdir -p ~/.local/share/voxtype/models

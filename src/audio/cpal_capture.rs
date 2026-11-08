@@ -14,6 +14,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use tokio::sync::{mpsc, oneshot};
 
+/// How long `start()` waits for the capture thread to confirm the stream is
+/// running before returning anyway.
+const STREAM_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Commands sent to the audio capture thread
 enum CaptureCommand {
     Stop(oneshot::Sender<Vec<f32>>),
@@ -187,6 +191,10 @@ impl AudioCapture for CpalCapture {
         // Create channels
         let (chunk_tx, chunk_rx) = mpsc::channel(64);
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<CaptureCommand>();
+        // The stream is built on the capture thread. Its outcome comes back
+        // here so a device that refuses to open fails `start()` instead of
+        // handing back a receiver that never yields a sample.
+        let (ready_tx, ready_rx) = oneshot::channel::<Result<(), String>>();
 
         // Shared state
         let samples = Arc::new(Mutex::new(Vec::<f32>::new()));
@@ -254,7 +262,7 @@ impl AudioCapture for CpalCapture {
                     build_stream::<u16>(&device, &stream_config, make_params(), err_fn)
                 }
                 format => {
-                    tracing::error!("Unsupported sample format: {:?}", format);
+                    let _ = ready_tx.send(Err(format!("unsupported sample format {format:?}")));
                     return;
                 }
             };
@@ -262,15 +270,16 @@ impl AudioCapture for CpalCapture {
             let stream = match stream_result {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::error!("Failed to build audio stream: {}", e);
+                    let _ = ready_tx.send(Err(format!("could not open the input stream: {e}")));
                     return;
                 }
             };
 
             if let Err(e) = stream.play() {
-                tracing::error!("Failed to start audio stream: {}", e);
+                let _ = ready_tx.send(Err(format!("could not start the input stream: {e}")));
                 return;
             }
+            let _ = ready_tx.send(Ok(()));
 
             tracing::debug!("Audio capture thread started");
 
@@ -337,6 +346,26 @@ impl AudioCapture for CpalCapture {
 
             tracing::debug!("Audio capture thread stopped");
         });
+
+        match tokio::time::timeout(STREAM_READY_TIMEOUT, ready_rx).await {
+            Ok(Ok(Err(message))) => {
+                let _ = thread_handle.join();
+                return Err(AudioError::StreamError(message));
+            }
+            Ok(Err(_)) => {
+                let _ = thread_handle.join();
+                return Err(AudioError::StreamError(
+                    "the capture thread exited before the stream started".to_string(),
+                ));
+            }
+            // A slow backend keeps the old behaviour: carry on and let the
+            // stream deliver samples when it comes up.
+            Err(_) => tracing::warn!(
+                "Audio stream not confirmed after {:?}; continuing",
+                STREAM_READY_TIMEOUT
+            ),
+            Ok(Ok(Ok(()))) => {}
+        }
 
         self.cmd_tx = Some(cmd_tx);
         self.thread_handle = Some(thread_handle);

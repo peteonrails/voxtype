@@ -30,6 +30,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::signal::unix::{signal, SignalKind};
 
+/// Runtime-directory marker holding the last model-load failure notified at
+/// startup, so a systemd restart loop doesn't repeat the same notice.
+const STARTUP_FAILURE_MARKER: &str = "startup_failure_notice";
+
 /// Send a desktop notification with optional engine icon
 async fn send_notification(
     title: &str,
@@ -1067,6 +1071,11 @@ pub struct Daemon {
     osd_supervisor_task: Option<tokio::task::JoinHandle<()>>,
     // Model manager for multi-model support
     model_manager: Option<ModelManager>,
+    // Rate-limits the notification for a microphone that won't open, so a
+    // hotkey pressed again and again doesn't stack identical notices.
+    capture_notices: crate::failure_notice::NoticeGate,
+    // Same for a model that won't load.
+    model_notices: crate::failure_notice::NoticeGate,
     // Background task for loading model on-demand
     model_load_task: Option<
         tokio::task::JoinHandle<
@@ -1221,6 +1230,8 @@ impl Daemon {
             streaming_drain_pump: None,
             osd_supervisor_task: None,
             model_manager: None,
+            capture_notices: Default::default(),
+            model_notices: Default::default(),
             model_load_task: None,
             override_cache: None,
             override_load_task: None,
@@ -1417,17 +1428,18 @@ impl Daemon {
                     if let Some(handle) = handle {
                         self.level_emitter_task = Some(handle);
                     }
+                    self.capture_notices.clear();
                     Ok(capture)
                 }
                 Err(e) => {
                     tracing::error!("Failed to start audio: {}", e);
-                    self.play_feedback(SoundEvent::Error);
+                    self.report_capture_failure(&e).await;
                     Err(())
                 }
             },
             Err(e) => {
                 tracing::error!("Failed to create audio capture: {}", e);
-                self.play_feedback(SoundEvent::Error);
+                self.report_capture_failure(&e).await;
                 Err(())
             }
         }
@@ -2135,17 +2147,18 @@ impl Daemon {
                         })
                     };
                     self.level_emitter_task = Some(handle);
+                    self.capture_notices.clear();
                     Ok((capture, streaming_rx))
                 }
                 Err(e) => {
                     tracing::error!("Failed to start audio: {}", e);
-                    self.play_feedback(SoundEvent::Error);
+                    self.report_capture_failure(&e).await;
                     Err(())
                 }
             },
             Err(e) => {
                 tracing::error!("Failed to create audio capture: {}", e);
-                self.play_feedback(SoundEvent::Error);
+                self.report_capture_failure(&e).await;
                 Err(())
             }
         }
@@ -2279,6 +2292,53 @@ impl Daemon {
         .await;
     }
 
+    /// Post a failure notice for ten seconds: long enough to read the fix.
+    async fn post_failure_notice(&self, notice: &crate::failure_notice::Notice) {
+        send_notification_with_lifetime(
+            &notice.title,
+            &notice.body,
+            self.config.output.notification.show_engine_icon,
+            self.config.engine,
+            &self.config.output.notification.urgency,
+            Lifetime::Millis(10_000),
+        )
+        .await;
+    }
+
+    /// The microphone could not be opened. The error beep alone goes
+    /// through the same audio stack that may be broken, so say what failed
+    /// and how to fix it, once per distinct failure.
+    async fn report_capture_failure(&mut self, err: &crate::error::AudioError) {
+        self.play_feedback(SoundEvent::Error);
+        let device = self.config.audio.device.clone();
+        if self
+            .capture_notices
+            .should_notify(&format!("{device}|{err}"), Instant::now())
+        {
+            let notice = crate::failure_notice::capture_failed(&device, err);
+            self.post_failure_notice(&notice).await;
+        }
+    }
+
+    /// The model for this recording could not be loaded.
+    async fn report_model_failure(
+        &mut self,
+        model_override: Option<&str>,
+        err: &crate::error::TranscribeError,
+    ) {
+        self.play_feedback(SoundEvent::Error);
+        let model = model_override
+            .unwrap_or(self.config.model_name())
+            .to_string();
+        if self
+            .model_notices
+            .should_notify(&format!("{model}|{err}"), Instant::now())
+        {
+            let notice = crate::failure_notice::model_load_failed(&self.config, &model, err, false);
+            self.post_failure_notice(&notice).await;
+        }
+    }
+
     /// Start building the override's transcriber in the background so it's
     /// ready by the time the recording stops.
     fn start_override_load(
@@ -2400,6 +2460,17 @@ impl Daemon {
         &mut self,
         model_override: Option<&str>,
     ) -> std::result::Result<Arc<dyn Transcriber>, ()> {
+        let transcriber = self.acquire_transcriber(model_override).await;
+        if transcriber.is_ok() {
+            self.model_notices.clear();
+        }
+        transcriber
+    }
+
+    async fn acquire_transcriber(
+        &mut self,
+        model_override: Option<&str>,
+    ) -> std::result::Result<Arc<dyn Transcriber>, ()> {
         if let Some(name) = model_override {
             match model_catalog::override_route(&self.config, name) {
                 Ok(model_catalog::OverrideRoute::Separate { engine, model }) => {
@@ -2428,12 +2499,15 @@ impl Daemon {
                     }
                     Ok(Err(e)) => {
                         tracing::error!("Model loading failed: {}", e);
-                        self.play_feedback(SoundEvent::Error);
+                        self.report_model_failure(model_override, &e).await;
                         Err(())
                     }
                     Err(e) => {
                         tracing::error!("Model loading task panicked: {}", e);
-                        self.play_feedback(SoundEvent::Error);
+                        let e = crate::error::TranscribeError::InitFailed(format!(
+                            "model loading panicked: {e}"
+                        ));
+                        self.report_model_failure(model_override, &e).await;
                         Err(())
                     }
                 }
@@ -2475,12 +2549,15 @@ impl Daemon {
                             }
                             Ok(Err(e)) => {
                                 tracing::error!("Failed to re-create transcriber: {}", e);
-                                self.play_feedback(SoundEvent::Error);
+                                self.report_model_failure(model_override, &e).await;
                                 Err(())
                             }
                             Err(e) => {
                                 tracing::error!("Transcriber creation task panicked: {}", e);
-                                self.play_feedback(SoundEvent::Error);
+                                let e = crate::error::TranscribeError::InitFailed(format!(
+                                    "model loading panicked: {e}"
+                                ));
+                                self.report_model_failure(model_override, &e).await;
                                 Err(())
                             }
                         }
@@ -2501,7 +2578,7 @@ impl Daemon {
                             Ok(t) => Ok(t),
                             Err(e) => {
                                 tracing::error!("Failed to get transcriber: {}", e);
-                                self.play_feedback(SoundEvent::Error);
+                                self.report_model_failure(model_override, &e).await;
                                 Err(())
                             }
                         }
@@ -3716,15 +3793,77 @@ impl Daemon {
         }
     }
 
+    /// Load the transcription model at startup (on_demand_loading off).
+    fn preload_transcriber(
+        &mut self,
+        model_manager: &mut ModelManager,
+    ) -> std::result::Result<(), crate::error::TranscribeError> {
+        match self.config.engine {
+            crate::config::TranscriptionEngine::Whisper => {
+                if self.config.whisper.streaming {
+                    // Streaming needs the transcriber in `transcriber_preloaded`
+                    // so try_start_streaming can find it. The factory returns
+                    // the sliding-window wrapper when [whisper] streaming = true.
+                    if self.config.whisper.on_demand_loading {
+                        tracing::warn!(
+                            "[whisper] streaming requires on_demand_loading = false; \
+                             streaming will be unavailable"
+                        );
+                    }
+                    self.transcriber_preloaded = Some(Arc::from(
+                        crate::transcribe::create_transcriber(&self.config)?,
+                    ));
+                } else {
+                    // Use model manager for Whisper
+                    model_manager.preload_primary()?;
+                }
+            }
+            crate::config::TranscriptionEngine::Parakeet
+            | crate::config::TranscriptionEngine::Moonshine
+            | crate::config::TranscriptionEngine::SenseVoice
+            | crate::config::TranscriptionEngine::Paraformer
+            | crate::config::TranscriptionEngine::Dolphin
+            | crate::config::TranscriptionEngine::Omnilingual
+            | crate::config::TranscriptionEngine::Cohere
+            | crate::config::TranscriptionEngine::OpenVino
+            | crate::config::TranscriptionEngine::Soniox => {
+                // Non-Whisper engines do their own setup; Soniox just validates
+                // API key + endpoint at construction (no model to download).
+                self.transcriber_preloaded = Some(Arc::from(
+                    crate::transcribe::create_transcriber(&self.config)?,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The model failed to load at startup and the daemon is about to exit.
+    /// Under systemd it is restarted every few seconds and fails the same
+    /// way, so the notice is posted once per distinct failure: a marker in
+    /// the runtime directory remembers the last one until a start succeeds.
+    async fn notify_startup_model_failure(&self, err: &crate::error::TranscribeError) {
+        let model = self.config.model_name();
+        let key = format!("{}|{}|{}", self.config.engine.name(), model, err);
+        let marker = Config::runtime_dir().join(STARTUP_FAILURE_MARKER);
+        if std::fs::read_to_string(&marker).ok().as_deref() == Some(key.as_str()) {
+            tracing::debug!("Startup failure already notified; not repeating it");
+            return;
+        }
+        let _ = std::fs::write(&marker, &key);
+        let notice = crate::failure_notice::model_load_failed(&self.config, model, err, true);
+        self.post_failure_notice(&notice).await;
+    }
+
     /// Fire a desktop notification when the running binary can't service
     /// the configured engine (e.g. `engine = "parakeet"` but the wrapper
     /// dispatches to a CPU Whisper variant — the Ryan case from #450).
     /// Logged at WARN regardless, so journalctl users see it too.
-    fn warn_on_variant_mismatch(&self) {
+    /// Returns whether it notified.
+    fn warn_on_variant_mismatch(&self) -> bool {
         let inventory = crate::setup::binary::inventory();
         let Some(mismatch) = crate::setup::variant_check::detect_mismatch(&self.config, &inventory)
         else {
-            return;
+            return false;
         };
 
         let active = mismatch
@@ -3756,6 +3895,7 @@ impl Daemon {
             body
         );
         crate::notification::send_sync(&title, &body);
+        true
     }
 
     /// Run the daemon main loop
@@ -3774,7 +3914,7 @@ impl Daemon {
         // but logs go to journald and most users never see them. A
         // notify-send pops up where the user is actually looking. See
         // #450 — the silent v0.6.x to v0.7.0 wrapper-flip incident.
-        self.warn_on_variant_mismatch();
+        let variant_mismatch_notified = self.warn_on_variant_mismatch();
 
         // Streaming dictation types characters at the cursor while the user is
         // still holding the PTT key. On Wayland compositors backed by libinput
@@ -3944,49 +4084,20 @@ impl Daemon {
         // Pre-load transcription model if on_demand_loading is disabled
         if !self.config.on_demand_loading() {
             tracing::info!("Loading transcription model: {}", self.config.model_name());
-            match self.config.engine {
-                crate::config::TranscriptionEngine::Whisper => {
-                    if self.config.whisper.streaming {
-                        // Streaming needs the transcriber in `transcriber_preloaded`
-                        // so try_start_streaming can find it. The factory returns
-                        // the sliding-window wrapper when [whisper] streaming = true.
-                        if self.config.whisper.on_demand_loading {
-                            tracing::warn!(
-                                "[whisper] streaming requires on_demand_loading = false; \
-                                 streaming will be unavailable"
-                            );
-                        }
-                        self.transcriber_preloaded = Some(Arc::from(
-                            crate::transcribe::create_transcriber(&self.config)?,
-                        ));
-                    } else {
-                        // Use model manager for Whisper
-                        if let Err(e) = model_manager.preload_primary() {
-                            tracing::error!("Failed to preload model: {}", e);
-                            return Err(crate::error::VoxtypeError::Transcribe(e));
-                        }
-                    }
+            if let Err(e) = self.preload_transcriber(&mut model_manager) {
+                tracing::error!("Failed to preload model: {}", e);
+                // A variant mismatch was already explained; this failure is
+                // its consequence, and a second notice would replace the fix.
+                if !variant_mismatch_notified {
+                    self.notify_startup_model_failure(&e).await;
                 }
-                crate::config::TranscriptionEngine::Parakeet
-                | crate::config::TranscriptionEngine::Moonshine
-                | crate::config::TranscriptionEngine::SenseVoice
-                | crate::config::TranscriptionEngine::Paraformer
-                | crate::config::TranscriptionEngine::Dolphin
-                | crate::config::TranscriptionEngine::Omnilingual
-                | crate::config::TranscriptionEngine::Cohere
-                | crate::config::TranscriptionEngine::OpenVino
-                | crate::config::TranscriptionEngine::Soniox => {
-                    // Non-Whisper engines do their own setup; Soniox just validates
-                    // API key + endpoint at construction (no model to download).
-                    self.transcriber_preloaded = Some(Arc::from(
-                        crate::transcribe::create_transcriber(&self.config)?,
-                    ));
-                }
+                return Err(crate::error::VoxtypeError::Transcribe(e));
             }
             tracing::info!("Model loaded, ready for voice input");
         } else {
             tracing::info!("On-demand loading enabled, model will be loaded when recording starts");
         }
+        let _ = std::fs::remove_file(Config::runtime_dir().join(STARTUP_FAILURE_MARKER));
 
         // Log secondary model if configured
         if let Some(ref secondary) = self.config.whisper.secondary_model {
