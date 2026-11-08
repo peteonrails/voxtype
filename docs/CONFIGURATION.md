@@ -2446,7 +2446,7 @@ When `true`, shows a notification when recording stops (transcription begins).
 
 When `true`, shows a notification with the transcribed text after transcription completes.
 
-**Requires:** `notify-send` (libnotify)
+**Requires:** a notification server (mako, swaync, dunst, or your desktop's own). Voxtype uses `notify-send` (libnotify) when installed and otherwise talks to the server over D-Bus directly.
 
 **Example:**
 ```toml
@@ -2472,7 +2472,7 @@ If you see this notification while you were speaking, your microphone level is p
 **Default:** `"normal"`
 **Required:** No
 
-Sets the urgency level passed to `notify-send` for all voxtype notifications.
+Sets the urgency level of all voxtype notifications.
 
 On GNOME, notifications with `"low"` urgency are delivered to the notification drawer without showing as a popup banner. Use `"normal"` (the default) if you want notifications to pop up on screen. Use `"critical"` if you want notifications that persist until dismissed.
 

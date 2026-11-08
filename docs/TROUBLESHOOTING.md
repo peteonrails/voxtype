@@ -951,11 +951,26 @@ restore_clipboard_delay_ms = 500  # Try 300-500ms for slow applications
 
 ### No desktop notification
 
-**Cause:** notify-send not installed or notifications disabled.
+**Cause:** No notification server is running, the session bus is unreachable from the daemon, or notifications are disabled in `[output.notification]`.
+
+Voxtype sends notifications with `notify-send` (libnotify) and, if that is missing or fails, talks to the notification server directly over D-Bus (`org.freedesktop.Notifications`). When neither works, the daemon logs this warning once:
+
+```
+Desktop notifications cannot be delivered, so Voxtype alerts will only appear in this log (...)
+```
+
+The part in parentheses says what each route reported. `ServiceUnknown` means no notification server is running; a "No such file or directory" error means the daemon cannot reach the session bus.
 
 **Solution:**
 ```bash
-# Install libnotify
+# Check whether a notification server is running
+busctl --user call org.freedesktop.Notifications /org/freedesktop/Notifications \
+    org.freedesktop.Notifications GetServerInformation
+
+# If not, install and start one (GNOME and KDE ship their own), e.g.
+# Arch: sudo pacman -S mako   (or swaync, dunst)
+
+# Optional: install notify-send for testing
 # Arch: sudo pacman -S libnotify
 # Debian: sudo apt install libnotify-bin
 # Fedora: sudo dnf install libnotify
@@ -963,6 +978,8 @@ restore_clipboard_delay_ms = 500  # Try 300-500ms for slow applications
 # Test
 notify-send "Test" "This is a test"
 ```
+
+If the test works in your terminal but the daemon still logs the warning, the systemd user service may not see your session bus. Run `systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS` from your compositor's startup and restart voxtype.
 
 ---
 
