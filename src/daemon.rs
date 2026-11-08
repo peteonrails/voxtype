@@ -3646,24 +3646,27 @@ impl Daemon {
                         ),
                     };
 
-                    if let Err(e) =
-                        output::output_with_fallback(&output_chain, &final_text, output_options)
-                            .await
-                    {
+                    let (report, result) = output::output_with_fallback_report(
+                        &output_chain,
+                        &final_text,
+                        output_options,
+                    )
+                    .await;
+                    if let Err(e) = result {
                         tracing::error!("Output failed: {}", e);
+                        // Nothing typed or copied: keep the text recoverable.
+                        output::fallback::notify_failed(&report, &e, &final_text).await;
                     } else {
                         self.play_feedback(SoundEvent::TranscriptionComplete);
-
-                        if self.config.output.notification.on_transcription {
-                            // Send notification on successful output
-                            output::send_transcription_notification(
-                                &final_text,
-                                self.config.output.notification.show_engine_icon,
-                                self.config.engine,
-                                &self.config.output.notification.urgency,
-                            )
-                            .await;
-                        }
+                        // Says "copied to clipboard" (and why, once) when
+                        // typing fell back to the clipboard.
+                        output::fallback::notify_delivered(
+                            &report,
+                            &final_text,
+                            &self.config.output.notification,
+                            self.config.engine,
+                        )
+                        .await;
                     }
 
                     *state = State::Idle;
@@ -3758,6 +3761,25 @@ impl Daemon {
         crate::notification::send_sync(&title, &body);
     }
 
+    /// Fire a desktop notification when the daemon has no WAYLAND_DISPLAY or
+    /// DISPLAY, which is how a systemd service started before the compositor
+    /// imported its environment looks: every typing and clipboard tool fails
+    /// and dictation goes nowhere. Not needed when output goes to a file.
+    #[cfg(target_os = "linux")]
+    fn warn_on_missing_display_env(&self) {
+        let out = &self.config.output;
+        if out.mode == crate::config::OutputMode::File && out.file_path.is_some() {
+            return;
+        }
+        if !output::session::display_env_missing() {
+            return;
+        }
+        let under_systemd = std::env::var_os("INVOCATION_ID").is_some();
+        let (title, body) = output::session::display_env_notice(under_systemd);
+        tracing::warn!("{}: {}", title, body.replace('\n', " "));
+        crate::notification::send_sync(&title, &body);
+    }
+
     /// Run the daemon main loop
     pub async fn run(&mut self) -> Result<()> {
         tracing::info!("Starting voxtype daemon");
@@ -3775,6 +3797,8 @@ impl Daemon {
         // notify-send pops up where the user is actually looking. See
         // #450 — the silent v0.6.x to v0.7.0 wrapper-flip incident.
         self.warn_on_variant_mismatch();
+        #[cfg(target_os = "linux")]
+        self.warn_on_missing_display_env();
 
         // Streaming dictation types characters at the cursor while the user is
         // still holding the PTT key. On Wayland compositors backed by libinput
