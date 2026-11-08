@@ -26,6 +26,8 @@ pub struct YdotoolOutput {
     supports_key_hold: bool,
     /// Whether to send Enter key after output
     auto_submit: bool,
+    /// Convert newlines to Shift+Enter (for apps where Enter submits)
+    shift_enter_newlines: bool,
     /// Text to append after transcription (before auto_submit)
     append_text: Option<String>,
     /// Path to ydotoold socket, if found at a non-default location
@@ -40,6 +42,7 @@ impl YdotoolOutput {
         type_delay_ms: u32,
         pre_type_delay_ms: u32,
         auto_submit: bool,
+        shift_enter_newlines: bool,
         append_text: Option<String>,
     ) -> Self {
         let supports_key_hold = Self::detect_key_hold_support();
@@ -54,6 +57,7 @@ impl YdotoolOutput {
             pre_type_delay_ms,
             supports_key_hold,
             auto_submit,
+            shift_enter_newlines,
             append_text,
             socket_path,
         }
@@ -81,24 +85,9 @@ impl YdotoolOutput {
             })
             .unwrap_or(false)
     }
-}
 
-#[async_trait::async_trait]
-impl TextOutput for YdotoolOutput {
-    async fn output(&self, text: &str) -> Result<(), OutputError> {
-        if text.is_empty() {
-            return Ok(());
-        }
-
-        // Pre-typing delay if configured
-        if self.pre_type_delay_ms > 0 {
-            tracing::debug!(
-                "ydotool: sleeping {}ms before typing",
-                self.pre_type_delay_ms
-            );
-            tokio::time::sleep(Duration::from_millis(self.pre_type_delay_ms as u64)).await;
-        }
-
+    /// Type a text segment via `ydotool type`.
+    async fn type_text(&self, text: &str) -> Result<(), OutputError> {
         let mut cmd = Command::new("ydotool");
         self.apply_socket_env(&mut cmd);
         cmd.arg("type");
@@ -150,56 +139,107 @@ impl TextOutput for YdotoolOutput {
             return Err(OutputError::InjectionFailed(stderr.to_string()));
         }
 
-        // Append text if configured (e.g., a space to separate sentences)
-        if let Some(ref append) = self.append_text {
-            let mut append_cmd = Command::new("ydotool");
-            self.apply_socket_env(&mut append_cmd);
-            append_cmd.arg("type");
-            append_cmd
-                .arg("--key-delay")
-                .arg(self.type_delay_ms.to_string());
-            if self.supports_key_hold {
-                append_cmd
-                    .arg("--key-hold")
-                    .arg(self.type_delay_ms.to_string());
+        Ok(())
+    }
+
+    /// Send Shift+Enter: hold shift (evdev 42), press/release Enter (28),
+    /// release shift. Keeps dictated newlines from submitting in chat apps.
+    async fn send_shift_enter(&self) -> Result<(), OutputError> {
+        let mut cmd = Command::new("ydotool");
+        self.apply_socket_env(&mut cmd);
+        let output = cmd
+            .args(shift_enter_args(self.type_delay_ms))
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| {
+                OutputError::InjectionFailed(format!("ydotool Shift+Enter failed: {}", e))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!("Failed to send Shift+Enter: {}", stderr);
+        }
+
+        Ok(())
+    }
+
+    /// Output text with newlines converted to Shift+Enter
+    async fn output_with_shift_enter_newlines(&self, text: &str) -> Result<(), OutputError> {
+        let segments: Vec<&str> = text.split('\n').collect();
+
+        for (i, segment) in segments.iter().enumerate() {
+            // Type the text segment
+            if !segment.is_empty() {
+                self.type_text(segment).await?;
             }
-            append_cmd.arg("--").arg(append);
 
-            let append_output = append_cmd
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .output()
-                .await
-                .map_err(|e| {
-                    OutputError::InjectionFailed(format!("ydotool append text failed: {}", e))
-                })?;
-
-            if !append_output.status.success() {
-                let stderr = String::from_utf8_lossy(&append_output.stderr);
-                tracing::warn!("Failed to append text: {}", stderr);
+            // Send Shift+Enter between segments (not after the last one)
+            if i < segments.len() - 1 {
+                self.send_shift_enter().await?;
             }
         }
 
-        // Send Enter key if configured
-        // ydotool key uses evdev key codes: 28 is KEY_ENTER
-        // Format: keycode:press (1) then keycode:release (0)
-        if self.auto_submit {
-            let mut enter_cmd = Command::new("ydotool");
-            self.apply_socket_env(&mut enter_cmd);
-            let enter_output = enter_cmd
-                .args(["key", "28:1", "28:0"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .output()
-                .await
-                .map_err(|e| {
-                    OutputError::InjectionFailed(format!("ydotool Enter failed: {}", e))
-                })?;
+        Ok(())
+    }
 
-            if !enter_output.status.success() {
-                let stderr = String::from_utf8_lossy(&enter_output.stderr);
-                tracing::warn!("Failed to send Enter key: {}", stderr);
-            }
+    /// Send Enter key (evdev 28)
+    async fn send_enter(&self) -> Result<(), OutputError> {
+        let mut cmd = Command::new("ydotool");
+        self.apply_socket_env(&mut cmd);
+        let output = cmd
+            .args(["key", "28:1", "28:0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| OutputError::InjectionFailed(format!("ydotool Enter failed: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!("Failed to send Enter key: {}", stderr);
+        }
+
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl TextOutput for YdotoolOutput {
+    async fn output(&self, text: &str) -> Result<(), OutputError> {
+        if text.is_empty() {
+            return Ok(());
+        }
+
+        // Pre-typing delay if configured
+        if self.pre_type_delay_ms > 0 {
+            tracing::debug!(
+                "ydotool: sleeping {}ms before typing",
+                self.pre_type_delay_ms
+            );
+            tokio::time::sleep(Duration::from_millis(self.pre_type_delay_ms as u64)).await;
+        }
+
+        // If shift_enter_newlines is enabled, process text with Shift+Enter for newlines
+        if self.shift_enter_newlines && text.contains('\n') {
+            self.output_with_shift_enter_newlines(text).await?;
+        } else {
+            self.type_text(text).await?;
+        }
+
+        // Append text if configured (e.g., a space to separate sentences)
+        if let Some(ref append) = self.append_text {
+            self.type_text(append)
+                .await
+                .unwrap_or_else(|e| tracing::warn!("Failed to append text: {}", e));
+        }
+
+        // Send Enter key if configured
+        if self.auto_submit {
+            self.send_enter()
+                .await
+                .unwrap_or_else(|e| tracing::warn!("Failed to send Enter key: {}", e));
         }
 
         Ok(())
@@ -236,13 +276,26 @@ impl TextOutput for YdotoolOutput {
     }
 }
 
+/// Build `ydotool key` args for Shift+Enter. `--key-delay` is only passed
+/// when configured; at 0 it is omitted so ydotool's own default delay applies
+/// and apps don't miss a zero-length key press.
+fn shift_enter_args(type_delay_ms: u32) -> Vec<String> {
+    let mut args = vec!["key".to_string()];
+    if type_delay_ms > 0 {
+        args.push("--key-delay".to_string());
+        args.push(type_delay_ms.to_string());
+    }
+    args.extend(["42:1", "28:1", "28:0", "42:0"].map(String::from));
+    args
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_new() {
-        let output = YdotoolOutput::new(10, 0, false, None);
+        let output = YdotoolOutput::new(10, 0, false, true, None);
         assert_eq!(output.type_delay_ms, 10);
         assert_eq!(output.pre_type_delay_ms, 0);
         assert!(!output.auto_submit);
@@ -252,14 +305,14 @@ mod tests {
 
     #[test]
     fn test_new_with_enter() {
-        let output = YdotoolOutput::new(0, 0, true, None);
+        let output = YdotoolOutput::new(0, 0, true, true, None);
         assert_eq!(output.type_delay_ms, 0);
         assert!(output.auto_submit);
     }
 
     #[test]
     fn test_new_with_pre_type_delay() {
-        let output = YdotoolOutput::new(0, 200, false, None);
+        let output = YdotoolOutput::new(0, 200, false, false, None);
         assert_eq!(output.type_delay_ms, 0);
         assert_eq!(output.pre_type_delay_ms, 200);
     }
@@ -268,5 +321,21 @@ mod tests {
     fn test_detect_key_hold_support() {
         // This test will pass regardless of ydotool version - it just shouldn't panic
         let _supports = YdotoolOutput::detect_key_hold_support();
+    }
+
+    #[test]
+    fn test_shift_enter_args_default_delay() {
+        assert_eq!(
+            shift_enter_args(0),
+            vec!["key", "42:1", "28:1", "28:0", "42:0"]
+        );
+    }
+
+    #[test]
+    fn test_shift_enter_args_with_delay() {
+        assert_eq!(
+            shift_enter_args(15),
+            vec!["key", "--key-delay", "15", "42:1", "28:1", "28:0", "42:0"]
+        );
     }
 }
