@@ -37,7 +37,7 @@ pub enum SetupAction {
     },
 
     /// Install Voxtype.app bundle with Login Items (macOS, recommended)
-    /// Creates /Applications/Voxtype.app and adds to Login Items.
+    /// Creates Voxtype.app in /Applications (or ~/Applications if not writable) and adds to Login Items.
     /// This method properly receives Accessibility, Input Monitoring,
     /// and Microphone permissions (unlike launchd).
     #[cfg(target_os = "macos")]
