@@ -11,9 +11,9 @@
 // `audio` property so the OsdSurface, EnginePicker, and MeetingControls
 // share one sidecar process rather than each spawning their own.
 //
-// Visibility follows `daemonState` unless `osdSuppressed` is set:
-// hidden when suppressed or idle/empty, shown
-// otherwise. The component is layered as a WlrLayer.Overlay surface so
+// Visibility follows `daemonState` unless `osdSuppressed` is set or
+// `activeOutput` is false: hidden when suppressed, off the active
+// output, or idle/empty, shown otherwise. The component is layered as a WlrLayer.Overlay surface so
 // it floats above all other windows without taking input focus.
 
 import QtQuick
@@ -35,6 +35,11 @@ PanelWindow {
     /// daemon's reported state.
     property bool osdSuppressed: false
 
+    /// False on outputs that shouldn't show the HUD right now. Wired by
+    /// the parent from the compositor's focused output; defaults to true
+    /// so a standalone surface behaves as before.
+    property bool activeOutput: true
+
     /// The audio bridge instance whose frameReceived signal drives the
     /// waveform. Passed in by the parent so it's shared with sibling
     /// widgets that also want VAD / peak data.
@@ -44,7 +49,7 @@ PanelWindow {
     /// visual recipe layers, and optional custom QML package entry.
     property var style: null
 
-    visible: !osdSuppressed && daemonState !== "idle" && daemonState !== ""
+    visible: !osdSuppressed && activeOutput && daemonState !== "idle" && daemonState !== ""
     anchors {
         top: true
         bottom: true
@@ -257,18 +262,21 @@ PanelWindow {
 
     Connections {
         target: panel.audio
-        enabled: panel.audio !== null
+        // Hidden surfaces (idle, --no-osd, every output but the ones
+        // showing) skip the 100 Hz frame work entirely.
+        enabled: panel.audio !== null && panel.visible
         function onFrameReceived(peak, rms, vad, tsMs) {
             panel.currentPeak = peak;
             panel.currentRms = rms;
 
-            // Push the new peak onto the ring; drop the oldest when full.
-            const r = panel.ring.slice();
+            // Push the new peak onto the ring in place; drop the oldest
+            // when full. Copying it at 100 Hz buys nothing: the renderer
+            // reads the ring on its own timer, not on change signals.
+            const r = panel.ring;
             r.push(peak);
-            while (r.length > panel.waveformColumns) {
-                r.shift();
+            if (r.length > panel.waveformColumns) {
+                r.splice(0, r.length - panel.waveformColumns);
             }
-            panel.ring = r;
 
             // dBFS from linear peak. Floor at -120 to match visual.rs's
             // PeakHold::held_dbfs sentinel for "effectively silent".
@@ -308,10 +316,20 @@ PanelWindow {
         _syncCustomItem();
     }
 
+    // A surface skips frames while hidden, so whatever it held is stale
+    // when it reappears (focus moved here mid-recording, or a --no-osd
+    // recording ended). Start clean rather than replaying old waveform
+    // and decaying the held peak across the whole hidden interval.
+    onVisibleChanged: {
+        if (visible) {
+            _resetMeters();
+        }
+    }
+
     onAudioChanged: _syncCustomItem()
     onStyleChanged: _syncCustomItem()
     onOrbHaloEnergyChanged: {
-        if (orbBackdropShadow.visible) {
+        if (panel.visible && orbBackdropShadow.visible) {
             orbBackdropShadow.requestPaint();
         }
     }
@@ -498,6 +516,10 @@ PanelWindow {
                     VT.RecipeRenderer {
                         id: recipeRenderer
                         anchors.fill: parent
+                        // Items inside a hidden PanelWindow still report
+                        // visible, so the renderer can't see a --no-osd
+                        // hide on its own.
+                        active: panel.visible
                         style: panel.style
                         ring: panel.ring
                         daemonState: panel.daemonState
