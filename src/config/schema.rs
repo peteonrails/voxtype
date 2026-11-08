@@ -194,12 +194,20 @@ pub fn feature_compiled(feature: &str) -> bool {
 // Choice lists. Each mirrors the corresponding `*_CHOICES` const in src/tui/.
 // ---------------------------------------------------------------------------
 
-/// Engines `voxtype config set engine` accepts. Mirrors `ENGINE_CHOICES` in
-/// `src/tui/engine.rs` and [`crate::config_set::ENGINE_NAMES`]. Note this is
-/// deliberately narrower than [`super::TranscriptionEngine`], which also has
-/// a `Soniox` variant that neither the TUI picker nor `config set engine`
-/// offers today.
-const ENGINE_CHOICES: &[&str] = crate::config_set::ENGINE_NAMES;
+/// Engines exposed by config settings surfaces. Soniox still requires manual
+/// table configuration; Seed-ASR has a complete schema and TUI form.
+const ENGINE_CHOICES: &[&str] = &[
+    "whisper",
+    "parakeet",
+    "moonshine",
+    "sensevoice",
+    "paraformer",
+    "dolphin",
+    "omnilingual",
+    "cohere",
+    "openvino",
+    "seedasr",
+];
 
 const WHISPER_MODE_CHOICES: &[&str] = &["local", "remote", "cli"];
 const WHISPER_LANG_CHOICES: &[&str] = &[
@@ -211,6 +219,9 @@ const COHERE_LANG_CHOICES: &[&str] = &[
 ];
 const OPENVINO_DEVICE_CHOICES: &[&str] = &["NPU", "GPU", "CPU", "AUTO"];
 const PARAKEET_MODEL_TYPE_CHOICES: &[&str] = &["tdt", "ctc"];
+const SEEDASR_RESOURCE_ID_CHOICES: &[&str] =
+    &["volc.seedasr.sauc.duration", "volc.seedasr.sauc.concurrent"];
+const SEEDASR_LANGUAGE_CHOICES: &[&str] = &["auto", "zh", "en"];
 
 const HOTKEY_MODE_CHOICES: &[&str] = &["push_to_talk", "toggle"];
 const HOTKEY_KEY_CHOICES: &[&str] = &[
@@ -853,6 +864,130 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Seconds to wait for an async transcription before giving up.",
     )
     .for_engine("soniox"),
+    // Seed-ASR
+    spec(
+        "seedasr.api_key",
+        "seedasr",
+        "api_key",
+        KeyType::String,
+        "Engine",
+        "API key",
+        "New-console Volcengine API key. Mutually exclusive with the legacy app_id and access_token credentials.",
+    )
+    .for_engine("seedasr"),
+    spec(
+        "seedasr.app_id",
+        "seedasr",
+        "app_id",
+        KeyType::String,
+        "Engine",
+        "App ID",
+        "Legacy-console Volcengine application ID.",
+    )
+    .for_engine("seedasr"),
+    spec(
+        "seedasr.access_token",
+        "seedasr",
+        "access_token",
+        KeyType::String,
+        "Engine",
+        "Access token",
+        "Legacy-console Volcengine access token. Used together with app_id.",
+    )
+    .for_engine("seedasr"),
+    spec(
+        "seedasr.resource_id",
+        "seedasr",
+        "resource_id",
+        open(SEEDASR_RESOURCE_ID_CHOICES),
+        "Engine",
+        "Resource ID",
+        "Volcengine Seed-ASR service resource identifier.",
+    )
+    .for_engine("seedasr"),
+    spec(
+        "seedasr.url",
+        "seedasr",
+        "url",
+        KeyType::String,
+        "Engine",
+        "WebSocket URL",
+        "Seed-ASR WebSocket endpoint. Use wss:// for production connections.",
+    )
+    .for_engine("seedasr"),
+    spec(
+        "seedasr.streaming",
+        "seedasr",
+        "streaming",
+        KeyType::Bool,
+        "Engine",
+        "Streaming",
+        "Stream microphone audio to Seed-ASR while recording instead of buffering the full recording first.",
+    )
+    .for_engine("seedasr"),
+    spec(
+        "seedasr.type_partials",
+        "seedasr",
+        "type_partials",
+        KeyType::Bool,
+        "Engine",
+        "Type partials",
+        "Type provisional results and their revisions while recording. Revised text may cause visible cursor edits.",
+    )
+    .for_engine("seedasr"),
+    spec(
+        "seedasr.language",
+        "seedasr",
+        "language",
+        open(SEEDASR_LANGUAGE_CHOICES),
+        "Engine",
+        "Language",
+        "Recognition language code, or auto for automatic detection.",
+    )
+    .for_engine("seedasr"),
+    spec(
+        "seedasr.enable_itn",
+        "seedasr",
+        "enable_itn",
+        KeyType::Bool,
+        "Engine",
+        "Inverse text normalization",
+        "Convert spoken numbers, dates, and similar expressions into written form.",
+    )
+    .for_engine("seedasr"),
+    spec(
+        "seedasr.enable_punc",
+        "seedasr",
+        "enable_punc",
+        KeyType::Bool,
+        "Engine",
+        "Punctuation",
+        "Ask Seed-ASR to add punctuation to recognition results.",
+    )
+    .for_engine("seedasr"),
+    spec(
+        "seedasr.enable_ddc",
+        "seedasr",
+        "enable_ddc",
+        KeyType::Bool,
+        "Engine",
+        "Semantic smoothing",
+        "Enable semantic smoothing and filler-word removal.",
+    )
+    .for_engine("seedasr"),
+    spec(
+        "seedasr.end_window_ms",
+        "seedasr",
+        "end_window_ms",
+        KeyType::Int {
+            min: 300,
+            max: 5_000,
+        },
+        "Engine",
+        "End window",
+        "Server-side silence window in milliseconds used to finalize an utterance.",
+    )
+    .for_engine("seedasr"),
     // -- Hotkey -------------------------------------------------------------
     spec(
         "hotkey.enabled",
@@ -2352,7 +2487,7 @@ fn ensure_required_siblings(editor: &mut ConfigEditor, spec: &KeySpec) {
     // Whisper's table is not optional and its `model` has a serde default.
     // An engine with no catalog default (Soniox) defaults `model` in serde.
     let default = crate::model_catalog::default_model(engine);
-    if engine == "whisper" || spec.field == "model" || default.is_empty() {
+    if matches!(engine, "whisper" | "seedasr") || spec.field == "model" || default.is_empty() {
         return;
     }
     if editor.get_string(spec.table, "model").is_none() {
@@ -2368,6 +2503,16 @@ fn ensure_required_siblings(editor: &mut ConfigEditor, spec: &KeySpec) {
 /// refuse to load the config it had just written.
 pub fn apply(editor: &mut ConfigEditor, found: &Found, value: &TypedValue) {
     ensure_required_siblings(editor, found.spec());
+    match found.spec().key {
+        "seedasr.api_key" => {
+            editor.unset("seedasr", "app_id");
+            editor.unset("seedasr", "access_token");
+        }
+        "seedasr.app_id" | "seedasr.access_token" => {
+            editor.unset("seedasr", "api_key");
+        }
+        _ => {}
+    }
     let (table, field) = found.target();
     match value {
         TypedValue::Bool(b) => editor.set_bool(table, field, *b),
@@ -2425,6 +2570,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
     // Without a table, post-processing is off; report the values a new
     // table would start with.
     let pp = || cfg.output.post_process.clone().unwrap_or_default();
+    let seed = || cfg.seedasr.clone().unwrap_or_default();
 
     let v = match key {
         "engine" => json!(cfg.engine.name()),
@@ -2534,6 +2680,22 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         },
         "soniox.async_api" => json!(so().async_api),
         "soniox.async_max_wait_secs" => json!(so().async_max_wait_secs),
+
+        "seedasr.api_key" => opt_str(seed().api_key.as_ref()),
+        "seedasr.app_id" => opt_str(seed().app_id.as_ref()),
+        "seedasr.access_token" => opt_str(seed().access_token.as_ref()),
+        "seedasr.resource_id" => json!(seed().resource_id),
+        "seedasr.url" => json!(seed().url),
+        "seedasr.streaming" => json!(seed().streaming),
+        "seedasr.type_partials" => json!(seed().type_partials),
+        "seedasr.language" => match seed().language {
+            Some(language) => json!(language),
+            None => json!("auto"),
+        },
+        "seedasr.enable_itn" => json!(seed().enable_itn),
+        "seedasr.enable_punc" => json!(seed().enable_punc),
+        "seedasr.enable_ddc" => json!(seed().enable_ddc),
+        "seedasr.end_window_ms" => json!(seed().end_window_ms),
 
         "hotkey.enabled" => json!(cfg.hotkey.enabled),
         "hotkey.key" => json!(cfg.hotkey.key),
@@ -3181,8 +3343,8 @@ mod tests {
     #[test]
     fn feature_gate_agrees_with_config_set() {
         for name in config_set::ENGINE_NAMES {
-            if *name == "whisper" {
-                continue; // always available, so it has no feature entry
+            if matches!(*name, "whisper" | "seedasr") {
+                continue; // unconditional engines have no Cargo feature entry
             }
             assert_eq!(
                 feature_compiled(name),
@@ -3199,8 +3361,8 @@ mod tests {
     fn onnx_engine_keys_are_feature_gated() {
         for s in CONFIG_KEYS {
             let Some(engine) = s.engine else { continue };
-            // Whisper and the Soniox cloud client are always compiled in.
-            if engine == "whisper" || engine == "soniox" {
+            // Whisper and the Soniox/Seed-ASR cloud clients are always compiled in.
+            if matches!(engine, "whisper" | "soniox" | "seedasr") {
                 assert!(
                     s.requires_feature.is_none(),
                     "{} should not be feature-gated; {} is always compiled in",
@@ -3244,12 +3406,37 @@ mod tests {
 
     #[test]
     fn engine_choices_match_config_set() {
-        assert_eq!(ENGINE_CHOICES, config_set::ENGINE_NAMES);
+        assert!(config_set::ENGINE_NAMES
+            .iter()
+            .all(|name| ENGINE_CHOICES.contains(name)));
+        let schema_only: Vec<_> = ENGINE_CHOICES
+            .iter()
+            .filter(|name| !config_set::ENGINE_NAMES.contains(name))
+            .copied()
+            .collect();
+        assert_eq!(schema_only, ["seedasr"]);
         let spec = scalar_keys().find(|s| s.key == "engine").unwrap();
         for name in ENGINE_CHOICES {
             assert!(validate_value(spec, name).is_ok(), "engine '{}'", name);
         }
         assert!(validate_value(spec, "nope").is_err());
+    }
+
+    #[test]
+    fn setting_a_seedasr_credential_scheme_removes_the_other_one() {
+        let (_dir, path) = temp_config();
+        let mut ed = ConfigEditor::load_from_path(path).unwrap();
+        ed.set_string("seedasr", "app_id", "legacy-app");
+        ed.set_string("seedasr", "access_token", "legacy-token");
+
+        let api = find_key("seedasr.api_key").unwrap();
+        apply(&mut ed, &api, &TypedValue::Str("new-api-key".to_string()));
+        assert_eq!(
+            ed.get_string("seedasr", "api_key").as_deref(),
+            Some("new-api-key")
+        );
+        assert!(ed.get_string("seedasr", "app_id").is_none());
+        assert!(ed.get_string("seedasr", "access_token").is_none());
     }
 
     #[test]
@@ -3427,7 +3614,8 @@ mod tests {
         .iter()
         .map(|t| format!("[{t}]\nmodel = \"m\"\n"))
         .collect();
-        src.push_str("[streaming]\n[output.post_process]\ncommand = \"cat\"\n");
+        // Seed-ASR has no `model` key.
+        src.push_str("[seedasr]\n[streaming]\n[output.post_process]\ncommand = \"cat\"\n");
         let cfg: Config = toml::from_str(&src).expect("materialized config parses");
 
         let mut leaves = Vec::new();

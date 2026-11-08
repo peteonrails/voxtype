@@ -9,6 +9,7 @@ mod omnilingual;
 mod openvino;
 mod paraformer;
 mod parakeet;
+mod seedasr;
 mod sensevoice;
 mod soniox;
 
@@ -19,6 +20,7 @@ pub use omnilingual::OmnilingualConfig;
 pub use openvino::OpenVinoConfig;
 pub use paraformer::ParaformerConfig;
 pub use parakeet::{ParakeetConfig, ParakeetModelType};
+pub use seedasr::{SeedAsrConfig, DEFAULT_SEEDASR_RESOURCE_ID, DEFAULT_SEEDASR_URL};
 pub use sensevoice::SenseVoiceConfig;
 pub use soniox::SonioxConfig;
 
@@ -70,6 +72,8 @@ pub enum TranscriptionEngine {
     OpenVino,
     /// Use Soniox (cloud streaming WebSocket STT).
     Soniox,
+    /// Use Volcengine Seed-ASR (cloud streaming WebSocket STT).
+    SeedAsr,
 }
 
 impl TranscriptionEngine {
