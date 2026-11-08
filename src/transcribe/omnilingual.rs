@@ -256,7 +256,7 @@ fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
     }
 
     // Also check int8 variant naming
-    let sherpa_int8_name = format!("{}-int8", &sherpa_name);
+    let sherpa_int8_name = format!("{}-int8", sherpa_name);
     let sherpa_int8_path = models_dir.join(&sherpa_int8_name);
     if sherpa_int8_path.exists() {
         return Ok(sherpa_int8_path);

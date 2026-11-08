@@ -159,7 +159,7 @@ pub fn is_parakeet_binary_active() -> bool {
     // If we can't read the symlink, check if parakeet feature is enabled
     #[cfg(feature = "parakeet")]
     {
-        return true;
+        true
     }
     #[cfg(not(feature = "parakeet"))]
     {

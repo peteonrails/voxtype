@@ -46,6 +46,41 @@ jobs:
       - name: cargo clippy -- -D warnings
         run: cargo clippy --all-targets --no-deps -- -D warnings
 
+  # Release binaries ship the ONNX engines and the native OSD, which the
+  # default feature set never compiles, so lints there went unseen. Separate
+  # job so it runs alongside the default clippy instead of after it. ort
+  # downloads its CPU prebuilt (~90 MB extracted) from pyke's CDN; no CUDA
+  # toolkit is needed, and the *-cuda features only flip ort/cuda, so the
+  # CPU set covers every engine's code paths except the CUDA probe.
+  # osd-gtk4 is left out: Ubuntu 24.04 doesn't package gtk4-layer-shell, and
+  # Dockerfile.onnx builds it from source, which is too slow for a lint job.
+  clippy-features:
+    name: clippy-features
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libclang-dev cmake \
+            libgtk-3-dev libglib2.0-dev libx11-dev libxi-dev libxtst-dev \
+            libwayland-dev libxkbcommon-dev
+
+      - name: cargo clippy (ONNX engines)
+        run: >
+          cargo clippy --all-targets --no-deps
+          --features parakeet,moonshine,sensevoice,paraformer,dolphin,omnilingual,cohere,ml-diarization
+          -- -D warnings
+
+      - name: cargo clippy (native OSD)
+        run: cargo clippy --all-targets --no-deps --features osd-native -- -D warnings
+
   test:
     name: test
     runs-on: ubuntu-latest
@@ -69,7 +104,7 @@ jobs:
   # the protection rule never needs to be touched.
   ci-success:
     name: ci-success
-    needs: [fmt, clippy, test]
+    needs: [fmt, clippy, clippy-features, test]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -78,11 +113,13 @@ jobs:
           set -e
           fmt='${{ needs.fmt.result }}'
           clippy='${{ needs.clippy.result }}'
+          clippy_features='${{ needs.clippy-features.result }}'
           test='${{ needs.test.result }}'
           echo "fmt:    $fmt"
           echo "clippy: $clippy"
+          echo "clippy-features: $clippy_features"
           echo "test:   $test"
-          if [[ "$fmt" != success || "$clippy" != success || "$test" != success ]]; then
+          if [[ "$fmt" != success || "$clippy" != success || "$clippy_features" != success || "$test" != success ]]; then
             echo "::error::One or more required jobs failed"
             exit 1
           fi

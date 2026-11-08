@@ -243,7 +243,7 @@ fn decode_paraformer_output(
 
     // Try extracting as i64 first (direct token IDs)
     if let Ok((shape, data)) = output_val.try_extract_tensor::<i64>() {
-        tracing::debug!("Paraformer output shape (i64): {:?}", &*shape);
+        tracing::debug!("Paraformer output shape (i64): {:?}", shape);
         let token_ids: Vec<u32> = data.iter().map(|&id| id as u32).collect();
         return Ok(tokens_to_text(&token_ids, tokens));
     }
@@ -513,9 +513,9 @@ fn read_cmvn_from_kaldi_mvn(
     let mut neg_mean = Vec::with_capacity(feat_dim);
     let mut inv_stddev = Vec::with_capacity(feat_dim);
 
-    for i in 0..feat_dim {
-        let mean = matrix[0][i] / count;
-        let variance = (matrix[1][i] / count) - (mean * mean);
+    for (sum, sum_sq) in matrix[0][..feat_dim].iter().zip(&matrix[1][..feat_dim]) {
+        let mean = sum / count;
+        let variance = (sum_sq / count) - (mean * mean);
         let stddev = variance.max(1e-20).sqrt();
         neg_mean.push(-mean as f32);
         inv_stddev.push((1.0 / stddev) as f32);
@@ -746,13 +746,11 @@ mod tests {
         // Build a minimal Kaldi binary float matrix: 2 rows x 4 cols
         // Row 0: [10.0, 20.0, 30.0, 5.0]  (sums + count=5)
         // Row 1: [30.0, 100.0, 200.0, 0.0] (sum of squares)
-        let mut data: Vec<u8> = Vec::new();
-        data.push(0x00); // binary marker
-        data.push(b'B');
-        data.push(b'F'); // float matrix
-        data.push(b'M');
-        data.push(b' ');
-        data.push(4); // \4 before rows
+        let mut data: Vec<u8> = vec![
+            0x00, // binary marker
+            b'B', b'F', // float matrix
+            b'M', b' ', 4, // \4 before rows
+        ];
         data.extend_from_slice(&2i32.to_le_bytes());
         data.push(4); // \4 before cols
         data.extend_from_slice(&4i32.to_le_bytes());
