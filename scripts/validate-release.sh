@@ -49,6 +49,7 @@ ONNX_BINARIES=(
     "voxtype-${VERSION}-linux-x86_64-onnx-cuda-12"
     "voxtype-${VERSION}-linux-x86_64-onnx-cuda-13"
     "voxtype-${VERSION}-linux-x86_64-onnx-migraphx"
+    "voxtype-${VERSION}-linux-x86_64-onnx-webgpu"
 )
 
 # OSD frontends and the audio-bridge sidecar, built by Dockerfile.onnx.
@@ -101,6 +102,14 @@ for binary in "${ALL_BINARIES[@]}"; do
 done
 echo ""
 
+for suffix in libwebgpu_dawn.so licenses.tar.gz tar.gz; do
+    companion="${RELEASE_DIR}/voxtype-${VERSION}-linux-x86_64-onnx-webgpu.${suffix}"
+    if [[ ! -s "$companion" ]]; then
+        echo "  Missing WebGPU artifact: $companion"
+        FAILED=true
+    fi
+done
+
 if [[ ${#FOUND_BINARIES[@]} -eq 0 ]]; then
     echo "ERROR: No binaries found!"
     exit 1
@@ -118,7 +127,17 @@ else
     echo "Checking version strings..."
 fi
 for binary in "${FOUND_BINARIES[@]}"; do
-    REPORTED_VERSION=$("${RELEASE_DIR}/${binary}" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    if [[ "$binary" == *-onnx-webgpu ]]; then
+        REPORTED_VERSION=$(
+            WEBGPU_TEMP=$(mktemp -d)
+            trap 'rm -rf "$WEBGPU_TEMP"' EXIT
+            tar -xzf "${RELEASE_DIR}/${binary}.tar.gz" -C "$WEBGPU_TEMP"
+            env -u LD_LIBRARY_PATH "$WEBGPU_TEMP/voxtype-onnx-webgpu" --version 2>&1 \
+                | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1
+        )
+    else
+        REPORTED_VERSION=$("${RELEASE_DIR}/${binary}" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    fi
     if [[ "$REPORTED_VERSION" == "$BASE_VERSION" ]]; then
         echo "  ✓ ${binary}: v${REPORTED_VERSION}"
     else

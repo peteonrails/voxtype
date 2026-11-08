@@ -128,6 +128,7 @@ pub fn backend_display_for_variant(v: setup::binary::Variant) -> &'static str {
         Variant::OnnxCuda13 => "ONNX GPU (CUDA 13)",
         Variant::OnnxCuda => "ONNX GPU (CUDA)",
         Variant::OnnxMigraphx => "ONNX GPU (MIGraphX)",
+        Variant::OnnxWebgpu => "ONNX (WebGPU)",
         Variant::OnnxNative => "ONNX CPU (native)",
     }
 }

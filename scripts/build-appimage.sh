@@ -2,10 +2,11 @@
 # Build AppImage packages for voxtype
 # Uses pre-built release binaries from releases/{version}/
 #
-# Produces 3 AppImages:
+# Produces 4 AppImages:
 #   voxtype-{ver}-x86_64.AppImage          Whisper (avx2 + avx512 + vulkan)
 #   voxtype-{ver}-onnx-x86_64.AppImage     ONNX engines (onnx-avx2 + onnx-avx512 + vulkan)
 #   voxtype-{ver}-onnx-cuda-x86_64.AppImage  ONNX CUDA (onnx-cuda + vulkan)
+#   voxtype-{ver}-onnx-webgpu-x86_64.AppImage  ONNX WebGPU (Parakeet + bundled Dawn)
 #
 # Usage:
 #   ./scripts/build-appimage.sh [options] VERSION
@@ -13,7 +14,7 @@
 #   ./scripts/build-appimage.sh --variant whisper 0.6.5
 #
 # Options:
-#   --variant NAME   whisper, onnx, onnx-cuda, all (default: all)
+#   --variant NAME   whisper, onnx, onnx-cuda, onnx-webgpu, all (default: all)
 #   --skip-build     Accepted for compatibility (binaries must already exist)
 
 set -euo pipefail
@@ -38,7 +39,7 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             echo "Usage: $0 [--variant NAME] VERSION"
             echo ""
-            echo "Variants: whisper, onnx, onnx-cuda, all"
+            echo "Variants: whisper, onnx, onnx-cuda, onnx-webgpu, all"
             echo ""
             echo "Requires appimagetool (auto-downloaded if missing)"
             exit 0
@@ -120,6 +121,7 @@ populate_shared_files() {
     # Desktop entry and icon at AppDir root (AppImage spec)
     cp "$APPIMAGE_DIR/voxtype.desktop" "$appdir/"
     cp "$APPIMAGE_DIR/voxtype.svg" "$appdir/"
+    ln -s voxtype.svg "$appdir/.DirIcon"
 }
 
 # Copy a binary into the AppDir if it exists
@@ -141,8 +143,9 @@ build_appimage() {
     local output_path="$RELEASE_DIR/$output_name"
 
     echo "  Building $output_name..."
-    ARCH=x86_64 "$APPIMAGETOOL" "$appdir" "$output_path" 2>&1 | tail -1
-    chmod +x "$output_path"
+    chmod 755 "$appdir" || return 1
+    ARCH=x86_64 "$APPIMAGETOOL" "$appdir" "$output_path" 2>&1 | tail -1 || return 1
+    chmod +x "$output_path" || return 1
     echo "  Created: $output_path ($(du -h "$output_path" | cut -f1))"
 }
 
@@ -257,6 +260,36 @@ build_onnx_cuda() {
     build_appimage "$appdir" "voxtype-${VERSION}-onnx-cuda-x86_64.AppImage"
 }
 
+build_onnx_webgpu() {
+    local binary="$RELEASE_DIR/voxtype-${VERSION}-linux-x86_64-onnx-webgpu"
+    local file
+    for file in "$binary" "${binary}.libwebgpu_dawn.so" "${binary}.licenses.tar.gz"; do
+        if [[ ! -f "$file" ]]; then
+            echo "  Missing WebGPU artifact: $file" >&2
+            return 1
+        fi
+    done
+
+    local appdir
+    appdir="$(mktemp -d "${TMPDIR:-/tmp}/voxtype-appimage.XXXXXX")"
+    trap 'rm -rf "$appdir"' RETURN
+
+    mkdir -p "$appdir/usr/bin" "$appdir/usr/lib/voxtype/webgpu" \
+        "$appdir/usr/share/licenses/voxtype/webgpu"
+    cp "$APPIMAGE_DIR/voxtype-onnx-wrapper.sh" "$appdir/usr/bin/voxtype"
+    chmod 755 "$appdir/usr/bin/voxtype"
+    copy_binary "$binary" "$appdir/usr/lib/voxtype/webgpu/voxtype-onnx-webgpu" || return 1
+    cp "${binary}.libwebgpu_dawn.so" "$appdir/usr/lib/voxtype/webgpu/libwebgpu_dawn.so" || return 1
+    tar -xzf "${binary}.licenses.tar.gz" -C "$appdir/usr/share/licenses/voxtype/webgpu" || return 1
+    ln -s webgpu/voxtype-onnx-webgpu "$appdir/usr/lib/voxtype/voxtype-onnx-webgpu"
+    copy_binary "$RELEASE_DIR/voxtype-${VERSION}-linux-x86_64-vulkan" \
+        "$appdir/usr/lib/voxtype/voxtype-vulkan" || true
+    cp "$APPIMAGE_DIR/AppRun" "$appdir/"
+    chmod 755 "$appdir/AppRun"
+    populate_shared_files "$appdir"
+    build_appimage "$appdir" "voxtype-${VERSION}-onnx-webgpu-x86_64.AppImage"
+}
+
 # Main
 echo "Building voxtype AppImage packages v${VERSION}"
 echo "Release dir: $RELEASE_DIR"
@@ -273,14 +306,18 @@ case "$VARIANT" in
     onnx-cuda)
         build_onnx_cuda || failed=1
         ;;
+    onnx-webgpu)
+        build_onnx_webgpu || exit 1
+        ;;
     all)
         build_whisper || failed=1
         build_onnx || failed=1
         build_onnx_cuda || failed=1
+        build_onnx_webgpu || failed=1
         ;;
     *)
         echo "Error: Unknown variant '$VARIANT'" >&2
-        echo "Valid variants: whisper, onnx, onnx-cuda, all" >&2
+        echo "Valid variants: whisper, onnx, onnx-cuda, onnx-webgpu, all" >&2
         exit 1
         ;;
 esac

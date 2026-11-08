@@ -60,6 +60,7 @@ pub const COLS: &[Acceleration] = &[
     Acceleration::Vulkan,
     Acceleration::Cuda,
     Acceleration::Migraphx,
+    Acceleration::Webgpu,
 ];
 
 pub struct App {

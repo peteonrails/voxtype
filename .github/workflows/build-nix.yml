@@ -3,9 +3,9 @@ name: Build (Nix)
 # Validates that the flake.nix produces working derivations before release.
 # Voxtype is maintained on non-NixOS hosts, so this CI is the only check that
 # catches flake regressions (e.g. missing `ort` example dep that broke
-# `nix switch` in v0.7.1, see #352). Targets `.#default` (CPU Whisper) and
-# `.#onnx` (CPU ONNX engines) — these cover the two most common install paths
-# for NixOS users. GPU variants (cuda/migraphx) are excluded because they
+# `nix switch` in v0.7.1, see #352). Checks CPU Whisper, CPU ONNX engines,
+# and the WebGPU package, including startup with its bundled Dawn library.
+# CUDA and MIGraphX variants are excluded because they
 # require unfree allowlists and/or hardware-specific runtime deps that
 # GitHub-hosted runners don't expose.
 
@@ -32,6 +32,8 @@ jobs:
             package: default
           - label: onnx
             package: onnx
+          - label: onnx-webgpu
+            package: onnx-webgpu
     steps:
       - uses: actions/checkout@v6
 

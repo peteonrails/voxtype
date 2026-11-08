@@ -32,6 +32,7 @@
 //! commit happening at hotkey release. Mid-recording incremental typing
 //! (commit-on-pause) is a follow-up once VAD-segmentation lands.
 
+use super::acceleration::AccelerationStatus;
 use super::parakeet::{build_execution_config, resolve_model_path};
 use super::streaming::{StreamHandle, StreamingEvent, StreamingTranscriber};
 use super::{TimedSegment, Transcriber};
@@ -52,6 +53,7 @@ pub struct ParakeetStreamingTranscriber {
     /// Reusable batch instance for `Transcriber::transcribe`. Reset between
     /// calls so no inter-call state leaks.
     batch: Mutex<ParakeetUnified>,
+    acceleration_status: Option<AccelerationStatus>,
 }
 
 impl ParakeetStreamingTranscriber {
@@ -99,15 +101,16 @@ impl ParakeetStreamingTranscriber {
         );
         let start = std::time::Instant::now();
 
-        let exec_config = build_execution_config();
-        let handle = ParakeetUnifiedHandle::load(&model_path, exec_config).map_err(|e| {
-            TranscribeError::InitFailed(format!(
-                "Parakeet streaming (ParakeetUnified) init failed: {}\n\n\
+        let (handle, acceleration_status) = build_execution_config().load(|exec_config| {
+            ParakeetUnifiedHandle::load(&model_path, exec_config).map_err(|e| {
+                TranscribeError::InitFailed(format!(
+                    "Parakeet streaming (ParakeetUnified) init failed: {}\n\n\
                 Streaming requires a TDT v3 model directory containing tokenizer.model.\n\
                 If you're using a TDT v2 directory, switch to TDT v3 or set\n\
                 [parakeet] streaming = false to use the batch pipeline.",
-                e
-            ))
+                    e
+                ))
+            })
         })?;
 
         let streaming_config = UnifiedStreamingConfig {
@@ -146,11 +149,16 @@ impl ParakeetStreamingTranscriber {
             handle,
             streaming_config,
             batch: Mutex::new(batch),
+            acceleration_status,
         })
     }
 }
 
 impl Transcriber for ParakeetStreamingTranscriber {
+    fn acceleration_status(&self) -> Option<AccelerationStatus> {
+        self.acceleration_status
+    }
+
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat(

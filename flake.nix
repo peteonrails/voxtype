@@ -134,6 +134,7 @@
         # ONNX Runtime variants for different GPU backends
         onnxruntimeCuda = pkgsUnfree.onnxruntime.override { cudaSupport = true; };
         onnxruntimeRocm = pkgs.onnxruntime.override { rocmSupport = true; };
+        onnxruntimeWebgpu = import ./nix/onnxruntime-webgpu.nix { inherit pkgs; };
 
 
         # Base derivation for voxtype (unwrapped)
@@ -298,6 +299,34 @@
           ORT_LIB_LOCATION = "${onnxruntimeRocm}/lib";
         });
 
+        onnxWebgpuUnwrapped = let
+          pkg = mkVoxtypeUnwrapped {
+            pname = "voxtype-onnx-webgpu";
+            features = [
+              "parakeet-webgpu"
+              "moonshine"
+              "sensevoice"
+              "paraformer"
+              "dolphin"
+              "omnilingual"
+              "cohere"
+            ];
+            extraBuildInputs = [ onnxruntimeWebgpu ];
+          };
+        in pkg.overrideAttrs (old: {
+          ORT_LIB_LOCATION = "${onnxruntimeWebgpu}/lib";
+          env = (old.env or {}) // {
+            RUSTFLAGS = (old.env.RUSTFLAGS or "")
+              + " -L native=${onnxruntimeWebgpu}/lib -l dylib=webgpu_dawn";
+          };
+          doInstallCheck = true;
+          installCheckPhase = ''
+            runHook preInstallCheck
+            env -u LD_LIBRARY_PATH -u ORT_DYLIB_PATH "$out/bin/voxtype" --version
+            runHook postInstallCheck
+          '';
+        });
+
         # OSD frontend packages. The launcher binary (`voxtype-osd`) ships
         # with every main voxtype package, these provide the GUI frontend
         # the launcher execs into.
@@ -407,6 +436,9 @@
           # Legacy
           voxtype-onnx-rocm-unwrapped = onnxMigraphxUnwrapped;
           voxtype-parakeet-rocm-unwrapped = onnxMigraphxUnwrapped;
+        } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          onnx-webgpu = wrapVoxtype onnxWebgpuUnwrapped;
+          voxtype-onnx-webgpu-unwrapped = onnxWebgpuUnwrapped;
         };
 
         # Development shell with all dependencies

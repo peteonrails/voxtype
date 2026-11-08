@@ -45,6 +45,7 @@ const VARIANTS_NEEDING_WRAPPER: &[&str] = &[
     "voxtype-onnx-cuda-12",
     "voxtype-onnx-cuda-13",
     "voxtype-onnx-migraphx",
+    "voxtype-onnx-webgpu",
 ];
 
 /// Return the subdirectory under /usr/lib/voxtype/ where a wrapper-needing
@@ -56,6 +57,7 @@ fn variant_subdir(basename: &str) -> Option<&'static str> {
         "voxtype-onnx-cuda-12" => Some("cuda-12"),
         "voxtype-onnx-cuda-13" => Some("cuda-13"),
         "voxtype-onnx-migraphx" => Some("migraphx"),
+        "voxtype-onnx-webgpu" => Some("webgpu"),
         _ => None,
     }
 }
@@ -297,6 +299,7 @@ pub enum Acceleration {
     /// still resolve to this variant via [`Variant::from_binary_name`] for
     /// the symlink-compat window.
     Migraphx,
+    Webgpu,
     /// Source-built generic binary (no specific tier).
     Native,
 }
@@ -320,6 +323,7 @@ pub enum Variant {
     /// Unversioned CUDA binary, present in source-built or pre-0.7.0 installs.
     OnnxCuda,
     OnnxMigraphx,
+    OnnxWebgpu,
     OnnxNative,
 }
 
@@ -338,6 +342,7 @@ impl Variant {
         Variant::OnnxCuda12,
         Variant::OnnxCuda13,
         Variant::OnnxMigraphx,
+        Variant::OnnxWebgpu,
         Variant::OnnxNative,
         Variant::WhisperBaseline,
     ];
@@ -355,6 +360,7 @@ impl Variant {
             Variant::OnnxCuda13 => "voxtype-onnx-cuda-13",
             Variant::OnnxCuda => "voxtype-onnx-cuda",
             Variant::OnnxMigraphx => "voxtype-onnx-migraphx",
+            Variant::OnnxWebgpu => "voxtype-onnx-webgpu",
             Variant::OnnxNative => "voxtype-onnx",
         }
     }
@@ -372,6 +378,7 @@ impl Variant {
             | Variant::OnnxCuda13
             | Variant::OnnxCuda
             | Variant::OnnxMigraphx
+            | Variant::OnnxWebgpu
             | Variant::OnnxNative => EngineFamily::Onnx,
         }
     }
@@ -384,6 +391,7 @@ impl Variant {
             Variant::WhisperVulkan => Acceleration::Vulkan,
             Variant::OnnxCuda12 | Variant::OnnxCuda13 | Variant::OnnxCuda => Acceleration::Cuda,
             Variant::OnnxMigraphx => Acceleration::Migraphx,
+            Variant::OnnxWebgpu => Acceleration::Webgpu,
             Variant::WhisperNative | Variant::OnnxNative => Acceleration::Native,
         }
     }
@@ -401,6 +409,7 @@ impl Variant {
             Variant::OnnxCuda13 => "ONNX (CUDA 13)",
             Variant::OnnxCuda => "ONNX (CUDA)",
             Variant::OnnxMigraphx => "ONNX (MIGraphX)",
+            Variant::OnnxWebgpu => "ONNX (WebGPU)",
             Variant::OnnxNative => "ONNX (native)",
         }
     }
@@ -442,6 +451,7 @@ impl Variant {
             "voxtype-onnx-cuda" | "voxtype-parakeet-cuda" => Some(Variant::OnnxCuda),
             // Canonical name for the MIGraphX-based ONNX binary (0.7.0+).
             "voxtype-onnx-migraphx" => Some(Variant::OnnxMigraphx),
+            "voxtype-onnx-webgpu" => Some(Variant::OnnxWebgpu),
             // Legacy ROCm names continue to resolve during the symlink-compat
             // window so `voxtype-bin` users with the old AUR symlink still see
             // the variant correctly identified.
@@ -525,6 +535,7 @@ pub fn best_variant_for_engine(inv: &Inventory, engine: &str) -> Option<Variant>
             Acceleration::Cuda if inv.gpus.nvidia => Some(0),
             Acceleration::Migraphx if inv.gpus.amd => Some(1),
             Acceleration::Vulkan => Some(2),
+            Acceleration::Webgpu if inv.cpu.avx2 => Some(2),
             Acceleration::Avx512 if inv.cpu.avx512 => Some(3),
             Acceleration::Avx2 if inv.cpu.avx2 => Some(4),
             _ => None,
@@ -831,7 +842,9 @@ fn variant_runs_on_cpu(v: Variant, cpu: &Cpu) -> bool {
         // binary itself can still trip SIGILL on init. Treat AVX-512 as
         // a hard requirement for CUDA/MIGraphX variants.
         Acceleration::Cuda | Acceleration::Migraphx => cpu.avx512,
-        Acceleration::Avx2 | Acceleration::Vulkan | Acceleration::Native => cpu.avx2,
+        Acceleration::Avx2 | Acceleration::Vulkan | Acceleration::Webgpu | Acceleration::Native => {
+            cpu.avx2
+        }
     }
 }
 
@@ -901,6 +914,9 @@ pub fn compiled_features() -> Vec<&'static str> {
     }
     if cfg!(feature = "gpu-metal") {
         f.push("gpu-metal");
+    }
+    if cfg!(feature = "parakeet-webgpu") {
+        f.push("parakeet-webgpu");
     }
     // OSD frontends. Affects whether `voxtype-osd-gtk4` and
     // `voxtype-osd-native` are present in the build. (The Quickshell
@@ -984,6 +1000,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn webgpu_variant_is_available_to_parakeet() {
+        let variant = Variant::from_binary_name("voxtype-onnx-webgpu")
+            .expect("the packaged WebGPU variant should be recognised");
+
+        assert_eq!(
+            (
+                variant.binary_name(),
+                variant.family(),
+                variant.display(),
+                variant.supports_engine("parakeet"),
+            ),
+            (
+                "voxtype-onnx-webgpu",
+                EngineFamily::Onnx,
+                "ONNX (WebGPU)",
+                true,
+            )
+        );
+    }
+
+    #[test]
     fn binary_names_are_unique() {
         let mut names: Vec<&str> = Variant::ALL.iter().map(|v| v.binary_name()).collect();
         names.sort();
@@ -1032,7 +1069,7 @@ mod tests {
             .filter(|v| v.family() == EngineFamily::Onnx)
             .count();
         assert_eq!(whisper, 5);
-        assert_eq!(onnx, 7);
+        assert_eq!(onnx, 8);
         assert_eq!(whisper + onnx, Variant::ALL.len());
     }
 
@@ -1318,6 +1355,7 @@ mod tests {
             "voxtype-onnx-cuda-12",
             "voxtype-onnx-cuda-13",
             "voxtype-onnx-migraphx",
+            "voxtype-onnx-webgpu",
         ] {
             let path = std::path::Path::new("/nonexistent/usr/lib/voxtype").join(variant);
             let basename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
@@ -1370,6 +1408,7 @@ mod tests {
             ("voxtype-onnx-cuda-12", "cuda-12"),
             ("voxtype-onnx-cuda-13", "cuda-13"),
             ("voxtype-onnx-migraphx", "migraphx"),
+            ("voxtype-onnx-webgpu", "webgpu"),
         ];
         for (basename, expected_sub) in cases {
             assert_eq!(

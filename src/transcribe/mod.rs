@@ -13,6 +13,7 @@
 //! - Optionally Omnilingual via ONNX Runtime (when `omnilingual` feature is enabled)
 //! - Optionally OpenVINO Whisper for Intel NPU/CPU/GPU (when `openvino-whisper` feature is enabled)
 
+pub mod acceleration;
 pub mod cli;
 #[cfg(feature = "parakeet")]
 pub mod parakeet_streaming;
@@ -53,6 +54,8 @@ pub mod ctc;
 
 #[cfg(feature = "parakeet")]
 pub mod parakeet;
+#[cfg(feature = "parakeet")]
+mod parakeet_execution;
 
 #[cfg(feature = "moonshine")]
 pub mod moonshine;
@@ -100,6 +103,12 @@ pub struct TimedSegment {
 
 /// Trait for speech-to-text implementations
 pub trait Transcriber: Send + Sync {
+    /// Provider registration observed while loading this model, when available.
+    /// Registration success does not establish that inference ran on the GPU.
+    fn acceleration_status(&self) -> Option<acceleration::AccelerationStatus> {
+        None
+    }
+
     /// Transcribe audio samples to text
     /// Input: f32 samples, mono, 16kHz
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError>;

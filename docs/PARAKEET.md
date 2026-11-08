@@ -29,6 +29,25 @@ Parakeet support requires an ONNX-enabled binary. Download from the releases pag
 
 The AVX2 binary works on most modern x86_64 CPUs. Use AVX-512 if your CPU supports it for better performance.
 
+### WebGPU (experimental)
+
+A build with `--features parakeet-webgpu` selects ONNX Runtime's native WebGPU execution provider. On Linux, the provider uses Google's Dawn library to run GPU operations through Vulkan. It supports multiple GPU vendors without a browser. parakeet-rs marks the provider as experimental and warns that it may produce incorrect results, so check the transcription output before relying on it.
+
+The x86_64 Linux release build produces an `onnx-webgpu` bundle with the executable, its matching `libwebgpu_dawn.so`, and license notices. The executable searches its own directory for Dawn, so keep both files together when extracting the bundle. Debian/RPM packages and the WebGPU AppImage include the library. A working Vulkan driver is still required. If the provider cannot register, inference falls back to CPU.
+
+For packaged installations, `voxtype setup gpu --enable` can select the installed WebGPU variant for Parakeet. `voxtype info accel` reads structured registration results from the daemon. Failed registration across all model sessions reports CPU fallback. Successful or mixed registration reports `unknown`, because registration does not prove GPU execution. The configure TUI also lists the WebGPU variant.
+
+For Nix on x86_64 Linux, use `packages.x86_64-linux.onnx-webgpu` (or `nix build .#onnx-webgpu`). The package includes the pinned ONNX Runtime and Dawn libraries and configures their runtime paths.
+
+For a local Cargo build, the downloaded Dawn library is available beside the executable in `target/release`. Install both files together:
+
+```bash
+cargo build --release --features parakeet-webgpu
+sudo install -Dm755 target/release/voxtype /usr/local/lib/voxtype/voxtype
+sudo install -Dm755 target/release/libwebgpu_dawn.so /usr/local/lib/voxtype/libwebgpu_dawn.so
+sudo ln -sfn /usr/local/lib/voxtype/voxtype /usr/local/bin/voxtype
+```
+
 ## Downloading the Model
 
 Download the Parakeet TDT 0.6B model:

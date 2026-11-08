@@ -395,8 +395,8 @@ fn na_hint_lines<'a>(row: usize, col: usize) -> Vec<Line<'a>> {
         }
         (Some(EngineFamily::Onnx), Some(Acceleration::Vulkan)) => {
             "ONNX Runtime does not ship a Vulkan execution provider. Use \
-             ONNX (CUDA) for NVIDIA, ONNX (MIGraphX) for AMD, or ONNX (AVX2/AVX-512) \
-             for CPU."
+             ONNX (CUDA) for NVIDIA, ONNX (MIGraphX) for AMD, ONNX (WebGPU) for \
+             experimental Parakeet acceleration through Vulkan, or ONNX (AVX2/AVX-512) for CPU."
         }
         _ => "This combination is not built.",
     };
@@ -501,6 +501,14 @@ fn recommended_models(v: Variant) -> ModelRecommendations {
                 "CUDA inference is so fast on Parakeet that English dictation \
                  is effectively instantaneous; use the largest model that fits \
                  your VRAM.",
+            ),
+        },
+        Variant::OnnxWebgpu => ModelRecommendations {
+            english: "parakeet-tdt-0.6b-v3",
+            european: "omnilingual-300m  (CPU)",
+            asian: "sensevoice-small  (CPU)",
+            note: Some(
+                "WebGPU is experimental. Check transcription accuracy before relying on it.",
             ),
         },
         Variant::OnnxMigraphx => ModelRecommendations {
@@ -613,6 +621,17 @@ fn variant_hint(v: Variant) -> VariantHint {
             speed: "10-20x AVX2 on capable GPUs; Parakeet faster than real-time even at large sizes",
             hardware: "NVIDIA GPU + matching CUDA 12.x or 13.x driver; AVX-512 CPU",
         },
+        Variant::OnnxWebgpu => VariantHint {
+            headline: "Parakeet on WebGPU",
+            body: &[
+                "Experimental GPU inference for Parakeet through ONNX Runtime and Dawn.",
+                "Other ONNX engines in this variant run on CPU.",
+                "If the provider cannot register, inference falls back to CPU.",
+            ],
+            models: "Parakeet TDT and CTC",
+            speed: "Hardware-dependent; not benchmarked",
+            hardware: "Vulkan-capable GPU and driver; AVX2 CPU",
+        },
         Variant::OnnxMigraphx => VariantHint {
             headline: "ONNX engines on AMD MIGraphX",
             body: &[
@@ -677,6 +696,7 @@ fn accel_label(a: Acceleration) -> &'static str {
         Acceleration::Vulkan => "Vulkan",
         Acceleration::Cuda => "CUDA",
         Acceleration::Migraphx => "MIGraphX",
+        Acceleration::Webgpu => "WebGPU",
         Acceleration::Native => "native",
     }
 }

@@ -27,6 +27,12 @@ fn main() -> Result<(), Error> {
     // every build, not just release builds.
     expose_build_version();
 
+    if env::var_os("CARGO_FEATURE_PARAKEET_WEBGPU").is_some()
+        && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux")
+    {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+    }
+
     // Only generate man pages for release builds or when explicitly requested
     let profile = env::var("PROFILE").unwrap_or_default();
     let generate = env::var("VOXTYPE_GEN_MANPAGES").is_ok() || profile == "release";

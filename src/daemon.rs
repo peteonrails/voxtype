@@ -1326,6 +1326,13 @@ impl Daemon {
 
     /// Update the state file if configured
     fn update_state(&self, state_name: &str) {
+        #[cfg(feature = "parakeet-webgpu")]
+        match state_name {
+            "idle" => self.publish_acceleration_status(self.transcriber_preloaded.as_deref()),
+            "recording" => self.publish_acceleration_status(None),
+            _ => {}
+        }
+
         if let Some(ref path) = self.state_file_path {
             write_state_file(path, state_name);
         }
@@ -1344,6 +1351,26 @@ impl Daemon {
             "idle" | "stopped" => set_osd_suppressed(false),
             _ => {}
         }
+    }
+
+    #[cfg(feature = "parakeet-webgpu")]
+    fn publish_acceleration_status(&self, transcriber: Option<&dyn Transcriber>) {
+        if self.pid_file_path.is_none() {
+            return;
+        }
+
+        let mut status = transcriber.and_then(Transcriber::acceleration_status);
+        if let Some(meeting) = &self.meeting_daemon {
+            let meeting_status = meeting.acceleration_status();
+            status = if transcriber.is_none() {
+                meeting_status
+            } else {
+                status
+                    .zip(meeting_status)
+                    .and_then(|(dictation, meeting)| dictation.combined_with(meeting))
+            };
+        }
+        crate::setup::accel::publish_transcriber_status(status);
     }
 
     /// Build a `SpeechTracker` for silence-based auto-stop, if `armed` and
@@ -2400,6 +2427,18 @@ impl Daemon {
         &mut self,
         model_override: Option<&str>,
     ) -> std::result::Result<Arc<dyn Transcriber>, ()> {
+        let result = self.load_transcriber_for_recording(model_override).await;
+        #[cfg(feature = "parakeet-webgpu")]
+        self.publish_acceleration_status(
+            result.as_ref().ok().map(|transcriber| transcriber.as_ref()),
+        );
+        result
+    }
+
+    async fn load_transcriber_for_recording(
+        &mut self,
+        model_override: Option<&str>,
+    ) -> std::result::Result<Arc<dyn Transcriber>, ()> {
         if let Some(name) = model_override {
             match model_catalog::override_route(&self.config, name) {
                 Ok(model_catalog::OverrideRoute::Separate { engine, model }) => {
@@ -2658,6 +2697,12 @@ impl Daemon {
                         }
 
                         self.meeting_daemon = Some(daemon);
+                        #[cfg(feature = "parakeet-webgpu")]
+                        self.publish_acceleration_status(
+                            self.active_transcriber
+                                .as_deref()
+                                .or(self.transcriber_preloaded.as_deref()),
+                        );
                         self.meeting_mic_buffer.clear();
                         self.meeting_loopback_buffer.clear();
 
@@ -2733,6 +2778,13 @@ impl Daemon {
                     tracing::error!("Error stopping meeting: {}", e);
                 }
             }
+
+            #[cfg(feature = "parakeet-webgpu")]
+            self.publish_acceleration_status(
+                self.active_transcriber
+                    .as_deref()
+                    .or(self.transcriber_preloaded.as_deref()),
+            );
 
             self.meeting_mic_buffer.clear();
             self.meeting_loopback_buffer.clear();
@@ -2996,6 +3048,9 @@ impl Daemon {
         chunk_audio: Vec<f32>,
         transcriber: Arc<dyn Transcriber>,
     ) {
+        #[cfg(feature = "parakeet-webgpu")]
+        self.publish_acceleration_status(Some(transcriber.as_ref()));
+
         tracing::debug!(
             "Spawning eager transcription for chunk {} ({:.1}s)",
             chunk_index,
@@ -3810,6 +3865,9 @@ impl Daemon {
 
         // Write PID file for external control via signals
         self.pid_file_path = write_pid_file();
+
+        #[cfg(feature = "parakeet-webgpu")]
+        self.publish_acceleration_status(None);
 
         // Set up signal handlers for external control
         let mut sigusr1 = signal(SignalKind::user_defined1()).map_err(|e| {
@@ -5091,6 +5149,9 @@ impl Daemon {
         if let Some(ref path) = self.meeting_state_file_path {
             cleanup_state_file(path);
         }
+
+        #[cfg(feature = "parakeet-webgpu")]
+        let _ = std::fs::remove_file(crate::setup::accel::state_file_path());
 
         // Remove PID file on shutdown
         if let Some(ref path) = self.pid_file_path {

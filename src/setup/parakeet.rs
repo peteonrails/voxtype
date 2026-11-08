@@ -19,6 +19,7 @@ pub enum ParakeetBackend {
     /// Unversioned CUDA binary (source-built or pre-0.7.0).
     Cuda,
     Migraphx,
+    Webgpu,
     /// Custom binary (source-compiled without specific suffix)
     Custom,
 }
@@ -32,6 +33,7 @@ impl ParakeetBackend {
             ParakeetBackend::Cuda13 => Variant::OnnxCuda13,
             ParakeetBackend::Cuda => Variant::OnnxCuda,
             ParakeetBackend::Migraphx => Variant::OnnxMigraphx,
+            ParakeetBackend::Webgpu => Variant::OnnxWebgpu,
             ParakeetBackend::Custom => Variant::OnnxNative,
         }
     }
@@ -44,6 +46,7 @@ impl ParakeetBackend {
             Variant::OnnxCuda13 => Some(ParakeetBackend::Cuda13),
             Variant::OnnxCuda => Some(ParakeetBackend::Cuda),
             Variant::OnnxMigraphx => Some(ParakeetBackend::Migraphx),
+            Variant::OnnxWebgpu => Some(ParakeetBackend::Webgpu),
             Variant::OnnxNative => Some(ParakeetBackend::Custom),
             _ => None,
         }
@@ -61,7 +64,8 @@ impl ParakeetBackend {
             ParakeetBackend::Cuda12
             | ParakeetBackend::Cuda13
             | ParakeetBackend::Cuda
-            | ParakeetBackend::Migraphx => Variant::WhisperVulkan,
+            | ParakeetBackend::Migraphx
+            | ParakeetBackend::Webgpu => Variant::WhisperVulkan,
             ParakeetBackend::Custom => Variant::WhisperNative,
         }
     }
@@ -137,9 +141,9 @@ fn pick_best_backend(
         }
     }
 
-    // Then MIGraphX, then CPU-only backends.
     let preference = [
         Variant::OnnxMigraphx,
+        Variant::OnnxWebgpu,
         Variant::OnnxAvx512,
         Variant::OnnxAvx2,
         Variant::OnnxNative,
@@ -238,6 +242,7 @@ pub fn show_status() {
             ParakeetBackend::Cuda13,
             ParakeetBackend::Cuda,
             ParakeetBackend::Migraphx,
+            ParakeetBackend::Webgpu,
             ParakeetBackend::Custom,
         ] {
             let installed = available.contains(&backend);
@@ -382,6 +387,7 @@ mod tests {
             ParakeetBackend::Cuda13,
             ParakeetBackend::Cuda,
             ParakeetBackend::Migraphx,
+            ParakeetBackend::Webgpu,
             ParakeetBackend::Custom,
         ] {
             assert_eq!(ParakeetBackend::from_variant(b.variant()), Some(b));
@@ -425,6 +431,7 @@ mod tests {
             ParakeetBackend::Cuda13,
             ParakeetBackend::Cuda,
             ParakeetBackend::Migraphx,
+            ParakeetBackend::Webgpu,
             ParakeetBackend::Custom,
         ] {
             assert_eq!(b.whisper_equivalent().family(), EngineFamily::Whisper);
@@ -452,6 +459,20 @@ mod tests {
             &binary::Gpus { nvidia, amd },
             Some(Variant::WhisperAvx512),
         )
+    }
+
+    #[test]
+    fn webgpu_backend_is_selected_on_avx2_cpu() {
+        let dir = lib_dir_with(&[
+            Variant::OnnxAvx2,
+            Variant::OnnxMigraphx,
+            Variant::OnnxWebgpu,
+        ]);
+
+        assert_eq!(
+            pick_best_backend(&statuses(&dir, false, true, false), None),
+            Some(ParakeetBackend::Webgpu)
+        );
     }
 
     #[test]
