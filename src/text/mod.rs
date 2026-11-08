@@ -3,6 +3,11 @@
 //! Provides post-transcription text transformations including:
 //! - Spoken punctuation conversion (e.g., "period" → ".")
 //! - Custom word replacements
+//!
+//! [`learn`] diffs an edited dictation against the last transcript so
+//! `voxtype learn` can grow `[text.replacements]`.
+
+pub mod learn;
 
 use crate::config::TextConfig;
 use regex::Regex;
