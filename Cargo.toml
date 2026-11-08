@@ -166,6 +166,10 @@ nix = { version = "0.29", features = ["signal", "process"] }  # Unix signals for
 # instead of shelling out to playerctl lets us see MPRIS-compliant players
 # that playerctl silently filters out, and surfaces real errors on resume.
 zbus = { version = "4", default-features = false, features = ["tokio"] }
+# Native X11 text output (`x11` driver) talks the X protocol directly over the
+# socket: no libX11 to link and no external typing tool to install, which keeps
+# the release and Nix builds free of an extra system dependency.
+x11rb = { version = "0.14", features = ["xtest"] }
 
 [features]
 default = []

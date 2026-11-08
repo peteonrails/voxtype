@@ -299,8 +299,9 @@ pub struct Cli {
         value_name = "DRIVERS",
         help_heading = "Output",
         long_help = "Output driver order for type mode (comma-separated).\n\
-        Available: wtype, dotool, ydotool, clipboard.\n\
-        Example: --driver=ydotool,wtype,clipboard"
+        Available: wtype, eitype, dotool, x11, ydotool, clipboard, xclip.\n\
+        Example: --driver=ydotool,wtype,clipboard\n\
+        Example: --driver=x11,xclip  (native X11 typing, no extra tools installed)"
     )]
     pub driver: Option<String>,
 
@@ -383,6 +384,19 @@ pub struct Cli {
         hide_short_help = true
     )]
     pub type_delay: Option<u32>,
+
+    /// Wait after changing the X11 keyboard mapping (ms), x11 driver only
+    #[arg(
+        long,
+        value_name = "MS",
+        help_heading = "Output",
+        hide_short_help = true,
+        long_help = "How long the x11 driver waits after changing the X11 keyboard \
+        mapping before pressing the keys that depend on it (ms), and again before \
+        restoring it. Clients that resolve key events through their own copy of the \
+        mapping need that moment, or CJK and other unmapped characters are dropped."
+    )]
+    pub x11_keymap_settle_ms: Option<u32>,
 
     /// Keyboard layout for dotool (e.g., de, fr)
     #[arg(
