@@ -481,7 +481,7 @@ min_speech_duration_ms = 50  # Accept shorter speech segments (default: 100)
 
 ### VAD model not found (Whisper VAD backend)
 
-**Symptom:** Error about missing VAD model when using `backend = "whisper"` or `backend = "auto"` with the Whisper engine.
+**Symptom:** A "Voxtype: voice activity detection is off" notification when the daemon starts, with `backend = "whisper"`. Silent recordings get transcribed, sometimes as made-up text. With `backend = "auto"` and the Whisper engine, the daemon instead logs `Whisper VAD unavailable, [vad] backend = "auto" falls back to Energy VAD` and keeps filtering silence with Energy VAD.
 
 **Solution:** Download the Silero VAD model:
 

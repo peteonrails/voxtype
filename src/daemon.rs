@@ -1181,18 +1181,23 @@ impl Daemon {
 
         // Initialize Voice Activity Detection if enabled
         let vad = match crate::vad::create_vad(&config) {
-            Ok(Some(vad)) => {
+            Ok(Some(init)) => {
                 tracing::info!(
-                    "Voice Activity Detection enabled (backend: {:?}, threshold: {:.2}, min_speech: {}ms)",
+                    "Voice Activity Detection enabled (backend: {:?}, configured: {:?}, threshold: {:.2}, min_speech: {}ms)",
+                    init.backend,
                     config.vad.backend,
                     config.vad.threshold,
                     config.vad.min_speech_duration_ms
                 );
-                Some(Arc::from(vad))
+                Some(Arc::from(init.detector))
             }
             Ok(None) => None,
             Err(e) => {
+                // Without VAD, silence reaches the model and can be typed as
+                // hallucinated text, so the user has to hear about it.
+                let (title, body) = crate::vad::unavailable_notice(&config.vad, &e);
                 tracing::warn!("Failed to initialize VAD, continuing without: {}", e);
+                crate::notification::send_sync(title, &body);
                 None
             }
         };

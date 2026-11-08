@@ -43,47 +43,121 @@ pub trait VoiceActivityDetector: Send + Sync {
     fn detect(&self, samples: &[f32]) -> Result<VadResult, VadError>;
 }
 
+/// A ready voice activity detector and the backend actually running it.
+pub struct VadInit {
+    pub detector: Box<dyn VoiceActivityDetector>,
+    /// Never `Auto`: the backend `auto` resolved to, or the one it fell back to.
+    pub backend: VadBackend,
+}
+
+/// The backend a config asks for, with `auto` resolved by engine: Whisper VAD
+/// for the Whisper engine, Energy VAD for every other engine.
+pub fn preferred_backend(config: &Config) -> VadBackend {
+    match config.vad.backend {
+        VadBackend::Auto => match config.engine {
+            TranscriptionEngine::Whisper => VadBackend::Whisper,
+            TranscriptionEngine::Parakeet
+            | TranscriptionEngine::Moonshine
+            | TranscriptionEngine::SenseVoice
+            | TranscriptionEngine::Paraformer
+            | TranscriptionEngine::Dolphin
+            | TranscriptionEngine::Omnilingual
+            | TranscriptionEngine::Cohere
+            | TranscriptionEngine::Soniox
+            | TranscriptionEngine::OpenVino => VadBackend::Energy,
+        },
+        explicit => explicit,
+    }
+}
+
 /// Create a VAD instance based on configuration
 ///
-/// Returns None if VAD is disabled, or Err if initialization fails
-pub fn create_vad(config: &Config) -> Result<Option<Box<dyn VoiceActivityDetector>>, VadError> {
+/// Returns None if VAD is disabled, or Err if the configured backend cannot
+/// start. With `backend = "auto"`, a Whisper VAD that cannot start (model
+/// missing or unloadable) falls back to Energy VAD, which needs no model, so
+/// silence is still filtered. An explicit `backend = "whisper"` never falls
+/// back: the user chose that backend, and the caller reports the error.
+pub fn create_vad(config: &Config) -> Result<Option<VadInit>, VadError> {
     if !config.vad.enabled {
         return Ok(None);
     }
 
-    // Determine which backend to use
-    let backend = match config.vad.backend {
-        VadBackend::Auto => {
-            // Auto-select: Whisper VAD for Whisper engine, Energy for Parakeet
-            match config.engine {
-                TranscriptionEngine::Whisper => VadBackend::Whisper,
-                TranscriptionEngine::Parakeet
-                | TranscriptionEngine::Moonshine
-                | TranscriptionEngine::SenseVoice
-                | TranscriptionEngine::Paraformer
-                | TranscriptionEngine::Dolphin
-                | TranscriptionEngine::Omnilingual
-                | TranscriptionEngine::Cohere
-                | TranscriptionEngine::Soniox
-                | TranscriptionEngine::OpenVino => VadBackend::Energy,
+    let init = match preferred_backend(config) {
+        VadBackend::Whisper => match create_whisper_vad(&config.vad) {
+            Ok(detector) => VadInit {
+                detector,
+                backend: VadBackend::Whisper,
+            },
+            Err(e) if config.vad.backend == VadBackend::Auto => {
+                tracing::warn!(
+                    "Whisper VAD unavailable, [vad] backend = \"auto\" falls back to Energy VAD: {}",
+                    e
+                );
+                energy_vad(&config.vad)
             }
-        }
-        explicit => explicit,
+            Err(e) => return Err(e),
+        },
+        VadBackend::Energy | VadBackend::Auto => energy_vad(&config.vad),
     };
 
-    let vad: Box<dyn VoiceActivityDetector> = match backend {
-        VadBackend::Energy | VadBackend::Auto => {
-            tracing::info!("Using Energy VAD backend");
-            Box::new(EnergyVad::new(&config.vad))
-        }
-        VadBackend::Whisper => {
-            let model_path = resolve_whisper_vad_model_path(&config.vad)?;
-            tracing::info!("Using Whisper VAD backend with model {:?}", model_path);
-            Box::new(WhisperVad::new(&model_path, &config.vad)?)
-        }
-    };
+    Ok(Some(init))
+}
 
-    Ok(Some(vad))
+fn energy_vad(config: &crate::config::VadConfig) -> VadInit {
+    tracing::info!("Using Energy VAD backend");
+    VadInit {
+        detector: Box::new(EnergyVad::new(config)),
+        backend: VadBackend::Energy,
+    }
+}
+
+fn create_whisper_vad(
+    config: &crate::config::VadConfig,
+) -> Result<Box<dyn VoiceActivityDetector>, VadError> {
+    let model_path = resolve_whisper_vad_model_path(config)?;
+    tracing::info!("Using Whisper VAD backend with model {:?}", model_path);
+    Ok(Box::new(WhisperVad::new(&model_path, config)?))
+}
+
+/// Notification title and body for a VAD that was enabled but could not
+/// start: which model failed, what that means, and what fixes it.
+pub fn unavailable_notice(
+    config: &crate::config::VadConfig,
+    error: &VadError,
+) -> (&'static str, String) {
+    const CONSEQUENCE: &str =
+        "Silence and noise now go straight to transcription and can come out as made-up text.";
+    let body = match (error, config.model.as_deref()) {
+        (VadError::ModelNotFound(_), Some(model)) => format!(
+            "The Silero VAD model set in [vad] model was not found: {}. {} \
+             Fix the path, or remove [vad] model and run `voxtype setup vad`.",
+            model, CONSEQUENCE
+        ),
+        (VadError::ModelNotFound(_), None) => format!(
+            "The Silero VAD model is not installed ({}). {} \
+             Run `voxtype setup vad`, or set [vad] backend = \"energy\" (no model needed).",
+            default_whisper_vad_model_path().display(),
+            CONSEQUENCE
+        ),
+        (_, Some(model)) => format!(
+            "The Silero VAD model {} failed to load ({}). {} \
+             Replace it with a valid ggml Silero model, or set [vad] backend = \"energy\".",
+            model, error, CONSEQUENCE
+        ),
+        (_, None) => format!(
+            "The Silero VAD model {} failed to load ({}). {} \
+             Delete it and run `voxtype setup vad` to download it again, \
+             or set [vad] backend = \"energy\".",
+            default_whisper_vad_model_path().display(),
+            error,
+            CONSEQUENCE
+        ),
+    };
+    ("Voxtype: voice activity detection is off", body)
+}
+
+fn default_whisper_vad_model_path() -> PathBuf {
+    Config::models_dir().join(get_whisper_vad_model_filename())
 }
 
 /// Resolve the path to the Whisper VAD model
@@ -97,17 +171,12 @@ fn resolve_whisper_vad_model_path(config: &crate::config::VadConfig) -> Result<P
         return Err(VadError::ModelNotFound(model.clone()));
     }
 
-    // Use default model location
-    let models_dir = Config::models_dir();
-    let model_path = models_dir.join("ggml-silero-vad.bin");
-
+    let model_path = default_whisper_vad_model_path();
     if model_path.exists() {
         Ok(model_path)
     } else {
-        Err(VadError::ModelNotFound(format!(
-            "{}. Download with: voxtype setup vad",
-            model_path.display()
-        )))
+        // ModelNotFound's message already names `voxtype setup vad`.
+        Err(VadError::ModelNotFound(model_path.display().to_string()))
     }
 }
 
@@ -165,6 +234,68 @@ mod tests {
         // Auto + Parakeet = Energy (no model needed)
         let vad = create_vad(&config).unwrap();
         assert!(vad.is_some());
+    }
+
+    fn whisper_vad_config(backend: VadBackend) -> Config {
+        let mut config = Config::default();
+        config.vad.enabled = true;
+        config.vad.backend = backend;
+        config.engine = TranscriptionEngine::Whisper;
+        config.vad.model = Some("/nonexistent/voxtype-test/ggml-silero-vad.bin".to_string());
+        config
+    }
+
+    #[test]
+    fn test_preferred_backend_resolves_auto_by_engine() {
+        let mut config = Config::default();
+        config.vad.backend = VadBackend::Auto;
+        config.engine = TranscriptionEngine::Whisper;
+        assert_eq!(preferred_backend(&config), VadBackend::Whisper);
+        config.engine = TranscriptionEngine::Parakeet;
+        assert_eq!(preferred_backend(&config), VadBackend::Energy);
+        config.vad.backend = VadBackend::Whisper;
+        assert_eq!(preferred_backend(&config), VadBackend::Whisper);
+    }
+
+    #[test]
+    fn test_auto_falls_back_to_energy_when_whisper_vad_model_missing() {
+        let config = whisper_vad_config(VadBackend::Auto);
+        let init = create_vad(&config).unwrap().unwrap();
+        assert_eq!(init.backend, VadBackend::Energy);
+    }
+
+    #[test]
+    fn test_explicit_whisper_backend_does_not_fall_back() {
+        let config = whisper_vad_config(VadBackend::Whisper);
+        assert!(matches!(
+            create_vad(&config),
+            Err(VadError::ModelNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn test_unavailable_notice_default_model_names_setup_command() {
+        let config = crate::config::VadConfig::default();
+        let error = VadError::ModelNotFound("x".to_string());
+        let (title, body) = unavailable_notice(&config, &error);
+        assert!(title.contains("voice activity detection is off"));
+        assert!(body.contains("ggml-silero-vad.bin"));
+        assert!(body.contains("`voxtype setup vad`"));
+        assert!(body.contains("backend = \"energy\""));
+    }
+
+    #[test]
+    fn test_unavailable_notice_custom_model_names_the_path() {
+        let config = whisper_vad_config(VadBackend::Whisper).vad;
+        let error = VadError::ModelNotFound("x".to_string());
+        let (_, body) = unavailable_notice(&config, &error);
+        assert!(body.contains("/nonexistent/voxtype-test/ggml-silero-vad.bin"));
+        assert!(body.contains("[vad] model"));
+
+        let error = VadError::InitFailed("bad magic".to_string());
+        let (_, body) = unavailable_notice(&config, &error);
+        assert!(body.contains("failed to load"));
+        assert!(body.contains("bad magic"));
     }
 
     #[test]
