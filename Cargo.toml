@@ -98,6 +98,8 @@ rustfft = { version = "6", optional = true }
 # with_properties() to WhisperPipeline (needed for CACHE_DIR compiled-model
 # caching), pending upstream review.
 openvino-genai = { version = "0.11.0", optional = true, features = ["runtime-linking"] }
+# Native OpenVINO encoder for Cohere on Intel GPUs; decoder stays in ONNX Runtime.
+openvino = { version = "0.11.0", optional = true, features = ["runtime-linking"] }
 
 # CPU count for thread detection
 num_cpus = "1.16"
@@ -250,6 +252,8 @@ omnilingual-tensorrt = ["omnilingual", "onnx-tensorrt-enabled"]
 cohere = ["onnx-common", "dep:half", "dep:tokenizers"]
 cohere-cuda = ["cohere", "onnx-cuda-enabled"]
 cohere-tensorrt = ["cohere", "onnx-tensorrt-enabled"]
+# Experimental, explicitly selected via cohere.encoder_backend = "openvino_gpu".
+cohere-openvino = ["cohere", "dep:openvino"]
 # Soniox is unconditional. Its deps (tokio-tungstenite, futures-util, reqwest)
 # add ~1-2 MB after LTO+strip and ride alongside ureq, which every binary
 # already ships for model downloads. Treating it like remote.rs (also always
@@ -332,6 +336,10 @@ path = "src/bin/voxtype_mirror_registry.rs"
 name = "inspect_cohere_onnx"
 required-features = ["cohere"]
 
+[[example]]
+name = "benchmark_cohere"
+required-features = ["cohere"]
+
 # TEMPORARY: openvino-genai 0.11.0's WhisperPipeline has no way to pass
 # device properties (CACHE_DIR etc.), unlike LlmPipeline/VlmPipeline in
 # the same crate which already expose with_properties(). Pinned to a
@@ -343,3 +351,6 @@ required-features = ["cohere"]
 # if needed) once that PR merges and ships in a crates.io release.
 [patch.crates-io]
 openvino-genai = { git = "https://github.com/voxtype/openvino-rs", branch = "whisper-pipeline-with-properties" }
+# Share the same openvino-sys source as openvino-genai (its native links name
+# cannot appear twice in Cargo's dependency graph, even for optional backends).
+openvino = { git = "https://github.com/voxtype/openvino-rs", branch = "whisper-pipeline-with-properties" }

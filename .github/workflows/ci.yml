@@ -5,11 +5,9 @@ on:
     branches: [main, dev]
   pull_request:
 
-# Three parallel jobs (fmt, clippy, test) instead of a single sequential `check`.
-# Each runs on its own runner so a 4 min clippy run doesn't block a 30 s fmt
-# check, and PR failures attribute to the specific gate that broke. Required
-# status checks on dev (PR-time) and main (release-time) reference all three
-# job names; if you rename or remove one here, update branch protection.
+# Separate runners keep a long clippy run from blocking a quick fmt check.
+# The Cohere matrix exercises optional bindings without requiring GPU hardware.
+# ci-success aggregates these checks for branch protection.
 
 jobs:
   fmt:
@@ -64,12 +62,42 @@ jobs:
       - name: cargo test
         run: cargo test
 
+      - name: Benchmark tooling tests (offline)
+        run: python3 -B -m unittest discover -s scripts/tests -p 'test_benchmark_cohere_gpu.py'
+
+  cohere:
+    name: cohere (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both unavailable-backend validation and the shared OpenVINO binding
+        # with GenAI are compiled. No model, Intel GPU, or native runtime needed.
+        features: [cohere, 'cohere-openvino,openvino-whisper']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libclang-dev cmake \
+            libgtk-3-dev libglib2.0-dev libx11-dev libxi-dev libxtst-dev
+      - name: Check optional feature combinations
+        run: cargo clippy --locked --all-targets --no-deps --features '${{ matrix.features }},onnx-load-dynamic' -- -D warnings
+      - name: Cohere configuration and pure-Rust tests
+        run: |
+          cargo test --locked --features '${{ matrix.features }},onnx-load-dynamic' --lib cohere
+          cargo test --locked --features '${{ matrix.features }},onnx-load-dynamic' --test cohere_backend_config
+          cargo test --locked --features '${{ matrix.features }},onnx-load-dynamic' --example benchmark_cohere
+
   # Aggregator job — branch protection only needs to require `ci-success`.
   # Adding/removing parallel checks above just updates the `needs:` list;
   # the protection rule never needs to be touched.
   ci-success:
     name: ci-success
-    needs: [fmt, clippy, test]
+    needs: [fmt, clippy, test, cohere]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -79,10 +107,12 @@ jobs:
           fmt='${{ needs.fmt.result }}'
           clippy='${{ needs.clippy.result }}'
           test='${{ needs.test.result }}'
+          cohere='${{ needs.cohere.result }}'
           echo "fmt:    $fmt"
           echo "clippy: $clippy"
           echo "test:   $test"
-          if [[ "$fmt" != success || "$clippy" != success || "$test" != success ]]; then
+          echo "cohere: $cohere"
+          if [[ "$fmt" != success || "$clippy" != success || "$test" != success || "$cohere" != success ]]; then
             echo "::error::One or more required jobs failed"
             exit 1
           fi

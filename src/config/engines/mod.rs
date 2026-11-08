@@ -12,7 +12,7 @@ mod parakeet;
 mod sensevoice;
 mod soniox;
 
-pub use cohere::CohereConfig;
+pub use cohere::{CohereConfig, CohereEncoderBackend};
 pub use dolphin::DolphinConfig;
 pub use moonshine::MoonshineConfig;
 pub use omnilingual::OmnilingualConfig;

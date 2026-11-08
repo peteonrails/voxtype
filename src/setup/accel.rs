@@ -257,6 +257,15 @@ pub(crate) fn classify_line(line: &str) -> Option<(Signal, Option<&'static str>)
         .collect::<Vec<_>>()
         .join(" ");
 
+    // Cohere compiles explicitly for GPU (no AUTO/HETERO fallback). Only a
+    // completed inference proves use; successfully preparing a model does not.
+    if l.contains("cohere openvino gpu encoder inference succeeded;") {
+        return Some((Signal::Positive, Some("openvino_gpu")));
+    }
+    if l.contains("cohere openvino gpu encoder ready;") {
+        return Some((Signal::Intent, Some("openvino_gpu")));
+    }
+
     // whisper.cpp / ggml. `use gpu = 1` is the requested setting, printed
     // from the context params before any device is opened, so it is intent.
     // `use gpu = 0` is different: the GPU was never even asked for, which
@@ -329,7 +338,7 @@ pub(crate) fn classify_line(line: &str) -> Option<(Signal, Option<&'static str>)
 /// Journal patterns worth pulling out of a daemon's log. Passed to
 /// `journalctl -g` so the filtering happens there rather than by streaming
 /// every line of a weeks-old daemon's journal into this process.
-const JOURNAL_PATTERN: &str = "use gpu|whisper_backend_init_gpu|ggml_vulkan|ggml_cuda|execution provider|onnxruntime|falling back to cpu|no cuda devices";
+const JOURNAL_PATTERN: &str = "use gpu|whisper_backend_init_gpu|ggml_vulkan|ggml_cuda|execution provider|onnxruntime|falling back to cpu|no cuda devices|Cohere OpenVINO GPU encoder";
 
 /// Read the GPU-relevant lines this PID logged.
 fn scan_journal(pid: i32) -> Signals {
@@ -575,6 +584,7 @@ pub(crate) fn report_for(pid: Option<i32>) -> AccelReport {
             Some("vulkan") => Some("vulkan"),
             Some("cuda") => Some("cuda"),
             Some("migraphx") => Some("migraphx"),
+            Some("openvino_gpu") => Some("openvino_gpu"),
             _ => variant_backend(variant),
         };
         return AccelReport {
@@ -646,6 +656,36 @@ mod tests {
             s.record(line);
         }
         s
+    }
+
+    #[test]
+    fn cohere_openvino_requires_successful_inference() {
+        let ready = "Cohere OpenVINO GPU encoder ready; decoder remains on CPU";
+        let success = "Cohere OpenVINO GPU encoder inference succeeded; decoder remains on CPU";
+        assert_eq!(
+            classify_line(ready),
+            Some((Signal::Intent, Some("openvino_gpu")))
+        );
+        assert_eq!(
+            decide(None, &signals_from(&[ready]), None).0,
+            AccelState::Unknown
+        );
+        assert_eq!(
+            classify_line(success),
+            Some((Signal::Positive, Some("openvino_gpu")))
+        );
+        assert_eq!(
+            decide(None, &signals_from(&[ready, success]), None),
+            (AccelState::Gpu, Some("openvino_gpu"))
+        );
+        assert_eq!(
+            classify_line("Cohere OpenVINO GPU encoder: failed to compile model"),
+            None
+        );
+        // Keep the journal's prefilter in step with the classifier.
+        assert!(JOURNAL_PATTERN
+            .split('|')
+            .any(|pattern| success.contains(pattern)));
     }
 
     #[test]
