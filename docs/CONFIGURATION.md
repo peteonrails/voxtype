@@ -3850,10 +3850,38 @@ the `voxtype-osd` wrapper launches via `[osd] frontend`.
 
 ```toml
 [osd]
-frontend = "gtk4"           # Default. Uses voxtype-osd-gtk4.
+frontend = "auto"           # Default. Quickshell on Omarchy, GTK4 elsewhere.
+# frontend = "gtk4"         # GTK4 + layer-shell (voxtype-osd-gtk4).
 # frontend = "native"       # wgpu/egui-based (voxtype-osd-native).
 # frontend = "quickshell"   # QML/Quickshell launcher (voxtype-osd-quickshell).
 ```
+
+`"auto"` (also what you get when `frontend` is not set) picks `quickshell`
+when it finds an Omarchy install (`~/.local/state/omarchy/current` or
+`~/.config/omarchy/current`), Quickshell's `qs` on PATH, and the
+`voxtype-osd-quickshell` launcher. Omarchy's own shell runs on Quickshell, and
+the Quickshell OSD follows Omarchy theme switches live and supports the style
+recipes below. On every other system `"auto"` picks `gtk4`, the frontend
+earlier releases always launched. Any explicit value always wins over the
+detection. Configs written by earlier `voxtype setup` runs contain
+`frontend = "gtk4"`; change it to `"auto"` (or remove the line) to get the
+Omarchy detection:
+
+```bash
+voxtype config set osd.frontend auto
+```
+
+The frontend can also be chosen per launch with `voxtype-osd --frontend <name>`
+or the `VOXTYPE_OSD_FRONTEND` environment variable.
+
+When the frontend you chose explicitly is not installed (or, for
+`"quickshell"`, `qs` is missing), the wrapper falls back to one that is,
+GTK4 first. The daemon logs a warning and sends one desktop notification per
+start naming the missing piece, for example:
+
+> **Voxtype: OSD frontend 'quickshell' unavailable**
+> Showing the gtk4 OSD instead. Quickshell (qs) is not installed. Install it
+> (Arch: sudo pacman -S quickshell), or set [osd] frontend = "gtk4" to keep gtk4.
 
 If you pick `"quickshell"`, install the QML tree first so the launcher can
 find it:

@@ -100,7 +100,7 @@ impl Field {
 
 const TABLE: &str = "osd";
 
-const FRONTEND_CHOICES: &[&str] = &["gtk4", "native", "quickshell"];
+const FRONTEND_CHOICES: &[&str] = &["auto", "gtk4", "native", "quickshell"];
 const PALETTE_CHOICES: &[&str] = &["auto", "omarchy", "fallback", "package", "custom"];
 const LAYOUT_CHOICES: &[&str] = &["compact", "wide", "minimal", "tile", "orb", "custom"];
 const POSITION_CHOICES: &[&str] = &[
@@ -133,7 +133,7 @@ impl OsdState {
             enabled: ed.get_bool(TABLE, "enabled").unwrap_or(true),
             frontend: ed
                 .get_string(TABLE, "frontend")
-                .unwrap_or_else(|| "gtk4".to_string()),
+                .unwrap_or_else(|| "auto".to_string()),
             style: ed
                 .get_string(TABLE, "style")
                 .unwrap_or_else(|| "default".to_string()),
@@ -543,7 +543,10 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
                  difference is the underlying toolkit.",
             ),
             Line::from(""),
-            Line::from("  gtk4    GTK4 + layer-shell. Default. Already pulled in by most"),
+            Line::from("  auto    Default. quickshell on Omarchy when qs is installed,"),
+            Line::from("          gtk4 everywhere else."),
+            Line::from(""),
+            Line::from("  gtk4    GTK4 + layer-shell. Already pulled in by most"),
             Line::from("          Hyprland setups (walker, swayosd) so no extra runtime cost."),
             Line::from(""),
             Line::from("  native  SCTK + wgpu + egui. Skips GTK4 entirely if you want to"),
@@ -552,7 +555,7 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
             Line::from("  quickshell  QML frontend. Supports style packages, Omarchy palette"),
             Line::from("              inheritance, recipe layers, and explicit custom QML."),
             Line::from(""),
-            dim("If the chosen binary isn't on PATH, the wrapper falls back to whichever it finds and logs a warning."),
+            dim("If the chosen frontend isn't installed, the wrapper falls back to whichever it finds; the daemon logs a warning and sends one notification."),
         ],
         Field::Style => {
             let mut lines = vec![
