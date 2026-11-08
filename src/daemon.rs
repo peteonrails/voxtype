@@ -1062,6 +1062,14 @@ pub struct Daemon {
     last_dictation: Option<(String, Instant)>,
     /// Audio level broadcaster for the OSD (None when disabled or bind failed)
     level_hub: Option<audio::levels::LevelHub>,
+    /// Meeting transcript/status broadcaster for the meeting HUD (None if bind failed)
+    meeting_event_hub: Option<meeting::MeetingEventHub>,
+    /// The daemon's current view of the active (or most recently ended)
+    /// meeting, mirrored into `meeting_event_hub`'s `hello` snapshot on every
+    /// transition. Source of truth for the HUD; independent of the meeting
+    /// state *file* (`write_meeting_state_file`), which exists for Waybar-
+    /// style consumers that only want the plain-text status.
+    meeting_hud: meeting::MeetingHudState,
     /// Active per-recording level emitter task; aborted when recording stops
     level_emitter_task: Option<tokio::task::JoinHandle<()>>,
     /// Tracks time-since-last-speech for the active recording, when
@@ -1284,6 +1292,8 @@ impl Daemon {
             post_processor,
             last_dictation: None,
             level_hub: None,
+            meeting_event_hub: None,
+            meeting_hud: meeting::MeetingHudState::idle(),
             level_emitter_task: None,
             silence_tracker: None,
             is_external_trigger: false,
@@ -2838,9 +2848,27 @@ impl Daemon {
     }
 
     /// Update the meeting state file if configured
-    fn update_meeting_state(&self, state_name: &str, meeting_id: Option<&str>) {
+    fn update_meeting_state(&mut self, state_name: &str, meeting_id: Option<&str>) {
         if let Some(ref path) = self.meeting_state_file_path {
             write_meeting_state_file(path, state_name, meeting_id);
+        }
+
+        // Mirror into the meeting HUD snapshot. "idle" always means the
+        // meeting fully ended (or none is running): reset everything so a
+        // HUD connecting afterwards doesn't see a stale title/transcript
+        // from the meeting that just finished.
+        if state_name == "idle" {
+            self.meeting_hud = meeting::MeetingHudState::idle();
+        } else {
+            self.meeting_hud.status = state_name.to_string();
+            if let Some(id) = meeting_id {
+                self.meeting_hud.meeting_id = Some(id.to_string());
+            }
+        }
+
+        if let Some(ref hub) = self.meeting_event_hub {
+            hub.update_snapshot(&self.meeting_hud);
+            hub.publish_status(state_name);
         }
     }
 
@@ -2883,6 +2911,14 @@ impl Daemon {
             None
         };
 
+        // Captured for the HUD snapshot before `diarization_config` and
+        // `title` are moved into `meeting_config` / `daemon.start()` below.
+        let (diar_enabled_for_hud, diar_backend_for_hud) = match &diarization_config {
+            Some(cfg) => (cfg.enabled, Some(cfg.backend.clone())),
+            None => (false, None),
+        };
+        let title_for_hud = title.clone();
+
         let meeting_config = meeting::MeetingConfig {
             enabled: self.config.meeting.enabled,
             chunk_duration_secs: self.config.meeting.chunk_duration_secs,
@@ -2911,6 +2947,18 @@ impl Daemon {
                 match daemon.start(title).await {
                     Ok(meeting_id) => {
                         let id_str = meeting_id.to_string();
+                        self.meeting_hud = meeting::MeetingHudState {
+                            status: "recording".to_string(),
+                            meeting_id: Some(id_str.clone()),
+                            title: title_for_hud,
+                            started_at: Some(chrono::Utc::now()),
+                            chunk_count: 0,
+                            diarization: meeting::DiarizationInfo {
+                                enabled: diar_enabled_for_hud,
+                                backend: diar_backend_for_hud,
+                            },
+                            segments: Vec::new(),
+                        };
                         self.update_meeting_state("recording", Some(&id_str));
                         tracing::info!("Meeting started: {}", meeting_id);
 
@@ -3028,6 +3076,19 @@ impl Daemon {
                     }
                 }
             }
+
+            // The tail flush below is where real wall-clock time is spent
+            // (transcribing the last partial chunk), yet the external state
+            // previously jumped straight from "recording" to "idle" with no
+            // wind-down in between. Surface "finalizing" first so a HUD (or
+            // any other consumer) doesn't read the daemon as hung, or
+            // disappear before the transcript is actually complete.
+            let meeting_id = self
+                .meeting_daemon
+                .as_ref()
+                .and_then(|d| d.current_meeting_id())
+                .map(|id| id.to_string());
+            self.update_meeting_state("finalizing", meeting_id.as_deref());
 
             // Flush the final partial chunk so speech near stop is not dropped.
             self.process_buffered_meeting_audio(true).await;
@@ -4281,6 +4342,26 @@ impl Daemon {
             self.tray = crate::tray::TrayRuntime::start_for_config(&self.config);
         }
 
+        // Start the meeting-event broadcaster for the meeting HUD. Bound
+        // unconditionally (like the audio level socket) regardless of
+        // whether meeting mode is enabled in config, so a HUD can always
+        // connect and simply see the idle snapshot when no meeting is
+        // running. Failure to bind is not fatal.
+        let meeting_socket = meeting::events::default_socket_path();
+        match meeting::MeetingEventHub::start(meeting_socket.clone()).await {
+            Ok(hub) => {
+                tracing::info!("Meeting event socket: {:?}", hub.socket_path());
+                self.meeting_event_hub = Some(hub);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Could not start meeting event socket at {:?}: {}",
+                    meeting_socket,
+                    e
+                );
+            }
+        }
+
         crate::daemon_status::publish_version();
 
         tracing::info!("Output mode: {:?}", self.config.output.mode);
@@ -5472,24 +5553,43 @@ impl Daemon {
                     }
                 }, if self.meeting_event_rx.is_some() => {
                     match event {
-                        Some(MeetingEvent::Started { meeting_id }) => {
+                        Some(MeetingEvent::Started { meeting_id, .. }) => {
+                            // The HUD snapshot for this transition is already
+                            // set synchronously in `start_meeting` (title,
+                            // diarization info, started_at), ahead of this
+                            // event reaching the select loop. Nothing to do.
                             tracing::info!("Meeting event: started {}", meeting_id);
                         }
                         Some(MeetingEvent::ChunkProcessed { chunk_id, segments }) => {
                             tracing::debug!("Meeting event: chunk {} processed with {} segments",
                                 chunk_id, segments.len());
+                            self.meeting_hud.segments.extend(segments.iter().cloned());
+                            self.meeting_hud.chunk_count = chunk_id + 1;
+                            if let Some(ref hub) = self.meeting_event_hub {
+                                hub.publish_segments(chunk_id, &segments);
+                                hub.update_snapshot(&self.meeting_hud);
+                            }
                         }
                         Some(MeetingEvent::Paused) => {
+                            // `pause_meeting` already published this via
+                            // `update_meeting_state("paused", ...)`.
                             tracing::info!("Meeting event: paused");
                         }
                         Some(MeetingEvent::Resumed) => {
+                            // `resume_meeting` already published this via
+                            // `update_meeting_state("recording", ...)`.
                             tracing::info!("Meeting event: resumed");
                         }
                         Some(MeetingEvent::Stopped { meeting_id }) => {
+                            // `stop_meeting` already published the "idle"
+                            // transition via `update_meeting_state`.
                             tracing::info!("Meeting event: stopped {}", meeting_id);
                         }
                         Some(MeetingEvent::Error(msg)) => {
                             tracing::error!("Meeting error: {}", msg);
+                            if let Some(ref hub) = self.meeting_event_hub {
+                                hub.publish_error(&msg);
+                            }
                         }
                         None => {
                             // Channel closed
@@ -5575,6 +5675,11 @@ impl Daemon {
         // Remove the OSD audio level socket so a stale path doesn't
         // confuse the next daemon start.
         if let Some(ref hub) = self.level_hub {
+            hub.cleanup();
+        }
+
+        // Same for the meeting event socket.
+        if let Some(ref hub) = self.meeting_event_hub {
             hub.cleanup();
         }
 

@@ -11,7 +11,9 @@
 //! ## Contract
 //!
 //! - Key order: `text, alt, class, tooltip` (then `model, device, backend,
-//!   model_upgrade, osd_frontend_active` when extended). `model_upgrade` is
+//!   model_upgrade, osd_frontend_active` when extended, then
+//!   `meeting_active, meeting_status[, meeting_id]` when extended *and*
+//!   meeting info is supplied). `model_upgrade` is
 //!   the `voxtype::model_upgrade::UpgradeStatus` object, or `null` when there
 //!   is nothing to offer, no ONNX removal notice and nothing to clean up.
 //!   `osd_frontend_active` is `quickshell`, `gtk4`, `native` or `none`.
@@ -49,6 +51,20 @@ pub struct ExtendedStatusInfo {
     pub model_upgrade: Option<UpgradeStatus>,
     /// The OSD frontend in use: `quickshell`, `gtk4`, `native` or `none`.
     pub osd_frontend_active: String,
+}
+
+/// Meeting-mode status, surfaced in extended JSON output so external
+/// consumers (Quickshell, a future GNOME extension — issue #518) don't need
+/// to separately poll `meeting_state` or shell out to `voxtype meeting
+/// status`. Built from the same `meeting_state` file the CLI reads; the
+/// caller (`app/status.rs`) does that I/O and hands the parsed result here,
+/// matching how the base `state: &str` argument is already handled.
+#[derive(Debug, Clone)]
+pub struct MeetingStatusInfo {
+    pub active: bool,
+    /// `idle`, `recording`, `paused`, or `finalizing`.
+    pub status: String,
+    pub meeting_id: Option<String>,
 }
 
 impl ExtendedStatusInfo {
@@ -276,10 +292,16 @@ pub fn backend_display_for_variant(v: setup::binary::Variant) -> &'static str {
 /// containing `"` or `\` can't produce malformed JSON. The outer template
 /// stays hand-rolled to preserve the existing whitespace shape that Waybar's
 /// example configs and several user dotfiles match against.
+///
+/// `meeting` is additive: it only ever appends `meeting_active`,
+/// `meeting_status`, and (when a meeting is active) `meeting_id` after the
+/// existing keys, and only when `extended` is also `Some` — passing `None`
+/// leaves the output byte-identical to before meeting fields existed.
 pub fn format_state_json(
     state: &str,
     icons: &config::ResolvedIcons,
     extended: Option<&ExtendedStatusInfo>,
+    meeting: Option<&MeetingStatusInfo>,
 ) -> String {
     let (text, base_tooltip) = match state {
         "recording" => (&icons.recording, "Recording..."),
@@ -316,8 +338,8 @@ pub fn format_state_json(
                 .as_ref()
                 .and_then(|status| serde_json::to_string(status).ok())
                 .unwrap_or_else(|| "null".to_string());
-            format!(
-                r#"{{"text": {}, "alt": {}, "class": {}, "tooltip": {}, "model": {}, "device": {}, "backend": {}, "model_upgrade": {}, "osd_frontend_active": {}}}"#,
+            let mut out = format!(
+                r#"{{"text": {}, "alt": {}, "class": {}, "tooltip": {}, "model": {}, "device": {}, "backend": {}, "model_upgrade": {}, "osd_frontend_active": {}"#,
                 json_str(text),
                 json_str(alt),
                 json_str(class),
@@ -327,7 +349,19 @@ pub fn format_state_json(
                 json_str(&info.backend),
                 upgrade,
                 json_str(&info.osd_frontend_active),
-            )
+            );
+            if let Some(m) = meeting {
+                out.push_str(&format!(
+                    r#", "meeting_active": {}, "meeting_status": {}"#,
+                    m.active,
+                    json_str(&m.status),
+                ));
+                if let Some(ref id) = m.meeting_id {
+                    out.push_str(&format!(r#", "meeting_id": {}"#, json_str(id)));
+                }
+            }
+            out.push('}');
+            out
         }
         None => format!(
             r#"{{"text": {}, "alt": {}, "class": {}, "tooltip": {}}}"#,
@@ -405,7 +439,7 @@ mod tests {
     #[test]
     fn record_cancel_leaves_idle_not_stopped() {
         let icons = config::StatusConfig::default().resolve_icons();
-        let json = format_state_json("idle", &icons, None);
+        let json = format_state_json("idle", &icons, None, None);
         assert!(
             json.contains("\"alt\": \"idle\""),
             "format_state_json('idle') must keep alt=idle so Waybar shows \
@@ -420,7 +454,7 @@ mod tests {
 
         // And stopped should still map distinctly so we don't accidentally
         // collapse the two states in the other direction.
-        let stopped_json = format_state_json("stopped", &icons, None);
+        let stopped_json = format_state_json("stopped", &icons, None, None);
         assert!(stopped_json.contains("\"alt\": \"stopped\""));
     }
 
@@ -445,29 +479,29 @@ mod tests {
 
         // --- Without extended info ---
         assert_eq!(
-            format_state_json("recording", &icons, None),
+            format_state_json("recording", &icons, None, None),
             r#"{"text": "R", "alt": "recording", "class": "recording", "tooltip": "Recording..."}"#,
         );
         assert_eq!(
-            format_state_json("streaming", &icons, None),
+            format_state_json("streaming", &icons, None, None),
             r#"{"text": "S", "alt": "streaming", "class": "streaming", "tooltip": "Streaming live..."}"#,
         );
         assert_eq!(
-            format_state_json("transcribing", &icons, None),
+            format_state_json("transcribing", &icons, None, None),
             r#"{"text": "T", "alt": "transcribing", "class": "transcribing", "tooltip": "Transcribing..."}"#,
         );
         assert_eq!(
-            format_state_json("idle", &icons, None),
+            format_state_json("idle", &icons, None, None),
             r#"{"text": "I", "alt": "idle", "class": "idle", "tooltip": "Voxtype ready - hold hotkey to record"}"#,
         );
         assert_eq!(
-            format_state_json("stopped", &icons, None),
+            format_state_json("stopped", &icons, None, None),
             r#"{"text": "X", "alt": "stopped", "class": "stopped", "tooltip": "Voxtype not running"}"#,
         );
         // Unknown state falls back to the idle icon but keeps the literal
         // alt/class for the consumer to inspect.
         assert_eq!(
-            format_state_json("bogus", &icons, None),
+            format_state_json("bogus", &icons, None, None),
             r#"{"text": "I", "alt": "bogus", "class": "bogus", "tooltip": "Unknown state"}"#,
         );
 
@@ -482,12 +516,61 @@ mod tests {
             osd_frontend_active: "gtk4".to_string(),
         };
         assert_eq!(
-            format_state_json("recording", &icons, Some(&ext)),
+            format_state_json("recording", &icons, Some(&ext), None),
             r#"{"text": "R", "alt": "recording", "class": "recording", "tooltip": "Recording...\nModel: base.en\nDevice: default\nBackend: CPU (AVX2)", "model": "base.en", "device": "default", "backend": "CPU (AVX2)", "model_upgrade": null, "osd_frontend_active": "gtk4"}"#,
         );
         assert_eq!(
-            format_state_json("idle", &icons, Some(&ext)),
+            format_state_json("idle", &icons, Some(&ext), None),
             r#"{"text": "I", "alt": "idle", "class": "idle", "tooltip": "Voxtype ready - hold hotkey to record\nModel: base.en\nDevice: default\nBackend: CPU (AVX2)", "model": "base.en", "device": "default", "backend": "CPU (AVX2)", "model_upgrade": null, "osd_frontend_active": "gtk4"}"#,
+        );
+    }
+
+    /// Meeting fields are additive and only appear when both `extended` and
+    /// `meeting` are supplied, appended strictly after `backend`. Closes
+    /// #518 (no meeting data in `voxtype status --format json`).
+    #[test]
+    fn format_state_json_appends_meeting_fields_when_extended() {
+        let icons = config::ResolvedIcons {
+            idle: "I".to_string(),
+            recording: "R".to_string(),
+            streaming: "S".to_string(),
+            transcribing: "T".to_string(),
+            stopped: "X".to_string(),
+        };
+        let ext = ExtendedStatusInfo {
+            model: "base.en".to_string(),
+            device: "default".to_string(),
+            backend: "CPU (AVX2)".to_string(),
+            model_upgrade: None,
+            osd_frontend_active: "gtk4".to_string(),
+        };
+
+        // A meeting in progress: meeting_id is present.
+        let meeting = MeetingStatusInfo {
+            active: true,
+            status: "recording".to_string(),
+            meeting_id: Some("abc-123".to_string()),
+        };
+        assert_eq!(
+            format_state_json("recording", &icons, Some(&ext), Some(&meeting)),
+            r#"{"text": "R", "alt": "recording", "class": "recording", "tooltip": "Recording...\nModel: base.en\nDevice: default\nBackend: CPU (AVX2)", "model": "base.en", "device": "default", "backend": "CPU (AVX2)", "model_upgrade": null, "osd_frontend_active": "gtk4", "meeting_active": true, "meeting_status": "recording", "meeting_id": "abc-123"}"#,
+        );
+
+        // No meeting running: meeting_id is omitted entirely, not emitted as null.
+        let no_meeting = MeetingStatusInfo {
+            active: false,
+            status: "idle".to_string(),
+            meeting_id: None,
+        };
+        assert_eq!(
+            format_state_json("idle", &icons, Some(&ext), Some(&no_meeting)),
+            r#"{"text": "I", "alt": "idle", "class": "idle", "tooltip": "Voxtype ready - hold hotkey to record\nModel: base.en\nDevice: default\nBackend: CPU (AVX2)", "model": "base.en", "device": "default", "backend": "CPU (AVX2)", "model_upgrade": null, "osd_frontend_active": "gtk4", "meeting_active": false, "meeting_status": "idle"}"#,
+        );
+
+        // Non-extended callers see no meeting fields at all, even if passed.
+        assert_eq!(
+            format_state_json("idle", &icons, None, Some(&meeting)),
+            r#"{"text": "I", "alt": "idle", "class": "idle", "tooltip": "Voxtype ready - hold hotkey to record"}"#,
         );
     }
 
@@ -512,7 +595,7 @@ mod tests {
             osd_frontend_active: "gtk4".to_string(),
         };
 
-        let json = format_state_json("recording", &icons, Some(&ext));
+        let json = format_state_json("recording", &icons, Some(&ext), None);
 
         // Must be valid JSON.
         let parsed: serde_json::Value =
@@ -579,7 +662,7 @@ mod tests {
             model_upgrade: Some(upgrade(false)),
             osd_frontend_active: "quickshell".to_string(),
         };
-        let json = format_state_json("idle", &icons, Some(&ext));
+        let json = format_state_json("idle", &icons, Some(&ext), None);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(value.as_object().unwrap().contains_key("model_upgrade"));
         assert!(json.starts_with(
@@ -589,7 +672,7 @@ mod tests {
         assert_eq!(value["model_upgrade"]["cleanup"], serde_json::Value::Null);
 
         ext.model_upgrade = Some(upgrade(true));
-        let declined = format_state_json("idle", &icons, Some(&ext));
+        let declined = format_state_json("idle", &icons, Some(&ext), None);
         assert!(!declined.contains(MODEL_UPDATE_LINE));
         assert!(declined.contains(r#""declined":true"#));
     }

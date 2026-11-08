@@ -25,6 +25,7 @@
 pub mod chunk;
 pub mod data;
 pub mod diarization;
+pub mod events;
 pub mod export;
 pub mod state;
 pub mod storage;
@@ -35,6 +36,7 @@ pub use data::{
     ActionItem, AudioSource, MeetingData, MeetingId, MeetingMetadata, MeetingStatus,
     MeetingSummary, Transcript, TranscriptSegment,
 };
+pub use events::{DiarizationInfo, MeetingEventHub, MeetingHudState};
 pub use export::{export_meeting, export_meeting_to_file, ExportFormat, ExportOptions};
 pub use state::{ChunkState, MeetingState};
 pub use storage::{MeetingStorage, StorageConfig, StorageError};
@@ -83,7 +85,13 @@ impl Default for MeetingConfig {
 #[derive(Debug)]
 pub enum MeetingEvent {
     /// Meeting started
-    Started { meeting_id: MeetingId },
+    Started {
+        meeting_id: MeetingId,
+        title: Option<String>,
+        started_at: chrono::DateTime<chrono::Utc>,
+        diarization_enabled: bool,
+        diarization_backend: Option<String>,
+    },
     /// Chunk processed
     ChunkProcessed {
         chunk_id: u32,
@@ -188,12 +196,24 @@ impl MeetingDaemon {
         meeting.metadata.storage_path = Some(storage_path);
 
         let meeting_id = meeting.metadata.id;
+        let title = meeting.metadata.title.clone();
+        let started_at = meeting.metadata.started_at;
+        let (diarization_enabled, diarization_backend) = match &self.config.diarization {
+            Some(cfg) => (cfg.enabled, Some(cfg.backend.clone())),
+            None => (false, None),
+        };
         self.current_meeting = Some(meeting);
         self.state = MeetingState::start();
 
         let _ = self
             .event_tx
-            .send(MeetingEvent::Started { meeting_id })
+            .send(MeetingEvent::Started {
+                meeting_id,
+                title,
+                started_at,
+                diarization_enabled,
+                diarization_backend,
+            })
             .await;
         tracing::info!("Meeting started: {}", meeting_id);
 
@@ -386,6 +406,20 @@ impl MeetingDaemon {
                 meeting.transcript.add_segment(segment.clone());
             }
             meeting.transcript.total_chunks = chunk_id + 1;
+        }
+
+        // Persist after every chunk, not just on stop(): a crash mid-meeting
+        // previously lost the entire transcript, and `meeting show`/`--json`
+        // reported chunk_count: 0 while a meeting was in progress. The extra
+        // write is one small JSON file per chunk_duration_secs (default 30s),
+        // negligible next to the transcription work already done this chunk.
+        if let Some(ref meeting) = self.current_meeting {
+            if let Err(e) = self
+                .storage
+                .save_transcript(&meeting.metadata.id, &meeting.transcript)
+            {
+                tracing::warn!("Failed to persist transcript incrementally: {}", e);
+            }
         }
 
         // Advance state

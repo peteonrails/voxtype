@@ -214,9 +214,18 @@ pub(crate) async fn run_meeting_command(
             println!("Meeting resume requested.");
         }
 
-        MeetingAction::Status => {
+        MeetingAction::Status { json } => {
             let (phase, meeting_id) = meeting_phase(&config::Config::runtime_dir());
-            if phase == MeetingPhase::Idle {
+            let active = phase != MeetingPhase::Idle;
+
+            if json {
+                let payload = serde_json::json!({
+                    "active": active,
+                    "status": phase.as_str(),
+                    "meeting_id": meeting_id,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else if !active {
                 println!("No meeting currently in progress.");
                 println!();
                 println!("Use 'voxtype meeting list' to see past meetings.");
@@ -228,9 +237,14 @@ pub(crate) async fn run_meeting_command(
             }
         }
 
-        MeetingAction::List { limit } => {
+        MeetingAction::List { limit, json } => {
             match meeting::list_meetings(&meeting_config, Some(limit)) {
                 Ok(meetings) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&meetings)?);
+                        return Ok(());
+                    }
+
                     if meetings.is_empty() {
                         println!("No meetings found.");
                         return Ok(());
@@ -323,8 +337,11 @@ pub(crate) async fn run_meeting_command(
             }
         }
 
-        MeetingAction::Show { meeting_id } => {
+        MeetingAction::Show { meeting_id, json } => {
             match meeting::get_meeting(&meeting_config, &meeting_id) {
+                Ok(meeting) if json => {
+                    println!("{}", serde_json::to_string_pretty(&meeting)?);
+                }
                 Ok(meeting) => {
                     println!("{}", meeting.metadata.display_title());
                     println!("{}", "=".repeat(meeting.metadata.display_title().len()));
@@ -542,6 +559,7 @@ enum MeetingPhase {
     Paused,
     Resuming,
     Stopping,
+    Finalizing,
 }
 
 impl MeetingPhase {
@@ -554,17 +572,19 @@ impl MeetingPhase {
             MeetingPhase::Paused => "paused",
             MeetingPhase::Resuming => "resuming",
             MeetingPhase::Stopping => "stopping",
+            MeetingPhase::Finalizing => "finalizing",
         }
     }
 }
 
-/// The daemon's own view, from `meeting_state`: Idle, Recording or Paused.
+/// The daemon's own view from `meeting_state`.
 fn base_meeting_state(runtime_dir: &std::path::Path) -> (MeetingPhase, Option<String>) {
     let state = std::fs::read_to_string(runtime_dir.join("meeting_state")).unwrap_or_default();
     let mut lines = state.lines();
     let phase = match lines.next().map(str::trim) {
         Some("recording") => MeetingPhase::Recording,
         Some("paused") => MeetingPhase::Paused,
+        Some("finalizing") => MeetingPhase::Finalizing,
         _ => return (MeetingPhase::Idle, None),
     };
     let id = lines
@@ -685,6 +705,16 @@ mod tests {
         std::fs::remove_file(dir.path().join("meeting_stop")).unwrap();
         std::fs::remove_file(dir.path().join("meeting_pause")).unwrap();
         assert_eq!(meeting_phase(dir.path()).0, MeetingPhase::Recording);
+    }
+
+    #[test]
+    fn finalizing_is_active_and_keeps_the_meeting_id() {
+        let dir = runtime();
+        touch(dir.path(), "meeting_state", "finalizing\nabc-123");
+        assert_eq!(
+            meeting_phase(dir.path()),
+            (MeetingPhase::Finalizing, Some("abc-123".to_string()))
+        );
     }
 
     #[test]

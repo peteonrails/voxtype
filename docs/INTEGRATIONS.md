@@ -93,6 +93,75 @@ decides for itself when to send it.
 A `[profiles.agent]` block with a `post_process_command` is a good place to
 normalise dictation before an agent sees it, stripping filler words for instance.
 
+## Meeting mode
+
+### Checking meeting status alongside dictation status
+
+`voxtype status --format json --extended` appends `meeting_active`,
+`meeting_status`, and (only when a meeting is active) `meeting_id` after the
+existing `model`/`device`/`backend` fields:
+
+```json
+{"text": "R", "alt": "recording", "class": "recording", "tooltip": "...", "model": "base.en", "device": "default", "backend": "CPU (AVX2)", "meeting_active": true, "meeting_status": "recording", "meeting_id": "b6b2e5b2-..."}
+```
+
+`meeting_status` is one of `idle`, `recording`, `paused`, or `finalizing`.
+`finalizing` covers the window between `meeting stop` and the meeting actually
+disappearing: the daemon is still transcribing the last partial chunk, which
+takes real wall-clock time. Treat it as "still running, about to end," not as
+"stopped." These fields are omitted entirely without `--extended`, and
+`meeting_active`/`meeting_status` never appear without a `meeting_id` when a
+meeting is running.
+
+### `--json` on read-only meeting commands
+
+`meeting status`, `meeting show <id>`, and `meeting list` accept `--json`:
+
+```sh
+voxtype meeting status --json
+# {"active": true, "status": "recording", "meeting_id": "b6b2e5b2-..."}
+
+voxtype meeting show latest --json     # the full MeetingData (metadata + transcript)
+voxtype meeting list --json            # an array of MeetingMetadata
+```
+
+`show`/`list` JSON is the same serde shape written to `metadata.json` and
+`transcript.json` on disk (snake_case), not the camelCase `meeting export -f
+json` emits — the export format predates this and is a separate, deliberately
+different schema for downstream tooling that already consumes it.
+
+### Live transcript and status: `meeting.sock`
+
+While a meeting is active (and even when one isn't — the socket is always
+bound), the daemon publishes meeting lifecycle and transcript events as
+newline-delimited JSON (NDJSON) over a Unix socket at
+`$XDG_RUNTIME_DIR/voxtype/meeting.sock`. This is how the meeting HUD gets a
+live transcript without polling `voxtype meeting show`.
+
+Connect and read lines; the first line is always a `hello` snapshot so a late
+subscriber is correct immediately, with no separate read of `transcript.json`
+needed:
+
+```json
+{"event": "hello", "status": "recording", "meeting_id": "...", "title": "Standup", "started_at": "2026-09-03T14:00:00Z", "chunk_count": 7, "diarization": {"enabled": true, "backend": "simple"}, "segments": [ /* TranscriptSegment[], same shape as transcript.json */ ]}
+{"event": "segments", "chunk_id": 8, "segments": [ /* TranscriptSegment[] for this chunk only */ ]}
+{"event": "status", "status": "paused"}
+{"event": "error", "message": "..."}
+```
+
+Delivery is best-effort: a subscriber that falls behind is disconnected
+rather than allowed to back-pressure the daemon, the same trade-off the audio
+level socket (`audio.sock`) makes. Reconnect and read a fresh `hello` if that
+happens.
+
+Events fire roughly once per `chunk_duration_secs` (default 30s), not per
+word — meeting mode transcribes in chunks, it does not stream. A UI built on
+this socket should show a "listening…" affordance between updates, not
+imitate word-by-word streaming it cannot actually deliver.
+
+`speakers` (live speaker naming) and `summary` (auto-generated meeting
+summary) events are planned for a later release and are not emitted yet.
+
 ## What Voxtype will not do for you
 
 Voxtype does not edit your configuration, and asks that you not edit its own:

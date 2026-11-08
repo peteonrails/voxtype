@@ -35,12 +35,20 @@ pub enum MeetingAction {
     /// Resume a paused meeting
     Resume,
     /// Show meeting status
-    Status,
+    Status {
+        /// Output as JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
     /// List past meetings
     List {
         /// Maximum number of meetings to show
         #[arg(long, short, default_value = "10")]
         limit: u32,
+
+        /// Output as JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
     },
     /// Export a meeting transcript
     Export {
@@ -71,6 +79,10 @@ pub enum MeetingAction {
     Show {
         /// Meeting ID (or "latest" for most recent)
         meeting_id: String,
+
+        /// Output as JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
     },
     /// Delete a meeting
     Delete {

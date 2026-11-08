@@ -112,9 +112,10 @@ This is useful for breaks, side conversations you do not want transcribed, or wh
 
 ```bash
 voxtype meeting status
+voxtype meeting status --json
 ```
 
-Shows whether a meeting is recording, paused, or idle, along with the meeting ID if one is in progress.
+Shows whether a meeting is recording, paused, finalizing, or idle, along with the meeting ID if one is in progress. The transcript keeps updating while a meeting is in progress, so `voxtype meeting show latest` is accurate mid-meeting too, not just after `stop`.
 
 The daemon acts on meeting commands between audio chunks, so while it is transcribing a chunk a request can take a few seconds to land. Until it does, status reports the request itself: `starting`, `pausing`, `resuming` or `stopping`. A second `voxtype meeting start` is refused as soon as the first one is issued, not only once that meeting is recording.
 
@@ -123,6 +124,7 @@ The daemon acts on meeting commands between audio chunks, so while it is transcr
 ```bash
 voxtype meeting list
 voxtype meeting list --limit 5
+voxtype meeting list --json
 ```
 
 Lists recent meetings with their ID, title, date, duration, status, and chunk count. Defaults to showing the 10 most recent. Meetings are sorted by start time, newest first.
@@ -132,11 +134,14 @@ Lists recent meetings with their ID, title, date, duration, status, and chunk co
 ```bash
 voxtype meeting show latest
 voxtype meeting show <meeting-id>
+voxtype meeting show latest --json
 ```
 
 Shows detailed information about a meeting: title, start/end times, duration, word count, number of chunks, speakers detected, and the transcription engine used.
 
 You can use `latest` as a shorthand for the most recent meeting's ID. This works with all commands that take a meeting ID.
+
+`--json` on `status`, `list`, and `show` (and `meeting_active`/`meeting_status` in `voxtype status --format json --extended`) are documented as an integration contract in [`INTEGRATIONS.md`](./INTEGRATIONS.md#meeting-mode), along with the `meeting.sock` NDJSON socket that streams the live transcript and status for building a HUD or bar widget.
 
 ### Exporting Transcripts
 
