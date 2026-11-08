@@ -160,11 +160,15 @@ struct DeviceManager {
     inotify_buffer: [u8; 1024],
     /// Last time we did a full validation
     last_validation: Instant,
+    /// Hotkey/modifier keys we listen for; devices advertising any of these
+    /// are opened in addition to full keyboards (media keys often live on a
+    /// separate "Consumer Control" HID interface with no letter keys).
+    keys_of_interest: HashSet<Key>,
 }
 
 impl DeviceManager {
     /// Create a new device manager with inotify watcher
-    fn new() -> Result<Self, HotkeyError> {
+    fn new(keys_of_interest: HashSet<Key>) -> Result<Self, HotkeyError> {
         let inotify = Inotify::init().map_err(|e| {
             HotkeyError::DeviceAccess(format!("Failed to initialize inotify: {}", e))
         })?;
@@ -180,6 +184,7 @@ impl DeviceManager {
             inotify,
             inotify_buffer: [0u8; 1024],
             last_validation: Instant::now(),
+            keys_of_interest,
         };
 
         // Initial device enumeration
@@ -238,18 +243,20 @@ impl DeviceManager {
                     return;
                 }
 
-                // Check if device has keyboard capabilities
-                let has_keys = device
+                // Open full keyboards, plus devices advertising a configured
+                // hotkey (e.g. a macropad's media-key-only interface).
+                let should_open = device
                     .supported_keys()
                     .map(|keys| {
-                        // A keyboard should have at least some letter keys
-                        keys.contains(Key::KEY_A)
+                        let is_keyboard = keys.contains(Key::KEY_A)
                             && keys.contains(Key::KEY_Z)
-                            && keys.contains(Key::KEY_ENTER)
+                            && keys.contains(Key::KEY_ENTER);
+                        let has_hotkey = self.keys_of_interest.iter().any(|k| keys.contains(*k));
+                        is_keyboard || has_hotkey
                     })
                     .unwrap_or(false);
 
-                if has_keys {
+                if should_open {
                     // Set device to non-blocking mode
                     let fd = device.as_raw_fd();
                     unsafe {
@@ -475,7 +482,13 @@ fn evdev_listener_loop(
     tx: mpsc::Sender<HotkeyEvent>,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<(), HotkeyError> {
-    let mut manager = DeviceManager::new()?;
+    let mut keys_of_interest = modifier_keys.clone();
+    keys_of_interest.insert(target_key);
+    keys_of_interest.extend(cancel_key);
+    keys_of_interest.extend(model_modifier);
+    keys_of_interest.extend(profile_modifiers.keys().copied());
+
+    let mut manager = DeviceManager::new(keys_of_interest)?;
 
     // Track currently held modifier keys
     let mut active_modifiers: HashSet<Key> = HashSet::new();
