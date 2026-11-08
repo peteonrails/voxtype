@@ -347,6 +347,8 @@ pub struct OsdConfig {
     pub palette: Option<OsdPaletteSource>,
     /// Layout preset for the Quickshell OSD host.
     pub layout: OsdLayout,
+    /// Size multiplier for the Quickshell host card, 0.5..=4.0.
+    pub card_scale: f32,
     /// Explicit third-party package path. QML code in this path is trusted.
     pub plugin_path: Option<PathBuf>,
     /// Quickshell host-frame styling for no-code recipes.
@@ -372,6 +374,7 @@ impl Default for OsdConfig {
             style: "default".to_string(),
             palette: None,
             layout: OsdLayout::default(),
+            card_scale: 1.0,
             plugin_path: None,
             frame: OsdFrameConfig::default(),
             visual: OsdVisualConfig::default(),
@@ -398,6 +401,7 @@ mod tests {
         assert_eq!(c.style, "default");
         assert_eq!(c.palette, None);
         assert_eq!(c.layout, OsdLayout::Compact);
+        assert!((c.card_scale - 1.0).abs() < 1e-6);
         assert!(c.plugin_path.is_none());
         assert_eq!(c.frame.background, "background");
         assert_eq!(c.frame.border, "state");
