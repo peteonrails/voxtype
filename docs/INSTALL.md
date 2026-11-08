@@ -85,8 +85,8 @@ For the GTK4 OSD frontend, additionally install `gtk4` + `gtk4-layer-shell`.
 Pick your distro from the list below. The fastest path on each:
 
 - **Arch:** `paru -S voxtype-bin`
-- **Debian/Ubuntu:** `sudo apt install ./voxtype_1.0.1-1_amd64.deb`
-- **Fedora:** `sudo dnf install ./voxtype-1.0.1-1.x86_64.rpm`
+- **Debian/Ubuntu:** `sudo apt install ./voxtype_1.1.1-1_amd64.deb`
+- **Fedora:** `sudo dnf install ./voxtype-1.1.1-1.x86_64.rpm`
 - **macOS:** `brew install --cask peteonrails/voxtype/voxtype`
 - **NixOS:** `nix profile install github:peteonrails/voxtype#vulkan`
 - **AppImage:** download, `chmod +x`, run.
@@ -143,8 +143,8 @@ The post-install hook auto-picks the right CUDA variant (`cuda-12` vs `cuda-13`)
 Requires Ubuntu 24.04+ or Debian Trixie+ (glibc 2.39+). Older versions: [build from source](#build-from-source).
 
 ```bash
-wget https://github.com/peteonrails/voxtype/releases/download/v1.0.1/voxtype_1.0.1-1_amd64.deb
-sudo apt install ./voxtype_1.0.1-1_amd64.deb
+wget https://github.com/peteonrails/voxtype/releases/download/v1.1.1/voxtype_1.1.1-1_amd64.deb
+sudo apt install ./voxtype_1.1.1-1_amd64.deb
 ```
 
 Recommended optional packages:
@@ -160,8 +160,8 @@ The .deb ships every Linux binary variant (baseline for pre-AVX2 CPUs, avx2, avx
 Requires Fedora 40+ (glibc 2.39+).
 
 ```bash
-wget https://github.com/peteonrails/voxtype/releases/download/v1.0.1/voxtype-1.0.1-1.x86_64.rpm
-sudo dnf install ./voxtype-1.0.1-1.x86_64.rpm
+wget https://github.com/peteonrails/voxtype/releases/download/v1.1.1/voxtype-1.1.1-1.x86_64.rpm
+sudo dnf install ./voxtype-1.1.1-1.x86_64.rpm
 ```
 
 Recommended optional packages:
@@ -181,7 +181,7 @@ brew install --cask peteonrails/voxtype/voxtype
 voxtype configure
 ```
 
-Or download `voxtype-1.0.1-macos-universal.dmg` from the [latest release](https://github.com/peteonrails/voxtype/releases/latest). First launch opens a setup wizard that walks you through accessibility permissions, model download, and the FN-key hotkey.
+Or download `voxtype-1.1.1-macos-universal.dmg` from the [latest release](https://github.com/peteonrails/voxtype/releases/latest). First launch opens a setup wizard that walks you through accessibility permissions, model download, and the FN-key hotkey.
 
 ### NixOS
 
@@ -189,39 +189,39 @@ A flake ships every variant:
 
 ```bash
 # Imperative install
-nix profile install github:peteonrails/voxtype/v1.0.1#vulkan
+nix profile install github:peteonrails/voxtype/v1.1.1#vulkan
 
 # Available outputs: default, vulkan, cuda, rocm, osdGtk4, osdNative
-nix build github:peteonrails/voxtype/v1.0.1#osdGtk4
+nix build github:peteonrails/voxtype/v1.1.1#osdGtk4
 
 # Or pin in your flake inputs
-inputs.voxtype.url = "github:peteonrails/voxtype/v1.0.1";
+inputs.voxtype.url = "github:peteonrails/voxtype/v1.1.1";
 ```
 
 ### Linux arm64 (aarch64) — manual install
 
-The 0.7.2 release ships two experimental arm64 Linux binaries for
+Each release ships two experimental arm64 Linux binaries for
 Raspberry Pi 4/5, Ampere servers, Snapdragon X laptops, and AWS
 Graviton instances. They are not yet wired into the .deb / .rpm / AUR
 packages, so install is manual:
 
 ```bash
 # Whisper engine, CPU-only
-curl -L https://github.com/peteonrails/voxtype/releases/download/v0.7.2/voxtype-0.7.2-linux-aarch64-cpu \
+curl -L https://github.com/peteonrails/voxtype/releases/download/v1.1.1/voxtype-1.1.1-linux-aarch64-cpu \
   -o /tmp/voxtype
 chmod 755 /tmp/voxtype
 sudo mv /tmp/voxtype /usr/local/bin/voxtype
 voxtype --version
 
 # Or, for the ONNX engines (Parakeet, Moonshine, SenseVoice, Paraformer, etc.)
-curl -L https://github.com/peteonrails/voxtype/releases/download/v0.7.2/voxtype-0.7.2-linux-aarch64-onnx \
+curl -L https://github.com/peteonrails/voxtype/releases/download/v1.1.1/voxtype-1.1.1-linux-aarch64-onnx \
   -o /tmp/voxtype
 chmod 755 /tmp/voxtype
 sudo mv /tmp/voxtype /usr/local/bin/voxtype
 ```
 
 These binaries are CPU-only. No CUDA, MIGraphX, or Vulkan support on
-arm64 in 0.7.2 because the Jetson CUDA toolchain is awkward and there
+arm64 because the Jetson CUDA toolchain is awkward and there
 is no mainstream consumer arm64 hardware with Vulkan GPUs yet.
 
 Once installed, the rest of the setup (input group, models, hotkey)
