@@ -14,6 +14,12 @@ pub const DEFAULT_CONFIG: &str = r#"# Voxtype Configuration
 state_file = "auto"
 
 [hotkey]
+# Linux hotkey backend: "evdev", "portal", or "auto"
+# evdev is the default and requires access to /dev/input.
+# portal uses the desktop's GlobalShortcuts portal and requires
+# xdg-desktop-portal 1.20 or later.
+# backend = "evdev"
+
 # Key to hold for push-to-talk
 # Common choices: SCROLLLOCK, PAUSE, RIGHTALT, F13-F24
 # Use `evtest` to find key names for your keyboard
@@ -33,8 +39,8 @@ modifiers = []
 # When disabled, use `voxtype record start/stop/toggle` to control recording
 # enabled = true
 
-# Modifier key to select secondary model (evdev input mode only)
-# When held while pressing the hotkey, uses whisper.secondary_model instead
+# Modifier key to select the secondary model. Portal mode exposes the
+# combination as a separate desktop-managed action.
 # Example: model_modifier = "LEFTSHIFT"  # Shift+hotkey uses secondary model
 # model_modifier = "LEFTSHIFT"
 

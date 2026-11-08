@@ -79,6 +79,7 @@ pub(crate) async fn show_config(config: &config::Config) -> anyhow::Result<()> {
     println!("=====================\n");
 
     println!("[hotkey]");
+    println!("  backend = {:?}", config.hotkey.backend.name());
     println!("  key = {:?}", config.hotkey.key);
     println!("  modifiers = {:?}", config.hotkey.modifiers);
     println!("  mode = {:?}", config.hotkey.mode);
