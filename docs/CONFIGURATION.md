@@ -123,6 +123,8 @@ The main key to hold for recording. Must be a valid Linux evdev key name.
 - `PAGEDOWN` - Page Down key
 - `DELETE` - Delete key
 
+> **Using keyd?** keyd reports `RIGHTCTRL`, `RIGHTSHIFT`, and `RIGHTMETA` as the left-hand key, so those names never match. See [Hotkey Detection with Key Remappers (keyd)](TROUBLESHOOTING.md#hotkey-detection-with-key-remappers-keyd).
+
 **Example:**
 ```toml
 [hotkey]

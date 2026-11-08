@@ -6,6 +6,7 @@ Solutions to common issues when using Voxtype.
 
 - [Modifier Key Interference (Hyprland/Sway/River)](#modifier-key-interference-hyprlandswayriver)
 - [Hotkey Detection on KDE Plasma](#hotkey-detection-on-kde-plasma)
+- [Hotkey Detection with Key Remappers (keyd)](#hotkey-detection-with-key-remappers-keyd)
 - [Permission Issues](#permission-issues)
 - [Audio Problems](#audio-problems)
 - [Transcription Issues](#transcription-issues)
@@ -187,6 +188,25 @@ modifiers = ["LEFTSHIFT"]  # Press Shift first, then Alt
 Press Shift first, then Alt while holding Shift. This avoids KDE keyboard layout switching and works consistently.
 
 **Note:** This is not a voxtype limitation. Any application using evdev on KDE Plasma will experience the same behavior with Meta+modifier hotkeys. The compositor keybinding approach is the most reliable solution on KDE.
+
+---
+
+## Hotkey Detection with Key Remappers (keyd)
+
+### Right Ctrl, Right Shift, or Right Meta arrives as the left key
+
+**Symptoms:** With [keyd](https://github.com/rvaiya/keyd) running, a hotkey set to `RIGHTCTRL`, `RIGHTSHIFT`, or `RIGHTMETA` never fires, and a `modifiers` entry for one of those keys never matches. `sudo evtest` on the "keyd virtual keyboard" device shows `KEY_LEFTCTRL` (or `KEY_LEFTSHIFT` / `KEY_LEFTMETA`) when you press the right-hand key, and never the right-hand name.
+
+**Cause:** keyd grabs the physical keyboard and re-emits every event from its own "keyd virtual keyboard" device, which is the device evdev hotkey detection reads. keyd's built-in defaults treat the left and right variants of Ctrl, Shift, and Meta as one key: `rightcontrol = control`, `rightshift = shift`, and `rightmeta = meta` are bound to the matching modifier layer, and that layer emits the **left** key. This is keyd's design, not a voxtype bug. The defaults are the same in keyd v2.6.0, the latest release at the time of writing, so upgrading keyd does not change it.
+
+`RIGHTALT` is not merged by default: it maps to keyd's `altgr` layer, which emits `RIGHTALT`. It is affected only if your keyd config binds it to another layer (for example `rightalt = layer(alt)` or `rightalt = overload(alt, ...)`), in which case holding it emits `LEFTALT`.
+
+**Check what voxtype receives:** run `sudo evtest`, pick the "keyd virtual keyboard" device, press your key, and read the event name. That name is what `[hotkey] key` has to match.
+
+**Workarounds:**
+
+- Use a key that keyd does not remap, such as `SCROLLLOCK`, `PAUSE`, or `F13` through `F24`. A key with no binding in your keyd config passes through unchanged.
+- If any Ctrl key is acceptable, set `key = "LEFTCTRL"`. It fires for both Ctrl keys.
 
 ---
 
