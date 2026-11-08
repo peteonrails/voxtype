@@ -4004,7 +4004,14 @@ impl Daemon {
             match listener.start() {
                 Ok(rx) => Some(rx),
                 Err(e) => {
-                    tracing::warn!("Failed to start hotkey listener: {}. Use 'voxtype record' commands instead.", e);
+                    tracing::warn!("Failed to start hotkey listener: {}\n  Until then, use 'voxtype record' commands.", e);
+                    // The daemon keeps running for `voxtype record`, so
+                    // without this the hotkey just does nothing.
+                    #[cfg(target_os = "linux")]
+                    if let Some((title, body)) = hotkey::access::startup_failure_notification(&e) {
+                        notification::send_status(title, &body, "normal", Lifetime::Millis(15000))
+                            .await;
+                    }
                     None
                 }
             }
@@ -4024,7 +4031,7 @@ impl Daemon {
         let max_duration = Duration::from_secs(self.config.audio.max_duration_secs as u64);
 
         let activation_mode = self.config.hotkey.mode;
-        if self.config.hotkey.enabled {
+        if hotkey_rx.is_some() {
             let mode_desc = match activation_mode {
                 ActivationMode::PushToTalk => "hold to record, release to transcribe",
                 ActivationMode::Toggle => "press to start/stop recording",
