@@ -119,6 +119,22 @@ class ReleaseValidationTests(unittest.TestCase):
         path.write_text(path.read_text() + "# changed helper\n")
         self.assertNotEqual(self.check(path).returncode, 0)
 
+    def test_gtk_version_probe_suppresses_existing_stdout_logs(self):
+        path = self.binary(suffix="osd-gtk4")
+        # Mirror the real helper's EnvFilter default INFO log before Args::parse.
+        path.write_text('#!/bin/sh\n'
+                        'if [ "${RUST_LOG:-info}" != off ]; then\n'
+                        '  printf "GTK 4.14 predates the gtk#8366 fix\\n"\n'
+                        'fi\n'
+                        f'printf "voxtype-osd-gtk4 {VERSION}\\n"\n')
+        for action in ("check", "record-runtime"):
+            with self.subTest(action=action):
+                result = self.artifact_command(action, path)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # Do not weaken exact stdout matching by discarding arbitrary lines.
+        self.binary(suffix="osd-gtk4", output=f"unconditional noise\nvoxtype-osd-gtk4 {VERSION}")
+        self.assertNotEqual(self.artifact_command("record-runtime", path).returncode, 0)
+
     def test_aarch64_cpu_version_check_is_preserved(self):
         path = self.binary(suffix="cpu")
         path = path.rename(Path(str(path).replace("x86_64", "aarch64")))

@@ -35,8 +35,11 @@ def runtime_stdout(path, program, version):
     if not os.access(path, os.X_OK):
         raise ValueError("binary is not executable: " + str(path))
     # Never parse stderr or accept output from a failed process.
+    # The GTK helper logs its compatibility workaround before parsing args.
+    # Silence tracing only in this probe subprocess; never filter result lines.
     result = subprocess.run([str(path.resolve()), "--version"], capture_output=True,
-                            text=True, check=True, timeout=30)
+                            text=True, check=True, timeout=30,
+                            env=dict(os.environ, RUST_LOG="off"))
     expected = program + " " + version + "\n"
     if result.stdout != expected:
         raise ValueError("unexpected --version stdout: " + repr(result.stdout) +
