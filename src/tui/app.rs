@@ -511,9 +511,10 @@ fn detect_missing_model() -> Option<MissingModel> {
                 .unwrap_or_default(),
             "voxtype setup --download",
         ),
-        // Cohere — checked but model layout differs by rc/0.7.0; skip the
-        // disk probe rather than emit a false-positive missing warning.
         config::TranscriptionEngine::Cohere => return None,
+        // Whistle's model isn't managed by voxtype's model catalog; return
+        // None to avoid false "missing model" warnings in the TUI.
+        config::TranscriptionEngine::Whistle => return None,
         // Soniox is cloud-only, no local model to probe.
         config::TranscriptionEngine::Soniox => return None,
         // OpenVINO models are stored as multi-file IR directories; skip the
