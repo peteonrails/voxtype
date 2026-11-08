@@ -89,6 +89,8 @@ pub struct DotoolOutput {
     xkb_layout: Option<String>,
     /// Keyboard layout variant (e.g., "nodeadkeys")
     xkb_variant: Option<String>,
+    /// Press Shift+Enter for newlines instead of Enter
+    shift_enter_newlines: bool,
 }
 
 impl DotoolOutput {
@@ -100,6 +102,7 @@ impl DotoolOutput {
         append_text: Option<String>,
         xkb_layout: Option<String>,
         xkb_variant: Option<String>,
+        shift_enter_newlines: bool,
     ) -> Self {
         if let Some(ref layout) = xkb_layout {
             tracing::debug!("dotool: using keyboard layout '{}'", layout);
@@ -111,6 +114,7 @@ impl DotoolOutput {
             append_text,
             xkb_layout,
             xkb_variant,
+            shift_enter_newlines,
         }
     }
 
@@ -143,6 +147,27 @@ impl DotoolOutput {
         Some(path)
     }
 
+    /// Add the commands that type `text`. dotool reads one command per line
+    /// and `type` takes the rest of its line, so a newline inside `type`
+    /// would end the command and run the next line of text as a command of
+    /// its own. Each line of text gets its own `type`, with an Enter (or
+    /// Shift+Enter) key press between lines.
+    fn push_type_commands(&self, commands: &mut String, text: &str) {
+        let newline_key = if self.shift_enter_newlines {
+            "key shift+enter\n"
+        } else {
+            "key enter\n"
+        };
+        for (i, line) in text.split('\n').enumerate() {
+            if i > 0 {
+                commands.push_str(newline_key);
+            }
+            if !line.is_empty() {
+                commands.push_str(&format!("type {}\n", line));
+            }
+        }
+    }
+
     fn build_commands(&self, text: &str) -> String {
         let mut commands = String::new();
 
@@ -152,13 +177,11 @@ impl DotoolOutput {
             commands.push_str(&format!("typehold {}\n", self.type_delay_ms));
         }
 
-        // Type the text
-        // Note: dotool's type command takes text on the same line
-        commands.push_str(&format!("type {}\n", text));
+        self.push_type_commands(&mut commands, text);
 
         // Append text if configured (e.g., a space to separate sentences)
         if let Some(ref append) = self.append_text {
-            commands.push_str(&format!("type {}\n", append));
+            self.push_type_commands(&mut commands, append);
         }
 
         // Send Enter key if auto_submit is enabled
@@ -327,7 +350,7 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = DotoolOutput::new(10, 0, false, None, Some("de".to_string()), None);
+        let output = DotoolOutput::new(10, 0, false, None, Some("de".to_string()), None, false);
         assert_eq!(output.type_delay_ms, 10);
         assert_eq!(output.pre_type_delay_ms, 0);
         assert!(!output.auto_submit);
@@ -336,30 +359,54 @@ mod tests {
 
     #[test]
     fn build_commands_basic() {
-        let output = DotoolOutput::new(0, 0, false, None, None, None);
+        let output = DotoolOutput::new(0, 0, false, None, None, None, false);
         let cmds = output.build_commands("Hello world");
         assert_eq!(cmds, "type Hello world\n");
     }
 
     #[test]
     fn build_commands_with_delay() {
-        let output = DotoolOutput::new(17, 0, false, None, None, None);
+        let output = DotoolOutput::new(17, 0, false, None, None, None, false);
         let cmds = output.build_commands("Test");
         assert!(cmds.contains("typedelay 17"));
         assert!(cmds.contains("typehold 17"));
         assert!(cmds.contains("type Test"));
     }
 
+    /// A newline ends dotool's `type` command, so "a\nb" must not reach
+    /// dotool as one `type`: "b" would run as a command and be lost.
+    #[test]
+    fn build_commands_types_each_line_with_enter_between() {
+        let output = DotoolOutput::new(0, 0, false, None, None, None, false);
+        assert_eq!(
+            output.build_commands("Thanks.\nPat"),
+            "type Thanks.\nkey enter\ntype Pat\n"
+        );
+        assert_eq!(
+            output.build_commands("a\n\nb\n"),
+            "type a\nkey enter\nkey enter\ntype b\nkey enter\n"
+        );
+    }
+
+    #[test]
+    fn build_commands_shift_enter_newlines() {
+        let output = DotoolOutput::new(0, 0, false, None, None, None, true);
+        assert_eq!(
+            output.build_commands("one\ntwo"),
+            "type one\nkey shift+enter\ntype two\n"
+        );
+    }
+
     #[test]
     fn build_commands_auto_submit_appends_enter() {
-        let output = DotoolOutput::new(0, 0, true, None, None, None);
+        let output = DotoolOutput::new(0, 0, true, None, None, None, false);
         let cmds = output.build_commands("hi");
         assert!(cmds.contains("key enter"));
     }
 
     #[test]
     fn build_commands_appends_text_before_enter() {
-        let output = DotoolOutput::new(0, 0, true, Some(".".to_string()), None, None);
+        let output = DotoolOutput::new(0, 0, true, Some(".".to_string()), None, None, false);
         let cmds = output.build_commands("hi");
         let dot_pos = cmds.find("type .\n").unwrap();
         let enter_pos = cmds.find("key enter\n").unwrap();
@@ -368,7 +415,7 @@ mod tests {
 
     #[test]
     fn choose_invocation_uses_dotoolc_when_daemon_available_without_xkb_override() {
-        let output = DotoolOutput::new(0, 0, false, None, None, None);
+        let output = DotoolOutput::new(0, 0, false, None, None, None, false);
         let invocation = output.choose_invocation(Some(PathBuf::from("/tmp/dotool-pipe")));
 
         assert_eq!(invocation.binary, "dotoolc");
@@ -379,7 +426,7 @@ mod tests {
 
     #[test]
     fn choose_invocation_bypasses_daemon_when_layout_override_is_set() {
-        let output = DotoolOutput::new(0, 0, false, None, Some("ru".to_string()), None);
+        let output = DotoolOutput::new(0, 0, false, None, Some("ru".to_string()), None, false);
         let invocation = output.choose_invocation(Some(PathBuf::from("/tmp/dotool-pipe")));
 
         assert_eq!(invocation.binary, "dotool");
@@ -390,7 +437,8 @@ mod tests {
 
     #[test]
     fn choose_invocation_bypasses_daemon_when_variant_override_is_set() {
-        let output = DotoolOutput::new(0, 0, false, None, None, Some("phonetic".to_string()));
+        let output =
+            DotoolOutput::new(0, 0, false, None, None, Some("phonetic".to_string()), false);
         let invocation = output.choose_invocation(Some(PathBuf::from("/tmp/dotool-pipe")));
 
         assert_eq!(invocation.binary, "dotool");
