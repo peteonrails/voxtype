@@ -6,7 +6,7 @@ name: Build Linux
 permissions:
   contents: write
 
-# Builds the full 8-binary x86_64 release matrix using Docker for every variant.
+# Builds 9 x86_64 and 2 experimental aarch64 variants in Docker.
 # Each Dockerfile pins a glibc cap via its base image; the matrix mirrors that
 # with a matching ubuntu host runner as belt-and-suspenders. See AGENTS.md
 # "Building Release Binaries" for the policy this enforces.
@@ -176,13 +176,11 @@ jobs:
             # --locked` requires Cargo.lock to list the same version. A tag
             # cut without a matching bump produces binaries that report the
             # previous version and a source package that won't build (the
-            # v0.4.6 incident). Strip an optional `-rc.*` / `-rc*` suffix on
-            # both sides so a v0.7.3-rc1 tag matches Cargo.toml's 0.7.3.
-            tag_base="${VERSION%%-rc*}"
-            cargo_base="${CARGO_VERSION%%-rc*}"
-            if [[ "${tag_base}" != "${cargo_base}" ]]; then
+            # v0.4.6 incident). RC artifacts must compile the actual RC
+            # version too, not just receive an RC filename.
+            if [[ "${VERSION}" != "${CARGO_VERSION}" ]]; then
               echo "::error::Cargo.toml version (${CARGO_VERSION}) does not match tag (${VERSION})."
-              echo "::error::Bump Cargo.toml + Cargo.lock to ${tag_base} before tagging."
+              echo "::error::Bump Cargo.toml + Cargo.lock to ${VERSION} before tagging."
               exit 1
             fi
           else
@@ -192,11 +190,14 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Resolved VERSION=${VERSION} (Cargo.toml: ${CARGO_VERSION})"
 
+      - name: Check release transport and desktop assets
+        run: python3 testing/test-release-transport.py
+
       - name: Build ${{ matrix.variant }} binary in Docker
         run: |
           set -euo pipefail
           VERSION='${{ steps.version.outputs.version }}'
-          docker build \
+          docker build --no-cache \
             -f '${{ matrix.dockerfile }}' \
             -t 'voxtype-${{ matrix.variant }}' \
             --build-arg "VERSION=${VERSION}" \
@@ -220,7 +221,9 @@ jobs:
           set -euo pipefail
           VERSION='${{ steps.version.outputs.version }}'
           BIN="releases/${VERSION}/voxtype-${VERSION}-linux-${{ matrix.arch }}-${{ matrix.variant }}"
+          WORKER="${BIN}.gguf-worker"
           test -f "${BIN}" || { echo "Missing binary: ${BIN}"; ls -la "releases/${VERSION}/"; exit 1; }
+          test -f "${WORKER}" || { echo "Missing GGUF worker: ${WORKER}"; ls -la "releases/${VERSION}/"; exit 1; }
           # The Dockerfile already sets the binary to 755; no chmod needed.
           # GPU variants may not have CUDA/ROCm on the host runner; --version should
           # still resolve without loading providers.
@@ -240,23 +243,26 @@ jobs:
           set -euo pipefail
           VERSION='${{ steps.version.outputs.version }}'
           BIN="releases/${VERSION}/voxtype-${VERSION}-linux-${{ matrix.arch }}-${{ matrix.variant }}"
+          WORKER="${BIN}.gguf-worker"
           CAP='${{ matrix.glibc_cap }}'
-          MAX=$(objdump -T "${BIN}" 2>/dev/null \
-            | grep -oP 'GLIBC_\d+\.\d+' \
-            | sed 's/GLIBC_//' \
-            | sort -t. -k1,1n -k2,2n -u \
-            | tail -1)
-          echo "Max glibc requirement: GLIBC_${MAX} (cap GLIBC_${CAP})"
-          if [[ -z "${MAX}" ]]; then
-            echo "Could not determine max glibc version"; exit 1
-          fi
-          # Compare as version: fail if MAX > CAP.
-          higher=$(printf '%s\n%s\n' "${CAP}" "${MAX}" | sort -t. -k1,1n -k2,2n | tail -1)
-          if [[ "${higher}" != "${CAP}" ]]; then
-            echo "FAIL: binary requires GLIBC_${MAX} which exceeds cap GLIBC_${CAP}"
-            echo "This binary was likely linked against a newer host glibc than the Docker base image."
-            exit 1
-          fi
+          for artifact in "${BIN}" "${WORKER}"; do
+            MAX=$(objdump -T "${artifact}" 2>/dev/null \
+              | grep -oP 'GLIBC_\d+\.\d+' \
+              | sed 's/GLIBC_//' \
+              | sort -t. -k1,1n -k2,2n -u \
+              | tail -1)
+            echo "$(basename "${artifact}"): GLIBC_${MAX} (cap GLIBC_${CAP})"
+            if [[ -z "${MAX}" ]]; then
+              echo "Could not determine max glibc version"; exit 1
+            fi
+            # Compare as version: fail if MAX > CAP.
+            higher=$(printf '%s\n%s\n' "${CAP}" "${MAX}" | sort -t. -k1,1n -k2,2n | tail -1)
+            if [[ "${higher}" != "${CAP}" ]]; then
+              echo "FAIL: ${artifact} requires GLIBC_${MAX} which exceeds cap GLIBC_${CAP}"
+              echo "This artifact was likely linked against a newer host glibc than the Docker base image."
+              exit 1
+            fi
+          done
 
       - name: Verify ISA floor (Haswell / x86_64-v3) on AVX2 and Vulkan variants
         if: matrix.check_no_avx512
@@ -264,6 +270,7 @@ jobs:
           set -euo pipefail
           VERSION='${{ steps.version.outputs.version }}'
           BIN="releases/${VERSION}/voxtype-${VERSION}-linux-${{ matrix.arch }}-${{ matrix.variant }}"
+          WORKER="${BIN}.gguf-worker"
           # The "no AVX-512" variants must run on every x86_64-v3 CPU: Haswell,
           # Kaby Lake, Zen 2, Zen 3, etc. That floor excludes AVX-512, GFNI,
           # AVX-VNNI, and SSE4a (AMD-only). The previous gate only checked zmm
@@ -272,7 +279,7 @@ jobs:
           # SHA-NI, VAES (ymm), and VPCLMULQDQ (ymm) are NOT checked because
           # the sha2/aes crates emit them behind cpufeatures-dispatched
           # runtime CPUID guards; they show up in every working binary.
-          DUMP=$(objdump -d "${BIN}")
+          DUMP=$(objdump -d "${BIN}" "${WORKER}")
           ZMM=$(echo "$DUMP" | grep -c zmm || true)
           EVEX=$(echo "$DUMP" | grep -cE 'vpternlog|vpermt2|vpermi2|vpblendm|valign[dq]|vpcompress|vpexpand' || true)
           BCAST=$(echo "$DUMP" | grep -c '{1to' || true)
@@ -303,6 +310,7 @@ jobs:
           set -euo pipefail
           VERSION='${{ steps.version.outputs.version }}'
           BIN="releases/${VERSION}/voxtype-${VERSION}-linux-${{ matrix.arch }}-${{ matrix.variant }}"
+          WORKER="${BIN}.gguf-worker"
           # The baseline promises x86-64-v2 (Nehalem 2008+). No static count
           # can gate that promise: a correct build legitimately carries ~370
           # BMI2 instructions (ring's CPUID-dispatched assembly) and ~1800
@@ -310,7 +318,7 @@ jobs:
           # contamination added only ~60 BMI2 on top - inside the noise. The
           # counts below are a drift alarm, not a gate; the decisive check is
           # the QEMU inference step that follows.
-          DUMP=$(objdump -d "${BIN}")
+          DUMP=$(objdump -d "${BIN}" "${WORKER}")
           BMI2=$(echo "$DUMP" | grep -cP '\t(shrx|sarx|shlx|mulx|pdep|pext|bzhi|rorx)[ \t]' || true)
           FMA=$(echo "$DUMP" | grep -cP '\t(vfmadd|vfmsub|vfnmadd|vfnmsub)' || true)
           YMM=$(echo "$DUMP" | grep -c ymm || true)
@@ -419,7 +427,7 @@ jobs:
   release:
     name: collect-and-release
     needs: build
-    if: ${{ always() && !cancelled() }}
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -461,6 +469,12 @@ jobs:
           find artifacts -type f -name 'voxtype-*' -exec mv -n {} "releases/${VERSION}/" \;
           echo "Collected files:"
           ls -la "releases/${VERSION}/"
+
+      - name: Package matching desktop assets
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.version.outputs.version }}'
+          python3 scripts/package-desktop-assets.py --output "releases/${VERSION}/voxtype-${VERSION}-desktop-assets.tar.gz"
 
       - name: Generate SHA256SUMS.txt
         run: |

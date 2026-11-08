@@ -4,6 +4,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
+import qs.Commons as ShellTheme
 import qs.Ui
 import "components"
 
@@ -113,7 +114,10 @@ Item {
       var entry = root.styles[i]
       if (!entry) continue
       var name = String(entry.name)
-      out.push({ value: name, label: name })
+      var words = name.split(/[-_]+/)
+      for (var j = 0; j < words.length; j++)
+        words[j] = words[j].toLowerCase() === "hud" ? "HUD" : words[j].charAt(0).toUpperCase() + words[j].slice(1)
+      out.push({ value: name, label: words.join(" "), description: String(entry.description || "") })
     }
     return out
   }
@@ -158,7 +162,7 @@ Item {
     root.replacementsError = ""
     root.restartError = ""
     root.schemaError = ""
-    if (payload.section !== undefined) root.activeSection = String(payload.section)
+    if (payload.section !== undefined) root.activeSection = root.canonicalSection(payload.section)
 
     cli.fetchSchema()
     cli.fetchStatus()
@@ -300,7 +304,7 @@ Item {
     // Opens on a named section, or jumps to it if the panel is already up. An
     // unknown name lands on the first section, same as a stale payload does.
     function section(name: string): string {
-      var wanted = String(name || "")
+      var wanted = root.canonicalSection(name || "")
       if (wanted === "") return "usage: section <name>"
       if (root.opened) {
         if (root.sections.indexOf(wanted) === -1) return "unknown section: " + wanted
@@ -344,13 +348,29 @@ Item {
 
   // ---------------------------------------------------------------- schema
 
+  // Keep existing IPC callers and older executable schemas usable without
+  // inventing any settings that the executable did not advertise.
+  function canonicalSection(name) {
+    return String(name) === "Text" ? "Text Cleanup" : String(name)
+  }
+
   function applySchema(next) {
     root.schemaError = ""
     root.schema = next
     // VoxtypeCli validates the parsed JSON array before emitting it. Crossing
     // its signal(var) can wrap it as a QML sequence: length/indexing survive,
     // but Array.isArray does not. Rejecting that wrapper hides every section.
-    root.keys = next.keys && next.keys.length !== undefined ? next.keys : []
+    var normalized = []
+    var incoming = next.keys && next.keys.length !== undefined ? next.keys : []
+    for (var i = 0; i < incoming.length; ++i) {
+      if (!incoming[i]) continue
+      var spec = ({})
+      for (var key in incoming[i]) spec[key] = incoming[i][key]
+      spec.section = canonicalSection(spec.section || "")
+      normalized.push(spec)
+    }
+    root.keys = normalized
+    root.activeSection = canonicalSection(root.activeSection)
     root.engine = next.engine === undefined || next.engine === null ? "" : String(next.engine)
     root.voxtypeVersion = next.voxtype_version ? String(next.voxtype_version) : ""
     root.daemonVersionLabel = next.daemon_version_label ? String(next.daemon_version_label) : ""
@@ -660,7 +680,7 @@ Item {
         Rectangle {
           Layout.fillWidth: true
           implicitHeight: 1
-          color: Util.alpha(Color.foreground, 0.12)
+          color: Util.alpha(ShellTheme.Color.foreground, 0.12)
         }
 
         RestartBanner {
@@ -688,9 +708,9 @@ Item {
             width: Math.min(parent.width, Style.space(460))
             implicitHeight: degradedBody.implicitHeight + contentTopInset + contentBottomInset
             height: implicitHeight
-            color: Util.alpha(Color.foreground, 0.04)
+            color: Util.alpha(ShellTheme.Color.foreground, 0.04)
             radius: Style.cornerRadius
-            borderSpec: Border.flat(Util.alpha(Color.urgent, 0.45), Math.max(1, Style.normalBorderWidth))
+            borderSpec: Border.flat(Util.alpha(ShellTheme.Color.urgent, 0.45), Math.max(1, Style.normalBorderWidth))
             padding: Style.spacing.panelPadding
 
             Column {
@@ -704,7 +724,7 @@ Item {
               Text {
                 width: parent.width
                 text: "This panel requires voxtype 0.8 or newer."
-                color: Color.foreground
+                color: ShellTheme.Color.foreground
                 font.family: Style.font.family
                 font.pixelSize: Style.font.title
                 wrapMode: Text.WordWrap
@@ -713,7 +733,7 @@ Item {
               Text {
                 width: parent.width
                 text: "It reads every setting from `voxtype config schema --json`, which earlier builds do not provide."
-                color: Qt.darker(Color.foreground, 1.5)
+                color: Qt.darker(ShellTheme.Color.foreground, 1.5)
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
                 wrapMode: Text.WordWrap
@@ -723,7 +743,7 @@ Item {
                 width: parent.width
                 visible: root.schemaError !== ""
                 text: root.schemaError
-                color: Color.urgent
+                color: ShellTheme.Color.urgent
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
                 wrapMode: Text.WordWrap
@@ -785,7 +805,7 @@ Item {
           Rectangle {
             Layout.fillHeight: true
             width: 1
-            color: Util.alpha(Color.foreground, 0.12)
+            color: Util.alpha(ShellTheme.Color.foreground, 0.12)
           }
 
           SchemaForm {

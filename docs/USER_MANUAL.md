@@ -1,6 +1,90 @@
 # Voxtype User Manual
 
+## Switching Parakeet or Cohere backends
+
+The graphical and terminal model pickers offer checkpoints supported by the
+current binary. GGUF checkpoints require the matching `voxtype-gguf-worker`.
+An old ONNX model can remain in a per-engine table after switching away from
+that engine. Switching back validates the pair before saving: a compatible
+installed model is required, and nothing is downloaded automatically. In the
+terminal Engine section, choose the model before saving if the retained choice
+is incompatible. A missing model produces a download/selection requirement,
+not a successful setup or an engine-only restart.
+
+Working explicit ONNX/MIGraphX setups stay unchanged in legacy-capable builds.
+Save operations preserve unrelated settings and comments. Finish the current
+dictation or meeting before explicitly restarting to apply an engine change.
+
 Voxtype is a push-to-talk voice-to-text tool for Linux. Optimized for Wayland, works on X11 too. This manual covers everything you need to know to use Voxtype effectively.
+
+## OSD style picker
+
+The graphical OSD section obtains its choices from `voxtype info styles --json`,
+not a hard-coded renderer enum. Installed packages include Capsule, Aura, Halo,
+Shell Line, Shell Dots and the four Showcase styles, alongside Default and Aegis
+HUD. Package values remain canonical hyphenated names; the picker displays readable
+labels. A user-installed package shadows a shipped package with the same name.
+
+Each shipped recipe also has a selectable package with the same palette, layout,
+frame and visual layers. Picking a style changes `osd.style`; screen position and
+other explicit user settings remain independent. Applying a full recipe through
+`setup osd --recipe` remains a separate operation. The local installer adds missing
+style packages/recipes without replacing existing custom packages. This does not
+implement live preview while editing settings.
+
+## Quick language selection
+
+Open the microphone menu and choose **Language**. The submenu identifies the
+configured default engine/checkpoint and checks the saved next-dictation choice.
+Known Cohere Transcribe checkpoints offer their 14 explicit language hints, not
+Auto. Known local multilingual Whisper checkpoints offer their supported language
+vocabulary and Auto; English-only checkpoints are read-only. Unknown/custom
+checkpoints, remote/CLI Whisper backends and engines without a verified hint
+control show an explanation instead of a misleading universal language list.
+
+Selecting a language saves only that engine's canonical `language` key. Comments,
+other engines, model/backend choices, profiles and Text Cleanup settings are
+preserved. The daemon consumes the change at the next idle boundary and rebuilds
+its cached transcribers, including resident workers. An in-flight utterance keeps
+its original configuration and is neither canceled nor restarted. The next model
+load can be colder after a language change. The menu updates only after successful
+save and readback; a failure keeps the prior choice and shows an explanation.
+
+This controls the configured default checkpoint, not a temporary `record --model`
+override. Other engines retain their independent hints, and profile processing is
+unchanged. Startup CLI/environment overrides still apply on a later daemon start;
+a successful explicit tray selection controls the current daemon immediately at
+its next safe boundary. Generic `config set` edits do not imply a full hot reload.
+If the file's engine/model no longer matches the daemon, the tray rejects the
+change rather than changing the wrong checkpoint.
+
+For this native `ItemIsMenu=true` route, repeated-click menu toggling belongs to
+the tray host. The current Omarchy host always reopens the same menu; the local
+candidate includes a separately tested minimal host patch, not an automatic shell
+customization. An app-owned Omarchy compact panel/bar widget could instead own
+its toggle, as Superwhisper does; that alternative is not implemented here.
+Only the explicit
+**Settings** row opens the full application.
+
+## Native system tray (Linux)
+
+The tray is enabled by default and remains visible while idle. Opt out with
+`voxtype config set tray.enabled false`, then restart Voxtype when ready. It shows recording, transcribing,
+and failed-dictation states without relying on audio feedback.
+
+Clicking the icon opens a compact native menu without launching settings or closing
+the tray drawer. Choose the explicit **Settings** gear row for the full settings
+frontend. The menu shows live status. There is one recording
+control, **Start Recording** / **Stop Recording**, and **Cancel** is available while
+recording or transcribing. Starting another recording is disabled during inference.
+The tray uses the existing daemon control protocol, not a second recording daemon.
+
+The tray and desktop entry share `voxtype-configure-launcher`: it prefers the
+available integrated Quickshell frontend, then a separately installed graphical
+settings desktop entry, then the terminal TUI. The current source ships no GTK
+settings application; `voxtype-osd-gtk4` is an OSD, not settings. On a headless host,
+run `voxtype configure` directly in your terminal. Concurrent app-open requests
+are coalesced, and Quickshell uses idempotent `open` rather than `toggle`.
 
 ## Table of Contents
 
@@ -156,7 +240,7 @@ sets the window class to `voxtype` so compositors can float it.
 | Hotkey | PTT key, mode (PTT vs toggle), cancel key, modifier key, evdev-listener toggle |
 | Audio | Input device, max recording length, MPRIS pause/ducking, audio feedback theme/volume |
 | Output | Mode (type/clipboard/paste/file), driver order, auto-submit, post-process command |
-| Text | Spoken-punctuation toggle, smart-auto-submit, custom replacements list editor |
+| Text Cleanup | Independent deterministic stages, opt-in LARD cleanup/model path, learned punctuation/casing, smart auto-submit, replacements editor |
 | VAD | Silero VAD enable, backend (auto/energy/whisper), threshold |
 | Meeting | Meeting mode enable, speaker diarization, audio source (mic/system/both) |
 | Notifications | Desktop notifications for recording start/stop and transcription |
@@ -186,9 +270,10 @@ The About pane explains the choice (`"AMD GPU detected. The MIGraphX
 execution provider is new… ONNX (AVX-512) on CPU is the safe default."`).
 
 When you switch the engine on the Engine page, the TUI also picks the
-matching binary variant if one is needed (e.g. moving from Whisper to
-Parakeet swaps the symlink at `/usr/bin/voxtype` from a Whisper variant to
-an ONNX variant). The actual symlink change runs through `pkexec` so you
+matching binary variant if one is needed. An explicit Parakeet ONNX model
+requires an ONNX variant. A Cohere or Parakeet GGUF model stays on the running
+binary when its GGUF client is compiled in, including the Vulkan variant.
+The actual symlink change runs through `pkexec` so you
 get the standard polkit prompt.
 
 #### Compositor binding awareness
@@ -299,6 +384,16 @@ files under `$XDG_RUNTIME_DIR/voxtype/`. The OSD itself does not need a
 keybinding; it activates automatically when the daemon enters the
 recording state.
 
+While you record, the Quickshell HUD shows a live waveform and the elapsed
+time. Near `audio.max_duration_secs` the clock turns into a countdown
+(amber, then red for the last 5 seconds), so a long dictation is not cut off
+by surprise. The engine and model serving the recording appear briefly when
+it starts. While transcribing, the waveform becomes a slow ripple. When the
+session ends, the HUD confirms the result for a moment (a check with the
+number of characters, or "No speech detected", "Transcription failed", and
+so on) before it fades out. Cancelled recordings and `--no-osd` recordings
+show no result.
+
 Quickshell also supports OSD customization through `[osd]`:
 
 ```toml
@@ -306,7 +401,7 @@ Quickshell also supports OSD customization through `[osd]`:
 frontend = "quickshell"
 style = "default"      # built-in style, package name, or package path
 # palette = "omarchy" # omit for auto, or force active Omarchy theme colors
-layout = "compact"    # compact, wide, minimal, tile, orb, custom
+layout = "compact"    # compact, wide, minimal, pill, shell, tile, orb, custom
 
 [osd.frame]
 background = "none"   # semantic role, literal color, or none
@@ -319,7 +414,7 @@ layers such as `shadow`, `pulse`, `bars`, `waveform`, `ring`, `meter`, `icon`,
 and `label`. Colors are
 semantic Omarchy tokens by default (`accent`, `background`, `foreground`,
 `success`, `warning`, `error`). `layout` changes the outer frame: strip-style
-layouts use `compact`, `wide`, or `minimal`, while `tile` and `orb` create
+layouts use `compact`, `wide`, `minimal`, `pill`, or `shell`, while `tile` and `orb` create
 non-strip OSD frames. `[osd.frame]` can remove or recolor the host background
 and border without changing QML. The styling system was contributed by
 [OldJobobo](https://github.com/OldJobobo)
@@ -338,7 +433,15 @@ are plain `[osd]` config presets rather than installable packages. Apply one
 with `voxtype setup osd --recipe <name>`, which writes its keys into your
 config without duplicating any that are already there and prints each
 changed key with its previous value; `--dry-run` previews the change and
-`voxtype setup osd --list` shows what's installed. Recipes resolve against
+`voxtype setup osd --list` shows what's installed. For a quiet HUD, the
+`capsule`, `shell-line`, `shell-dots`, `aura`, and `halo` recipes show only
+the state, your live voice level, and the clock; the `showcase-*` recipes
+layer more instruments. `shell-line` keeps Capsule's flowing lines, while
+`shell-dots` uses Aura's voice-assistant dots. Both follow Omarchy Shell's
+corner rounding, popup border, monospace text, and spacing instead of the
+fully rounded pill shape. Their theme background stays steady, with no
+glow or dimming between words.
+Recipes resolve against
 `~/.config/voxtype/osd-recipes/`, `~/.local/share/voxtype/osd-recipes/`, and
 `/usr/share/voxtype/osd-recipes/`, and `--recipe` also accepts a path to a
 `.toml` file. While developing a package, set
@@ -913,6 +1016,21 @@ This is the recommended engine for most users.
 
 ### Parakeet
 
+On GGUF-capable builds, first selecting Parakeet uses
+`parakeet-tdt-0.6b-v3-Q8_0.gguf`; first selecting Cohere uses
+`cohere-transcribe-03-2026-Q4_K_M.gguf`. The CLI (`voxtype config set engine
+parakeet` or `cohere`), TUI, and schema-backed settings agree on these defaults.
+Download the selected model with `voxtype setup model` or
+`voxtype setup --download --model <name>`. GGUF inference requires the matching
+`voxtype-gguf-worker`, with Vulkan support for GPU use.
+
+Existing explicit ONNX models, including Parakeet MIGraphX and streaming
+configurations, remain unchanged. Selecting an engine again does not replace
+its saved model. Migrating to GGUF requires deliberately selecting a GGUF
+model; Parakeet GGUF does not support `streaming = true`. Builds without the
+corresponding GGUF feature keep the legacy model default. The initial default
+engine remains Whisper.
+
 Parakeet is NVIDIA's FastConformer-based ASR model. It offers:
 
 - Very fast CPU inference (30x realtime on AVX-512)
@@ -1069,7 +1187,7 @@ model = "omnilingual-large"  # Default model
 
 ### Cohere Transcribe
 
-Cohere Transcribe is an encoder-decoder ASR model from Cohere Labs running via ONNX Runtime. It currently sits at #1 on the Open ASR Leaderboard. It offers:
+Cohere Transcribe is an encoder-decoder ASR model from Cohere Labs running via transcribe.cpp for GGUF files or ONNX Runtime for legacy model directories. It currently sits at #1 on the Open ASR Leaderboard. It offers:
 
 - Best-in-class accuracy on a wide range of audio (5.42 average WER on the leaderboard)
 - Support for 14 languages with a single model
@@ -1936,22 +2054,83 @@ Output hooks are generic shell commands—you can use them for any compositor or
 
 ## Dictation Cleanup
 
-Speech isn't writing. You restart sentences, stutter, say "scratch that", and pause in places a period doesn't belong. Voxtype can clean that up with a few small rule-based stages that run on your machine in well under a millisecond. There is no model to download and no LLM involved.
+Speech isn't writing. You restart sentences, stutter, say "scratch that", and pause in places a period doesn't belong. Voxtype can clean that up locally with deterministic rules, plus an optional token-classification model for engines that emit lowercase text without punctuation. No LLM is involved.
 
-Filler-word removal is on by default. The other three stages are off until you turn them on:
+New configurations created by Voxtype enable filler-word removal, sentence-break repair, and number formatting. They leave restart collapsing off because a false positive can delete words you actually said:
 
 ```toml
 [text]
-collapse_restarts = true       # restarts, stutters, "scratch that"
+filter_filler_words = true     # conservative single-syllable fillers
+punctuation_casing = false     # opt in for plain CTC engines after model setup
+collapse_restarts = false      # opt in to restarts, stutters, "scratch that"
 repair_sentence_breaks = true  # premature periods, lost question marks
 format_numbers = true          # "three thirty p m" -> "3:30 p.m."
 ```
+
+These values are written only when Voxtype creates a new config. Upgrades do not add them to an existing config or change compatibility defaults for omitted keys.
 
 Each one is also a `voxtype config set` key, so you can try one at a time:
 
 ```bash
 voxtype config set text.collapse_restarts true
 ```
+
+The punctuation/casing stage is only used with Paraformer, Dolphin,
+Omnilingual, Parakeet CTC, and SenseVoice when its own ITN is disabled. It
+never rewrites output from engines that already provide punctuation and
+casing. Install its Apache-2.0 multilingual model before enabling it:
+
+```bash
+voxtype setup punctuation
+voxtype config set text.punctuation_casing true
+```
+
+The download is about 1.1 GB. It supports 47 languages; see the
+[configuration reference](CONFIGURATION.md#punctuation_casing) for the list.
+If the model cannot load or run, Voxtype warns and keeps the original
+transcript.
+
+### Optional trained English cleanup
+
+In `voxtype configure`, select **Text Cleanup**. The deterministic switches are
+spoken punctuation, filler removal, restart collapse, sentence-break repair and
+number formatting. Restart collapse remains off by default. **LARD disfluency
+cleanup** is a separate opt-in switch; **LARD model path** is an independent
+inline field. Enter or Space toggles a switch; Enter/i edits the path, Enter
+commits, Esc cancels, and an empty path restores the default location. `s` saves
+and `r` reverts. Arrow keys or j/k navigate; the form scrolls to keep the selected
+row visible, including replacement edit/add/delete rows. Saving unchanged cleanup
+options does not add missing keys or copy CLI/environment overrides into the file.
+Existing model selections, sibling options and TOML comments are preserved.
+The TUI's normal exit behavior can restart the daemon after saved configuration
+changes; changing a model path does not itself install or validate a model.
+Learned punctuation/casing is separate from deterministic cleanup and is disabled
+in the TUI if this client lacks the `punctuation-casing` build feature.
+
+
+In the graphical VoxType app, the **Text Cleanup** section separates **Clean up text**
+from **LARD disfluency cleanup**. Clean up text contains independent deterministic
+stage switches. There is no master switch that resets your individual choices.
+The LARD switch only changes `text.lard_disfluency`; it does not change those
+rules, enable restart collapse, install a model, or restart the daemon. The
+separate model license is linked there and opens only when clicked. Controls
+not advertised by your executable's schema are not shown, so an older binary
+may not offer LARD yet. Punctuation/casing restoration and smart auto-submit
+remain under **Other text options**, not the deterministic cleanup group.
+
+Install the separate model with
+`voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf`, then run
+`voxtype config set text.lard_disfluency true` and restart the daemon. Check it
+with `voxtype setup lard --status`. Use an explicit English engine language;
+auto-detected and non-English languages skip this stage.
+
+This opt-in stage can remove a discarded phrase such as "I need a flight no"
+from "I need a flight no I need a hotel". It does not generate replacement
+words. The model is CC BY-SA 4.0 and has its own model card under
+`assets/models/`. Publication is pending approval, so there is no implicit model
+download. Missing or invalid weights leave the remaining cleanup available.
+See [LARD configuration](CONFIGURATION.md#lard_disfluency-and-lard_model_path)
+for CLI/environment overrides and finalized-streaming behavior.
 
 ### What each stage does
 
@@ -1987,13 +2166,13 @@ meet me at three thirty p m               ->  meet me at 3:30 p.m.
 
 It only touches sentences that are about a quantity, so "one of the things we need" stays prose. Engines that already write digits, like Parakeet, leave it less to do.
 
-### Why most of it is off by default
+### Why restart collapsing stays opt-in
 
-A false positive deletes words you said. That's worse than leaving an "um" in, so these stages are conservative, and whether the trade is worth it is your call, not a default. Try them on your own dictation for a day.
+A false-positive restart deletes words you said. That's worse than leaving a disfluency in place, so `collapse_restarts` remains a choice even for new installations. Sentence repair and number formatting use narrower guards: ordinary sentence boundaries, prose-heavy number words, abbreviations, decimals, and lower-case proper nouns are left alone.
 
 ### Order and your own rules
 
-Cleanup runs in this order: filler words, spoken punctuation, restarts, sentence breaks, numbers, then your `replacements`. Your own rules always get the last word. `[output.post_process]` runs after all of it.
+Cleanup runs in this order: filler words, spoken punctuation, restarts, punctuation/casing when applicable, sentence breaks, numbers, then your `replacements`. Your own rules always get the last word. `[output.post_process]` runs after all of it.
 
 ### Seeing what changed
 
@@ -2041,6 +2220,29 @@ Add an `[output.post_process]` section to your config:
 command = "ollama run llama3.2:1b 'Clean up this dictation. Fix grammar, remove filler words. Output only the cleaned text:'"
 timeout_ms = 30000  # 30 second timeout (generous for LLM)
 ```
+
+To keep an LLM from replacing the whole transcript, enable the edit-list
+contract and ask your script to return only JSON edits:
+
+```toml
+[output.post_process]
+command = "~/.config/voxtype/llm-edit-list.sh"
+edit_list = true
+```
+
+The command must return an array like this:
+
+```json
+[
+  {"find":"It are ready","replace":"It is ready","reason":"grammar"}
+]
+```
+
+Voxtype applies only exact, unambiguous, non-overlapping edits to the original
+transcription. If the model adds a preamble or code fence, returns invalid JSON,
+or names text that is missing or repeated, Voxtype ignores the response and
+uses the original transcription. Existing post-processing commands continue to
+return plain text unless `edit_list` is enabled.
 
 ### Example Commands
 
@@ -2157,7 +2359,7 @@ You'll see log messages like:
 
 ## Profiles
 
-Profiles let you define named configurations for different contexts, each with its own post-processing command and output mode. Instead of changing your config file when switching between tasks, use profiles to switch behavior on the fly.
+Profiles let you define named configurations for different contexts, each with its own vocabulary, post-processing command, and output mode. Instead of changing your config file when switching between tasks, use profiles to switch behavior on the fly.
 
 ### When to Use Profiles
 
@@ -2179,6 +2381,9 @@ post_process_command = "ollama run llama3.2:1b 'Format this for Slack. Keep it c
 [profiles.code]
 post_process_command = "ollama run llama3.2:1b 'Format as a code comment. Be technical and precise:'"
 output_mode = "clipboard"  # Override output mode for this profile
+
+[profiles.code.vocabulary]
+terms = ["Voxtype", "Hyprland", "PipeWire", "Tailscale"]
 
 [profiles.email]
 post_process_command = "ollama run llama3.2:1b 'Format as professional email text:'"
@@ -2218,6 +2423,8 @@ Each profile can override these settings:
 
 | Option | Description |
 |--------|-------------|
+| `vocabulary.terms` | Canonical spellings used by conservative vocabulary correction |
+| `vocabulary.terms_file` | JSON array containing additional vocabulary terms |
 | `post_process_command` | Shell command for text processing (overrides `[output.post_process].command`) |
 | `post_process_timeout_ms` | Timeout in milliseconds (overrides `[output.post_process].timeout_ms`) |
 | `output_mode` | Output mode: `type`, `clipboard`, or `paste` (overrides `[output].mode`) |
@@ -2227,6 +2434,11 @@ Each profile can override these settings:
 - If a profile doesn't specify an option, the default from your config is used
 - Unknown profile names log a warning and fall back to default behavior
 - Profiles work with all recording modes (evdev hotkey, compositor keybindings)
+- Profile terms bias Whisper-compatible and Soniox backends without replacing
+  an explicit backend prompt or Soniox terms list
+- Vocabulary correction runs when batch or streaming text becomes final;
+  provisional streaming text is left untouched
+- `[text.replacements]` runs after vocabulary correction and can override it
 
 ### Example: Context-Aware Dictation
 
@@ -2256,6 +2468,8 @@ post_process_command = "ollama run llama3.2:1b 'Convert to bullet points. Be con
 
 Voice Activity Detection (VAD) filters silence-only recordings before transcription. This prevents Whisper from hallucinating text when processing silent audio (a known issue where Whisper may output phrases like "Thank you for watching" when given silence).
 
+Voxtype enables VAD with the model-free `energy` backend in newly generated configurations. Existing configurations that omit `[vad]` stay disabled.
+
 ### Enabling VAD
 
 **Via config file:**
@@ -2271,16 +2485,16 @@ voxtype --vad daemon
 
 ### Configuration Options
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `enabled` | `false` | Enable VAD filtering |
-| `backend` | `auto` | Detection algorithm: `auto`, `energy`, `whisper` |
-| `threshold` | `0.5` | Sensitivity (0.0 = very sensitive, 1.0 = aggressive) |
-| `min_speech_duration_ms` | `100` | Minimum speech required (ms) |
+| Option | New config | Omitted-key compatibility default | Description |
+|--------|------------|-----------------------------------|-------------|
+| `enabled` | `true` | `false` | Enable VAD filtering |
+| `backend` | `energy` | `auto` | Detection algorithm: `auto`, `energy`, `whisper` |
+| `threshold` | `0.5` | `0.5` | Sensitivity (0.0 = very sensitive, 1.0 = aggressive) |
+| `min_speech_duration_ms` | `100` | `100` | Minimum speech required (ms) |
 
 ### VAD Backends
 
-- **auto** (default): Selects the best backend for your transcription engine
+- **auto** (compatibility default when omitted): Selects a backend for your transcription engine
   - Whisper engine → Whisper VAD (requires model download)
   - Parakeet engine → Energy VAD (no model needed)
 - **energy**: Fast RMS-based detection. Works with any engine, no model download required.

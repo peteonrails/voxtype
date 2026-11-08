@@ -144,6 +144,7 @@ pub(crate) async fn dispatch(
             language,
             translate,
             threads,
+            initial_prompt,
         } => {
             // Internal command: run transcription worker process
             // This is spawned by the daemon when gpu_isolation is enabled
@@ -161,6 +162,9 @@ pub(crate) async fn dispatch(
             }
             if let Some(t) = threads {
                 whisper_config.threads = Some(t);
+            }
+            if let Some(prompt) = initial_prompt {
+                whisper_config.initial_prompt = Some(prompt);
             }
             transcribe::worker::run_worker(&whisper_config)?;
         }
@@ -350,12 +354,36 @@ pub(crate) async fn dispatch(
                     warn_if_root("compositor");
                     setup::compositor::run(&compositor_type).await?;
                 }
+                #[cfg(target_os = "linux")]
+                Some(SetupAction::Icons { uninstall }) => {
+                    if uninstall {
+                        setup::icons::uninstall()?;
+                    } else {
+                        setup::icons::install()?;
+                    }
+                }
                 Some(SetupAction::Vad { status }) => {
                     warn_if_root("vad");
                     if status {
                         setup::vad::show_status();
                     } else {
                         setup::vad::download_model()?;
+                    }
+                }
+                Some(SetupAction::Lard {
+                    source,
+                    url,
+                    status,
+                }) => {
+                    warn_if_root("lard");
+                    setup::lard::setup(source.as_deref(), url.as_deref(), status)?;
+                }
+                Some(SetupAction::Punctuation { status }) => {
+                    warn_if_root("punctuation");
+                    if status {
+                        setup::punctuation::show_status();
+                    } else {
+                        setup::punctuation::download_model()?;
                     }
                 }
                 Some(SetupAction::Osd {
@@ -411,6 +439,15 @@ pub(crate) async fn dispatch(
 
         Commands::Config { action } => match action {
             None => show_config(&config).await?,
+            Some(ConfigAction::ValidateSelection { require_idle }) => {
+                voxtype::model_selection::validate_ready(config.engine.name(), config.model_name())
+                    .map_err(anyhow::Error::msg)?;
+                if require_idle {
+                    voxtype::model_selection::validate_idle_for_restart(&config)
+                        .map_err(anyhow::Error::msg)?;
+                }
+                println!("Engine/model selection is compatible and installed");
+            }
             Some(ConfigAction::Set { key, value }) => {
                 run_config_set(cli.config.clone(), &key, &value)?;
             }

@@ -12,7 +12,9 @@ pub struct CohereConfig {
     ///   encoder_model.onnx (+ .onnx_data),
     ///   decoder_model_merged.onnx (+ .onnx_data),
     ///   tokenizer.json
-    /// Short names: "cohere-transcribe-q4f16" (default, ~1.5 GB),
+    /// GGUF-capable builds default to "cohere-transcribe-03-2026-Q4_K_M.gguf".
+    /// ONNX-only builds default to "cohere-transcribe-q4f16" (~1.5 GB).
+    /// Other ONNX short names:
     ///              "cohere-transcribe-q4", "cohere-transcribe-int8",
     ///              "cohere-transcribe-fp16"
     pub model: String,
@@ -62,7 +64,7 @@ fn default_boundary_search_secs() -> f32 {
 impl Default for CohereConfig {
     fn default() -> Self {
         Self {
-            model: "cohere-transcribe-q4f16".to_string(),
+            model: crate::model_catalog::default_model("cohere").to_string(),
             gguf_backend: default_gguf_backend(),
             max_chunk_secs: default_max_chunk_secs(),
             boundary_search_secs: default_boundary_search_secs(),

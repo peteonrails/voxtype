@@ -1,0 +1,46 @@
+# Out-of-process host for transcribe.cpp GGUF models (Cohere, Parakeet).
+#
+# A crate of its own, and one that does not depend on voxtype, for link-line
+# reasons rather than code structure. transcribe.cpp and whisper-rs each vendor
+# a copy of ggml exporting the same 644 global symbols, and the linker resolves
+# each name once:
+#
+# - While transcribe-cpp was a voxtype dependency, its link directives reached
+#   every binary in the package and transcribe.cpp's ggml 0.20.2 displaced the
+#   0.9.5 that whisper.cpp was compiled against. A separate bin target in the
+#   voxtype package did not help; cargo features are package-wide.
+# - Depending on voxtype from here would do the same in reverse, because voxtype
+#   links whisper-rs unconditionally.
+#
+# So voxtype never links transcribe-cpp, and this crate never links whisper-rs.
+# voxtype appears below only as a dev-dependency, for tests that check the two
+# config representations still agree; dev-dependencies never reach the binary.
+[package]
+name = "voxtype-gguf-worker"
+version = "1.2.0-rc1"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "voxtype-gguf-worker"
+path = "src/main.rs"
+
+[dependencies]
+transcribe-cpp = { version = "=0.2.3", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+voxtype = { path = "../..", default-features = false }
+hound = "3"
+tempfile = "3"
+
+[features]
+default = []
+vulkan = ["transcribe-cpp/vulkan"]
+cuda = ["transcribe-cpp/cuda"]
+rocm = ["transcribe-cpp/rocm"]
+metal = ["transcribe-cpp/metal"]

@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as ShellTheme
 import qs.Ui
 
 // One muted line of what is actually running, as opposed to what is
@@ -31,8 +32,8 @@ Item {
   property string vramLabel: ""
   property string vramText: ""
 
-  readonly property color dim: Qt.darker(Color.foreground, 1.5)
-  readonly property color separatorColor: Qt.darker(Color.foreground, 2.2)
+  readonly property color dim: Qt.darker(ShellTheme.Color.foreground, 1.5)
+  readonly property color separatorColor: Qt.darker(ShellTheme.Color.foreground, 2.2)
   readonly property bool unitFailed: root.unitState === "failed"
 
   // Built as a list so the separators stay right however many items are
@@ -93,7 +94,7 @@ Item {
       var fact = root.facts[i]
       var body = root.escaped(fact.text)
       if (fact.urgent === true)
-        body = "<b><font color=\"" + root.hex(Color.urgent) + "\">" + body + "</font></b>"
+        body = "<b><font color=\"" + root.hex(ShellTheme.Color.urgent) + "\">" + body + "</font></b>"
       parts.push(body)
     }
     return parts.join(separator)

@@ -12,9 +12,9 @@ import Quickshell.Io
 //
 //   { "voxtypeBin": "/home/you/voxtype/target/release/voxtype" }
 //
-// The file is read synchronously (blockLoading) at load time, which is
-// before the shell calls the panel's open(), so the very first schema fetch
-// already uses the right binary. Without the file we run "voxtype" off PATH.
+// The file is read synchronously when resolving the first command, including
+// when the host delivers a queued open immediately after assigning manifest.
+// Without the file we run "voxtype" off PATH.
 Item {
   id: root
 
@@ -22,7 +22,18 @@ Item {
   property var manifest: null
 
   readonly property string manifestDir: (manifest && manifest.__sourceDir) ? String(manifest.__sourceDir) : ""
-  property string bin: "voxtype"
+  readonly property string bin: {
+    // The host assigns manifest after constructing the asynchronous Loader.
+    // Resolve on the first command read, not an onLoaded callback which may
+    // run after a queued open() has already fetched the schema from PATH.
+    if (devConfig.path === "") return "voxtype"
+    try {
+      var parsed = JSON.parse(devConfig.text())
+      if (parsed && typeof parsed.voxtypeBin === "string" && parsed.voxtypeBin.length > 0)
+        return parsed.voxtypeBin
+    } catch (e) {}
+    return "voxtype"
+  }
 
   // Command used for anything that wants a terminal the user can watch.
   readonly property string terminalLauncher: "omarchy-launch-floating-terminal-with-presentation"
@@ -601,8 +612,40 @@ Item {
   // ------------------------------------------------------------- restart
 
   function restartDaemon() {
-    if (restartProc.running) return
+    if (root.restarting) return
+    if (root.writeQueue.length > 0 || root.writing) {
+      root.restarted(false, "Wait for pending settings to finish saving before restarting.")
+      return
+    }
     root.restarting = true
+    restartCheck.err = ""
+    restartCheck.command = [root.bin, "config", "validate-selection", "--require-idle"]
+    restartCheck.running = true
+  }
+
+  Process {
+    id: restartCheck
+    property string err: ""
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: restartCheck.err = String(text || "").trim()
+    }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.restarting = false
+        root.restarted(false, restartCheck.err || "Engine/model selection is not ready; no restart performed.")
+        return
+      }
+      if (root.writeQueue.length > 0 || root.writing) {
+        root.restarting = false
+        root.restarted(false, "Settings changed during validation. Finish saving and retry the restart.")
+        return
+      }
+      root.performRestart()
+    }
+  }
+
+  function performRestart() {
     restartProc.err = ""
     restartProc.command = ["systemctl", "--user", "restart", "voxtype"]
     restartProc.running = true
@@ -806,16 +849,7 @@ Item {
     id: devConfig
     path: root.manifestDir !== "" ? root.manifestDir + "/dev.json" : ""
     blockLoading: true
+    blockAllReads: true
     printErrors: false
-    onLoaded: {
-      try {
-        var parsed = JSON.parse(text())
-        if (parsed && typeof parsed.voxtypeBin === "string" && parsed.voxtypeBin.length > 0)
-          root.bin = parsed.voxtypeBin
-      } catch (e) {
-        root.bin = "voxtype"
-      }
-    }
-    onLoadFailed: root.bin = "voxtype"
   }
 }

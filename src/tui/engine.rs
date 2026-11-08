@@ -20,7 +20,9 @@ use super::common::{
 };
 use super::config_editor::{ConfigEditor, EditorError};
 use crate::config::TranscriptionEngine;
-use crate::model_catalog::{default_model, installed_models_for, model_catalog};
+use crate::model_catalog::{
+    default_model, installed_models_for, supported_model_catalog as model_catalog,
+};
 use crate::setup::binary::{self, EngineFamily, InstallKind, Variant};
 use crate::setup::model;
 use strum::IntoEnumIterator;
@@ -302,6 +304,10 @@ fn rows_for_engine_with_mode(engine: &str, whisper_mode: &str) -> Vec<FieldId> {
 impl EngineState {
     pub fn load() -> Result<Self, EditorError> {
         let ed = ConfigEditor::load()?;
+        Ok(Self::from_editor(&ed))
+    }
+
+    fn from_editor(ed: &ConfigEditor) -> Self {
         let engine = ed
             .get_string("", "engine")
             .unwrap_or_else(|| "whisper".to_string());
@@ -428,7 +434,7 @@ impl EngineState {
             editing: None,
         };
         state.refresh_binary_match();
-        Ok(state)
+        state
     }
 
     /// Required binary family for an engine name. Whisper needs a Whisper
@@ -444,10 +450,32 @@ impl EngineState {
     /// Recompute pending_variant_switch / binary_switch_blocked based on the
     /// current engine selection. Called whenever the engine field changes.
     fn refresh_binary_match(&mut self) {
+        self.refresh_binary_match_with_inventory(&binary::inventory());
+    }
+
+    fn refresh_binary_match_with_inventory(&mut self, inv: &binary::Inventory) {
         self.pending_variant_switch = None;
         self.binary_switch_blocked = None;
 
-        let inv = binary::inventory();
+        // A GGUF client can run in the Vulkan/Whisper binary. Engine family
+        // alone is not enough: explicit ONNX models still need ONNX binaries.
+        let gguf_supported = match self.engine.as_str() {
+            "cohere" if self.fields.co_model.to_ascii_lowercase().ends_with(".gguf") => {
+                Some(cfg!(feature = "cohere-gguf"))
+            }
+            "parakeet" if self.fields.pk_model.to_ascii_lowercase().ends_with(".gguf") => {
+                Some(cfg!(feature = "parakeet-gguf"))
+            }
+            _ => None,
+        };
+        if let Some(supported) = gguf_supported {
+            if !supported {
+                self.binary_switch_blocked = Some(
+                    "This binary does not support the selected GGUF model. Use a GGUF-capable voxtype build and matching voxtype-gguf-worker.",
+                );
+            }
+            return;
+        }
 
         // OpenVINO isn't part of the prebuilt binary distribution: no
         // Whisper or ONNX variant links against openvino-genai (it's an
@@ -535,6 +563,21 @@ impl EngineState {
             }
         };
 
+        self.save_to_editor(&mut ed)
+    }
+
+    fn save_to_editor(&mut self, ed: &mut ConfigEditor) -> Action {
+        if let Some(model) = active_model_for_engine(&self.engine, &self.fields) {
+            if matches!(self.engine.as_str(), "parakeet" | "cohere") {
+                if let Err(message) = crate::model_selection::validate_ready(&self.engine, &model) {
+                    self.feedback = Some(Feedback {
+                        level: FeedbackLevel::Err,
+                        message,
+                    });
+                    return Action::None;
+                }
+            }
+        }
         // Active engine at root.
         ed.set_string("", "engine", &self.engine);
 
@@ -821,7 +864,9 @@ impl EngineState {
                 let installed = installed_engine_choices();
                 let filtered: Vec<&'static str> = TranscriptionEngine::iter()
                     .map(|e| e.name())
-                    .filter(|e| installed.contains(e))
+                    .filter(|e| {
+                        installed.contains(e) && crate::config_set::engine_feature_compiled(e)
+                    })
                     .collect();
                 if filtered.is_empty() {
                     // Nothing to cycle through; leave the engine unchanged.
@@ -860,7 +905,10 @@ impl EngineState {
                 return;
             }
 
-            FieldId::PkModel => f.pk_model = cycle_model("parakeet", &f.pk_model, delta),
+            FieldId::PkModel => {
+                f.pk_model = cycle_model("parakeet", &f.pk_model, delta);
+                self.refresh_binary_match();
+            }
             FieldId::PkModelType => {
                 let idx = PARAKEET_MODEL_TYPES
                     .iter()
@@ -898,7 +946,10 @@ impl EngineState {
             FieldId::OmThreads => f.om_threads = cycle_threads(f.om_threads, delta),
             FieldId::OmOnDemandLoading => f.om_on_demand_loading = !f.om_on_demand_loading,
 
-            FieldId::CoModel => f.co_model = cycle_model("cohere", &f.co_model, delta),
+            FieldId::CoModel => {
+                f.co_model = cycle_model("cohere", &f.co_model, delta);
+                self.refresh_binary_match();
+            }
             FieldId::CoLanguage => {
                 f.co_language = cycle_str(CO_LANG_CHOICES, &f.co_language, delta)
             }
@@ -1040,7 +1091,7 @@ fn cycle_str(choices: &[&'static str], current: &str, delta: i32) -> String {
 }
 
 fn cycle_model(engine: &str, current: &str, delta: i32) -> String {
-    let names = model_catalog(engine);
+    let names = crate::model_catalog::supported_model_catalog(engine);
     if names.is_empty() {
         return current.to_string();
     }
@@ -2061,6 +2112,124 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn fresh_gguf_selection_does_not_request_an_onnx_binary() {
+        for (engine, compiled) in [
+            ("cohere", cfg!(feature = "cohere-gguf")),
+            ("parakeet", cfg!(feature = "parakeet-gguf")),
+        ] {
+            if !compiled {
+                continue;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            let mut ed = ConfigEditor::load_from_path(path.clone()).unwrap();
+            let mut state = EngineState::from_editor(&ed);
+            state.engine = engine.to_string();
+            state.refresh_binary_match();
+            assert!(
+                state.binary_switch_blocked.is_none(),
+                "{}: {:?}",
+                engine,
+                state.binary_switch_blocked
+            );
+            assert!(
+                state.pending_variant_switch.is_none(),
+                "GGUF must stay on the compatible running binary"
+            );
+            state.save_to_editor(&mut ed);
+            assert!(
+                !path.exists(),
+                "missing weights must not be saved or downloaded without consent"
+            );
+            assert!(matches!(
+                state.feedback.as_ref().map(|value| value.level),
+                Some(FeedbackLevel::Err)
+            ));
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "cohere-gguf", feature = "parakeet-gguf"))]
+    fn cycling_model_refreshes_binary_compatibility() {
+        let dir = tempfile::tempdir().unwrap();
+        let ed = ConfigEditor::load_from_path(dir.path().join("config.toml")).unwrap();
+        let mut state = EngineState::from_editor(&ed);
+        for (engine, field) in [("cohere", FieldId::CoModel), ("parakeet", FieldId::PkModel)] {
+            state.engine = engine.to_string();
+            state.cursor = state.rows().iter().position(|id| *id == field).unwrap();
+            state.binary_switch_blocked = Some("stale ONNX mismatch");
+            state.pending_variant_switch = Some(Variant::OnnxMigraphx);
+            state.cycle(0);
+            assert!(state.binary_switch_blocked.is_none());
+            assert!(state.pending_variant_switch.is_none());
+        }
+    }
+
+    #[test]
+    fn packaged_gguf_selection_stays_on_running_vulkan_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let ed = ConfigEditor::load_from_path(dir.path().join("config.toml")).unwrap();
+        let mut state = EngineState::from_editor(&ed);
+        let mut inv = binary::inventory();
+        inv.install_kind = InstallKind::Package;
+        inv.active_variant = Some(Variant::WhisperVulkan);
+        inv.variants.clear(); // No ONNX variant is installed.
+        for (engine, compiled) in [
+            ("cohere", cfg!(feature = "cohere-gguf")),
+            ("parakeet", cfg!(feature = "parakeet-gguf")),
+        ] {
+            if !compiled {
+                continue;
+            }
+            state.engine = engine.to_string();
+            state.refresh_binary_match_with_inventory(&inv);
+            assert!(
+                state.binary_switch_blocked.is_none(),
+                "{engine}: {:?}",
+                state.binary_switch_blocked
+            );
+            assert!(state.pending_variant_switch.is_none());
+        }
+        // An explicit legacy model must still require the ONNX family.
+        state.engine = "parakeet".to_string();
+        state.fields.pk_model = "/models/parakeet-migraphx".to_string();
+        state.refresh_binary_match_with_inventory(&inv);
+        assert!(state.binary_switch_blocked.is_some());
+    }
+
+    #[test]
+    fn existing_legacy_models_survive_tui_open_save() {
+        for (engine, model) in [
+            ("parakeet", "/models/parakeet-migraphx"),
+            ("parakeet", "parakeet-unified-en-0.6b"),
+            ("cohere", "/models/cohere-onnx"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            let source = format!("engine = \"{engine}\"\n[parakeet]\nmodel = \"{}\"\nstreaming = true\nstreaming_chunk_secs = 0.8\nexecution_provider = \"migraphx\"\n[cohere]\nmodel = \"{}\"\n[custom]\nprovider = \"migraphx\"\n", if engine == "parakeet" { model } else { "parakeet-tdt-0.6b-v3" }, if engine == "cohere" { model } else { "cohere-transcribe-q4f16" });
+            std::fs::write(&path, &source).unwrap();
+            let mut ed = ConfigEditor::load_from_path(path.clone()).unwrap();
+            let mut state = EngineState::from_editor(&ed);
+            state.pending_variant_switch = None;
+            state.save_to_editor(&mut ed);
+            let result = std::fs::read_to_string(&path).unwrap();
+            let before: toml::Value = toml::from_str(&source).unwrap();
+            let after: toml::Value = toml::from_str(&result).unwrap();
+            for section in ["parakeet", "cohere", "custom"] {
+                for (key, value) in before[section].as_table().unwrap() {
+                    assert_eq!(&after[section][key], value, "{section}.{key}");
+                }
+            }
+            assert_eq!(
+                crate::config::load_config(Some(&path))
+                    .unwrap()
+                    .model_name(),
+                model
+            );
+        }
     }
 
     #[test]

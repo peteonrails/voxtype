@@ -12,6 +12,7 @@ use crate::error::TranscribeError;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 
 /// CLI-based transcriber using whisper-cli subprocess
 pub struct CliTranscriber {
@@ -27,6 +28,8 @@ pub struct CliTranscriber {
     threads: usize,
     /// Initial prompt for context
     initial_prompt: Option<String>,
+    /// Profile vocabulary selected for the current recording.
+    active_vocabulary: Mutex<Vec<String>>,
 }
 
 /// JSON output structure from whisper-cli
@@ -76,6 +79,7 @@ impl CliTranscriber {
             translate: config.translate,
             threads,
             initial_prompt: config.initial_prompt.clone(),
+            active_vocabulary: Mutex::new(Vec::new()),
         })
     }
 
@@ -118,6 +122,13 @@ impl CliTranscriber {
 }
 
 impl Transcriber for CliTranscriber {
+    fn set_vocabulary(&self, terms: &[String]) {
+        if let Ok(mut active) = self.active_vocabulary.lock() {
+            active.clear();
+            active.extend_from_slice(terms);
+        }
+    }
+
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat(
@@ -174,8 +185,15 @@ impl Transcriber for CliTranscriber {
             cmd.arg("--translate");
         }
 
-        // Initial prompt
-        if let Some(prompt) = &self.initial_prompt {
+        // Preserve the configured prompt and append active profile terms.
+        let vocabulary = self
+            .active_vocabulary
+            .lock()
+            .map(|terms| terms.clone())
+            .unwrap_or_default();
+        if let Some(prompt) =
+            super::prompt_with_vocabulary(self.initial_prompt.as_deref(), &vocabulary)
+        {
             cmd.arg("--prompt").arg(prompt);
         }
 

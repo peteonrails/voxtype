@@ -275,6 +275,10 @@ impl App {
         match self.current_section {
             Section::Engine => self.engine.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Output => self.output.as_ref().is_some_and(|s| s.editing.is_some()),
+            Section::Text => self
+                .text
+                .as_ref()
+                .is_some_and(|s| s.editing.is_some() || s.model_edit.is_some()),
             Section::Hotkey => self.hotkey.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Audio => self.audio.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Waybar => self.waybar.as_ref().is_some_and(|s| s.editing.is_some()),

@@ -217,7 +217,7 @@ fn run_models(json: bool, only: Option<&str>, verify: bool) -> anyhow::Result<()
     let checked: Vec<(&str, Vec<ModelStatus>)> = engines
         .iter()
         .map(|engine| {
-            let statuses = model_catalog::model_catalog(engine)
+            let statuses = model_catalog::supported_model_catalog(engine)
                 .into_iter()
                 .map(|name| ModelStatus::check(engine, name, verify))
                 .collect();

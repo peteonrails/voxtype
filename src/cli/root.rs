@@ -55,6 +55,10 @@ pub struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
+    /// Native Linux tray (enabled by default). Use --tray=false to disable.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+    pub tray: Option<bool>,
+
     /// Quiet mode (errors only)
     #[arg(short, long)]
     pub quiet: bool,
@@ -479,9 +483,90 @@ pub struct Cli {
     pub modifier_release_timeout_ms: Option<u64>,
 
     // -- Text Processing --
+    /// Enable English-only trained disfluency cleanup (local model required)
+    #[arg(long, help_heading = "Text Processing")]
+    pub lard_disfluency: bool,
+
+    /// Disable trained disfluency cleanup
+    #[arg(
+        long,
+        conflicts_with = "lard_disfluency",
+        help_heading = "Text Processing"
+    )]
+    pub no_lard_disfluency: bool,
+
+    /// Local LARD VXDF model file (never downloaded at startup)
+    #[arg(long, value_name = "FILE", help_heading = "Text Processing")]
+    pub lard_model_path: Option<std::path::PathBuf>,
+
+    /// Restore punctuation and casing for plain CTC transcription engines
+    #[arg(
+        long,
+        help_heading = "Text Processing",
+        long_help = "Restore punctuation, sentence boundaries, and letter casing for engines that emit plain CTC text. Has no effect on engines such as Whisper, Parakeet TDT, and Cohere that already supply punctuation and casing. Requires 'voxtype setup punctuation'."
+    )]
+    pub punctuation_casing: bool,
+
+    /// Disable punctuation and casing restoration (overrides config)
+    #[arg(
+        long,
+        conflicts_with = "punctuation_casing",
+        help_heading = "Text Processing",
+        hide_short_help = true
+    )]
+    pub no_punctuation_casing: bool,
+
     /// Enable spoken punctuation conversion (e.g., say "period" to get ".")
     #[arg(long, help_heading = "Text Processing")]
     pub spoken_punctuation: bool,
+
+    /// Disable spoken punctuation conversion (overrides config and environment)
+    #[arg(
+        long,
+        conflicts_with = "spoken_punctuation",
+        help_heading = "Text Processing",
+        hide_short_help = true
+    )]
+    pub no_spoken_punctuation: bool,
+
+    /// Collapse repeated starts, stutters, and explicit retractions (off by default)
+    #[arg(long, help_heading = "Text Processing")]
+    pub collapse_restarts: bool,
+
+    /// Disable restart collapsing (overrides config and environment)
+    #[arg(
+        long,
+        conflicts_with = "collapse_restarts",
+        help_heading = "Text Processing",
+        hide_short_help = true
+    )]
+    pub no_collapse_restarts: bool,
+
+    /// Repair premature sentence breaks using deterministic rules (off by default)
+    #[arg(long, help_heading = "Text Processing")]
+    pub repair_sentence_breaks: bool,
+
+    /// Disable sentence-break repair (overrides config and environment)
+    #[arg(
+        long,
+        conflicts_with = "repair_sentence_breaks",
+        help_heading = "Text Processing",
+        hide_short_help = true
+    )]
+    pub no_repair_sentence_breaks: bool,
+
+    /// Format dictated quantities, money, and times (off by default; requires itn)
+    #[arg(long, help_heading = "Text Processing")]
+    pub format_numbers: bool,
+
+    /// Disable number formatting (overrides config and environment)
+    #[arg(
+        long,
+        conflicts_with = "format_numbers",
+        help_heading = "Text Processing",
+        hide_short_help = true
+    )]
+    pub no_format_numbers: bool,
 
     /// Convert newlines to Shift+Enter instead of regular Enter
     #[arg(long, help_heading = "Text Processing")]

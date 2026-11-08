@@ -149,21 +149,21 @@ impl ConfigEditor {
     }
 
     pub fn set_string(&mut self, table: &str, key: &str, value: &str) {
-        if table.is_empty() {
-            self.document.as_table_mut()[key] = toml_edit::value(value);
-        } else {
-            let item = self.ensure_table(table);
-            item[key] = toml_edit::value(value);
-        }
-        self.dirty = true;
+        self.set_decorated_value(table, key, Value::from(value));
     }
 
     pub fn set_bool(&mut self, table: &str, key: &str, value: bool) {
+        self.set_decorated_value(table, key, Value::from(value));
+    }
+
+    fn set_decorated_value(&mut self, table: &str, key: &str, mut value: Value) {
+        if let Some(previous) = self.value(table, key) {
+            *value.decor_mut() = previous.decor().clone();
+        }
         if table.is_empty() {
-            self.document.as_table_mut()[key] = toml_edit::value(value);
+            self.document.as_table_mut()[key] = Item::Value(value);
         } else {
-            let item = self.ensure_table(table);
-            item[key] = toml_edit::value(value);
+            self.ensure_table(table)[key] = Item::Value(value);
         }
         self.dirty = true;
     }
@@ -342,6 +342,26 @@ impl ConfigEditor {
     /// untouched on disk (atomic rename hasn't happened yet).
     pub fn save(&mut self) -> Result<(), EditorError> {
         let serialized = self.document.to_string();
+
+        // Validate the file-layer selection, not CLI/environment overrides.
+        // Inactive legacy tables remain editable/preserved in GGUF-only builds.
+        let next: config::Config =
+            toml::from_str(&serialized).map_err(|e| EditorError::Validate(e.to_string()))?;
+        let previous = fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|text| toml::from_str::<config::Config>(&text).ok());
+        let changed = previous
+            .as_ref()
+            .is_none_or(|old| old.engine != next.engine || old.model_name() != next.model_name());
+        if changed
+            && matches!(
+                next.engine,
+                config::TranscriptionEngine::Parakeet | config::TranscriptionEngine::Cohere
+            )
+        {
+            crate::model_selection::validate_ready(next.engine.name(), next.model_name())
+                .map_err(EditorError::Validate)?;
+        }
 
         // Validate before touching the on-disk file: parse the serialized
         // text via the runtime config loader. We do this by writing to a temp

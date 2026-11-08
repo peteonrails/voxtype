@@ -1,0 +1,24 @@
+name = "shell-dots"
+version = "0.1.0"
+description = "Voice-assistant dots in an Omarchy Shell panel."
+palette = "omarchy"
+layout = "shell"
+
+[frame]
+background = "background"
+border = "accent"
+glow = false
+halo = false
+
+[[visual.layers]]
+type = "dots"
+source = "peak"
+color = "accent"
+secondary_color = "foreground"
+order = 10
+x = 0.0
+y = 0.0
+width = 1.0
+height = 1.0
+gain = 1.0
+opacity = 1.0

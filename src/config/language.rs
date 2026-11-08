@@ -2,6 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Language tokens accepted by the Cohere Transcribe checkpoint.
+pub const COHERE_LANGUAGES: &[&str] = &[
+    "ar", "de", "el", "en", "es", "fr", "it", "ja", "ko", "nl", "pl", "pt", "vi", "zh",
+];
+
 /// Language configuration supporting single language or array of allowed languages
 ///
 /// Supports three modes:

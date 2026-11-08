@@ -1,4 +1,4 @@
-# Voxtype Settings — an Omarchy shell panel
+# VoxType: an Omarchy shell panel
 
 A graphical settings panel for [voxtype](https://voxtype.io), running as a
 panel plugin inside `omarchy-shell`. It renders whatever `voxtype config schema
@@ -80,6 +80,42 @@ Because a keybind can fire while the panel has never been opened, the manifest
 sets `keepLoaded: true` — the panel is instantiated with the shell so its IPC
 target exists from the start. Adding or removing that flag needs a full
 `omarchy-restart-shell`; `rescanPlugins` alone will not re-instantiate it.
+
+## Text Cleanup
+
+Open it with `omarchy-shell io.voxtype.settings section 'Text Cleanup'`.
+The legacy `section Text` IPC request remains an alias. The canonical section
+label comes from the executable's schema; older schemas labeled Text are displayed
+as Text Cleanup without adding unsupported keys. A schema without
+`text.lard_disfluency` cannot offer the model opt-in switch: update to a compatible
+client and plugin together. A daemon restart alone does not add CLI schema keys.
+
+
+The **Text Cleanup** section groups **Clean up text** as independent deterministic
+switches: spoken punctuation, filler removal, restart collapse, sentence-break
+repair, and number formatting. It preserves each stage's schema value; opening
+the section does not enable anything. **LARD disfluency cleanup** is a separate
+opt-in switch over `text.lard_disfluency`, with its own local-model path and
+CC BY-SA 4.0 license link. It requires explicit English and separate model setup
+(`voxtype setup lard --source /path/to/model.vxdf`). Missing or invalid models
+leave deterministic cleanup available. A click on the license opens the browser;
+there are no automatic network requests or downloads. Older schemas only show
+the keys they actually support. Learned punctuation/casing restoration and
+smart auto-submit remain under **Other text options**.
+
+Regression test (Quickshell and a Wayland session required):
+
+```bash
+python3 omarchy-plugin/tests/test-cleanup-controls.py \
+  --bin /path/to/new/voxtype --old-bin /path/to/older/voxtype \
+  --evidence /path/to/evidence
+```
+
+The test drives the real panel's keyboard activation through SettingDelegate,
+SchemaForm, and VoxtypeCli into a disposable config, then re-fetches the schema
+and verifies independent toggles, exact writes, sibling values, the model
+license affordance, and older-schema behavior. It never writes your live config
+or restarts the daemon.
 
 ## Keybinding
 
@@ -254,8 +290,12 @@ to `manifest.json`:
 { "voxtypeBin": "/home/you/voxtype/target/release/voxtype" }
 ```
 
-It is read synchronously at load, before the shell calls `open()`, so the first
-schema fetch already uses it. The file is deliberately not committed.
+It is read synchronously when a command first resolves its executable, including
+an `open()` queued before the host injects the manifest. Missing or malformed
+files fall back to `voxtype` on `PATH`. The file is deliberately not committed.
+For an installation that uses a launcher wrapper, point `voxtypeBin` at that
+wrapper, not its resolved executable: the wrapper may establish model-cache or
+runtime environment variables needed by its backend.
 
 `dev/sample-schema.json` is a fixture matching the `config schema --json`
 contract — useful for eyeballing the layout, or as a stub:
@@ -267,9 +307,12 @@ contract — useful for eyeballing the layout, or as a stub:
 where `fake-voxtype` is a script that `cat`s the fixture for `config schema
 --json`.
 
-Saving any file under `~/.config/omarchy/plugins/` hot-reloads plugin code, so
-iterating is edit-and-resummon. `omarchy plugin validate ./omarchy-plugin`
-checks the manifest against what the shell enforces.
+Saving a file under `~/.config/omarchy/plugins/` requests a plugin hot reload.
+A rescan alone retains `keepLoaded` instances, and Qt can retain compiled QML
+even across a full plugin reload. If the old code remains after resummoning,
+restart the shell in an unlocked session; do not restart the dictation daemon
+for a panel-only change. `omarchy plugin validate ./omarchy-plugin` checks the
+manifest against what the shell enforces.
 
 Layout of the QML:
 

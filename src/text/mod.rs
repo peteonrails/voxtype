@@ -5,17 +5,26 @@
 //! - Custom word replacements
 
 pub mod diff;
+pub mod disfluency;
 #[cfg(feature = "itn")]
 pub mod itn;
+#[cfg(feature = "punctuation-casing")]
+pub mod punctuation;
 pub mod restarts;
 pub mod sentences;
+pub mod vocabulary;
 
 use crate::config::TextConfig;
 use regex::Regex;
 use std::collections::HashMap;
+use vocabulary::Vocabulary;
 
 /// Text processor that applies transformations to transcribed text
 pub struct TextProcessor {
+    disfluency_tagger: Option<disfluency::DisfluencyTagger>,
+    /// Resident classifier used only for engines with plain CTC output.
+    #[cfg(feature = "punctuation-casing")]
+    punctuation_caser: Option<punctuation::PunctuationCaser>,
     /// Whether spoken punctuation is enabled
     spoken_punctuation: bool,
     /// Marks that take no space before them, for the active language
@@ -120,6 +129,30 @@ impl TextProcessor {
     /// Only the built-in default is narrowed. A user who lists filler words
     /// explicitly gets exactly what they asked for.
     pub fn new_for_language(config: &TextConfig, language: Option<&str>) -> Self {
+        Self::build(config, language, false)
+    }
+
+    /// Build a processor for finished output from the active transcription
+    /// configuration. Punctuation restoration is activated only when both
+    /// the user opted in and that exact engine configuration emits plain CTC
+    /// output (for example SenseVoice with its own ITN disabled).
+    pub fn new_for_config(
+        config: &TextConfig,
+        language: Option<&str>,
+        root: &crate::config::Config,
+    ) -> Self {
+        Self::build(config, language, root.needs_punctuation_casing())
+    }
+
+    fn build(config: &TextConfig, language: Option<&str>, engine_needs_punctuation: bool) -> Self {
+        #[cfg(not(feature = "punctuation-casing"))]
+        if config.punctuation_casing && engine_needs_punctuation {
+            tracing::warn!(
+                "Punctuation/casing was requested, but this build does not include the \
+                 punctuation-casing feature; keeping engine output unchanged"
+            );
+        }
+
         // Normalize replacement keys to lowercase for case-insensitive matching
         let replacements = config
             .replacements
@@ -180,7 +213,42 @@ impl TextProcessor {
             "BUG: connector-before-terminator regex is a compile-time constant and must be valid",
         );
 
+        let disfluency_tagger = if config.lard_disfluency {
+            if language.and_then(|l| l.split(['-', '_']).next()) == Some("en") {
+                let path = config
+                    .lard_model_path
+                    .clone()
+                    .unwrap_or_else(crate::setup::lard::model_path);
+                match std::fs::read(&path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|bytes| {
+                        disfluency::DisfluencyTagger::from_bytes(&bytes).map_err(|e| e.to_string())
+                    }) {
+                    Ok(model) => Some(model),
+                    Err(error) => {
+                        tracing::warn!(path = %path.display(), %error,
+                            "LARD cleanup unavailable; preserving text. Run voxtype setup lard --source <verified-model.vxdf>");
+                        None
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "LARD cleanup requires an explicit English language; preserving text"
+                );
+                None
+            }
+        } else {
+            None
+        };
+
         Self {
+            disfluency_tagger,
+            #[cfg(feature = "punctuation-casing")]
+            punctuation_caser: load_punctuation_caser(
+                config.punctuation_casing,
+                engine_needs_punctuation,
+                language,
+            ),
             spoken_punctuation: config.spoken_punctuation,
             tight_punctuation: tight_punctuation(language),
             replacements,
@@ -200,7 +268,19 @@ impl TextProcessor {
 
     /// Process text by applying all enabled transformations
     pub fn process(&self, text: &str) -> String {
+        self.process_with_vocabulary(text, None)
+    }
+
+    /// Process text with the vocabulary selected by the active profile.
+    pub fn process_with_vocabulary(&self, text: &str, vocabulary: Option<&Vocabulary>) -> String {
         let mut result = text.to_string();
+
+        // Vocabulary is the first cleanup stage so every later stage sees the
+        // canonical spelling. User replacements still run at the end and can
+        // deliberately override a vocabulary result.
+        if let Some(vocabulary) = vocabulary {
+            result = vocabulary.correct(&result);
+        }
 
         // Filter filler words first, on the raw transcription. Running before
         // word_replacements lets users override the default list (e.g. by
@@ -226,8 +306,41 @@ impl TextProcessor {
         // anyone using spoken_punctuation. Filler removal has already gone,
         // so a filler mid-stutter ("the uh the point") cannot hide the repeat
         // either, and the replacements pass below still gets the last word.
+        if let Some(tagger) = &self.disfluency_tagger {
+            let tokens = tagger.tag(&result);
+            let mut cleaned = String::with_capacity(result.len());
+            let mut cursor = 0;
+            for token in tokens.iter().filter(|token| token.disfluent) {
+                cleaned.push_str(&result[cursor..token.start]);
+                cursor = token.end;
+                while result[cursor..].starts_with(char::is_whitespace) {
+                    cursor += result[cursor..].chars().next().unwrap().len_utf8();
+                }
+            }
+            cleaned.push_str(&result[cursor..]);
+            // A model that labels everything must never erase a dictation.
+            if !cleaned.trim().is_empty() {
+                // Segment separators belong to the streaming protocol. Do not
+                // trim them or adjacent fluent Final events will join words.
+                result = cleaned;
+            }
+        }
+
         if self.collapse_restarts {
             result = restarts::collapse_restarts(&result);
+        }
+
+        // Plain CTC engines emit lowercase words without sentence marks. The
+        // model is loaded only for those engines, so native punctuation from
+        // Whisper, Parakeet TDT, Cohere, and remote APIs is never discarded.
+        #[cfg(feature = "punctuation-casing")]
+        if let Some(model) = &self.punctuation_caser {
+            match model.restore(&result) {
+                Ok(restored) => result = restored,
+                Err(error) => tracing::warn!(
+                    "Punctuation/casing failed; keeping the engine transcript unchanged: {error}"
+                ),
+            }
         }
 
         // Boundary repair runs after disfluency removal, so a restart that
@@ -359,6 +472,12 @@ impl TextProcessor {
             return text.to_string();
         };
 
+        // Fluent streaming deltas carry their own separators. With no filler
+        // there is nothing to clean up, including whitespace or punctuation.
+        if !re.is_match(text) {
+            return text.to_string();
+        }
+
         // Mark each filler, remembering whether Whisper capitalized it: a
         // capitalized filler usually started a sentence, and its capital
         // belongs to the word that now starts it.
@@ -397,12 +516,19 @@ impl TextProcessor {
 
         // Trim leading/trailing whitespace and dangling connector punctuation
         // produced when fillers appeared at the start/end of the utterance.
-        result
+        let cleaned = result
             .trim()
             .trim_start_matches([',', ';', ':'])
             .trim_start()
-            .trim_end_matches([',', ';', ':'])
-            .to_string()
+            .trim_end_matches([',', ';', ':']);
+        if cleaned.is_empty() {
+            return String::new();
+        }
+        // Only discard separators created by removing a filler, not the
+        // original segment boundary carried by a streaming backend.
+        let leading = &text[..text.len() - text.trim_start().len()];
+        let trailing = &text[text.trim_end().len()..];
+        format!("{leading}{cleaned}{trailing}")
     }
 
     /// Apply custom word replacements (case-insensitive)
@@ -414,6 +540,35 @@ impl TextProcessor {
         }
 
         result
+    }
+}
+
+#[cfg(feature = "punctuation-casing")]
+fn load_punctuation_caser(
+    enabled: bool,
+    engine_needs_punctuation: bool,
+    language: Option<&str>,
+) -> Option<punctuation::PunctuationCaser> {
+    if !enabled || !engine_needs_punctuation {
+        return None;
+    }
+    if !punctuation::supports_language(language) {
+        tracing::warn!(
+            language = language.unwrap_or("unknown"),
+            "Punctuation/casing is not available for this language; keeping engine output"
+        );
+        return None;
+    }
+    let model_dir = crate::config::Config::models_dir().join(punctuation::MODEL_DIR);
+    match punctuation::PunctuationCaser::from_dir(&model_dir) {
+        Ok(model) => {
+            tracing::info!(path = %model_dir.display(), "Punctuation/casing model loaded");
+            Some(model)
+        }
+        Err(error) => {
+            tracing::warn!("Punctuation/casing disabled: {error}");
+            None
+        }
     }
 }
 
@@ -660,6 +815,53 @@ fn clean_punctuation_spacing(text: &str, tight: &[char]) -> String {
 
 #[cfg(test)]
 mod tests {
+    fn lard_processor(language: &str, model: &std::path::Path) -> super::TextProcessor {
+        let config: crate::config::TextConfig = toml::from_str(&format!(
+            "lard_disfluency = true\nlard_model_path = {:?}\nfilter_filler_words = false",
+            model.to_string_lossy()
+        ))
+        .unwrap();
+        super::TextProcessor::new_for_language(&config, Some(language))
+    }
+
+    #[test]
+    fn lard_preserves_fluent_streaming_segment_spacing() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/models/lard-disfluency-v1.vxdf");
+        let text = " Please book a hotel in Boston for Tuesday ";
+        assert_eq!(lard_processor("en", &path).process(text), text);
+    }
+
+    #[test]
+    fn lard_cleanup_is_opt_in_english_and_fail_open() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/models/lard-disfluency-v1.vxdf");
+        let text = "I need a flight no I need a hotel";
+        assert_eq!(
+            lard_processor("en-US", &path).process(text),
+            "I need a hotel"
+        );
+        assert_eq!(lard_processor("fr", &path).process(text), text);
+        assert_eq!(lard_processor("auto", &path).process(text), text);
+        assert_eq!(
+            lard_processor("en", std::path::Path::new("/missing/lard.vxdf")).process(text),
+            text
+        );
+        let corrupt = tempfile::NamedTempFile::new().unwrap();
+        assert_eq!(lard_processor("en", corrupt.path()).process(text), text);
+        assert_eq!(
+            super::TextProcessor::new(&crate::config::TextConfig {
+                filter_filler_words: false,
+                ..Default::default()
+            })
+            .process(text),
+            text
+        );
+        assert_eq!(
+            lard_processor("en", &path).process("Please book a hotel in Boston for Tuesday"),
+            "Please book a hotel in Boston for Tuesday"
+        );
+    }
 
     /// #566: "um" is the masculine indefinite article in Portuguese, so the
     /// English filler list silently turned "Faça um commit" into

@@ -39,7 +39,7 @@ pub const SECTIONS: &[&str] = &[
     "Hotkey",
     "Audio",
     "Output",
-    "Text",
+    "Text Cleanup",
     "VAD",
     "Meeting",
     "Notifications",
@@ -178,7 +178,7 @@ impl KeySpec {
 /// `cfg!` blocks can't drift.
 pub fn feature_compiled(feature: &str) -> bool {
     match feature {
-        "parakeet" => cfg!(feature = "parakeet"),
+        "parakeet" => cfg!(any(feature = "parakeet", feature = "parakeet-gguf")),
         "moonshine" => cfg!(feature = "moonshine"),
         "sensevoice" => cfg!(feature = "sensevoice"),
         "paraformer" => cfg!(feature = "paraformer"),
@@ -244,8 +244,10 @@ const OSD_FRONTEND_CHOICES: &[&str] = &["gtk4", "native", "quickshell"];
 const OSD_PALETTE_CHOICES: &[&str] = &["omarchy", "fallback", "package", "custom"];
 /// Canonical hints only — any palette role name or literal color is accepted.
 const OSD_FRAME_BACKGROUND_CHOICES: &[&str] = &["background", "none"];
-const OSD_FRAME_BORDER_CHOICES: &[&str] = &["state", "accent", "none"];
-const OSD_LAYOUT_CHOICES: &[&str] = &["compact", "wide", "minimal", "tile", "orb", "custom"];
+const OSD_FRAME_BORDER_CHOICES: &[&str] = &["state", "accent", "aura", "none"];
+const OSD_LAYOUT_CHOICES: &[&str] = &[
+    "compact", "wide", "minimal", "pill", "shell", "tile", "orb", "custom",
+];
 const OSD_POSITION_CHOICES: &[&str] = &[
     "bottom-center",
     "top-center",
@@ -422,7 +424,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::DynamicEnum { source: "models" },
         "Engine",
         "Model",
-        "Parakeet model directory name under the voxtype models dir.",
+        "Parakeet ONNX model directory, or path to a transcribe.cpp GGUF file.",
     )
     .for_onnx_engine("parakeet"),
     spec(
@@ -442,7 +444,17 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Int { min: 1, max: 256 },
         "Engine",
         "Threads",
-        "ONNX Runtime intra-op threads. Unset uses 4; long CPU dictations are fastest at the physical core count.",
+        "ONNX Runtime intra-op threads. Unset uses 4; long CPU dictations are fastest at the physical core count. GGUF models: transcribe.cpp CPU threads.",
+    )
+    .for_onnx_engine("parakeet"),
+    spec(
+        "parakeet.gguf_backend",
+        "parakeet",
+        "gguf_backend",
+        closed(&["auto", "cpu", "cpu_accel", "vulkan", "metal", "cuda", "rocm"]),
+        "Engine",
+        "GGUF backend",
+        "Compute backend for transcribe.cpp GGUF inference.",
     )
     .for_onnx_engine("parakeet"),
     spec(
@@ -1112,13 +1124,49 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Keep text when output is empty",
         "Output the original transcription when the command prints nothing. Turn off to let the command drop a transcription.",
     ),
+    spec(
+        "output.post_process.edit_list",
+        "output.post_process",
+        "edit_list",
+        KeyType::Bool,
+        "Output",
+        "Require an edit list",
+        "Accept only a JSON list of exact, unambiguous edits from the post-process command.",
+    ),
     // -- Text ---------------------------------------------------------------
+    spec(
+        "text.lard_disfluency",
+        "text",
+        "lard_disfluency",
+        KeyType::Bool,
+        "Text Cleanup",
+        "LARD disfluency cleanup",
+        "Opt in to the local English-only LARD model. Missing or invalid models leave the other cleanup stages available; nothing is downloaded at startup.",
+    ),
+    spec(
+        "text.lard_model_path",
+        "text",
+        "lard_model_path",
+        KeyType::String,
+        "Text Cleanup",
+        "LARD model file",
+        "Path to the local VXDF model. By default use the model installed by voxtype setup lard in the XDG data directory.",
+    ),
+    spec(
+        "text.punctuation_casing",
+        "text",
+        "punctuation_casing",
+        KeyType::Bool,
+        "Text Cleanup",
+        "Restore punctuation and casing",
+        "Add punctuation, sentence boundaries, and letter casing to plain CTC output. Engines that already provide them are unchanged.",
+    ),
     spec(
         "text.spoken_punctuation",
         "text",
         "spoken_punctuation",
         KeyType::Bool,
-        "Text",
+        "Text Cleanup",
         "Spoken punctuation",
         "Convert spoken names like \"period\" and \"new line\" into the characters they describe.",
     ),
@@ -1127,7 +1175,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "text",
         "smart_auto_submit",
         KeyType::Bool,
-        "Text",
+        "Text Cleanup",
         "Say \"submit\" to press Enter",
         "Strip a trailing \"submit\" from the transcription and press Return instead.",
     ),
@@ -1136,7 +1184,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "text",
         "filter_filler_words",
         KeyType::Bool,
-        "Text",
+        "Text Cleanup",
         "Drop filler words",
         "Remove \"uh\", \"um\" and the rest of text.filler_words from the output.",
     ),
@@ -1145,7 +1193,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "text",
         "collapse_restarts",
         KeyType::Bool,
-        "Text",
+        "Text Cleanup",
         "Collapse restarts and stutters",
         "Remove self-corrections where a phrase is restarted by repeating a word, plus stutters and \"scratch that\" retractions.",
     ),
@@ -1154,7 +1202,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "text",
         "repair_sentence_breaks",
         KeyType::Bool,
-        "Text",
+        "Text Cleanup",
         "Repair sentence breaks",
         "Join fragments split off by a premature sentence boundary and add question marks to interrogatives.",
     ),
@@ -1163,7 +1211,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "text",
         "format_numbers",
         KeyType::Bool,
-        "Text",
+        "Text Cleanup",
         "Format dictated numbers",
         "Convert spoken quantities to written form (\"twenty five dollars\" -> \"$25\"). Prose-heavy words like \"one\" and \"first\" are left alone.",
     ),
@@ -1172,7 +1220,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         REPLACEMENTS_TABLE,
         "<from>",
         KeyType::MapString,
-        "Text",
+        "Text Cleanup",
         "Word replacements",
         "Case-insensitive substitutions applied to the transcription, keyed by the spoken form.",
     ),
@@ -1295,6 +1343,11 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Notifications",
         "Engine icon in title",
         "Prefix the notification title with the active engine's icon.",
+    ),
+    spec(
+        "tray.enabled", "tray", "enabled", KeyType::Bool, "Status",
+        "Native system tray",
+        "Show the Linux system tray icon and recording controls. Enabled by default; restart the daemon after changing. Requires a StatusNotifierItem host, such as Omarchy, KDE, Waybar or GNOME AppIndicator.",
     ),
     // -- OSD ----------------------------------------------------------------
     spec(
@@ -2567,6 +2620,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             Some(n) => json!(n),
             None => Json::Null,
         },
+        "parakeet.gguf_backend" => json!(pk().gguf_backend),
         "parakeet.on_demand_loading" => json!(pk().on_demand_loading),
         "parakeet.streaming" => json!(pk().streaming),
 
@@ -2677,7 +2731,11 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "output.post_process.timeout_ms" => json!(pp().timeout_ms),
         "output.post_process.trim" => json!(pp().trim),
         "output.post_process.fallback_on_empty" => json!(pp().fallback_on_empty),
+        "output.post_process.edit_list" => json!(pp().edit_list),
 
+        "text.lard_disfluency" => json!(cfg.text.lard_disfluency),
+        "text.lard_model_path" => json!(cfg.text.lard_model_path),
+        "text.punctuation_casing" => json!(cfg.text.punctuation_casing),
         "text.spoken_punctuation" => json!(cfg.text.spoken_punctuation),
         "text.smart_auto_submit" => json!(cfg.text.smart_auto_submit),
         "text.filter_filler_words" => json!(cfg.text.filter_filler_words),
@@ -2714,6 +2772,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "output.notification.show_edits" => json!(cfg.output.notification.show_edits),
         "output.notification.show_engine_icon" => json!(cfg.output.notification.show_engine_icon),
 
+        "tray.enabled" => json!(cfg.tray.enabled),
         "osd.enabled" => json!(cfg.osd.enabled),
         "osd.frontend" => serde_json::to_value(cfg.osd.frontend).ok()?,
         "osd.style" => json!(cfg.osd.style),
@@ -2914,6 +2973,7 @@ pub fn schema_json(cfg: &Config, path: &Path, editor: &ConfigEditor) -> Json {
         .iter()
         .map(|(k, v)| (k.clone(), json!(v)))
         .collect();
+    let profiles = serde_json::to_value(&cfg.profiles).unwrap_or_else(|_| json!({}));
     // `voxtype_version` is this CLI's build. `daemon_version` is what is
     // actually serving dictation, which is routinely a different thing: an
     // upgrade installed but not restarted, an ExecStart override pointing at
@@ -2931,6 +2991,7 @@ pub fn schema_json(cfg: &Config, path: &Path, editor: &ConfigEditor) -> Json {
         "engine": cfg.engine.name(),
         "keys": keys,
         "replacements": Json::Object(replacements),
+        "profiles": profiles,
     })
 }
 
@@ -2951,6 +3012,10 @@ pub fn get_all_json(cfg: &Config) -> Json {
         .map(|(k, v)| (k.clone(), json!(v)))
         .collect();
     o.insert(REPLACEMENTS_TABLE.to_string(), Json::Object(replacements));
+    o.insert(
+        "profiles".to_string(),
+        serde_json::to_value(&cfg.profiles).unwrap_or_else(|_| json!({})),
+    );
     Json::Object(o)
 }
 
@@ -3120,6 +3185,14 @@ mod tests {
                 continue;
             }
             for choice in choices {
+                if s.key == "engine" {
+                    // Enum deserialization is independent of installed weights.
+                    // Activation/persistence has separate transaction tests.
+                    let cfg: crate::config::Config =
+                        toml::from_str(&format!("engine = {choice:?}")).unwrap();
+                    assert_eq!(cfg.engine.name(), *choice);
+                    continue;
+                }
                 let (_dir, path) = temp_config();
                 let typed = validate_value(s, choice).unwrap();
                 let mut ed = ConfigEditor::load_from_path(path.clone()).unwrap();
@@ -3378,6 +3451,7 @@ mod tests {
         assert_eq!(doc["config_path"], json!(path.display().to_string()));
         assert_eq!(doc["engine"], json!("whisper"));
         assert!(doc["replacements"].is_object());
+        assert!(doc["profiles"].is_object());
 
         let keys = doc["keys"].as_array().unwrap();
         assert_eq!(keys.len(), scalar_keys().count());

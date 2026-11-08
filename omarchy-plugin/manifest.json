@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.voxtype.settings",
   "name": "Voxtype Settings",
-  "version": "0.1.0",
+  "version": "1.2.0-rc1",
   "author": "Voxtype",
   "license": "MIT",
   "homepage": "https://github.com/peteonrails/voxtype",

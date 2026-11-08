@@ -8,7 +8,7 @@
 //!   cargo xtask man [DIR]           Render the man pages into DIR (default target/man)
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 // The voxtype CLI definitions, attached the same way build.rs does it, so
@@ -277,9 +277,9 @@ fn dev(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn prepend_path(dir: &PathBuf) -> anyhow::Result<String> {
+fn prepend_path(dir: &Path) -> anyhow::Result<String> {
     let old = env::var_os("PATH").unwrap_or_default();
-    let mut paths = vec![dir.clone()];
+    let mut paths = vec![dir.to_path_buf()];
     paths.extend(env::split_paths(&old));
     Ok(env::join_paths(paths)?.to_string_lossy().into_owned())
 }

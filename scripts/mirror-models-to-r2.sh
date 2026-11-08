@@ -132,7 +132,8 @@ cd "$REPO_DIR"
 echo "[mirror] building voxtype-mirror-registry..." >&2
 cargo build --quiet --bin voxtype-mirror-registry
 
-REGISTRY_JSON="$(./target/debug/voxtype-mirror-registry)"
+TARGET_DIR="$(cargo metadata --no-deps --format-version 1 | jq -r .target_directory)"
+REGISTRY_JSON="$("$TARGET_DIR/debug/voxtype-mirror-registry")"
 
 mirror_one() {
     local engine="$1"
@@ -159,10 +160,15 @@ mirror_one() {
     file_count="$(echo "$files_json" | jq 'length')"
 
     for i in $(seq 0 $((file_count - 1))); do
-        local upstream_path local_path url dest size sha
+        local upstream_path local_path file_upstream url dest size sha
         upstream_path="$(echo "$files_json" | jq -r ".[$i].upstream_path")"
         local_path="$(echo "$files_json" | jq -r ".[$i].local_path")"
-        url="https://huggingface.co/$upstream/resolve/main/$upstream_path"
+        file_upstream="$(echo "$files_json" | jq -r ".[$i].upstream_repo // \"$upstream\"")"
+        if [[ "$upstream_path" == resolve/* ]]; then
+            url="https://huggingface.co/$file_upstream/$upstream_path"
+        else
+            url="https://huggingface.co/$file_upstream/resolve/main/$upstream_path"
+        fi
         dest="$workdir/$local_path"
 
         mkdir -p "$(dirname "$dest")"
@@ -221,10 +227,15 @@ plan_one() {
     file_count="$(echo "$files_json" | jq 'length')"
 
     for i in $(seq 0 $((file_count - 1))); do
-        local upstream_path local_path url
+        local upstream_path local_path file_upstream url
         upstream_path="$(echo "$files_json" | jq -r ".[$i].upstream_path")"
         local_path="$(echo "$files_json" | jq -r ".[$i].local_path")"
-        url="https://huggingface.co/$upstream/resolve/main/$upstream_path"
+        file_upstream="$(echo "$files_json" | jq -r ".[$i].upstream_repo // \"$upstream\"")"
+        if [[ "$upstream_path" == resolve/* ]]; then
+            url="https://huggingface.co/$file_upstream/$upstream_path"
+        else
+            url="https://huggingface.co/$file_upstream/resolve/main/$upstream_path"
+        fi
         echo "  would fetch $url -> $local_path" >&2
         if ! curl -fsSLI --retry 3 -o /dev/null "$url"; then
             echo "  WARN: HF 404 (or transient failure) on $upstream_path" >&2

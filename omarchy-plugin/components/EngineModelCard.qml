@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as ShellTheme
 import qs.Ui
 
 // The model catalog for the engine in effect: which models this engine knows
@@ -38,7 +39,7 @@ Item {
   signal downloadRequested(string name)
   signal cancelDownloadRequested()
 
-  readonly property color dim: Qt.darker(Color.foreground, 1.5)
+  readonly property color dim: Qt.darker(ShellTheme.Color.foreground, 1.5)
   readonly property bool haveModelInfo: {
     for (var k in root.engines) return true
     return false
@@ -71,9 +72,9 @@ Item {
     anchors.right: parent.right
     implicitHeight: body.implicitHeight + contentTopInset + contentBottomInset
     height: implicitHeight
-    color: Util.alpha(Color.foreground, 0.04)
+    color: Util.alpha(ShellTheme.Color.foreground, 0.04)
     radius: Style.cornerRadius
-    borderSpec: Border.flat(Util.alpha(Color.foreground, 0.10), 1)
+    borderSpec: Border.flat(Util.alpha(ShellTheme.Color.foreground, 0.10), 1)
     padding: Style.spacing.rowPaddingX
 
     Column {
@@ -130,7 +131,7 @@ Item {
                                        nameText.implicitHeight + Style.spacing.controlGap)
               height: implicitHeight
               current: modelRow.inUse
-              foreground: Color.foreground
+              foreground: ShellTheme.Color.foreground
 
               Text {
                 id: nameText
@@ -138,7 +139,7 @@ Item {
                 anchors.leftMargin: Style.spacing.controlPaddingX
                 anchors.verticalCenter: parent.verticalCenter
                 text: entry.modelName
-                color: Color.foreground
+                color: ShellTheme.Color.foreground
                 font.family: Style.font.family
                 font.pixelSize: Style.font.body
                 font.bold: modelRow.inUse
@@ -163,7 +164,7 @@ Item {
                   anchors.verticalCenter: parent.verticalCenter
                   visible: modelRow.inUse && !entry.downloading
                   text: "in use"
-                  color: Color.accent
+                  color: ShellTheme.Color.accent
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                   font.bold: true
@@ -212,7 +213,7 @@ Item {
               width: parent.width
               leftPadding: Style.spacing.controlPaddingX
               text: entry.errorText
-              color: Color.urgent
+              color: ShellTheme.Color.urgent
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap

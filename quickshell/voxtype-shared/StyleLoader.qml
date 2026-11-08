@@ -13,6 +13,11 @@ QtObject {
 
     property string styleFile: Quickshell.env("VOXTYPE_OSD_STYLE_FILE") || ""
     property var config: _defaultConfig()
+    readonly property real shellCornerRadius: _shellMetrics.cornerRadius
+
+    property ShellMetrics _shellMetrics: ShellMetrics {
+        enabled: root.config && root.config.layout === "shell"
+    }
 
     // Degraded-path fallback used only when VOXTYPE_OSD_STYLE_FILE is
     // missing or invalid. Mirrors the Rust defaults; keep in sync with
@@ -43,7 +48,11 @@ QtObject {
                 "recording": "#F2594D",
                 "streaming": "#66C7FF",
                 "transcribing": "#F2CC4D",
-                "idle": "rgba(235, 235, 242, 0.750)"
+                "idle": "rgba(235, 235, 242, 0.750)",
+                "grid": "rgba(102, 199, 255, 0.200)",
+                "glow": "rgba(102, 199, 255, 0.360)",
+                "core": "rgba(235, 235, 242, 0.960)",
+                "amber": "#F2CC4D"
             },
             "frame": {
                 "background": "background",

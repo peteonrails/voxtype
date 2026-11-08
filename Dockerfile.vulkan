@@ -78,7 +78,11 @@ RUN cargo build --release --features gpu-vulkan \
     --config 'profile.release.lto=false' \
     --config 'profile.release.codegen-units=8' \
     -vv 2>&1 | tee /tmp/build.log \
-    && cp target/release/voxtype /tmp/voxtype-vulkan
+    && cp target/release/voxtype /tmp/voxtype-vulkan \
+    && cargo build --release -p voxtype-gguf-worker --features vulkan \
+        --config 'profile.release.lto=false' \
+        --config 'profile.release.codegen-units=8' \
+    && cp target/release/voxtype-gguf-worker /tmp/voxtype-gguf-worker
 
 # Verify no out-of-floor instructions leaked in. The ISA floor is x86_64-v3
 # (Haswell): AVX2 + BMI1/2 + FMA, no AVX-512, no GFNI, no AVX-VNNI, and no
@@ -90,7 +94,7 @@ RUN cargo build --release --features gpu-vulkan \
 # Rust compiler's own emission via target-cpu=haswell + target-feature
 # disables above, which is what stops issue-#393-style leaks.
 RUN echo "=== Verifying Vulkan binary ISA floor (x86_64-v3 / Haswell, no SSE4a) ===" \
-    && DUMP=$(objdump -d /tmp/voxtype-vulkan) \
+    && DUMP=$(objdump -d /tmp/voxtype-vulkan; objdump -d /tmp/voxtype-gguf-worker) \
     && zmm_count=$(echo "$DUMP" | grep -c zmm || true) \
     && avx512_count=$(echo "$DUMP" | grep -cE 'vpternlog|vpermt2|vpermi2|vpblendm|valign[dq]|vpcompress|vpexpand' || true) \
     && broadcast_count=$(echo "$DUMP" | grep -c '{1to' || true) \
@@ -114,6 +118,8 @@ RUN echo "=== Verifying Vulkan binary ISA floor (x86_64-v3 / Haswell, no SSE4a) 
 # Output stage - copy binary to /output volume
 CMD mkdir -p /output \
     && cp /tmp/voxtype-vulkan /output/voxtype-${VERSION}-linux-x86_64-vulkan \
+    && cp /tmp/voxtype-gguf-worker /output/voxtype-${VERSION}-linux-x86_64-vulkan.gguf-worker \
     && chmod 755 /output/voxtype-${VERSION}-linux-x86_64-vulkan \
+    && chmod 755 /output/voxtype-${VERSION}-linux-x86_64-vulkan.gguf-worker \
     && echo "Binary copied to /output:" \
     && ls -la /output/voxtype-*-vulkan

@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as ShellTheme
 import qs.Ui
 
 // The engine switch, pinned above the Engine section's scroller rather than
@@ -25,7 +26,7 @@ Item {
 
   signal engineChangeRequested(string name)
 
-  readonly property color dim: Qt.darker(Color.foreground, 1.5)
+  readonly property color dim: Qt.darker(ShellTheme.Color.foreground, 1.5)
 
   function engineAvailable(name) {
     // Absent the engines list, offer everything: `config set engine` refuses an
@@ -53,9 +54,9 @@ Item {
     anchors.right: parent.right
     implicitHeight: body.implicitHeight + contentTopInset + contentBottomInset
     height: implicitHeight
-    color: Util.alpha(Color.foreground, 0.04)
+    color: Util.alpha(ShellTheme.Color.foreground, 0.04)
     radius: Style.cornerRadius
-    borderSpec: Border.flat(Util.alpha(Color.accent, 0.35), Math.max(1, Style.normalBorderWidth))
+    borderSpec: Border.flat(Util.alpha(ShellTheme.Color.accent, 0.35), Math.max(1, Style.normalBorderWidth))
     padding: Style.spacing.rowPaddingX
 
     Column {
@@ -83,7 +84,7 @@ Item {
 
           Text {
             text: root.engine === "" ? "unknown" : root.engine
-            color: Color.foreground
+            color: ShellTheme.Color.foreground
             font.family: Style.font.family
             font.pixelSize: Style.font.title
             font.bold: true
@@ -91,7 +92,7 @@ Item {
 
           Text {
             width: parent.width
-            text: "Switching engines rewrites the engine key and reloads this panel, because each engine brings its own settings and its own models."
+            text: "Switching engines validates and saves a compatible installed model together with the engine. Existing compatible choices are preserved; missing weights require an explicit download. The panel reloads after saving."
             color: root.dim
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
@@ -123,7 +124,7 @@ Item {
         visible: root.errorText !== ""
         width: parent.width
         text: root.errorText
-        color: Color.urgent
+        color: ShellTheme.Color.urgent
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
         wrapMode: Text.WordWrap

@@ -55,6 +55,9 @@ pub enum ConfigSetError {
     #[error("{0}")]
     BadValue(#[from] ValueError),
 
+    #[error("{0}")]
+    IncompatibleModel(String),
+
     #[error(
         "'{key}' belongs to the '{feature}' engine, which is not compiled into \
          this binary.\n  Install a variant that includes it (see \
@@ -79,6 +82,7 @@ impl ConfigSetError {
             | ConfigSetError::FeatureNotCompiled(_)
             | ConfigSetError::UnknownKey(_)
             | ConfigSetError::BadValue(_)
+            | ConfigSetError::IncompatibleModel(_)
             | ConfigSetError::KeyFeatureNotCompiled { .. } => 2,
             ConfigSetError::Editor(_) => 1,
         }
@@ -134,7 +138,9 @@ pub fn engine_feature_compiled(name: &str) -> bool {
     match engine {
         TranscriptionEngine::Whisper => true,
         TranscriptionEngine::Soniox => true,
-        TranscriptionEngine::Parakeet => cfg!(feature = "parakeet"),
+        TranscriptionEngine::Parakeet => {
+            cfg!(any(feature = "parakeet", feature = "parakeet-gguf"))
+        }
         TranscriptionEngine::Moonshine => cfg!(feature = "moonshine"),
         TranscriptionEngine::SenseVoice => cfg!(feature = "sensevoice"),
         TranscriptionEngine::Paraformer => cfg!(feature = "paraformer"),
@@ -150,7 +156,8 @@ pub fn engine_feature_compiled(name: &str) -> bool {
 /// Validates the name and the compiled-feature gate before touching disk.
 /// If the file doesn't exist, an empty document is created and `engine = ".."`
 /// is written at the root. If it exists, `toml_edit` updates only the
-/// `engine` key, preserving comments and other fields.
+/// `engine` key and seeds the model only when absent, preserving explicit
+/// models, comments and other fields.
 pub fn set_engine(path: PathBuf, name: &str) -> Result<PathBuf, ConfigSetError> {
     if parse_engine(name).is_none() {
         return Err(ConfigSetError::UnknownEngine(name.to_string()));
@@ -160,7 +167,23 @@ pub fn set_engine(path: PathBuf, name: &str) -> Result<PathBuf, ConfigSetError> 
     }
 
     let mut editor = ConfigEditor::load_from_path(path)?;
+    if matches!(name, "parakeet" | "cohere") {
+        let retained = editor.get_string(name, "model");
+        let model = crate::model_selection::select_engine_model_in(
+            name,
+            retained.as_deref(),
+            &crate::config::Config::models_dir(),
+        )
+        .map_err(ConfigSetError::IncompatibleModel)?;
+        crate::model_selection::validate_ready(name, &model)
+            .map_err(ConfigSetError::IncompatibleModel)?;
+        editor.set_string(name, "model", &model);
+    }
     editor.set_string("", "engine", name);
+    let default = crate::model_catalog::default_model(name);
+    if !default.is_empty() && editor.get_string(name, "model").is_none() {
+        editor.set_string(name, "model", default);
+    }
     editor.save()?;
     Ok(editor.path().to_path_buf())
 }
@@ -210,6 +233,14 @@ pub fn set_key(path: PathBuf, key: &str, raw: &str) -> Result<SetOutcome, Config
     let found = lookup(key)?;
     let spec = found.spec();
     let value = schema::validate_value(spec, raw)?;
+
+    if let Some(engine) = key
+        .strip_suffix(".model")
+        .filter(|e| matches!(*e, "parakeet" | "cohere"))
+    {
+        crate::model_selection::validate_ready(engine, raw)
+            .map_err(ConfigSetError::IncompatibleModel)?;
+    }
 
     let mut editor = ConfigEditor::load_from_path(path)?;
     schema::apply(&mut editor, &found, &value);
@@ -318,6 +349,120 @@ mod tests {
     #[test]
     fn engine_feature_unknown_returns_false() {
         assert!(!engine_feature_compiled("not-a-real-engine"));
+    }
+
+    #[test]
+    fn explicit_unsupported_checkpoint_is_rejected_without_writing() {
+        for (engine, legacy, gguf_only) in [
+            (
+                "parakeet",
+                "parakeet-tdt-0.6b-v2",
+                cfg!(feature = "parakeet-gguf") && !cfg!(feature = "parakeet"),
+            ),
+            (
+                "cohere",
+                "cohere-transcribe-int8",
+                cfg!(feature = "cohere-gguf") && !cfg!(feature = "cohere"),
+            ),
+        ] {
+            if !gguf_only {
+                continue;
+            }
+            let source = "# preserve\nengine = \"whisper\"\n";
+            let (_dir, path) = temp_config(source);
+            let result = set_key(path.clone(), &format!("{engine}.model"), legacy);
+            assert!(
+                result.is_err(),
+                "unsupported explicit {engine} ONNX selection must fail"
+            );
+            let message = result.unwrap_err().to_string();
+            assert!(
+                message.contains("ONNX") && message.contains("GGUF"),
+                "{message}"
+            );
+            assert_eq!(fs::read_to_string(path).unwrap(), source);
+        }
+    }
+
+    #[test]
+    fn first_engine_selection_requires_an_installed_compatible_model() {
+        for engine in ["cohere", "parakeet"] {
+            if !engine_feature_compiled(engine) {
+                continue;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            let result = set_engine(path.clone(), engine);
+            if let Err(error) = result {
+                assert!(matches!(error, ConfigSetError::IncompatibleModel(_)));
+                assert!(!path.exists(), "failed selection must not create config");
+                continue;
+            }
+            let text = fs::read_to_string(&path).unwrap();
+            let doc: toml::Value = toml::from_str(&text).unwrap();
+            assert_eq!(
+                doc[engine]["model"].as_str(),
+                Some(crate::model_catalog::default_model(engine))
+            );
+            let cfg = crate::config::load_config(Some(&path)).unwrap();
+            assert_eq!(
+                cfg.model_name(),
+                crate::model_catalog::default_model(engine)
+            );
+        }
+    }
+
+    #[test]
+    fn selecting_existing_legacy_engine_preserves_bytes() {
+        for (engine, model) in [
+            ("cohere", "cohere-transcribe-q4f16"),
+            ("parakeet", "/models/parakeet-migraphx"),
+        ] {
+            if !engine_feature_compiled(engine) {
+                continue;
+            }
+            let source = format!("# Keep my legacy setup\nengine = \"{engine}\"\n\n[{engine}]\nmodel = \"{model}\" # pinned\nthreads = 6\non_demand_loading = true\n");
+            let (_dir, path) = temp_config(&source);
+            let result = set_engine(path.clone(), engine);
+            if let Err(error) = result {
+                assert!(matches!(error, ConfigSetError::IncompatibleModel(_)));
+            }
+            assert_eq!(fs::read_to_string(&path).unwrap(), source);
+            assert_eq!(
+                crate::config::load_config(Some(&path))
+                    .unwrap()
+                    .model_name(),
+                model
+            );
+        }
+    }
+
+    #[test]
+    fn schema_setting_seeds_same_default_as_engine_selection() {
+        for engine in ["cohere", "parakeet"] {
+            if !engine_feature_compiled(engine) {
+                continue;
+            }
+            let (_dir, path) = temp_config("");
+            set_key(path.clone(), &format!("{engine}.threads"), "2").unwrap();
+            let doc: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(
+                doc[engine]["model"].as_str(),
+                Some(crate::model_catalog::default_model(engine))
+            );
+        }
+    }
+
+    #[test]
+    fn engine_struct_defaults_agree_with_first_selection() {
+        assert_eq!(
+            crate::config::CohereConfig::default().model,
+            crate::model_catalog::default_model("cohere")
+        );
+        assert_eq!(
+            crate::config::ParakeetConfig::default().model,
+            crate::model_catalog::default_model("parakeet")
+        );
     }
 
     #[test]
@@ -744,8 +889,16 @@ type_delay_ms = 5
                 continue;
             }
 
-            set_engine(path.clone(), name)
-                .unwrap_or_else(|e| panic!("menu bar offers engine {name}, rejected: {e}"));
+            let original = fs::read(&path).unwrap();
+            if let Err(error) = set_engine(path.clone(), name) {
+                assert!(
+                    matches!(error, ConfigSetError::IncompatibleModel(_))
+                        && matches!(*name, "parakeet" | "cohere"),
+                    "{error}"
+                );
+                assert_eq!(fs::read(&path).unwrap(), original);
+                continue;
+            }
 
             let text = fs::read_to_string(&path).unwrap();
             assert!(

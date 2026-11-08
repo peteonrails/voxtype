@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as ShellTheme
 import qs.Ui
 
 // The panel's surface: a scrim over the desktop with one centered card on
@@ -20,7 +21,7 @@ Item {
   // editor instead of driving the card.
   property bool keyBlocked: false
 
-  property color scrim: Util.alpha(Color.background, 0.6)
+  property color scrim: Util.alpha(ShellTheme.Color.background, 0.6)
 
   default property alias content: keyCatcher.data
   readonly property alias keyCatcher: keyCatcher
@@ -47,9 +48,9 @@ Item {
     anchors.centerIn: parent
     width: Math.min(root.cardWidth, root.width - Style.gapsOut * 2)
     height: Math.min(root.cardHeight, root.height - Style.gapsOut * 2)
-    color: Color.popups.background
+    color: ShellTheme.Color.popups.background
     radius: Style.cornerRadius
-    borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.normalBorderWidth))
+    borderSpec: Border.surfaceSpec("popups", "border", ShellTheme.Color.popups.border, Math.max(1, Style.normalBorderWidth))
     padding: Style.spacing.panelPadding
 
     // Clicks inside the card must not reach the scrim behind it.

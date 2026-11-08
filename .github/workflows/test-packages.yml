@@ -68,6 +68,8 @@ jobs:
           CMAKE_C_FLAGS="-mno-avx512f" CMAKE_CXX_FLAGS="-mno-avx512f" cargo build --release
           mkdir -p releases/test
           cp target/release/voxtype releases/test/voxtype-test-linux-x86_64-avx2
+          cargo build --release -p voxtype-gguf-worker
+          cp target/release/voxtype-gguf-worker releases/test/voxtype-test-linux-x86_64-avx2.gguf-worker
 
           # Build AVX-512 (on CI this produces same as AVX2 since runners lack AVX-512)
           # Clean build cache to ensure whisper.cpp recompiles with different flags
@@ -91,6 +93,7 @@ jobs:
           # Copy tiered binaries
           cp "$RELEASE_DIR/voxtype-test-linux-x86_64-avx2" "$STAGING/usr/lib/voxtype/voxtype-avx2"
           cp "$RELEASE_DIR/voxtype-test-linux-x86_64-avx512" "$STAGING/usr/lib/voxtype/voxtype-avx512"
+          cp "$RELEASE_DIR/voxtype-test-linux-x86_64-avx2.gguf-worker" "$STAGING/usr/lib/voxtype/voxtype-gguf-worker"
           chmod 755 "$STAGING/usr/lib/voxtype/"*
 
           # Copy other files

@@ -15,6 +15,17 @@ version: '3.8'
 #   docker compose -f docker-compose.build.yml up avx512
 
 services:
+  baseline:
+    build:
+      context: .
+      dockerfile: Dockerfile.baseline
+      args:
+        VERSION: ${VERSION:-0.6.2}
+    volumes:
+      - ./releases/${VERSION:-0.6.2}:/output
+    environment:
+      - VERSION=${VERSION:-0.6.2}
+
   avx2:
     build:
       context: .

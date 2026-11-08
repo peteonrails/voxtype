@@ -1,8 +1,8 @@
 use super::{
     AudioConfig, CohereConfig, DolphinConfig, HotkeyConfig, MeetingConfig, MoonshineConfig,
-    OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig, ParakeetConfig, Profile,
-    SenseVoiceConfig, SonioxConfig, StatusConfig, StreamingConfig, TextConfig, TranscriptionEngine,
-    VadConfig, WhisperConfig,
+    OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig, ParakeetConfig,
+    ParakeetModelType, Profile, SenseVoiceConfig, SonioxConfig, StatusConfig, StreamingConfig,
+    TextConfig, TranscriptionEngine, VadConfig, WhisperConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -95,6 +95,10 @@ pub struct Config {
     #[serde(default)]
     pub osd: crate::osd::config::OsdConfig,
 
+    /// Native Linux StatusNotifierItem tray, enabled unless explicitly disabled.
+    #[serde(default)]
+    pub tray: TrayConfig,
+
     /// Meeting transcription configuration
     #[serde(default)]
     pub meeting: MeetingConfig,
@@ -111,6 +115,25 @@ pub struct Config {
     /// Use with: `voxtype record start --profile slack`
     #[serde(default)]
     pub profiles: HashMap<String, Profile>,
+}
+
+/// Tray preferences are retained on all platforms; runtime support is Linux-only.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TrayConfig {
+    #[serde(default = "default_tray_enabled")]
+    pub enabled: bool,
+}
+
+fn default_tray_enabled() -> bool {
+    true
+}
+
+impl Default for TrayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_tray_enabled(),
+        }
+    }
 }
 
 impl Default for Config {
@@ -135,6 +158,7 @@ impl Default for Config {
             vad: VadConfig::default(),
             status: StatusConfig::default(),
             osd: crate::osd::config::OsdConfig::default(),
+            tray: TrayConfig::default(),
             meeting: MeetingConfig::default(),
             state_file: default_state_file(),
             profiles: HashMap::new(),
@@ -426,6 +450,28 @@ impl Config {
         }
     }
 
+    /// Whether the active backend configuration emits plain text that needs
+    /// punctuation restoration and true-casing. This is an allow-list so a
+    /// new engine keeps its native output until its behavior is tested.
+    pub fn needs_punctuation_casing(&self) -> bool {
+        match self.engine {
+            TranscriptionEngine::Parakeet => self
+                .parakeet
+                .as_ref()
+                .is_some_and(|config| config.model_type == Some(ParakeetModelType::Ctc)),
+            // SenseVoice's built-in ITN supplies punctuation. Preserve it
+            // when enabled instead of lowercasing and reclassifying it.
+            TranscriptionEngine::SenseVoice => self
+                .sensevoice
+                .as_ref()
+                .is_some_and(|config| !config.use_itn),
+            TranscriptionEngine::Paraformer
+            | TranscriptionEngine::Dolphin
+            | TranscriptionEngine::Omnilingual => true,
+            _ => false,
+        }
+    }
+
     /// Whether the active engine will run its streaming pipeline.
     ///
     /// Streaming types text at the cursor as it is decoded, which means the
@@ -556,6 +602,41 @@ mod tests {
     use super::super::hotkey::default_hotkey_key;
     use super::super::{ActivationMode, OutputMode};
     use super::*;
+
+    #[test]
+    fn punctuation_casing_tracks_exact_engine_output_capability() {
+        let mut config = Config::default();
+        assert!(!config.needs_punctuation_casing());
+
+        config.engine = TranscriptionEngine::Paraformer;
+        assert!(config.needs_punctuation_casing());
+        config.engine = TranscriptionEngine::Dolphin;
+        assert!(config.needs_punctuation_casing());
+        config.engine = TranscriptionEngine::Omnilingual;
+        assert!(config.needs_punctuation_casing());
+
+        config.engine = TranscriptionEngine::SenseVoice;
+        config.sensevoice = Some(SenseVoiceConfig::default());
+        assert!(!config.needs_punctuation_casing());
+        config.sensevoice.as_mut().unwrap().use_itn = false;
+        assert!(config.needs_punctuation_casing());
+
+        config.engine = TranscriptionEngine::Parakeet;
+        config.parakeet = Some(ParakeetConfig::default());
+        assert!(!config.needs_punctuation_casing());
+        config.parakeet.as_mut().unwrap().model_type = Some(ParakeetModelType::Ctc);
+        assert!(config.needs_punctuation_casing());
+
+        for engine in [
+            TranscriptionEngine::Moonshine,
+            TranscriptionEngine::Cohere,
+            TranscriptionEngine::OpenVino,
+            TranscriptionEngine::Soniox,
+        ] {
+            config.engine = engine;
+            assert!(!config.needs_punctuation_casing(), "{engine}");
+        }
+    }
 
     #[test]
     fn meeting_mode_forces_soniox_async_when_user_had_realtime() {

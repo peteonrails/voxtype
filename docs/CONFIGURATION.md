@@ -2,6 +2,53 @@
 
 Complete reference for all configuration options in Voxtype.
 
+## Engine/model selection transactions
+
+Parakeet and Cohere each have separate GGUF and legacy ONNX backends. An engine
+being compiled does not imply support for both formats. `config set engine`
+preserves an installed compatible explicit model. When a retained model needs an
+unavailable backend, an intentional engine selection can choose an installed
+compatible catalog model in the same atomic save. With no compatible weights it
+fails without changing the config and prints an explicit download command.
+Explicit `config set parakeet.model` / `cohere.model` choices are never silently
+substituted. Existing configs are not migrated when loaded.
+
+Use `voxtype config validate-selection` to check the selected backend, weights
+and worker without loading a model or recording audio. Settings restart actions
+also check the final selection and refuse when the daemon reports a busy state.
+Downloads require a separate explicit command or interactive consent.
+
+## Tray language changes
+
+The microphone menu writes the existing `whisper.language` or `cohere.language`
+key and sends an internal daemon-owned selection event. It introduces no new
+configuration key, global language default, or signal that could start/stop audio.
+The hint is applied only after the active utterance completes. Model/backend,
+other engine languages, profiles and cleanup flags are not reloaded from disk.
+Supported quick choices are deliberately limited to verified named local
+Whisper/Cohere checkpoints. See the manual's Quick language selection section.
+
+## Native system tray
+
+```toml
+[tray]
+enabled = true # default, including an omitted table or key
+```
+
+Disable with `voxtype config set tray.enabled false` or `VOXTYPE_TRAY_ENABLED=false`.
+Explicit false is preserved on upgrade. Disable for one invocation with
+`voxtype --tray=false daemon`. Precedence is CLI, environment, file, built-in default.
+Restart the daemon after changing the saved setting. The terminal **Status** page
+and schema-driven graphical **Status** page expose the same `tray.enabled` key.
+
+Requires a StatusNotifierItem host (Omarchy, KDE, Waybar's tray, or GNOME with
+AppIndicator support). Idle stays visible. Recording, transcription and failures
+have distinct icons/tooltips. No GTK library is required for the tray. Embedded
+pixmaps work without installing icons; `voxtype setup icons` optionally installs
+bundled theme icons under `$XDG_DATA_HOME/icons/hicolor` (`--uninstall` removes them).
+The daemon never installs icons or rewrites configuration at startup.
+
+
 > **Tip**: For interactive editing, run `voxtype configure` — it edits the
 > same `config.toml` this document describes, preserves comments and unknown
 > fields, and validates each save before swapping the file in. The reference
@@ -51,13 +98,13 @@ Selects which speech-to-text engine to use for transcription.
 
 **Values:**
 - `whisper` - OpenAI Whisper via whisper.cpp (default, recommended)
-- `parakeet` - NVIDIA Parakeet via ONNX Runtime (requires ONNX binary)
+- `parakeet` - NVIDIA Parakeet via transcribe.cpp/GGUF or legacy ONNX Runtime
 - `moonshine` - Moonshine encoder-decoder transformer via ONNX Runtime (experimental, requires special binary)
 - `sensevoice` - Alibaba SenseVoice CTC via ONNX Runtime (CJK + English)
 - `paraformer` - FunASR Paraformer CTC via ONNX Runtime (Chinese + English)
 - `dolphin` - Dictation-optimized CTC via ONNX Runtime (Chinese + English)
 - `omnilingual` - FunASR Omnilingual CTC via ONNX Runtime (50+ languages)
-- `cohere` - Cohere Transcribe encoder-decoder via ONNX Runtime (#1 Open ASR Leaderboard, 14 languages, ~3 GB model)
+- `cohere` - Cohere Transcribe via transcribe.cpp/GGUF or legacy ONNX Runtime (14 languages)
 
 **Example:**
 ```toml
@@ -88,7 +135,8 @@ config changes; restart it with `systemctl --user restart voxtype` for the
 new engine to take effect.
 
 **Notes:**
-- Whisper, Remote Whisper, and Soniox run in every binary. The other engines (Parakeet, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual, Cohere) require an ONNX-enabled binary (`voxtype-*-onnx-*`)
+- First selection through `config set engine`, the TUI, or a schema-backed settings client seeds the compiled model default only when no model was saved. Existing explicit ONNX model names/paths and other settings are not migrated. The top-level default engine remains Whisper; this is not a global switch to Cohere.
+- Whisper, Remote Whisper, and Soniox run in every binary. Cohere and Parakeet GGUF need their GGUF client features and a matching `voxtype-gguf-worker`; `gpu-vulkan` enables both clients. Their ONNX models and the other ONNX engines require an ONNX-enabled binary (`voxtype-*-onnx-*`).
 - Each ONNX engine reads its own `[<engine>]` section (e.g. `[parakeet]`, `[cohere]`)
 - See [PARAKEET.md](PARAKEET.md) for detailed Parakeet setup instructions
 - See [MOONSHINE.md](MOONSHINE.md) for detailed Moonshine setup instructions
@@ -1318,10 +1366,10 @@ See [PARAKEET.md](PARAKEET.md) for detailed setup instructions.
 ### model
 
 **Type:** String
-**Default:** `"parakeet-tdt-0.6b-v3"`
+**Default:** `"parakeet-tdt-0.6b-v3-Q8_0.gguf"` when built with `parakeet-gguf` (including `gpu-vulkan`); otherwise `"parakeet-tdt-0.6b-v3"`.
 **Required:** No
 
-The Parakeet model to use. Can be a model name (looked up in `~/.local/share/voxtype/models/`) or an absolute path to a model directory.
+The Parakeet model to use. Can be a model name (looked up in `~/.local/share/voxtype/models/`) or an absolute path to a model directory. A name or path ending in `.gguf` is a transcribe.cpp GGUF file instead of an ONNX model directory, and runs through transcribe.cpp (see [gguf_backend](#gguf_backend)).
 
 **Example:**
 ```toml
@@ -1333,6 +1381,15 @@ model = "parakeet-tdt-0.6b-v3"
 ```toml
 [parakeet]
 model = "/opt/models/parakeet-tdt-0.6b-v3"
+```
+
+Setup downloads two GGUF files, `parakeet-tdt-0.6b-v3-F16.gguf` (1.26 GB) and `parakeet-tdt-0.6b-v3-Q8_0.gguf` (0.74 GB), through `voxtype setup model` or `voxtype setup --download --model <name>`, and verifies them against the publisher's SHA-256.
+
+**GGUF on a Vulkan GPU:**
+```toml
+[parakeet]
+model = "parakeet-tdt-0.6b-v3-F16.gguf"
+gguf_backend = "vulkan"
 ```
 
 ### model_type
@@ -1364,11 +1421,23 @@ Number of CPU threads for ONNX Runtime intra-op parallelism. Applies to the batc
 
 Parakeet's wait after you stop talking grows with the length of the dictation, so this matters most for long recordings on the CPU. On a 12-core Ryzen AI 9 HX 370, 12 threads took a 3-minute dictation from 11.7 s to 8.6 s, and more threads than physical cores were slower again. Leave it unset on battery-sensitive laptops, or set it to your physical core count for the shortest wait.
 
+With a GGUF model, this is transcribe.cpp's CPU thread count instead, and unset leaves the library's default.
+
 **Example:**
 ```toml
 [parakeet]
 threads = 12
 ```
+
+### gguf_backend
+
+**Type:** String
+**Default:** `"auto"`
+**Required:** No
+
+The transcribe.cpp compute backend for GGUF models. Ignored for ONNX models. Accepts the same values as `[cohere] gguf_backend`: `auto`, `cpu`, `cpu_accel`, `vulkan`, `metal`, `cuda`, `rocm`.
+
+`"vulkan"` requires a hardware Vulkan device and reports an error if transcribe.cpp would run on a software renderer such as llvmpipe; `"auto"` lets transcribe.cpp choose. `--features parakeet-gguf` (included in `gpu-vulkan`) lets voxtype use GGUF models; transcribe.cpp itself runs in `voxtype-gguf-worker`, and the backends available are the ones that worker was built with (`--features vulkan` for Vulkan). GGUF models do not support `streaming = true`. See [PARAKEET.md](PARAKEET.md#gguf-on-vulkan-transcribecpp) for timings.
 
 ### on_demand_loading
 
@@ -1554,7 +1623,7 @@ Cohere Transcribe is an encoder-decoder ASR model from Cohere Labs. It currently
 ### model
 
 **Type:** String
-**Default:** `"cohere-transcribe-q4f16"`
+**Default:** `"cohere-transcribe-03-2026-Q4_K_M.gguf"` when built with `cohere-gguf`; otherwise `"cohere-transcribe-q4f16"`.
 **Required:** No
 
 The Cohere model to use. ONNX models use a model name (looked up in `~/.local/share/voxtype/models/<name>/`) or a directory path. GGUF models use a `.gguf` file path, including `cohere-transcribe-03-2026-Q4_K_M.gguf`.
@@ -1662,7 +1731,7 @@ on_demand_loading = true
 
 | Option | CLI Flag | Environment Variable | Default | Description |
 |--------|----------|---------------------|---------|-------------|
-| `model` | `--model` | `VOXTYPE_MODEL` | `"cohere-transcribe-q4f16"` | Cohere model name or path |
+| `model` | `--model` | `VOXTYPE_MODEL` | GGUF Q4_K_M when enabled; otherwise `"cohere-transcribe-q4f16"` | Cohere model name or path |
 | `language` | `--language` | `VOXTYPE_LANGUAGE` | `"en"` | One of the 14 supported language codes |
 | `threads` | - | - | auto | ONNX intra-op thread count |
 | `gguf_backend` | - | - | `"auto"` | transcribe.cpp backend for GGUF models |
@@ -1695,9 +1764,9 @@ The prebuilt `voxtype-*-onnx-*` release binaries already include `cohere`, so us
 
 ### GGUF with Vulkan
 
-GGUF models use [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) in the Voxtype daemon through its Rust binding. The model and session remain loaded across recordings when `on_demand_loading = false`. This is the same `cohere` engine in Voxtype, with a different inference runtime selected by the `.gguf` extension. The ONNX model directory and GGUF file are distinct formats.
+GGUF models use [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) through its Rust binding, in a helper process, `voxtype-gguf-worker`, that voxtype starts and keeps running. It is separate because transcribe.cpp and Whisper each bundle their own copy of ggml, and the two cannot share one process. The model stays loaded across recordings when `on_demand_loading = false`. This is the same `cohere` engine in Voxtype, with a different inference runtime selected by the `.gguf` extension. The ONNX model directory and GGUF file are distinct formats.
 
-Build Voxtype with `--features gpu-vulkan`, then run `voxtype setup model` and choose a Cohere GGUF variant. To download without activating it:
+Build Voxtype with `--features gpu-vulkan` and the worker with `cargo build --release -p voxtype-gguf-worker --features vulkan` (release packages include both), then run `voxtype setup model` and choose a Cohere GGUF variant. To download without activating it:
 
 ```sh
 voxtype setup --download --model cohere-transcribe-03-2026-Q4_K_M.gguf
@@ -1714,7 +1783,7 @@ gguf_backend = "vulkan"
 language = "en"
 ```
 
-`gguf_backend = "vulkan"` requires a hardware Vulkan device and reports an error if none is selected; `"auto"` lets transcribe.cpp select the backend. `--features cohere-gguf` alone builds the CPU runtime; `--features cohere` also includes GGUF support. The Rust dependency builds transcribe.cpp from source and needs CMake and a C++ compiler; Vulkan builds also need Vulkan and SPIR-V headers plus `glslc`. Setup downloads Q4_K_M and Q8_0 from a pinned revision of the [official transcribe.cpp Cohere GGUF repository](https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf); the other published quantizations remain usable by absolute path.
+`gguf_backend = "vulkan"` requires a hardware Vulkan device and reports an error if none is selected; `"auto"` lets transcribe.cpp select the backend. `--features cohere-gguf` lets voxtype use GGUF models, and `--features cohere` includes it; the backend comes from how `voxtype-gguf-worker` was built, CPU unless built with `--features vulkan`. Building the worker compiles transcribe.cpp from source and needs CMake and a C++ compiler; Vulkan builds also need Vulkan and SPIR-V headers plus `glslc`. Setup downloads Q4_K_M and Q8_0 from Voxtype's model mirror, checked against the SHA-256 of a pinned revision of the [official transcribe.cpp Cohere GGUF repository](https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf); the other published quantizations remain usable by absolute path.
 
 ---
 
@@ -2834,6 +2903,7 @@ voxtype config set output.post_process.command "sed 's/uh, //g'"
 voxtype config set output.post_process.trim false
 voxtype config set output.post_process.fallback_on_empty false
 voxtype config set output.post_process.timeout_ms 10000
+voxtype config set output.post_process.edit_list true
 ```
 
 **Examples:**
@@ -2875,6 +2945,45 @@ the original text is used and a warning is logged.
 command = "ollama run llama3.2:1b 'Clean up:'"
 timeout_ms = 45000  # 45 second timeout for LLM
 ```
+
+### edit_list
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Require the command to return a JSON array of explicit edits instead of a
+replacement transcript. Voxtype applies only exact targets that occur once in
+the original transcription. It rejects preambles, code fences, unknown fields,
+ambiguous targets, and overlapping edits, then uses the original text if the
+contract is not satisfied.
+
+Edits are bounded cleanup, not unrestricted rewriting: each `find` span is at
+most 4,096 Unicode scalar values, its replacement is at most twice the span
+length plus eight, and Levenshtein distance is at most half the span length
+(with a four-character allowance for short corrections). Across the complete
+list, net content addition is limited to 20% of the original length or eight
+characters, whichever is greater. Any rejected edit rejects the whole list.
+These mechanical checks reduce drift; they do not prove semantic equivalence.
+
+Each edit must contain `find`, `replace`, and `reason` strings:
+
+```json
+[
+  {"find":"It are ready","replace":"It is ready","reason":"grammar"}
+]
+```
+
+```toml
+[output.post_process]
+command = "~/.config/voxtype/llm-edit-list.sh"
+edit_list = true
+```
+
+This is intended for LLM cleanup where you want bounded spelling or formatting
+changes without accepting unrelated generated text. Existing commands keep
+their plain-text behavior unless this option is enabled. Profile-specific
+post-process commands use the same setting.
 
 ### Context from Previous Dictation
 
@@ -2929,7 +3038,7 @@ Make it executable: `chmod +x ~/.config/voxtype/lm-studio-cleanup.sh`
 
 ## [profiles.*]
 
-Named profiles for context-specific settings. Profiles allow you to define different post-processing commands and output modes for different use cases, selectable at recording time via `--profile`.
+Named profiles for context-specific settings. Profiles allow you to define vocabulary, post-processing commands, and output modes for different use cases, selectable at recording time via `--profile`.
 
 ### Defining Profiles
 
@@ -2943,12 +3052,56 @@ post_process_command = "ollama run llama3.2:1b 'Format for Slack:'"
 post_process_command = "ollama run llama3.2:1b 'Format as code comment:'"
 output_mode = "clipboard"
 
+[profiles.code.vocabulary]
+terms = ["Voxtype", "Hyprland", "PipeWire"]
+terms_file = "/home/me/.config/voxtype/work-terms.json"
+
 [profiles.email]
 post_process_command = "ollama run llama3.2:1b 'Format as professional email:'"
 post_process_timeout_ms = 45000
 ```
 
 ### Profile Options
+
+#### vocabulary.terms
+
+**Type:** Array of strings
+
+**Default:** `[]`
+**Required:** No
+
+Canonical spellings for product names, people, acronyms, and jargon used by
+this profile. Voxtype sends the terms through each backend's native vocabulary
+mechanism when one exists: the local Whisper and whisper-cli prompts, the
+OpenAI-compatible remote `prompt` field, and Soniox `context.terms`. An
+explicit `[whisper] initial_prompt` or `[soniox] terms` list is preserved and
+the profile terms are appended.
+
+When text becomes final, Voxtype also corrects only unambiguous phonetic
+near-matches. Provisional streaming text is not corrected. Exact
+case-insensitive matches receive the configured casing. Short terms, URLs,
+email addresses, paths, ties, and known ordinary word collisions are left
+unchanged. Correction runs before cleanup stages; `[text.replacements]` still
+runs last and can override it.
+
+#### vocabulary.terms_file
+
+**Type:** Path
+
+**Default:** None
+**Required:** No
+
+Path to a UTF-8 JSON array of additional terms, for example:
+
+```json
+["Shae Wilde", "PipeWire", "Tailscale"]
+```
+
+The file is loaded once when the daemon starts and merged with `terms`.
+Invalid or unreadable files disable vocabulary for that profile and write a
+warning to the log. Restart the daemon after editing the file. Streaming
+backends receive the terms when the session starts, and correction applies to
+final segments only, never provisional text.
 
 #### post_process_command
 
@@ -3016,7 +3169,25 @@ post_process_timeout_ms = 60000
 
 ## [text]
 
-Controls text post-processing after transcription.
+Controls text post-processing after transcription. The terminal and graphical
+settings section is named **Text Cleanup**; the TOML table remains `[text]`.
+Each cleanup stage is independent. The optional model switch does not enable
+restart collapse or change deterministic choices.
+
+| Config key | Enable / disable CLI flags | Environment variable |
+|---|---|---|
+| `text.spoken_punctuation` | `--spoken-punctuation` / `--no-spoken-punctuation` | `VOXTYPE_SPOKEN_PUNCTUATION` |
+| `text.filter_filler_words` | `--filter-fillers` / `--no-filter-fillers` | `VOXTYPE_FILTER_FILLERS` |
+| `text.collapse_restarts` | `--collapse-restarts` / `--no-collapse-restarts` | `VOXTYPE_COLLAPSE_RESTARTS` |
+| `text.repair_sentence_breaks` | `--repair-sentence-breaks` / `--no-repair-sentence-breaks` | `VOXTYPE_REPAIR_SENTENCE_BREAKS` |
+| `text.format_numbers` | `--format-numbers` / `--no-format-numbers` | `VOXTYPE_FORMAT_NUMBERS` |
+| `text.lard_disfluency` | `--lard-disfluency` / `--no-lard-disfluency` | `VOXTYPE_LARD_DISFLUENCY` |
+
+CLI flags override environment values, which override the config file. TUI edits
+operate on the file layer only, preserving omitted options unless you change them.
+The TUI reads the canonical defaults, including the existing distinction between
+an absent `[text]` table and omitted fields within a present table. Saving an
+unrelated option does not pin extra cleanup keys into the file.
 
 > **Applied per committed segment when streaming is enabled.** Streaming types
 > text at the cursor as it is decoded; `spoken_punctuation`, `replacements`,
@@ -3026,6 +3197,77 @@ Controls text post-processing after transcription.
 > transcript is processed once at the end.
 > [`[output.post_process]`](#outputpost_process) remains inactive while
 > streaming; the daemon warns at startup if it is configured.
+
+### lard_disfluency and lard_model_path
+
+**Types:** Boolean and optional local file path
+**Defaults:** `false` and the XDG data directory's `voxtype/models/lard-disfluency-v1.vxdf`
+
+Opt in to English-only, trained disfluency removal. Select an explicit English
+engine language (`en`, `en-US`, or `en_US`); automatic or unsupported languages
+skip this stage. Vocabulary correction runs first, followed by filler filtering
+and trained disfluency cleanup, punctuation/casing, number formatting, then user
+replacements. User replacements remain authoritative.
+
+The compact VXDF model is separately licensed under CC BY-SA 4.0; see
+`assets/models/lard-disfluency-v1.MODEL_CARD.md` for provenance and evaluation.
+Install it explicitly, then enable cleanup:
+
+```bash
+voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf
+voxtype setup lard --status
+voxtype config set text.lard_disfluency true
+```
+
+No default download URL is enabled until publication approval. An explicit
+`voxtype setup lard --url https://your-approved-host/model.vxdf` also works,
+but must match the pinned 65,560-byte artifact and SHA-256
+`f11b45d644b2d829349df2ac2ad3d69c9cf19cd3fae888c69268bddf64cfb354`.
+A failed download or checksum check does not replace an installed model.
+Startup never downloads weights. Missing, corrupt, or unsupported models skip
+only the LARD stage; other configured cleanup still applies. The stage never
+replaces a whole dictation with empty output.
+
+Use `--lard-disfluency`, `--no-lard-disfluency`, or `--lard-model-path FILE`
+for a CLI override. Environment variables are `VOXTYPE_LARD_DISFLUENCY` and
+`VOXTYPE_LARD_MODEL_PATH`; CLI overrides take priority.
+
+Batch output and finalized streaming segments use the same processor.
+Provisional streaming text stays raw until finalization. Revising already typed
+provisional text requires a backspace-capable output backend; if unavailable,
+that segment stays unchanged. File-mode streaming processes the whole transcript
+once at completion. LLM post-processing remains unsupported during streaming.
+
+### punctuation_casing
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Restores punctuation, sentence boundaries, and letter casing for plain CTC
+output: Paraformer, Dolphin, Omnilingual, Parakeet configured as `ctc`, and
+SenseVoice when its own `use_itn` is off. The capability gate is strict.
+SenseVoice with ITN, Whisper, Parakeet TDT, Cohere, Moonshine, OpenVINO,
+Soniox, and remote transcription keep their native output unchanged.
+
+```bash
+voxtype setup punctuation
+voxtype config set text.punctuation_casing true
+```
+
+The local classifier is
+`1-800-BAD-CODE/xlm-roberta_punctuation_fullstop_truecase`, licensed
+Apache-2.0. It is about 1.1 GB and supports 47 languages: af, am, ar, bg, bn,
+de, el, en, es, et, fa, fi, fr, gu, hi, hr, hu, id, is, it, ja, kk, kn, ko,
+ky, lt, lv, mk, ml, mr, nl, or, pa, pl, ps, pt, ro, ru, rw, so, sr, sw, ta,
+te, tr, uk, and zh. Region forms such as `pt-BR` use their base language.
+
+If the model is missing, the build lacks the `punctuation-casing` feature, the
+language is unsupported, or inference fails, Voxtype logs a warning and sends
+the original engine transcript through the remaining cleanup stages. It never
+drops the dictation. CLI overrides are `--punctuation-casing` and
+`--no-punctuation-casing`; the environment equivalent is
+`VOXTYPE_PUNCTUATION_CASING`.
 
 ### spoken_punctuation
 
@@ -3148,7 +3390,8 @@ VOXTYPE_SMART_AUTO_SUBMIT=true voxtype
 ### repair_sentence_breaks
 
 **Type:** Boolean
-**Default:** `false`
+**Generated config:** `true`
+**Compatibility default when omitted:** `false`
 **Required:** No
 
 Repairs sentence boundaries the engine placed at a pause rather than at the end of a thought. Two rules that only work together:
@@ -3163,7 +3406,7 @@ what are the other phases? we have here.
 
 The inversion test is what keeps it safe. "How might we ship this." becomes a question; "What we need is a switch.", "How to install this." and "What a mess." are left alone, because none of them inverts. Joining skips abbreviations (`e.g.`, `p.m.`), decimals (`3.30`), and lower-case proper nouns (`iPhone`).
 
-This is a heuristic standing in for a punctuation model, so it is deliberately narrow and off by default.
+This is a deliberately narrow heuristic. Voxtype writes it as `true` in newly generated configurations, while existing configurations that omit the key retain the compatibility default of `false`.
 
 **Example:**
 
@@ -3175,7 +3418,8 @@ repair_sentence_breaks = true
 ### format_numbers
 
 **Type:** Boolean
-**Default:** `false`
+**Generated config:** `true`
+**Compatibility default when omitted:** `false`
 **Required:** No
 
 Converts dictated quantities into written form - inverse text normalization.
@@ -3189,6 +3433,8 @@ Converts dictated quantities into written form - inverse text normalization.
 That also means it does less than you might expect on engines that already normalize numbers themselves. Parakeet, for example, emits "22 open issues" as digits without help, so there is nothing left to convert.
 
 Every release build includes it. If you build voxtype yourself with `--no-default-features`, add `--features itn` back; a build without it ignores `format_numbers` and logs a warning at startup.
+
+Voxtype writes this as `true` in newly generated configurations. Existing configurations that omit the key retain the compatibility default of `false`.
 
 **Example:**
 
@@ -3229,7 +3475,8 @@ This runs after filler-word filtering and after spoken-punctuation conversion - 
 ### filter_filler_words
 
 **Type:** Boolean
-**Default:** `true`
+**Generated config:** `true`
+**Compatibility default:** `true`
 **Required:** No
 
 When `true` (the default), strips common filler words ("uh", "um", "er", ...) from each transcription before output. Matching is case-insensitive and respects word boundaries, so words like "umbrella" or "summer" are not affected. Surrounding commas, semicolons, and double spaces are cleaned up so the result reads naturally. Set to `false` to disable.
@@ -3292,10 +3539,11 @@ Voice Activity Detection configuration. When enabled, VAD filters silence-only r
 ### enabled
 
 **Type:** Boolean
-**Default:** `false`
+**Generated config:** `true`
+**Compatibility default when omitted:** `false`
 **Required:** No
 
-Enable Voice Activity Detection. When enabled, recordings with no detected speech are rejected before transcription, saving processing time and preventing hallucinations on silent audio.
+Enable Voice Activity Detection. When enabled, recordings with no detected speech are rejected before transcription, saving processing time and preventing hallucinations on silent audio. Newly generated configurations enable VAD with the model-free `energy` backend. Existing configurations that omit `[vad]` remain disabled.
 
 **Example:**
 ```toml
@@ -3311,7 +3559,8 @@ voxtype --vad daemon
 ### backend
 
 **Type:** String (`auto`, `energy`, `whisper`)
-**Default:** `auto`
+**Generated config:** `energy`
+**Compatibility default when omitted:** `auto`
 **Required:** No
 
 VAD detection algorithm to use:
@@ -3675,11 +3924,17 @@ Path to a state file for external integrations like Waybar or Polybar. When conf
 **Values written:**
 - `idle` - Ready for input
 - `recording` - Push-to-talk active, capturing audio
-- `transcribing` - Processing audio through Whisper
+- `streaming` - Capturing audio with a streaming engine
+- `transcribing` - Processing the recorded audio
 
 **Special values:**
 - `"auto"` - Uses `$XDG_RUNTIME_DIR/voxtype/state` (default, recommended)
 - `"disabled"` - Turns off state file (also accepts `"none"`, `"off"`, `"false"`)
+
+While the state file is enabled, the daemon also writes `recording.json` and
+`outcome.json` to `$XDG_RUNTIME_DIR/voxtype/` for OSD frontends. See
+[OSD runtime files](#osd-runtime-files). Disabling the state file turns
+those off too.
 
 **Example:**
 ```toml
@@ -3829,8 +4084,14 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_EITYPE_XKB_LAYOUT` | string | `output.eitype_xkb_layout` |
 | `VOXTYPE_EITYPE_XKB_VARIANT` | string | `output.eitype_xkb_variant` |
 | `VOXTYPE_SPOKEN_PUNCTUATION` | bool | `text.spoken_punctuation` |
+| `VOXTYPE_LARD_DISFLUENCY` | bool | `text.lard_disfluency` |
+| `VOXTYPE_LARD_MODEL_PATH` | path | `text.lard_model_path` |
+| `VOXTYPE_PUNCTUATION_CASING` | bool | `text.punctuation_casing` |
 | `VOXTYPE_SMART_AUTO_SUBMIT` | bool | `text.smart_auto_submit` |
 | `VOXTYPE_FILTER_FILLERS` | bool | `text.filter_filler_words` |
+| `VOXTYPE_COLLAPSE_RESTARTS` | bool | `text.collapse_restarts` |
+| `VOXTYPE_REPAIR_SENTENCE_BREAKS` | bool | `text.repair_sentence_breaks` |
+| `VOXTYPE_FORMAT_NUMBERS` | bool | `text.format_numbers` |
 
 Boolean values: `true`, `1` to enable; `false`, `0` to disable.
 
@@ -4118,16 +4379,16 @@ voxtype config schema          # lists every settable key
 frontend = "quickshell"
 style = "default"      # Built-in style, package name, or package path
 # palette = "omarchy" # omit for auto, or use omarchy, fallback, package, custom
-layout = "compact"    # compact, wide, minimal, tile, orb, custom
+layout = "compact"    # compact, wide, minimal, pill, shell, tile, orb, custom
 
 # Explicit trusted package path. Custom QML is not sandboxed.
 # plugin_path = "~/.config/voxtype/osd/my-style"
 
 [osd.frame]
 background = "background" # semantic role, literal color, or "none"
-border = "state"          # state, semantic role, literal color, or "none"
+border = "state"          # state, aura, semantic role, literal color, or "none"
 glow = true               # voice-reactive soft glow around the frame
-halo = true               # outline halo, used most visibly by orb recipes
+halo = true               # voice-reactive outline; a soft glow around orb layouts
 
 [[osd.visual.layers]]
 type = "pulse"
@@ -4152,27 +4413,136 @@ recipe colors such as `accent`, `background`,
 `foreground`, `success`, `warning`, and `error` resolve from the active
 Omarchy theme at `~/.config/omarchy/current/theme/colors.toml`. Literal colors
 such as `"#ff6600"` are allowed when a recipe needs to override the theme.
+Decorative package roles follow the same palette: `grid` and `glow` are
+translucent accent, `core` is translucent foreground, and `amber` follows
+`warning` (which need not be yellow in the selected theme).
 
 With the Quickshell frontend, Omarchy theme switches apply live: the launcher
 watches the active theme and rewrites the resolved style, and the OSD picks up
 the new colors immediately without a restart. The GTK4 frontend reads the
 theme at startup, so it picks up a new theme the next time the OSD starts.
 
-Recipe layer `type` can be `shadow`, `background`, `waveform`, `bars`,
-`pulse`, `ring`, `meter`, `icon`, or `label`. Layer `source` can be `peak`,
+Recipe layer `type` can be `shadow`, `background`, `waveform`, `line`,
+`bars`, `dots`, `pulse`, `ring`, `meter`, `icon`, or `label`. Layer `source` can be `peak`,
 `rms`, `vad`, `state`, or `none`. Layer tunables you don't set use each
 layer type's own defaults; explicit values, including `0.0`, are honored.
 On `meter` layers, `color` sets the low-zone color while the mid/high
 gradient stops keep the `warning`/`error` roles; on `shadow` layers,
 `color` tints the backdrop (default black).
 
-`layout` controls the outer OSD frame. `compact`, `wide`, and `minimal` are
-strip layouts; `tile` is a square card; `orb` is a circular frame intended for
+`waveform` and `bars` layers place peak levels on a decibel scale: -52 dBFS
+(room noise) is empty and -6 dBFS is full height, and each column shows the
+loudest sample in its slice of history, so syllables and pauses stay
+visible for quiet and loud voices alike. A layer's `gain` multiplies that
+level. While transcribing, these layers show a slow travelling ripple
+instead of the last audio, and `meter` layers drain to empty. `icon` layers
+draw vector icons, so no Nerd Font is needed.
+
+`line` and `dots` layers show the live level rather than history. A `line`
+layer draws three thin strands, in `color`, `secondary_color`, and a blend
+of the two, that swell with your voice and drift apart, pinned to the
+baseline at both ends; `radius` sets the strand thickness. A `dots` layer
+draws a short row of round dots that stretch into capsules as you speak.
+The center dot shows the current level and the outer dots lag slightly
+behind, so each syllable ripples outward. While transcribing, the line
+shimmers and the dots bounce in turn.
+
+`layout` controls the outer OSD frame. `compact`, `wide`, `minimal`, `pill`,
+and `shell` are strip layouts; `pill` is a short capsule with fully rounded
+ends. `tile` is a square card; `orb` is a circular frame intended for
 ring-focused recipes.
+
+`shell` keeps a compact strip but follows Omarchy Shell's chrome: live
+Hyprland `decoration:rounding`, popup border colors/gradient, border alpha
+and uniform width, monospace text, and font-scaled spacing. It reads
+`[popups]` border/text, `[font] base-size`, and `[spacing]` scale tokens
+from the active theme's `shell.toml`, overlaid by
+`~/.config/omarchy/shell.toml`. Like Omarchy's own OSD, its theme-background
+fill stays at 97% opacity instead of dimming between words. Missing tokens
+use shell defaults and the active palette; without Hyprland, corners are
+square. This is opt-in and leaves all other layouts unchanged. The
+`shell-line` and `shell-dots` recipes pair it with Capsule's flowing voice
+strands or Aura's voice-assistant dots, respectively.
 
 `[osd.frame]` controls the host frame around the recipe. Set
 `background = "none"` or `border = "none"` for frameless recipes; the visual
-layers continue to render normally.
+layers continue to render normally. `border = "aura"` draws a gradient edge
+in the theme's accent and state colors, with a soft glow, that turns slowly
+while listening, speeds up and brightens with your voice, and spins while
+transcribing.
+
+The shipped recipes include five minimal styles built on these: `capsule`
+(a pill with a voice line), `shell-line` (the same line in shell chrome),
+`shell-dots` (voice-assistant dots in shell chrome), `aura` (a pill with an
+aura edge and dots), and `halo` (a round badge with an aura edge and a voice
+line). Apply one with
+`voxtype setup osd --recipe capsule`.
+
+Around the recipe, the built-in Quickshell HUD also shows:
+
+- **Elapsed time** while recording or streaming. In the last stretch before
+  `audio.max_duration_secs` (the final 15 seconds, or the final half of a
+  limit under 30 seconds) it becomes a countdown, amber and then red for the
+  last 5 seconds. Strip layouts also draw a bar along the card's bottom edge
+  that drains toward the limit.
+- **Engine and model** in a small chip for the first couple of seconds of
+  each recording, which confirms a `--model` override or a modifier-selected
+  model.
+- **The result** for a moment after the session ends: a check with the
+  number of characters delivered, "No speech detected", "Nothing
+  transcribed", "Transcription failed", or "Couldn't type the text", with a
+  note when the time limit ended the recording. Cancelled recordings,
+  accidental taps, and `record start --no-osd` sessions show no result.
+
+In strip layouts the clock sits at the right end of the card. In `tile` and
+`orb` layouts the clock, result message, and model chip sit just outside the
+card. The HUD fades and scales in when a recording starts and out when it
+ends. These need a daemon that writes the [OSD runtime files](#osd-runtime-files);
+against an older daemon the HUD shows the recording without them.
+
+### OSD runtime files
+
+The state file holds a single word, and that contract is stable, so the
+daemon publishes extra detail for OSD frontends in sibling files in
+`$XDG_RUNTIME_DIR/voxtype/`. Both are written atomically (to a temporary
+file, then renamed), so a reader never sees a partial file. Both are skipped
+when `state_file = "disabled"`, and a failed write is logged and otherwise
+ignored.
+
+`recording.json` exists from the start of a recording or streaming session
+until the daemon returns to idle:
+
+```json
+{"mode":"recording","started_at_ms":1760000000000,"max_duration_secs":60,"engine":"whisper","model":"base.en"}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `mode` | `recording` or `streaming` |
+| `started_at_ms` | Wall-clock start, Unix milliseconds |
+| `max_duration_secs` | The effective recording limit (config, then `VOXTYPE_MAX_DURATION_SECS`, then `--max-duration`) |
+| `engine` | Engine serving this recording, lowercase |
+| `model` | Model serving this recording, after any `--model` override |
+
+`outcome.json` is rewritten each time a session ends:
+
+```json
+{"outcome":"ok","session_started_at_ms":1760000000000,"suppressed":false,"chars":42,"limit_reached":false,"at_ms":1760000004200}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `outcome` | `ok`, `no_speech`, `too_short`, `empty`, `cancelled`, `error`, or `output_failed` |
+| `session_started_at_ms` | Matches the recording's `started_at_ms`; reject results belonging to an older session |
+| `suppressed` | Durable `--no-osd` policy; never display a result when true, including after a frontend restart |
+| `chars` | Characters delivered; `0` unless `outcome` is `ok` |
+| `limit_reached` | `true` when `max_duration_secs` ended the session rather than the user |
+| `at_ms` | When the session ended, Unix milliseconds; tells a fresh outcome from an old one |
+
+The built-in frontend waits until recording ends before showing a matching result.
+Pre-release outcome files without explicit session identity and suppression fields
+are ignored rather than replayed unsafely. Older released daemons that publish no
+outcome files retain their original behavior.
 
 ### Style packages
 
@@ -4181,7 +4551,13 @@ optional assets under `assets/`, and optionally a QML entry file. A
 manifest-only package recolors and rearranges the built-in renderer; a package
 with a `qml_entry` replaces the renderer entirely. Package QML is trusted
 code and only loads when the package is selected through `style` or
-`plugin_path`. A manifest only overrides the `[osd]` fields it explicitly
+`plugin_path`. The custom item is anchored to fill the OSD window, positions
+itself, and receives each of these properties it declares: `daemonState`,
+`audio` (the shared audio bridge), `theme` (the style loader, with
+`theme.color(role, fallback)` and `theme.config`), `recipe`, `assetRoot`,
+`session` (parsed `recording.json`, or `null`), and `outcome` (parsed
+`outcome.json`, or `null`). They are re-sent when the state, session, or
+outcome changes and when the style reloads. A manifest only overrides the `[osd]` fields it explicitly
 sets: a package that ships only `[colors]` keeps your configured `layout`,
 `[osd.frame]`, and `[[osd.visual.layers]]` recipe, and an explicit `palette`
 in your config always beats the manifest's.

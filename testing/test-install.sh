@@ -134,6 +134,23 @@ test_binary_exists() {
     fi
 }
 
+test_gguf_worker_exists() {
+    if [[ -x /usr/lib/voxtype/voxtype-gguf-worker || -x /usr/bin/voxtype-gguf-worker ]]; then
+        log_pass "GGUF worker is installed beside voxtype"
+    else
+        log_fail "GGUF worker is missing from the package"
+        return 1
+    fi
+
+    local directory
+    for directory in /usr/lib/voxtype /usr/bin; do
+        if [[ -x "$directory/voxtype-vulkan" && ! -x "$directory/voxtype-gguf-worker-vulkan" ]]; then
+            log_fail "Vulkan GGUF worker is missing or not executable beside $directory/voxtype-vulkan"
+            return 1
+        fi
+    done
+}
+
 # Test 3: Binary runs without SIGILL
 test_binary_runs() {
     log_info "Testing binary execution (checking for SIGILL)..."
@@ -242,6 +259,7 @@ main() {
 
     echo "--- Binary Tests ---"
     test_binary_exists
+    test_gguf_worker_exists
     test_binary_runs
     test_help_command
     test_binary_variant

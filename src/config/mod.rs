@@ -33,7 +33,7 @@ pub use engines::{
     TranscriptionEngine,
 };
 pub use hotkey::{ActivationMode, HotkeyConfig};
-pub use language::LanguageConfig;
+pub use language::{LanguageConfig, COHERE_LANGUAGES};
 pub use load::{load_config, save_config};
 pub use meeting::{
     MeetingAudioConfig, MeetingConfig, MeetingDiarizationConfig, MeetingSummaryConfig,
@@ -43,8 +43,8 @@ pub use output::{
     default_language_to_layout, AppliedLanguageXkbHint, FileMode, OutputConfig, OutputDriver,
     OutputMode,
 };
-pub use profile::{PostProcessConfig, Profile};
-pub use root::Config;
+pub use profile::{PostProcessConfig, Profile, VocabularyConfig};
+pub use root::{Config, TrayConfig};
 pub use status::{ResolvedIcons, StatusConfig, StatusIconOverrides};
 pub use streaming::StreamingConfig;
 pub use text::TextConfig;

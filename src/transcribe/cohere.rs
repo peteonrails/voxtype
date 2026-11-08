@@ -100,9 +100,7 @@ fn lang_token(lang: &str) -> Option<i64> {
     })
 }
 
-const SUPPORTED_LANGUAGES: &[&str] = &[
-    "ar", "de", "el", "en", "es", "fr", "it", "ja", "ko", "nl", "pl", "pt", "vi", "zh",
-];
+use crate::config::COHERE_LANGUAGES as SUPPORTED_LANGUAGES;
 
 const MAX_TOKENS_PER_SECOND: f32 = 8.0;
 const ABSOLUTE_MAX_TOKENS: usize = 1024;

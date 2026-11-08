@@ -33,6 +33,7 @@ use ort::session::builder::{BuilderResult, SessionBuilder};
 /// the modified builder; if no EPs are compiled in or registration
 /// fails, falls through unchanged and ort uses the CPU EP.
 #[cfg(feature = "onnx-common")]
+#[allow(clippy::result_large_err)] // ort owns the public BuilderResult error shape.
 pub fn register_gpu_eps(
     builder: SessionBuilder,
     engine_label: &str,

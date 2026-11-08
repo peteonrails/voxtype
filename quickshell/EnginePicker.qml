@@ -8,7 +8,7 @@
 //
 // ## Read path
 //
-// 1. Available engines: the canonical list of 8 transcription engines
+// 1. Available engines: the canonical list of 9 transcription engines
 //    is hardcoded here to match `ENGINE_NAMES` in `src/config_set.rs`.
 //    Whether the running binary was compiled with the matching Cargo
 //    feature is discovered by spawning `voxtype info variants --json`
@@ -158,7 +158,8 @@ PanelWindow {
         { name: "paraformer",  label: "Paraformer",  blurb: "FunASR CTC encoder" },
         { name: "dolphin",     label: "Dolphin",     blurb: "Dictation-optimized CTC" },
         { name: "omnilingual", label: "Omnilingual", blurb: "FunASR 50+ languages" },
-        { name: "cohere",      label: "Cohere",      blurb: "Whisper-style; top of OpenASR" }
+        { name: "cohere",      label: "Cohere",      blurb: "Whisper-style; top of OpenASR" },
+        { name: "openvino",    label: "OpenVINO",    blurb: "OpenVINO Whisper; Intel NPU/GPU/CPU" }
     ]
 
     // ----- internal state -----
@@ -455,9 +456,9 @@ PanelWindow {
     Rectangle {
         id: card
         width: 420
-        // Height grows with the engine list + chrome.
-        // Header (~28) + 8 rows (~36 each) + status line (~20) + padding.
-        height: 28 + root.engines.length * 36 + 20 + 2 * VT.Theme.padding + 16
+        // Size to the layout so the card grows with the engine list, the
+        // row spacing, and the status line instead of clipping them.
+        height: cardLayout.implicitHeight + 2 * VT.Theme.padding
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.verticalCenter: parent.verticalCenter
         radius: VT.Theme.cornerRadius
@@ -489,7 +490,7 @@ PanelWindow {
             event.accepted = true;
         }
         Keys.onPressed: function(event) {
-            // Number keys 1..8 jump-select then commit.
+            // Number keys 1..9 jump-select then commit.
             if (event.key >= Qt.Key_1 && event.key <= Qt.Key_9) {
                 const idx = event.key - Qt.Key_1;
                 if (idx < root.engines.length) {
@@ -501,6 +502,7 @@ PanelWindow {
         }
 
         ColumnLayout {
+            id: cardLayout
             anchors.fill: parent
             anchors.margins: VT.Theme.padding
             spacing: 8
@@ -537,7 +539,9 @@ PanelWindow {
                     engineName: modelData.name
                     engineLabel: modelData.label
                     blurb: modelData.blurb
-                    shortcut: (index + 1).toString()
+                    // Only keys 1..9 are bound, so rows past the ninth
+                    // get no hint rather than a "[10]" that does nothing.
+                    shortcut: index < 9 ? (index + 1).toString() : ""
                     isActive: modelData.name === root._activeEngine
                     isSelected: index === root._selectedIndex
                     isAvailable: root._engineAvailable(modelData.name)

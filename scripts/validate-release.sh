@@ -7,6 +7,8 @@
 #   3. All binaries have unique SHA256 hashes
 #   4. Baseline/AVX2/Vulkan binaries have no AVX-512 contamination
 #   5. AVX-512 binaries have AVX-512 instructions
+#   6. Every release binary has its matching GGUF worker
+#   7. Main binaries and workers stay within their glibc caps
 #
 # Usage:
 #   ./scripts/validate-release.sh [version]
@@ -52,6 +54,14 @@ ONNX_BINARIES=(
     "voxtype-${VERSION}-linux-x86_64-onnx-migraphx"
 )
 
+# Every release binary has a separately built GGUF worker. The suffix keeps
+# workers for different ISA floors and GPU capabilities distinct while the
+# release assets share one directory.
+WORKER_BINARIES=()
+for binary in "${WHISPER_BINARIES[@]}" "${ONNX_BINARIES[@]}"; do
+    WORKER_BINARIES+=("${binary}.gguf-worker")
+done
+
 # OSD frontends and the audio-bridge sidecar, built by Dockerfile.onnx.
 # Shipped as their own release assets and consumed by the voxtype-bin AUR
 # package, so a release missing them is incomplete (#488).
@@ -67,12 +77,21 @@ MUST_BE_CLEAN=(
     "voxtype-${VERSION}-linux-x86_64-baseline"
     "voxtype-${VERSION}-linux-x86_64-avx2"
     "voxtype-${VERSION}-linux-x86_64-vulkan"
+    "voxtype-${VERSION}-linux-x86_64-baseline.gguf-worker"
+    "voxtype-${VERSION}-linux-x86_64-avx2.gguf-worker"
+    "voxtype-${VERSION}-linux-x86_64-vulkan.gguf-worker"
+    "voxtype-${VERSION}-linux-x86_64-onnx-avx2.gguf-worker"
+    "voxtype-${VERSION}-linux-x86_64-onnx-cuda-12.gguf-worker"
+    "voxtype-${VERSION}-linux-x86_64-onnx-cuda-13.gguf-worker"
+    "voxtype-${VERSION}-linux-x86_64-onnx-migraphx.gguf-worker"
 )
 
 # Binaries that MUST have AVX-512 instructions
 MUST_HAVE_AVX512=(
     "voxtype-${VERSION}-linux-x86_64-avx512"
     "voxtype-${VERSION}-linux-x86_64-onnx-avx512"
+    "voxtype-${VERSION}-linux-x86_64-avx512.gguf-worker"
+    "voxtype-${VERSION}-linux-x86_64-onnx-avx512.gguf-worker"
 )
 
 FAILED=false
@@ -87,6 +106,7 @@ ALL_BINARIES=(
     "${WHISPER_BINARIES[@]}"
     "${ONNX_BINARIES[@]}"
     "${COMPANION_BINARIES[@]}"
+    "${WORKER_BINARIES[@]}"
 )
 FOUND_BINARIES=()
 MISSING_BINARIES=()
@@ -119,7 +139,13 @@ if [[ "$VERSION" != "$BASE_VERSION" ]]; then
 else
     echo "Checking version strings..."
 fi
-for binary in "${FOUND_BINARIES[@]}"; do
+VERSIONED_BINARIES=(
+    "${WHISPER_BINARIES[@]}"
+    "${ONNX_BINARIES[@]}"
+    "${COMPANION_BINARIES[@]}"
+)
+for binary in "${VERSIONED_BINARIES[@]}"; do
+    [[ -f "${RELEASE_DIR}/${binary}" ]] || continue
     REPORTED_VERSION=$("${RELEASE_DIR}/${binary}" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
     if [[ "$REPORTED_VERSION" == "$BASE_VERSION" ]]; then
         echo "  ✓ ${binary}: v${REPORTED_VERSION}"
@@ -135,7 +161,8 @@ echo "Checking hash uniqueness..."
 declare -A HASH_TO_BINARY
 HASH_DUPLICATES=false
 
-for binary in "${FOUND_BINARIES[@]}"; do
+for binary in "${VERSIONED_BINARIES[@]}"; do
+    [[ -f "${RELEASE_DIR}/${binary}" ]] || continue
     HASH=$(sha256sum "${RELEASE_DIR}/${binary}" | cut -d' ' -f1)
     SHORT_HASH="${HASH:0:12}"
 
@@ -154,6 +181,42 @@ if [[ "$HASH_DUPLICATES" == "true" ]]; then
     echo ""
     echo "  ERROR: Duplicate hashes detected!"
     echo "  This usually means one build overwrote another."
+fi
+
+# 6. Check glibc symbol requirements. Ubuntu 22.04 variants cap at 2.35;
+# Ubuntu 24.04 variants cap at 2.39. Workers are checked against the same cap
+# as the main binary they accompany.
+if command -v objdump &> /dev/null; then
+    echo "Checking glibc compatibility..."
+    for binary in "${WHISPER_BINARIES[@]}" "${ONNX_BINARIES[@]}" "${WORKER_BINARIES[@]}"; do
+        [[ -f "${RELEASE_DIR}/${binary}" ]] || continue
+        case "$binary" in
+            *-baseline|*-baseline.gguf-worker|*-avx2|*-avx2.gguf-worker|*-avx512|*-avx512.gguf-worker)
+                # ONNX variants use Ubuntu 24.04 despite sharing these suffixes.
+                if [[ "$binary" == *-onnx-* ]]; then
+                    max_allowed=2.39
+                else
+                    max_allowed=2.35
+                fi
+                ;;
+            *) max_allowed=2.39 ;;
+        esac
+        max_glibc=$(objdump -T "${RELEASE_DIR}/${binary}" 2>/dev/null \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
+            | sed 's/GLIBC_//' \
+            | sort -V \
+            | tail -1 || true)
+        if [[ -z "$max_glibc" ]]; then
+            echo "  ✗ ${binary}: no GLIBC symbols found"
+            FAILED=true
+        elif [[ "$(printf '%s\n%s\n' "$max_allowed" "$max_glibc" | sort -V | tail -1)" != "$max_allowed" ]]; then
+            echo "  ✗ ${binary}: GLIBC_${max_glibc} exceeds GLIBC_${max_allowed}"
+            FAILED=true
+        else
+            echo "  ✓ ${binary}: GLIBC_${max_glibc} (max GLIBC_${max_allowed})"
+        fi
+    done
+    echo ""
 fi
 echo ""
 
@@ -223,7 +286,8 @@ else
     echo ""
     echo "SHA256 checksums for release:"
     echo ""
-    for binary in "${FOUND_BINARIES[@]}"; do
+    for binary in "${VERSIONED_BINARIES[@]}" "${WORKER_BINARIES[@]}"; do
+        [[ -f "${RELEASE_DIR}/${binary}" ]] || continue
         sha256sum "${RELEASE_DIR}/${binary}"
     done
 fi

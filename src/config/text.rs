@@ -7,6 +7,18 @@ use serde::{Deserialize, Serialize};
 /// Text processing configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TextConfig {
+    /// Apply the optional English-only LARD disfluency model. Never downloads at startup.
+    #[serde(default)]
+    pub lard_disfluency: bool,
+    /// Local VXDF model; defaults to the XDG data directory.
+    #[serde(default)]
+    pub lard_model_path: Option<std::path::PathBuf>,
+    /// Restore punctuation, sentence boundaries, and letter casing for
+    /// engines whose output is plain uncased CTC text. Engines that already
+    /// supply these features are left untouched.
+    #[serde(default)]
+    pub punctuation_casing: bool,
+
     /// Enable spoken punctuation conversion (e.g., "period" → ".")
     #[serde(default)]
     pub spoken_punctuation: bool,
@@ -60,6 +72,9 @@ pub struct TextConfig {
 impl Default for TextConfig {
     fn default() -> Self {
         Self {
+            lard_disfluency: false,
+            lard_model_path: None,
+            punctuation_casing: false,
             spoken_punctuation: false,
             replacements: HashMap::new(),
             smart_auto_submit: false,

@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as ShellTheme
 import qs.Ui
 
 // Left rail: the search box, then one row per section in schema order.
@@ -90,7 +91,7 @@ Item {
       visible: root.searching
       width: parent.width
       text: "Showing matches from every section."
-      color: Qt.darker(Color.foreground, 1.6)
+      color: Qt.darker(ShellTheme.Color.foreground, 1.6)
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
       wrapMode: Text.WordWrap

@@ -54,6 +54,9 @@ fn apply_transcribe_model(config: &mut config::Config, model: &str) {
 /// the global flag when the subcommand didn't set its own.
 pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Option<String> {
     let top_level_model = cli.model.clone();
+    if let Some(enabled) = cli.tray {
+        config.tray.enabled = enabled;
+    }
 
     if cli.clipboard {
         config.output.mode = config::OutputMode::Clipboard;
@@ -276,9 +279,39 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         cli.fallback_to_clipboard,
         cli.no_fallback_to_clipboard,
     );
-    if cli.spoken_punctuation {
-        config.text.spoken_punctuation = true;
+    apply_bool_override(
+        &mut config.text.lard_disfluency,
+        cli.lard_disfluency,
+        cli.no_lard_disfluency,
+    );
+    if let Some(path) = &cli.lard_model_path {
+        config.text.lard_model_path = Some(path.clone());
     }
+    apply_bool_override(
+        &mut config.text.punctuation_casing,
+        cli.punctuation_casing,
+        cli.no_punctuation_casing,
+    );
+    apply_bool_override(
+        &mut config.text.spoken_punctuation,
+        cli.spoken_punctuation,
+        cli.no_spoken_punctuation,
+    );
+    apply_bool_override(
+        &mut config.text.collapse_restarts,
+        cli.collapse_restarts,
+        cli.no_collapse_restarts,
+    );
+    apply_bool_override(
+        &mut config.text.repair_sentence_breaks,
+        cli.repair_sentence_breaks,
+        cli.no_repair_sentence_breaks,
+    );
+    apply_bool_override(
+        &mut config.text.format_numbers,
+        cli.format_numbers,
+        cli.no_format_numbers,
+    );
     apply_bool_override(
         &mut config.text.filter_filler_words,
         cli.filter_fillers,

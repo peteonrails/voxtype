@@ -284,6 +284,7 @@ type_delay_ms = 0
 # timeout_ms = 30000  # 30 second timeout (generous for LLM)
 # trim = true         # Strip leading/trailing whitespace from output (default: true)
 # fallback_on_empty = true  # Use original text if command returns empty (default: true)
+# edit_list = false         # Require a JSON edit list and apply only exact matches
 
 [output.notification]
 # Show notification when recording starts (hotkey pressed)
@@ -295,16 +296,35 @@ on_recording_stop = false
 # Show notification with transcribed text after transcription completes
 on_transcription = true
 
+# Show notification when no speech is detected and the recording is discarded.
+# This is especially useful because VAD is enabled for new installations below.
+on_no_speech = true
+
+# When text cleanup or post_process changed the transcription, show the edits
+# as a word diff in the notification instead of a plain preview.
+show_edits = true
+
 # Notification urgency level: "low", "normal", or "critical".
 # On GNOME, "low" notifications are delivered to the drawer without a popup banner.
 # Use "normal" (default) to ensure notifications appear as banners.
 # urgency = "normal"
 
-# [text]
+[text]
+# Optional English-only trained cleanup. Install the separately licensed model
+# explicitly with: voxtype setup lard --source /path/to/lard-disfluency-v1.vxdf
+# lard_disfluency = false
+# lard_model_path = "/path/to/lard-disfluency-v1.vxdf"
 # Text processing options (word replacements, spoken punctuation)
 #
+# Restore punctuation, sentence boundaries, and casing for plain CTC engines
+# (Paraformer, Dolphin, Omnilingual, Parakeet CTC, and SenseVoice when its own
+# ITN is disabled). Off by default so an upgrade never changes existing
+# dictation. Download the local model first:
+#   voxtype setup punctuation
+# punctuation_casing = false
+#
 # Enable spoken punctuation conversion (e.g., say "period" to get ".")
-# spoken_punctuation = false
+spoken_punctuation = false
 #
 # Custom word replacements (case-insensitive)
 # replacements = { "vox type" = "voxtype" }
@@ -315,9 +335,9 @@ on_transcription = true
 #
 # Remove filler words like "uh" and "um" from transcribed text. Held
 # pronunciations ("uhhhh", "ummm", "hmmm") are matched too.
-# Enabled by default. Set filter_filler_words = false to disable, or override
+# Enabled for new installations. Set filter_filler_words = false to disable, or override
 # the word list via filler_words.
-# filter_filler_words = true
+filter_filler_words = true
 # filler_words = ["uh", "um", "er", "ah", "eh", "hmm", "hm", "mm", "mhm"]
 #
 # Collapse restart disfluencies: a phrase you interrupt and restart by
@@ -325,19 +345,19 @@ on_transcription = true
 # back-to-back stutters ("the the the"), and explicit retractions
 # ("scratch that", "I'm sorry"). Off by default, because a wrong guess
 # deletes words you actually said.
-# collapse_restarts = false
+collapse_restarts = false
 #
 # Convert dictated quantities to written form: "twenty five dollars" becomes
 # "$25", "three thirty p m" becomes "3:30 p.m.". Only sentences that look like
 # they are about a quantity are touched, and a lone number word is never made
 # a digit, so "one of the things" and "no one knows" are left alone.
-# Requires a build with the `itn` feature.
-# format_numbers = false
+# Enabled for new installations. Requires a build with the `itn` feature.
+format_numbers = true
 #
 # Repair sentence boundaries the engine placed at a pause: join a fragment
 # split off mid-sentence ("what are the other phases? we have here.") and
 # give a structurally interrogative sentence its question mark.
-# repair_sentence_breaks = false
+repair_sentence_breaks = true
 
 [osd]
 # On-screen display frontend.
@@ -358,11 +378,12 @@ style = "default"
 # - custom: use literal recipe colors
 # palette = "omarchy"
 
-# Quickshell host layout: compact, wide, minimal, tile, orb, or custom.
+# Quickshell host layout: compact, wide, minimal, pill, tile, orb, or custom.
 layout = "compact"
 
 # Quickshell host frame. Background/border accept semantic color roles,
-# literal CSS colors, or "none".
+# literal CSS colors, or "none". border = "aura" draws an animated
+# gradient edge that brightens with your voice.
 # [osd.frame]
 # background = "background"
 # border = "state"
@@ -374,7 +395,7 @@ layout = "compact"
 
 # Declarative Quickshell visual recipe. Layers render in order.
 # [[osd.visual.layers]]
-# type = "bars"       # shadow, waveform, bars, pulse, ring, meter, background, icon, label
+# type = "bars"       # shadow, waveform, line, bars, dots, pulse, ring, meter, background, icon, label
 # source = "peak"     # peak, rms, vad, state
 # color = "accent"    # Omarchy token or literal color
 # order = 10
@@ -382,13 +403,18 @@ layout = "compact"
 # opacity = 1.0
 # mirror = true
 
-# [vad]
+[vad]
 # Voice Activity Detection - filters silence-only recordings
 # Prevents Whisper hallucinations on silent audio
-#
-# enabled = false      # Enable VAD (off by default)
-# threshold = 0.5      # 0.0 = sensitive, 1.0 = aggressive
-# min_speech_duration_ms = 100  # Minimum speech required
+# The energy backend needs no extra model download and works with every engine.
+enabled = true
+backend = "energy"
+threshold = 0.5      # 0.0 = sensitive, 1.0 = aggressive
+min_speech_duration_ms = 100  # Minimum speech required
+
+# Native Linux system tray is enabled by default. Set false to opt out.
+# [tray]
+# enabled = true
 
 # [status]
 # Status display icons for Waybar/tray integrations
@@ -416,7 +442,7 @@ layout = "compact"
 # stopped = ""
 
 # [profiles]
-# Named profiles for context-specific post-processing
+# Named profiles for context-specific vocabulary and post-processing
 # Use with: voxtype record start --profile slack
 #
 # [profiles.slack]
@@ -425,6 +451,10 @@ layout = "compact"
 # [profiles.code]
 # post_process_command = "ollama run llama3.2:1b 'Format as code comment...'"
 # output_mode = "clipboard"
+#
+# [profiles.code.vocabulary]
+# terms = ["Voxtype", "Hyprland", "PipeWire"]
+# terms_file = "/path/to/team-terms.json"
 "#;
 
 /// Return the default config content with platform-appropriate hotkey
@@ -445,5 +475,76 @@ pub fn default_config_content() -> String {
     #[cfg(not(target_os = "macos"))]
     {
         DEFAULT_CONFIG.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Config, VadBackend};
+    use crate::text::TextProcessor;
+
+    #[test]
+    fn generated_config_enables_conservative_first_run_features() {
+        let config: Config = toml::from_str(&default_config_content())
+            .expect("the generated config template must be valid TOML");
+
+        assert!(config.text.filter_filler_words);
+        assert!(config.text.repair_sentence_breaks);
+        assert!(config.text.format_numbers);
+        assert!(!config.text.collapse_restarts);
+        assert!(!config.text.spoken_punctuation);
+
+        assert!(config.vad.enabled);
+        assert_eq!(config.vad.backend, VadBackend::Energy);
+        assert_eq!(config.vad.threshold, 0.5);
+        assert_eq!(config.vad.min_speech_duration_ms, 100);
+
+        assert!(config.output.notification.on_no_speech);
+        assert!(config.output.notification.show_edits);
+    }
+
+    #[test]
+    fn shipped_reference_template_uses_the_same_first_run_choices() {
+        let config: Config = toml::from_str(include_str!("../../config/default.toml"))
+            .expect("config/default.toml must be valid TOML");
+
+        assert!(config.text.filter_filler_words);
+        assert!(config.text.repair_sentence_breaks);
+        assert!(config.text.format_numbers);
+        assert!(!config.text.collapse_restarts);
+        assert!(config.vad.enabled);
+        assert_eq!(config.vad.backend, VadBackend::Energy);
+    }
+
+    #[test]
+    fn existing_partial_configs_keep_compatibility_defaults() {
+        let config: Config = toml::from_str(
+            r#"
+                [hotkey]
+                key = "F13"
+            "#,
+        )
+        .expect("an old partial config must still parse");
+
+        assert!(!config.text.repair_sentence_breaks);
+        assert!(!config.text.format_numbers);
+        assert!(!config.text.collapse_restarts);
+        assert!(!config.vad.enabled);
+        assert_eq!(config.vad.backend, VadBackend::Auto);
+    }
+
+    #[test]
+    fn generated_cleanup_defaults_preserve_representative_prose() {
+        let config: Config = toml::from_str(&default_config_content()).unwrap();
+        let processor = TextProcessor::new_for_language(&config.text, Some("en"));
+
+        let prose = "What we need is a switch. No one knows. We shipped it. iPhone users benefit. Version one point two point three.";
+        assert_eq!(processor.process(prose), prose);
+
+        assert_eq!(
+            processor.process("Um, one of the things we need costs twenty five dollars."),
+            "One of the things we need costs $25."
+        );
     }
 }

@@ -10,6 +10,7 @@ use super::Transcriber;
 use crate::config::{LanguageConfig, WhisperConfig};
 use crate::error::TranscribeError;
 use std::io::Cursor;
+use std::sync::Mutex;
 use std::time::Duration;
 use ureq::serde_json;
 
@@ -28,6 +29,8 @@ pub struct RemoteTranscriber {
     api_key: Option<String>,
     /// Optional initial prompt for transcription context
     initial_prompt: Option<String>,
+    /// Profile vocabulary selected for the current recording.
+    active_vocabulary: Mutex<Vec<String>>,
     /// Send an explicit `language=auto` field instead of omitting it
     send_auto_language: bool,
     /// Request timeout
@@ -108,6 +111,7 @@ impl RemoteTranscriber {
             translate: config.translate,
             api_key,
             initial_prompt,
+            active_vocabulary: Mutex::new(Vec::new()),
             send_auto_language: config.remote_send_auto_language,
             timeout,
         })
@@ -181,8 +185,14 @@ impl RemoteTranscriber {
             body.extend_from_slice(b"\r\n");
         }
 
-        // Add prompt field (if initial_prompt is configured)
-        if let Some(ref prompt) = self.initial_prompt {
+        // Preserve the configured prompt and append active profile terms.
+        let vocabulary = self
+            .active_vocabulary
+            .lock()
+            .map(|terms| terms.clone())
+            .unwrap_or_default();
+        let prompt = super::prompt_with_vocabulary(self.initial_prompt.as_deref(), &vocabulary);
+        if let Some(ref prompt) = prompt {
             body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
             body.extend_from_slice(b"Content-Disposition: form-data; name=\"prompt\"\r\n\r\n");
             body.extend_from_slice(prompt.as_bytes());
@@ -202,6 +212,13 @@ impl RemoteTranscriber {
 }
 
 impl Transcriber for RemoteTranscriber {
+    fn set_vocabulary(&self, terms: &[String]) {
+        if let Ok(mut active) = self.active_vocabulary.lock() {
+            active.clear();
+            active.extend_from_slice(terms);
+        }
+    }
+
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         if samples.is_empty() {
             return Err(TranscribeError::AudioFormat("Empty audio buffer".into()));
@@ -421,6 +438,22 @@ mod tests {
 
         assert!(body_str.contains("name=\"prompt\""));
         assert!(body_str.contains("Technical discussion about Rust and Kubernetes."));
+    }
+
+    #[test]
+    fn multipart_prompt_preserves_configured_prompt_and_adds_profile_vocabulary() {
+        let config = WhisperConfig {
+            mode: Some(crate::config::WhisperMode::Remote),
+            remote_endpoint: Some("http://localhost:8080".to_string()),
+            initial_prompt: Some("Technical discussion.".to_string()),
+            ..Default::default()
+        };
+        let transcriber = RemoteTranscriber::new(&config).unwrap();
+        transcriber.set_vocabulary(&["Voxtype".into(), "PipeWire".into()]);
+
+        let (_, body) = transcriber.build_multipart_body(&[0u8; 100]);
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("Technical discussion.\nVocabulary: Voxtype, PipeWire"));
     }
 
     #[test]

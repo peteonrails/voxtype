@@ -61,8 +61,17 @@ jobs:
           sudo apt-get install -y libasound2-dev libclang-dev cmake \
             libgtk-3-dev libglib2.0-dev libx11-dev libxi-dev libxtst-dev
 
+      - name: GGUF worker package-layout regressions
+        run: python3 testing/test-gguf-worker-packaging.py
+
       - name: cargo test
-        run: cargo test
+        # These features include the worker client, not transcribe.cpp itself.
+        run: cargo test --features cohere-gguf,parakeet-gguf
+
+      - name: GGUF worker executable-routing regressions
+        run: |
+          cargo build --features cohere-gguf,parakeet-gguf --bin voxtype
+          python3 testing/test-gguf-worker-routing.py --binary target/debug/voxtype
 
   # macOS-only modules (src/menubar.rs, src/hotkey_macos.rs) are behind
   # `#[cfg(target_os = "macos")]`, so the three jobs above never compile a line

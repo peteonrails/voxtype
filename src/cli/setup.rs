@@ -71,6 +71,14 @@ pub enum SetupAction {
         toggle: bool,
     },
 
+    /// Install bundled Linux tray theme icons (embedded pixmaps work without this).
+    #[cfg(target_os = "linux")]
+    Icons {
+        /// Remove the installed theme icons
+        #[arg(long)]
+        uninstall: bool,
+    },
+
     /// Show Waybar configuration snippets
     Waybar {
         /// Output only the JSON config (for scripting)
@@ -195,6 +203,26 @@ pub enum SetupAction {
     /// Download the Silero VAD model for speech detection
     Vad {
         /// Show VAD model status
+        #[arg(long)]
+        status: bool,
+    },
+
+    /// Install or inspect the optional English LARD disfluency model
+    Lard {
+        /// Install a local model with the pinned release checksum
+        #[arg(long, conflicts_with = "url")]
+        source: Option<std::path::PathBuf>,
+        /// Explicit HTTPS model URL (publication is a separate release approval)
+        #[arg(long)]
+        url: Option<String>,
+        /// Inspect the local model without downloading
+        #[arg(long, conflicts_with_all = ["source", "url"])]
+        status: bool,
+    },
+
+    /// Download the optional punctuation/casing model
+    Punctuation {
+        /// Show model status without downloading it
         #[arg(long)]
         status: bool,
     },
@@ -338,6 +366,18 @@ mod tests {
     use super::*;
     use crate::cli::*;
     use clap::Parser;
+
+    #[test]
+    fn punctuation_setup_status_parses() {
+        let cli = Cli::parse_from(["voxtype", "setup", "punctuation", "--status"]);
+        match cli.command {
+            Some(Commands::Setup {
+                action: Some(SetupAction::Punctuation { status }),
+                ..
+            }) => assert!(status),
+            _ => panic!("Expected setup punctuation --status"),
+        }
+    }
 
     #[test]
     fn test_setup_quiet_flag() {
