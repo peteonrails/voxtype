@@ -2736,7 +2736,8 @@ command = "~/.config/voxtype/lm-studio-cleanup.sh"
 **Required:** No
 
 Maximum time in milliseconds to wait for the command to complete. If exceeded,
-the original text is used and a warning is logged.
+the original text is used, a warning is logged, and a desktop notification says
+the cleanup timed out.
 
 **Recommendations:**
 - Simple shell commands: `5000` (5 seconds)
@@ -2766,6 +2767,15 @@ If the post-processing command fails for any reason (command not found, non-zero
 exit, timeout, empty output), Voxtype gracefully falls back to the original
 transcribed text and logs a warning. This ensures voice-to-text output is never
 blocked by post-processing issues.
+
+So that you know the cleanup didn't run, Voxtype also shows a desktop
+notification after the text is delivered, naming what went wrong and the setting
+to fix: the program that wasn't found, the exit code and first line of the
+command's stderr, the timeout (and how to raise it), or the empty output. The
+first failure of each kind always notifies; the same failure repeating is quiet
+for 5 minutes, and a successful run resets it. A failing `pre_output_command`,
+`post_output_command` or `pre_recording_command` hook gets the same kind of
+notice.
 
 **Debugging:**
 Run voxtype with `-v` or `-vv` to see detailed logs about post-processing:
