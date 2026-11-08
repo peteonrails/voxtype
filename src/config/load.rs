@@ -257,6 +257,9 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     if let Ok(val) = std::env::var("VOXTYPE_FILTER_FILLERS") {
         config.text.filter_filler_words = parse_bool_env(&val);
     }
+    if let Ok(val) = std::env::var("VOXTYPE_STRIP_MODEL_PUNCTUATION") {
+        config.text.strip_model_punctuation = parse_bool_env(&val);
+    }
 
     Ok(config)
 }

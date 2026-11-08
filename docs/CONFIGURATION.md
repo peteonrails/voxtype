@@ -3064,6 +3064,39 @@ filler_words = ["uh", "um", "er", "like", "you know"]
 
 Multi-word entries like "you know" are matched as a single phrase. Adding aggressive entries (such as "like") may strip legitimate uses of the word; keep the list conservative or disable the filter for technical writing.
 
+### strip_model_punctuation
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+When `true`, removes the punctuation the transcription model adds on its own: `.` `,` `?` `!` `;` `:` and `…` before a space or at the end of the text. Run it with `spoken_punctuation = true` to punctuate only by voice: you get a comma where you say "comma", and nowhere else. Punctuation inside a token is kept, so "3.5" and "10:30" survive.
+
+Stripping runs first, so the symbols that `spoken_punctuation` and `replacements` produce are kept. Capitalization is left as the model wrote it.
+
+**Example:**
+
+```toml
+[text]
+spoken_punctuation = true
+strip_model_punctuation = true
+```
+
+With this enabled, if the model hears "Hello comma how are you question mark" as "Hello, comma, how are you? Question mark.", Voxtype types "Hello, how are you?".
+
+**CLI flag:**
+
+```bash
+voxtype --strip-model-punctuation       # force on (overrides config)
+voxtype --no-strip-model-punctuation    # force off (overrides config)
+```
+
+**Environment variable:**
+
+```bash
+VOXTYPE_STRIP_MODEL_PUNCTUATION=true voxtype
+```
+
 ---
 
 ## [vad]
@@ -3612,6 +3645,7 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_SPOKEN_PUNCTUATION` | bool | `text.spoken_punctuation` |
 | `VOXTYPE_SMART_AUTO_SUBMIT` | bool | `text.smart_auto_submit` |
 | `VOXTYPE_FILTER_FILLERS` | bool | `text.filter_filler_words` |
+| `VOXTYPE_STRIP_MODEL_PUNCTUATION` | bool | `text.strip_model_punctuation` |
 
 Boolean values: `true`, `1` to enable; `false`, `0` to disable.
 

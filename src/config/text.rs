@@ -32,6 +32,13 @@ pub struct TextConfig {
     /// whitespace are cleaned up after removal.
     #[serde(default = "default_filler_words")]
     pub filler_words: Vec<String>,
+
+    /// Remove the punctuation the speech model adds on its own (". , ? ! ; :"
+    /// and "…" before a space or the end), so text is punctuated only by
+    /// what you say (`spoken_punctuation`) and by `replacements`. Defaults to
+    /// false.
+    #[serde(default)]
+    pub strip_model_punctuation: bool,
 }
 
 impl Default for TextConfig {
@@ -42,6 +49,7 @@ impl Default for TextConfig {
             smart_auto_submit: false,
             filter_filler_words: true,
             filler_words: default_filler_words(),
+            strip_model_punctuation: false,
         }
     }
 }

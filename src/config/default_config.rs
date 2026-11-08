@@ -317,6 +317,10 @@ on_transcription = true
 # the word list via filler_words.
 # filter_filler_words = true
 # filler_words = ["uh", "um", "er", "ah", "eh", "hmm", "hm", "mm", "mhm"]
+#
+# Remove the punctuation the speech model adds, so the only punctuation is
+# what you say. Pair with spoken_punctuation = true.
+# strip_model_punctuation = false
 
 [osd]
 # On-screen display frontend.
