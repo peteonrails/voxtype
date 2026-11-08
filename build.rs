@@ -3,6 +3,7 @@
 //! Generates man pages from CLI definitions using clap_mangen.
 
 use clap::CommandFactory;
+use clap_complete::{generate_to, shells};
 use clap_mangen::Man;
 use std::env;
 use std::fs::{self, File};
@@ -39,7 +40,7 @@ fn main() -> Result<(), Error> {
     let man_dir = out_dir.join("man");
     fs::create_dir_all(&man_dir)?;
 
-    let cmd = Cli::command();
+    let mut cmd = Cli::command();
 
     // Generate main man page (voxtype.1)
     let man = Man::new(cmd.clone());
@@ -81,6 +82,20 @@ fn main() -> Result<(), Error> {
     );
 
     expose_cuda_build_major();
+
+    let completion_dir = PathBuf::from("packaging/completions").into_os_string();
+    fs::create_dir_all(&completion_dir)?;
+    generate_to(shells::Bash, &mut cmd, "voxtype", &completion_dir).unwrap();
+    generate_to(shells::Zsh, &mut cmd, "voxtype", &completion_dir).unwrap();
+    generate_to(shells::Fish, &mut cmd, "voxtype", &completion_dir).unwrap();
+    fs::rename(
+        "packaging/completions/_voxtype",
+        "packaging/completions/voxtype.zsh",
+    )?;
+    println!(
+        "cargo:warning=Shell completions pages generated in: {}",
+        completion_dir.display()
+    );
 
     Ok(())
 }
